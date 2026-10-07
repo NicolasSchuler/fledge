@@ -1,15 +1,15 @@
 # Troubleshooting
 
 Read the first blocking finding and its next step. Save details with
-`--report NEW_FILE` outside the input; use `latex-prep rule CODE` for an explanation.
+`--report NEW_FILE` outside the input; use `fledge rule CODE` for an explanation.
 
 | Problem | Next step |
 | --- | --- |
-| Command not found | With the installer, use `~/.local/bin/latex-prep`; with manual setup, activate the environment and try `python -m latexprep --help`. |
-| Installer refuses an existing destination | Choose a fresh `--prefix` and a `--bin-dir` without a `latex-prep` launcher; existing prefixes and launchers are not overwritten. |
+| Command not found | With the installer, use `~/.local/bin/fledge`; with manual setup, activate the environment and try `python -m latexprep --help`. |
+| Installer refuses an existing destination | Choose a fresh `--prefix` and a `--bin-dir` without a `fledge` launcher; existing prefixes and launchers are not overwritten. |
 | Ambiguous document root | Set `--main main.tex`, or configure independent `workflow.documents`. |
 | Unexpected configuration | Inspect `execution.config_path`; use `--config FILE` or `--isolated`. |
-| Invalid setting or selector | Check the [configuration guide](configuration.md) and `latex-prep rules`. |
+| Invalid setting or selector | Check the [configuration guide](configuration.md) and `fledge rules`. |
 | Output already exists | Choose a new path outside the input. |
 | Missing tool, isolation failure, or Biber cache error | Check [installation requirements](installation.md); source-only `inspect` remains available. |
 | Missing/incomplete build trace or ambiguous dependency graph | Resolve the reported build/path evidence. Preparation cannot safely choose package contents without it. |

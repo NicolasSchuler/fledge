@@ -17,15 +17,15 @@ virtual environment:
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -e .
-latex-prep inspect examples/nested-paper
-latex-prep bib check examples/nested-paper --json
-latex-prep check examples/nested-paper --main main.tex
-latex-prep prepare examples/nested-paper \
+fledge inspect examples/nested-paper
+fledge bib check examples/nested-paper --json
+fledge check examples/nested-paper --main main.tex
+fledge prepare examples/nested-paper \
   --main main.tex --layout flat --output /tmp/prepared-paper
 ```
 
 Alternatively, install the local package with your Python package manager
-(`uv tool install .`, for example) to expose the `latex-prep` executable.
+(`uv tool install .`, for example) to expose the `fledge` executable.
 Preparation commands never install tools automatically; the separate installer
 handles explicitly confirmed setup.
 
@@ -229,9 +229,9 @@ passes. See the [check catalogue and test links](checks.md) and the
 partial, and intentionally excluded functionality.
 
 ```sh
-latex-prep rules
-latex-prep rule TEX105
-latex-prep inspect ./paper --config ./settings.toml
+fledge rules
+fledge rule TEX105
+fledge inspect ./paper --config ./settings.toml
 ```
 
 ## Readable output and agent handoff
@@ -246,10 +246,10 @@ finding with no table, ANSI styling or hard wrapping. Embedded newlines are
 escaped; progress remains on stderr. Use `--quiet` for a clean combined capture.
 
 ```sh
-latex-prep check ./paper --output-format compact --quiet > issues.txt
-latex-prep check ./paper --output-format json --quiet > report.json
-latex-prep pdf check ./paper.pdf --html-report /tmp/paper-report.html
-latex-prep check ./paper --output-format ci --quiet
+fledge check ./paper --output-format compact --quiet > issues.txt
+fledge check ./paper --output-format json --quiet > report.json
+fledge pdf check ./paper.pdf --html-report /tmp/paper-report.html
+fledge check ./paper --output-format ci --quiet
 ```
 
 Example compact finding:
@@ -290,7 +290,7 @@ two CPU slots, with one build and one page-pair renderer at a time. To allow mor
 PDF and formatting work to overlap, select explicit bounds:
 
 ```sh
-latex-prep prepare ./paper --output /tmp/prepared-paper \
+fledge prepare ./paper --output /tmp/prepared-paper \
   --jobs 4 --render-jobs 2 --job-timeout-seconds 600
 ```
 

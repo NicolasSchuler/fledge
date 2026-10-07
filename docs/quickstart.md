@@ -16,7 +16,7 @@ manual setup and other platforms.
 Replace the paths and root filename:
 
 ```sh
-~/.local/bin/latex-prep prepare /path/to/paper --main main.tex \
+~/.local/bin/fledge prepare /path/to/paper --main main.tex \
   --output /path/to/submission
 ```
 
@@ -35,7 +35,7 @@ PDF preservation, and rebuilds the exact ZIP. Add `--layout flat` when required.
 Read the [report outcome](reports.md) before submitting. A blocked run releases
 no verified bundle; originals remain unchanged.
 
-For a source-only check, use `~/.local/bin/latex-prep inspect /path/to/paper
+For a source-only check, use `~/.local/bin/fledge inspect /path/to/paper
 --main main.tex --offline`. `prepare --dry-run` still builds the baseline.
 Next: [configuration](configuration.md), [transformations](preparation-options.md),
 or the [offline demo](examples.md).

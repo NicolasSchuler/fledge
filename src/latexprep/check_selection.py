@@ -32,7 +32,7 @@ class CheckSelection:
                 if selector not in _SELECTORS:
                     raise PreparationError(
                         f"Unknown checks.{name} selector {selector!r}; use ALL, a public "
-                        "check code, or a matching family/number prefix from latex-prep rules"
+                        "check code, or a matching family/number prefix from fledge rules"
                     )
 
     def enabled(self, code: str) -> bool:

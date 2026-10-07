@@ -12,10 +12,10 @@ affect the result. The [implementation backlog](check-backlog.md) distinguishes
 implemented observations from remaining semantic and workflow gaps.
 
 ```sh
-latex-prep rules
-latex-prep rule MAN011
-latex-prep rule PDF202 --json
-latex-prep inspect ./paper --output-format compact --quiet
+fledge rules
+fledge rule MAN011
+fledge rule PDF202 --json
+fledge inspect ./paper --output-format compact --quiet
 ```
 
 ## Behaviour and configuration
@@ -86,7 +86,7 @@ configured checks inconclusive. An unconfigured constraint is not a pass.
 ## Catalogue
 
 The table is derived from the registered `RULES`. Linked files contain behavioral
-tests; `latex-prep rule CODE` lists their exact method names. The catalogue
+tests; `fledge rule CODE` lists their exact method names. The catalogue
 integrity test checks unique codes and resolvable associations, not the behavior
 itself. Online tests use fake transports and do not establish current provider
 availability or coverage. Tool-output fixtures are distinct from live-tool tests.

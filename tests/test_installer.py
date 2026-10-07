@@ -45,7 +45,7 @@ if name.startswith("python"):
     if args[:2] == ["-m", "venv"]:
         target = Path(args[2]) / "bin"
         target.mkdir(parents=True)
-        for tool in ("python", "latex-prep"):
+        for tool in ("python", "fledge", "latex-prep"):
             shutil.copy2(os.environ["MOCK_PROGRAM"], target / tool)
     elif args[:2] == ["-m", "pip"] and os.environ.get("MOCK_PIP_FAIL"):
         sys.exit(19)
@@ -66,12 +66,12 @@ elif name == "brew":
     for package in args:
         for tool in binaries.get(package, ()):
             shutil.copy2(os.environ["MOCK_PROGRAM"], Path(os.environ["MOCK_BIN"]) / tool)
-elif name == "latex-prep":
+elif name in ("fledge", "latex-prep"):
     if args == ["--tool-locations"]:
         for tool in ("latexmk", "pdflatex", "pdfinfo"):
             subprocess.run([tool, "--selected-tool"], check=True)
     else:
-        print("Usage: latex-prep [OPTIONS] COMMAND [ARGS]...")
+        print(f"Usage: {name} [OPTIONS] COMMAND [ARGS]...")
 elif args == ["--selected-tool"]:
     print(str(Path(sys.argv[0]).absolute()))
 """
@@ -96,7 +96,7 @@ main "$@"
 
 class InstallerTests(unittest.TestCase):
     def setUp(self):
-        temporary = tempfile.TemporaryDirectory(prefix="latex installer tests ")
+        temporary = tempfile.TemporaryDirectory(prefix="fledge installer tests ")
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
         self.source = self.root / "source with spaces"
@@ -126,11 +126,11 @@ class InstallerTests(unittest.TestCase):
 
     @property
     def prefix(self):
-        return self.home / ".local/share/latex-preparation"
+        return self.home / ".local/share/fledge"
 
     @property
     def launcher(self):
-        return self.home / ".local/bin/latex-prep"
+        return self.home / ".local/bin/fledge"
 
     def add_tools(self, *names):
         for name in names:
@@ -164,6 +164,9 @@ class InstallerTests(unittest.TestCase):
             with self.subTest(args=args):
                 result = self.run_installer(*args)
                 self.assertEqual(result.returncode, 0 if args == ("--help",) else 1)
+                if args == ("--help",):
+                    self.assertIn("Install Fledge", result.stdout)
+                    self.assertIn("Default: ~/.local/share/fledge", result.stdout)
                 self.assert_no_install()
 
     def test_unsupported_platforms_and_root_are_rejected(self):
@@ -190,6 +193,9 @@ class InstallerTests(unittest.TestCase):
         result = self.run_installer("--dry-run", "--yes")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Reuse Python", result.stdout)
+        self.assertIn("Installation plan for Fledge", result.stdout)
+        self.assertIn(f"Private environment: {self.prefix}/venv", result.stdout)
+        self.assertIn(f"Launcher: {self.launcher}", result.stdout)
         self.assertIn("Dry run complete", result.stdout)
         self.assertNotIn("install --cask", result.stdout)
         self.assert_no_install()
@@ -284,10 +290,10 @@ class InstallerTests(unittest.TestCase):
         self.complete_tools()
         result = self.run_installer("--yes", "--prefix", "private dir", "--bin-dir", "bin dir")
         self.assertEqual(result.returncode, 0, result.stderr)
-        launcher = self.root / "bin dir/latex-prep"
+        launcher = self.root / "bin dir/fledge"
         self.assertTrue(launcher.is_file())
         self.assertTrue(os.access(launcher, os.X_OK))
-        self.assertIn("Installed. Run from any directory", result.stdout)
+        self.assertIn("Fledge installed. Run from any directory", result.stdout)
         pip = next(command for command in self.commands() if command[1:3] == ["-m", "pip"])
         self.assertEqual(Path(pip[-1]), self.source.resolve())
         run = subprocess.run(
@@ -299,8 +305,34 @@ class InstallerTests(unittest.TestCase):
             timeout=10,
         )
         self.assertEqual(run.returncode, 0, run.stderr)
-        self.assertIn("Usage: latex-prep", run.stdout)
+        self.assertIn("Usage: fledge", run.stdout)
         self.assertFalse(any(self.home.glob(".*rc")))
+
+    def test_new_install_preserves_legacy_environment_and_launcher(self):
+        self.complete_tools()
+        legacy_prefix = self.home / ".local/share/latex-preparation"
+        legacy_environment = legacy_prefix / "venv"
+        legacy_environment.mkdir(parents=True)
+        legacy_marker = legacy_environment / "existing-installation"
+        legacy_marker.write_text("Keep the previous installation.")
+        legacy_launcher = self.home / ".local/bin/latex-prep"
+        legacy_launcher.parent.mkdir(parents=True)
+        legacy_launcher.write_text("#!/bin/bash\nexit 23\n")
+        legacy_launcher.chmod(0o755)
+
+        result = self.run_installer("--yes")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((self.prefix / "venv/bin/fledge").is_file())
+        self.assertTrue(self.launcher.is_file())
+        self.assertEqual(legacy_marker.read_text(), "Keep the previous installation.")
+        self.assertEqual(list(legacy_environment.iterdir()), [legacy_marker])
+        self.assertEqual(legacy_launcher.read_text(), "#!/bin/bash\nexit 23\n")
+        self.assertTrue(os.access(legacy_launcher, os.X_OK))
+        self.assertEqual(
+            [command for command in self.commands() if command[0] in ("fledge", "latex-prep")],
+            [["fledge", "--help"], ["fledge", "--help"]],
+        )
 
     def test_mock_homebrew_install_and_post_install_verification(self):
         self.add_tools("brew")

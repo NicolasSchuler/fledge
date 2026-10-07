@@ -658,5 +658,5 @@ def get_rule(code: str) -> Rule:
         return BY_CODE[code.upper()]
     except KeyError:
         raise ValueError(
-            f"Unknown check code {code!r}; run 'latex-prep rules' to list checks"
+            f"Unknown check code {code!r}; run 'fledge rules' to list checks"
         ) from None

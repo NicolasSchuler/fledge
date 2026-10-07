@@ -20,15 +20,15 @@ The page limit includes references and appendices; no page limit is assumed by
 default. Run source checks first, then compile to measure the PDF:
 
 ```sh
-latex-prep inspect path/to/paper
-latex-prep check path/to/paper
+fledge inspect path/to/paper
+fledge check path/to/paper
 ```
 
 The selected configuration path is
 recorded in the report's `execution.config_path`; `null` means built-in defaults
 and command-line options were used. The {download}`example configuration <../examples/latex-prep.toml>`
-shows the defaults and a few alternatives. Run `latex-prep rules` or
-`latex-prep rule TEX001` to discover available codes and their meanings.
+shows the defaults and a few alternatives. Run `fledge rules` or
+`fledge rule TEX001` to discover available codes and their meanings.
 
 ## Choose checks
 
@@ -81,6 +81,9 @@ are omitted before determining the outcome.
 
 ## Discovery and precedence
 
+Fledge keeps the existing configuration names and tables for compatibility;
+there is no need to rename your settings files.
+
 Discovery starts at the original input directory. For a ZIP or PDF input, it
 starts at that file's parent directory. Configuration inside a ZIP is never
 loaded automatically.
@@ -106,8 +109,8 @@ Explicit CLI options override the chosen file, including negative options such
 as `--no-format` and `--offline`.
 
 ```sh
-latex-prep inspect paper --config review.toml
-latex-prep inspect paper --isolated --jobs 1
+fledge inspect paper --config review.toml
+fledge inspect paper --isolated --jobs 1
 ```
 
 Invalid TOML, unknown settings, invalid option types, and unknown selectors

@@ -1,4 +1,4 @@
-# LaTeX Submission Preparation Architecture
+# Fledge architecture
 
 Architecture based on [the requirements](requirements.md). The application uses Python with a CLI, a shared application core, and isolated tool execution. A later web interface calls the same job API; its deployment model remains open. The [README](README.md) describes the implemented subset and current limitations.
 

@@ -1,4 +1,6 @@
-# LaTeX preparation
+<img src="docs/_static/logo.png" width="128" height="128" alt="Fledge logo: an ink-blue origami swallow with an orange fold">
+
+# Fledge
 
 Prepare and verify a LaTeX submission ZIP containing the selected paper's needed
 inputs. Your original files remain unchanged.
@@ -19,7 +21,7 @@ See [installation](docs/installation.md) for a preview, requirements, and manual
 Replace the paths and `main.tex` with your project and root document:
 
 ```sh
-~/.local/bin/latex-prep prepare /path/to/paper --main main.tex \
+~/.local/bin/fledge prepare /path/to/paper --main main.tex \
   --output /path/to/submission
 ```
 
@@ -32,4 +34,4 @@ the copy; [configure extra deliverables](docs/configuration.md#package-contents)
 - [Quick start](docs/quickstart.md) · [offline demo](docs/examples.md)
 - [Configuration](docs/configuration.md) · [reports](docs/reports.md) · [troubleshooting](docs/troubleshooting.md)
 - [Detailed workflow and support limits](docs/workflow.md) · [all documentation](docs/index.md)
-- [Development, documentation builds, and design references](docs/development.md)
+- [Development, documentation builds, and design references](docs/development.md) · [source repository](https://github.com/NicolasSchuler/fledge)

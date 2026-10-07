@@ -10,7 +10,7 @@ usage() {
 Usage: bash install.sh [--dry-run] [--yes] [--with-optional]
                        [--prefix DIR] [--bin-dir DIR]
 
-Install latex-prep from this local source directory on macOS.
+Install Fledge from this local source directory on macOS.
 Reuse existing Python 3.11+, TeX and Poppler tools. Install missing tools using
 an existing Homebrew installation; see https://brew.sh if Homebrew is missing.
 
@@ -18,7 +18,7 @@ an existing Homebrew installation; see https://brew.sh if Homebrew is missing.
   --yes            Accept the displayed plan without an interactive question.
   --with-optional  Also install missing tex-fmt, qpdf and MuPDF (mutool).
   --prefix DIR     New private installation directory.
-                   Default: ~/.local/share/latex-preparation
+                   Default: ~/.local/share/fledge
   --bin-dir DIR    Launcher directory. Default: ~/.local/bin
   --help          Show this help.
 
@@ -92,7 +92,7 @@ check_destinations() {
 
 main() {
     local dry_run=false accept=false optional=false
-    local prefix="${HOME:?HOME is not set}/.local/share/latex-preparation"
+    local prefix="${HOME:?HOME is not set}/.local/share/fledge"
     local bin_dir="$HOME/.local/bin" argument
     while [[ $# -gt 0 ]]; do
         argument="$1"
@@ -118,7 +118,7 @@ main() {
     prefix="${prefix%/}"
     bin_dir="${bin_dir%/}"
     [[ -n "$prefix" && -n "$bin_dir" ]] || fail "The filesystem root is not an installation directory."
-    local launcher="$bin_dir/latex-prep" venv="$prefix/venv"
+    local launcher="$bin_dir/fledge" venv="$prefix/venv"
     local source_dir
     source_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
     [[ -f "$source_dir/pyproject.toml" && -f "$source_dir/src/latexprep/cli.py" ]] ||
@@ -174,7 +174,7 @@ main() {
         done
     fi
 
-    printf '\nInstallation plan:\n  Source: %s\n  Private environment: %s\n  Launcher: %s\n' \
+    printf '\nInstallation plan for Fledge:\n  Source: %s\n  Private environment: %s\n  Launcher: %s\n' \
         "$source_dir" "$venv" "$launcher"
     if "$install_tex"; then
         printf '  MacTeX: multi-GB download and substantial disk space; administrator password required.\n'
@@ -228,7 +228,7 @@ main() {
     "$python" -m venv "$venv"
     current_step='installing the local Python package'
     "$venv/bin/python" -m pip install --disable-pip-version-check "$source_dir"
-    "$venv/bin/latex-prep" --help >/dev/null
+    "$venv/bin/fledge" --help >/dev/null
     current_step='creating the launcher'
     # Match find_tool's PATH-first search, then its fallback directory order.
     # Saving absolute entries also preserves selection when the launcher's caller
@@ -252,19 +252,19 @@ main() {
         {
             printf '#!/bin/bash\n'
             printf 'export PATH=%q\n' "$launcher_path"
-            printf 'exec %q "$@"\n' "$venv/bin/latex-prep"
+            printf 'exec %q "$@"\n' "$venv/bin/fledge"
         } > "$launcher"
     )
     chmod +x "$launcher"
     current_step='verifying the launcher'
     "$launcher" --help >/dev/null
     trap - ERR
-    printf '\nInstalled. Run from any directory:\n'
+    printf '\nFledge installed. Run from any directory:\n'
     print_command "$launcher" --help
     printf 'For the short command in this terminal only, run:\n'
     # shellcheck disable=SC2016 # Print a command for the user's shell.
     printf '  export PATH=%q:"$PATH"\n' "$bin_dir"
-    printf '  latex-prep --help\n'
+    printf '  fledge --help\n'
 }
 
 if [[ "${BASH_SOURCE[0]}" = "$0" ]]; then main "$@"; fi

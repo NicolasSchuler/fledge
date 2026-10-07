@@ -1,4 +1,4 @@
-# LaTeX preparation
+# Fledge
 
 Start with [installation](installation.md) and [prepare your paper](quickstart.md).
 Use the [offline demo](examples.md) to try source inspection without TeX.

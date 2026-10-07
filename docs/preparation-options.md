@@ -220,12 +220,12 @@ defaults and later package setup commands remain outside its scope. This
 instrumentation is absent from original and submitted sources.
 
 ```sh
-latex-prep pdf check paper.pdf --config settings.toml --output-format compact
-latex-prep pdf check new.pdf --reference-pdf old.pdf --json
-latex-prep check ./paper --config settings.toml --preview-output ./gray-pages
-latex-prep prepare ./paper --config settings.toml --output ./prepared \
+fledge pdf check paper.pdf --config settings.toml --output-format compact
+fledge pdf check new.pdf --reference-pdf old.pdf --json
+fledge check ./paper --config settings.toml --preview-output ./gray-pages
+fledge prepare ./paper --config settings.toml --output ./prepared \
   --html-report ./report.html --diagnostics ./unverified-diagnostics.zip
-latex-prep inspect ./paper --output-format ci
+fledge inspect ./paper --output-format ci
 ```
 
 Grayscale previews are PNG pages retained outside the source ZIP. Preparation

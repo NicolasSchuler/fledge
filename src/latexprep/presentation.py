@@ -138,7 +138,7 @@ def print_report(
     for name, path in report.artifacts.items():
         console.print(Text(f"{name}: {_safe(path)}"))
     if any(item.code and item.status != "passed" for item in report.findings):
-        console.print(Text("\nExplain a check: latex-prep rule CODE", style="dim"))
+        console.print(Text("\nExplain a check: fledge rule CODE", style="dim"))
 
 
 def render_terminal(report: Report, show_diff: bool = False, show_passed: bool = False) -> str:
@@ -196,4 +196,4 @@ def print_rules(rules: tuple[Rule, ...], console: Console, *, explain: bool = Fa
     for rule in rules:
         table.add_row(Text(rule.code), Text(rule.title))
     console.print(table)
-    console.print(Text("Explain a check and its tests: latex-prep rule CODE", style="dim"))
+    console.print(Text("Explain a check and its tests: fledge rule CODE", style="dim"))

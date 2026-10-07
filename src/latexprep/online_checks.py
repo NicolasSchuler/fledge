@@ -376,7 +376,7 @@ async def _exchange(
         authority = f"[{target.host}]" if ":" in target.host else target.host
         request = (
             f"{method} {target.path} HTTP/1.1\r\nHost: {authority}\r\n"
-            "User-Agent: latex-preparation/0.1 (explicit reference checks)\r\n"
+            "User-Agent: fledge/0.1 (explicit reference checks)\r\n"
             "Accept: application/json, */*;q=0.1\r\nAccept-Encoding: identity\r\n"
             "Connection: close\r\n\r\n"
         )

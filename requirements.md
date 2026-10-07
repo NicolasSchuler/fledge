@@ -1,4 +1,4 @@
-# LaTeX Submission Preparation Requirements
+# Fledge requirements
 
 Status: Draft for product and implementation planning  
 Date: 6 October 2026
@@ -290,15 +290,15 @@ No outcome guarantees publisher acceptance. Define stable exit codes distinguish
 The proposed command groups are `inspect`, `check`, `prepare`, `bib`, `fmt`, and `report`. A typical interface could be:
 
 ```sh
-latex-prep check paper.zip --main main.tex
-latex-prep prepare paper.zip --main main.tex --layout flat --format --output prepared-paper
-latex-prep prepare paper/ --config submission.yaml --output prepared-paper
-latex-prep check paper.zip --main main.tex --reference-pdf submitted.pdf
-latex-prep bib check paper/
-latex-prep fmt paper/ --check
+fledge check paper.zip --main main.tex
+fledge prepare paper.zip --main main.tex --layout flat --format --output prepared-paper
+fledge prepare paper/ --config submission.yaml --output prepared-paper
+fledge check paper.zip --main main.tex --reference-pdf submitted.pdf
+fledge bib check paper/
+fledge fmt paper/ --check
 ```
 
-`latex-prep` is a placeholder executable name. `check` leaves the input unchanged and may build a temporary copy; `prepare` runs the complete workflow. The command syntax is illustrative, not a finalized API.
+`fledge` is the executable name. `check` leaves the input unchanged and may build a temporary copy; `prepare` runs the complete workflow. The command syntax is illustrative, not a finalized API.
 
 Provide `--dry-run` to show the plan without producing a submission bundle and `--non-interactive` to guarantee that a run cannot wait for terminal input. Neither option bypasses ambiguous mappings or mandatory verification. Report whether compilation was needed during planning.
 

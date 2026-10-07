@@ -117,10 +117,10 @@ def _build_options(function):
     return function
 
 
-@click.group(context_settings={"help_option_names": ["-h", "--help"]})
-@click.version_option(__version__, prog_name="latex-prep")
+@click.group(name="fledge", context_settings={"help_option_names": ["-h", "--help"]})
+@click.version_option(__version__, prog_name="fledge")
 def cli() -> None:
-    """Check and prepare a separate LaTeX submission copy.
+    """Fledge checks and prepares a separate LaTeX submission copy.
 
     INPUT is a source folder or ZIP. Originals are never edited. Check codes and
     suggested next steps appear in reports. Check selection and generic limits
@@ -366,7 +366,7 @@ def _execute(command: str, options: dict[str, Any]) -> int:
 def main(argv: list[str] | None = None) -> int:
     """Return an exit code for console scripts, embedding, and existing callers."""
     try:
-        return cli.main(args=argv, prog_name="latex-prep", standalone_mode=False) or 0
+        return cli.main(args=argv, prog_name="fledge", standalone_mode=False) or 0
     except click.ClickException as error:
         error.show()
         return error.exit_code

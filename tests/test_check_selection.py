@@ -225,7 +225,7 @@ class ConfigDiscoveryTests(unittest.TestCase):
         run.assert_not_awaited()
         report = json.loads(result.output)
         self.assertIn("Unknown checks.select", report["findings"][0]["message"])
-        self.assertIn("latex-prep rules", report["findings"][0]["message"])
+        self.assertIn("fledge rules", report["findings"][0]["message"])
 
     def test_cli_help_explains_configuration_controls(self) -> None:
         result = CliRunner().invoke(cli, ["inspect", "--help"])

@@ -2,7 +2,7 @@
 
 ## macOS installer
 
-From the source checkout or extracted source distribution:
+From the [source checkout](https://github.com/NicolasSchuler/fledge) or extracted source distribution:
 
 ```sh
 bash install.sh --dry-run
@@ -17,12 +17,13 @@ A conflicting partial TeX installation stops with advice instead of replacement.
 Homebrew is required only when external tools are missing; the script does not
 install Homebrew itself.
 
-The default prefix is `~/.local/share/latex-preparation`, with a `venv` child;
-the launcher is `~/.local/bin/latex-prep`. An existing prefix or launcher, including
+The default prefix is `~/.local/share/fledge`, with a `venv` child;
+the launcher is `~/.local/bin/fledge`. An existing prefix or launcher, including
 a symlink, is refused. There is no overwrite or upgrade mode. The launcher supplies
 detected tool paths; no shell files are edited.
-Use that full launcher path wherever these docs show `latex-prep` unless its
-directory is already on your `PATH`.
+Use that full launcher path wherever these docs show `fledge` unless its
+directory is already on your `PATH`. Existing installations under the former
+name are left untouched.
 
 | Option | Purpose |
 | --- | --- |
@@ -43,13 +44,21 @@ Use Python 3.11+ and install external tools separately:
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install .
-latex-prep --help
+fledge --help
 ```
 
 For a wheel, use `python -m pip install /path/to/package.whl`; for development,
 use `python -m pip install -e .`. Installation may download Click and Rich; offline
 installation needs local copies. The wheel contains the CLI, while the source
 archive also includes the installer, docs, examples, and tests.
+
+The `fledge` distribution installs both `fledge` and the compatible `latex-prep`
+console entrypoints. The macOS installer exposes only the `fledge` launcher; the
+legacy entrypoint remains inside its private virtual environment. Existing
+[configuration names and tables](configuration.md#discovery-and-precedence) are
+retained. When replacing the former `latex-preparation` distribution, use a fresh
+Python environment: both distributions provide the same `latexprep` module and
+should not be installed together.
 
 ## Tools and platform support
 

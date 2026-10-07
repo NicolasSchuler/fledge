@@ -25,16 +25,16 @@ without thresholds are measurements, not compliance claims. Operational findings
 may have `code: null`.
 
 ```sh
-latex-prep rule TEX001
-latex-prep inspect /path/to/paper --offline --show-passed
+fledge rule TEX001
+fledge inspect /path/to/paper --offline --show-passed
 ```
 
 ## Save or share
 
 ```sh
-latex-prep check /path/to/paper --offline --report report.json
-latex-prep check /path/to/paper --offline --html-report report.html
-latex-prep inspect /path/to/paper --offline --output-format compact --quiet
+fledge check /path/to/paper --offline --report report.json
+fledge check /path/to/paper --offline --html-report report.html
+fledge inspect /path/to/paper --offline --output-format compact --quiet
 ```
 
 Report destinations must be new and outside the input. JSON retains full evidence

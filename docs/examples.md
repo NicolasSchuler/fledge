@@ -3,8 +3,8 @@
 Use this small fixture to try the CLI without your own manuscript, including
 from a wheel installation. After [installing](installation.md), run these commands
 in one POSIX shell. They create a fresh temporary directory; no TeX or PDF tools
-are needed. With the macOS installer, use `~/.local/bin/latex-prep` in place of
-`latex-prep` below unless its directory is on your `PATH`.
+are needed. With the macOS installer, use `~/.local/bin/fledge` in place of
+`fledge` below unless its directory is on your `PATH`.
 
 ```sh
 demo_dir="$(mktemp -d)"
@@ -38,8 +38,8 @@ BIB
 ## Inspect it
 
 ```sh
-latex-prep inspect "$demo_dir/paper" --main main.tex --isolated --offline
-latex-prep bib check "$demo_dir/paper" --main main.tex --isolated --offline
+fledge inspect "$demo_dir/paper" --main main.tex --isolated --offline
+fledge bib check "$demo_dir/paper" --main main.tex --isolated --offline
 ```
 
 Both commands should return exit code 0 with `outcome: passed` and four passing
@@ -50,9 +50,9 @@ disables reference-network requests.
 ## Save a report
 
 ```sh
-latex-prep inspect "$demo_dir/paper" --main main.tex --isolated --offline \
+fledge inspect "$demo_dir/paper" --main main.tex --isolated --offline \
   --quiet --output-format json --report "$demo_dir/inspection.json"
-latex-prep rule BIB001
+fledge rule BIB001
 ```
 
 The report file must be new and outside the input. JSON also appears on stdout.
@@ -61,7 +61,7 @@ Use the [report guide](reports.md) to interpret it.
 The source distribution includes a nested fixture too. From its root directory:
 
 ```sh
-latex-prep inspect examples/nested-paper --main main.tex --isolated --offline
+fledge inspect examples/nested-paper --main main.tex --isolated --offline
 ```
 
 For your own manuscript, follow the [quick start](quickstart.md).

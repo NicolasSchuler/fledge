@@ -530,7 +530,7 @@ def render_html(report: Report) -> str:
         '<meta name="viewport" content="width=device-width,initial-scale=1">',
         '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; '
         "style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'\">",
-        "<title>LaTeX preparation report</title><style>",
+        "<title>Fledge report</title><style>",
         "body{font:16px/1.5 system-ui,sans-serif;max-width:1100px;margin:2rem auto;padding:0 1rem;"
         "color:#17202a;background:#fafafa}article,section{margin:1rem 0;padding:1rem;"
         "border:1px solid "
