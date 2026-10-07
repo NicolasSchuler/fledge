@@ -1,0 +1,51 @@
+# All constraints come from the author. No publisher profile is loaded.
+main = "main.tex"
+layout = "flat"
+engine = "pdflatex"
+format = false
+normalize_doi = false
+cleanup = true
+jobs = 2
+build_jobs = 1
+render_jobs = 1
+memory_mb = 2048
+build_memory_mb = 1024
+timeout_seconds = 120
+job_timeout_seconds = 600
+max_temporary_bytes = 2147483648
+# Pin the same PDF build epoch across separate runs when comparing results:
+# source_date_epoch = 1700000000
+max_files = 10000
+max_bytes = 268435456
+max_depth = 32
+# Total PDF pages, including references and appendices, if you enable this limit:
+# max_pages = 12
+wrap_length = 80
+tab_size = 2
+
+# Optional generic manuscript constraints (examples, not publisher requirements).
+# Only literal declarations in the selected document graph are inspected.
+# expected_document_class = "article"
+# required_class_options = ["review"]
+# forbidden_class_options = ["draft"]
+# forbidden_packages = ["draftwatermark"]
+# require_abstract = true
+# abstract_min_words = 100
+# abstract_max_words = 250
+# keywords_min_count = 3
+# keywords_max_count = 6
+# required_sections = ["Data Availability", "Competing Interests"]
+
+# Optional PDF constraints. Dimensions use PDF points (1/72 inch).
+# Supply width and height together; orientation is not swapped automatically.
+# expected_page_width_pt = 612
+# expected_page_height_pt = 792
+# page_size_tolerance_pt = 1.0
+# require_consistent_page_size = true
+# min_image_dpi = 300
+# require_embedded_fonts = true
+# forbid_type3_fonts = true
+# forbid_encryption = true
+# forbid_forms = true
+# forbid_javascript = true
+# forbid_attachments = true

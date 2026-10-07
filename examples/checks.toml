@@ -1,0 +1,83 @@
+# Illustrative author-selected policies, not publisher requirements.
+# Change the limits and required fields to match your actual submission.
+main = "main.tex"
+layout = "preserve"
+require_abstract = true
+max_pages = 12
+match_source_pdf_metadata = ["title"]
+
+[bibliography_checks]
+check_citation_coverage = true
+check_uncited_entries = true
+all_roots = false
+required_fields = { article = ["title", "author|editor", "year"] }
+doi_entry_types = ["article"]
+check_page_ranges = true
+check_urls = true
+# Heuristics only; no reference is changed or removed.
+check_capitalization = false
+check_fuzzy_duplicates = false
+
+[build_checks]
+overfull_tolerance_pt = 1.0 # TeX points, not PDF points.
+inventory_loaded_packages = true
+# Package policies use recorder-observed .sty/.cls filenames.
+# forbidden_loaded_packages = ["draftwatermark.sty"]
+# minimum_package_dates = { "graphicx.sty" = "2020-01-01" }
+# check_local_package_shadows = true
+
+[manuscript_checks]
+required_metadata = ["title"]
+check_orcid = true
+max_heading_depth = 3 # section=1, subsection=2, subsubsection=3.
+check_empty_sections = true
+require_float_captions = true
+require_float_labels = true
+check_float_label_order = true
+# required_declarations = ["Data Availability", "Competing Interests"]
+# require_figure_descriptions = true
+# abstract_abbreviation_policy = "define" # Or "forbid"; heuristic.
+
+[pdf_checks]
+required_metadata = ["Title"]
+min_text_size_pt = 8.0
+printable_margins_pt = [36.0, 36.0, 36.0, 36.0] # left, top, right, bottom.
+# Supply actual inclusive page boundaries; they are not inferred.
+# section_budgets = [{ name = "Main text", start_page = 1, end_page = 8, max_pages = 8 }]
+# Coordinates are PDF points from the top-left of an unrotated, uncropped page.
+# text_size_regions = [{ name = "Figure labels", page = 2, left_pt = 36.0, top_pt = 180.0, right_pt = 576.0, bottom_pt = 420.0, min_text_size_pt = 9.0 }]
+# require_tagged = true
+# expected_language = "en" # Requires qpdf; unavailable evidence is inconclusive.
+# forbidden_annotation_types = ["Text", "FileAttachment"]
+# min_stroke_width_pt = 0.3 # Requires MuPDF mutool; advisory.
+
+[submission_checks]
+scan_secrets = true
+scan_private_comments = true
+check_shell_escape = true
+filename_max_length = 80 # Unicode characters in each basename.
+max_archive_bytes = 20000000 # Compressed output ZIP, separate from import limits.
+# Identity terms scan bundle text/comments/URLs/filenames and extracted PDF evidence.
+# identity_terms = ["Your Name", "your-institution.example"]
+# scan_identity_hints = true
+# allowed_extensions = [".tex", ".bib", ".cls", ".sty", ".bst", ".pdf", ".png"]
+# required_deliverables = { "cover-letter.txt" = "text", "title-page.pdf" = "pdf" }
+# Reference paths resolve relative to this TOML file; keys are bundle-relative.
+# template_references = { "template.cls" = "../templates/template.cls" }
+# report_unused_assets = true # Advisory for one selected dependency graph only.
+
+[online_checks]
+# Permission and individual check selection are separate. This file stays offline.
+# --online grants permission for selected checks; --offline revokes it.
+online = false
+online_doi_resolution = false
+online_metadata = false
+online_missing_doi = false
+online_published_versions = false
+online_notices = false
+online_reference_links = false
+online_replication_links = false
+online_max_requests = 20
+online_timeout_seconds = 10
+online_jobs = 2
+# online_replication_urls = ["https://example.org/artifact"]

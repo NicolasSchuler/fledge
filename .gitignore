@@ -1,0 +1,45 @@
+# Python environments, caches and distribution output
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.venv-*/
+venv/
+.tox/
+.nox/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ty_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+build/
+dist/
+
+# Rendered documentation
+/docs/_build/
+
+# Local input papers, generated reports and private scratch material belong here.
+/.local/
+/output/
+/reports/
+/prepared-*/
+.env
+.env.*
+!.env.example
+.DS_Store
+
+# TeX build intermediates; PDFs and source assets remain visible to Git.
+*.aux
+*.bbl
+*.bcf
+*.blg
+*.fdb_latexmk
+*.fls
+*.log
+*.out
+*.run.xml
+*.synctex.gz
+*.toc

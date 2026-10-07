@@ -1,0 +1,19 @@
+# Works with examples/nested-paper; original files remain unchanged.
+layout = "flat"
+bibliography_backend = "bibtex"
+normalize_doi = true
+
+[bibliography_transform]
+format_entries = true
+remove_fields = ["file", "annotation"]
+cited_only = true
+
+[source_transforms]
+comment_policy = "private"
+
+[formatting_options]
+exclude = ["generated/*.tex"]
+blank_lines = "preserve"
+
+[workflow]
+baseline_runs = 2
