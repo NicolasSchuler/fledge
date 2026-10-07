@@ -24,6 +24,8 @@ PDF_TOOLS = (
     "pdfimages",
     "pdftohtml",
 )
+SYSTEM_DIRECTORIES = ("/usr/bin", "/bin", "/usr/sbin", "/sbin")
+INSTALLER_FALLBACKS = "local tool_dirs=(/Library/TeX/texbin /opt/homebrew/bin /usr/local/bin)"
 
 MOCK_PROGRAM = r"""
 import json
@@ -149,6 +151,49 @@ class InstallerTests(unittest.TestCase):
             timeout=30,
         )
 
+    def run_interactive(self, answer, *args):
+        master, slave = pty.openpty()
+        self.addCleanup(os.close, master)
+        self.addCleanup(os.close, slave)
+        process = subprocess.Popen(
+            ["/bin/bash", "-c", HARNESS, "installer-test", str(self.script), *args],
+            cwd=self.root,
+            env=self.env,
+            stdin=slave,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        os.write(master, answer)
+        stdout, stderr = process.communicate(timeout=10)
+        return process.returncode, stdout, stderr
+
+    def run_with_real_discovery(self, path, fallbacks, *args):
+        """Run the installer's own find_tool with PATH and the fallback directories chosen here."""
+        # Replace only the host-specific fallback paths in this isolated script copy, so no
+        # machine's installed TeX is involved. Discovery itself is the unmodified function.
+        original = self.script.read_text()
+        self.assertIn(INSTALLER_FALLBACKS, original)
+        quoted = " ".join(shlex.quote(str(directory)) for directory in fallbacks)
+        self.script.write_text(original.replace(INSTALLER_FALLBACKS, f"local tool_dirs=({quoted})"))
+        harness = HARNESS[: HARNESS.index("find_tool() {")] + 'main "$@"\n'
+        return subprocess.run(
+            ["/bin/bash", "-c", harness, "installer-test", str(self.script), *args],
+            cwd=self.root,
+            env={**self.env, "PATH": path},
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+    def launcher_path(self, launcher=None):
+        """Return the PATH entries saved in a generated launcher, resolved for comparison."""
+        for line in (launcher or self.launcher).read_text().splitlines():
+            if line.startswith("export PATH="):
+                value = shlex.split(line)[1].removeprefix("PATH=")
+                return [os.path.realpath(entry) for entry in value.split(":")]
+        self.fail("The launcher does not export PATH")
+
     def commands(self):
         if not self.log.exists():
             return []
@@ -160,13 +205,21 @@ class InstallerTests(unittest.TestCase):
         self.assertTrue(all(command[1:2] == ["-c"] for command in self.commands()))
 
     def test_help_and_invalid_options(self):
-        for args in (("--help",), ("--unknown",), ("--prefix",), ("--bin-dir", "--yes")):
+        for args in (
+            ("--help",),
+            ("--unknown",),
+            ("--prefix",),
+            ("--bin-dir", "--yes"),
+            ("--uninstall", "--with-optional"),
+        ):
             with self.subTest(args=args):
                 result = self.run_installer(*args)
                 self.assertEqual(result.returncode, 0 if args == ("--help",) else 1)
                 if args == ("--help",):
                     self.assertIn("Install Fledge", result.stdout)
                     self.assertIn("Default: ~/.local/share/fledge", result.stdout)
+                    self.assertIn("--uninstall", result.stdout)
+                    self.assertIn("To upgrade, run --uninstall", result.stdout)
                 self.assert_no_install()
 
     def test_unsupported_platforms_and_root_are_rejected(self):
@@ -259,21 +312,8 @@ class InstallerTests(unittest.TestCase):
 
     def test_interactive_decline_makes_no_changes(self):
         self.complete_tools()
-        master, slave = pty.openpty()
-        self.addCleanup(os.close, master)
-        self.addCleanup(os.close, slave)
-        process = subprocess.Popen(
-            ["/bin/bash", "-c", HARNESS, "installer-test", str(self.script)],
-            cwd=self.root,
-            env=self.env,
-            stdin=slave,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        os.write(master, b"n\n")
-        stdout, stderr = process.communicate(timeout=10)
-        self.assertEqual(process.returncode, 0, stderr)
+        returncode, stdout, stderr = self.run_interactive(b"n\n")
+        self.assertEqual(returncode, 0, stderr)
         self.assertIn("Cancelled. No changes made.", stdout)
         self.assert_no_install()
 
@@ -307,6 +347,9 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertIn("Usage: fledge", run.stdout)
         self.assertFalse(any(self.home.glob(".*rc")))
+        self.assertEqual(
+            self.launcher_path(launcher)[0], os.path.realpath(self.tools), "selected tools first"
+        )
 
     def test_new_install_preserves_legacy_environment_and_launcher(self):
         self.complete_tools()
@@ -361,31 +404,30 @@ class InstallerTests(unittest.TestCase):
         preferred.mkdir()
         fallback = self.root / "second fallback"
         fallback.mkdir()
+        transient = self.root / "transient venv/bin"
+        transient.mkdir(parents=True)
+        shutil.copy2(self.program, transient / "unrelated-tool")
         for name in ("python3", "pdflatex"):
             shutil.copy2(self.program, preferred / name)
         for name in ("latexmk", "pdflatex", "pdfinfo"):
             shutil.copy2(self.program, fallback / name)
-        # Keep the real discovery function. Replace only its host-specific paths
-        # in this isolated script copy so no machine's installed TeX is involved.
-        script = self.script.read_text().replace(
-            "local tool_dirs=(/Library/TeX/texbin /opt/homebrew/bin /usr/local/bin)",
-            f"local tool_dirs=({shlex.quote(str(self.tools))} {shlex.quote(str(fallback))})",
-        )
-        self.script.write_text(script)
-        harness = HARNESS[: HARNESS.index("find_tool() {")] + 'main "$@"\n'
-        environment = {**self.env, "PATH": "preferred tools:/usr/bin:/bin"}
-        result = subprocess.run(
-            ["/bin/bash", "-c", harness, "installer-test", str(self.script), "--yes"],
-            cwd=self.root,
-            env=environment,
-            capture_output=True,
-            text=True,
-            timeout=30,
+        result = self.run_with_real_discovery(
+            f"{transient}:preferred tools:/usr/bin:/bin", (self.tools, fallback), "--yes"
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(f"Reuse pdflatex: {preferred.resolve()}/pdflatex", result.stdout)
         self.assertIn(f"Reuse latexmk: {fallback}/latexmk", result.stdout)
         self.assertIn(f"Reuse pdfinfo: {self.tools}/pdfinfo", result.stdout)
+        # Only the directories that supplied selected tools are saved, in PATH-first
+        # search order (not tool order), then fallbacks and system directories. The
+        # caller's other PATH entries, including the transient one, are left out.
+        self.assertEqual(
+            self.launcher_path(),
+            [
+                os.path.realpath(path)
+                for path in (preferred, self.tools, fallback, *SYSTEM_DIRECTORIES)
+            ],
+        )
         # Invoke the installed launcher from a different directory and a PATH
         # that otherwise selects the unwanted copies. Execute tools, not merely
         # parse the generated launcher text.
@@ -404,6 +446,54 @@ class InstallerTests(unittest.TestCase):
                 (fallback / "latexmk").resolve(),
                 (preferred / "pdflatex").resolve(),
                 (self.tools / "pdfinfo").resolve(),
+            ],
+        )
+
+    def test_launcher_saves_only_selected_directories_and_removes_duplicates(self):
+        # The mocked discovery selects everything from one directory; the caller's
+        # PATH (a project virtual environment and a relative entry) is not saved.
+        self.complete_tools()
+        project_environment = self.root / "project/.venv/bin"
+        project_environment.mkdir(parents=True)
+        self.env["PATH"] = (
+            f"{project_environment}:relative entry:/usr/bin:{self.tools}:/usr/bin:/bin"
+        )
+        result = self.run_installer("--yes")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            self.launcher_path(),
+            [
+                os.path.realpath(path)
+                for path in (
+                    self.tools,
+                    "/Library/TeX/texbin",
+                    "/opt/homebrew/bin",
+                    "/usr/local/bin",
+                    *SYSTEM_DIRECTORIES,
+                )
+            ],
+        )
+        self.assertNotIn(str(self.root / "relative entry"), self.launcher.read_text())
+
+    def test_launcher_keeps_already_installed_optional_tools_reachable(self):
+        # Optional tools are not required without --with-optional, but a copy that
+        # exists must stay reachable from the launcher. Missing ones add nothing.
+        self.complete_tools()
+        python_directory = self.root / "python bin"
+        optional_directory = self.root / "optional bin"
+        for directory in (python_directory, optional_directory):
+            directory.mkdir()
+        shutil.copy2(self.program, python_directory / "python3")
+        shutil.copy2(self.program, optional_directory / "tex-fmt")
+        path = f"{python_directory}:{optional_directory}:/usr/bin:/bin"
+        result = self.run_with_real_discovery(path, (self.tools,), "--yes")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("Reuse tex-fmt", result.stdout)
+        self.assertEqual(
+            self.launcher_path(),
+            [
+                os.path.realpath(path)
+                for path in (optional_directory, self.tools, *SYSTEM_DIRECTORIES)
             ],
         )
 
@@ -432,6 +522,131 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(result.returncode, 19)
         self.assertIn("installing the local Python package", result.stderr)
         self.assertTrue(self.prefix.exists())
+        self.assertFalse(self.launcher.exists())
+
+    def install(self, *args):
+        self.complete_tools()
+        result = self.run_installer("--yes", *args)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_uninstall_removes_installation_and_launcher_only(self):
+        self.install()
+        bystander = self.launcher.parent / "unrelated-tool"
+        bystander.write_text("keep")
+        sibling = self.prefix.parent / "other-application"
+        sibling.mkdir()
+        before = self.commands()
+        result = self.run_installer("--uninstall", "--yes")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Fledge removed", result.stdout)
+        self.assertFalse(self.prefix.exists())
+        self.assertFalse(self.launcher.exists())
+        self.assertEqual(bystander.read_text(), "keep")
+        self.assertTrue(sibling.is_dir())
+        self.assertEqual(self.commands(), before, "uninstalling must not run any tool")
+        # Upgrading is uninstall followed by a fresh install.
+        again = self.run_installer("--yes")
+        self.assertEqual(again.returncode, 0, again.stderr)
+        self.assertTrue(self.launcher.is_file())
+
+    def test_uninstall_matches_custom_relative_destinations(self):
+        self.install("--prefix", "private dir", "--bin-dir", "bin dir")
+        launcher, prefix = self.root / "bin dir/fledge", self.root / "private dir"
+        wrong = self.run_installer("--uninstall", "--yes", "--prefix", "private dir")
+        self.assertEqual(wrong.returncode, 1)
+        self.assertTrue(prefix.is_dir() and launcher.is_file())
+        result = self.run_installer(
+            "--uninstall", "--yes", "--prefix", "private dir", "--bin-dir", "bin dir"
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(prefix.exists() or launcher.exists())
+        self.assertTrue(launcher.parent.is_dir())
+
+    def test_uninstall_refuses_foreign_or_unrelated_launchers(self):
+        other = self.root / "other prefix"
+        self.prefix.mkdir(parents=True)
+        marker = self.prefix / "venv/keep"
+        marker.parent.mkdir()
+        marker.write_text("keep")
+        self.launcher.parent.mkdir(parents=True)
+        foreign = {
+            "unrelated program": '#!/bin/bash\nexec /usr/bin/true "$@"\n',
+            "another prefix": f'#!/bin/bash\nexec {shlex.quote(str(other))}/venv/bin/fledge "$@"\n',
+            "escaping path": f'#!/bin/bash\nexec {self.prefix}/venv/../../elsewhere "$@"\n',
+            "mentions prefix only": f"#!/bin/bash\n# {self.prefix}/venv/bin/fledge\n",
+        }
+        for name, content in foreign.items():
+            with self.subTest(name):
+                self.launcher.write_text(content)
+                result = self.run_installer("--uninstall", "--yes")
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("Nothing was removed", result.stderr)
+                self.assertEqual(self.launcher.read_text(), content)
+                self.assertEqual(marker.read_text(), "keep")
+        with self.subTest("missing launcher"):
+            self.launcher.unlink()
+            result = self.run_installer("--uninstall", "--yes")
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(marker.read_text(), "keep")
+
+    def test_uninstall_refuses_symbolic_links_to_the_installation(self):
+        self.install()
+        real_launcher = self.root / "real launcher"
+        real_prefix = self.root / "real prefix"
+        self.launcher.rename(real_launcher)
+        self.launcher.symlink_to(real_launcher)
+        result = self.run_installer("--uninstall", "--yes")
+        self.assertEqual(result.returncode, 1)
+        self.assertTrue(self.launcher.is_symlink() and real_launcher.is_file())
+        self.launcher.unlink()
+        real_launcher.rename(self.launcher)
+        self.prefix.rename(real_prefix)
+        self.prefix.symlink_to(real_prefix)
+        result = self.run_installer("--uninstall", "--yes")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("symbolic link", result.stderr)
+        self.assertTrue(self.prefix.is_symlink() and self.launcher.is_file())
+        self.assertTrue((real_prefix / "venv/bin/fledge").is_file())
+
+    def test_uninstall_refuses_home_directory_and_its_parents(self):
+        keep = self.home / "keep"
+        keep.write_text("keep")
+        for prefix in (self.home, self.home.parent):
+            with self.subTest(prefix=prefix):
+                result = self.run_installer("--uninstall", "--yes", "--prefix", str(prefix))
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("home directory", result.stderr)
+                self.assertEqual(keep.read_text(), "keep")
+
+    def test_uninstall_dry_run_and_declined_confirmation_change_nothing(self):
+        self.install()
+        before = self.commands()
+        for args in (("--dry-run",), ("--dry-run", "--yes")):
+            with self.subTest(args=args):
+                result = self.run_installer("--uninstall", *args)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(f"Remove launcher: {self.launcher}", result.stdout)
+                self.assertIn(str(self.prefix), result.stdout)
+                self.assertIn("Dry run complete", result.stdout)
+                self.assertTrue(self.launcher.is_file() and (self.prefix / "venv").is_dir())
+        noninteractive = self.run_installer("--uninstall")
+        self.assertEqual(noninteractive.returncode, 1)
+        self.assertIn("use --yes", noninteractive.stderr)
+        returncode, stdout, stderr = self.run_interactive(b"n\n", "--uninstall")
+        self.assertEqual(returncode, 0, stderr)
+        self.assertIn("Cancelled. No changes made.", stdout)
+        self.assertTrue(self.launcher.is_file() and (self.prefix / "venv").is_dir())
+        self.assertEqual(self.commands(), before)
+        returncode, stdout, stderr = self.run_interactive(b"y\n", "--uninstall")
+        self.assertEqual(returncode, 0, stderr)
+        self.assertFalse(self.launcher.exists() or self.prefix.exists())
+
+    def test_uninstall_removes_stale_launcher_after_environment_is_gone(self):
+        self.install()
+        shutil.rmtree(self.prefix)
+        result = self.run_installer("--uninstall", "--yes")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("already absent", result.stdout)
         self.assertFalse(self.launcher.exists())
 
 

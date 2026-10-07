@@ -65,7 +65,13 @@ subfiles have different semantics and are not silently merged. Bibliography
 inlining accepts an explicitly supplied literal BibTeX `thebibliography` file;
 it does not inline arbitrary biblatex output. Comments retain newline-suppression
 markers, literal environments, license blocks and formatter/template directives.
-Formatter output must preserve protected spans and pass a second idempotence run.
+Comment removal edits only `.tex`, `.ltx` and `.latex` files; local class and
+style files are copied unchanged. Formatter output must preserve protected spans
+and pass a second idempotence run. A formatter-off region starts at a comment
+line `% tex-fmt: off` and ends at `% tex-fmt: on`; the prefixes `fmt`,
+`fledge` and the earlier `latex-prep` are accepted as well. Only `tex-fmt` itself
+honors `% tex-fmt: off`; the other prefixes protect regions in Fledge's checks. An
+unmatched marker makes the result inconclusive.
 Filename overrides require `layout = "flat"` and retain flattening safety checks.
 
 ## Independent manuscript and supplement packages
@@ -94,7 +100,7 @@ globs; each pattern must match a file and the selected root must be included.
 These patterns restrict candidate inputs; they do not force every match into the
 final package. Omitting `include` makes every imported file in that document's
 source directory a candidate. Dependency selection retains the needed inputs;
-declare additional files with `submission_checks.required_deliverables` using
+list additional files in `[package] include` using
 paths relative to that document's source directory. Those paths follow any flat
 filename mapping. See [package contents](configuration.md#package-contents).
 Reference PDF paths resolve relative to the settings file. Use either `main` or
@@ -241,9 +247,6 @@ macOS execution uses `sandbox-exec`; Linux uses a required Bubblewrap backend
 with private namespaces and read-only toolchain inputs. Backend unavailability
 blocks builds. Linux runtime behavior and optional qpdf/MuPDF adapters need their
 own live validation on hosts where they are available. No tool is installed
-automatically and no unsandboxed fallback is provided.
-
-The installed macOS Biber launcher currently fails because it needs to execute
-self-extracted binaries from writable cache, which confinement denies. Selecting
-`bibliography_backend = "biber"` does not bypass this restriction. BibTeX workflows
-and simple XeLaTeX/LuaLaTeX builds have live macOS verification.
+automatically and no unsandboxed fallback is provided. On macOS, Biber runs from a
+sealed copy that Fledge prepares for the job; see
+[Biber on macOS](workflow.md#biber-on-macos).

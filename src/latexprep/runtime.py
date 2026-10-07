@@ -9,8 +9,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import copy
+import hashlib
 import json
 import os
+import platform
 import re
 import shutil
 import signal
@@ -20,7 +22,7 @@ import tempfile
 import time
 import xml.etree.ElementTree as ET
 from collections.abc import AsyncGenerator, Awaitable
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, TypeVar
 
@@ -136,6 +138,96 @@ _LINUX_SYSTEM_RESOURCES = (
     "/var/cache/fontconfig",
 )
 _LINUX_TOOL_PREFIXES = (Path("/usr"), Path("/bin"), Path("/lib"), Path("/lib64"))
+# Mach-O universal ("fat") container headers, always big-endian. The 32-bit form
+# uses fat_arch records and the 64-bit form fat_arch_64 records.
+_FAT_MAGIC_32 = 0xCAFEBABE
+_FAT_MAGIC_64 = 0xCAFEBABF
+_FAT_CPU_TYPES = {"arm64": 0x0100000C, "x86_64": 0x01000007}
+# A runtime-owned toolchain copy is interpolated into latexmk's Perl configuration
+# and into the command line latexmk builds for it, so its path must be inert in
+# both. Application-generated temporary paths satisfy this; nothing else is used.
+_INERT_PATH = re.compile(r"[A-Za-z0-9_./-]+")
+
+
+def _host_macho_slice(data: bytes) -> bytes:
+    """Return the host-architecture slice of a Mach-O executable image.
+
+    Universal binaries are split here rather than with ``lipo``: the Xcode
+    command-line stub that ``lipo`` resolves to is never a permitted grant, and
+    a universal Biber wrapper would shell out to it inside the sandbox. A
+    single-architecture image is already the slice and is returned unchanged.
+    """
+    if len(data) < 8:
+        raise PreparationError("The tool executable is too small to inspect")
+    magic = int.from_bytes(data[:4], "big")
+    if magic not in {_FAT_MAGIC_32, _FAT_MAGIC_64}:
+        return data
+    wide = magic == _FAT_MAGIC_64
+    width = 32 if wide else 20
+    count = int.from_bytes(data[4:8], "big")
+    if not 1 <= count <= 64 or 8 + count * width > len(data):
+        raise PreparationError("The universal executable header is truncated or unusable")
+    machine = platform.machine()
+    if machine not in _FAT_CPU_TYPES:
+        raise PreparationError(f"Unsupported host architecture for tool isolation: {machine}")
+    for index in range(count):
+        record = data[8 + index * width : 8 + (index + 1) * width]
+        if int.from_bytes(record[:4], "big") != _FAT_CPU_TYPES[machine]:
+            continue
+        offset, size = (
+            (int.from_bytes(record[8:16], "big"), int.from_bytes(record[16:24], "big"))
+            if wide
+            else (int.from_bytes(record[8:12], "big"), int.from_bytes(record[12:16], "big"))
+        )
+        if size < 8 or offset < 8 + count * width or offset + size > len(data):
+            raise PreparationError("The universal executable slice lies outside its container")
+        return data[offset : offset + size]
+    raise PreparationError(f"The universal executable has no {machine} slice")
+
+
+@dataclass(frozen=True)
+class _BiberToolchain:
+    """A runtime-owned single-architecture Biber with its extracted PAR payload.
+
+    ``executable`` lives beside ``payload`` rather than inside it, so no granted
+    program is ever reachable from its own writable workspace during warm-up.
+    """
+
+    executable: Path
+    payload: Path
+    identity: tuple[int, int, int, int]
+    payload_identity: tuple[int, int]
+
+    def validate(self) -> None:
+        """Confirm the granted copies are still the ones this runner prepared."""
+        info = self.executable.lstat()
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or (
+                info.st_dev,
+                info.st_ino,
+                info.st_size,
+                info.st_mtime_ns,
+            )
+            != self.identity
+        ):
+            raise PreparationError("The prepared bibliography tool was modified or replaced")
+        info = self.payload.lstat()
+        if not stat.S_ISDIR(info.st_mode) or (info.st_dev, info.st_ino) != self.payload_identity:
+            raise PreparationError("The prepared bibliography payload was replaced")
+
+
+def _seal_toolchain(root: Path) -> None:
+    """Drop every write bit so granted execution cannot be redirected later."""
+    for path in sorted(root.rglob("*"), reverse=True):
+        info = path.lstat()
+        if stat.S_ISDIR(info.st_mode):
+            path.chmod(0o500)
+        elif stat.S_ISREG(info.st_mode):
+            path.chmod(0o500 if info.st_mode & 0o111 else 0o400)
+        else:
+            raise PreparationError("The prepared tool payload contains an unsupported entry")
+    root.chmod(0o500)
 
 
 def _linux_tool_path(path: Path) -> bool:
@@ -270,6 +362,16 @@ class _RuntimeStatistics:
     version_probes: int = 0
 
 
+def _sample_interval(start: float) -> float:
+    """Sample tightly while a job ramps up, then relax to keep tree walks cheap.
+
+    Runaway allocation and output growth almost always appear in the first
+    seconds, where the shorter interval bounds the overshoot; afterwards the
+    repeated walk of the whole job tree costs more than the added precision.
+    """
+    return 0.1 if time.monotonic() - start < 3.0 else 0.5
+
+
 _CleanupResult = TypeVar("_CleanupResult")
 
 
@@ -320,6 +422,10 @@ class ToolRunner:
         self._job_max_temp_bytes = 0
         self._job_monitor: asyncio.Task[None] | None = None
         self._job_failure: str | None = None
+        self._biber_toolchain: _BiberToolchain | None = None
+        self._biber_ready = False
+        self._biber_failure: str | None = None
+        self._biber_preparation = asyncio.Lock()
         self._metrics = _RuntimeStatistics(
             memory_limit_mb=budget.memory_mb if budget else self.limits.memory_mb,
             parent_memory_reservation_mb=budget.parent_memory_mb if budget else None,
@@ -497,6 +603,90 @@ class ToolRunner:
             validated.append(path)
         return tuple(validated)
 
+    async def prepare_biber(self, root: Path) -> Path | None:
+        """Prepare a sandbox-executable Biber once per runner; ``None`` keeps the plain tool.
+
+        TeX Live ships Biber on macOS as a PAR-packed universal binary. The
+        universal wrapper shells out to the Xcode ``lipo`` stub, and the packed
+        payload execs itself out of ``$PAR_GLOBAL_TEMP``; neither is reachable
+        under a fail-closed profile. A single-architecture slice plus a warmed,
+        then read-only, payload directory is, and both live outside every tool
+        workspace. Linux Bubblewrap already permits execution inside the bound
+        workspace, so nothing is prepared there.
+        """
+        if sys.platform != "darwin":
+            return None
+        async with self._biber_preparation:
+            if self._biber_ready and self._biber_toolchain is not None:
+                return self._biber_toolchain.executable
+            if self._biber_failure is not None:
+                raise PreparationError(self._biber_failure)
+            try:
+                return await self._prepare_biber(root)
+            except (OSError, PreparationError) as error:
+                self._biber_failure = str(error)
+                self._biber_toolchain = None
+                # An unusable copy must never stay the resolved tool: a later
+                # probe would run it with no grants instead of reporting this.
+                self._resolved_tools.pop("biber", None)
+                raise PreparationError(self._biber_failure) from error
+
+    async def _prepare_biber(self, root: Path) -> Path:
+        source = _tool_path("biber")
+        if source.stat().st_size > self.limits.max_file_bytes:
+            raise PreparationError("The installed biber exceeds the tool file size limit")
+        image = _host_macho_slice(source.read_bytes())
+        # The payload is counted against the job temporary budget: it is created
+        # under the monitored job root whenever a job scope is active.
+        base = (self._job_root or root.resolve(strict=True)) / ".toolchain"
+        base = base / f"biber-{hashlib.sha256(image).hexdigest()[:16]}"
+        executable, payload = base / "biber", base / "payload"
+        if not _INERT_PATH.fullmatch(str(executable)):
+            raise PreparationError(
+                "An isolated bibliography tool needs a path of letters, digits, underscores, "
+                f"dots, slashes or hyphens: {executable}"
+            )
+        try:
+            base.mkdir(mode=0o700, parents=True, exist_ok=False)
+        except FileExistsError as error:
+            raise PreparationError(
+                "An isolated bibliography tool requires a new runtime-owned directory"
+            ) from error
+        with executable.open("xb") as outgoing:
+            outgoing.write(image)
+        executable.chmod(0o500)
+        payload.mkdir(mode=0o700)
+        info = payload.stat()
+        self._resolved_tools["biber"] = executable
+        self._biber_toolchain = _BiberToolchain(
+            executable,
+            payload,
+            self._file_identity(executable),
+            (info.st_dev, info.st_ino),
+        )
+        # The first exec stage unpacks only a handful of files, so the warm-up
+        # itself must be allowed to execute inside the payload directory.
+        await self.tool_version(["biber", "--noconf", "--version"], payload)
+        _seal_toolchain(base)
+        self._biber_toolchain = replace(
+            self._biber_toolchain, identity=self._file_identity(executable)
+        )
+        self._biber_ready = True
+        return executable
+
+    def _biber_scope(self, command: list[str]) -> _BiberToolchain | None:
+        """Return the prepared payload only when this command may execute Biber.
+
+        The runtime-owned path appears in the version probe and in the ``$biber``
+        rule of a latexmk build that permits Biber. A build that disabled Biber
+        never mentions it and therefore never receives these grants.
+        """
+        toolchain = self._biber_toolchain
+        if toolchain is None or not any(str(toolchain.executable) in arg for arg in command):
+            return None
+        toolchain.validate()
+        return toolchain
+
     async def tool_version(self, argv: list[str], workspace: Path) -> dict[str, object]:
         if not argv or any(not isinstance(arg, str) or "\0" in arg for arg in argv):
             raise PreparationError("A version command must contain non-NUL string arguments")
@@ -527,7 +717,7 @@ class ToolRunner:
                     or result.output_limited
                     or result.resource_exceeded
                     or not lines
-                    or re.search(r"(?:Syntax|Internal|Fontconfig) Error:|Error:", result.stderr)
+                    or "Error:" in result.stderr
                 ):
                     raise PreparationError(f"Cannot verify tool {argv[0]}: {result.stderr[:500]}")
                 self._versions[key] = {
@@ -561,6 +751,8 @@ class ToolRunner:
         if any(_inside(workspace, root) for root in roots if root.is_dir()):
             raise PreparationError("A job workspace cannot be inside a declared toolchain tree")
         inputs = self._validate_readonly_inputs(readonly_inputs)
+        toolchain = self._biber_scope(command)
+        isolated = () if toolchain is None else (toolchain.executable, toolchain.payload)
 
         def quote(path: Path) -> str:
             return json.dumps(str(path), ensure_ascii=False)
@@ -574,12 +766,28 @@ class ToolRunner:
         for path in sorted(executables | set(inputs)):
             reads.append(f"(literal {quote(path)})")
         ancestors = {
-            parent for root in roots | {workspace} | set(inputs) for parent in root.parents
+            parent
+            for root in roots | {workspace} | set(inputs) | set(isolated)
+            for parent in root.parents
         }
         metadata = " ".join(f"(literal {quote(parent)})" for parent in sorted(ancestors))
         execution = " ".join(
             f"(literal {quote(path)})"
             for path in sorted(executables | {item.resolve() for item in executables})
+        )
+        # A read-only runtime-owned payload outside every tool workspace; execution
+        # still never originates in project-writable storage.
+        targets = " ".join(
+            f"({'subpath' if path.is_dir() else 'literal'} {quote(path)})" for path in isolated
+        )
+        granted = (
+            ()
+            if not targets
+            else (
+                f"(allow process-exec {targets})",
+                f"(allow file-read* {targets})",
+                f"(allow file-map-executable {targets})",
+            )
         )
         profile = "\n".join(
             (
@@ -594,6 +802,7 @@ class ToolRunner:
                 f"(allow file-read-metadata {metadata})",
                 f"(allow file-write* (subpath {quote(workspace)}))",
                 '(allow file-write-data (literal "/dev/null"))',
+                *granted,
             )
         )
         return [backend, "-p", profile, *command]
@@ -743,8 +952,13 @@ class ToolRunner:
             'ulimit -t "$2" || exit 125; ulimit -n 256 || exit 125; '
             'shift 2; exec "$@"'
         )
+        # `ulimit -f` counts 1024-byte units in bash outside POSIX mode, which is
+        # what the computed argument assumes. Dash, the Debian/Ubuntu /bin/sh,
+        # counts 512-byte blocks instead and would halve the limit; macOS /bin/sh
+        # is bash and already agrees with /bin/bash here.
+        shell = "/bin/bash" if os.path.isfile("/bin/bash") else "/bin/sh"
         return [
-            "/bin/sh",
+            shell,
             "-c",
             script,
             "latexprep-limits",
@@ -801,6 +1015,7 @@ class ToolRunner:
         return rows
 
     def _workspace_usage(self, workspace: Path) -> tuple[int, str | None]:
+        """Walk one workspace. Blocking: callers on the event loop use a worker thread."""
         total = count = 0
         for directory, directories, filenames in os.walk(workspace, followlinks=False):
             count += len(directories) + len(filenames)
@@ -816,6 +1031,17 @@ class ToolRunner:
                         return total, "Workspace exceeded the total disk limit"
         return total, None
 
+    def _job_storage(self, workspaces: tuple[Path, ...]) -> tuple[tuple[str | None, ...], int]:
+        """Walk every active workspace and the whole job tree in one worker-thread pass."""
+        assert self._job_root is not None
+        failures = tuple(self._workspace_usage(workspace)[1] for workspace in workspaces)
+        total = 0
+        for directory, _, files in os.walk(self._job_root, followlinks=False):
+            for name in files:
+                with contextlib.suppress(FileNotFoundError):
+                    total += (Path(directory) / name).lstat().st_size
+        return failures, total
+
     @staticmethod
     def _group_usage(
         rows: list[tuple[int, int, int]], pid: int, memory_mb: int
@@ -830,13 +1056,14 @@ class ToolRunner:
 
     async def _resource_monitor(self, pid: int, workspace: Path) -> str:
         """Standalone-run fallback; jobs use the shared monitor below."""
+        start = time.monotonic()
         while True:
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(_sample_interval(start))
             rows = await self._process_sample()
             _, failure = self._group_usage(rows, pid, self._groups[pid].memory_mb)
             if failure:
                 return failure
-            _, failure = self._workspace_usage(workspace)
+            _, failure = await asyncio.to_thread(self._workspace_usage, workspace)
             if failure:
                 return failure
 
@@ -893,15 +1120,15 @@ class ToolRunner:
                     )
                     if failure:
                         self._fail_group(registration, failure)
-            for registration in groups.values():
-                _, failure = self._workspace_usage(registration.workspace)
+            # Walking the workspaces and the job tree is blocking and grows with
+            # the toolchain payload and build output, so it never runs inline.
+            registrations = tuple(groups.values())
+            failures, total = await asyncio.to_thread(
+                self._job_storage, tuple(item.workspace for item in registrations)
+            )
+            for registration, failure in zip(registrations, failures, strict=True):
                 if failure:
                     self._fail_group(registration, failure)
-            total = 0
-            for directory, _, files in os.walk(self._job_root, followlinks=False):
-                for name in files:
-                    with contextlib.suppress(FileNotFoundError):
-                        total += (Path(directory) / name).lstat().st_size
             self._metrics.peak_temp_bytes = max(int(self._metrics.peak_temp_bytes), total)
             if total > self._job_max_temp_bytes:
                 self._fail_job(f"Job temporary storage exceeded {self._job_max_temp_bytes} bytes")
@@ -912,10 +1139,13 @@ class ToolRunner:
             )
 
     async def _monitor_job(self) -> None:
+        start = time.monotonic()
         try:
             while True:
                 await self._sample_job()
-                await asyncio.sleep(0.1)
+                interval = _sample_interval(start)
+                self._metrics.sample_interval_seconds = interval
+                await asyncio.sleep(interval)
         except asyncio.CancelledError:
             raise
         except Exception as error:
@@ -1007,13 +1237,13 @@ class ToolRunner:
             raise PreparationError("Executing a project-supplied program is not permitted")
         command = [str(executable), *argv[1:]]
         context = self._tool_context(executable)
-        # Keep existing test subclasses with the original two-argument override working.
-        wrapped = (
-            self._sandbox_command(command, workspace, inputs)
-            if inputs
-            else self._sandbox_command(command, workspace)
-        )
+        wrapped = self._sandbox_command(command, workspace, inputs)
         environment = self._environment(workspace, executable)
+        toolchain = self._biber_scope(command)
+        if toolchain is not None:
+            # PAR execs its payload out of this directory; point it at the warmed,
+            # runtime-owned copy instead of the writable per-invocation temporary.
+            environment["PAR_GLOBAL_TEMP"] = str(toolchain.payload)
         lease = self.budget.current_lease if self.budget is not None else None
         maximum = min(self.limits.memory_mb, lease.memory_mb) if lease else self.limits.memory_mb
         if memory_mb is not None and memory_mb > maximum:
@@ -1153,7 +1383,9 @@ class ToolRunner:
                     registration.finished.set()
 
             await _finish_cleanup(close())
-        _, final_violation = self._workspace_usage(workspace)
+        _, final_violation = await _finish_cleanup(
+            asyncio.to_thread(self._workspace_usage, workspace)
+        )
         exceeded = exceeded or final_violation
         stdout, stderr = (bytes(data).decode("utf-8", errors="replace") for data in buffers)
         if any(
@@ -1204,7 +1436,9 @@ def _linux_process_groups(output: bytes, registered: set[int]) -> list[tuple[int
 
 
 def _kill_group(pid: int) -> None:
-    with contextlib.suppress(ProcessLookupError):
+    # macOS reports EPERM instead of ESRCH for a group whose leader is already a
+    # zombie being reaped; either way no signalable member of our group remains.
+    with contextlib.suppress(ProcessLookupError, PermissionError):
         os.killpg(pid, signal.SIGKILL)
 
 
@@ -1213,6 +1447,11 @@ def _read_bounded(path: Path, limit: int) -> str:
         return ""
     with path.open("rb") as stream:
         return stream.read(limit).decode("utf-8", errors="replace")
+
+
+def _log_tail(log: str, *, lines: int = 60, max_characters: int = 8000) -> str:
+    """Keep the closing log lines that explain a failure; reports redact centrally."""
+    return "\n".join(log.splitlines()[-lines:])[-max_characters:]
 
 
 def _log_findings(
@@ -1301,7 +1540,14 @@ def _log_findings(
     return findings
 
 
-def _copy_source(source: Path, destination: Path, limit: int) -> None:
+def _copy_source(source: Path, destination: Path, max_total_bytes: int) -> None:
+    """Import a bounded project snapshot into a disposable writable build copy.
+
+    ``max_total_bytes`` is the per-job import budget: it caps the combined size
+    of every imported file rather than the size of any single one. Callers pass
+    ``RuntimeLimits.max_file_bytes``, which therefore acts as the whole-tree
+    limit here, not as a per-file limit.
+    """
     total = count = 0
     for item in source.rglob("*"):
         info = item.lstat()
@@ -1309,7 +1555,7 @@ def _copy_source(source: Path, destination: Path, limit: int) -> None:
             raise PreparationError(f"Build inputs must be regular files/directories: {item.name}")
         count += 1
         total += info.st_size if item.is_file() else 0
-        if count > 20_000 or total > limit:
+        if count > 20_000 or total > max_total_bytes:
             raise PreparationError("Build input exceeds file-count or total-size limits")
     shutil.copytree(source, destination)
     # Imported snapshots may be read-only; writable disposable build copies are distinct.
@@ -1442,7 +1688,7 @@ async def build_project(
     work.mkdir(parents=True)
     work = work.resolve()
     project, output = work / "project", work / "output"
-    _copy_source(source, project, runner.limits.max_file_bytes)
+    _copy_source(source, project, max_total_bytes=runner.limits.max_file_bytes)
     output.mkdir()
     options_probe = None
     options_error = None
@@ -1454,10 +1700,22 @@ async def build_project(
     cwd = project / relative.parent
     output_argument = os.path.relpath(output, cwd)
     mode = {"pdflatex": "-pdf", "xelatex": "-xelatex", "lualatex": "-lualatex"}[engine]
+    biber_error: str | None = None
+    biber_executable = "biber"
+    if bibliography_backend != "bibtex":
+        # Prepared once per runner and reused by every later build of the job.
+        # A failure is reported through the bibliography-tool check below rather
+        # than raised, because an auto build may never need Biber at all.
+        try:
+            prepared = await runner.prepare_biber(work.parent)
+        except PreparationError as error:
+            biber_error = str(error)
+        else:
+            if prepared is not None:
+                biber_executable = str(prepared)
     # Static trusted configuration overrides no imported rc, rules, or environment.
     controlled_rules = (
-        "$max_repeat=5; $bibtex_use=1; $biber='biber --noconf %O %B'; "
-        "$use_make_for_missing_files=0; @cus_dep_list=();"
+        "$max_repeat=5; $bibtex_use=1; $use_make_for_missing_files=0; @cus_dep_list=();"
     )
     if bibliography_backend != "auto":
         # Latexmk's documented internal-command adapter returns failure without
@@ -1471,6 +1729,10 @@ async def build_project(
                 "biber": "$bibtex='internal latexprep_backend_blocked';",
             }[bibliography_backend]
         )
+    if bibliography_backend != "bibtex":
+        # Only an application-generated path reaches this Perl literal, and
+        # prepare_biber rejects any path that is not inert in Perl and the shell.
+        controlled_rules += f" $biber='{biber_executable} --noconf %O %B';"
     command = [
         "latexmk",
         "-norc",
@@ -1504,24 +1766,9 @@ async def build_project(
             version_command = (
                 [name, "-norc", version_flag] if name == "latexmk" else [name, version_flag]
             )
-            if hasattr(runner, "tool_version"):
-                result.tools[name] = copy.deepcopy(
-                    await runner.tool_version(version_command, workspace=work)
-                )
-            else:
-                # Legacy adapter doubles can retain the original run-only interface.
-                version = await runner.run(version_command, cwd=cwd, workspace=work)
-                if (
-                    version.returncode
-                    or version.timed_out
-                    or version.output_limited
-                    or version.resource_exceeded
-                ):
-                    raise PreparationError(f"Cannot verify tool {name}: {version.stderr[:500]}")
-                result.tools[name] = {
-                    "version": (version.stdout + version.stderr).splitlines()[:3],
-                    "executable": version.command[0],
-                }
+            result.tools[name] = copy.deepcopy(
+                await runner.tool_version(version_command, workspace=work)
+            )
         execution = await runner.run(command, cwd=cwd, workspace=work)
     except PreparationError as error:
         result.findings.append(
@@ -1572,11 +1819,12 @@ async def build_project(
         ),
     ):
         if condition:
-            result.findings.append(
-                Finding(
-                    rule, message, "error", path=main, details={"stderr": execution.stderr[-4000:]}
-                )
-            )
+            details: dict[str, object] = {"stderr": execution.stderr[-4000:]}
+            if rule == "build.failed":
+                # TeX reports the actual cause only in the log: latexmk's own
+                # stderr names the failed rule, not the offending input.
+                details["log_tail"] = _log_tail(result.log)
+            result.findings.append(Finding(rule, message, "error", path=main, details=details))
     recorder = output / f"{stem}.fls"
     recorder_inputs: set[Path] = set()
     if recorder.exists() and recorder.stat().st_size <= runner.limits.max_output_bytes:
@@ -1673,23 +1921,13 @@ async def build_project(
             ["biber", "--noconf", "--version"] if name == "biber" else ["bibtex", "--version"]
         )
         try:
-            if hasattr(runner, "tool_version"):
-                result.tools[name] = copy.deepcopy(
-                    await runner.tool_version(version_command, workspace=work)
+            if name == "biber" and biber_error is not None:
+                raise PreparationError(
+                    f"Cannot run biber under restricted execution: {biber_error}"
                 )
-            else:
-                version = await runner.run(version_command, cwd=cwd, workspace=work)
-                if (
-                    version.returncode
-                    or version.timed_out
-                    or version.output_limited
-                    or version.resource_exceeded
-                ):
-                    raise PreparationError(f"Cannot verify tool {name}: {version.stderr[:500]}")
-                result.tools[name] = {
-                    "version": (version.stdout + version.stderr).splitlines()[:3],
-                    "executable": version.command[0],
-                }
+            result.tools[name] = copy.deepcopy(
+                await runner.tool_version(version_command, workspace=work)
+            )
         except PreparationError as error:
             result.findings.append(
                 Finding(
@@ -1719,7 +1957,13 @@ async def build_project(
             valid_pdf = stream.read(5) == b"%PDF-"
     if not valid_pdf:
         result.findings.append(
-            Finding("build.missing_pdf", "No complete new PDF was produced.", "error", path=main)
+            Finding(
+                "build.missing_pdf",
+                "No complete new PDF was produced.",
+                "error",
+                path=main,
+                details={"log_tail": _log_tail(result.log)},
+            )
         )
     result.success = bool(valid_pdf) and not any(
         item.severity == "error" and item.code not in ignored_log_checks for item in result.findings

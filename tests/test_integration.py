@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import shutil
 import struct
 import tempfile
@@ -16,6 +15,7 @@ from latexprep.config import Settings
 from latexprep.core import JobRequest, run_job
 from latexprep.pdf import PdfOptions, inspect_pdf
 from latexprep.runtime import RuntimeLimits, ToolRunner
+from tests.support import live_tests_enabled
 
 
 def write_png(path: Path, rgb: bytes) -> None:
@@ -32,8 +32,8 @@ def write_png(path: Path, rgb: bytes) -> None:
 
 
 @unittest.skipUnless(
-    os.environ.get("LATEX_PREP_RUN_INTEGRATION") == "1",
-    "Set LATEX_PREP_RUN_INTEGRATION=1 for live restricted-tool integration checks",
+    live_tests_enabled(),
+    "Set FLEDGE_RUN_INTEGRATION=1 for live restricted-tool integration checks",
 )
 class LiveIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_nested_sources_bibliography_images_formatting_and_zip_rebuild(self):

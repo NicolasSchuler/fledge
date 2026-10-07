@@ -10,12 +10,13 @@ import re
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from .manuscript_checks import _placeholder, _read, _stop, _value
+from .manuscript_checks import _placeholder, _read, _stop, _value, _where
 from .models import Finding, PreparationError
 from .pdf import _page_count
 from .pdf_checks import _Objects, _properties, _result, _session, _unavailable
 from .runtime import ToolRunner
 from .scheduler import ResourceBudget, cancellation_point
+from .source import in_conditional
 
 _LIMIT = 10000
 _REFERENCE = re.compile(r"[0-9]+ [0-9]+ R")
@@ -140,22 +141,16 @@ def check_author_records(root: Path, main: str | None, options: StructureOptions
             and command.arguments[0].value.strip() == "document"
         ):
             break
-        if command.name.startswith(("if", "If")) or command.name in {
-            "else",
-            "or",
-            "fi",
-            "def",
-            "gdef",
-            "xdef",
-            "edef",
-            "csname",
-            "catcode",
-            "let",
-        }:
-            uncertainty.append("conditional or dynamically redefined preamble commands")
+        if command.name in {"def", "gdef", "xdef", "edef", "csname", "catcode", "let"}:
+            uncertainty.append("dynamically redefined preamble commands")
         if command.name not in configured:
             continue
         location = document.location(command.start)
+        # A \if… token only matters where it encloses a record: a \newif-defined
+        # name or a branch-taking package conditional executes nothing by itself.
+        if in_conditional(document.conditionals, command.start):
+            uncertainty.append(f"{location}: author record inside conditional control flow")
+            continue
         if command.depth or command.options or len(command.arguments) != 1:
             uncertainty.append(f"{location}: grouped, optional or ambiguous author-record syntax")
             continue
@@ -175,14 +170,25 @@ def check_author_records(root: Path, main: str | None, options: StructureOptions
     finish()
     if not records:
         violations.append({"reason": "no supported literal author records"})
+    reasons = sorted(set(uncertainty))
+    confirmed: list[object] = violations if not reasons else []
+    places = _where([item for item in confirmed if isinstance(item, dict)])
+    message = "Checked each configured sequential literal author record."
+    if confirmed:
+        message = (
+            f"{len(confirmed)} of {max(len(records), 1)} literal author records "
+            "lack a configured field" + (f": {places}" if places else "") + "."
+        )
+    elif reasons:
+        message += " Inconclusive: " + reasons[0].rstrip(".") + "."
     result = _result(
         "manuscript.author_records",
-        "Checked each configured sequential literal author record.",
-        violations if not uncertainty else [],
+        message,
+        confirmed,
         uncertain=bool(uncertainty),
         records=records[:100],
         observed_violations=violations[:100],
-        uncertainty=sorted(set(uncertainty)),
+        uncertainty=reasons,
         author_command=options.author_command,
         required_fields=list(options.required_author_fields),
         scope="User-selected preamble record grammar; no template, identity or "

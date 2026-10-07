@@ -17,11 +17,13 @@ from .runtime import CommandResult, ToolRunner
 from .scheduler import ResourceBudget, bounded_map, cancellation_point, run_in_thread
 from .workflow_options import ComparisonOptions
 
-_MAX_PAGES = 300
+_MAX_INSPECTION_PAGES = 5000
+_MAX_RENDERED_PAGES = 300
 _DPI = 144
 _MAX_PIXELS = 16_000_000
 _MAX_DIMENSION = 8192
 _RENDER_HEADROOM_MB = 128
+_PIXEL_CHUNK = 3 * 1024  # a whole number of RGB pixels
 _Result = TypeVar("_Result")
 
 
@@ -140,16 +142,27 @@ def _fields(output: str) -> dict[str, str]:
     }
 
 
-def _page_count(fields: dict[str, str]) -> int:
+def _page_count(fields: dict[str, str], maximum: int = _MAX_INSPECTION_PAGES) -> int:
     try:
         pages = int(fields["Pages"])
     except (KeyError, ValueError) as error:
         raise PreparationError("pdfinfo did not return a valid page count") from error
-    if pages < 1 or pages > _MAX_PAGES:
-        raise PreparationError(
-            f"PDF has {pages} pages; this implementation supports 1–{_MAX_PAGES}"
-        )
+    if pages < 1 or pages > maximum:
+        raise PreparationError(f"PDF has {pages} pages; this implementation supports 1–{maximum}")
     return pages
+
+
+def _require_rendered_pages(pages: int, subject: str = "Rendered comparison") -> None:
+    """Rendering costs one process and raster per page, so it keeps a smaller cap."""
+    if pages > _MAX_RENDERED_PAGES:
+        raise PreparationError(
+            f"{subject} supports at most {_MAX_RENDERED_PAGES} pages; this PDF has {pages}"
+        )
+
+
+def _is_type3(font_type: object) -> bool:
+    """Shared Type 3 test for pdffonts type cells; spacing and case are not significant."""
+    return re.fullmatch(r"Type\s*3", str(font_type), re.IGNORECASE) is not None
 
 
 def _page_sizes(output: str, pages: int) -> list[tuple[float, float]]:
@@ -591,9 +604,7 @@ async def inspect_pdf(
                     )
                 )
         if options.forbid_type3_fonts:
-            type3 = [
-                font for font in inventory if re.fullmatch(r"Type\s*3", str(font["type"]), re.I)
-            ]
+            type3 = [font for font in inventory if _is_type3(font["type"])]
             findings.append(
                 _constraint(
                     "pdf.type3_fonts",
@@ -746,8 +757,10 @@ async def inspect_pdf(
                 "Arbitrary annotations and active media are not inspected by this "
                 "Poppler adapter; their absence is unverified."
             ),
-            "warning",
-            "inconclusive",
+            # A scope disclaimer, not an observation: it must not make an otherwise
+            # clean inspection an advisory outcome.
+            "info",
+            "skipped",
             suggestion="Use a structural PDF checker before relying on these objects being absent.",
         )
     )
@@ -808,6 +821,7 @@ async def _comparison_side(session: _PdfWork, name: str) -> _ComparisonSide:
     document = f"./{name}.pdf"
     info = await session.run(f"{name}/properties", ["pdfinfo", document])
     pages = _page_count(_fields(info.stdout))
+    _require_rendered_pages(pages)
     side = _ComparisonSide(pages)
     geometry, text = await _measurements(
         [
@@ -842,9 +856,13 @@ def _pair_memory_mb(left: tuple[float, float], right: tuple[float, float]) -> in
 
 def _changed_pixels(left: bytes, right: bytes, channel_tolerance: int) -> int:
     count = 0
-    for start in range(0, len(left), 3072):
+    for start in range(0, len(left), _PIXEL_CHUNK):
         cancellation_point()
-        for offset in range(start, min(len(left), start + 3072), 3):
+        stop = min(len(left), start + _PIXEL_CHUNK)
+        if left[start:stop] == right[start:stop]:
+            # Identical bytes cannot exceed any tolerance; scan only differing chunks.
+            continue
+        for offset in range(start, stop, 3):
             if any(
                 abs(left[offset + channel] - right[offset + channel]) > channel_tolerance
                 for channel in range(3)

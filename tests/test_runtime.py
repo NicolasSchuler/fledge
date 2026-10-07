@@ -47,6 +47,7 @@ class FakeBuildRunner(ToolRunner):
         self.log = log
         self.trace = trace
         self.commands: list[list[str]] = []
+        self.biber_preparations = 0
 
     @property
     def resource_roots(self) -> frozenset[Path]:
@@ -54,6 +55,11 @@ class FakeBuildRunner(ToolRunner):
 
     def _resolve_tool(self, name: str) -> Path:
         return Path("/tools") / Path(name).name
+
+    async def prepare_biber(self, root: Path) -> Path | None:
+        """Fake builds never launch a real tool, so no toolchain copy is prepared."""
+        self.biber_preparations += 1
+        return None
 
     async def run(
         self,
@@ -104,6 +110,50 @@ class BuildTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result.success)
         self.assertIsNone(result.pdf)
         self.assertIn("build.failed", {item.rule for item in result.findings})
+
+    async def test_failure_findings_carry_a_bounded_tail_of_the_final_log(self) -> None:
+        log = "\n".join(f"log line {number}" for number in range(400)) + "\n! Emergency stop.\n"
+        result = await build_project(
+            self.source,
+            "main.tex",
+            self.root / "build",
+            "pdflatex",
+            FakeBuildRunner(returncode=1, log=log),
+        )
+        self.assertFalse(result.success)
+        failed = next(item for item in result.findings if item.rule == "build.failed")
+        tail = failed.details["log_tail"]
+        self.assertIsInstance(tail, str)
+        self.assertLessEqual(len(tail), 8000)
+        self.assertLessEqual(len(tail.splitlines()), 60)
+        self.assertIn("! Emergency stop.", tail)
+        self.assertIn("log line 399", tail)
+        self.assertNotIn("log line 300", tail)
+        # Successful builds must not carry build output into the report.
+        passed = await build_project(
+            self.source, "main.tex", self.root / "passing", "pdflatex", FakeBuildRunner(log="fine")
+        )
+        self.assertTrue(passed.success)
+        self.assertFalse(any("log_tail" in item.details for item in passed.findings))
+
+    async def test_missing_pdf_reports_the_log_tail_without_a_tool_failure(self) -> None:
+        class EmptyOutputRunner(FakeBuildRunner):
+            async def run(self, argv, cwd, workspace, **kwargs):
+                result = await super().run(argv, cwd, workspace, **kwargs)
+                if argv[-1] not in {"-v", "--version"}:
+                    (workspace / "output/main.pdf").write_bytes(b"not a PDF")
+                return result
+
+        result = await build_project(
+            self.source,
+            "main.tex",
+            self.root / "build",
+            "pdflatex",
+            EmptyOutputRunner(log="! LaTeX Error: File `missing.sty' not found."),
+        )
+        self.assertFalse(result.success)
+        missing = next(item for item in result.findings if item.rule == "build.missing_pdf")
+        self.assertIn("missing.sty", str(missing.details["log_tail"]))
 
     async def test_final_rerun_request_blocks_success(self) -> None:
         result = await build_project(
@@ -375,6 +425,17 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         for key in ("HOME", "CODEX_HOME", "PERL5OPT", "OPENAI_API_KEY"):
             self.assertNotIn(key, environment)
         self.assertTrue(environment["TEXMFHOME"].startswith(str(self.work)))
+
+    def test_file_size_limit_uses_a_shell_that_counts_kibibyte_units(self) -> None:
+        runner = ToolRunner(RuntimeLimits(max_file_bytes=4096))
+        wrapped = runner._limited_command(["/usr/bin/true"])
+        self.assertEqual(wrapped[3:6], ["latexprep-limits", "4", "120"])
+        self.assertEqual(wrapped[-1], "/usr/bin/true")
+        # Dash counts 512-byte blocks and would halve the limit, so bash wins
+        # wherever it exists; macOS /bin/sh is bash and agrees either way.
+        self.assertEqual(wrapped[0], "/bin/bash" if Path("/bin/bash").is_file() else "/bin/sh")
+        with patch("latexprep.runtime.os.path.isfile", return_value=False):
+            self.assertEqual(runner._limited_command(["/usr/bin/true"])[0], "/bin/sh")
 
     async def test_missing_backend_never_runs_command(self) -> None:
         with (

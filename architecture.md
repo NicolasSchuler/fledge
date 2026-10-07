@@ -192,7 +192,7 @@ The ordered chain of baseline build, transformations, prepared build and final-p
 ## Boundaries
 
 - **Input preservation:** originals and the imported snapshot remain unchanged. Tools receive only the job paths needed for their operation and declared toolchain resources.
-- **Execution:** builds, formatting and PDF tooling run under resource and file-access limits. Shell escape and network access are disabled by default; imported executable configuration is not trusted implicitly.
+- **Execution:** builds, formatting and PDF tooling run under resource and file-access limits. Shell escape and network access are disabled by default; imported executable configuration is not trusted implicitly. On macOS, Biber's self-extracting universal binary runs from a runtime-owned, sealed single-architecture copy prepared inside the job directory; execution is granted only for that sealed copy, never for files in a writable workspace.
 - **Network:** optional metadata lookup uses a separate bounded client outside the build sandbox. It receives only enabled reference fields and never gains access to arbitrary manuscript files.
 - **Policy:** the application evaluates generic constraints supplied by the user. It contains no maintained publisher or venue profile catalog.
 - **Interface:** structured job requests, progress, review decisions, findings and artifacts are shared by CLI and future web adapters. A remote web deployment must add upload isolation, access control and retention controls before accepting projects.

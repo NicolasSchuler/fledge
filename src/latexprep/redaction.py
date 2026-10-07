@@ -8,7 +8,9 @@ and does not import report models. Unsupported values are never stringified.
 from __future__ import annotations
 
 import json
+import math
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import unquote, unquote_plus
@@ -70,6 +72,20 @@ _BEARER = re.compile(r"(?i)\bBearer\s+(?P<value>[A-Za-z0-9._~+/=-]+)")
 # character. Bare credentials start at token boundaries; query keys are bounded.
 _USERINFO = re.compile(r"//(?P<value>[^\s/?#<>]+)@")
 _BARE_USERINFO = re.compile(r"(?<![^\s/<>])(?P<value>[^\s/:@<>]+:[^\s/@<>]+)@")
+# A bare ``scheme:address@host`` URI names a recipient, not a user and password.
+# Authorities (``//user:password@host``) never receive this exemption.
+_NON_CREDENTIAL_SCHEMES = frozenset(
+    {"mailto", "sip", "sips", "xmpp", "acct", "im", "pres", "mid", "cid", "news", "nntp", "urn"}
+)
+# Secrets shorter than this are only replaced as whole tokens, so a short password
+# such as "git" or "alice" cannot corrupt unrelated words in a report.
+_MIN_SUBSTRING_SECRET = 8
+_TOKEN_BEFORE = r"(?<![A-Za-z0-9])"
+_TOKEN_AFTER = r"(?![A-Za-z0-9])"
+# A password-less username is secret only when it looks like a bearer token.
+_TOKEN_USERNAME_MIN_CHARS = 16
+_TOKEN_ENTROPY_MIXED_CASE = 3.5
+_TOKEN_ENTROPY_SINGLE_CASE = 4.0
 _QUERY = re.compile(r"(?:[?&#;])(?P<key>[^\s=&;#]{1,256})=(?P<value>[^\s&#;<>\"']*)")
 
 
@@ -87,6 +103,30 @@ def _variants(text: str) -> list[str]:
     if unquote(result[-1]) != result[-1]:
         raise _Limit
     return result
+
+
+def _token_like(value: str) -> bool:
+    """Whether a long username is more likely a bearer token than a name."""
+    if len(value) < _TOKEN_USERNAME_MIN_CHARS:
+        return False
+    if any(char.isdigit() for char in value):
+        return True
+    counts = Counter(value)
+    entropy = -sum(n / len(value) * math.log2(n / len(value)) for n in counts.values())
+    mixed_case = any(char.isupper() for char in value) and any(char.islower() for char in value)
+    return entropy >= (_TOKEN_ENTROPY_MIXED_CASE if mixed_case else _TOKEN_ENTROPY_SINGLE_CASE)
+
+
+def _userinfo_secrets(userinfo: str, *, authority: bool) -> tuple[str, ...]:
+    """Secrets in ``user:password`` or, for an authority, a token-like lone username.
+
+    Short names such as ``git`` or ``oauth2`` and recipients such as
+    ``mailto:alice`` are not credentials; neither is ever added on its own.
+    """
+    user, _, password = userinfo.partition(":")
+    if password and (authority or user.lower() not in _NON_CREDENTIAL_SCHEMES):
+        return userinfo, password
+    return (user,) if authority and _token_like(user) else ()
 
 
 def _sensitive_key(key: str) -> bool:
@@ -153,12 +193,10 @@ class _Scan:
                     self.add(candidate)
             for match in _BEARER.finditer(value):
                 self.add(match.group("value"))
-            for pattern in (_USERINFO, _BARE_USERINFO):
+            for pattern, authority in ((_USERINFO, True), (_BARE_USERINFO, False)):
                 for match in pattern.finditer(value):
-                    credential = match.group("value")
-                    self.add(credential)
-                    for part in credential.split(":", 1):
-                        self.add(part)
+                    for secret in _userinfo_secrets(match.group("value"), authority=authority):
+                        self.add(secret)
             for match in _QUERY.finditer(value):
                 if _query_sensitive(unquote_plus(match.group("key"))):
                     self.add(match.group("value"))
@@ -215,8 +253,16 @@ def redact_data(value: Any) -> Any:
     except _Limit:
         return LIMIT_REDACTION
     secrets = sorted(scan.secrets, key=len, reverse=True)
-    pattern = re.compile("|".join(map(re.escape, secrets))) if secrets else None
-    long_secrets = [secret for secret in secrets if len(secret) >= 8]
+    long_secrets = [secret for secret in secrets if len(secret) >= _MIN_SUBSTRING_SECRET]
+    short_secrets = [secret for secret in secrets if len(secret) < _MIN_SUBSTRING_SECRET]
+    alternatives = []
+    if long_secrets:
+        alternatives.append("|".join(map(re.escape, long_secrets)))
+    if short_secrets:
+        alternatives.append(
+            _TOKEN_BEFORE + "(?:" + "|".join(map(re.escape, short_secrets)) + ")" + _TOKEN_AFTER
+        )
+    pattern = re.compile("|".join(alternatives)) if alternatives else None
     key_pattern = re.compile("|".join(map(re.escape, long_secrets))) if long_secrets else None
 
     def text(source: str, *, key: bool = False) -> str:

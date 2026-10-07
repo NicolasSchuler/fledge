@@ -6,8 +6,13 @@ RULE_DEFINITIONS = (
         "name": "submission.identity_terms",
         "title": "Configured source identity terms",
         "description": "Scan configured literal identity terms in bundle text, comments, URLs "
-        "and filenames. Case-insensitive matches do not establish anonymity.",
-        "tests": ("tests.test_submission_checks.SubmissionTests.test_source_identity_terms",),
+        "and filenames. Case-insensitive whole-word matches (set identity_term_matching to "
+        "substring to match inside words) do not establish anonymity.",
+        "tests": (
+            "tests.test_submission_checks.SubmissionTests.test_source_identity_terms",
+            "tests.test_submission_checks.SubmissionTests."
+            "test_short_identity_terms_match_whole_words_unless_substring_is_requested",
+        ),
         "fix": "Review the reported locations against the intended anonymity policy.",
     },
     {
@@ -15,7 +20,8 @@ RULE_DEFINITIONS = (
         "name": "submission.pdf_identity_terms",
         "title": "Configured PDF identity terms",
         "description": "Scan extracted PDF text and supplied metadata for configured literal "
-        "identity terms; unavailable extraction is inconclusive.",
+        "identity terms using the same whole-word or substring matching as source files; "
+        "unavailable extraction is inconclusive.",
         "tests": ("tests.test_submission_checks.SubmissionTests.test_pdf_identity_terms",),
         "fix": "Review the PDF text and metadata before submission, then regenerate the PDF.",
     },

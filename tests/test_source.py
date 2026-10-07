@@ -80,13 +80,19 @@ class SourceTests(unittest.TestCase):
         self.assertEqual(selected.roots, ["main.tex"])
         self.assertEqual(selected.findings, [])
 
+        # Reading every file to discover roots must not attribute their lexical
+        # uncertainties to the selected document.
         inspected = analyze_sources(self.root, "main.tex")
-        self.assertFalse(inspected.complete)
+        self.assertTrue(inspected.complete, inspected.findings)
         self.assertIn("other.tex", inspected.roots)
-        self.assertIn("source-argument-limit", {item.rule for item in inspected.findings})
+        self.assertNotIn("source-argument-limit", {item.rule for item in inspected.findings})
         flattened = plan_flatten(self.root, "main.tex")
         self.assertIn("other.tex", flattened.mapping)
         self.assertIn("flatten-multiple-roots", {item.rule for item in flattened.findings})
+        self.assertIn(
+            "source-argument-limit",
+            {item.details.get("source_rule") for item in flattened.findings},
+        )
 
     def test_selected_analysis_keeps_transitive_local_inputs_and_resources(self) -> None:
         sources = {
@@ -134,12 +140,9 @@ class SourceTests(unittest.TestCase):
         self,
     ) -> None:
         self.write("data/table.csv", "data")
-        self.write("figure.pdf", "pdf")
-        self.write("figure.png", "png")
         for command, rule in (
             (r"\input{\chosen}", "source-dynamic-path"),
             (r"\input{missing}", "source-missing-dependency"),
-            (r"\includegraphics{figure}", "source-ambiguous-dependency"),
             (r"\customreader{data/table.csv}", "source-custom-path"),
             (r"\IfFileExists{data/table.csv}{}{}", "source-unsupported-command"),
             (r"\directlua{require('reader')}", "source-unsupported-command"),
@@ -278,19 +281,55 @@ class SourceTests(unittest.TestCase):
         self.write("fig/result.pdf", b"pdf")
         self.write("fig/result.png", b"png")
         plan = plan_flatten(self.root, "main.tex")
-        self.assertTrue(has_blockers(plan.findings))
+        self.assert_usable(plan)
         finding = next(item for item in plan.findings if item.rule == "source-ambiguous-dependency")
         self.assertEqual(finding.code, "TEX008")
-        self.assertEqual(finding.details["candidates"], ["fig/result.pdf", "fig/result.png"])
+        self.assertEqual((finding.severity, finding.status), ("warning", "passed"))
+        self.assertEqual(finding.details["selected"], "fig/result.pdf")
+        self.assertEqual(finding.details["alternatives"], ["fig/result.png"])
+        self.assertEqual(finding.details["resolved_by"], "TeX lookup order")
+        # The rewritten reference names the file the lookup order selects.
+        self.assertIn(b"\\includegraphics{result.pdf}", plan.contents["main.tex"])
+        self.assertIn("fig/result.pdf", analyze_sources(self.root, "main.tex").dependencies)
+        self.assertNotIn("fig/result.png", analyze_sources(self.root, "main.tex").dependencies)
 
-    def test_searchpath_ambiguity_is_blocked(self) -> None:
+    def test_searchpath_ambiguity_uses_tex_lookup_order(self) -> None:
         self.write(
             "main.tex",
             "\\documentclass{article}\n\\graphicspath{{a/}{b/}}\n\\includegraphics{result.pdf}",
         )
         self.write("a/result.pdf", b"a")
         self.write("b/result.pdf", b"b")
-        self.assertTrue(has_blockers(plan_flatten(self.root, "main.tex").findings))
+        plan = plan_flatten(self.root, "main.tex")
+        self.assert_usable(plan)
+        finding = next(item for item in plan.findings if item.rule == "source-ambiguous-dependency")
+        self.assertEqual(finding.details["selected"], "a/result.pdf")
+        self.assertEqual(finding.details["alternatives"], ["b/result.pdf"])
+        self.assertIn(b"\\includegraphics{a-result.pdf}", plan.contents["main.tex"])
+
+    def test_tex_lookup_order_prefers_the_build_directory_and_default_suffix(self) -> None:
+        self.write(
+            "main.tex",
+            "\\documentclass{article}\n\\graphicspath{{images/}}\n"
+            "\\includegraphics{plot.pdf}\n\\input{body}\n",
+        )
+        self.write("plot.pdf", b"cwd")
+        self.write("images/plot.pdf", b"searched")
+        self.write("body.tex", "Body.\n")
+        self.write("body", "Not a TeX file.\n")
+        plan = plan_flatten(self.root, "main.tex")
+        self.assert_usable(plan)
+        rewritten = plan.contents["main.tex"].decode()
+        self.assertIn("\\includegraphics{plot.pdf}", rewritten)
+        self.assertIn("\\input{body.tex}", rewritten)
+        self.assertEqual(
+            {
+                item.details["reference"]: item.details["selected"]
+                for item in plan.findings
+                if item.rule == "source-ambiguous-dependency"
+            },
+            {"plot.pdf": "plot.pdf", "body": "body.tex"},
+        )
 
     def test_repeated_input_in_different_search_contexts_is_blocked(self) -> None:
         self.write(
@@ -585,6 +624,60 @@ class SourceTests(unittest.TestCase):
         self.write("main.tex", "\\documentclass{article}\n$\\frac{a/b}{c}$")
         self.assert_usable(plan_flatten(self.root, "main.tex"))
 
+    def test_unmatched_bracket_does_not_hide_the_rest_of_a_file(self) -> None:
+        self.write(
+            "main.tex",
+            "\\documentclass{article}\nLet $t \\in [0, 1)$.\n\\input{sections/body}\n",
+        )
+        self.write("sections/body.tex", "Body.\n")
+        for analyze in (analyze_sources, analyze_selected_sources):
+            with self.subTest(analyze=analyze.__name__):
+                result = analyze(self.root, "main.tex")
+                self.assertTrue(result.complete, result.findings)
+                self.assertEqual(result.dependencies, {"main.tex", "sections/body.tex"})
+
+    def test_argument_collection_stops_at_a_paragraph_break(self) -> None:
+        self.write("data/table.csv", "a,b\n1,2\n")
+        for separator, expected in (("\n", True), ("\n\n", False)):
+            with self.subTest(separator=separator):
+                self.write(
+                    "main.tex",
+                    "\\documentclass{article}\n\\mymacro{x}" + separator + "{data/table.csv}\n",
+                )
+                rules = {item.rule for item in analyze_sources(self.root, "main.tex").findings}
+                self.assertEqual("source-custom-path" in rules, expected)
+
+    def test_conditional_uncertainty_covers_only_enclosed_project_references(self) -> None:
+        self.write(
+            "local/helper.sty",
+            "\\ProvidesPackage{helper}\n\\if@twocolumn\\RequirePackage{multicol}\\fi\n",
+        )
+        self.write("figure.pdf", b"image")
+        preamble = "\\documentclass{article}\n\\newif\\ifanonymous\n\\usepackage{local/helper}\n"
+        self.write("main.tex", preamble + "\\includegraphics{figure.pdf}\n")
+        self.assert_usable(plan_flatten(self.root, "main.tex"))
+        self.write("main.tex", preamble + "\\ifanonymous\n\\includegraphics{figure.pdf}\n\\fi\n")
+        findings = [
+            item
+            for item in analyze_sources(self.root, "main.tex").findings
+            if item.rule == "source-conditional-dependency"
+        ]
+        self.assertEqual([(item.path, item.line) for item in findings], [("main.tex", 5)])
+        self.assertTrue(findings[0].suggestion.startswith("Make the dependency unconditional"))
+        self.assertTrue(has_blockers(plan_flatten(self.root, "main.tex").findings))
+
+    def test_formatting_commands_and_template_internals_are_not_advisories(self) -> None:
+        self.write(
+            "main.tex",
+            "\\documentclass{article}\n\\usepackage{local/template}\n"
+            "\\textcolor{red}{Result} \\color{blue}\n\\label{intro}\n",
+        )
+        self.write(
+            "local/template.sty",
+            "\\ProvidesPackage{template}\n% TODO internal note\n\\hl{draft}\n\\label{intro}\n",
+        )
+        self.assertEqual(analyze_sources(self.root, "main.tex").findings, [])
+
     def test_unclosed_and_oversized_arguments_are_bounded_and_explicit(self) -> None:
         for argument in ("unclosed", "x" * (64 * 1024 + 1) + "}"):
             with self.subTest(length=len(argument)):
@@ -678,8 +771,15 @@ class SourceTests(unittest.TestCase):
         self.assert_usable(plan)
         self.assertIn(b"\\import{./}{body.tex}", plan.contents["paper/main.tex"])
         self.assertIn(b"\\subimport{./}{part.tex}", plan.contents["paper/chapters/body.tex"])
-        self.write("paper/inside.tex", "Ambiguous root candidate.\n")
-        self.assertTrue(has_blockers(plan_flatten(self.root, "paper/main.tex").findings))
+        # LaTeX tries the plain filename before the import path.
+        self.write("paper/inside.tex", "Shadows the imported input.\n")
+        shadowed = plan_flatten(self.root, "paper/main.tex")
+        self.assert_usable(shadowed)
+        self.assertIn(b"\\input{paper-inside.tex}", shadowed.contents["paper/chapters/body.tex"])
+        finding = next(
+            item for item in shadowed.findings if item.rule == "source-ambiguous-dependency"
+        )
+        self.assertEqual(finding.details["selected"], "paper/inside.tex")
 
     def test_literal_subfile_body_and_parent_reference_are_flattened(self) -> None:
         self.write(

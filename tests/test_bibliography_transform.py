@@ -213,6 +213,33 @@ class BibliographyTransformTests(unittest.TestCase):
         self.write("other.tex", "\\documentclass{article}\\cite{unused}\\bibliography{references}")
         self.assert_blocked(self.plan(cited_only=True), "BIB203")
 
+    def test_resolved_source_dependencies_do_not_block_pruning(self) -> None:
+        self.manuscript("\\includegraphics{fig}\\cite{keep}")
+        self.write("fig.pdf", b"%PDF-1.4")
+        self.write("fig.png", b"\x89PNG\r\n\x1a\n")
+        self.write("references.bib", "@misc{keep}@misc{unused}")
+        proposed, _, rows = self.plan(cited_only=True)
+        self.assertEqual(self.code(rows), "BIB203")
+        self.assertEqual(rows[0].status, "passed")
+        self.assertEqual(
+            {entry.key for entry in self.parsed(proposed["references.bib"]).entries}, {"keep"}
+        )
+
+    def test_ordinary_macro_and_conditional_definitions_do_not_block_pruning(self) -> None:
+        self.manuscript(
+            "\\newcommand{\\R}{\\mathbb{R}}\\def\\shorthand{text}\\let\\old\\relax\n"
+            "\\ifdefined\\flag\\relax\\fi\n\\cite{keep}"
+        )
+        self.write("references.bib", "@misc{keep}@misc{unused}")
+        proposed, _, rows = self.plan(cited_only=True)
+        self.assertEqual(self.code(rows), "BIB203")
+        self.assertEqual(rows[0].status, "passed")
+        self.assertEqual(
+            {entry.key for entry in self.parsed(proposed["references.bib"]).entries}, {"keep"}
+        )
+        self.manuscript("\\ifdefined\\flag\\cite{keep}\\fi")
+        self.assert_blocked(self.plan(cited_only=True), "BIB203")
+
     def test_key_rename_updates_only_literal_uses_and_relationships_atomically(self) -> None:
         self.manuscript("\\input{chapter}\\nocite{old}\n% \\cite{old}\n\\verb|\\cite{old}|")
         chapter = self.write("chapter.tex", "\ufeffText \\parencites[see]{old, stay}{child}.\r\n")

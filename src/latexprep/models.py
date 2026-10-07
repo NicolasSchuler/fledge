@@ -4,9 +4,15 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass, field
+from typing import Literal, get_args
 
 from .redaction import redact_data
 from .rules import BY_NAME, code_for
+
+Severity = Literal["error", "warning", "info"]
+Status = Literal["failed", "inconclusive", "skipped", "passed", "not_applicable"]
+SEVERITIES: frozenset[str] = frozenset(get_args(Severity))
+STATUSES: frozenset[str] = frozenset(get_args(Status))
 
 
 class PreparationError(Exception):
@@ -17,8 +23,8 @@ class PreparationError(Exception):
 class Finding:
     rule: str
     message: str
-    severity: str = "warning"
-    status: str = "failed"
+    severity: Severity = "warning"
+    status: Status = "failed"
     path: str | None = None
     line: int | None = None
     evidence: str = "direct"
@@ -106,9 +112,9 @@ class Report:
             for item, original in zip(values["findings"], self.findings, strict=True):
                 if original.code is not None:
                     item["rule"] = original.rule
-                if original.severity in {"error", "warning", "info"}:
+                if original.severity in SEVERITIES:
                     item["severity"] = original.severity
-                if original.status in {"failed", "inconclusive", "skipped", "passed"}:
+                if original.status in STATUSES:
                     item["status"] = original.status
             values["findings"] = [Finding(**item) for item in values["findings"]]
             values["changes"] = [Change(**item) for item in values["changes"]]

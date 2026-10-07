@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import json
-import os
 import shutil
+import struct
 import sys
 import tempfile
 import unittest
@@ -13,11 +13,15 @@ from latexprep.models import PreparationError
 from latexprep.runtime import (
     CommandResult,
     ToolRunner,
+    _BiberToolchain,
     _distribution_roots,
+    _host_macho_slice,
     _linux_process_groups,
+    _seal_toolchain,
     _ToolContext,
     build_project,
 )
+from tests.support import live_tests_enabled
 from tests.test_runtime import FakeBuildRunner
 
 _BCF = (
@@ -181,7 +185,7 @@ class LinuxSandboxTests(unittest.IsolatedAsyncioTestCase):
                 _linux_process_groups(malformed, {1})
 
     @unittest.skipUnless(
-        sys.platform == "linux" and os.environ.get("LATEXPREP_RUN_SANDBOX_TESTS") == "1",
+        sys.platform == "linux" and live_tests_enabled("LATEXPREP_RUN_SANDBOX_TESTS"),
         "opt-in live Linux isolation check; requires operational Bubblewrap user namespaces",
     )
     async def test_live_linux_denies_sibling_reads_and_writes(self) -> None:
@@ -202,6 +206,116 @@ class LinuxSandboxTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, "DENIED BLOCKED")
         self.assertFalse((self.root / "outside-write").exists())
+
+
+class ToolIsolationTests(unittest.IsolatedAsyncioTestCase):
+    """A universal Biber image is split in-process; the lipo stub is never granted."""
+
+    @staticmethod
+    def universal(entries: tuple[tuple[int, bytes], ...], *, wide: bool = False) -> bytes:
+        width = 32 if wide else 20
+        records = payload = b""
+        start = 8 + len(entries) * width
+        for cpu_type, image in entries:
+            offset = start + len(payload)
+            records += (
+                struct.pack(">IIQQII", cpu_type, 0, offset, len(image), 14, 0)
+                if wide
+                else struct.pack(">IIIII", cpu_type, 0, offset, len(image), 14)
+            )
+            payload += image
+        magic = 0xCAFEBABF if wide else 0xCAFEBABE
+        return struct.pack(">II", magic, len(entries)) + records + payload
+
+    def test_host_slice_is_extracted_from_both_container_widths(self) -> None:
+        arm, intel = b"arm64 slice image", b"x86_64 slice image"
+        for wide in (False, True):
+            image = self.universal(((0x01000007, intel), (0x0100000C, arm)), wide=wide)
+            for machine, expected in (("arm64", arm), ("x86_64", intel)):
+                with (
+                    self.subTest(wide=wide, machine=machine),
+                    patch("latexprep.runtime.platform.machine", return_value=machine),
+                ):
+                    self.assertEqual(_host_macho_slice(image), expected)
+
+    def test_unusable_containers_are_refused_and_thin_images_pass_through(self) -> None:
+        thin = b"\xcf\xfa\xed\xfe single architecture executable"
+        self.assertEqual(_host_macho_slice(thin), thin)
+        with patch("latexprep.runtime.platform.machine", return_value="arm64"):
+            for description, image in (
+                ("absent host slice", self.universal(((0x01000007, b"x86_64 only"),))),
+                ("truncated records", struct.pack(">II", 0xCAFEBABE, 4) + b"\x01\x00\x00\x0c"),
+                ("empty container", struct.pack(">II", 0xCAFEBABE, 0)),
+                ("short image", b"\xca\xfe\xba\xbe"),
+            ):
+                with self.subTest(description=description), self.assertRaises(PreparationError):
+                    _host_macho_slice(image)
+            escaping = bytearray(self.universal(((0x0100000C, b"arm64 slice image"),)))
+            escaping[16:20] = (len(escaping) - 4).to_bytes(4, "big")
+            with self.assertRaisesRegex(PreparationError, "outside its container"):
+                _host_macho_slice(bytes(escaping))
+        with (
+            patch("latexprep.runtime.platform.machine", return_value="riscv64"),
+            self.assertRaisesRegex(PreparationError, "Unsupported host architecture"),
+        ):
+            _host_macho_slice(self.universal(((0x0100000C, b"arm64 slice image"),)))
+
+    def test_sealing_leaves_no_writable_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve() / "biber-0"
+            (base / "payload/inner").mkdir(parents=True)
+            (base / "biber").write_bytes(b"thin image")
+            (base / "biber").chmod(0o700)
+            (base / "payload/inner/module.pm").write_bytes(b"payload module")
+            _seal_toolchain(base)
+            for path in (base, *base.rglob("*")):
+                with self.subTest(path=path.name):
+                    self.assertFalse(path.stat().st_mode & 0o222, path)
+            self.assertTrue((base / "biber").stat().st_mode & 0o100)
+            (base / "payload").chmod(0o700)
+            (base / "payload/link").symlink_to(base / "biber")
+            with self.assertRaisesRegex(PreparationError, "unsupported entry"):
+                _seal_toolchain(base)
+
+    @unittest.skipUnless(sys.platform == "darwin", "Seatbelt profiles are macOS-only")
+    async def test_only_commands_that_may_run_biber_receive_payload_grants(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            base, workspace = root / ".toolchain/biber-0", root / "work"
+            base.mkdir(parents=True)
+            workspace.mkdir()
+            executable, payload = base / "biber", base / "payload"
+            executable.write_bytes(b"thin biber image")
+            executable.chmod(0o500)
+            payload.mkdir()
+            (payload / "libperl.dylib").write_bytes(b"extracted payload")
+            runner = ToolRunner()
+            info = payload.stat()
+            runner._biber_toolchain = _BiberToolchain(
+                executable,
+                payload,
+                ToolRunner._file_identity(executable),
+                (info.st_dev, info.st_ino),
+            )
+            profile = runner._sandbox_command(
+                ["/bin/sh", "-e", f"$biber='{executable} --noconf %O %B';"], workspace
+            )[2]
+            for rule in ("process-exec", "file-read*", "file-map-executable"):
+                self.assertIn(
+                    f"(allow {rule} (literal {json.dumps(str(executable))}) "
+                    f"(subpath {json.dumps(str(payload))}))",
+                    profile,
+                )
+            blocked = runner._sandbox_command(
+                ["/bin/sh", "-e", "$biber='internal latexprep_backend_blocked';"], workspace
+            )[2]
+            self.assertNotIn(str(payload), blocked)
+            self.assertNotIn(str(executable), blocked)
+            self.assertNotIn("(allow process-exec (literal", blocked.rsplit("\n", 1)[-1])
+            shutil.rmtree(payload)
+            payload.mkdir()
+            with self.assertRaisesRegex(PreparationError, "payload was replaced"):
+                runner._sandbox_command(["/bin/sh", "-e", str(executable)], workspace)
 
 
 class ControlBuildRunner(FakeBuildRunner):
@@ -284,6 +398,39 @@ class BibliographyBackendTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(result.success)
         self.assertEqual(finding.status, "not_applicable")
+
+    async def test_bibtex_strategy_never_prepares_or_names_the_biber_payload(self) -> None:
+        for backend, preparations in (("bibtex", 0), ("auto", 1), ("biber", 1)):
+            with self.subTest(backend=backend):
+                _, runner = await self.build(backend, {"main.aux": "\\relax\n"})
+                self.assertEqual(runner.biber_preparations, preparations)
+                build = next(command for command in runner.commands if command[-1].endswith(".tex"))
+                rules = build[build.index("-e") + 1]
+                self.assertEqual("$biber='biber --noconf %O %B'" in rules, backend != "bibtex")
+                if backend == "bibtex":
+                    self.assertIn("$biber='internal latexprep_backend_blocked'", rules)
+                    self.assertNotIn("--noconf", rules)
+
+    async def test_unpreparable_biber_is_reported_instead_of_raising(self) -> None:
+        self.build_count += 1
+        runner = ControlBuildRunner({"main.bcf": _BCF})
+        with patch.object(
+            runner,
+            "prepare_biber",
+            AsyncMock(side_effect=PreparationError("no arm64 slice")),
+        ):
+            result = await build_project(
+                self.source,
+                "main.tex",
+                self.root / f"build-{self.build_count}",
+                "pdflatex",
+                runner,
+                bibliography_backend="biber",
+            )
+        tool = next(item for item in result.findings if item.rule == "build.bibliography_tool")
+        self.assertEqual((tool.code, tool.status), ("BLD202", "inconclusive"))
+        self.assertIn("no arm64 slice", tool.message)
+        self.assertFalse(result.success)
 
     async def test_mismatching_and_malformed_controls_block(self) -> None:
         for backend, controls, status in (

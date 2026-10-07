@@ -22,6 +22,8 @@ from .source import (
     _group,
     _mask,
     _ParseLimit,
+    conditional_spans,
+    in_conditional,
 )
 from .submission_checks import _inventory, _read
 
@@ -166,8 +168,7 @@ def _edit_spans(text: str, edits: Sequence[MetadataEdit]) -> list[tuple[int, int
     if len(commands) >= MAX_COMMANDS:
         raise PreparationError("Source exceeds supported metadata command limits")
     if any(
-        command.name.startswith(("if", "If"))
-        or command.name
+        command.name
         in {
             "catcode",
             "csname",
@@ -177,7 +178,10 @@ def _edit_spans(text: str, edits: Sequence[MetadataEdit]) -> list[tuple[int, int
         }
         for command in commands
     ):
-        raise PreparationError("Conditional or dynamic source prevents a literal metadata proposal")
+        raise PreparationError("Dynamic source syntax prevents a literal metadata proposal")
+    # Only a conditional that encloses a selected declaration makes its old value
+    # unestablished; an unrelated \if…\fi elsewhere in the file does not.
+    conditionals = conditional_spans(commands)
     targets: dict[str, list[tuple[int, int]]] = {edit.field: [] for edit in edits}
     for command in commands:
         if command.name == "endinput" or (
@@ -193,6 +197,10 @@ def _edit_spans(text: str, edits: Sequence[MetadataEdit]) -> list[tuple[int, int
         )
         if not selected:
             continue
+        if in_conditional(conditionals, command.start):
+            raise PreparationError(
+                "Selected metadata is enclosed by conditional source control flow"
+            )
         if (
             command.depth
             or len(command.arguments) != 1
@@ -410,6 +418,9 @@ def _inflate(data: bytes) -> bytes:
 @dataclass
 class _MetadataText:
     entries: list[tuple[str, str]] = field(default_factory=list)
+    # Blocks deliberately not inspected. These bound the scope of a negative
+    # result; unlike an error they do not make the surrounding scan unusable.
+    limitations: list[str] = field(default_factory=list)
     size: int = 0
 
     def append(self, item: tuple[str, str]) -> None:
@@ -422,8 +433,14 @@ class _MetadataText:
         for item in items:
             self.append(item)
 
+    def limit(self, reason: str) -> None:
+        if reason not in self.limitations:
+            if len(self.limitations) >= _MAX_ENTRIES:
+                raise PreparationError("Skipped metadata blocks exceed the reporting limit")
+            self.limitations.append(reason)
 
-def _exif(data: bytes) -> list[tuple[str, str]]:
+
+def _exif(data: bytes, result: _MetadataText) -> None:
     if len(data) < 8 or data[:2] not in {b"II", b"MM"}:
         raise PreparationError("Unsupported EXIF byte order")
     order = "<" if data[:2] == b"II" else ">"
@@ -437,7 +454,6 @@ def _exif(data: bytes) -> list[tuple[str, str]]:
         raise PreparationError("Unsupported EXIF TIFF header")
     pending = [integer(4, 4)]
     seen: set[int] = set()
-    result = _MetadataText()
     total = 0
     sizes = {1: 1, 2: 1, 3: 2, 4: 4, 5: 8, 6: 1, 7: 1, 8: 2, 9: 4, 10: 8, 11: 4, 12: 8}
     while pending:
@@ -466,7 +482,10 @@ def _exif(data: bytes) -> list[tuple[str, str]]:
                     raise PreparationError("Unsupported EXIF subdirectory pointer")
                 pending.append(integer(entry + 8, 4))
             elif tag == 0x927C:
-                raise PreparationError("Vendor EXIF MakerNote metadata is not inspected")
+                # MakerNote holds an undocumented vendor structure whose own byte
+                # order and offsets are not portable. Skipping it keeps the rest of
+                # an ordinary camera image's metadata determinable.
+                result.limit("EXIF MakerNote (vendor binary)")
             elif kind == 2:
                 result.append((f"EXIF tag {tag:#06x}", value.rstrip(b"\0").decode("ascii")))
             elif tag == 0x9286 and kind == 7:
@@ -490,10 +509,74 @@ def _exif(data: bytes) -> list[tuple[str, str]]:
             elif tag == 700 and kind in {1, 7}:
                 result.append(("EXIF XMP", value.rstrip(b"\0").decode("utf-8")))
         pending.append(integer(offset + 2 + 12 * integer(offset, 2), 4))
-    return result.entries
 
 
-def _png_metadata(data: bytes) -> list[tuple[str, str]]:
+def _iptc(data: bytes, result: _MetadataText) -> None:
+    """Record simple IPTC IIM application-record text datasets."""
+    cursor = 0
+    datasets = 0
+    while cursor < len(data):
+        datasets += 1
+        if datasets > _MAX_ENTRIES:
+            raise PreparationError("JPEG IPTC dataset limit exceeded")
+        if data[cursor] != 0x1C or cursor + 5 > len(data):
+            result.limit("JPEG IPTC dataset outside the supported IIM layout")
+            return
+        record, dataset = data[cursor + 1], data[cursor + 2]
+        length = int.from_bytes(data[cursor + 3 : cursor + 5], "big")
+        cursor += 5
+        if length & 0x8000:
+            result.limit("JPEG IPTC extended dataset length")
+            return
+        if cursor + length > len(data):
+            result.limit("truncated JPEG IPTC dataset")
+            return
+        value = data[cursor : cursor + length]
+        cursor += length
+        # Record 2 is the application record. Dataset 0 is its binary version
+        # number and other records hold envelope or object-data bytes.
+        if record != 2 or dataset == 0:
+            continue
+        try:
+            result.append((f"JPEG IPTC 2:{dataset:03d}", value.decode("utf-8")))
+        except UnicodeDecodeError:
+            result.limit("JPEG IPTC dataset with an undeclared text encoding")
+
+
+def _photoshop(contents: bytes, result: _MetadataText) -> None:
+    """Walk 8BIM image resources and inspect only the IPTC-NAA resource."""
+    header = b"Photoshop 3.0\0"
+    if not contents.startswith(header):
+        result.limit("JPEG APP13 block outside the supported Photoshop layout")
+        return
+    cursor = len(header)
+    blocks = 0
+    while cursor < len(contents):
+        blocks += 1
+        if blocks > _MAX_ENTRIES:
+            raise PreparationError("JPEG APP13 resource limit exceeded")
+        if contents[cursor : cursor + 4] != b"8BIM" or cursor + 7 > len(contents):
+            result.limit("JPEG APP13 block outside the supported Photoshop layout")
+            return
+        identifier = int.from_bytes(contents[cursor + 4 : cursor + 6], "big")
+        # The resource name is a Pascal string padded to an even total length.
+        name = 1 + contents[cursor + 6]
+        cursor += 6 + name + name % 2
+        if cursor + 4 > len(contents):
+            result.limit("truncated JPEG APP13 resource")
+            return
+        size = int.from_bytes(contents[cursor : cursor + 4], "big")
+        cursor += 4
+        if size > _MAX_METADATA_BYTES or cursor + size > len(contents):
+            result.limit("oversized or truncated JPEG APP13 resource")
+            return
+        block = contents[cursor : cursor + size]
+        cursor += size + size % 2
+        if identifier == 0x0404:
+            _iptc(block, result)
+
+
+def _png_metadata(data: bytes) -> _MetadataText:
     if not data.startswith(b"\x89PNG\r\n\x1a\n"):
         raise PreparationError("PNG signature is invalid")
     result = _MetadataText()
@@ -515,7 +598,7 @@ def _png_metadata(data: bytes) -> list[tuple[str, str]]:
             if len(contents) > _MAX_METADATA_BYTES:
                 raise PreparationError("PNG metadata block exceeds the size limit")
             if kind == b"eXIf":
-                result.extend(_exif(contents))
+                _exif(contents, result)
             elif kind == b"tEXt":
                 key, value = contents.split(b"\0", 1)
                 result.append(("PNG tEXt", (key + b" " + value).decode("latin-1")))
@@ -548,12 +631,12 @@ def _png_metadata(data: bytes) -> list[tuple[str, str]]:
         elif kind == b"IEND":
             if length or end + 4 != len(data):
                 raise PreparationError("PNG has malformed termination or uninspected trailing data")
-            return result.entries
+            return result
         cursor = end + 4
     raise PreparationError("PNG termination was not found")
 
 
-def _jpeg_metadata(data: bytes) -> list[tuple[str, str]]:
+def _jpeg_metadata(data: bytes) -> _MetadataText:
     if not data.startswith(b"\xff\xd8"):
         raise PreparationError("JPEG signature is invalid")
     result = _MetadataText()
@@ -572,14 +655,14 @@ def _jpeg_metadata(data: bytes) -> list[tuple[str, str]]:
         if kind == 0xD9:
             if cursor != len(data):
                 raise PreparationError("JPEG has uninspected trailing data")
-            return result.entries
+            return result
         if kind == 0xDA:
             if cursor + 2 > len(data):
                 raise PreparationError("JPEG scan header is truncated")
             length = int.from_bytes(data[cursor : cursor + 2], "big")
             if length < 2 or cursor + length > len(data) or not data.endswith(b"\xff\xd9"):
                 raise PreparationError("JPEG scan header or termination is incomplete")
-            return result.entries
+            return result
         if kind in {0x00, 0xD8} or 0xD0 <= kind <= 0xD7 or cursor + 2 > len(data):
             raise PreparationError("Unexpected standalone JPEG marker")
         length = int.from_bytes(data[cursor : cursor + 2], "big")
@@ -590,13 +673,20 @@ def _jpeg_metadata(data: bytes) -> list[tuple[str, str]]:
             result.append(("JPEG comment", contents.decode("utf-8")))
         elif kind == 0xE1:
             if contents.startswith(b"Exif\0\0"):
-                result.extend(_exif(contents[6:]))
+                _exif(contents[6:], result)
             elif contents.startswith(b"http://ns.adobe.com/xap/1.0/\0"):
                 result.append(("JPEG XMP", contents.split(b"\0", 1)[1].decode("utf-8")))
+            elif contents.startswith(b"http://ns.adobe.com/xmp/extension/\0"):
+                # The extension header carries a GUID and binary chunk offsets
+                # ahead of the XMP text; it is decoded for term matching only and
+                # a term split across chunks is consequently not reconstructed.
+                body = contents.split(b"\0", 1)[1]
+                result.append(("JPEG extended XMP", body.decode("utf-8", errors="replace")))
+                result.limit("JPEG extended XMP is matched per chunk only")
             else:
-                raise PreparationError("Unsupported or extended JPEG APP1 metadata")
+                raise PreparationError("Unsupported JPEG APP1 metadata")
         elif kind == 0xED:
-            raise PreparationError("JPEG IPTC/Photoshop metadata is outside this scan")
+            _photoshop(contents, result)
         cursor += length
     raise PreparationError("JPEG pre-scan metadata termination was not found")
 
@@ -619,6 +709,7 @@ def check_image_metadata(root: Path, options: MetadataPrivacyOptions) -> list[Fi
         selected = selected[:_MAX_IMAGE_COUNT]
     terms = [_normalized(term) for term in options.image_identity_terms]
     matches = []
+    limitations: list[dict[str, str]] = []
     scanned = total = metadata_total = 0
     for name, path in selected:
         cancellation_point()
@@ -628,12 +719,16 @@ def check_image_metadata(root: Path, options: MetadataPrivacyOptions) -> list[Fi
             if total > _MAX_IMAGE_TOTAL:
                 issues.append({"reason": "Total image bytes exceeded the scan limit"})
                 break
-            entries = _png_metadata(data) if path.suffix.lower() == ".png" else _jpeg_metadata(data)
+            text = _png_metadata(data) if path.suffix.lower() == ".png" else _jpeg_metadata(data)
+            entries = text.entries
             metadata_total += sum(len(value.encode("utf-8")) for _, value in entries)
             if metadata_total > _MAX_METADATA_TOTAL:
                 issues.append({"reason": "Decoded metadata exceeded the scan limit"})
                 break
             scanned += 1
+            # A skipped vendor block narrows this image's scope; the remaining
+            # channels still support a determinable result for the project.
+            limitations.extend({"path": name, "skipped": reason} for reason in text.limitations)
             for channel, value in entries:
                 # XMP may encode names with numeric/predefined XML character references.
                 # Decode text only; never evaluate entities or fetch XML resources.
@@ -653,18 +748,22 @@ def check_image_metadata(root: Path, options: MetadataPrivacyOptions) -> list[Fi
             if matches
             else "Image metadata inspection is incomplete."
             if issues
-            else "No configured identity terms were found in the supported image metadata scope.",
+            else "No configured identity terms were found in the supported image metadata scope."
+            + (" Some vendor-specific blocks were skipped." if limitations else ""),
             "info" if status == "passed" else "error",
             status,
             details={
                 "matches": matches,
                 "issues": issues[:_MAX_MATCHES],
+                "limitations": limitations[:_MAX_MATCHES],
                 "incomplete": bool(issues),
                 "images_selected": len(selected),
                 "images_scanned": scanned,
                 "match_output_limited": len(matches) >= _MAX_MATCHES,
-                "scope": "PNG tEXt/zTXt/iTXt/EXIF and pre-scan JPEG EXIF/XMP/comments; "
+                "scope": "PNG tEXt/zTXt/iTXt/EXIF and pre-scan JPEG EXIF/XMP/"
+                "extended XMP/IPTC IIM application records/comments; "
                 "literal text with character-reference decoding; "
+                "skipped vendor blocks are listed as limitations; "
                 "no OCR, pixel content, later JPEG scans, other image formats "
                 "or guarantee of anonymity.",
             },

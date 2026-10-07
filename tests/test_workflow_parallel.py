@@ -80,7 +80,7 @@ class ParallelWorkflowTests(unittest.IsolatedAsyncioTestCase):
         started, release = threading.Event(), threading.Event()
         inspected = asyncio.Event()
 
-        def bibliography(_root):
+        def bibliography(_root, _main=None):
             started.set()
             if not release.wait(5):
                 raise AssertionError("PDF branch did not release the independent analysis")

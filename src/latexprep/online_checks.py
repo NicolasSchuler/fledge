@@ -30,8 +30,9 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, quote, urlencode, urljoin, urlsplit, urlunsplit
 
-from .bibliography import _Document, _doi_value, _Parser
-from .models import Finding, PreparationError
+from .bibliography import _Document, _doi_value, _Parser, _resource_declarations
+from .manuscript import _reachable_sources
+from .models import Finding, PreparationError, Severity, Status
 from .scheduler import ResourceBudget, bounded_map, cancellation_point, run_in_thread
 from .source import _commands, _Inspection, _ParseLimit, mask_literals
 
@@ -45,6 +46,14 @@ _SECRET_KEY = re.compile(
     re.I,
 )
 _DOI = re.compile(r"10\.\d{4,9}/[^\s<>\"{}\\]{1,2048}", re.I)
+_EMAIL = re.compile(
+    r"[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\.[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+)*"
+    r"@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+    r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+"
+)
+# Crossref's polite pool keys on a contact address inside the product comment.
+_PRODUCT = "fledge/0.1"
+_DEFAULT_USER_AGENT = f"{_PRODUCT} (explicit reference checks)"
 _TOGGLES = (
     "online_doi_resolution",
     "online_metadata",
@@ -67,6 +76,19 @@ _RULES = (
 
 @dataclass(frozen=True)
 class OnlineOptions:
+    """Every remote check is opt-in and bounded; nothing is retried automatically.
+
+    ``online_max_requests`` caps the whole job, not each check. Its default of 40
+    is reached quickly by an ordinary bibliography: one DOI resolution, metadata
+    lookup, notice query or URL probe each spend one request, so a project with
+    more references than the remaining budget reports ``request_limit`` for the
+    unvisited entries instead of silently treating them as verified. Raise it
+    deliberately (up to 1000) when complete reference coverage is required.
+
+    ``online_contact_email`` is sent only in the User-Agent request header, for
+    Crossref's polite pool. It never enters a finding, detail or report field.
+    """
+
     online: bool = False
     online_doi_resolution: bool = False
     online_metadata: bool = False
@@ -76,6 +98,7 @@ class OnlineOptions:
     online_reference_links: bool = False
     online_replication_links: bool = False
     online_replication_urls: tuple[str, ...] = ()
+    online_contact_email: str | None = None
     online_max_requests: int = 40
     online_timeout_seconds: int = 10
     online_max_redirects: int = 4
@@ -113,6 +136,19 @@ class OnlineOptions:
             raise PreparationError(
                 "online_replication_urls must be a tuple of at most 1000 nonempty URLs"
             )
+        email = self.online_contact_email
+        if email is not None and (
+            not isinstance(email, str) or len(email) > 254 or _EMAIL.fullmatch(email) is None
+        ):
+            raise PreparationError(
+                "online_contact_email must be one simple email address of at most 254 characters"
+            )
+
+    @property
+    def user_agent(self) -> str:
+        """The exact User-Agent header value; the only place a contact address is used."""
+        email = self.online_contact_email
+        return f"{_PRODUCT} (mailto:{email})" if email else _DEFAULT_USER_AGENT
 
 
 class NetworkFailure(Exception):
@@ -356,7 +392,12 @@ class Response:
 
 
 async def _exchange(
-    target: Target, address: str, method: str, body: bool, maximum: int
+    target: Target,
+    address: str,
+    method: str,
+    body: bool,
+    maximum: int,
+    user_agent: str = _DEFAULT_USER_AGENT,
 ) -> Response:
     """Connect to a numeric address once; TLS verifies the original DNS hostname."""
     address = _public_ip(address)
@@ -376,7 +417,7 @@ async def _exchange(
         authority = f"[{target.host}]" if ":" in target.host else target.host
         request = (
             f"{method} {target.path} HTTP/1.1\r\nHost: {authority}\r\n"
-            "User-Agent: fledge/0.1 (explicit reference checks)\r\n"
+            f"User-Agent: {user_agent}\r\n"
             "Accept: application/json, */*;q=0.1\r\nAccept-Encoding: identity\r\n"
             "Connection: close\r\n\r\n"
         )
@@ -513,7 +554,12 @@ class _Client:
                     if not addresses:
                         raise NetworkFailure("unavailable", "DNS returned no public addresses")
                     response = await _exchange(
-                        target, addresses[0], method, body, self.options.online_max_response_bytes
+                        target,
+                        addresses[0],
+                        method,
+                        body,
+                        self.options.online_max_response_bytes,
+                        self.options.user_agent,
                     )
                 if response.status == 429:
                     self.throttled.add(target.host)
@@ -596,13 +642,30 @@ def _collect(
 ) -> tuple[list[Reference], list[Reference], list[str]]:
     if not root.is_dir():
         raise PreparationError("Online reference input must be a directory")
-    references, links, gaps = [], [], []
+    references: list[Reference] = []
+    links: list[Reference] = []
+    gaps: list[str] = []
     total = 0
-    paths = (
-        sorted(path for path in root.rglob("*") if path.suffix.lower() == ".bib")
-        if any(getattr(options, toggle) for toggle in _TOGGLES[:-1])
-        else []
-    )
+    # Both bibliography entries and source links are scoped by the selected graph.
+    inspection = _Inspection(root, main)
+    paths: list[Path] = []
+    if any(getattr(options, toggle) for toggle in _TOGGLES[:-1]):
+        resources, resource_reasons = (
+            _resource_declarations(inspection, _reachable_sources(inspection))
+            if inspection.main
+            else (set(), [])
+        )
+        if resources:
+            paths = [root / name for name in sorted(resources)]
+            gaps.extend(resource_reasons)
+        elif not inspection.roots:
+            # A bibliography-only directory states its own scope: every local file.
+            paths = sorted(path for path in root.rglob("*") if path.suffix.lower() == ".bib")
+        else:
+            gaps.append(
+                "The selected source graph declares no resolvable bibliography resource; "
+                "no entry was requested"
+            )
     for path in paths:
         cancellation_point()
         if (
@@ -663,7 +726,6 @@ def _collect(
     if options.online_replication_links:
         for index, url in enumerate(options.online_replication_urls, 1):
             links.append(Reference(f"configured link {index}", None, None, "url", {"url": url}))
-        inspection = _Inspection(root, main)
         if inspection.main is None or inspection.uncertainties:
             gaps.append("Literal source-link coverage is incomplete in the selected source graph")
         for name in sorted(inspection.visited):
@@ -700,8 +762,8 @@ def _finding(
     reference: Reference,
     message: str,
     *,
-    status: str = "inconclusive",
-    severity: str = "warning",
+    status: Status = "inconclusive",
+    severity: Severity = "warning",
     evidence: str = "direct",
     **details: Any,
 ) -> Finding:
@@ -1180,9 +1242,12 @@ async def check_online_references(
 ) -> list[Finding]:
     """Opt-in only: share DOI/URL identifiers and titles, never whole source files.
 
-    All discovered .bib entries are in scope; source links use the selected literal
-    source graph. Transport availability and metadata agreement are separate checks.
-    A request failure is advisory/inconclusive, never a fabricated metadata match.
+    Entries come from the bibliography resources the selected literal source graph
+    declares, so spare copies outside the manuscript spend no request; a directory
+    without any document root falls back to every local .bib file. Source links use
+    the same selected graph. Transport availability and metadata agreement are
+    separate checks. A request failure is advisory/inconclusive, never a fabricated
+    metadata match, and the bounded request budget is reported with the findings.
     """
     enabled = [rule for name, rule in zip(_TOGGLES, _RULES, strict=True) if getattr(options, name)]
     if not options.online:

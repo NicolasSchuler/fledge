@@ -7,10 +7,15 @@ from collections import Counter
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict, replace
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
-from latexprep.models import PreparationError
+from latexprep.check_pipeline import inspect_standalone_pdf
+from latexprep.config import Settings
+from latexprep.models import PreparationError, has_blockers
 from latexprep.pdf import PdfOptions, _pair_memory_mb, _read_raster, compare_pdfs, inspect_pdf
-from latexprep.runtime import CommandResult
+from latexprep.pdf_artwork import PdfArtworkOptions
+from latexprep.pdf_checks import PdfCheckOptions
+from latexprep.runtime import CommandResult, ToolRunner
 from latexprep.scheduler import ResourceBudget
 from tests.test_pdf import FakePdfRunner
 
@@ -446,6 +451,31 @@ class ParallelPdfTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("compare.rendering", by_rule)
         self.assertIn(f"{required} MiB", by_rule["compare.unavailable"].message)
         self.assertFalse(any(argv[0] == "pdftoppm" for argv in runner.commands))
+
+    async def test_standalone_pdf_reports_source_only_settings_as_not_run(self) -> None:
+        settings = Settings(
+            match_source_pdf_metadata=("title",),
+            pdf_checks=PdfCheckOptions(require_embedded_figure_fonts=True),
+            figure_artwork=PdfArtworkOptions(classify_artwork=True),
+        )
+        empty = AsyncMock(return_value=[])
+        with (
+            patch("latexprep.check_pipeline.inspect_pdf", new=empty),
+            patch("latexprep.check_pipeline.inspect_pdf_details", new=empty),
+            patch("latexprep.check_pipeline.inspect_pdf_artwork", new=empty),
+            patch("latexprep.check_pipeline.inspect_pdf_structure", new=empty),
+        ):
+            findings = await inspect_standalone_pdf(
+                self.left, self.root / "standalone", ToolRunner(), settings, ResourceBudget(2, 1024)
+            )
+        self.assertEqual(
+            [item.rule for item in findings],
+            ["pdf.metadata_agreement", "pdf.included_figure_fonts", "pdf.artwork_input_scope"],
+        )
+        for item in findings:
+            self.assertEqual((item.severity, item.status), ("info", "skipped"))
+            self.assertIn("requires a source project; not run for a standalone PDF", item.message)
+        self.assertFalse(has_blockers(findings))
 
     def test_raster_pixels_cannot_exceed_geometry_reservation(self) -> None:
         raster = self.root / "oversized.ppm"

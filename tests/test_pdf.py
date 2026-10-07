@@ -5,7 +5,15 @@ import unittest
 from pathlib import Path
 
 from latexprep.models import PreparationError
-from latexprep.pdf import PdfOptions, _page_sizes, compare_pdfs, inspect_pdf
+from latexprep.pdf import (
+    PdfOptions,
+    _changed_pixels,
+    _is_type3,
+    _page_count,
+    _page_sizes,
+    compare_pdfs,
+    inspect_pdf,
+)
 from latexprep.runtime import CommandResult, ToolRunner
 
 
@@ -139,8 +147,84 @@ class PdfTests(unittest.IsolatedAsyncioTestCase):
         findings = await inspect_pdf(self.left, self.root / "inspect", FakePdfRunner())
         by_rule = {item.rule: item for item in findings}
         self.assertEqual(by_rule["pdf.fonts"].details["nonembedded"], [])
-        self.assertEqual(by_rule["pdf.annotation_media_scope"].status, "inconclusive")
+        scope = by_rule["pdf.annotation_media_scope"]
+        self.assertEqual((scope.severity, scope.status), ("info", "skipped"))
+        self.assertIn("absence is unverified", scope.message)
         self.assertEqual(by_rule["pdf.attachments"].status, "passed")
+
+    async def test_clean_inspection_has_no_advisory_or_blocking_findings(self) -> None:
+        findings = await inspect_pdf(self.left, self.root / "inspect", FakePdfRunner())
+        self.assertEqual(
+            [item.rule for item in findings if item.severity != "info" and item.status != "passed"],
+            [],
+        )
+
+    async def test_comparison_rejects_documents_beyond_the_rendering_cap(self) -> None:
+        findings = await compare_pdfs(
+            self.left, self.right, self.root / "compare", FakePdfRunner(pages_right=301)
+        )
+        rules = {item.rule: item for item in findings}
+        self.assertNotIn("compare.rendering", rules)
+        unavailable = rules["compare.unavailable"]
+        self.assertEqual((unavailable.severity, unavailable.status), ("error", "inconclusive"))
+        self.assertIn("Rendered comparison supports at most 300 pages", unavailable.message)
+
+    def test_page_count_bounds_are_explicit_per_purpose(self) -> None:
+        self.assertEqual(_page_count({"Pages": "5000"}), 5000)
+        self.assertEqual(_page_count({"Pages": "300"}, maximum=300), 300)
+        for fields, maximum in (({"Pages": "5001"}, 5000), ({"Pages": "301"}, 300)):
+            with self.subTest(pages=fields["Pages"]), self.assertRaises(PreparationError):
+                _page_count(fields, maximum=maximum)
+        for fields in ({"Pages": "0"}, {"Pages": "many"}, {}):
+            with self.subTest(fields=fields), self.assertRaises(PreparationError):
+                _page_count(fields)
+
+    def test_type3_font_detection_is_shared_and_exact(self) -> None:
+        for value in ("Type 3", "Type3", "type  3", "TYPE\t3"):
+            self.assertTrue(_is_type3(value), value)
+        for value in ("Type 1", "Type 1C", "Type 30", "CID Type 3C", "TrueType", ""):
+            self.assertFalse(_is_type3(value), value)
+
+    def test_changed_pixels_matches_a_per_pixel_reference_across_chunk_boundaries(self) -> None:
+        def reference(left: bytes, right: bytes, tolerance: int) -> int:
+            return sum(
+                any(abs(left[i + c] - right[i + c]) > tolerance for c in range(3))
+                for i in range(0, len(left), 3)
+            )
+
+        # More than two 1024-pixel chunks, ending inside a partial chunk.
+        pixels = 2 * 1024 + 517
+        left = bytes((index * 7) % 256 for index in range(3 * pixels))
+        right = bytearray(left)
+        # Differences straddling chunk edges, in a lone channel, and within tolerance.
+        for pixel, channel, delta in (
+            (0, 0, 9),
+            (1023, 2, 1),
+            (1024, 1, 5),
+            (1025, 0, 2),
+            (2047, 1, 200),
+            (2048, 2, 3),
+            (pixels - 1, 0, 40),
+        ):
+            offset = 3 * pixel + channel
+            right[offset] = (right[offset] + delta) % 256
+        right = bytes(right)
+        for tolerance in (0, 1, 2, 5, 255):
+            with self.subTest(tolerance=tolerance):
+                self.assertEqual(
+                    _changed_pixels(left, right, tolerance), reference(left, right, tolerance)
+                )
+        self.assertEqual(_changed_pixels(left, left, 0), 0)
+        self.assertEqual(_changed_pixels(b"", b"", 0), 0)
+
+    async def test_inspection_supports_documents_beyond_the_rendering_cap(self) -> None:
+        findings = await inspect_pdf(
+            self.left, self.root / "inspect", ConfigurablePdfRunner(pages=301)
+        )
+        by_rule = {item.rule: item for item in findings}
+        self.assertEqual(by_rule["pdf.pages"].details["pages"], 301)
+        self.assertNotIn("pdf.inspection_unavailable", by_rule)
+        self.assertEqual(by_rule["pdf.text"].status, "passed")
 
     async def test_missing_pdf_inspection_tool_is_blocking(self) -> None:
         findings = await inspect_pdf(

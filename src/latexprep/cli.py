@@ -28,6 +28,8 @@ EXIT_CODES = {
     "error": 4,
     "cancelled": 130,
 }
+# Invalid command-line syntax (BSD sysexits EX_USAGE); distinct from every outcome.
+USAGE_EXIT_CODE = 64
 
 
 def _common(function):
@@ -117,7 +119,32 @@ def _build_options(function):
     return function
 
 
-@click.group(name="fledge", context_settings={"help_option_names": ["-h", "--help"]})
+def _command_line_error(error: click.UsageError) -> None:
+    # Click declares exit_code as a class default; the instance value is what it reports.
+    setattr(error, "exit_code", USAGE_EXIT_CODE)  # noqa: B010
+
+
+class _FledgeGroup(click.Group):
+    """Report invalid command-line syntax with an exit code no outcome uses."""
+
+    def make_context(self, *args: Any, **kwargs: Any) -> click.Context:
+        try:
+            return super().make_context(*args, **kwargs)
+        except click.UsageError as error:
+            _command_line_error(error)
+            raise
+
+    def invoke(self, ctx: click.Context) -> Any:
+        try:
+            return super().invoke(ctx)
+        except click.UsageError as error:
+            _command_line_error(error)
+            raise
+
+
+@click.group(
+    name="fledge", cls=_FledgeGroup, context_settings={"help_option_names": ["-h", "--help"]}
+)
 @click.version_option(__version__, prog_name="fledge")
 def cli() -> None:
     """Fledge checks and prepares a separate LaTeX submission copy.
@@ -175,8 +202,8 @@ def prepare_command(**options) -> int:
     """Package the selected paper's needed inputs and explicit deliverables.
 
     Unrelated files are omitted from the copy; originals stay unchanged. Complete
-    dependency evidence and an exact archive rebuild are required. Retain extra
-    files with submission_checks.required_deliverables in project configuration.
+    dependency evidence and an exact archive rebuild are required. Ship extra
+    files with [package] include = [...] in project configuration.
     """
     return _execute("prepare", options)
 
@@ -317,6 +344,30 @@ def _execute(command: str, options: dict[str, Any]) -> int:
     except (PreparationError, OSError, ValueError) as error:
         report.outcome = "error"
         report.findings.append(Finding("execution.request", str(error), "error", "inconclusive"))
+    except Exception as error:
+        # A defect must still yield a machine-readable error report and exit code.
+        report.outcome = "error"
+        report.findings.append(
+            Finding(
+                "execution.internal",
+                f"Internal error ({type(error).__name__}): {error}",
+                "error",
+                "inconclusive",
+                suggestion="Report this defect with the command and the JSON report.",
+            )
+        )
+    from .reporting import export_diagnostic_bundle, render_ci_annotations, render_html
+
+    # Write the HTML and diagnostics first, so a failure is reflected in the saved JSON.
+    try:
+        if html_destination is not None:
+            with html_destination.open("x", encoding="utf-8") as stream:
+                stream.write(render_html(report))
+        if diagnostic_destination is not None:
+            export_diagnostic_bundle(report, diagnostic_destination)
+    except (PreparationError, OSError, ValueError) as error:
+        report.outcome = "error"
+        report.findings.append(Finding("report.write", str(error), "error", "failed"))
     encoded = json.dumps(report.to_dict(), indent=2, ensure_ascii=False) + "\n"
     if report_destination is not None:
         try:
@@ -328,23 +379,6 @@ def _execute(command: str, options: dict[str, Any]) -> int:
                 Finding("report.write", f"Cannot write report: {error}", "error", "failed")
             )
             encoded = json.dumps(report.to_dict(), indent=2, ensure_ascii=False) + "\n"
-    if (
-        html_destination is not None
-        or diagnostic_destination is not None
-        or output_format in {"html", "ci"}
-    ):
-        from .reporting import export_diagnostic_bundle, render_ci_annotations, render_html
-
-        try:
-            if html_destination is not None:
-                with html_destination.open("x", encoding="utf-8") as stream:
-                    stream.write(render_html(report))
-            if diagnostic_destination is not None:
-                export_diagnostic_bundle(report, diagnostic_destination)
-        except (PreparationError, OSError, ValueError) as error:
-            report.outcome = "error"
-            report.findings.append(Finding("report.write", str(error), "error", "failed"))
-            encoded = json.dumps(report.to_dict(), indent=2, ensure_ascii=False) + "\n"
     if output_format == "json":
         click.echo(encoded, nl=False)
     elif output_format == "compact":
@@ -352,7 +386,7 @@ def _execute(command: str, options: dict[str, Any]) -> int:
     elif output_format == "html":
         click.echo(render_html(report))
     elif output_format == "ci":
-        click.echo(render_ci_annotations(report))
+        click.echo(render_ci_annotations(report, show_passed=options["show_passed"]))
     else:
         print_report(
             report,

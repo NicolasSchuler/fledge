@@ -132,8 +132,8 @@ RULE_DEFINITIONS = (
         "name": "pdf.included_figure_fonts",
         "title": "Included PDF figure fonts",
         "description": "Inspect explicitly supplied input PDFs for configured embedding and "
-        "Type 3 policies. No reported fonts is inconclusive; final-PDF attribution and bitmap "
-        "Type 3 glyph classification are not established.",
+        "Type 3 policies. A figure with no font resources has nothing to embed and passes; "
+        "final-PDF attribution and bitmap Type 3 glyph classification are not established.",
         "tests": (
             "tests.test_pdf_checks.PdfDetailTests.test_included_figure_fonts_keep_source_attribution_and_unknown_coverage",
         ),

@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from latexprep.models import Finding, PreparationError
+from latexprep.option_config import read_options
 from latexprep.submission_checks import (
     SubmissionOptions,
     check_pdf_identity,
@@ -72,6 +73,135 @@ class SubmissionTests(unittest.TestCase):
             self.assertEqual(
                 check_pdf_identity("very long text", {"A": "B"}, options)[0].status, "inconclusive"
             )
+
+    def test_short_identity_terms_match_whole_words_unless_substring_is_requested(self) -> None:
+        rule = "submission.identity_terms"
+        word = SubmissionOptions(identity_terms=("Li",))
+        substring = SubmissionOptions(identity_terms=("Li",), identity_term_matching="substring")
+        self.assertEqual(word.identity_term_matching, "word")
+        self.write("Linear.tex", "Linear models, Delivery, and a complicated table.\n")
+        self.assertEqual(self.result(rule, word).status, "passed")
+        found = self.result(rule, substring)
+        self.assertEqual(found.status, "failed")
+        self.assertEqual({item["path"] for item in found.details["matches"]}, {"Linear.tex"})
+        for text, expected in (
+            ("Li, Wei and Zhang\n", True),
+            ("by LI\n", True),
+            ("(Li)\n", True),
+            ("Li2\n", False),
+            ("li_paper has no word edge\n", True),
+            ("Lisbon\n", False),
+            ("Mali\n", False),
+        ):
+            with self.subTest(text=text):
+                self.write("Linear.tex", text)
+                self.assertEqual(self.result(rule, word).status == "failed", expected)
+                self.assertEqual(self.result(rule, substring).status, "failed")
+        self.write("Linear.tex", "")
+        self.write("li_paper.tex", "")
+        self.assertEqual(self.result(rule, word).details["matches"][0]["channel"], "filename")
+        # Terms that begin or end with punctuation keep that edge literal.
+        self.write("Linear.tex", "mail jane@private.example now\n")
+        email = SubmissionOptions(identity_terms=("@private.example",))
+        self.assertEqual(self.result(rule, email).status, "failed")
+        folded = SubmissionOptions(identity_terms=("Jürgen",))
+        self.write("Linear.tex", "JÜRGEN\u0301x and Ju\u0308rgen\n")
+        self.assertEqual(self.result(rule, folded).status, "failed")
+        pdf_word = check_pdf_identity("Linear regression", {"Author": "Anonymous"}, word)[0]
+        self.assertEqual(pdf_word.status, "passed")
+        pdf_substring = check_pdf_identity("Linear regression", {"Author": "Anon"}, substring)[0]
+        self.assertEqual(pdf_substring.status, "failed")
+        self.assertEqual(
+            check_pdf_identity("Contact Li", {"Author": "Anon"}, word)[0].status, "failed"
+        )
+
+    def test_identity_term_matching_is_validated_and_configurable(self) -> None:
+        for value in ("regex", "", "WORD", None, True):
+            with self.subTest(value=value), self.assertRaises(PreparationError):
+                SubmissionOptions(identity_term_matching=value)  # type: ignore[arg-type]
+        configured = read_options(
+            SubmissionOptions,
+            {"identity_terms": ["Li"], "identity_term_matching": "substring"},
+            "submission_checks",
+        )
+        self.assertEqual(configured.identity_term_matching, "substring")
+        with self.assertRaises(PreparationError):
+            read_options(SubmissionOptions, {"identity_term_matching": 1}, "submission_checks")
+
+    def test_failure_message_states_count_and_locations_without_identity_terms(self) -> None:
+        rule = "submission.identity_terms"
+        options = SubmissionOptions(identity_terms=("Jane Smith", "private.example"))
+        self.write("a.tex", "Jane Smith\n\nprivate.example\n")
+        self.write("b.txt", "x\nJane Smith and private.example\n")
+        result = self.result(rule, options)
+        # Two terms on one line are two matches at one location.
+        self.assertEqual(result.message, "4 matches: a.tex:1, a.tex:3, b.txt:2")
+        self.assertNotIn("Jane", result.message)
+        self.assertNotIn("private", result.message)
+        for index in range(5):
+            self.write(f"c{index}.tex", "Jane Smith\n")
+        result = self.result(rule, options)
+        self.assertEqual(result.message, "9 matches: a.tex:1, a.tex:3, b.txt:2 (+5 more)")
+        many = self.result("submission.filename_length", SubmissionOptions(filename_max_length=4))
+        self.assertEqual(many.message, "8 matches: a.tex, b.txt, c0.tex (+5 more)")
+        self.assertEqual(len(many.details["matches"]), 8)
+        self.write("x" * 240 + ".dat", "")
+        long = self.result("submission.filename_length", SubmissionOptions(filename_max_length=200))
+        self.assertEqual(long.message, "1 match: " + "x" * 119 + "…")
+        self.assertEqual(long.details["matches"], [{"path": "x" * 240 + ".dat"}])
+
+    def test_file_policy_and_deliverable_messages_name_the_offending_files(self) -> None:
+        self.write("only-one.dat", "")
+        one = self.result(
+            "submission.file_extensions", SubmissionOptions(allowed_extensions=(".tex",))
+        )
+        self.assertEqual(one.message, "1 match: only-one.dat")
+        # Deliverable reasons stay visible without opening the JSON details.
+        missing = self.result(
+            "submission.deliverables",
+            SubmissionOptions(required_deliverables=(("missing.pdf", "pdf"),)),
+        )
+        self.assertEqual(missing.message, "1 match: missing.pdf (missing regular file)")
+        with patch("latexprep.submission_checks.MAX_SCAN_MATCHES", 2):
+            self.write("a.tex", "Identity\n" * 5)
+            capped = self.result(
+                "submission.identity_terms", SubmissionOptions(identity_terms=("Identity",))
+            )
+        self.assertEqual(capped.message, "2+ matches: a.tex:1, a.tex:2")
+
+    def test_inconclusive_message_names_the_first_issue_and_pdf_message_names_channels(
+        self,
+    ) -> None:
+        options = SubmissionOptions(identity_terms=("Jane Smith",))
+        incomplete = self.incomplete("submission.identity_terms", options)
+        self.assertEqual(
+            incomplete.message, "The configured scan is incomplete: Unreadable directory."
+        )
+        self.assertEqual(
+            self.result("submission.identity_terms", options).message,
+            "No matches in the stated scope.",
+        )
+        bad = check_pdf_identity("Jane Smith", {"Author": "JANE SMITH"}, options)[0]
+        self.assertEqual(bad.message, "2 matches: text, metadata")
+        empty = check_pdf_identity("", {}, options)[0]
+        self.assertEqual(
+            empty.message,
+            "The configured scan is incomplete: "
+            "Extracted PDF text is unavailable or empty. (+1 more)",
+        )
+
+    def test_failure_message_never_echoes_credentials_from_file_names(self) -> None:
+        token = "ghp_" + "Ab12" * 10
+        self.write(token + ".tex", "Jane Smith")
+        results = check_submission(
+            self.root,
+            "main.tex",
+            SubmissionOptions(identity_terms=("Jane Smith",), scan_secrets=True),
+        )
+        for item in results:
+            self.assertNotIn(token, item.message)
+            self.assertNotIn(token, json.dumps(asdict(item)))
+        self.assertTrue(any("REDACTED" in item.message for item in results))
 
     def test_identity_hints(self) -> None:
         rule = "submission.identity_hints"

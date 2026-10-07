@@ -8,6 +8,7 @@ import tempfile
 import unittest
 import warnings
 import zipfile
+import zlib
 from pathlib import Path
 from unittest.mock import patch
 
@@ -117,10 +118,9 @@ class ProjectTests(unittest.TestCase):
             "C:relative.tex",
             "a\\..\\escaped.tex",
             "\\server\\share\\file.tex",
-            "file.tex:stream",
-            "name. ",
-            "NUL.tex",
-            "con/file.tex",
+            "",
+            "./",
+            "a/..",
         ]
         for name in names:
             with self.subTest(name=name):
@@ -129,6 +129,139 @@ class ProjectTests(unittest.TestCase):
                     import_project(archive, self.base / "import")
                 self.assertFalse((self.base / "import").exists())
         self.assertFalse((self.base / "escaped.tex").exists())
+
+    def test_nonportable_zip_names_are_kept_with_one_warning_per_file(self) -> None:
+        cases = {
+            "file.tex:stream": ['contains a character from <>:"|?*'],
+            "name. ": ["ends with a space or dot"],
+            "NUL.tex": ["uses a reserved Windows device name"],
+            "con/file.tex": ["uses a reserved Windows device name"],
+            "figures/bad\x01name.pdf": ["contains a control character"],
+            "what?.tex": ['contains a character from <>:"|?*'],
+            "figures/aux.png": ["uses a reserved Windows device name"],
+            "ab:c.tex": ['contains a character from <>:"|?*'],
+            "x*y. ": [
+                'contains a character from <>:"|?*',
+                "ends with a space or dot",
+            ],
+        }
+        archive = self.make_zip([("main.tex", b"main")] + [(name, b"data") for name in cases])
+        result = import_project(archive, self.base / "import", unwrap=False)
+        self.assertEqual(result.files, sorted(["main.tex", *cases]))
+        for name in cases:
+            self.assertEqual((result.root / name).read_bytes(), b"data")
+        self.assertEqual({finding.path for finding in result.findings}, set(cases))
+        self.assertEqual(len(result.findings), len(cases))
+        for finding in result.findings:
+            with self.subTest(path=finding.path):
+                self.assertEqual(finding.rule, "project.nonportable_filename")
+                self.assertEqual((finding.severity, finding.status), ("warning", "failed"))
+                assert finding.path is not None
+                self.assertEqual(finding.details, {"reasons": cases[finding.path]})
+                self.assertIn(repr(finding.path), finding.message)
+                self.assertTrue(finding.message.isprintable())
+
+    def test_nonportable_folder_names_are_kept_with_warnings(self) -> None:
+        names = ["bad\rname.tex", "what?.tex", "sub/aux.pdf", "trailing."]
+        try:
+            for name in names:
+                self.write_file(name)
+        except OSError as error:
+            self.skipTest(f"This file system cannot store the fixture names: {error}")
+        self.write_file("main.tex")
+        result = import_project(self.source, self.base / "import")
+        self.assertEqual(result.files, sorted([*names, "main.tex"]))
+        self.assertEqual({finding.path for finding in result.findings}, set(names))
+        control = next(item for item in result.findings if item.path == "bad\rname.tex")
+        self.assertIn(r"'bad\rname.tex'", control.message)
+        self.assertEqual(control.details, {"reasons": ["contains a control character"]})
+        for name in names:
+            self.assertTrue((result.root / name).is_file())
+        self.assertTrue((self.source / "what?.tex").is_file())
+
+    def test_nonportable_names_inside_a_wrapper_are_reported_without_the_wrapper(self) -> None:
+        archive = self.make_zip([("paper:v2/main.tex", b"m"), ("paper:v2/fig?.pdf", b"f")])
+        result = import_project(archive, self.base / "import")
+        self.assertEqual(result.files, ["fig?.pdf", "main.tex"])
+        self.assertEqual([finding.path for finding in result.findings], ["fig?.pdf"])
+
+    def test_nonportable_directory_is_reported_once_through_its_files_or_when_empty(self) -> None:
+        archive = self.make_zip(
+            [("ab:dir/one.tex", b"1"), ("ab:dir/two.tex", b"2"), ("cd:empty/", b"")]
+        )
+        result = import_project(archive, self.base / "import", unwrap=False)
+        self.assertEqual(
+            [finding.path for finding in result.findings],
+            ["ab:dir/one.tex", "ab:dir/two.tex", "cd:empty"],
+        )
+        self.assertTrue((result.root / "cd:empty").is_dir())
+
+    def test_portable_projects_have_no_nonportable_findings(self) -> None:
+        self.write_file("main.tex")
+        self.write_file("figures/plot.pdf")
+        self.write_file(".hidden/.config")
+        self.assertEqual(import_project(self.source, self.base / "import").findings, [])
+
+    def test_unwritable_nonportable_name_still_fails_import_and_removes_output(self) -> None:
+        archive = self.make_zip([("main.tex", b"m"), ("what?.tex", b"w")])
+        with patch.object(Path, "open", side_effect=OSError("Invalid argument")):
+            with self.assertRaisesRegex(PreparationError, "Could not import project"):
+                import_project(archive, self.base / "import", unwrap=False)
+        self.assertFalse((self.base / "import").exists())
+
+    def test_macos_icon_file_and_appledouble_files_are_excluded_as_metadata(self) -> None:
+        names = ["figures/Icon\r", "figures/._plot.pdf", "._main.tex", "Icon\r"]
+        try:
+            for name in names:
+                self.write_file(name, b"metadata")
+        except OSError as error:
+            self.skipTest(f"This file system cannot store the fixture names: {error}")
+        self.write_file("main.tex", b"main")
+        self.write_file("figures/plot.pdf", b"plot")
+        self.write_file("Icons/Icon.png", b"keep")
+        self.write_file("figures/Icon", b"keep")
+        self.write_file("figures/_plot.pdf", b"keep")
+        folder = import_project(self.source, self.base / "from-folder")
+        zipped = self.make_zip(
+            [(name, b"metadata") for name in names]
+            + [
+                ("main.tex", b"main"),
+                ("figures/plot.pdf", b"plot"),
+                ("Icons/Icon.png", b"keep"),
+                ("figures/Icon", b"keep"),
+                ("figures/_plot.pdf", b"keep"),
+            ]
+        )
+        archive = import_project(zipped, self.base / "from-zip", unwrap=False)
+        expected = ["Icons/Icon.png", "figures/Icon", "figures/_plot.pdf", "figures/plot.pdf"]
+        for result in (folder, archive):
+            self.assertEqual(result.files, sorted([*expected, "main.tex"]))
+            self.assertEqual({change.path for change in result.changes}, set(names))
+            self.assertTrue(all(change.kind == "exclude" for change in result.changes))
+            self.assertEqual(result.findings, [])
+        # Exact re-extraction keeps them and reports the nonportable control character.
+        exact = import_project(zipped, self.base / "exact", unwrap=False, exclude_metadata=False)
+        self.assertIn("figures/Icon\r", exact.files)
+        self.assertEqual({finding.path for finding in exact.findings}, {"figures/Icon\r", "Icon\r"})
+
+    def test_security_rejections_still_abort_alongside_nonportable_names(self) -> None:
+        archive = self.make_zip([("what?.tex", b"ok"), ("../escape.tex", b"bad")])
+        with self.assertRaises(PreparationError):
+            import_project(archive, self.base / "import", unwrap=False)
+        self.assertFalse((self.base / "import").exists())
+        self.write_file("what?.tex")
+        (self.source / "link").symlink_to(self.base)
+        with self.assertRaisesRegex(PreparationError, "Links and special"):
+            import_project(self.source, self.base / "import-folder")
+        self.assertFalse((self.base / "import-folder").exists())
+
+    def test_nonportable_names_do_not_bypass_collision_checks(self) -> None:
+        for first, second in (("a?.tex", "A?.tex"), ("con.tex", "CON.tex")):
+            with self.subTest(first=first):
+                archive = self.make_zip([(first, b"1"), (second, b"2")])
+                with self.assertRaisesRegex(PreparationError, "collision"):
+                    import_project(archive, self.base / "import", unwrap=False)
+                self.assertFalse((self.base / "import").exists())
 
     def test_normalized_case_and_unicode_collisions_are_rejected(self) -> None:
         pairs = [
@@ -387,7 +520,7 @@ class ProjectTests(unittest.TestCase):
             "main.tex~",
             ".main.tex.swp",
             "data.bin",
-            "results.out",
+            "results.dat",
             "experiment.bak",
             "data/required.aux",
             ".DS_Store",
@@ -412,6 +545,65 @@ class ProjectTests(unittest.TestCase):
         )
         self.assertTrue(all(change.kind == "exclude" and change.reason for change in changes))
         self.assertEqual(self.tree(self.source), before)
+
+    def test_cleanup_proposes_common_latex_build_debris_but_never_bbl(self) -> None:
+        debris = [
+            "main.out",
+            "slides.nav",
+            "slides.snm",
+            "slides.vrb",
+            "main.xdv",
+            "main.idx",
+            "main.ilg",
+            "main.ind",
+            "main.glo",
+            "main.gls",
+            "main.glg",
+            "main.ist",
+            "main.brf",
+            "main.lol",
+            "main.loa",
+            "main.thm",
+            "main.ptc",
+            "main.bbl-SAVE-ERROR",
+            "main.synctex(busy)",
+            "main.synctex.gz(busy)",
+            "main.pyg",
+            "main.auxlock",
+            "sections/chapter.aux",
+            "_minted-main/default.pygstyle",
+            "_minted-main/0123456789abcdef.pygtex",
+            "_minted-main/nested/cache.json",
+            "chapters/_minted-chapter/code.pygtex",
+        ]
+        kept = ["main.bbl", "main.tex", "refs.bib", "main.pdf", "minted-notes.txt", "main.aux.txt"]
+        for name in [*debris, *kept]:
+            self.write_file(name)
+        changes = plan_cleanup(self.source, set())
+        self.assertEqual({change.path for change in changes}, set(debris))
+        self.assertTrue(all(change.kind == "exclude" and change.reason for change in changes))
+
+    def test_observed_dependencies_protect_debris_like_names(self) -> None:
+        for name in ("data/table.out", "_minted-main/needed.pygtex", "main.ind", "main.idx"):
+            self.write_file(name)
+        changes = plan_cleanup(
+            self.source, {"data/table.out", "_minted-main/needed.pygtex", "./main.ind"}
+        )
+        self.assertEqual([change.path for change in changes], ["main.idx"])
+
+    def test_archive_entries_use_deflate_level_nine(self) -> None:
+        text = b" ".join(f"w{(index * 7919) % 997}".encode() for index in range(6000))
+        self.write_file("main.tex", text)
+        archive = self.base / "level.zip"
+        create_archive(self.source, archive)
+        with zipfile.ZipFile(archive) as zipped:
+            info = zipped.getinfo("main.tex")
+        raw = archive.read_bytes()
+        name_length, extra_length = struct.unpack_from("<2H", raw, info.header_offset + 26)
+        start = info.header_offset + 30 + name_length + extra_length
+        compressor = zlib.compressobj(9, zlib.DEFLATED, -15)
+        expected = compressor.compress(text) + compressor.flush()
+        self.assertEqual(raw[start : start + info.compress_size], expected)
 
     def test_observed_dependency_comparison_is_conservative_about_case(self) -> None:
         self.write_file("main.aux")

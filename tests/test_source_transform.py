@@ -73,6 +73,18 @@ class SourceTransformTests(unittest.TestCase):
         self.write("main.tex", "\\documentclass{article}\n\\catcode`\\%=12\n% private\n")
         self.assertTrue(has_blockers(self.plan(comment_policy="private").findings))
 
+    def test_comment_removal_only_edits_document_sources(self) -> None:
+        self.write("main.tex", "\\documentclass{local/template}\n% TODO note\nText.\n")
+        self.write(
+            "local/template.cls",
+            "\\ProvidesClass{template}\n% TODO internal note\n\\LoadClass{article}\n",
+        )
+        plan = self.plan(comment_policy="all")
+        self.assertFalse(has_blockers(plan.findings), plan.findings)
+        self.assertEqual(set(plan.contents), {"main.tex"})
+        self.assertNotIn(b"TODO note", plan.contents["main.tex"])
+        self.assertEqual({finding.path for finding in plan.findings}, {"main.tex"})
+
     def test_merge_inputs(self) -> None:
         original = (
             "\\documentclass{article}\n\\begin{document}\n\\input{parts/body}\n\\end{document}\n"

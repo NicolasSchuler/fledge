@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from .models import Finding, PreparationError
-from .pdf import _font_inventory, _page_count, _read_raster
+from .pdf import _font_inventory, _page_count, _read_raster, _require_rendered_pages
 from .pdf_checks import (
     PdfRegion,
     _contains,
@@ -1108,6 +1108,16 @@ async def _render_findings(
         if options.grayscale_preview
         else sorted({r.page for r in regions if r.page <= len(sizes)})
     )
+    try:
+        _require_rendered_pages(len(page_numbers), "Rendered artwork measurement")
+    except PreparationError as error:
+        # Inspection reads long documents; a render per page keeps the smaller cap.
+        result.extend(
+            _unavailable(rule, error, advisory=True)
+            for rule in selected_rules
+            if regions or rule == "pdf.grayscale_preview"
+        )
+        return result
     for page in page_numbers:
         width_pt, height_pt = sizes[page - 1]
         expected = (

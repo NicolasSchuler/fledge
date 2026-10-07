@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import replace
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -44,6 +45,46 @@ def _figure_inputs(root: Path, main: str) -> tuple[tuple[Path, ...], bool]:
     complete = bool(inspection.main) and not inspection.uncertainties
     complete = complete and not has_blockers(inspection.findings)
     return figures, complete
+
+
+async def _privacy(
+    pdf: Path, work: Path, runner: ToolRunner, settings: Settings, budget: ResourceBudget
+) -> list[Finding]:
+    privacy_options = settings.submission_checks
+    if not settings.checks.enabled("PRV002"):
+        privacy_options = replace(privacy_options, identity_terms=())
+    if not (privacy_options.identity_terms or privacy_options.scan_secrets):
+        return []
+    try:
+        text, metadata = await extract_pdf_evidence(pdf, work / "privacy", runner, budget=budget)
+    except (PreparationError, OSError):
+        # Tool errors can contain document fragments. The checker explains missing evidence
+        # without copying raw tool output into an identity/credential report.
+        text, metadata = "", {}
+    return await _read(budget, "PDF privacy", check_pdf_identity, text, metadata, privacy_options)
+
+
+async def _artwork(
+    pdf: Path, work: Path, runner: ToolRunner, settings: Settings, budget: ResourceBudget
+) -> list[Finding]:
+    return await inspect_pdf_artwork(
+        pdf, work / "artwork", runner, options=settings.pdf_artwork, budget=budget
+    )
+
+
+async def _structure(
+    pdf: Path, work: Path, runner: ToolRunner, settings: Settings, budget: ResourceBudget
+) -> list[Finding]:
+    return await inspect_pdf_structure(
+        pdf, work / "structure", runner, settings.structure_checks, budget
+    )
+
+
+async def _run_groups(
+    groups: Sequence[Callable[[], Awaitable[list[Finding]]]], budget: ResourceBudget
+) -> list[Finding]:
+    results = await bounded_map(groups, lambda function: function(), limit=budget.jobs)
+    return [finding for group in results for finding in group]
 
 
 async def inspect_additional_pdf_checks(
@@ -91,24 +132,6 @@ async def inspect_additional_pdf_checks(
             await inspect_pdf_details(pdf, work / "details", runner, options=options, budget=budget)
         )
         return findings
-
-    async def privacy() -> list[Finding]:
-        privacy_options = settings.submission_checks
-        if not settings.checks.enabled("PRV002"):
-            privacy_options = replace(privacy_options, identity_terms=())
-        if not (privacy_options.identity_terms or privacy_options.scan_secrets):
-            return []
-        try:
-            text, metadata = await extract_pdf_evidence(
-                pdf, work / "privacy", runner, budget=budget
-            )
-        except (PreparationError, OSError):
-            # Tool errors can contain document fragments. The checker explains missing evidence
-            # without copying raw tool output into an identity/credential report.
-            text, metadata = "", {}
-        return await _read(
-            budget, "PDF privacy", check_pdf_identity, text, metadata, privacy_options
-        )
 
     async def figures() -> list[Finding]:
         if not (
@@ -179,23 +202,16 @@ async def inspect_additional_pdf_checks(
         )
         return findings
 
-    async def execute(function: Callable) -> list[Finding]:
-        return await function()
-
-    async def artwork() -> list[Finding]:
-        return await inspect_pdf_artwork(
-            pdf, work / "artwork", runner, options=settings.pdf_artwork, budget=budget
-        )
-
-    async def structure() -> list[Finding]:
-        return await inspect_pdf_structure(
-            pdf, work / "structure", runner, settings.structure_checks, budget
-        )
-
-    groups = await bounded_map(
-        [details, privacy, figures, artwork, structure], execute, limit=budget.jobs
+    return await _run_groups(
+        [
+            details,
+            partial(_privacy, pdf, work, runner, settings, budget),
+            figures,
+            partial(_artwork, pdf, work, runner, settings, budget),
+            partial(_structure, pdf, work, runner, settings, budget),
+        ],
+        budget,
     )
-    return [finding for group in groups for finding in group]
 
 
 async def inspect_standalone_pdf(
@@ -223,22 +239,6 @@ async def inspect_standalone_pdf(
             pdf, work / "details", runner, options=settings.pdf_checks, budget=budget
         )
 
-    async def privacy() -> list[Finding]:
-        privacy_options = settings.submission_checks
-        if not settings.checks.enabled("PRV002"):
-            privacy_options = replace(privacy_options, identity_terms=())
-        if not (privacy_options.identity_terms or privacy_options.scan_secrets):
-            return []
-        try:
-            text, metadata = await extract_pdf_evidence(
-                pdf, work / "privacy", runner, budget=budget
-            )
-        except (PreparationError, OSError):
-            text, metadata = "", {}
-        return await _read(
-            budget, "PDF privacy", check_pdf_identity, text, metadata, privacy_options
-        )
-
     async def comparison() -> list[Finding]:
         return (
             await compare_pdfs(reference, pdf, work / "comparison", runner, budget=budget)
@@ -246,53 +246,35 @@ async def inspect_standalone_pdf(
             else []
         )
 
-    async def execute(function: Callable) -> list[Finding]:
-        return await function()
-
-    async def artwork() -> list[Finding]:
-        return await inspect_pdf_artwork(
-            pdf, work / "artwork", runner, options=settings.pdf_artwork, budget=budget
-        )
-
-    async def structure() -> list[Finding]:
-        return await inspect_pdf_structure(
-            pdf, work / "structure", runner, settings.structure_checks, budget
-        )
-
-    groups = await bounded_map(
-        [basic, detailed, privacy, comparison, artwork, structure], execute, limit=budget.jobs
+    findings = await _run_groups(
+        [
+            basic,
+            detailed,
+            partial(_privacy, pdf, work, runner, settings, budget),
+            comparison,
+            partial(_artwork, pdf, work, runner, settings, budget),
+            partial(_structure, pdf, work, runner, settings, budget),
+        ],
+        budget,
     )
-    findings = [finding for group in groups for finding in group]
+    # Source-only settings are neither failures nor evidence for a standalone PDF.
+    source_only = []
     if settings.match_source_pdf_metadata:
-        findings.append(
-            Finding(
-                "pdf.metadata_agreement",
-                "Source-to-PDF metadata comparison requires a source project.",
-                "error",
-                "skipped",
-            )
-        )
+        source_only.append(("pdf.metadata_agreement", "Source-to-PDF metadata comparison"))
     if (
         settings.pdf_checks.require_embedded_figure_fonts
         or settings.pdf_checks.forbid_type3_figure_fonts
     ):
-        findings.append(
-            Finding(
-                "pdf.included_figure_fonts",
-                "Separate input-figure fonts require a source project; "
-                "the final PDF font resources were inspected separately.",
-                "error",
-                "skipped",
-            )
-        )
+        source_only.append(("pdf.included_figure_fonts", "Input-figure font inspection"))
     if artwork_checks_enabled(settings.figure_artwork):
-        findings.append(
-            Finding(
-                "pdf.artwork_input_scope",
-                "Input-figure artwork checks require a source project; "
-                "only the supplied PDF was inspected.",
-                "error",
-                "skipped",
-            )
+        source_only.append(("pdf.artwork_input_scope", "Input-figure artwork inspection"))
+    findings.extend(
+        Finding(
+            rule,
+            f"{subject} requires a source project; not run for a standalone PDF.",
+            "info",
+            "skipped",
         )
+        for rule, subject in source_only
+    )
     return findings

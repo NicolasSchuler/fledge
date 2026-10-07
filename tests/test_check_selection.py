@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock, patch
 from click.testing import CliRunner
 
 from latexprep.check_selection import CheckSelection
-from latexprep.cli import cli
+from latexprep.cli import USAGE_EXIT_CODE, cli
 from latexprep.config import load_settings, resolve_config_path
 from latexprep.models import PreparationError, Report
 from latexprep.rules import RULES
@@ -103,6 +103,18 @@ class ConfigDiscoveryTests(unittest.TestCase):
         self.assertEqual(resolve_config_path(self.source), plain)
         hidden = self.write(self.source / ".latex-prep.toml")
         self.assertEqual(resolve_config_path(self.source), hidden)
+        fledge = self.write(self.source / "fledge.toml")
+        self.assertEqual(resolve_config_path(self.source), fledge)
+        hidden_fledge = self.write(self.source / ".fledge.toml")
+        self.assertEqual(resolve_config_path(self.source), hidden_fledge)
+
+    def test_pyproject_accepts_fledge_table_but_not_both_names(self) -> None:
+        path = self.write(self.source / "pyproject.toml", "[tool.fledge]\njobs = 1\n")
+        self.assertEqual(resolve_config_path(self.source), path)
+        self.assertEqual(load_settings(path, {}).jobs, 1)
+        self.write(path, "[tool.fledge]\njobs = 1\n[tool.latex-prep]\njobs = 2\n")
+        with self.assertRaisesRegex(PreparationError, "both"):
+            load_settings(path, {})
 
     def test_unrelated_pyproject_is_skipped_and_other_tables_are_ignored(self) -> None:
         self.write(self.source / "pyproject.toml", '[project]\nname = "paper"\n')
@@ -159,7 +171,9 @@ class ConfigDiscoveryTests(unittest.TestCase):
         ):
             with self.subTest(text=text), self.assertRaisesRegex(PreparationError, message):
                 load_settings(self.write(self.source / "latex-prep.toml", text), {})
-        with self.assertRaisesRegex(PreparationError, "no \\[tool.latex-prep\\] table"):
+        with self.assertRaisesRegex(
+            PreparationError, "no \\[tool.fledge\\] or \\[tool.latex-prep\\] table"
+        ):
             load_settings(self.write(self.source / "pyproject.toml", "[project]\n"), {})
         with self.assertRaisesRegex(PreparationError, "must be a settings table"):
             resolve_config_path(
@@ -214,7 +228,7 @@ class ConfigDiscoveryTests(unittest.TestCase):
         result = CliRunner().invoke(
             cli, ["inspect", str(self.source), "--config", str(explicit), "--isolated"]
         )
-        self.assertEqual(result.exit_code, 2, result.output)
+        self.assertEqual(result.exit_code, USAGE_EXIT_CODE, result.output)
         self.assertIn("cannot be combined", result.output)
 
     def test_cli_invalid_discovered_selector_prevents_dispatch(self) -> None:

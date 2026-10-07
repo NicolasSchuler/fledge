@@ -6,8 +6,9 @@ RULE_DEFINITIONS = (
         "name": "bibliography.citation_coverage",
         "title": "Source citation coverage",
         "description": "Resolve supported literal citation keys against resources declared by the "
-        "selected root, or each explicitly selected all-root graph. Dynamic source and incomplete "
-        "bibliographies are inconclusive; this does not replace compilation.",
+        "selected root, or each explicitly selected all-root graph. Citation-relevant macro "
+        "definitions, citations inside conditionals and incomplete bibliographies are "
+        "inconclusive; this does not replace compilation.",
         "tests": (
             "tests.test_bibliography_checks.BibliographyCheckTests.test_citation_coverage_uses_selected_resources_and_inline_entries",
             "tests.test_bibliography_checks.BibliographyCheckTests.test_dynamic_and_incomplete_coverage_is_inconclusive",
@@ -23,7 +24,8 @@ RULE_DEFINITIONS = (
         "description": "Find entries unreachable from literal citations, nocite and supported "
         "relationships within selected bibliography resources. Explicit all-root scope unions "
         "usage across roots; dynamic/filter/set uncertainty prevents a definitive absence claim. "
-        "No entry is removed.",
+        "All candidates share one finding that lists every entry with its path and line in the "
+        "details. No entry is removed.",
         "tests": (
             "tests.test_bibliography_checks.BibliographyCheckTests.test_uncited_entries_respect_nocite_aliases_and_relationships",
             "tests.test_bibliography_checks.BibliographyCheckTests.test_uncited_candidates_are_inconclusive_for_filters_and_dynamic_relationships",

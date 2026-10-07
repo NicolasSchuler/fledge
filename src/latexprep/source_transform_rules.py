@@ -5,9 +5,10 @@ SOURCE_TRANSFORM_RULES = (
         "code": "TEX201",
         "name": "source.comment_removal",
         "title": "Reviewed comment removal",
-        "description": "Propose removing selected comment bodies while retaining percent signs, "
-        "line endings, literal regions, directives and license blocks; unclosed or dynamic lexical "
-        "contexts are inconclusive.",
+        "description": "Propose removing selected comment bodies from document sources "
+        "(.tex/.ltx/.latex) while retaining percent signs, line endings, literal regions, "
+        "directives and license blocks; local class/style files are copied unchanged. Unclosed "
+        "or dynamic lexical contexts are inconclusive.",
         "tests": ("tests.test_source_transform.SourceTransformTests.test_comment_removal",),
         "fix": "Review the copy and resolve unsupported lexical constructs before retrying.",
     },

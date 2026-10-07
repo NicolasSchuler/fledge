@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import shutil
 import tempfile
 import unittest
@@ -10,6 +9,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from latexprep.runtime import ToolRunner, build_project
+from tests.support import live_tests_enabled
 
 
 class DiagnosticRunner(ToolRunner):
@@ -35,8 +35,8 @@ class DiagnosticRunner(ToolRunner):
 
 
 @unittest.skipUnless(
-    os.environ.get("LATEX_PREP_RUN_INTEGRATION") == "1",
-    "Enable LATEX_PREP_RUN_INTEGRATION for real restricted TeX/Biber tools",
+    live_tests_enabled(),
+    "Enable FLEDGE_RUN_INTEGRATION for real restricted TeX/Biber tools",
 )
 class LiveBackendIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):

@@ -11,7 +11,7 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
-from .models import Finding, PreparationError
+from .models import Finding, PreparationError, Status
 from .scheduler import cancellation_point
 from .source import (
     _FILE_COMMANDS,
@@ -24,6 +24,8 @@ from .source import (
     _items,
     _ParseLimit,
     _Source,
+    conditional_spans,
+    in_conditional,
     mask_literals,
 )
 
@@ -124,6 +126,113 @@ _OMIT_ARGUMENTS = {
     "Cref",
     "nocite",
 }
+# Structural, bibliographic and layout commands that contribute no countable
+# manuscript text and leave no interpretation gap. Their own token disappears
+# while surrounding literal text is retained. This list is the single source of
+# truth shared with the manuscript_checks safe-command inventory.
+_NONCONTENT_COMMANDS = {
+    "appendix",
+    "bfseries",
+    "bigskip",
+    "bottomrule",
+    "centering",
+    "cleardoublepage",
+    "clearpage",
+    "displaystyle",
+    "flushleft",
+    "flushright",
+    "footnotesize",
+    "hfill",
+    "hline",
+    "hrule",
+    "huge",
+    "Huge",
+    "ignorespaces",
+    "itshape",
+    "large",
+    "Large",
+    "LARGE",
+    "listoffigures",
+    "listoftables",
+    "maketitle",
+    "medskip",
+    "midrule",
+    "newpage",
+    "noindent",
+    "nonumber",
+    "normalfont",
+    "normalsize",
+    "pagebreak",
+    "printbibliography",
+    "protect",
+    "raggedleft",
+    "raggedright",
+    "relax",
+    "rmfamily",
+    "scriptsize",
+    "selectfont",
+    "sffamily",
+    "small",
+    "smallskip",
+    "strut",
+    "tableofcontents",
+    "tiny",
+    "today",
+    "toprule",
+    "ttfamily",
+    "upshape",
+    "vfill",
+}
+# Non-content commands whose leading arguments hold a filename, length, counter
+# or style value instead of prose; the token and that many arguments disappear.
+_NONCONTENT_ARGUMENTS = {
+    **{
+        name: 1
+        for name in (
+            "addbibresource",
+            "addtocounter",
+            "bibliography",
+            "bibliographystyle",
+            "cline",
+            "cmidrule",
+            "graphicspath",
+            "hphantom",
+            "hskip",
+            "hspace",
+            "hypersetup",
+            "includegraphics",
+            "kern",
+            "linespread",
+            "pagenumbering",
+            "pagestyle",
+            "phantom",
+            "refstepcounter",
+            "setstretch",
+            "stepcounter",
+            "thispagestyle",
+            "vphantom",
+            "vskip",
+            "vspace",
+        )
+    },
+    "addtolength": 2,
+    "fontsize": 2,
+    "rule": 2,
+    "setcounter": 2,
+    "setlength": 2,
+}
+_SPACE_COMMANDS = {"par", "newline", "linebreak", "and", "sep", "\\", ",", ";", "!", " "}
+_CHARACTER_COMMANDS = {"%", "&", "#", "_", "{", "}"}
+# Every command the literal text scan interprets without an interpretation gap.
+_KNOWN_TEXT_COMMANDS = frozenset(
+    _TEXT_WRAPPERS
+    | _OMIT_ARGUMENTS
+    | _NONCONTENT_COMMANDS
+    | set(_NONCONTENT_ARGUMENTS)
+    | _SPACE_COMMANDS
+    | _CHARACTER_COMMANDS
+    | {"TeX", "LaTeX"}
+)
 _HEADING_COMMANDS = {
     "part",
     "chapter",
@@ -139,15 +248,29 @@ _MATH_ENVS = "equation|equation\\*|align|align\\*|displaymath|math"
 _COUNT_METHOD = (
     "Unicode alphanumeric tokens; internal hyphens and apostrophes stay in one word. "
     "Comments, common literal/code regions, math, and citation/reference/label arguments "
-    "count as zero. Common text-formatting wrappers retain their text. Unresolved macros "
-    "make the count inconclusive. This is a source count, not a rendered word count."
+    "count as zero. Common text-formatting wrappers retain their text. Bibliography, "
+    "layout and other known non-content commands count as zero without an interpretation "
+    "gap. Each unresolved macro widens the reported range by one word, so only a range "
+    "that lies wholly inside or outside the limits is decisive. This is a source count, "
+    "not a rendered word count."
 )
 
 
 def _plain_text(value: str) -> tuple[str, list[str]]:
     """Return countable literal text and unresolved constructs, without expanding TeX."""
+    text, uncertain, _ = _scan_text(value)
+    return text, uncertain
+
+
+def _scan_text(value: str) -> tuple[str, list[str], int]:
+    """Return literal text, unresolved constructs and how many unknown macros occurred.
+
+    The occurrence count bounds how much rendered text the unresolved macros could
+    contribute; it is deliberately not an estimate of their expansion.
+    """
     value = mask_literals(value)
     uncertain: set[str] = set()
+    unresolved = 0
     value = re.sub(rf"\\begin\{{({_MATH_ENVS})\}}.*?\\end\{{\1\}}", " ", value, flags=re.S)
     for pattern in (
         r"\$\$.*?\$\$",
@@ -161,16 +284,17 @@ def _plain_text(value: str) -> tuple[str, list[str]]:
     try:
         commands = _commands(value)
     except _ParseLimit:
-        return "", ["unclosed or oversized argument"]
+        return "", ["unclosed or oversized argument"], 1
     edits: list[tuple[int, int, str]] = []
     covered_until = -1
     for command in commands:
         if command.start < covered_until:
             continue
         token_end = command.start + len(command.name) + 1
-        if command.name in _OMIT_ARGUMENTS:
+        if command.name in _OMIT_ARGUMENTS or command.name in _NONCONTENT_ARGUMENTS:
+            keep = _NONCONTENT_ARGUMENTS.get(command.name, 1)
             stop = max(
-                (arg.end + 1 for arg in (*command.arguments[:1], *command.options)),
+                (arg.end + 1 for arg in (*command.arguments[:keep], *command.options)),
                 default=token_end,
             )
             edits.append((command.start, stop, " "))
@@ -179,27 +303,17 @@ def _plain_text(value: str) -> tuple[str, list[str]]:
             edits.append((command.start, token_end, ""))
         elif command.name in {"TeX", "LaTeX"}:
             edits.append((command.start, token_end, command.name))
-        elif command.name in {
-            "par",
-            "newline",
-            "linebreak",
-            "and",
-            "sep",
-            "\\",
-            ",",
-            ";",
-            "!",
-            " ",
-        }:
+        elif command.name in _SPACE_COMMANDS or command.name in _NONCONTENT_COMMANDS:
             edits.append((command.start, token_end, " "))
-        elif command.name in {"%", "&", "#", "_", "{", "}"}:
+        elif command.name in _CHARACTER_COMMANDS:
             edits.append((command.start, token_end, command.name))
         else:
             uncertain.add("\\" + command.name)
+            unresolved += 1
             edits.append((command.start, token_end, " "))
     for start, stop, replacement in reversed(edits):
         value = value[:start] + replacement + value[stop:]
-    return value.replace("{", "").replace("}", "").replace("~", " "), sorted(uncertain)
+    return value.replace("{", "").replace("}", "").replace("~", " "), sorted(uncertain), unresolved
 
 
 def _normalize_heading(value: str) -> str:
@@ -266,7 +380,9 @@ class _Block:
     uncertain: tuple[str, ...] = ()
 
 
-def _blocks(name: str, source: _Source, kind: str, conditional: bool) -> list[_Block]:
+def _blocks(
+    name: str, source: _Source, kind: str, conditionals: list[tuple[int, int]]
+) -> list[_Block]:
     names = {"abstract"} if kind == "abstract" else _KEYWORD_ENVS
     result: list[_Block] = []
     pending: dict[str, list[_Command]] = {}
@@ -277,7 +393,10 @@ def _blocks(name: str, source: _Source, kind: str, conditional: bool) -> list[_B
         return tuple(
             message
             for enabled, message in (
-                (conditional, "conditional source control flow"),
+                (
+                    in_conditional(conditionals, command.start),
+                    "conditional source control flow",
+                ),
                 (bool(command.depth), "declaration inside a group or macro argument"),
                 (command.start in nested, "nested manuscript environments"),
             )
@@ -329,7 +448,7 @@ def _blocks(name: str, source: _Source, kind: str, conditional: bool) -> list[_B
 def _result(
     rule: str,
     message: str,
-    status: str,
+    status: Status,
     details: dict[str, object],
     path: str | None = None,
     line: int | None = None,
@@ -343,6 +462,7 @@ def _result(
                 for item in entries:
                     uncertainty.extend(item.get("uncertainty", []))
                     uncertainty.extend(item.get("content_uncertainty", []))
+                    uncertainty.extend(item.get("macro_uncertainty", []))
         message += (
             " Inconclusive: "
             + (str(uncertainty[0]) if uncertainty else "no unique supported literal interpretation")
@@ -435,7 +555,9 @@ def check_manuscript(root: Path, main: str, options: ManuscriptOptions) -> list[
         }
     )
     for item in inspection.findings:
-        if item.path in scope and item.rule in incomplete_rules:
+        # A resolved source finding records how a reference was interpreted; only an
+        # unresolved one leaves the manuscript interpretation incomplete.
+        if item.path in scope and item.rule in incomplete_rules and item.status != "passed":
             graph_reasons.append(f"{item.path}: {item.message}")
     classes: list[dict[str, object]] = []
     packages: list[dict[str, object]] = []
@@ -446,8 +568,11 @@ def check_manuscript(root: Path, main: str, options: ManuscriptOptions) -> list[
         cancellation_point()
         source = inspection.sources[name]
         commands = _commands_before_end(source)
-        conditional = any(command.name.startswith(("if", "If")) for command in commands)
+        # Only primitive \if…\fi ranges hide declarations. A \newif-defined name or a
+        # branch-taking package conditional executes nothing by itself.
+        conditionals = conditional_spans(source.commands)
         for command in commands:
+            conditional = in_conditional(conditionals, command.start)
             if command.name == "endinput":
                 if command.depth or conditional:
                     graph_reasons.append(
@@ -497,6 +622,9 @@ def check_manuscript(root: Path, main: str, options: ManuscriptOptions) -> list[
                     if command.arguments
                     else ("", ["missing heading argument"])
                 )
+                # A heading whose own title text is unresolved could carry any
+                # required name, so it cannot support a "missing" claim either.
+                resolved = bool(command.arguments) and not unknown
                 if command.depth or conditional:
                     unknown.append("macro, grouped, or conditional heading")
                 headings.append(
@@ -505,16 +633,18 @@ def check_manuscript(root: Path, main: str, options: ManuscriptOptions) -> list[
                         "line": command.line,
                         "heading": " ".join(title.split()),
                         "command": command.name,
+                        "title_resolved": resolved,
                         "uncertainty": unknown,
                     }
                 )
         if name in content:
-            abstracts.extend(_blocks(name, source, "abstract", conditional))
-            keywords.extend(_blocks(name, source, "keywords", conditional))
+            abstracts.extend(_blocks(name, source, "abstract", conditionals))
+            keywords.extend(_blocks(name, source, "keywords", conditionals))
     graph_reasons = sorted(set(graph_reasons))
     abstract_counts = []
+    abstract_bounds: list[tuple[int, int]] = []
     for block in abstracts:
-        text, unknown = _plain_text(block.value)
+        text, unknown, macros = _scan_text(block.value)
         count = len(re.findall(r"[^\W_]+(?:['’\-‑][^\W_]+)*", text))
         nonempty_text = bool(text.strip())
         content_uncertainty = []
@@ -533,14 +663,22 @@ def check_manuscript(root: Path, main: str, options: ManuscriptOptions) -> list[
             content_uncertainty.append(
                 "abstract has no literal text outside citation/reference commands"
             )
+        if not nonempty_text and macros:
+            content_uncertainty.append("abstract has no literal text outside unresolved macros")
+        abstract_bounds.append((count, count + macros))
         abstract_counts.append(
             {
                 "path": block.path,
                 "line": block.line,
                 "words": count,
+                # Each unresolved macro contributes at least zero and, without
+                # expanding TeX, at most one further countable word.
+                "word_count_range": [count, count + macros],
+                "unresolved_macros": macros,
                 "nonempty_literal_text": nonempty_text,
                 "content_uncertainty": content_uncertainty,
-                "uncertainty": [*block.uncertain, *unknown],
+                "macro_uncertainty": unknown,
+                "uncertainty": list(block.uncertain),
             }
         )
     keyword_counts = []
@@ -683,29 +821,41 @@ def check_manuscript(root: Path, main: str, options: ManuscriptOptions) -> list[
             )
         )
     if options.abstract_min_words is not None or options.abstract_max_words is not None:
-        count = abstract_counts[0]["words"] if len(abstract_counts) == 1 else None
-        status = (
-            "inconclusive"
-            if abstract_uncertain or any(item["uncertainty"] for item in abstract_counts)
-            else "failed"
+        minimum, maximum = options.abstract_min_words, options.abstract_max_words
+        # Unresolved macros bound the count instead of discarding it: a range that
+        # lies wholly inside or wholly outside the configured limits is decisive.
+        bounds = (
+            (0, 0)
+            if not abstract_bounds
+            else abstract_bounds[0]
+            if len(abstract_bounds) == 1
+            else None
         )
-        if status != "inconclusive" and isinstance(count, int):
-            status = (
-                "failed"
-                if (options.abstract_min_words is not None and count < options.abstract_min_words)
-                or (options.abstract_max_words is not None and count > options.abstract_max_words)
-                else "passed"
+        status = "inconclusive"
+        if not abstract_uncertain and bounds is not None:
+            lower, upper = bounds
+            inside = (minimum is None or lower >= minimum) and (maximum is None or upper <= maximum)
+            outside = (minimum is not None and upper < minimum) or (
+                maximum is not None and lower > maximum
             )
+            status = "passed" if inside else "failed" if outside else "inconclusive"
+        reported = (
+            "unavailable"
+            if bounds is None
+            else str(bounds[0])
+            if bounds[0] == bounds[1]
+            else f"{bounds[0]} to {bounds[1]}"
+        )
         findings.append(
             _result(
                 "manuscript.abstract_words",
-                f"Abstract source word count: {count if count is not None else 'unavailable'}; "
-                f"configured minimum/maximum: {options.abstract_min_words}/"
-                f"{options.abstract_max_words}.",
+                f"Abstract source word count: {reported}; "
+                f"configured minimum/maximum: {minimum}/{maximum}.",
                 status,
                 {
-                    "minimum": options.abstract_min_words,
-                    "maximum": options.abstract_max_words,
+                    "minimum": minimum,
+                    "maximum": maximum,
+                    "word_count_range": list(bounds) if bounds is not None else None,
                     "abstracts": abstract_counts,
                     "counting_method": _COUNT_METHOD,
                     "uncertainty": graph_reasons,
@@ -752,22 +902,48 @@ def check_manuscript(root: Path, main: str, options: ManuscriptOptions) -> list[
         present = {
             _normalize_heading(str(item["heading"])) for item in headings if not item["uncertainty"]
         }
-        missing = [
-            heading
-            for heading in options.required_sections
-            if _normalize_heading(heading) not in present
-        ]
-        uncertain = bool(graph_reasons or any(item["uncertainty"] for item in headings))
-        status = "inconclusive" if uncertain else "failed" if missing else "passed"
+        # A heading with an unresolved title could carry any required name, so no
+        # absence claim survives it. A resolved but conditional heading only
+        # prevents a claim about its own name.
+        opaque = bool(graph_reasons) or any(not item["title_resolved"] for item in headings)
+        unresolved_names = {
+            _normalize_heading(str(item["heading"]))
+            for item in headings
+            if item["uncertainty"] and item["title_resolved"]
+        }
+        missing: list[str] = []
+        unconfirmed: list[str] = []
+        for heading in options.required_sections:
+            key = _normalize_heading(heading)
+            if key in present:
+                continue
+            if opaque or key in unresolved_names:
+                unconfirmed.append(heading)
+            else:
+                missing.append(heading)
+        uncertain = bool(
+            unconfirmed or graph_reasons or any(item["uncertainty"] for item in headings)
+        )
+        status = "failed" if missing else "inconclusive" if uncertain else "passed"
+        if missing:
+            message = f"Missing required literal headings: {', '.join(missing)}"
+            if unconfirmed:
+                message += f"; could not confirm: {', '.join(unconfirmed)}"
+        elif unconfirmed:
+            message = f"Could not confirm required literal headings: {', '.join(unconfirmed)}"
+        elif uncertain:
+            message = "Required literal headings matched an incompletely interpreted source"
+        else:
+            message = "All required literal headings are present"
         findings.append(
             _result(
                 "manuscript.required_sections",
-                f"Missing required literal headings: {missing or 'none'}; "
-                "content adequacy is not assessed.",
+                message + "; content adequacy is not assessed.",
                 status,
                 {
                     "required": list(options.required_sections),
                     "missing": missing,
+                    "unconfirmed": unconfirmed,
                     "headings": headings,
                     "matching": "Case-insensitive, collapsed whitespace, "
                     "common literal formatting wrappers removed.",

@@ -5,14 +5,17 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
 from latexprep.models import PreparationError
-from latexprep.runtime import CommandResult, ToolRunner
+from latexprep.runtime import CommandResult, ToolRunner, _kill_group, _sample_interval
 from latexprep.scheduler import ResourceBudget
+from tests.support import live_tests_enabled
 
 
 class ProbeRunner(ToolRunner):
@@ -261,7 +264,7 @@ class VersionAndInputTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(f'(subpath "{self.root}")', profile)
 
     @unittest.skipUnless(
-        os.environ.get("LATEXPREP_RUN_SANDBOX_TESTS") == "1" and sys.platform == "darwin",
+        live_tests_enabled("LATEXPREP_RUN_SANDBOX_TESTS") and sys.platform == "darwin",
         "opt-in live Seatbelt test (LATEXPREP_RUN_SANDBOX_TESTS=1)",
     )
     async def test_live_sandbox_denies_sibling_writes_and_undeclared_reads(self) -> None:
@@ -324,7 +327,7 @@ class SharedMonitorTests(unittest.IsolatedAsyncioTestCase):
             )
 
     @unittest.skipUnless(
-        os.environ.get("LATEXPREP_RUN_SANDBOX_TESTS") == "1" and sys.platform == "darwin",
+        live_tests_enabled("LATEXPREP_RUN_SANDBOX_TESTS") and sys.platform == "darwin",
         "opt-in live job-monitor test (LATEXPREP_RUN_SANDBOX_TESTS=1)",
     )
     async def test_live_job_monitor_samples_parent_and_real_tool_group(self) -> None:
@@ -421,6 +424,30 @@ class SharedMonitorTests(unittest.IsolatedAsyncioTestCase):
             async with asyncio.timeout(3):
                 result = await task
             self.assertEqual(result.resource_exceeded, "Tool process count exceeded 32")
+
+    async def test_storage_walks_run_off_the_event_loop_and_relax_their_interval(self) -> None:
+        runner = SampledRunner(ResourceBudget(1, 1024))
+        runner.allow_sample.set()
+        threads: set[int] = set()
+        original = ToolRunner._job_storage
+
+        def recorded(self: ToolRunner, workspaces: tuple[Path, ...]) -> object:
+            threads.add(threading.get_ident())
+            return original(self, workspaces)
+
+        with patch.object(ToolRunner, "_job_storage", recorded):
+            async with runner.job_scope(self.root, max_temp_bytes=1_000_000):
+                task = asyncio.create_task(self.sleeping_command(runner, "command", 64))
+                await self.wait_groups(runner, 1)
+                await asyncio.sleep(0.25)
+                _kill_group(next(iter(runner._groups)))
+                async with asyncio.timeout(3):
+                    await task
+        self.assertTrue(threads)
+        self.assertNotIn(threading.get_ident(), threads)
+        self.assertEqual(runner.statistics()["sample_interval_seconds"], 0.1)
+        self.assertEqual(_sample_interval(time.monotonic() - 10), 0.5)
+        self.assertEqual(_sample_interval(time.monotonic()), 0.1)
 
     async def test_job_disk_ceiling_applies_even_without_active_tools(self) -> None:
         runner = SampledRunner(ResourceBudget(1, 1024))

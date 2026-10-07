@@ -22,7 +22,6 @@ MANDATORY_CODES = frozenset(
         "TEX005",
         "TEX006",
         "TEX007",
-        "TEX008",
         "PKG001",
         "PKG002",
         "PKG003",

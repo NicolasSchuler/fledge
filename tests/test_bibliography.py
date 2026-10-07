@@ -95,6 +95,43 @@ class BibliographyTests(unittest.TestCase):
         self.assertTrue(first.exists() and second.exists())
         self.assertIn("https://doi.org/", second.read_text())
 
+    def test_selected_main_limits_inspection_to_its_declared_resources(self) -> None:
+        self.write(
+            "\\documentclass{article}\n\\begin{document}\n\\cite{same}\n"
+            "\\bibliography{references}\n\\end{document}\n",
+            "main.tex",
+        )
+        self.write(
+            "@article{same, title={First}, doi={https://doi.org/10.1234/Same}}\n", "references.bib"
+        )
+        backup = self.write(
+            "@article{same, title={Second}, doi={https://doi.org/10.1234/Same}}\n",
+            "old/references-backup.bib",
+        )
+
+        self.assertEqual(check_bibliography(self.root, "main.tex"), [])
+        proposed, _, findings = normalize_dois(self.root, "main.tex")
+        self.assertEqual(set(proposed), {"references.bib"})
+        self.assertEqual(findings, [])
+
+        self.assertEqual(
+            {item.rule for item in check_bibliography(self.root)},
+            {"bibliography.duplicate_key", "bibliography.duplicate_doi"},
+        )
+        self.assertIn("https://doi.org/", backup.read_text())
+
+    def test_unresolved_resource_selection_keeps_the_whole_tree_scope(self) -> None:
+        self.write("@misc{one, doi={https://doi.org/10.1234/One}}\n", "references.bib")
+        self.write("@misc{two, doi={https://doi.org/10.1234/Two}}\n", "spare/extra.bib")
+        for body in ("\\bibliography{\\dynamicname}", ""):
+            with self.subTest(body=body):
+                self.write(
+                    "\\documentclass{article}\n\\begin{document}\n" + body + "\n\\end{document}\n",
+                    "main.tex",
+                )
+                proposed, _, _ = normalize_dois(self.root, "main.tex")
+                self.assertEqual(set(proposed), {"references.bib", "spare/extra.bib"})
+
     def test_repeated_doi_fields_are_not_chosen_or_normalized(self) -> None:
         self.write("@misc{k, doi={https://doi.org/10.1234/One}, DOI={doi:10.1234/Two}}")
 

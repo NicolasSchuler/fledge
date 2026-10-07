@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import tempfile
 import unittest
 from dataclasses import FrozenInstanceError
@@ -13,6 +12,7 @@ from latexprep.loaded_options import _native_string, _parse_options, stage_loade
 from latexprep.models import PreparationError
 from latexprep.pdf import compare_pdfs
 from latexprep.runtime import BuildResult, ToolRunner, build_project
+from tests.support import live_tests_enabled
 from tests.test_runtime import FakeBuildRunner
 
 
@@ -258,7 +258,7 @@ class LoadedOptionsTests(unittest.IsolatedAsyncioTestCase):
 
 
 @unittest.skipUnless(
-    os.environ.get("LATEX_PREP_RUN_INTEGRATION") == "1",
+    live_tests_enabled(),
     "Enable LATEX_PREP_RUN_INTEGRATION for real restricted TeX option instrumentation",
 )
 class LiveLoadedOptionsTests(unittest.IsolatedAsyncioTestCase):

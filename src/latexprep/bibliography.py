@@ -13,8 +13,10 @@ from bisect import bisect_right
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .models import Change, Finding, PreparationError
+from .manuscript import _commands_before_end, _reachable_sources
+from .models import Change, Finding, PreparationError, Severity, Status
 from .scheduler import cancellation_point
+from .source import _Inspection, _items
 
 _MAX_FILE_BYTES = 16 * 1024 * 1024
 _MAX_NESTING = 256
@@ -25,6 +27,7 @@ _DOI_PREFIX = re.compile(r"(?:https?://(?:dx\.)?doi\.org/|doi:\s*)", re.IGNORECA
 _DOI = re.compile(r"10\.\d{4,9}/[!-~]+")
 _MONTHS = frozenset("jan feb mar apr may jun jul aug sep oct nov dec".split())
 _RELATIONSHIPS = frozenset({"crossref", "xref", "xdata", "related", "entryset"})
+_RESOURCE_COMMANDS = frozenset({"bibliography", "addbibresource"})
 
 
 @dataclass(frozen=True)
@@ -71,8 +74,8 @@ class _Document:
         message: str,
         offset: int,
         *,
-        severity: str = "warning",
-        status: str = "failed",
+        severity: Severity = "warning",
+        status: Status = "failed",
         suggestion: str | None = None,
         details: dict[str, object] | None = None,
     ) -> Finding:
@@ -298,14 +301,55 @@ class _Parser:
             )
 
 
-def _load(root: Path) -> tuple[list[_Document], list[Finding]]:
+def _resource_declarations(
+    inspection: _Inspection, selected: set[str]
+) -> tuple[set[str], list[str]]:
+    """Resolve literal bibliography resource declarations in the selected sources."""
+    resources: set[str] = set()
+    reasons: list[str] = []
+    for name in sorted(selected):
+        cancellation_point()
+        for command in _commands_before_end(inspection.sources[name]):
+            if command.name not in _RESOURCE_COMMANDS or not command.arguments:
+                continue
+            for argument in _items(command.arguments[0], command.name == "bibliography"):
+                target = inspection.references.get((name, argument.start, argument.end))
+                if target and target[1] in _RESOURCE_COMMANDS:
+                    resources.add(target[0])
+                else:
+                    reasons.append(
+                        f"{name}:{command.line}: bibliography resource could not be resolved"
+                    )
+    return resources, reasons
+
+
+def _selected_resources(root: Path, main: str | None) -> set[str] | None:
+    """Return the resources one selected literal graph declares, or None if unavailable.
+
+    An unselectable main source or a declaration that cannot be resolved keeps the
+    documented whole-tree scope instead of silently narrowing the inspected files.
+    """
+    if main is None:
+        return None
+    inspection = _Inspection(root, main)
+    if inspection.main is None:
+        return None
+    resources, _ = _resource_declarations(inspection, _reachable_sources(inspection))
+    return resources or None
+
+
+def _load(root: Path, only: set[str] | None = None) -> tuple[list[_Document], list[Finding]]:
     if not root.is_dir():
         raise PreparationError(f"Bibliography input is not a directory: {root}")
     documents: list[_Document] = []
     findings: list[Finding] = []
-    paths = sorted(
-        (path for path in root.rglob("*") if path.suffix.lower() == ".bib"),
-        key=lambda path: path.relative_to(root).as_posix(),
+    paths = (
+        sorted(
+            (path for path in root.rglob("*") if path.suffix.lower() == ".bib"),
+            key=lambda path: path.relative_to(root).as_posix(),
+        )
+        if only is None
+        else [root / name for name in sorted(only)]
     )
     for path in paths:
         cancellation_point()
@@ -554,22 +598,31 @@ def _check(documents: list[_Document], findings: list[Finding]) -> list[Finding]
     return findings
 
 
-def check_bibliography(root: Path) -> list[Finding]:
+def check_bibliography(root: Path, main: str | None = None) -> list[Finding]:
     """Inspect UTF-8 .bib files without changing them or accessing the network.
+
+    When ``main`` names a source whose selected literal graph declares resolvable
+    bibliography resources, only those resources are inspected, so duplicate keys
+    and DOIs are reported within that declared set. Without such a selection every
+    .bib file below ``root`` is inspected, including unreferenced spare copies.
 
     No findings means no problem was found by these checks, not that metadata,
     macro expansion order, style requirements, or rendered citations are valid.
     """
-    return _check(*_load(root))
+    return _check(*_load(root, _selected_resources(root, main)))
 
 
-def normalize_dois(root: Path) -> tuple[dict[str, bytes], list[Change], list[Finding]]:
+def normalize_dois(
+    root: Path, main: str | None = None
+) -> tuple[dict[str, bytes], list[Change], list[Finding]]:
     """Propose literal DOI prefix removal; callers explicitly select and apply it.
 
-    Invalid files and repeated DOI fields are left unchanged. Only changed files
-    are returned, keyed by their relative POSIX path, with visible unified diffs.
+    ``main`` narrows the inspected and proposed files exactly as it does for
+    :func:`check_bibliography`. Invalid files and repeated DOI fields are left
+    unchanged. Only changed files are returned, keyed by their relative POSIX
+    path, with visible unified diffs.
     """
-    documents, input_findings = _load(root)
+    documents, input_findings = _load(root, _selected_resources(root, main))
     findings = _check(documents, input_findings)
     proposed: dict[str, bytes] = {}
     changes: list[Change] = []

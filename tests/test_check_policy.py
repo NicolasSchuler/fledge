@@ -457,7 +457,6 @@ class CheckPolicyTests(unittest.TestCase):
             "TEX005",
             "TEX006",
             "TEX007",
-            "TEX008",
             "TEX201",
             "TEX202",
             "TEX203",
@@ -531,6 +530,7 @@ class CheckPolicyTests(unittest.TestCase):
             "TEX002",
             "TEX003",
             "TEX004",
+            "TEX008",
             "BIB003",
             "BIB006",
             "BIB007",
@@ -770,6 +770,27 @@ class CheckPolicyAdapterTests(unittest.IsolatedAsyncioTestCase):
             [],
         )
         self.assertEqual(runner.calls, [])
+
+
+class CheckPolicyMapTests(unittest.TestCase):
+    """The hand-maintained activation maps must name real codes and option fields."""
+
+    def test_policy_maps_reference_registered_codes_and_existing_fields(self) -> None:
+        from latexprep import check_policy
+        from latexprep.config import Settings
+
+        settings = Settings()
+        for code, fields in check_policy._ROOT_CHECKS.items():
+            self.assertIn(code, BY_CODE)
+            for name in fields:
+                self.assertTrue(hasattr(settings, name), (code, name))
+        for group, policies in check_policy._GROUP_CHECKS.items():
+            options = getattr(settings, group)
+            for code, fields in policies.items():
+                self.assertIn(code, BY_CODE)
+                for name in fields:
+                    self.assertTrue(hasattr(options, name), (group, code, name))
+        self.assertLessEqual(set(check_policy.MANDATORY_CODES), set(BY_CODE))
 
 
 if __name__ == "__main__":

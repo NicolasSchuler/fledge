@@ -3,12 +3,15 @@
 ZIP files use stored or deflated entries only. Packaging uses DEFLATE level 9,
 the DOS epoch, and Unix modes 0644/0755, independent of source timestamps/modes.
 Import never executes project files or follows links. Excluded metadata
-directories are not traversed when importing folders.
+directories are not traversed when importing folders. Unsafe names (traversal,
+absolute paths, links, collisions) abort the import; names that merely cannot be
+used on every operating system are kept and reported as warnings.
 """
 
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import stat
 import struct
@@ -29,6 +32,45 @@ _METADATA_DIRS = {".git", ".hg", ".svn", "__MACOSX"}
 _RESERVED_NAMES = {"con", "prn", "aux", "nul", "conin$", "conout$"} | {
     f"{prefix}{number}" for prefix in ("com", "lpt") for number in "123456789¹²³"
 }
+_DRIVE_PREFIX = re.compile(r"[A-Za-z]:")
+# Finder custom-folder-icon file: the name ends with a carriage return.
+_ICON_FILE = "Icon\r"
+_AUXILIARY_SUFFIXES = (
+    ".aux",
+    ".auxlock",
+    ".log",
+    ".fdb_latexmk",
+    ".fls",
+    ".synctex",
+    ".synctex.gz",
+    ".synctex(busy)",
+    ".synctex.gz(busy)",
+    ".blg",
+    ".bcf",
+    ".run.xml",
+    ".toc",
+    ".lof",
+    ".lot",
+    ".out",
+    ".nav",
+    ".snm",
+    ".vrb",
+    ".xdv",
+    ".idx",
+    ".ilg",
+    ".ind",
+    ".glo",
+    ".gls",
+    ".glg",
+    ".ist",
+    ".brf",
+    ".lol",
+    ".loa",
+    ".thm",
+    ".ptc",
+    ".bbl-SAVE-ERROR",
+    ".pyg",
+)
 _DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 _FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
 
@@ -102,6 +144,10 @@ def _key(path: str) -> str:
 
 
 def _normalise_path(name: str) -> str:
+    """Normalise a relative path, rejecting only names that are unsafe to extract.
+
+    Names that are merely nonportable are accepted; see ``_portability_reasons``.
+    """
     if not name or name.startswith("/") or "\\" in name or "\x00" in name:
         raise PreparationError(f"Unsafe project path: {name!r}.")
     parts = name.split("/")
@@ -110,14 +156,50 @@ def _normalise_path(name: str) -> str:
     parts = [part for part in parts if part not in {"", "."}]
     if not parts:
         raise PreparationError(f"Empty project path: {name!r}.")
-    for part in parts:
-        if (
-            any(ord(char) < 32 or char in '<>:"|?*' for char in part)
-            or part.endswith((" ", "."))
-            or _key(part.split(".", 1)[0]) in _RESERVED_NAMES
-        ):
-            raise PreparationError(f"Nonportable or unsafe project filename: {name!r}.")
+    if _DRIVE_PREFIX.match(parts[0]):
+        # A Windows drive-letter prefix is an absolute or drive-relative path there.
+        raise PreparationError(f"Unsafe project path: {name!r}.")
     return "/".join(parts)
+
+
+def _portability_reasons(path: str) -> list[str]:
+    """Explain why a normalised path cannot be used on every operating system."""
+    reasons: list[str] = []
+    for part in path.split("/"):
+        found = (
+            (any(ord(char) < 32 for char in part), "contains a control character"),
+            (any(char in '<>:"|?*' for char in part), 'contains a character from <>:"|?*'),
+            (part.endswith((" ", ".")), "ends with a space or dot"),
+            (_key(part.split(".", 1)[0]) in _RESERVED_NAMES, "uses a reserved Windows device name"),
+        )
+        for present, reason in found:
+            if present and reason not in reasons:
+                reasons.append(reason)
+    return reasons
+
+
+def _portability_findings(entries: list[tuple[str, bool]]) -> list[Finding]:
+    """Warn once per kept file (or empty directory) whose path is nonportable."""
+    occupied: set[str] = set()
+    for path, _ in entries:
+        parts = path.split("/")
+        occupied.update("/".join(parts[:index]) for index in range(1, len(parts)))
+    findings = []
+    for path, is_dir in entries:
+        reasons = _portability_reasons(path)
+        if reasons and not (is_dir and path in occupied):
+            findings.append(
+                Finding(
+                    "project.nonportable_filename",
+                    f"Project file name is not portable to all operating systems: {path!r} "
+                    f"({'; '.join(reasons)}). It was kept unchanged.",
+                    "warning",
+                    "failed",
+                    path=path,
+                    details={"reasons": reasons},
+                )
+            )
+    return findings
 
 
 class _PathRegistry:
@@ -153,7 +235,9 @@ def _metadata_prefix(path: str, is_dir: bool) -> str | None:
     for index, part in enumerate(parts):
         if part in _METADATA_DIRS and (index < len(parts) - 1 or is_dir):
             return "/".join(parts[: index + 1])
-    if not is_dir and parts[-1] == ".DS_Store":
+    if not is_dir and (
+        parts[-1] in {".DS_Store", _ICON_FILE} or parts[-1].startswith("._")  # AppleDouble
+    ):
         return path
     return None
 
@@ -426,6 +510,7 @@ def import_project(
             finally:
                 os.close(directory_fd)
             files = [entry.path for entry in entries if not entry.is_dir]
+            findings = _portability_findings([(entry.path, entry.is_dir) for entry in entries])
         else:
             source_fd = os.open(source, _FILE_FLAGS)
             with os.fdopen(source_fd, "rb") as stream:
@@ -440,10 +525,12 @@ def import_project(
                     target.mkdir(mode=0o700)
                     created = True
                     files = []
+                    kept: list[tuple[str, bool]] = []
                     for entry in entries:
                         path = entry.path.removeprefix(wrapper + "/") if wrapper else entry.path
                         if wrapper and entry.path == wrapper:
                             continue
+                        kept.append((path, entry.is_dir))
                         output = target / path
                         if entry.is_dir:
                             output.mkdir(parents=True, exist_ok=True)
@@ -453,8 +540,9 @@ def import_project(
                         with archive.open(entry.zip_info) as reader, output.open("xb") as writer:
                             _copy_bytes(reader, writer, path, budget, entry.zip_info.compress_size)
                         files.append(path)
+                    findings = _portability_findings(kept)
         budget.check_time()
-        return ImportedProject(target, sorted(files), changes=changes)
+        return ImportedProject(target, sorted(files), findings, changes)
     except BaseException as error:
         if created and target is not None:
             shutil.rmtree(target)
@@ -496,8 +584,11 @@ def create_archive(root: Path, archive: Path) -> None:
                         info = zipfile.ZipInfo(entry.path + ("/" if entry.is_dir else ""))
                         info.create_system = 3
                         info.compress_type = zipfile.ZIP_DEFLATED
-                        # ZipInfo has no public streamed compression-level setter on Python 3.11.
-                        info._compresslevel = 9  # type: ignore
+                        # Byte-identical archives also require the same zlib version.
+                        if hasattr(zipfile.ZipInfo, "compress_level"):  # Python 3.13+
+                            info.compress_level = 9
+                        else:  # No public per-entry level setter before Python 3.13.
+                            info._compresslevel = 9  # type: ignore
                         info.file_size = entry.size
                         mode = stat.S_IFDIR | 0o755 if entry.is_dir else stat.S_IFREG | 0o644
                         info.external_attr = mode << 16 | (0x10 if entry.is_dir else 0)
@@ -519,28 +610,12 @@ def create_archive(root: Path, archive: Path) -> None:
 
 
 def _cleanup_reason(path: str) -> str | None:
-    name = path.rsplit("/", 1)[-1]
-    if (
-        _metadata_prefix(path, False)
-        or name in {"Thumbs.db", "desktop.ini"}
-        or name.startswith("._")
-    ):
+    *directories, name = path.split("/")
+    if _metadata_prefix(path, False) or name in {"Thumbs.db", "desktop.ini"}:
         return "Operating-system or version-control metadata."
-    if name.endswith(
-        (
-            ".aux",
-            ".log",
-            ".fdb_latexmk",
-            ".fls",
-            ".synctex",
-            ".synctex.gz",
-            ".blg",
-            ".bcf",
-            ".run.xml",
-            ".toc",
-            ".lof",
-            ".lot",
-        )
+    # Never ``.bbl``: a submission usually needs the generated bibliography.
+    if name.endswith(_AUXILIARY_SUFFIXES) or any(
+        directory.startswith("_minted") for directory in directories
     ):
         return "Rebuildable LaTeX auxiliary or diagnostic file."
     if (

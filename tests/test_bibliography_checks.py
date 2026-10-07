@@ -12,6 +12,13 @@ from latexprep.bibliography_checks import BibliographyOptions, check_bibliograph
 from latexprep.models import Finding, PreparationError, has_blockers
 
 
+def listed(finding: Finding, key: str) -> list:
+    """Read one list-valued detail of a finding without narrowing every element."""
+    value = finding.details.get(key, [])
+    assert isinstance(value, list), value
+    return value
+
+
 class BibliographyCheckTests(unittest.TestCase):
     def setUp(self) -> None:
         self.directory = tempfile.TemporaryDirectory()
@@ -102,9 +109,10 @@ class BibliographyCheckTests(unittest.TestCase):
         self.manuscript("\\cite{child,alias}\\nocite{set}")
         path = self.write("references.bib", original)
         rows = self.rows("uncited_entries")
-        self.assertEqual(
-            [(row.details.get("entry"), row.status) for row in rows], [("unused", "failed")]
-        )
+        self.assertEqual([row.status for row in rows], ["failed"])
+        self.assertEqual([item["entry"] for item in listed(rows[0], "entries")], ["unused"])
+        self.assertEqual(rows[0].message, "1 of 8 entries have no scanned use: unused")
+        self.assertEqual((rows[0].path, rows[0].line), ("references.bib", 8))
         self.assertEqual(rows[0].code, "BIB102")
         self.assertEqual(rows[0].severity, "warning")
         self.assertEqual(path.read_text(), original)
@@ -128,17 +136,100 @@ class BibliographyCheckTests(unittest.TestCase):
                 self.manuscript(source)
                 self.write("references.bib", bib)
                 rows = self.rows("uncited_entries")
-                self.assertTrue(any(row.details.get("entry") == "unused" for row in rows))
+                self.assertTrue(
+                    any(
+                        item["entry"] == "unused" for row in rows for item in listed(row, "entries")
+                    )
+                )
                 self.assertTrue(all(row.status == "inconclusive" for row in rows))
+
+    def test_ordinary_macro_and_conditional_definitions_keep_coverage_conclusive(self) -> None:
+        self.write("references.bib", "@article{used,title={A work}}")
+        self.manuscript(
+            "\\newcommand{\\R}{\\mathbb{R}}\n\\def\\shorthand{text}\n\\let\\old\\relax\n"
+            "\\renewcommand{\\arraystretch}{1.2}\n\\ifdefined\\flag\\relax\\fi\n\\cite{used}"
+        )
+        self.assertEqual([row.status for row in self.rows("citation_coverage")], ["passed"])
+        self.assertEqual([row.status for row in self.rows("uncited_entries")], ["passed"])
+        for body, reason in (
+            ("\\ifdefined\\flag\\cite{used}\\fi", "conditional citation or bibliography"),
+            ("\\newcommand{\\mycite}[1]{\\cite{#1}}\\mycite{used}", "macro definition of citation"),
+            ("\\csname cite\\endcsname{used}", "category-code execution"),
+        ):
+            with self.subTest(body=body):
+                self.manuscript(body)
+                rows = self.rows("citation_coverage")
+                self.assertTrue(rows)
+                self.assertTrue(all(row.status == "inconclusive" for row in rows))
+                self.assertTrue(
+                    any(reason in str(item) for row in rows for item in listed(row, "uncertainty"))
+                )
+
+    def test_resolved_source_dependencies_do_not_make_every_check_inconclusive(self) -> None:
+        # TeX's lookup order selects fig.pdf; the reported alternative is evidence,
+        # not missing evidence, so it must not spread uncertainty to every rule.
+        self.manuscript("\\includegraphics{fig}\n\\cite{used}")
+        self.write("fig.pdf", b"%PDF-1.4")
+        self.write("fig.png", b"\x89PNG\r\n\x1a\n")
+        self.write("references.bib", "@article{used,pages={1--2},url={https://example.org/}}")
+        rows = self.check()
+        self.assertEqual(
+            {row.rule: row.status for row in rows},
+            {
+                "bibliography.citation_coverage": "passed",
+                "bibliography.uncited_entries": "passed",
+                "bibliography.page_ranges": "passed",
+                "bibliography.url_syntax": "passed",
+            },
+        )
+
+    def test_many_uncited_entries_collapse_into_one_listed_finding(self) -> None:
+        self.manuscript("\\cite{used}")
+        self.write(
+            "references.bib",
+            "@misc{used}\n" + "".join(f"@misc{{spare{index}}}\n" for index in range(1, 6)),
+        )
+        rows = self.rows("uncited_entries")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].status, "failed")
+        self.assertEqual(
+            rows[0].message, "5 of 6 entries have no scanned use: spare1, spare2, spare3 (+2 more)"
+        )
+        self.assertEqual(
+            [(item["entry"], item["path"], item["line"]) for item in listed(rows[0], "entries")],
+            [(f"spare{index}", "references.bib", index + 1) for index in range(1, 6)],
+        )
+
+    def test_checks_without_supported_items_are_not_applicable_rather_than_passed(self) -> None:
+        self.manuscript("\\cite{used}")
+        self.write("references.bib", "@misc{used}")
+        reported = {
+            "bibliography.required_fields",
+            "bibliography.missing_doi",
+            "bibliography.page_ranges",
+            "bibliography.url_syntax",
+        }
+        rows = [
+            row
+            for row in self.check(
+                doi_entry_types=("article",), required_fields=(("article", ("author",)),)
+            )
+            if row.rule in reported
+        ]
+        self.assertEqual({row.rule for row in rows}, reported)
+        self.assertTrue(all(row.status == "not_applicable" for row in rows))
+        self.assertTrue(all(row.severity == "info" for row in rows))
+        self.assertTrue(all(row.message == "No supported items to check." for row in rows))
+        self.assertTrue(all(row.details["checked"] == 0 for row in rows))
+        self.assertFalse(has_blockers(rows))
 
     def test_all_roots_unions_usage_without_importing_other_resources(self) -> None:
         self.manuscript("\\cite{first}")
         self.write("references.bib", "@misc{first}\n@misc{second}")
         self.write("other.tex", "\\documentclass{article}\\cite{second}\\bibliography{references}")
         self.write("unused-resource.bib", "@misc{unselected}")
-        self.assertEqual(
-            [row.details.get("entry") for row in self.rows("uncited_entries")], ["second"]
-        )
+        rows = self.rows("uncited_entries")
+        self.assertEqual([item["entry"] for item in listed(rows[0], "entries")], ["second"])
         self.assertEqual(
             [row.status for row in self.rows("uncited_entries", all_roots=True)], ["passed"]
         )
@@ -260,7 +351,7 @@ class BibliographyCheckTests(unittest.TestCase):
                 ("", "references", "@article{broken,title={"),
                 ("", "\\selectedresource", "@article{known}"),
                 (
-                    "\\ifdefined\\flag\\relax\\fi",
+                    "\\ifdefined\\flag\\cite{known}\\fi",
                     "references",
                     "@article{known,author={A. Author},doi={10.1234/Work}}",
                 ),
@@ -456,7 +547,7 @@ class BibliographyCheckTests(unittest.TestCase):
         rows = self.check(all_roots=True)
         self.assertTrue(all(row.status == "inconclusive" for row in rows))
         self.assertTrue(any("All-root discovery" in row.message for row in rows))
-        self.manuscript("\\ifdefined\\flag\\relax\\fi")
+        self.manuscript("\\ifdefined\\flag\\nocite{known}\\fi")
         rows = self.rows("required_fields", required_fields=(("*", ("title",)),))
         self.assertTrue(all(row.status == "inconclusive" for row in rows))
         self.assertTrue(all(row.severity == "error" for row in rows))

@@ -18,8 +18,10 @@ from latexprep.reporting import (
     ReportingOptions,
     ReviewRule,
     apply_reviews,
+    evidence_excerpt,
     export_diagnostic_bundle,
     has_unaccepted_blockers,
+    is_scope_disclaimer,
     render_ci_annotations,
     render_html,
     review_marker,
@@ -398,6 +400,102 @@ class RenderTests(unittest.TestCase):
         self.assertIn("%250A", render_ci_annotations(literal))
         report.findings[0] = replace(report.findings[0], path="../../outside.tex")
         self.assertNotIn("file=", render_ci_annotations(report))
+
+    def test_ci_hides_scope_disclaimers_unless_passed_results_are_requested(self):
+        report = Report(
+            "check",
+            findings=[
+                Finding("online.metadata", "Offline run.", "info", "skipped"),
+                Finding("build.bibliography_backend", "No backend.", "info", "not_applicable"),
+                Finding("pdf.pages", "1 page", "info", "passed"),
+                Finding("pdf.fonts", "Fonts unavailable", "error", "skipped"),
+                Finding("source-edit-marker", "Marker", path="main.tex", line=2),
+            ],
+        )
+        annotations = render_ci_annotations(report)
+        self.assertEqual(len(annotations.splitlines()), 2)
+        for hidden in ("Offline run", "No backend", "1 page"):
+            self.assertNotIn(hidden, annotations)
+        everything = render_ci_annotations(report, show_passed=True)
+        self.assertEqual(len(everything.splitlines()), 5)
+        self.assertIn("info/not_applicable: No backend.", everything)
+        self.assertTrue(is_scope_disclaimer(report.findings[0]))
+        self.assertFalse(is_scope_disclaimer(report.findings[3]))
+        self.assertFalse(is_scope_disclaimer(replace(report.findings[0], status="failed")))
+
+    def test_evidence_excerpt_uses_known_lists_in_order_and_counts_hidden_items(self):
+        def excerpt(**details):
+            return evidence_excerpt(Finding("pdf.fonts", "Generic.", details=details))
+
+        self.assertEqual(excerpt(), "")
+        self.assertEqual(excerpt(matches=[], violations=[{"page": 5}]), "page 5")
+        self.assertEqual(
+            excerpt(violations=[{"page": 5}], matches=[{"path": "a.tex"}, {"path": "b.tex"}]),
+            "a.tex, b.tex",
+        )
+        self.assertEqual(excerpt(unrelated=["x"]), "")
+        self.assertEqual(
+            excerpt(
+                matches=[{"path": f"{n}.tex", "line": n} for n in range(1, 8)],
+            ),
+            "1.tex:1, 2.tex:2, 3.tex:3 (+4 more)",
+        )
+        self.assertEqual(
+            excerpt(violations=[{"page": 2}, {"page": 3}], violation_count=12),
+            "page 2, page 3 (+10 more)",
+        )
+        self.assertEqual(excerpt(changed_pages=[4, 6]), "page 4, page 6")
+        self.assertEqual(
+            excerpt(nonembedded=["Helvetica", "Times", "Symbol", "Zapf"]),
+            "Helvetica, Times, Symbol (+1 more)",
+        )
+        self.assertEqual(excerpt(candidates=["a.tex", "b.tex"]), "a.tex, b.tex")
+        self.assertEqual(excerpt(missing=["twocolumn"]), "twocolumn")
+        self.assertEqual(excerpt(entries=[{"name": "key1"}, {"key": "key2"}]), "key1, key2")
+        self.assertEqual(excerpt(below_minimum=[{"page": 1, "number": 2, "x_dpi": 72}]), "page 1")
+        self.assertEqual(
+            excerpt(matches=[{"path": "a.pdf", "page": 3}, {"path": "a.pdf", "line": 4}]),
+            "a.pdf (page 3), a.pdf:4",
+        )
+        # Repeated locations are shown once; unreadable items are counted as not shown.
+        self.assertEqual(
+            excerpt(matches=[{"path": "a.tex", "line": 1}] * 3 + [{"unknown": 1}]),
+            "a.tex:1 (+1 more)",
+        )
+        self.assertEqual(excerpt(matches=[{"unknown": 1}], violations=[{"page": 2}]), "page 2")
+        self.assertEqual(excerpt(matches=[True, None, 1.5, [1]]), "")
+        self.assertEqual(len(excerpt(matches=["x" * 500])), 120)
+        passed = Finding("pdf.fonts", "ok", "info", "passed", details={"matches": ["a.tex"]})
+        self.assertEqual(evidence_excerpt(passed), "")
+
+    def test_ci_and_html_show_sanitized_evidence_excerpts(self):
+        secret = "SyntheticCredential_1234"
+        report = Report(
+            "check",
+            settings={"password": secret},
+            findings=[
+                Finding(
+                    "manuscript.forbidden_packages",
+                    "Generic message.",
+                    details={
+                        "matches": [
+                            {"path": f"{secret}.tex", "line": 2},
+                            {"path": "b\n::error::injected.tex", "line": 3},
+                            {"path": "<script>.tex"},
+                        ]
+                    },
+                )
+            ],
+        )
+        annotation = render_ci_annotations(report)
+        self.assertEqual(len(annotation.splitlines()), 1)
+        self.assertIn("| Evidence: ", annotation)
+        self.assertIn("b%0A::error::injected.tex:3", annotation)
+        self.assertNotIn(secret, annotation)
+        rendered = render_html(report)
+        self.assertIn("<p>Evidence: ", rendered)
+        self.assertIn("&lt;script&gt;.tex", rendered)
+        self.assertNotIn("<script>.tex", rendered)
 
     def test_review_reasons_are_visible_and_redacted_in_html_and_ci(self):
         report = Report(

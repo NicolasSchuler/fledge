@@ -55,25 +55,53 @@ status; the deployed site is at <https://nicolasschuler.github.io/fledge/>.
 ## Run checks
 
 ```sh
-python -m unittest discover -s tests -v
-ruff check src tests docs/conf.py
-ruff format --check src tests docs/conf.py
+python -m unittest discover -s tests -t . -v
+ruff check src tests docs/conf.py scripts
+ruff format --check src tests docs/conf.py scripts
 ty check src/latexprep
 ```
 
-Run these opt-in checks separately where application isolation and the relevant
-tools can actually start:
+`tests/__init__.py` puts `src/` first on the import path, so no `PYTHONPATH` is
+needed, and it fails loudly if a stale installed `latexprep` would shadow the
+checkout. Remove it with `python -m pip uninstall fledge latex-preparation`, then
+run `python -m pip install -e .`.
+
+Live tests are opt-in with `FLEDGE_RUN_INTEGRATION=1` (the older
+`LATEX_PREP_RUN_INTEGRATION=1` and `LATEXPREP_RUN_SANDBOX_TESTS=1` still work).
+Run them separately where application isolation and the relevant tools can
+actually start:
 
 ```sh
-LATEX_PREP_RUN_INTEGRATION=1 python -m unittest tests.test_integration -v
-LATEXPREP_RUN_SANDBOX_TESTS=1 python -m unittest tests.test_runtime_parallel -v
+FLEDGE_RUN_INTEGRATION=1 python -m unittest tests.test_integration \
+  tests.test_integration_checks tests.test_integration_remaining \
+  tests.test_integration_backends tests.test_integration_realistic \
+  tests.test_runtime_parallel -v
 ```
+
+`tests.test_integration_realistic` builds, checks and prepares projects with
+constructs found in ordinary papers and journal templates (template classes,
+`[0,1)` intervals, several matching graphics, a spare `.bib`, Biber).
 
 Controlled tool doubles establish component behavior, not live toolchain support.
 Skipped or blocked live checks must remain visible in validation results. Online
 tests use fake transports; `qpdf` and `mutool` controlled-output tests do not
 establish live-tool validation. The [workflow reference](workflow.md#development-checks)
 retains the detailed testing qualifications.
+
+## Continuous integration
+
+The [Tests workflow](https://github.com/NicolasSchuler/fledge/actions/workflows/tests.yml)
+runs on pushes to `main`, pull requests, manual dispatch and weekly. It lints with
+Ruff and `ty`, then runs the unit tests on macOS and Ubuntu with Python 3.11 and
+3.13. Manual and weekly runs add a live macOS job that installs BasicTeX, Poppler,
+`tex-fmt` and Biber and runs the opt-in integration and sandbox tests. Every
+third-party action in both workflows is pinned to a commit SHA.
+
+## Agent skill
+
+`skills/fledge/SKILL.md` is the Agent Skill described in
+[use Fledge from an AI agent](agents.md). A test checks that every command and
+option it names exists in the CLI, so update the skill together with CLI changes.
 
 ## Build local distributions
 
@@ -83,7 +111,7 @@ python -m build
 
 This creates a wheel and source archive in `dist/`; it does not publish them.
 The wheel installs the CLI. The source archive also carries the documentation,
-examples, tests, architecture, requirements, and benchmark script, so it can be
+examples, tests, agent skill, architecture, requirements, and benchmark script, so it can be
 used to build these docs and run the documented source checks. It also includes
 the opt-in macOS installer; installer tests use controlled commands, not native
 Homebrew or MacTeX installation.
@@ -119,6 +147,9 @@ eligible for a reviewed exception, check the review policy too. Exercise the
 relevant initial and final verification phases and add behavioral tests for
 valid, violating, and unavailable or ambiguous evidence. See
 [extending a check](checks.md#extending-a-check) for catalogue requirements.
+After changing a rule's description, regenerate the catalogue with
+`python scripts/generate_check_docs.py`; a test fails while `docs/checks.md` is
+stale, and its table is never edited by hand.
 
 For normal preparation, online checks run once on the fresh archive extraction;
 source inspection and dry runs use the initial snapshot. Preserve the request

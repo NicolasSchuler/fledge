@@ -163,9 +163,11 @@ def check_build_details(
     )
     if not (policies or options.inventory_loaded_packages):
         return findings
-    records = getattr(result, "loaded_packages", [])
-    complete = bool(getattr(result, "recorder_complete", False)) and result.success
-    names = {record["name"] for record in records}
+    records = result.loaded_packages
+    complete = result.recorder_complete and result.success
+    # Every recorder entry carries a literal filename; only its declared release
+    # date and version may be absent, so a policy never compares against None.
+    names = {name for record in records if isinstance(name := record["name"], str)}
     if options.inventory_loaded_packages:
         findings.append(
             Finding(
@@ -244,10 +246,8 @@ async def check_local_package_shadows(
     result: BuildResult, work: Path, runner: ToolRunner, *, budget: ResourceBudget | None = None
 ) -> list[Finding]:
     """Resolve system counterparts from an empty sandboxed directory, never user cwd."""
-    records = [
-        item for item in getattr(result, "loaded_packages", []) if item.get("origin") == "project"
-    ]
-    if not getattr(result, "recorder_complete", False) or not result.success:
+    records = [item for item in result.loaded_packages if item.get("origin") == "project"]
+    if not result.recorder_complete or not result.success:
         return [
             _finding(
                 "build.local_package_shadow",

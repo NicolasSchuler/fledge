@@ -47,9 +47,19 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
             ]
         )
         self.assertEqual(results["build"].status, "failed")
+        # A bare message loses the diagnosis whenever it is empty or just a path.
+        self.assertEqual(results["build"].error, "RuntimeError: build failed")
         self.assertEqual(results["pdf"].status, "blocked")
         self.assertEqual(results["report"].value, "diagnostics")
         self.assertEqual(results["source"].value, "diagnostics")
+
+    async def test_message_free_failures_still_name_their_exception_type(self):
+        async def fail():
+            raise OSError
+
+        results = await Scheduler(1, 128).execute([Task("build", fail)])
+        self.assertEqual(results["build"].status, "failed")
+        self.assertEqual(results["build"].error, "OSError: ")
 
     async def test_invalid_graphs_and_unsatisfiable_resources_rejected(self):
         async def nothing():

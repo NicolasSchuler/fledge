@@ -6,3 +6,4 @@ recursive-include examples *.toml *.tex *.bib
 recursive-include tests *.py
 include scripts/benchmark_parallelism.py
 prune docs/_build
+recursive-include skills *.md

@@ -40,6 +40,25 @@ def _relative(value: str, label: str, *, directory: bool = False) -> None:
 
 
 @dataclass(frozen=True)
+class PackageOptions:
+    """Extra project files to ship although the build does not read them.
+
+    Paths are relative to the input project (or a document's source directory)
+    and follow the flat filename map. They are packaging choices, not checks.
+    """
+
+    include: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.include, tuple) or len(set(self.include)) != len(self.include):
+            raise PreparationError("package.include must be an array of unique relative paths")
+        for path in self.include:
+            _relative(path, "package.include path")
+            if any(character in path for character in "*?["):
+                raise PreparationError("package.include lists exact paths, not glob patterns")
+
+
+@dataclass(frozen=True)
 class DocumentOptions:
     name: str
     main: str

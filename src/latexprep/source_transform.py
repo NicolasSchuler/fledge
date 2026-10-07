@@ -11,7 +11,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
-from .models import Change, Finding, PreparationError, has_blockers
+from .models import Change, Finding, PreparationError, Status, has_blockers
 from .source import (
     MAX_SOURCE_BYTES,
     MAX_TOTAL_SOURCE_BYTES,
@@ -25,14 +25,17 @@ from .source import (
 
 _DIRECTIVE = re.compile(
     r"^%\s*(?:!|&|\*|</?|(?:tex|latex|bib|biber|arara|encoding|coding|spell|"
-    r"fmt|tex-fmt|latex-prep|region|endregion)\b)",
+    r"fmt|tex-fmt|fledge|latex-prep|region|endregion)\b)",
     re.I,
 )
 _LICENSE = re.compile(
     r"\b(?:copyright|license|licence|SPDX|LPPL|public domain|all rights reserved)\b", re.I
 )
 _PRIVATE = re.compile(r"\b(?:TODO|FIXME|XXX|private|internal|confidential|note to self)\b", re.I)
-_FORMAT_MARKER = re.compile(r"^%\s*(?:tex-fmt|fmt|latex-prep)\s*:\s*(off|on)\b", re.I)
+_FORMAT_MARKER = re.compile(r"^%\s*(?:tex-fmt|fmt|fledge|latex-prep)\s*:\s*(off|on)\b", re.I)
+# Comment editing stays inside authored document sources; class, style and
+# generated template internals are copied verbatim.
+_EDITABLE_SUFFIXES = {".tex", ".ltx", ".latex"}
 
 
 def _relative(value: str) -> bool:
@@ -154,7 +157,7 @@ def _problem(
     message: str,
     path: str | None = None,
     *,
-    status: str = "inconclusive",
+    status: Status = "inconclusive",
 ) -> None:
     plan.findings.append(Finding(rule, message, "error", status, path=path))
 
@@ -415,6 +418,8 @@ def plan_source_transforms(
                 plan, "source.comment_removal", "Some source files could not be parsed safely."
             )
         for name, text in list(texts.items()):
+            if PurePosixPath(name).suffix.lower() not in _EDITABLE_SUFFIXES:
+                continue
             commands = inspection.sources[name].commands
             if any(c.name in {"catcode", "scantokens", "csname"} for c in commands):
                 _problem(

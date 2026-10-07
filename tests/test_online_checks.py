@@ -50,8 +50,10 @@ class OnlineCheckTests(unittest.IsolatedAsyncioTestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
         self.bib = self.root / "references.bib"
+        # Entries are only requested through the selected graph's declared resources.
         (self.root / "main.tex").write_text(
-            "\\documentclass{article}\n\\begin{document}Text.\\end{document}\n"
+            "\\documentclass{article}\n\\begin{document}Text.\n"
+            "\\bibliography{references}\n\\end{document}\n"
         )
 
     async def asyncTearDown(self):
@@ -67,8 +69,8 @@ class OnlineCheckTests(unittest.IsolatedAsyncioTestCase):
         original = self.bib.read_bytes() if self.bib.exists() else None
         calls = []
 
-        async def exchange(target, address, method, body, maximum):
-            calls.append((target, address, method, body))
+        async def exchange(target, address, method, body, maximum, *extra):
+            calls.append((target, address, method, body, *extra))
             self.assertEqual(address, "93.184.216.34")
             return response(target) if callable(response) else response
 
@@ -100,6 +102,70 @@ class OnlineCheckTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(findings), 1)
             self.assertEqual((findings[0].code, findings[0].status), ("NET002", "skipped"))
             self.assertEqual(findings[0].details["requests"], 0)
+
+    async def test_declared_resources_bound_the_requested_bibliographies(self):
+        self.reference()
+        spare = self.root / "old" / "references-backup.bib"
+        spare.parent.mkdir()
+        spare.write_text("@article{spare, title={Spare copy}, doi={10.9999/spare}}\n")
+        selected = options(online_doi_resolution=True)
+
+        _, findings, calls = await self.run_check(
+            selected, Response(200), "online.doi_resolution", "NET001"
+        )
+        self.assertEqual(
+            [item.path for item in findings if item.rule == "online.doi_resolution"],
+            ["references.bib"],
+        )
+        self.assertEqual(len(calls), 1)
+        self.assertNotIn("10.9999/spare", repr(findings))
+
+        # A bibliography-only directory keeps its documented whole-tree scope.
+        (self.root / "main.tex").unlink()
+        _, findings, calls = await self.run_check(
+            selected, Response(200), "online.doi_resolution", "NET001"
+        )
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(
+            sorted(item.path for item in findings if item.rule == "online.doi_resolution"),
+            ["old/references-backup.bib", "references.bib"],
+        )
+
+    async def test_unresolvable_resource_declaration_requests_nothing(self):
+        self.reference()
+        (self.root / "main.tex").write_text(
+            "\\documentclass{article}\n\\begin{document}\n\\bibliography{absent}\n\\end{document}\n"
+        )
+        finding, _, calls = await self.run_check(
+            options(online_doi_resolution=True), Response(200), "online.doi_resolution", "NET001"
+        )
+        self.assertEqual(finding.status, "inconclusive")
+        self.assertEqual(finding.details["outcome"], "input_coverage_incomplete")
+        self.assertFalse(calls)
+
+    async def test_contact_email_reaches_only_the_user_agent_header(self):
+        self.reference()
+        _, _, calls = await self.run_check(
+            options(online_doi_resolution=True), Response(200), "online.doi_resolution", "NET001"
+        )
+        self.assertEqual(calls[0][4], "fledge/0.1 (explicit reference checks)")
+        selected = options(online_doi_resolution=True, online_contact_email="paper@example.org")
+        _, findings, calls = await self.run_check(
+            selected, Response(200), "online.doi_resolution", "NET001"
+        )
+        self.assertEqual(calls[0][4], "fledge/0.1 (mailto:paper@example.org)")
+        self.assertNotIn("paper@example.org", repr(findings))
+        for value in (
+            "",
+            "not-an-email",
+            "paper@example",
+            "paper@example.org, other@example.org",
+            "paper@example.org\r\nX-Injected: 1",
+            "p" * 250 + "@example.org",
+            b"paper@example.org",
+        ):
+            with self.subTest(value=value), self.assertRaises(PreparationError):
+                replace(selected, online_contact_email=value)
 
     async def test_doi_resolution_valid_invalid_uncertain(self):
         self.reference()

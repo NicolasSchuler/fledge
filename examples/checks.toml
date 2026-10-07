@@ -1,10 +1,12 @@
 # Illustrative author-selected policies, not publisher requirements.
+# Runs cleanly against examples/nested-paper; uncomment the PDF metadata
+# policies once your document sets PDF properties (e.g. hyperref's pdfusetitle).
 # Change the limits and required fields to match your actual submission.
 main = "main.tex"
 layout = "preserve"
 require_abstract = true
 max_pages = 12
-match_source_pdf_metadata = ["title"]
+# match_source_pdf_metadata = ["title"] # Requires PDF Title metadata.
 
 [bibliography_checks]
 check_citation_coverage = true
@@ -39,7 +41,7 @@ check_float_label_order = true
 # abstract_abbreviation_policy = "define" # Or "forbid"; heuristic.
 
 [pdf_checks]
-required_metadata = ["Title"]
+# required_metadata = ["Title"] # Requires PDF Title metadata.
 min_text_size_pt = 8.0
 printable_margins_pt = [36.0, 36.0, 36.0, 36.0] # left, top, right, bottom.
 # Supply actual inclusive page boundaries; they are not inferred.

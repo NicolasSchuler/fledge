@@ -9,6 +9,8 @@ usage() {
     cat <<'EOF'
 Usage: bash install.sh [--dry-run] [--yes] [--with-optional]
                        [--prefix DIR] [--bin-dir DIR]
+       bash install.sh --uninstall [--dry-run] [--yes]
+                       [--prefix DIR] [--bin-dir DIR]
 
 Install Fledge from this local source directory on macOS.
 Reuse existing Python 3.11+, TeX and Poppler tools. Install missing tools using
@@ -20,16 +22,24 @@ an existing Homebrew installation; see https://brew.sh if Homebrew is missing.
   --prefix DIR     New private installation directory.
                    Default: ~/.local/share/fledge
   --bin-dir DIR    Launcher directory. Default: ~/.local/bin
-  --help          Show this help.
+  --uninstall      Remove the installation directory and launcher that this
+                   script created, using the same --prefix and --bin-dir. Only
+                   a launcher that runs that directory's environment qualifies.
+                   Homebrew and TeX packages are left installed.
+  --help           Show this help.
+
+To upgrade, run --uninstall, then run the installer again from the newer source.
 
 The default plan may install the full MacTeX distribution: a multi-GB download
 and system installation requiring administrator approval. Homebrew and MacTeX
 manage their own system files; this script never edits shell startup files.
 Existing installation directories or launchers are never overwritten.
-The launcher saves this terminal's PATH followed by the detected fallback
-directories, preserving tool selection when launched from another directory.
-Linux and Windows are not supported by this installer. It does not resolve
-the application's Biber isolation limitation or validate a document build.
+The launcher saves only the directories that supplied the selected TeX, Poppler
+and optional tools, in the order they were searched, followed by the fallback
+directories and the system directories. The rest of this terminal's PATH,
+such as a virtual environment or project directory, is not saved.
+Linux and Windows are not supported by this installer. It does not validate
+a document build.
 EOF
 }
 
@@ -81,6 +91,108 @@ print_command() {
     printf '\n'
 }
 
+confirm_plan() {
+    local answer
+    [[ -t 0 ]] || fail "Confirmation requires a terminal. Review --dry-run, then use --yes to accept the plan."
+    read -r -p 'Proceed with this plan? [y/N] ' answer
+    case "$answer" in
+        y|Y|yes|YES) return 0 ;;
+        *) printf 'Cancelled. No changes made.\n'; return 1 ;;
+    esac
+}
+
+# Print the directories find_tool searches, in its order: every PATH entry made
+# absolute exactly as find_tool does, then the fallback directories.
+search_dirs() {
+    local remaining_path="${PATH-}" entry directory
+    while :; do
+        entry="${remaining_path%%:*}"
+        [[ "$entry" = /* ]] || entry="$PWD/${entry:-.}"
+        printf '%s\n' "$entry"
+        [[ "$remaining_path" = *:* ]] || break
+        remaining_path="${remaining_path#*:}"
+    done
+    for directory in "${tool_dirs[@]}"; do
+        printf '%s\n' "$directory"
+    done
+}
+
+# Print the PATH to save in the launcher. Arguments are the selected tool paths.
+# Keep only the directories that supplied them, in find_tool's search order
+# (PATH first, then the fallbacks), so every tool still resolves to the copy
+# that was selected. Order by directory, not by tool: the directory supplying
+# latexmk can also contain an unselected pdflatex that must stay behind the
+# directory supplying the selected one. The fallback and system directories
+# follow; duplicates, including aliases of one directory, keep their first place.
+launcher_path_for() {
+    local selected=() ordered=() kept=() joined='' found directory entry duplicate
+    for found in "$@"; do
+        directory="${found%/*}"
+        selected+=("${directory:-/}")
+    done
+    while IFS= read -r entry; do
+        for directory in "${selected[@]}"; do
+            if [[ "$entry" -ef "$directory" ]]; then ordered+=("$entry"); break; fi
+        done
+    done < <(search_dirs)
+    # A selected directory outside the search list cannot happen with find_tool.
+    ordered+=("${selected[@]}" "${tool_dirs[@]}" /usr/bin /bin /usr/sbin /sbin)
+    for directory in "${ordered[@]}"; do
+        duplicate=false
+        for entry in ${kept[@]+"${kept[@]}"}; do
+            if [[ "$directory" = "$entry" || "$directory" -ef "$entry" ]]; then
+                duplicate=true
+                break
+            fi
+        done
+        if ! "$duplicate"; then
+            kept+=("$directory")
+            joined="${joined:+$joined:}$directory"
+        fi
+    done
+    printf '%s\n' "$joined"
+}
+
+# The exec line of the launcher for a prefix. Writing and recognizing it share
+# this function, so uninstalling accepts exactly what installing creates.
+launcher_exec_line() {
+    # shellcheck disable=SC2016 # The launcher expands "$@" itself.
+    printf 'exec %q "$@"\n' "$1/venv/bin/fledge"
+}
+
+launcher_belongs_to() {
+    [[ -f "$1" && ! -L "$1" ]] && grep -qxF -- "$(launcher_exec_line "$2")" "$1"
+}
+
+uninstall_fledge() {
+    local prefix="$1" launcher="$2" dry_run="$3" accept="$4"
+    case "$HOME/" in
+        "$prefix"/*) fail "Refusing to remove $prefix: it is or contains your home directory." ;;
+    esac
+    [[ ! -L "$prefix" ]] ||
+        fail "Installation directory is a symbolic link: $prefix. Nothing was removed; delete the link yourself if it is unwanted."
+    [[ ! -e "$prefix" || -d "$prefix" ]] ||
+        fail "Installation path is not a directory: $prefix. Nothing was removed."
+    launcher_belongs_to "$launcher" "$prefix" ||
+        fail "Launcher $launcher is missing or does not run $prefix/venv/bin/fledge. Nothing was removed; pass the --prefix and --bin-dir used for installation."
+    printf 'Uninstall plan for Fledge:\n  Remove launcher: %s\n' "$launcher"
+    if [[ -d "$prefix" ]]; then
+        printf '  Remove installation directory and everything inside it: %s\n' "$prefix"
+    else
+        printf '  Installation directory is already absent: %s\n' "$prefix"
+    fi
+    printf '  Homebrew, TeX and Poppler packages, shell startup files and projects are not touched.\n'
+    if "$dry_run"; then printf '\nDry run complete. Nothing removed.\n'; return; fi
+    if ! "$accept"; then confirm_plan || return 0; fi
+    # Recheck after confirmation. Remove the environment first: while it remains,
+    # the launcher still proves ownership, so a partial removal can be repeated.
+    launcher_belongs_to "$launcher" "$prefix" ||
+        fail "The launcher changed after the plan was shown. Nothing was removed."
+    rm -rf -- "$prefix"
+    rm -f -- "$launcher"
+    printf '\nFledge removed. To install it again, rerun this script without --uninstall.\n'
+}
+
 check_destinations() {
     [[ ! -e "$prefix" && ! -L "$prefix" ]] ||
         fail "Installation directory already exists: $prefix. Choose a new --prefix; nothing was overwritten."
@@ -91,7 +203,7 @@ check_destinations() {
 }
 
 main() {
-    local dry_run=false accept=false optional=false
+    local dry_run=false accept=false optional=false uninstall=false
     local prefix="${HOME:?HOME is not set}/.local/share/fledge"
     local bin_dir="$HOME/.local/bin" argument
     while [[ $# -gt 0 ]]; do
@@ -100,6 +212,7 @@ main() {
             --dry-run) dry_run=true; shift ;;
             --yes) accept=true; shift ;;
             --with-optional) optional=true; shift ;;
+            --uninstall) uninstall=true; shift ;;
             --prefix|--bin-dir)
                 [[ $# -ge 2 && -n "$2" && "$2" != --* ]] ||
                     fail "$argument requires a directory."
@@ -109,6 +222,7 @@ main() {
             *) fail "Unknown option: $argument. Use --help." ;;
         esac
     done
+    if "$uninstall" && "$optional"; then fail "--with-optional only applies to installation."; fi
     [[ "$(uname -s)" = Darwin ]] ||
         fail "This installer supports macOS only. Linux and Windows require manual setup; see docs/installation.md."
     [[ "$(id -u)" != 0 ]] || fail "Run this script as your normal user, without sudo."
@@ -119,6 +233,10 @@ main() {
     bin_dir="${bin_dir%/}"
     [[ -n "$prefix" && -n "$bin_dir" ]] || fail "The filesystem root is not an installation directory."
     local launcher="$bin_dir/fledge" venv="$prefix/venv"
+    if "$uninstall"; then
+        uninstall_fledge "$prefix" "$launcher" "$dry_run" "$accept"
+        return
+    fi
     local source_dir
     source_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
     [[ -f "$source_dir/pyproject.toml" && -f "$source_dir/src/latexprep/cli.py" ]] ||
@@ -126,7 +244,7 @@ main() {
     check_destinations
 
     local tool_dirs=(/Library/TeX/texbin /opt/homebrew/bin /usr/local/bin)
-    local brew python sandbox tool found directory
+    local brew python sandbox tool found
     local formulas=() tex_missing=() pdf_missing=()
     local tex_tools=(latexmk pdflatex bibtex)
     local pdf_tools=(pdfinfo pdftotext pdftoppm pdffonts pdfdetach pdfimages pdftohtml)
@@ -188,25 +306,22 @@ main() {
     printf '  Install this local Python package and its dependencies (downloads may be needed):\n'
     print_command "${python:-python3.13}" -m venv "$venv"
     print_command "$venv/bin/python" -m pip install --disable-pip-version-check "$source_dir"
-    printf '  Create a launcher with this terminal\047s PATH and fallback directories saved in discovery order.\n'
-    printf '  Relative PATH entries are saved as absolute paths; no shell startup files are edited.\n'
+    printf '  Create a launcher saving only the directories of the selected tools in discovery order,\n'
+    printf '  then fallback and system directories. The rest of this terminal\047s PATH is not saved.\n'
+    printf '  Saved directories are absolute; no shell startup files are edited.\n'
     if "$optional"; then
         printf '  Optional tools requested: tex-fmt, qpdf and mutool.\n'
     else
-        printf '  Optional tools left out; use --with-optional for tex-fmt, qpdf and mutool.\n'
+        printf '  Missing optional tools left out; use --with-optional for tex-fmt, qpdf and mutool.\n'
+        printf '  Optional tools that are already installed are still added to the launcher PATH.\n'
     fi
     printf '  Builds still require working isolation and project-specific TeX packages.\n'
-    printf '  Biber isolation remains limited; this installer does not validate document builds.\n'
+    printf '  This installer does not validate document builds.\n'
     if [[ -z "$brew" ]] && { "$install_tex" || [[ ${#formulas[@]} -gt 0 ]]; }; then
         fail "Homebrew is required for missing dependencies. Install it using https://brew.sh, then rerun this command."
     fi
     if "$dry_run"; then printf '\nDry run complete. No files written or packages installed.\n'; return; fi
-    if ! "$accept"; then
-        [[ -t 0 ]] || fail "Confirmation requires a terminal. Review --dry-run, then use --yes to accept the plan."
-        local answer
-        read -r -p 'Proceed with this plan? [y/N] ' answer
-        case "$answer" in y|Y|yes|YES) ;; *) printf 'Cancelled. No changes made.\n'; return ;; esac
-    fi
+    if ! "$accept"; then confirm_plan || return 0; fi
     # Recheck immediately before the first writes, including after confirmation.
     check_destinations
     local current_step='installing external dependencies'
@@ -217,11 +332,20 @@ main() {
     python=$(find_python || true)
     [[ -n "$python" ]] || fail "Python 3.11+ with venv and ensurepip is still unavailable after installation."
     local required_tools=("${tex_tools[@]}" "${pdf_tools[@]}")
+    local selected_tools=()
     if "$optional"; then required_tools+=("${optional_tools[@]}"); fi
     for tool in "${required_tools[@]}"; do
         found=$(find_tool "$tool" || true)
         [[ -n "$found" ]] || fail "$tool is still unavailable after installation. Inspect Homebrew's output and rerun once it is on PATH."
+        selected_tools+=("$found")
     done
+    if ! "$optional"; then
+        # Not required, but keep an existing tex-fmt, qpdf or mutool reachable.
+        for tool in "${optional_tools[@]}"; do
+            found=$(find_tool "$tool" || true)
+            if [[ -n "$found" ]]; then selected_tools+=("$found"); fi
+        done
+    fi
     current_step='creating the private Python environment'
     mkdir -p -- "${prefix%/*}"
     mkdir -- "$prefix"
@@ -230,21 +354,8 @@ main() {
     "$venv/bin/python" -m pip install --disable-pip-version-check "$source_dir"
     "$venv/bin/fledge" --help >/dev/null
     current_step='creating the launcher'
-    # Match find_tool's PATH-first search, then its fallback directory order.
-    # Saving absolute entries also preserves selection when the launcher's caller
-    # has a different PATH or working directory. Do not order by discovered tool:
-    # a directory supplying latexmk can also contain an unselected pdflatex.
-    local launcher_path='' remaining_path="${PATH-}" entry
-    while :; do
-        entry="${remaining_path%%:*}"
-        [[ "$entry" = /* ]] || entry="$PWD/${entry:-.}"
-        launcher_path="${launcher_path:+$launcher_path:}$entry"
-        [[ "$remaining_path" = *:* ]] || break
-        remaining_path="${remaining_path#*:}"
-    done
-    for directory in "${tool_dirs[@]}"; do
-        launcher_path="$launcher_path:$directory"
-    done
+    local launcher_path
+    launcher_path=$(launcher_path_for "${selected_tools[@]}")
     mkdir -p -- "$bin_dir"
     # noclobber also refuses a file that appeared since the preflight check.
     (
@@ -252,7 +363,7 @@ main() {
         {
             printf '#!/bin/bash\n'
             printf 'export PATH=%q\n' "$launcher_path"
-            printf 'exec %q "$@"\n' "$venv/bin/fledge"
+            launcher_exec_line "$prefix"
         } > "$launcher"
     )
     chmod +x "$launcher"

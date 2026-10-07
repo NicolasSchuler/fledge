@@ -1,0 +1,117 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  # Weekly, so live TeX and sandbox tests notice upstream drift between pushes.
+  schedule:
+    - cron: "17 4 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install development dependencies
+        run: python -m pip install -e '.[dev]'
+      - name: Lint
+        run: ruff check src tests docs/conf.py scripts
+      - name: Check formatting
+        run: ruff format --check src tests docs/conf.py scripts
+      - name: Check types
+        run: ty check src/latexprep
+
+  unit:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python-version: ["3.11", "3.13"]
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install package
+        run: python -m pip install -e .
+      # Tests that need TeX, Poppler or a live sandbox skip unless their
+      # opt-in variables are set; the live-macos job sets them.
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -t . -v
+
+  live-macos:
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    runs-on: macos-latest
+    continue-on-error: false
+    timeout-minutes: 60
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      HOMEBREW_NO_INSTALL_CLEANUP: "1"
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install TeX and PDF tools
+        run: |
+          brew install --cask basictex
+          brew install poppler tex-fmt
+          echo "/Library/TeX/texbin" >> "$GITHUB_PATH"
+      - name: Install TeX packages
+        run: |
+          sudo /Library/TeX/texbin/tlmgr update --self
+          sudo /Library/TeX/texbin/tlmgr install latexmk biber biblatex hyperref
+      - name: Show tool versions
+        run: |
+          latexmk -v | head -n 2
+          pdflatex --version | head -n 1
+          biber --version
+          pdfinfo -v
+          tex-fmt --version
+      - name: Install package
+        run: python -m pip install -e .
+      - name: Run live integration and sandbox tests
+        env:
+          LATEX_PREP_RUN_INTEGRATION: "1"
+          LATEXPREP_RUN_SANDBOX_TESTS: "1"
+        run: >-
+          python -m unittest
+          tests.test_integration
+          tests.test_integration_checks
+          tests.test_integration_remaining
+          tests.test_integration_backends
+          tests.test_runtime_parallel
+          -v

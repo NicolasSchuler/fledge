@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import tempfile
 import unittest
 import zipfile
@@ -17,11 +16,12 @@ from latexprep.pdf_checks import PdfCheckOptions, PdfSectionBudget, inspect_pdf_
 from latexprep.runtime import RuntimeLimits, ToolRunner
 from latexprep.scheduler import ResourceBudget
 from latexprep.submission_checks import SubmissionOptions
+from tests.support import live_tests_enabled
 
 
 @unittest.skipUnless(
-    os.environ.get("LATEX_PREP_RUN_INTEGRATION") == "1",
-    "Set LATEX_PREP_RUN_INTEGRATION=1 for the live configured-check preparation workflow",
+    live_tests_enabled(),
+    "Set FLEDGE_RUN_INTEGRATION=1 for the live configured-check preparation workflow",
 )
 class LiveConfiguredChecksTests(unittest.IsolatedAsyncioTestCase):
     async def test_configured_checks_survive_flattening_and_exact_archive_rebuild(self) -> None:

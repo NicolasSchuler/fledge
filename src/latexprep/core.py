@@ -8,7 +8,7 @@ import shutil
 import tempfile
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -103,6 +103,19 @@ def validate_destination(source: Path, destination: Path) -> Path:
 def _blocked(report: Report, settings: Settings) -> bool:
     report.findings = selected_findings(report.findings, settings.checks)
     return has_unaccepted_blockers(report.findings, settings.reporting)
+
+
+def _retained_files(settings: Settings) -> set[str]:
+    """Files shipped although the build does not read them.
+
+    Uses the requested (not check-filtered) settings: deselecting PKG104/PKG107
+    removes their presence checks but never changes what the package contains.
+    """
+    return {
+        *settings.package.include,
+        *(name for name, _ in settings.submission_checks.required_deliverables),
+        *(name for name, _ in settings.submission_checks.template_references),
+    }
 
 
 def _source_submission_options(settings: Settings):
@@ -296,7 +309,7 @@ def _source_policies(root: Path, main: str, settings: Settings) -> list[Finding]
     """Re-evaluate the actual shipped sources after all transformations."""
     return [
         *analyze_sources(root, main).findings,
-        *check_bibliography(root),
+        *check_bibliography(root, main),
         *check_bibliography_details(root, main, settings.bibliography_checks),
         *check_manuscript(root, main, settings.manuscript_options()),
         *check_manuscript_details(root, main, settings.manuscript_checks),
@@ -351,7 +364,7 @@ def _transform_sources(
         if not has_blockers(bib_findings):
             _apply_contents(prepared, contents)
     if settings.normalize_doi and not has_blockers(findings):
-        contents, doi_changes, doi_findings = normalize_dois(prepared)
+        contents, doi_changes, doi_findings = normalize_dois(prepared, selected)
         findings.extend(doi_findings)
         changes.extend(doi_changes)
         if not has_blockers(doi_findings):
@@ -408,101 +421,111 @@ def _flatten_sources(
     return prepared, selected, changes, findings, path_mapping
 
 
-async def _run_in_workspace(
-    request: JobRequest,
-    settings: Settings,
-    work: Path,
-    report: Report,
-    runner: ToolRunner,
-    budget: ResourceBudget,
-    emit: Callable[[str], None],
-) -> tuple[Path, Path, Path] | None:
-    if request.command == "pdf":
-        report.scope = "standalone PDF inspection; source and submission bundle were not verified"
-        report.findings.extend(
-            await inspect_standalone_pdf(
-                request.source,
-                work / "standalone",
-                runner,
-                settings,
-                budget,
-                request.reference_pdf,
-            )
-        )
-        report.outcome = _outcome(report, settings)
-        return None
-    limits = ImportLimits(
-        max_files=settings.max_files, max_bytes=settings.max_bytes, max_depth=settings.max_depth
-    )
-    emit("Importing a separate project snapshot")
-    imported = await _thread_operation(
-        budget, "import project", import_project, request.source, work / "import", limits
-    )
-    snapshot = imported.root
-    report.findings.extend(imported.findings)
-    report.changes.extend(imported.changes)
-    reference = None
-    if request.reference_pdf:
-        reference = await _thread_operation(
-            budget,
-            "snapshot supplied PDF",
-            runner.freeze_input,
-            request.reference_pdf,
-            work / "reference-input",
-        )
-    if request.command == "bib":
-        report.scope = "selected bibliography checks; no build or bundle verification"
-        roots = await _thread_operation(budget, "discover roots", discover_roots, snapshot)
-        selected = settings.main or (roots[0] if len(roots) == 1 else None)
-        if selected and (
-            Path(selected).is_absolute()
-            or ".." in Path(selected).parts
-            or not (snapshot / selected).is_file()
-        ):
-            raise PreparationError("main must name a source file inside the project")
-        selected = Path(selected).as_posix() if selected else None
-        report.main = selected
-        report.findings.extend(
-            await _thread_operation(budget, "bibliography checks", check_bibliography, snapshot)
-        )
-        report.findings.extend(
-            await _thread_operation(
-                budget,
-                "bibliography coverage and fields",
-                check_bibliography_details,
-                snapshot,
-                selected,
-                settings.bibliography_checks,
-            )
-        )
-        report.findings.extend(
-            await check_online_references(
-                snapshot, selected, options=settings.online_checks, budget=budget
-            )
-        )
-        report.outcome = _outcome(report, settings)
-        return None
-    if request.command == "fmt":
-        report.scope = "formatting check; no build or bundle verification"
-        formatted = await format_project(
-            snapshot, work / "format-check", runner, settings, budget=budget
-        )
-        report.findings.extend(formatted.findings)
-        report.tools.update(formatted.tools)
-        report.changes.extend(formatted.changes)
-        report.outcome = _outcome(report, settings)
-        return None
+@dataclass
+class _Job:
+    """State shared by the stages of one single-document job.
 
+    ``snapshot`` starts as the imported project and is replaced by the selected
+    preparation inputs once that selection succeeds; analysis tasks read it when
+    they start, after the selection task has completed.
+    """
+
+    request: JobRequest
+    settings: Settings
+    work: Path
+    report: Report
+    runner: ToolRunner
+    budget: ResourceBudget
+    emit: Callable[[str], None]
+    snapshot: Path
+    baseline_source: Path
+    reference: Path | None = None
+    selected: str | None = None
+    retained: set[str] = field(default_factory=set)
+    completed: dict[str, TaskResult] = field(default_factory=dict)
+    scheduler: Scheduler | None = None
+
+    def baseline_pdf(self) -> Path:
+        return self.completed["baseline build"].value.pdf
+
+    def block(self) -> None:
+        self.report.outcome = "blocked"
+
+
+async def _standalone_pdf(job: _Job) -> None:
+    job.report.scope = "standalone PDF inspection; source and submission bundle were not verified"
+    job.report.findings.extend(
+        await inspect_standalone_pdf(
+            job.request.source,
+            job.work / "standalone",
+            job.runner,
+            job.settings,
+            job.budget,
+            job.request.reference_pdf,
+        )
+    )
+    job.report.outcome = _outcome(job.report, job.settings)
+
+
+async def _bibliography_command(job: _Job) -> None:
+    settings, report = job.settings, job.report
+    report.scope = "selected bibliography checks; no build or bundle verification"
+    roots = await _thread_operation(job.budget, "discover roots", discover_roots, job.snapshot)
+    selected = settings.main or (roots[0] if len(roots) == 1 else None)
+    if selected and (
+        Path(selected).is_absolute()
+        or ".." in Path(selected).parts
+        or not (job.snapshot / selected).is_file()
+    ):
+        raise PreparationError("main must name a source file inside the project")
+    selected = Path(selected).as_posix() if selected else None
+    report.main = selected
+    report.findings.extend(
+        await _thread_operation(
+            job.budget, "bibliography checks", check_bibliography, job.snapshot, selected
+        )
+    )
+    report.findings.extend(
+        await _thread_operation(
+            job.budget,
+            "bibliography coverage and fields",
+            check_bibliography_details,
+            job.snapshot,
+            selected,
+            settings.bibliography_checks,
+        )
+    )
+    report.findings.extend(
+        await check_online_references(
+            job.snapshot, selected, options=settings.online_checks, budget=job.budget
+        )
+    )
+    report.outcome = _outcome(report, settings)
+
+
+async def _format_command(job: _Job) -> None:
+    job.report.scope = "formatting check; no build or bundle verification"
+    formatted = await format_project(
+        job.snapshot, job.work / "format-check", job.runner, job.settings, budget=job.budget
+    )
+    job.report.findings.extend(formatted.findings)
+    job.report.tools.update(formatted.tools)
+    job.report.changes.extend(formatted.changes)
+    job.report.outcome = _outcome(job.report, job.settings)
+
+
+async def _select_main(job: _Job) -> str | None:
+    settings = job.settings
     roots = (
         []
         if settings.main
-        else await _thread_operation(budget, "discover roots", discover_roots, snapshot)
+        else await _thread_operation(job.budget, "discover roots", discover_roots, job.snapshot)
     )
     selected = settings.main
     if selected is None and len(roots) == 1:
         selected = roots[0]
     if selected is None:
-        report.findings.append(
+        job.report.findings.append(
             Finding(
                 "project.main_selection",
                 f"Select --main explicitly; found {len(roots)} candidate roots: {', '.join(roots)}",
@@ -510,79 +533,95 @@ async def _run_in_workspace(
                 "inconclusive",
             )
         )
-    elif (
+        return None
+    if (
         Path(selected).is_absolute()
         or ".." in Path(selected).parts
-        or not (snapshot / selected).is_file()
+        or not (job.snapshot / selected).is_file()
     ):
         raise PreparationError(f"main must name a source file inside the project: {selected}")
-    if selected is not None:
-        selected = Path(selected).as_posix()
-    report.main = selected
-    baseline_source = snapshot
-    retained = {
-        name
-        for name, _ in (
-            *request.settings.submission_checks.required_deliverables,
-            *request.settings.submission_checks.template_references,
-        )
-    }
-    completed: dict[str, TaskResult] = {}
+    return Path(selected).as_posix()
 
-    def collect_task(result: TaskResult) -> None:
-        completed[result.name] = result
-        if result.name == "baseline build" and result.value is not None:
-            _collect_build(report, result.value, "baseline", settings)
-            report.stages[-1].update(
-                elapsed_seconds=result.elapsed_seconds, queue_seconds=result.queue_seconds
-            )
-            return
-        report.stages.append(
-            {
-                "name": result.name,
-                "status": result.status,
-                "elapsed_seconds": result.elapsed_seconds,
-                "queue_seconds": result.queue_seconds,
-            }
-        )
-        if result.name == "select preparation inputs" and result.value is not None:
-            _record_findings(report, result.value, result.name)
-            return
-        if result.status != "succeeded":
-            report.findings.append(
-                Finding("execution.task", f"{result.name}: {result.error}", "error", "inconclusive")
-            )
-        elif result.name == "source checks":
-            report.findings.extend(result.value.findings)
-        elif result.name in {"bibliography checks", "manuscript checks"}:
-            report.findings.extend(result.value)
-        else:
-            _record_findings(report, result.value, result.name)
 
-    scheduler = Scheduler(settings.jobs, settings.memory_mb, emit, collect_task, budget=budget)
+def _collect_task(job: _Job, result: TaskResult) -> None:
+    report = job.report
+    job.completed[result.name] = result
+    if result.name == "baseline build" and result.value is not None:
+        _collect_build(report, result.value, "baseline", job.settings)
+        report.stages[-1].update(
+            elapsed_seconds=result.elapsed_seconds, queue_seconds=result.queue_seconds
+        )
+        return
+    report.stages.append(
+        {
+            "name": result.name,
+            "status": result.status,
+            "elapsed_seconds": result.elapsed_seconds,
+            "queue_seconds": result.queue_seconds,
+        }
+    )
+    if result.name == "select preparation inputs" and result.value is not None:
+        _record_findings(report, result.value, result.name)
+        return
+    if result.status == "blocked":
+        # The failed prerequisite already reports its own blocking finding.
+        report.findings.append(
+            Finding(
+                "execution.task",
+                f"{result.name} was not run: {result.error}",
+                "info",
+                "skipped",
+                details={"task": result.name},
+            )
+        )
+    elif result.status != "succeeded":
+        report.findings.append(
+            Finding("execution.task", f"{result.name}: {result.error}", "error", "inconclusive")
+        )
+    elif result.name == "source checks":
+        report.findings.extend(result.value.findings)
+    elif result.name in {"bibliography checks", "manuscript checks"}:
+        report.findings.extend(result.value)
+    else:
+        _record_findings(report, result.value, result.name)
+
+
+def _analysis_tasks(job: _Job) -> list[Task]:
+    """Source, bibliography, privacy, baseline build and baseline PDF tasks."""
+    request, settings, work, runner, budget = (
+        job.request,
+        job.settings,
+        job.work,
+        job.runner,
+        job.budget,
+    )
+    selected = job.selected
     tasks = [
-        Task("source checks", lambda: run_in_thread(analyze_sources, snapshot, selected)),
-        Task("bibliography checks", lambda: run_in_thread(check_bibliography, snapshot)),
+        Task("source checks", lambda: run_in_thread(analyze_sources, job.snapshot, selected)),
+        Task(
+            "bibliography checks",
+            lambda: run_in_thread(check_bibliography, job.snapshot, selected),
+        ),
         Task(
             "bibliography coverage and fields",
             lambda: run_in_thread(
-                check_bibliography_details, snapshot, selected, settings.bibliography_checks
+                check_bibliography_details, job.snapshot, selected, settings.bibliography_checks
             ),
         ),
         Task(
             "manuscript details",
             lambda: run_in_thread(
-                check_manuscript_details, snapshot, selected, settings.manuscript_checks
+                check_manuscript_details, job.snapshot, selected, settings.manuscript_checks
             ),
         ),
         Task(
             "image metadata privacy",
-            lambda: run_in_thread(check_image_metadata, snapshot, settings.metadata_privacy),
+            lambda: run_in_thread(check_image_metadata, job.snapshot, settings.metadata_privacy),
         ),
         Task(
             "per-author fields",
             lambda: run_in_thread(
-                check_author_records, snapshot, selected, settings.structure_checks
+                check_author_records, job.snapshot, selected, settings.structure_checks
             ),
         ),
     ]
@@ -599,7 +638,7 @@ async def _run_in_workspace(
     tasks.append(
         Task(
             "source privacy and bundle checks",
-            lambda: run_in_thread(check_submission, snapshot, selected, submission_options),
+            lambda: run_in_thread(check_submission, job.snapshot, selected, submission_options),
         )
     )
     # A released package needs evidence about its transformed references. Run
@@ -610,212 +649,250 @@ async def _run_in_workspace(
             Task(
                 "online reference checks",
                 lambda: check_online_references(
-                    snapshot, selected, options=settings.online_checks, budget=budget
+                    job.snapshot, selected, options=settings.online_checks, budget=budget
                 ),
                 cpu=0,
                 memory_mb=0,
             )
         )
-    if selected:
-        tasks.append(
-            Task(
-                "manuscript checks",
-                lambda: run_in_thread(
-                    check_manuscript, snapshot, selected, settings.manuscript_options()
-                ),
-            )
-        )
-    if selected and request.command != "inspect":
-        tasks.append(
-            Task(
-                "baseline configured PDF checks",
-                lambda: inspect_additional_pdf_checks(
-                    completed["baseline build"].value.pdf,
-                    snapshot,
-                    selected,
-                    work / "additional-baseline",
-                    runner,
-                    settings,
-                    budget,
-                ),
-                requires=("baseline build",),
-                cpu=0,
-                memory_mb=0,
-            )
-        )
-        if settings.build_checks.check_local_package_shadows:
-            tasks.append(
-                Task(
-                    "baseline local package shadows",
-                    lambda: check_local_package_shadows(
-                        completed["baseline build"].value,
-                        work / "shadows-baseline",
-                        runner,
-                        budget=budget,
-                    ),
-                    requires=("baseline build",),
-                    cpu=0,
-                    memory_mb=0,
-                )
-            )
-        tasks.insert(
-            0,
-            Task(
-                "baseline build",
-                lambda: _build(baseline_source, selected, work / "baseline", settings, runner),
-                memory_mb=settings.build_memory_mb,
-                kind="build",
-                is_success=lambda value: value.success and value.pdf is not None,
+    if not selected:
+        return tasks
+    tasks.append(
+        Task(
+            "manuscript checks",
+            lambda: run_in_thread(
+                check_manuscript, job.snapshot, selected, settings.manuscript_options()
             ),
         )
+    )
+    if request.command == "inspect":
+        return tasks
+    tasks.insert(
+        0,
+        Task(
+            "baseline build",
+            lambda: _build(job.baseline_source, selected, work / "baseline", settings, runner),
+            memory_mb=settings.build_memory_mb,
+            kind="build",
+            is_success=lambda value: value.success and value.pdf is not None,
+        ),
+    )
+
+    def after_baseline(
+        name: str, run: Callable[[], Any], is_success: Callable[[Any], bool] | None = None
+    ) -> Task:
+        return Task(
+            name, run, requires=("baseline build",), cpu=0, memory_mb=0, is_success=is_success
+        )
+
+    tasks.append(
+        after_baseline(
+            "baseline configured PDF checks",
+            lambda: inspect_additional_pdf_checks(
+                job.baseline_pdf(),
+                job.snapshot,
+                selected,
+                work / "additional-baseline",
+                runner,
+                settings,
+                budget,
+            ),
+        )
+    )
+    if settings.build_checks.check_local_package_shadows:
         tasks.append(
-            Task(
-                "baseline PDF inspection",
-                lambda: inspect_pdf(
-                    completed["baseline build"].value.pdf,
-                    work / "inspect-baseline",
+            after_baseline(
+                "baseline local package shadows",
+                lambda: check_local_package_shadows(
+                    job.completed["baseline build"].value,
+                    work / "shadows-baseline",
                     runner,
-                    settings.max_pages,
-                    options=settings.pdf_options(),
                     budget=budget,
                 ),
-                requires=("baseline build",),
-                cpu=0,
-                memory_mb=0,
             )
         )
-        if reference:
-            tasks.append(
-                Task(
-                    "supplied PDF versus baseline",
-                    lambda: compare_pdfs(
-                        reference,
-                        completed["baseline build"].value.pdf,
-                        work / "reference-baseline",
-                        runner,
-                        budget=budget,
-                    ),
-                    requires=("baseline build",),
-                    cpu=0,
-                    memory_mb=0,
-                )
+    tasks.append(
+        after_baseline(
+            "baseline PDF inspection",
+            lambda: inspect_pdf(
+                job.baseline_pdf(),
+                work / "inspect-baseline",
+                runner,
+                settings.max_pages,
+                options=settings.pdf_options(),
+                budget=budget,
+            ),
+        )
+    )
+    reference = job.reference
+    if reference is not None:
+        tasks.append(
+            after_baseline(
+                "supplied PDF versus baseline",
+                lambda: compare_pdfs(
+                    reference,
+                    job.baseline_pdf(),
+                    work / "reference-baseline",
+                    runner,
+                    budget=budget,
+                ),
             )
-    if request.command == "prepare" and selected:
-
-        async def select_initial_inputs() -> list[Finding]:
-            nonlocal snapshot
-            baseline_build = completed["baseline build"].value
-            destination = work / "selected-inputs"
-            explicit = retained | (
-                {settings.source_transforms.inline_bibliography}
-                if settings.source_transforms.inline_bibliography
-                else set()
-            )
-            changes, findings = await _thread_operation(
-                budget,
-                "select preparation inputs",
-                select_package_inputs,
-                baseline_source,
-                destination,
-                selected,
-                getattr(baseline_build, "submission_inputs", None),
-                explicit,
-            )
-            report.changes.extend(changes)
-            if not has_blockers(findings):
-                snapshot = destination
-            return findings
-
+        )
+    if request.command == "prepare":
         tasks = [
             task
             if task.name == "baseline build"
-            else replace(task, requires=(*task.requires, "select preparation inputs"))
+            # Wait for selection, but still analyze the full snapshot if it fails.
+            else replace(task, after=(*task.after, "select preparation inputs"))
             for task in tasks
         ]
         tasks.append(
-            Task(
+            after_baseline(
                 "select preparation inputs",
-                select_initial_inputs,
-                requires=("baseline build",),
-                cpu=0,
-                memory_mb=0,
+                lambda: _select_initial_inputs(job),
                 is_success=lambda findings: not has_blockers(findings),
             )
         )
-    results = await scheduler.execute(tasks)
-    if request.command == "inspect":
-        report.scope = "source and bibliography checks; compilation and PDF checks not run"
-        report.outcome = _outcome(report, settings)
-        return None
-    report.scope = "selected source, bibliography, privacy, isolated build and PDF checks"
-    baseline_result = results.get("baseline build")
-    baseline = baseline_result.value if baseline_result else None
-    if baseline is None or not baseline.success or baseline.pdf is None or selected is None:
-        report.outcome = "blocked"
-        return None
-    if settings.workflow.baseline_runs > 1 and not _blocked(report, settings):
-        stable = True
-        for attempt in range(2, settings.workflow.baseline_runs + 1):
-            async with budget.lease(
-                f"repeat baseline {attempt}", memory_mb=settings.build_memory_mb, kind="build"
-            ):
-                repeated = await _build(
-                    baseline_source, selected, work / f"baseline-{attempt}", settings, runner
-                )
-            _collect_build(report, repeated, f"baseline repeat {attempt}", settings)
-            if not repeated.success or repeated.pdf is None:
-                stable = False
-                break
-            compared = await compare_pdfs(
-                baseline.pdf,
-                repeated.pdf,
-                work / f"compare-baseline-{attempt}",
-                runner,
-                budget=budget,
-            )
-            _record_findings(report, compared, f"baseline repeat {attempt}")
-            if has_blockers(compared):
-                stable = False
-                break
-        report.findings.append(
-            Finding(
-                "compare.baseline_stability",
-                f"{settings.workflow.baseline_runs} independent baseline builds match."
-                if stable
-                else "Baseline builds are inconsistent or could not be fully compared.",
-                "info" if stable else "error",
-                "passed" if stable else "failed",
-                details={
-                    "requested_builds": settings.workflow.baseline_runs,
-                    "comparison": "exact page count, normalized extracted text and 144-DPI pixels",
-                },
-            )
-        )
-    if request.command == "check" or _blocked(report, settings):
-        report.outcome = _outcome(report, settings)
-        return None
+    return tasks
 
-    emit("Planning and applying selected transformations in staging")
+
+async def _select_initial_inputs(job: _Job) -> list[Finding]:
+    settings = job.settings
+    assert job.selected is not None
+    destination = job.work / "selected-inputs"
+    explicit = job.retained | (
+        {settings.source_transforms.inline_bibliography}
+        if settings.source_transforms.inline_bibliography
+        else set()
+    )
+    changes, findings = await _thread_operation(
+        job.budget,
+        "select preparation inputs",
+        select_package_inputs,
+        job.baseline_source,
+        destination,
+        job.selected,
+        # Absent evidence (None) is a blocking diagnostic in select_package_inputs.
+        getattr(job.completed["baseline build"].value, "submission_inputs", None),
+        explicit,
+    )
+    job.report.changes.extend(changes)
+    if not has_blockers(findings):
+        job.snapshot = destination
+    return findings
+
+
+async def _repeat_baselines(job: _Job, baseline: BuildResult) -> None:
+    """Rebuild the unchanged baseline and require identical evidence (CMP101)."""
+    settings = job.settings
+    assert job.selected is not None and baseline.pdf is not None
+    main, first_pdf = job.selected, baseline.pdf
+
+    async def attempt(number: int) -> tuple[int, BuildResult, list[Finding]]:
+        async with job.budget.lease(
+            f"repeat baseline {number}", memory_mb=settings.build_memory_mb, kind="build"
+        ):
+            repeated = await _build(
+                job.baseline_source,
+                main,
+                job.work / f"baseline-{number}",
+                settings,
+                job.runner,
+            )
+        if not repeated.success or repeated.pdf is None:
+            return number, repeated, []
+        compared = await compare_pdfs(
+            first_pdf,
+            repeated.pdf,
+            job.work / f"compare-baseline-{number}",
+            job.runner,
+            budget=job.budget,
+        )
+        return number, repeated, compared
+
+    # Independent repeats overlap up to the configured build concurrency.
+    attempts = await bounded_map(
+        list(range(2, settings.workflow.baseline_runs + 1)), attempt, limit=settings.build_jobs
+    )
+    stable = True
+    for number, repeated, compared in attempts:
+        _collect_build(job.report, repeated, f"baseline repeat {number}", settings)
+        _record_findings(job.report, compared, f"baseline repeat {number}")
+        if not repeated.success or repeated.pdf is None or has_blockers(compared):
+            stable = False
+    job.report.findings.append(
+        Finding(
+            "compare.baseline_stability",
+            f"{settings.workflow.baseline_runs} independent baseline builds match."
+            if stable
+            else "Baseline builds are inconsistent or could not be fully compared.",
+            "info" if stable else "error",
+            "passed" if stable else "failed",
+            details={
+                "requested_builds": settings.workflow.baseline_runs,
+                "comparison": "exact page count, normalized extracted text and 144-DPI pixels",
+            },
+        )
+    )
+
+
+async def _build_stage(job: _Job, tree: Path, directory: str, stage: str) -> BuildResult:
+    settings = job.settings
+    assert job.selected is not None
+    job.emit(f"Rebuilding {stage} sources")
+    async with job.budget.lease(f"{stage} build", memory_mb=settings.build_memory_mb, kind="build"):
+        result = await _build(tree, job.selected, job.work / directory, settings, job.runner)
+    _collect_build(job.report, result, stage, settings)
+    if result.success and getattr(result, "submission_inputs", None) is None:
+        _record_findings(
+            job.report,
+            [
+                Finding(
+                    "package.dependencies",
+                    "Complete build dependency evidence is unavailable.",
+                    "error",
+                    "inconclusive",
+                    suggestion="Resolve the submission dependency diagnostic and retry.",
+                )
+            ],
+            stage,
+        )
+    if settings.build_checks.check_local_package_shadows:
+        _record_findings(
+            job.report,
+            await check_local_package_shadows(
+                result, job.work / f"shadows-{stage}", job.runner, budget=job.budget
+            ),
+            stage,
+        )
+    return result
+
+
+async def _plan_changes(job: _Job, baseline: BuildResult) -> Path | None:
+    """Apply the selected transformations and formatting to a staging copy."""
+    settings, report = job.settings, job.report
+    assert job.selected is not None
+    job.emit("Planning and applying selected transformations in staging")
     dependencies = set(baseline.dependencies)
-    analysis = results["source checks"].value
+    analysis = job.completed["source checks"].value
     if analysis:
         dependencies.update(analysis.dependencies)
-    prepared, selected, changes, findings, path_mapping = await _thread_operation(
-        budget,
+    prepared, _, changes, findings, _ = await _thread_operation(
+        job.budget,
         "transform sources",
         _transform_sources,
-        snapshot,
-        work,
-        selected,
+        job.snapshot,
+        job.work,
+        job.selected,
         settings,
         dependencies,
-        retained,
+        job.retained,
     )
     report.changes.extend(changes)
     report.findings.extend(findings)
     if settings.format and not _blocked(report, settings):
         formatted = await format_project(
-            prepared, work / "format-prepare", runner, settings, budget=budget
+            prepared, job.work / "format-prepare", job.runner, settings, budget=job.budget
         )
         report.tools.update(formatted.tools)
         report.findings.extend(
@@ -824,83 +901,77 @@ async def _run_in_workspace(
         report.changes.extend(formatted.changes)
         if not has_blockers(formatted.findings):
             await _thread_operation(
-                budget,
+                job.budget,
                 "apply formatting",
                 _apply_contents,
                 prepared,
                 formatted.contents,
                 originals=formatted.originals,
             )
-    if _blocked(report, settings):
-        report.outcome = "blocked"
-        return None
-    if request.dry_run:
-        report.scope = (
-            "preparation plan; baseline inputs selected and transformations previewed; "
-            "final input selection, layout and bundle not verified"
-        )
-        report.outcome = "planned"
-        return None
+    return None if _blocked(report, settings) else prepared
 
-    async def build_stage(tree: Path, directory: str, stage: str) -> BuildResult:
-        emit(f"Rebuilding {stage} sources")
-        async with budget.lease(f"{stage} build", memory_mb=settings.build_memory_mb, kind="build"):
-            result = await _build(tree, selected, work / directory, settings, runner)
-        _collect_build(report, result, stage, settings)
-        if result.success and getattr(result, "submission_inputs", None) is None:
-            _record_findings(
-                report,
-                [
-                    Finding(
-                        "package.dependencies",
-                        "Complete build dependency evidence is unavailable.",
-                        "error",
-                        "inconclusive",
-                        suggestion="Resolve the submission dependency diagnostic and retry.",
-                    )
-                ],
-                stage,
-            )
-        if settings.build_checks.check_local_package_shadows:
-            _record_findings(
-                report,
-                await check_local_package_shadows(
-                    result, work / f"shadows-{stage}", runner, budget=budget
-                ),
-                stage,
-            )
-        return result
 
-    staged = await build_stage(prepared, "transformed-build", "transformed")
+async def _ship(job: _Job, prepared: Path) -> tuple[Path, str, BuildResult, dict] | None:
+    """Rebuild staging, select the shipped inputs, flatten and compare with the baseline."""
+    settings, report = job.settings, job.report
+    assert job.selected is not None
+    staged = await _build_stage(job, prepared, "transformed-build", "transformed")
     if not staged.success or staged.pdf is None:
-        report.outcome = "blocked"
         return None
-    emit("Selecting the transformed document's inputs for submission")
-    shipment = work / "shipment"
+    job.emit("Selecting the transformed document's inputs for submission")
+    shipment = job.work / "shipment"
     changes, findings = await _thread_operation(
-        budget,
+        job.budget,
         "select submission inputs",
         select_package_inputs,
         prepared,
         shipment,
-        selected,
+        job.selected,
         getattr(staged, "submission_inputs", None),
-        retained,
+        job.retained,
     )
     report.changes.extend(changes)
     _record_findings(report, findings, "select submission inputs")
     if _blocked(report, settings):
-        report.outcome = "blocked"
         return None
-    prepared, selected, changes, findings, path_mapping = await _thread_operation(
-        budget, "flatten selected inputs", _flatten_sources, shipment, work, selected, settings
+    shipped, selected, changes, findings, path_mapping = await _thread_operation(
+        job.budget,
+        "flatten selected inputs",
+        _flatten_sources,
+        shipment,
+        job.work,
+        job.selected,
+        settings,
     )
     report.changes.extend(changes)
     report.findings.extend(findings)
     if _blocked(report, settings):
-        report.outcome = "blocked"
         return None
-    prepared_submission = replace(
+    if settings.layout == "flat":
+        staged = await _build_stage(
+            replace(job, selected=selected), shipped, "staged-build", "prepared"
+        )
+        if not staged.success or staged.pdf is None:
+            return None
+    _record_findings(
+        report,
+        await compare_pdfs(
+            job.baseline_pdf(),
+            staged.pdf,
+            job.work / "compare-prepared",
+            job.runner,
+            budget=job.budget,
+            options=settings.workflow.comparison,
+        ),
+        "baseline versus prepared",
+    )
+    if _blocked(report, settings):
+        return None
+    return shipped, selected, staged, path_mapping
+
+
+def _prepared_submission_options(settings: Settings, path_mapping: dict[str, str]):
+    return replace(
         _source_submission_options(settings),
         required_deliverables=tuple(
             (path_mapping.get(name, name), kind)
@@ -911,45 +982,37 @@ async def _run_in_workspace(
             for name, reference in settings.submission_checks.template_references
         ),
     )
+
+
+async def _package_and_verify(
+    job: _Job, shipped: Path, selected: str, staged: BuildResult, path_mapping: dict[str, str]
+) -> tuple[Path, Path, Path] | None:
+    """Write the archive, rebuild a fresh extraction and run the final checks."""
+    settings, report, work, runner, budget = (
+        job.settings,
+        job.report,
+        job.work,
+        job.runner,
+        job.budget,
+    )
+    prepared_submission = _prepared_submission_options(settings, path_mapping)
     _record_findings(
         report,
         await _thread_operation(
             budget,
             "prepared submission checks",
             check_submission,
-            prepared,
+            shipped,
             selected,
             prepared_submission,
         ),
         "prepared submission checks",
     )
     if _blocked(report, settings):
-        report.outcome = "blocked"
         return None
-    if settings.layout == "flat":
-        staged = await build_stage(prepared, "staged-build", "prepared")
-        if not staged.success or staged.pdf is None:
-            report.outcome = "blocked"
-            return None
-    _record_findings(
-        report,
-        await compare_pdfs(
-            baseline.pdf,
-            staged.pdf,
-            work / "compare-prepared",
-            runner,
-            budget=budget,
-            options=settings.workflow.comparison,
-        ),
-        "baseline versus prepared",
-    )
-    if _blocked(report, settings):
-        report.outcome = "blocked"
-        return None
-
-    emit("Packaging sources and rebuilding a fresh extraction of the exact ZIP")
+    job.emit("Packaging sources and rebuilding a fresh extraction of the exact ZIP")
     archive = work / "submission.zip"
-    await _thread_operation(budget, "create archive", create_archive, prepared, archive)
+    await _thread_operation(budget, "create archive", create_archive, shipped, archive)
     _record_findings(
         report,
         await _thread_operation(
@@ -962,10 +1025,19 @@ async def _run_in_workspace(
         "archive",
     )
     if _blocked(report, settings):
-        report.outcome = "blocked"
         return None
     if archive.stat().st_size > settings.max_bytes:
-        raise PreparationError("Prepared archive exceeds max_bytes")
+        report.findings.append(
+            Finding(
+                "package.archive_limit",
+                f"Prepared archive has {archive.stat().st_size} bytes; max_bytes is "
+                f"{settings.max_bytes}. It cannot be re-extracted for verification.",
+                "error",
+                "failed",
+                suggestion="Reduce the shipped files or raise max_bytes explicitly.",
+            )
+        )
+        return None
     # The archive is our own bounded output; preserve byte/count limits without
     # rejecting legitimate highly compressible sources on ratio alone.
     final_limits = ImportLimits(
@@ -984,20 +1056,22 @@ async def _run_in_workspace(
         unwrap=False,
         exclude_metadata=False,
     )
-    final = await build_stage(extracted.root, "archive-build", "archive")
+    final_job = replace(job, selected=selected)
+    final = await _build_stage(final_job, extracted.root, "archive-build", "archive")
     if not final.success or final.pdf is None:
-        report.outcome = "blocked"
         return None
     staged_pdf, final_pdf = staged.pdf, final.pdf
+    assert staged_pdf is not None
+    root = extracted.root
     final_tasks = [
         Task(
             "final source checks",
-            lambda: run_in_thread(_source_policies, extracted.root, selected, settings),
+            lambda: run_in_thread(_source_policies, root, selected, settings),
         ),
         Task(
             "final online reference checks",
             lambda: check_online_references(
-                extracted.root, selected, options=settings.online_checks, budget=budget
+                root, selected, options=settings.online_checks, budget=budget
             ),
             cpu=0,
             memory_mb=0,
@@ -1026,23 +1100,18 @@ async def _run_in_workspace(
         Task(
             "final configured PDF checks",
             lambda: inspect_additional_pdf_checks(
-                final_pdf,
-                extracted.root,
-                selected,
-                work / "additional-final",
-                runner,
-                settings,
-                budget,
+                final_pdf, root, selected, work / "additional-final", runner, settings, budget
             ),
             cpu=0,
             memory_mb=0,
         ),
         Task(
             "final submission checks",
-            lambda: run_in_thread(check_submission, extracted.root, selected, prepared_submission),
+            lambda: run_in_thread(check_submission, root, selected, prepared_submission),
         ),
     ]
-    if reference:
+    reference = job.reference
+    if reference is not None:
         final_tasks.append(
             Task(
                 "supplied PDF versus archive rebuild",
@@ -1053,8 +1122,9 @@ async def _run_in_workspace(
                 memory_mb=0,
             )
         )
-    await scheduler.execute(final_tasks)
-    final_pdf_check = completed.get("final PDF inspection")
+    assert job.scheduler is not None
+    await job.scheduler.execute(final_tasks)
+    final_pdf_check = job.completed.get("final PDF inspection")
     _record_findings(
         report,
         check_sanitized_pdf_metadata(
@@ -1066,8 +1136,132 @@ async def _run_in_workspace(
         "final metadata sanitization",
     )
     report.scope = "selected preparation checks, visual/text preservation and fresh ZIP rebuild"
+    return None if _blocked(report, settings) else (shipped, archive, final_pdf)
+
+
+def _online_checks_not_reached(job: _Job) -> None:
+    """Selected online checks run on the final extraction; say so when it was never reached."""
+    options = job.settings.online_checks
+    if not options.online or job.request.command != "prepare" or job.request.dry_run:
+        return
+    if any(finding.rule.startswith("online.") for finding in job.report.findings):
+        return
+    if not any(
+        getattr(options, name)
+        for name in (
+            "online_doi_resolution",
+            "online_metadata",
+            "online_missing_doi",
+            "online_published_versions",
+            "online_notices",
+            "online_reference_links",
+            "online_replication_links",
+        )
+    ):
+        return
+    job.report.findings.append(
+        Finding(
+            "online.not_reached",
+            "Selected online checks run on the final archive extraction and were not run "
+            "because preparation stopped earlier.",
+            "info",
+            "skipped",
+            suggestion="Resolve the blocking findings, or run `fledge check --online` "
+            "for online evidence on the original sources.",
+        )
+    )
+
+
+async def _prepare(job: _Job, baseline: BuildResult) -> tuple[Path, Path, Path] | None:
+    report, settings = job.report, job.settings
+    prepared = await _plan_changes(job, baseline)
+    if prepared is None:
+        return None
+    if job.request.dry_run:
+        report.scope = (
+            "preparation plan; baseline inputs selected and transformations previewed; "
+            "final input selection, layout and bundle not verified"
+        )
+        report.outcome = "planned"
+        return None
+    shipped = await _ship(job, prepared)
+    if shipped is None:
+        return None
+    pending = await _package_and_verify(job, *shipped)
     report.outcome = _outcome(report, settings)
-    return None if _blocked(report, settings) else (prepared, archive, final_pdf)
+    return pending
+
+
+async def _run_in_workspace(
+    request: JobRequest,
+    settings: Settings,
+    work: Path,
+    report: Report,
+    runner: ToolRunner,
+    budget: ResourceBudget,
+    emit: Callable[[str], None],
+) -> tuple[Path, Path, Path] | None:
+    job = _Job(request, settings, work, report, runner, budget, emit, work, work)
+    if request.command == "pdf":
+        await _standalone_pdf(job)
+        return None
+    limits = ImportLimits(
+        max_files=settings.max_files, max_bytes=settings.max_bytes, max_depth=settings.max_depth
+    )
+    emit("Importing a separate project snapshot")
+    imported = await _thread_operation(
+        budget, "import project", import_project, request.source, work / "import", limits
+    )
+    job.snapshot = job.baseline_source = imported.root
+    report.findings.extend(imported.findings)
+    report.changes.extend(imported.changes)
+    if request.reference_pdf:
+        job.reference = await _thread_operation(
+            budget,
+            "snapshot supplied PDF",
+            runner.freeze_input,
+            request.reference_pdf,
+            work / "reference-input",
+        )
+    if request.command == "bib":
+        await _bibliography_command(job)
+        return None
+    if request.command == "fmt":
+        await _format_command(job)
+        return None
+
+    job.selected = report.main = await _select_main(job)
+    job.retained = _retained_files(request.settings)
+    job.scheduler = Scheduler(
+        settings.jobs,
+        settings.memory_mb,
+        emit,
+        lambda result: _collect_task(job, result),
+        budget=budget,
+    )
+    results = await job.scheduler.execute(_analysis_tasks(job))
+    if request.command == "inspect":
+        report.scope = "source and bibliography checks; compilation and PDF checks not run"
+        report.outcome = _outcome(report, settings)
+        return None
+    report.scope = "selected source, bibliography, privacy, isolated build and PDF checks"
+    baseline_result = results.get("baseline build")
+    baseline = baseline_result.value if baseline_result else None
+    if baseline is None or not baseline.success or baseline.pdf is None or job.selected is None:
+        job.block()
+        _online_checks_not_reached(job)
+        return None
+    if settings.workflow.baseline_runs > 1 and not _blocked(report, settings):
+        await _repeat_baselines(job, baseline)
+    if request.command == "check" or _blocked(report, settings):
+        report.outcome = _outcome(report, settings)
+        _online_checks_not_reached(job)
+        return None
+    pending = await _prepare(job, baseline)
+    if pending is None and report.outcome != "planned":
+        job.block()
+        _online_checks_not_reached(job)
+    return pending
 
 
 async def _run_documents(
@@ -1245,7 +1439,10 @@ def _publish_documents(
         )
     encoded = json.dumps(public, indent=2, ensure_ascii=False) + "\n"
     check_deadline()
-    output.mkdir()
+    try:
+        output.mkdir()
+    except FileExistsError as error:
+        raise PreparationError(f"Output appeared while the job ran: {output}") from error
     try:
         for document in documents:
             assert document.pending is not None
@@ -1253,7 +1450,8 @@ def _publish_documents(
             if document.report.outcome == "error":
                 raise PreparationError(f"Cannot safely publish document {document.name}")
         _copy_previews(previews, check_deadline)
-        (output / "report.json").write_text(encoded)
+        with (output / "report.json").open("x", encoding="utf-8") as stream:
+            stream.write(encoded)
         check_deadline()
         report.artifacts.update(artifacts)
     except BaseException:
@@ -1271,7 +1469,10 @@ async def run_job(
     settings = load_settings(None, request.settings.to_dict())
     report = report if report is not None else Report(request.command)
     report.settings = settings.to_dict()
-    settings = effective_settings(settings)
+    effective = effective_settings(settings)
+    if effective is not settings:
+        report.execution["effective_settings"] = effective.to_dict()
+    settings = effective
     report.execution["check_selection"] = {
         "select": list(settings.checks.select),
         "ignore": list(settings.checks.ignore),
@@ -1338,7 +1539,7 @@ async def run_job(
             raise TimeoutError
 
     try:
-        with tempfile.TemporaryDirectory(prefix="latex-prep-") as temporary:
+        with tempfile.TemporaryDirectory(prefix="fledge-") as temporary:
             work = Path(temporary).resolve()
             pending = None
             documents = None
@@ -1432,12 +1633,18 @@ async def run_job(
                     )
                     published_paths.append(output)
                 if preview_output is not None and previews and report.outcome != "error":
-                    preview_output.mkdir()
+                    try:
+                        preview_output.mkdir()
+                    except FileExistsError as error:
+                        raise PreparationError(
+                            f"Preview output appeared while the job ran: {preview_output}"
+                        ) from error
                     published_paths.append(preview_output)
                     _copy_previews(previews, check_deadline)
-                    (preview_output / "report.json").write_text(
-                        json.dumps(report.to_dict(), indent=2, ensure_ascii=False) + "\n"
-                    )
+                    with (preview_output / "report.json").open("x", encoding="utf-8") as stream:
+                        stream.write(
+                            json.dumps(report.to_dict(), indent=2, ensure_ascii=False) + "\n"
+                        )
                 check_deadline()
             except BaseException:
                 # Track only directories created successfully by this transaction.

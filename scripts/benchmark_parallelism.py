@@ -39,7 +39,7 @@ OBSERVED_METRICS = (
     "commands",
     "version_probes",
 )
-_JOB_DIRECTORY = re.compile(r"/(?:[^/\s\"']+/)*latex-prep-[^/\s\"']+")
+_JOB_DIRECTORY = re.compile(r"/(?:[^/\s\"']+/)*(?:fledge|latex-prep)-[^/\s\"']+")
 console = Console(stderr=True, markup=False, highlight=False)
 
 

@@ -7,12 +7,14 @@ RULE_DEFINITIONS = (
         "title": "Configured per-author field completeness",
         "description": (
             "Check each sequential literal preamble author record against user-selected "
-            "associated commands; shared fields, conditional records and template semantics "
-            "are not inferred."
+            "associated commands; shared fields and template semantics are not inferred. A "
+            "record enclosed by primitive conditional control flow is inconclusive."
         ),
         "tests": (
             "tests.test_structure_checks.AuthorRecordTests.test_each_author_needs_its_own_fields",
             "tests.test_structure_checks.AuthorRecordTests.test_grouped_and_dynamic_records_are_inconclusive",
+            "tests.test_structure_checks.AuthorRecordTests.test_defined_conditional_names_do_not_block_author_records",
+            "tests.test_structure_checks.AuthorRecordTests.test_failed_author_records_report_counts_and_locations",
         ),
         "fix": (
             "Supply the missing fields for the indicated author using the selected record "

@@ -386,7 +386,9 @@ class Scheduler:
                 self.progress(f"Cancelled {task.name}")
                 raise
             except Exception as error:
-                result = TaskResult(task.name, "failed", error=str(error))
+                # Keep the exception type: a bare message such as an empty string
+                # or a lone path says nothing about what went wrong.
+                result = TaskResult(task.name, "failed", error=f"{type(error).__name__}: {error}")
             result.elapsed_seconds = round(time.monotonic() - start, 6)
             result.queue_seconds = round(queue_seconds, 6)
             self.progress(f"{task.name}: {result.status} ({result.elapsed_seconds:.1f}s)")
@@ -430,7 +432,12 @@ class Scheduler:
                 elif future.exception() is None:
                     record(future.result())
                 else:
-                    record(TaskResult(task.name, "failed", error=str(future.exception())))
+                    failure = future.exception()
+                    record(
+                        TaskResult(
+                            task.name, "failed", error=f"{type(failure).__name__}: {failure}"
+                        )
+                    )
             for name in pending:
                 record(
                     TaskResult(name, "cancelled", error="Cancelled before prerequisites completed")

@@ -682,7 +682,10 @@ def plan_bibliography(
         scope_errors = [
             item
             for item in inspection.findings
-            if item.path in reached | {inspection.main} and item.rule in _GRAPH_FAILURES
+            if item.path in reached | {inspection.main}
+            and item.rule in _GRAPH_FAILURES
+            # A resolved lookup-order or conditional dependency is evidence, not a gap.
+            and item.status != "passed"
         ]
         if inspection.main is None or not graph.resources or scope_errors:
             reason = (

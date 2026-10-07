@@ -257,7 +257,32 @@ class DependencyPackagingTests(unittest.IsolatedAsyncioTestCase):
                 self.assert_dependency_blocked(report, output)
                 self.assertEqual(build.counts["main.tex"], len(traces))
 
-    async def test_unsupported_selected_dependencies_block_despite_successful_fake_build(self):
+    async def test_unsupported_selected_dependencies_are_advisory_against_a_complete_trace(self):
+        self.write("body.tex", "Body.\n")
+        selected = {"main.tex", "body.tex"}
+        for name, command in (
+            ("dynamic", "\\newcommand{\\chosen}{body}\n\\input{\\chosen}\n"),
+            ("lua", "\\directlua{tex.print('Body.')}\n"),
+        ):
+            with self.subTest(source=name):
+                self.write("main.tex", "\\documentclass{article}\n" + command)
+                build = RecordedBuild({"main.tex": (selected,) * 3})
+                report, output = await self.prepare(
+                    Settings(main="main.tex", checks=CheckSelection(ignore=("ALL",))), build, name
+                )
+                self.assert_released(report)
+                self.assertEqual(set(self.archive_contents(output)), selected)
+                advisory = [
+                    item
+                    for item in report.findings
+                    if item.rule == "package.dependencies" and item.status == "inconclusive"
+                ]
+                self.assertTrue(advisory, report.findings)
+                self.assertTrue(all(item.severity == "warning" for item in advisory))
+                self.assertEqual(build.counts["main.tex"], 3)
+                self.assertEqual(build.visits[-1][2], self.archive_contents(output))
+
+    async def test_unsupported_selected_dependencies_block_without_complete_trace(self):
         self.write("body.tex", "Body.\n")
         for name, command in (
             ("dynamic", "\\newcommand{\\chosen}{body}\n\\input{\\chosen}\n"),
@@ -265,7 +290,7 @@ class DependencyPackagingTests(unittest.IsolatedAsyncioTestCase):
         ):
             with self.subTest(source=name):
                 self.write("main.tex", "\\documentclass{article}\n" + command)
-                build = RecordedBuild({"main.tex": ({"main.tex", "body.tex"},)})
+                build = RecordedBuild({"main.tex": (None,)})
                 report, output = await self.prepare(
                     Settings(main="main.tex", checks=CheckSelection(ignore=("ALL",))), build, name
                 )

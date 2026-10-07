@@ -7,7 +7,9 @@ RULE_DEFINITIONS = (
         "title": "Allowed direct package declarations",
         "description": (
             "Compare direct literal declarations in the selected local graph with an explicit "
-            "allowlist; system transitive packages are outside scope."
+            "allowlist; system transitive packages are outside scope. Only constructs that "
+            "could build or conditionally execute a declaration make the inventory "
+            "inconclusive, and a conditional declaration is never reported as a violation."
         ),
         "tests": ("tests.test_manuscript_checks.ManuscriptDetailTests.test_package_allowlist",),
         "fix": (
@@ -80,9 +82,16 @@ RULE_DEFINITIONS = (
         "title": "Apparently empty sections",
         "description": (
             "Advisory lexical scan for headings whose section subtree has no observable "
-            "content; generated content is inconclusive."
+            "content. Unexpanded constructs inside a section make only that section "
+            "inconclusive; bibliography and layout commands count as zero content."
         ),
-        "tests": ("tests.test_manuscript_checks.ManuscriptDetailTests.test_empty_sections",),
+        "tests": (
+            "tests.test_manuscript_checks.ManuscriptDetailTests.test_empty_sections",
+            "tests.test_manuscript_checks.ManuscriptDetailTests"
+            ".test_preamble_declarations_are_not_body_constructs",
+            "tests.test_manuscript_checks.ManuscriptDetailTests"
+            ".test_unknown_constructs_make_their_own_region_inconclusive",
+        ),
         "fix": (
             "Review the apparently empty section in the compiled manuscript and add content or "
             "remove its heading if appropriate."
@@ -111,7 +120,11 @@ RULE_DEFINITIONS = (
             "corresponding-author declarations in supported source commands; no identity or "
             "per-author completeness claim."
         ),
-        "tests": ("tests.test_manuscript_checks.ManuscriptDetailTests.test_required_metadata",),
+        "tests": (
+            "tests.test_manuscript_checks.ManuscriptDetailTests.test_required_metadata",
+            "tests.test_manuscript_checks.ManuscriptDetailTests"
+            ".test_unknown_constructs_make_their_own_region_inconclusive",
+        ),
         "fix": (
             "Supply the configured metadata using a supported literal command, or inspect the "
             "template-specific metadata manually."
@@ -151,9 +164,17 @@ RULE_DEFINITIONS = (
         "title": "Required figure and table captions",
         "description": (
             "Require nonempty literal caption commands in supported figure/table environments, "
-            "including starred environments and certain literal input boundaries."
+            "including starred environments and certain literal input boundaries. A float whose "
+            "own region could not be interpreted is reported as inconclusive without hiding "
+            "the floats that were confirmed."
         ),
-        "tests": ("tests.test_manuscript_checks.ManuscriptDetailTests.test_float_captions",),
+        "tests": (
+            "tests.test_manuscript_checks.ManuscriptDetailTests.test_float_captions",
+            "tests.test_manuscript_checks.ManuscriptDetailTests"
+            ".test_unrelated_uncertainty_never_hides_a_confirmed_violation",
+            "tests.test_manuscript_checks.ManuscriptDetailTests"
+            ".test_failure_messages_report_counts_and_first_locations",
+        ),
         "fix": (
             "Add a nonempty caption to the reported figure or table, or review unsupported "
             "template-generated captions manually."

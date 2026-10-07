@@ -7,10 +7,12 @@ RULE_DEFINITIONS = (
         "title": "Explicit source metadata sanitization",
         "description": "Plan user-selected literal metadata replacements in copied TeX source "
         "only when the unique field matches its exact expected-before value. Generated, "
-        "conditional, ambiguous and unsupported declarations block the proposal.",
+        "ambiguous and unsupported declarations block the proposal, as does conditional "
+        "control flow that encloses a selected declaration.",
         "tests": (
             "tests.test_metadata_privacy.MetadataPrivacyTests.test_literal_replacements_preserve_originals_and_other_metadata",
             "tests.test_metadata_privacy.MetadataPrivacyTests.test_uncertain_or_stale_source_blocks_the_whole_plan",
+            "tests.test_metadata_privacy.MetadataPrivacyTests.test_conditionals_only_block_the_declarations_they_enclose",
         ),
         "fix": "Review the literal field and expected old value, then rebuild the edited copy "
         "and recheck its final PDF metadata.",
@@ -32,13 +34,17 @@ RULE_DEFINITIONS = (
         "code": "PRV103",
         "name": "privacy.image_metadata",
         "title": "Configured identity terms in image metadata",
-        "description": "Scan supported PNG text/EXIF and pre-scan JPEG EXIF/XMP/comments for "
-        "explicit literal identity terms with bounded parsing and decompression. No OCR, pixel "
-        "scan, image rewriting or general anonymity guarantee.",
+        "description": "Scan supported PNG text/EXIF and pre-scan JPEG EXIF/XMP/extended "
+        "XMP/IPTC IIM application records/comments for explicit literal identity terms with "
+        "bounded parsing and decompression. Vendor blocks such as the EXIF MakerNote are "
+        "listed as limitations instead of making the scan unusable. No OCR, pixel scan, image "
+        "rewriting or general anonymity guarantee.",
         "tests": (
             "tests.test_metadata_privacy.ImageMetadataTests.test_png_text_compressed_text_and_exif_match_without_echoing_values",
             "tests.test_metadata_privacy.ImageMetadataTests.test_jpeg_exif_xmp_and_comments_are_scanned",
             "tests.test_metadata_privacy.ImageMetadataTests.test_malformed_compressed_and_unsupported_metadata_are_inconclusive",
+            "tests.test_metadata_privacy.ImageMetadataTests.test_vendor_blocks_are_limitations_rather_than_an_unusable_scan",
+            "tests.test_metadata_privacy.ImageMetadataTests.test_iptc_application_records_and_extended_xmp_are_scanned",
         ),
         "fix": "Review the named image metadata fields privately and explicitly re-export or "
         "sanitize the image when those values should not be shared.",

@@ -219,11 +219,14 @@ class PdfArtworkTests(unittest.IsolatedAsyncioTestCase):
             self.pdf, self.work(), runner or ArtworkRunner(), options=options
         )
 
-    async def status(self, options: PdfArtworkOptions, expected: str, **values: object):
-        findings = await self.check(options, ArtworkRunner(**values))
+    async def status_for(self, options: PdfArtworkOptions, expected: str, runner: ArtworkRunner):
+        findings = await self.check(options, runner)
         self.assertEqual(len(findings), 1, findings)
         self.assertEqual(findings[0].status, expected, findings)
         return findings[0]
+
+    async def status(self, options: PdfArtworkOptions, expected: str, **values: object):
+        return await self.status_for(options, expected, ArtworkRunner(**values))
 
     async def test_crop_marks_need_trim_aligned_pairs_and_keep_exemptions_and_uncertainty(
         self,
@@ -460,6 +463,33 @@ class PdfArtworkTests(unittest.IsolatedAsyncioTestCase):
         await self.status(options, "inconclusive", raster=b"P5\n1 1\n255\n\0")
         await self.status(options, "inconclusive", missing="pdftoppm")
         self.assertEqual(self.pdf.read_bytes(), b"%PDF-fixture")
+
+    async def test_whole_document_renders_keep_the_rendering_page_cap(self) -> None:
+        class LongDocumentRunner(ArtworkRunner):
+            async def run(self, argv: list[str], *args: Any, **kwargs: Any) -> CommandResult:
+                result = await super().run(argv, *args, **kwargs)
+                if argv[0] == "pdfinfo" and "-box" not in argv and argv[-1] != "-v":
+                    return replace(result, stdout="Pages: 301\n")
+                return result
+
+        pages = "".join(
+            f"Page {page} size: 100 x 100 pts\nPage {page} rot: 0\n"
+            f"Page {page} MediaBox: 0 0 100 100\nPage {page} CropBox: 0 0 100 100\n"
+            for page in range(1, 302)
+        )
+        runner = LongDocumentRunner(geometry=pages)
+        finding = await self.status_for(
+            PdfArtworkOptions(grayscale_preview=True), "inconclusive", runner
+        )
+        self.assertEqual(finding.rule, "pdf.grayscale_preview")
+        self.assertIn("supports at most 300 pages", finding.message)
+        self.assertFalse(any(argv[0] == "pdftoppm" for argv, _, _ in runner.calls))
+        # Explicit regions render only their own pages, so a long document stays measurable.
+        await self.status_for(
+            PdfArtworkOptions(figure_regions=(region(),), max_figure_whitespace_ratio=0.5),
+            "passed",
+            LongDocumentRunner(geometry=pages),
+        )
 
     async def test_input_figures_use_whole_page_and_keep_source_attribution(self) -> None:
         findings = await inspect_artwork_inputs(

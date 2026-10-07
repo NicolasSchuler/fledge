@@ -1,8 +1,9 @@
 """Bounded, local submission-policy checks; never edit sources or execute TeX.
 
-Identity checks are literal substring scans, not an anonymity guarantee. Privacy
-checks cover the whole supplied bundle; unused-asset hints alone use one selected
-literal dependency graph. No publisher policy or template registry is embedded.
+Identity checks are literal whole-word (or, on request, substring) scans, not an
+anonymity guarantee. Privacy checks cover the whole supplied bundle; unused-asset
+hints alone use one selected literal dependency graph. No publisher policy or
+template registry is embedded.
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ import stat
 import unicodedata
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
+from functools import lru_cache
 from pathlib import Path, PurePosixPath
 from typing import cast
 from urllib.parse import unquote
@@ -32,6 +34,7 @@ from .source import (
     mask_literals,
 )
 
+IDENTITY_TERM_MATCHING = ("word", "substring")
 MAX_SCAN_ENTRIES = 10_000
 MAX_SCAN_MATCHES = 200
 _TEXT_EXTENSIONS = {
@@ -102,8 +105,11 @@ class SubmissionOptions:
     max_archive_bytes: int | None = None
     report_unused_assets: bool = False
     template_references: tuple[tuple[str, str], ...] = ()
+    identity_term_matching: str = "word"
 
     def __post_init__(self) -> None:
+        if self.identity_term_matching not in IDENTITY_TERM_MATCHING:
+            raise PreparationError("identity_term_matching must be 'word' or 'substring'.")
         for name in (
             "scan_identity_hints",
             "scan_secrets",
@@ -276,6 +282,38 @@ def _read(path: Path, limit: int = MAX_SOURCE_BYTES, *, prefix: bool = False) ->
         return data
 
 
+def _match_label(match: Mapping[str, object]) -> str:
+    # Matches hold only locations and generated reasons, never matched text or terms.
+    path, line, reason = match.get("path"), match.get("line"), match.get("reason")
+    label = path if isinstance(path, str) else match.get("channel")
+    label = label if isinstance(label, str) else ""
+    if label and type(line) is int:
+        label += f":{line}"
+    if len(label) > 120:  # Over-long file names are the finding itself; details keep them whole.
+        label = label[:119] + "…"
+    if isinstance(reason, str):
+        label = f"{label} ({reason})" if label else reason
+    return label or "unspecified location"
+
+
+def _message(matches: Sequence[Mapping[str, object]], issues: list[str]) -> str:
+    if not matches:
+        if not issues:
+            return "No matches in the stated scope."
+        more = f" (+{len(issues) - 1} more)" if len(issues) > 1 else ""
+        return f"The configured scan is incomplete: {issues[0]}{more}"
+    labels = [_match_label(match) for match in matches]
+    shown = list(dict.fromkeys(labels))[:3]
+    # Scans stop collecting at the limit, so a full list means "at least" this many.
+    count = f"{len(matches)}{'+' if len(matches) == MAX_SCAN_MATCHES else ''}"
+    message = f"{count} match{'es' if len(matches) != 1 else ''}: {', '.join(shown)}"
+    if more := sum(label not in shown for label in labels):
+        message += f" (+{more} more)"
+    if issues:
+        message += f"; the scan was also incomplete: {issues[0]}"
+    return message
+
+
 def _result(
     rule: str,
     matches: Sequence[Mapping[str, object]],
@@ -288,11 +326,7 @@ def _result(
     status = "failed" if matches else "inconclusive" if issues else "passed"
     return Finding(
         rule,
-        "Review the reported matches."
-        if matches
-        else (
-            "The configured scan is incomplete." if issues else "No matches in the stated scope."
-        ),
+        _message(matches, issues),
         severity="info" if status == "passed" else "warning" if advisory else "error",
         status=status,
         evidence="heuristic" if advisory else "direct",
@@ -360,9 +394,34 @@ def _comments(text: str) -> list[tuple[int, str]]:
     return result
 
 
+@lru_cache(maxsize=16)
+def _term_patterns(terms: tuple[str, ...], matching: str) -> tuple[re.Pattern[str], ...]:
+    """Compile folded terms once; word mode requires non-alphanumeric (or no) neighbours."""
+    patterns = []
+    for term in terms:
+        folded = _fold(term)
+        if matching == "word":
+            # Underscores and punctuation separate words (jane_smith.tex); letters/digits do not.
+            before = r"(?<![^\W_])" if folded[:1].isalnum() else ""
+            after = r"(?![^\W_])" if folded[-1:].isalnum() else ""
+            patterns.append(re.compile(before + re.escape(folded) + after))
+        else:
+            patterns.append(re.compile(re.escape(folded)))
+    return tuple(patterns)
+
+
 def _term_matches(text: str, options: SubmissionOptions) -> list[int]:
     folded = _fold(text)
-    return [index for index, term in enumerate(options.identity_terms, 1) if _fold(term) in folded]
+    patterns = _term_patterns(options.identity_terms, options.identity_term_matching)
+    return [index for index, pattern in enumerate(patterns, 1) if pattern.search(folded)]
+
+
+def _term_rule(options: SubmissionOptions) -> str:
+    return (
+        "case-insensitive whole-word terms bounded by non-alphanumeric characters"
+        if options.identity_term_matching == "word"
+        else "case-insensitive literal substrings"
+    )
 
 
 def check_submission(
@@ -528,7 +587,7 @@ def check_submission(
                     "All supplied filenames and supported UTF-8 text files, "
                     "including other document roots; "
                     "PDF contents require the separate extracted-text/metadata scan. "
-                    "Identity terms are Unicode-normalized, case-insensitive literal substrings; "
+                    f"Identity terms are Unicode-normalized, {_term_rule(options)}; "
                     "hints and shell preflight use active TeX; "
                     "private-note checks use TeX comments.",
                     advisory=advisory,
@@ -769,7 +828,8 @@ def check_pdf_identity(
                 "submission.pdf_identity_terms",
                 identity_matches,
                 issues,
-                "Supplied extracted PDF text and metadata; literal normalized substrings only.",
+                "Supplied extracted PDF text and metadata; Unicode-normalized "
+                f"{_term_rule(options)} only.",
             )
         )
     if options.scan_secrets:

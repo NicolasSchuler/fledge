@@ -282,7 +282,7 @@ class ManuscriptTests(unittest.TestCase):
             ),
             (
                 r"\documentclass{article}\begin{abstract}Known \unknown.\end{abstract}",
-                ManuscriptOptions(abstract_max_words=100),
+                ManuscriptOptions(abstract_max_words=1),
                 "manuscript.abstract_words",
             ),
             (
@@ -410,6 +410,76 @@ class ManuscriptTests(unittest.TestCase):
                 self.assertEqual(result.status, "inconclusive")
                 self.assertEqual(result.severity, "error")
                 self.assertIn("endinput", result.message)
+
+    def test_defined_conditional_names_do_not_block_headings_or_abstracts(self) -> None:
+        source = (
+            r"\documentclass{article}\newif\ifanonymous\anonymousfalse"
+            r"\begin{abstract}Short findings here.\end{abstract}"
+            r"\section{Funding}None."
+        )
+        options = ManuscriptOptions(
+            require_abstract=True, required_sections=("Funding",), abstract_max_words=10
+        )
+        self.write("main.tex", source)
+        results = {item.rule: item for item in check_manuscript(self.root, "main.tex", options)}
+        self.assertEqual(results["manuscript.required_sections"].status, "passed")
+        self.assertEqual(results["manuscript.abstract_required"].status, "passed")
+        self.assertEqual(results["manuscript.abstract_words"].status, "passed")
+
+    def test_executed_conditional_still_blocks_the_declarations_it_encloses(self) -> None:
+        result = self.finding(
+            r"\documentclass{article}\iftrue\section{Funding}\fi",
+            ManuscriptOptions(required_sections=("Funding",)),
+            "manuscript.required_sections",
+        )
+        self.assertEqual(result.status, "inconclusive")
+        self.assertEqual(result.details["unconfirmed"], ["Funding"])
+        self.assertEqual(result.details["missing"], [])
+        self.assertIn("Could not confirm", result.message)
+        self.assertNotIn("Missing", result.message)
+
+    def test_unresolved_abstract_macros_bound_the_word_count(self) -> None:
+        source = (
+            r"\documentclass{article}\begin{abstract}We evaluate \ours{} on three"
+            r" datasets.\end{abstract}"
+        )
+        for minimum, maximum, status in (
+            (1, 10, "passed"),
+            (20, 30, "failed"),
+            (0, 4, "failed"),
+            (5, 5, "inconclusive"),
+        ):
+            with self.subTest(minimum=minimum, maximum=maximum):
+                result = self.finding(
+                    source,
+                    ManuscriptOptions(abstract_min_words=minimum, abstract_max_words=maximum),
+                    "manuscript.abstract_words",
+                )
+                self.assertEqual(result.status, status, result.details)
+        self.assertEqual(result.details["abstracts"][0]["word_count_range"], [5, 6])
+        self.assertEqual(result.details["abstracts"][0]["unresolved_macros"], 1)
+        self.assertIn("\\ours", result.message)
+
+    def test_resolved_ambiguous_graphics_lookup_is_not_graph_incompleteness(self) -> None:
+        (self.root / "fig.pdf").write_bytes(b"%PDF-1.7\n")
+        (self.root / "fig.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+        result = self.finding(
+            r"\documentclass{article}\usepackage{graphicx}"
+            r"\begin{abstract}Some findings.\end{abstract}\includegraphics{fig}",
+            ManuscriptOptions(require_abstract=True),
+            "manuscript.abstract_required",
+        )
+        self.assertEqual(result.status, "passed", result.details["uncertainty"])
+
+    def test_definitions_and_bibliography_commands_leave_no_word_count_gap(self) -> None:
+        result = self.finding(
+            r"\documentclass{article}\newcommand{\R}{\mathbb{R}}"
+            r"\begin{abstract}Three real words.\end{abstract}",
+            ManuscriptOptions(abstract_min_words=3, abstract_max_words=3, require_abstract=True),
+            "manuscript.abstract_words",
+        )
+        self.assertEqual(result.status, "passed", result.details)
+        self.assertEqual(result.details["abstracts"][0]["word_count_range"], [3, 3])
 
     def test_invalid_count_ranges_and_conflicting_class_options_are_rejected(self) -> None:
         for values in (

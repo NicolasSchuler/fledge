@@ -315,21 +315,86 @@ class ManuscriptDetailTests(unittest.TestCase):
         self.assertEqual(inventory["captions"][0]["line"], 2)
         self.assertEqual(inventory["labels"], ["fig:x"])
 
-    def test_unknown_macro_and_grouped_constructs_never_establish_pass(self) -> None:
+    def test_unknown_constructs_make_their_own_region_inconclusive(self) -> None:
+        # An unexpanded construct is an interpretation gap for the region it sits
+        # in, not for every check in the document.
+        cases = (
+            (r"\begin{figure}\generatedcaption\end{figure}", "float_captions"),
+            (r"\begin{figure}\begin{customfloat}\end{customfloat}\end{figure}", "float_captions"),
+            (r"\section{Results}\generatedbody", "empty_sections"),
+            (r"\newcommand{\x}{\title{Generated}}\x", "required_metadata"),
+            (r"\title{\generatedtitle}", "required_metadata"),
+            (r"\begin{abstract}\generatedprose\end{abstract}", "abstract_citations"),
+        )
         options = ManuscriptCheckOptions(
             require_float_captions=True,
             required_metadata=("title",),
-            max_heading_depth=2,
             check_empty_sections=True,
+            forbid_abstract_citations=True,
         )
-        for body in (
-            r"\generatedcontent",
-            r"\newcommand{\x}{\title{Generated}}\x",
-            r"\begin{customfloat}Generated.\end{customfloat}",
-        ):
+        for body, suffix in cases:
             with self.subTest(body=body):
-                results = self.results(body, options)
-                self.assertTrue(all(result.status == "inconclusive" for result in results))
+                result = self.result(body, options, suffix)
+                self.assertEqual(result.status, "inconclusive", result.details)
+                self.assertTrue(result.details["uncertainty"])
+
+    def test_unrelated_uncertainty_never_hides_a_confirmed_violation(self) -> None:
+        options = ManuscriptCheckOptions(require_float_captions=True, check_empty_sections=True)
+        result = self.result(
+            r"\newcommand{\R}{\mathbb{R}}\generatedprose"
+            r"\begin{figure}Plot.\end{figure}",
+            options,
+            "float_captions",
+        )
+        self.assertEqual(result.status, "failed", result.details)
+        self.assertEqual(result.message, "1 of 1 floats lack a caption: main.tex:2.")
+        self.assertTrue(result.details["matches"])
+        definitions = self.result(
+            r"\newcommand{\R}{\mathbb{R}}\def\ours{Method}"
+            r"\begin{figure}\caption{Shown}\end{figure}",
+            options,
+            "float_captions",
+        )
+        self.assertEqual(definitions.status, "passed", definitions.details)
+
+    def test_preamble_declarations_are_not_body_constructs(self) -> None:
+        self.write(
+            "main.tex",
+            "\\documentclass{article}\n"
+            "\\newcommand{\\R}{\\mathbb{R}}\n"
+            "\\usepackage{graphicx}\n"
+            "\\begin{document}\n"
+            "\\section{Results}Findings for $\\R$.\n"
+            "\\bibliographystyle{plain}\\bibliography{refs}\n"
+            "\\end{document}\n",
+        )
+        (self.root / "refs.bib").write_text("@misc{a, title={A}}\n")
+        results = check_manuscript_details(
+            self.root,
+            "main.tex",
+            ManuscriptCheckOptions(check_empty_sections=True, require_float_captions=True),
+        )
+        self.assertTrue(all(result.status == "passed" for result in results), results)
+
+    def test_failure_messages_report_counts_and_first_locations(self) -> None:
+        self.write("extra.tex", "\\begin{figure}\\end{figure}\n\\begin{figure}\\end{figure}\n")
+        result = self.result(
+            r"\begin{figure}\caption{One}\end{figure}\begin{figure}\end{figure}\input{extra}",
+            ManuscriptCheckOptions(require_float_captions=True),
+            "float_captions",
+        )
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(
+            result.message, "3 of 4 floats lack a caption: main.tex:2, extra.tex:1, extra.tex:2."
+        )
+        self.write("many.tex", "\\begin{figure}\\end{figure}\n" * 5)
+        many = self.result(
+            r"\input{many}", ManuscriptCheckOptions(require_float_captions=True), "float_captions"
+        )
+        self.assertEqual(
+            many.message,
+            "5 of 5 floats lack a caption: many.tex:1, many.tex:2, many.tex:3, +2 more.",
+        )
 
     def test_comments_literal_examples_unselected_sources_and_end_document_excluded(self) -> None:
         self.write("unused.tex", r"\documentclass{article}\begin{figure}\end{figure}")
@@ -349,7 +414,6 @@ class ManuscriptDetailTests(unittest.TestCase):
         for body in (
             r"\begin{figure}Unclosed.",
             r"\begin{figure}\begin{table}\end{figure}\end{table}",
-            r"\begin{figure}\label{same}\end{figure}\begin{figure}\label{same}\end{figure}",
         ):
             with self.subTest(body=body):
                 results = self.results(body, options)
@@ -357,6 +421,15 @@ class ManuscriptDetailTests(unittest.TestCase):
                     item for item in results if item.rule.endswith("float_references")
                 )
                 self.assertEqual(references.status, "inconclusive")
+        # Duplicate labels make reference attribution ambiguous, but with no
+        # reference anywhere in the document the absence itself is confirmed.
+        duplicated = self.result(
+            r"\begin{figure}\label{same}\end{figure}\begin{figure}\label{same}\end{figure}",
+            options,
+            "float_references",
+        )
+        self.assertEqual(duplicated.status, "failed")
+        self.assertIn("ambiguous reference targets", str(duplicated.details["uncertainty"]))
 
     def test_input_cycle_missing_input_and_bounds_are_inconclusive(self) -> None:
         options = ManuscriptCheckOptions(require_float_captions=True)

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import tempfile
 import unittest
 import zipfile
@@ -13,11 +12,12 @@ from latexprep.config import Settings
 from latexprep.core import JobRequest, run_job
 from latexprep.source_transform import SourceTransformOptions
 from latexprep.workflow_options import DocumentOptions, WorkflowOptions
+from tests.support import live_tests_enabled
 
 
 @unittest.skipUnless(
-    os.environ.get("LATEX_PREP_RUN_INTEGRATION") == "1",
-    "Enable LATEX_PREP_RUN_INTEGRATION for real restricted TeX tools",
+    live_tests_enabled(),
+    "Enable FLEDGE_RUN_INTEGRATION for real restricted TeX tools",
 )
 class LiveRemainingWorkflowTests(unittest.IsolatedAsyncioTestCase):
     async def test_two_independent_flat_packages_with_bibliography_and_source_cleanup(self):

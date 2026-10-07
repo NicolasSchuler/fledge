@@ -42,10 +42,11 @@ fledge inspect "$demo_dir/paper" --main main.tex --isolated --offline
 fledge bib check "$demo_dir/paper" --main main.tex --isolated --offline
 ```
 
-Both commands should return exit code 0 with `outcome: passed` and four passing
-findings. Their scope is source/bibliography inspection; no build or bundle is
-verified. `--isolated` disables configuration discovery, while `--offline`
-disables reference-network requests.
+Both commands should return exit code 0 with `outcome: passed`, two passed
+results and two not-applicable checks (page-range and URL syntax have nothing to
+examine); add `--show-passed` to list them. Their scope is source/bibliography
+inspection; no build or bundle is verified. `--isolated` disables configuration
+discovery, while `--offline` disables reference-network requests.
 
 ## Save a report
 

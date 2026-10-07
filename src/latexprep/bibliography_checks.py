@@ -15,11 +15,19 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from .bibliography import _MAX_FILE_BYTES, _Document, _doi_value, _Entry, _Field, _Parser
+from .bibliography import (
+    _MAX_FILE_BYTES,
+    _Document,
+    _doi_value,
+    _Entry,
+    _Field,
+    _Parser,
+    _resource_declarations,
+)
 from .manuscript import _commands_before_end, _reachable_sources
-from .models import Finding, PreparationError
+from .models import Finding, PreparationError, Severity, Status
 from .scheduler import cancellation_point
-from .source import _Inspection, _items
+from .source import _Inspection, conditional_spans, in_conditional
 
 _MAX_TOTAL_BYTES = 32 * 1024 * 1024
 _MAX_DOCUMENTS = 128
@@ -30,6 +38,7 @@ _MAX_FUZZY_PAIRS = 20_000
 _MAX_FUZZY_TEXT = 2_000
 _MAX_FIELD_CHARS = 64 * 1024
 _MAX_REASONS = 32
+_MAX_LISTED_ENTRIES = 3
 _NAME = re.compile(r"[a-z][a-z0-9_-]*")
 _CITATIONS = frozenset(
     "cite citep citet citealp citealt citeauthor citeyear citeyearpar "
@@ -41,7 +50,7 @@ _MULTICITES = frozenset(
 )
 _RELATIONS = frozenset({"crossref", "xref", "xdata", "related", "entryset"})
 _INHERITANCE = frozenset({"crossref", "xref", "xdata"})
-_DYNAMIC = frozenset(
+_DEFINITIONS = frozenset(
     {
         "newcommand",
         "renewcommand",
@@ -57,6 +66,12 @@ _DYNAMIC = frozenset(
         "xdef",
         "let",
         "futurelet",
+    }
+)
+# Expansion, category codes and bibliography-backend declarations can reach any
+# citation; no lexical argument inspection bounds what they may later execute.
+_EXECUTION = frozenset(
+    {
         "csname",
         "catcode",
         "directlua",
@@ -67,6 +82,10 @@ _DYNAMIC = frozenset(
         "DeclareDatamodelEntryfields",
     }
 )
+_DYNAMIC = _DEFINITIONS | _EXECUTION
+# Substrings that make a command name or a definition body citation-relevant. A
+# plain \newcommand{\R}{\mathbb{R}} cannot influence bibliography evidence.
+_CITATION_MARKERS = ("cite", "nocite", "bibitem", "addbibresource", "bibliography")
 _FILTERS = frozenset(
     {
         "defbibfilter",
@@ -205,6 +224,12 @@ def _keys(value: str) -> list[str] | None:
     return keys
 
 
+def _citation_marked(text: str) -> bool:
+    """Whether a command name or definition body can reach citation machinery."""
+    lowered = text.lower()
+    return any(marker in lowered for marker in _CITATION_MARKERS)
+
+
 def _reason_details(reasons: list[str]) -> list[str]:
     unique = sorted(set(reasons))
     if len(unique) > _MAX_REASONS:
@@ -224,20 +249,36 @@ def _graph(inspection: _Inspection) -> _Graph:
         return graph
     scope = selected | {inspection.main}
     for item in inspection.findings:
-        if item.path in scope and item.rule in _GRAPH_FAILURES:
+        # A resolved lookup-order or conditional dependency is evidence, not a gap.
+        if item.path in scope and item.rule in _GRAPH_FAILURES and item.status != "passed":
             graph.reasons.append(f"{item.path}: {item.message}")
+    resources, resource_reasons = _resource_declarations(inspection, selected)
+    graph.resources.update(resources)
+    graph.reasons.extend(resource_reasons)
     for name in sorted(selected):
         cancellation_point()
         source = inspection.sources[name]
         commands = _commands_before_end(source)
+        spans = conditional_spans(source.commands)
         for command in commands:
             if command.name == "subfile":
                 graph.reasons.append(
                     f"{name}:{command.line}: subfile bibliography content context is unsupported"
                 )
-            if command.name.startswith(("if", "If")) or command.name in _DYNAMIC:
+            if _citation_marked(command.name) and in_conditional(spans, command.start):
                 graph.reasons.append(
-                    f"{name}:{command.line}: conditional or macro execution is not expanded"
+                    f"{name}:{command.line}: conditional citation or bibliography "
+                    "execution is not expanded"
+                )
+            if command.name in _DEFINITIONS and _citation_marked(
+                " ".join(item.value for item in (*command.arguments, *command.options))
+            ):
+                graph.reasons.append(
+                    f"{name}:{command.line}: a macro definition of citation markup is not expanded"
+                )
+            if command.name in _EXECUTION:
+                graph.reasons.append(
+                    f"{name}:{command.line}: macro or category-code execution is not expanded"
                 )
             if command.name == "endinput":
                 # Tokens on its physical line may still run, even though lexical
@@ -257,15 +298,6 @@ def _graph(inspection: _Inspection) -> _Graph:
                 graph.unused_reasons.append(
                     f"{name}:{command.line}: bibliography print filters/options are not interpreted"
                 )
-            if command.name in {"bibliography", "addbibresource"} and command.arguments:
-                for argument in _items(command.arguments[0], command.name == "bibliography"):
-                    target = inspection.references.get((name, argument.start, argument.end))
-                    if target and target[1] in {"bibliography", "addbibresource"}:
-                        graph.resources.add(target[0])
-                    else:
-                        graph.reasons.append(
-                            f"{name}:{command.line}: bibliography resource could not be resolved"
-                        )
             citation = command.name.lower() in _CITATIONS | _MULTICITES
             inline = command.name == "bibitem"
             if not citation and not inline:
@@ -380,10 +412,10 @@ def _content_state(entry: _Entry, names: list[str]) -> str:
 def _finding(
     rule: str,
     message: str,
-    status: str,
+    status: Status,
     *,
     reference: _Reference | None = None,
-    severity: str = "warning",
+    severity: Severity = "warning",
     evidence: str = "derived",
     details: dict[str, object] | None = None,
 ) -> Finding:
@@ -410,7 +442,7 @@ def _summarize(
     *,
     scope: dict[str, object],
     description: str,
-    severity: str = "warning",
+    severity: Severity = "warning",
 ) -> list[Finding]:
     if reasons:
         findings.append(
@@ -422,7 +454,20 @@ def _summarize(
                 details={**scope, "checked": checked, "uncertainty": _reason_details(reasons)},
             )
         )
-    elif not findings:
+    elif findings:
+        return findings
+    elif not checked:
+        # Reporting "passed" for an empty inspection would overstate the evidence.
+        findings.append(
+            _finding(
+                rule,
+                "No supported items to check.",
+                "not_applicable",
+                severity="info",
+                details={**scope, "checked": 0},
+            )
+        )
+    else:
         findings.append(
             _finding(
                 rule,
@@ -540,18 +585,34 @@ def _coverage(
     if options.check_uncited_entries:
         unused: list[Finding] = []
         uncertainty_details = _reason_details(unused_reasons)
-        for reference in references:
+        candidates = [item for item in references if item.identity not in used]
+        if candidates:
             cancellation_point()
-            if reference.identity in used:
-                continue
+            # One aggregate keeps a shared master bibliography readable; every
+            # candidate stays individually addressable through the details.
+            rows = [
+                {
+                    "entry": item.entry.key,
+                    "entry_type": item.entry.kind,
+                    "path": item.document.path,
+                    "line": item.document.line(item.entry.start),
+                }
+                for item in candidates
+            ]
+            listed = ", ".join(str(item.entry.key) for item in candidates[:_MAX_LISTED_ENTRIES])
+            remaining = max(0, len(candidates) - _MAX_LISTED_ENTRIES)
             unused.append(
-                _finding(
-                    "uncited_entries",
-                    f"Entry {reference.entry.key!r} has no scanned use in the selected scope.",
-                    "inconclusive" if unused_reasons else "failed",
-                    reference=reference,
+                Finding(
+                    "bibliography.uncited_entries",
+                    f"{len(candidates)} of {len(references)} entries have no scanned use: "
+                    + listed
+                    + (f" (+{remaining} more)" if remaining else ""),
+                    severity="warning",
+                    status="inconclusive" if unused_reasons else "failed",
+                    path=candidates[0].document.path,
+                    line=candidates[0].document.line(candidates[0].entry.start),
                     evidence="heuristic",
-                    details={**scope, "uncertainty": uncertainty_details},
+                    details={**scope, "entries": rows, "uncertainty": uncertainty_details},
                 )
             )
         findings.extend(
@@ -567,7 +628,7 @@ def _coverage(
     return findings
 
 
-def _page_state(value: str) -> tuple[str, str]:
+def _page_state(value: str) -> tuple[Status, str]:
     if not value or any(character in value for character in "{}"):
         return ("failed", "empty page field") if not value else ("inconclusive", "brace markup")
     unknown = False
@@ -592,7 +653,7 @@ def _page_state(value: str) -> tuple[str, str]:
     return ("inconclusive", "unsupported page notation") if unknown else ("passed", "")
 
 
-def _url_state(value: str) -> tuple[str, str]:
+def _url_state(value: str) -> tuple[Status, str]:
     if any(character in value for character in "{}"):
         return "inconclusive", "brace markup"
     if not value or any(
@@ -710,6 +771,7 @@ def _metadata(
                 continue
             counts[rule] += 1
             value = _scalar(fields[0]) if len(fields) == 1 else None
+            status: Status
             tokens: list[str] = []
             if value is None:
                 status, reason = "inconclusive", "macro, concatenation, markup or repeated field"

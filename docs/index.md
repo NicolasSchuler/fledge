@@ -13,6 +13,7 @@ configuration
 preparation-options
 reports
 troubleshooting
+agents
 ```
 
 ```{toctree}

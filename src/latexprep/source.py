@@ -8,6 +8,7 @@ must reject plans with error findings before applying any mapping or contents.
 
 from __future__ import annotations
 
+import bisect
 import difflib
 import posixpath
 import re
@@ -43,7 +44,10 @@ _SOURCE_SUFFIXES = {
     ".bbl",
 }
 _ROOT_SUFFIXES = {".tex", ".ltx", ".latex"}
-_GRAPHICS_SUFFIXES = (".pdf", ".png", ".jpg", ".jpeg", ".eps", ".ps", ".mps", ".jbig2", ".jb2")
+# Manuscript text, as opposed to class, style and generated template internals.
+_MANUSCRIPT_SUFFIXES = {".tex", ".ltx", ".latex", ".tikz", ".pgf"}
+# Graphics lookup order of the default pdfTeX graphics rules.
+_GRAPHICS_SUFFIXES = (".pdf", ".png", ".jpg", ".mps", ".jpeg", ".jbig2", ".jb2", ".eps", ".ps")
 _LITERAL_ENVS = {
     "verbatim",
     "verbatim*",
@@ -193,12 +197,11 @@ _TEXT_COMMANDS = {
     "bibfield",
     "field",
 }
+# Ordinary formatting such as \textcolor is not an editing marker.
 _EDIT_COMMANDS = {
     "todo",
     "TODO",
     "hl",
-    "textcolor",
-    "color",
     "added",
     "deleted",
     "replaced",
@@ -423,8 +426,14 @@ def _commands(masked: str) -> list[_Command]:
                     cursor += 1
                 arguments: list[_Argument] = []
                 options: list[_Argument] = []
+                name = token.group(1)
                 for _ in range(6):
-                    cursor = _skip_space(masked, cursor)
+                    skipped = _skip_space(masked, cursor)
+                    # A paragraph break ends argument scanning: the next group starts
+                    # new text instead of completing this command.
+                    if masked.count("\n", cursor, skipped) > 1:
+                        break
+                    cursor = skipped
                     option = _group(masked, cursor, "[", "]")
                     arg = _group(masked, cursor)
                     if option:
@@ -434,26 +443,100 @@ def _commands(masked: str) -> list[_Command]:
                         arguments.append(arg)
                         cursor = arg.end + 1
                     else:
-                        if cursor < len(masked) and masked[cursor] in "[{":
+                        # An unbalanced brace leaves every later argument span
+                        # unreadable, but an unmatched bracket is ordinary text such
+                        # as "[0, 1)" and only ends this command's arguments.
+                        if cursor < len(masked) and masked[cursor] == "{":
                             raise _ParseLimit
                         break
                 argument_chars += sum(len(arg.value) for arg in (*arguments, *options))
                 if argument_chars > min(MAX_SOURCE_BYTES, len(masked) * 4):
                     raise _ParseLimit
-                if not arguments and token.group(1) == "input":
+                if not arguments and name == "input":
                     start = _skip_space(masked, token.end())
                     match = re.match(r"[^\s\\{}\[\]]+", masked[start:])
                     if match:
                         arguments.append(_Argument(start, start + match.end(), match.group()))
-                result.append(
-                    _Command(token.group(1), pos, line, depth, tuple(arguments), tuple(options))
-                )
+                result.append(_Command(name, pos, line, depth, tuple(arguments), tuple(options)))
                 if len(result) > MAX_COMMANDS:
                     return result
                 pos = token.end()
                 continue
         pos += 1
     return result
+
+
+# Tokens after these commands name a macro being defined, not a conditional being run.
+_DEFINITION_COMMANDS = frozenset(
+    {"newif", "def", "gdef", "edef", "xdef", "let", "futurelet", "global", "long", "protected"}
+)
+# Package conditionals that take braced branches instead of ending with \fi.
+_ARGUMENT_CONDITIONALS = frozenset(
+    {
+        "ifthenelse",
+        "iftoggle",
+        "ifbool",
+        "ifboolexpr",
+        "ifdef",
+        "ifundef",
+        "ifdefempty",
+        "ifdefvoid",
+        "ifdefstring",
+        "ifcsdef",
+        "ifcsundef",
+        "ifcsvoid",
+        "ifstrequal",
+        "ifstrempty",
+        "ifblank",
+        "ifnumcomp",
+        "ifdimcomp",
+        "ifpackageloaded",
+        "ifclassloaded",
+    }
+)
+
+
+def conditional_spans(commands: list[_Command]) -> list[tuple[int, int]]:
+    """Return offset ranges enclosed by primitive-style ``\\if…`` … ``\\fi`` conditionals.
+
+    A conditional name defined by ``\\newif`` or ``\\def`` is not itself executed,
+    and an opener without a matching ``\\fi`` (such as a branch-taking package
+    conditional) is ignored rather than extended to the end of the file.
+    """
+    spans: list[tuple[int, int]] = []
+    stack: list[int] = []
+    previous: _Command | None = None
+    for command in commands:
+        defined = (
+            previous is not None
+            and previous.name in _DEFINITION_COMMANDS
+            and not previous.arguments
+            and command.start == previous.start + len(previous.name) + 1
+        )
+        if command.name == "fi":
+            if stack:
+                start = stack.pop()
+                spans.append((start, command.start))
+        elif (
+            command.name.startswith("if")
+            and command.name not in _ARGUMENT_CONDITIONALS
+            and not defined
+        ):
+            stack.append(command.start)
+        previous = command
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(spans):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def in_conditional(spans: list[tuple[int, int]], offset: int) -> bool:
+    """Whether ``offset`` lies inside one of the merged ``conditional_spans``."""
+    index = bisect.bisect_right(spans, (offset, float("inf"))) - 1
+    return index >= 0 and spans[index][0] < offset < spans[index][1]
 
 
 def _key(value: str) -> str:
@@ -608,6 +691,22 @@ class _Inspection:
             self.uncertainties.append(finding)
             self.findings.append(finding)
 
+    def _names_project_file(self, command: _Command) -> bool:
+        """Whether a class/package reference can name a file inside the project.
+
+        Lookup context is not established while a file is loaded, so this only
+        rejects names with no matching project file under any directory.
+        """
+        if not command.arguments:
+            return False
+        suffix = _FILE_COMMANDS[command.name]
+        for item in _items(command.arguments[0], command.name in _LIST_COMMANDS):
+            if not _literal(item.value):
+                return True
+            if item.value in self.known_paths or item.value + suffix in self.known_paths:
+                return True
+        return False
+
     def _load(self, name: str) -> _Source | None:
         if name in self.sources:
             return self.sources[name]
@@ -664,15 +763,23 @@ class _Inspection:
             )
             return None
         source = _Source(text, masked, commands, raw.startswith(b"\xef\xbb\xbf"))
-        if any(command.name.startswith("if") for command in commands) and any(
-            command.name in _FILE_COMMANDS or command.name == "graphicspath" for command in commands
-        ):
+        spans = conditional_spans(commands)
+        for command in commands:
+            if command.name != "graphicspath" and command.name not in _FILE_COMMANDS:
+                continue
+            if not in_conditional(spans, command.start):
+                continue
+            # Toolchain classes and packages are covered by recorded build inputs.
+            if command.name in _SYSTEM_COMMANDS and not self._names_project_file(command):
+                continue
             self._uncertain(
                 "source-conditional-dependency",
-                "Conditional TeX control flow accompanies file references; "
+                "Conditional TeX control flow encloses a file reference; "
                 "the static scan does not establish which branch executes.",
                 name,
-                suggestion="Use preserve layout or make dependencies unconditional.",
+                command.line,
+                suggestion="Make the dependency unconditional, "
+                "or rely on the build trace for preserve layout.",
             )
         self.sources[name] = source
         for offset in incomplete:
@@ -929,29 +1036,42 @@ class _Inspection:
             elif suffix == "graphics":
                 candidates.extend(path + extension for extension in _GRAPHICS_SUFFIXES)
                 candidates.append(path)
+            elif suffix:
+                # TeX appends the default suffix before trying the bare name.
+                candidates.extend((path + suffix, path))
             else:
-                candidates.extend((path, path + suffix))
-        found = sorted(
-            {
-                path
-                for path in candidates
-                if path in self.files and not self.files[path].is_symlink()
-            }
-        )
+                candidates.append(path)
+        # Candidates keep TeX's lookup order: base paths first, then declared search
+        # directories, and the extensions each command tries within one directory.
+        found: list[str] = []
         for candidate in candidates:
-            if candidate in self.files and self.files[candidate].is_symlink():
+            if candidate not in self.files or candidate in found:
+                continue
+            if self.files[candidate].is_symlink():
                 self._load(candidate)
+                continue
+            found.append(candidate)
         if len(found) > 1:
-            self._error(
-                "source-ambiguous-dependency",
-                f"Reference {value!r} matches multiple files: {', '.join(found)}; "
-                "its resolution cannot be preserved safely.",
-                name,
-                command,
-                {"reference": value, "candidates": found},
+            self.findings.append(
+                Finding(
+                    "source-ambiguous-dependency",
+                    f"Reference {value!r} also matches {', '.join(found[1:])}; "
+                    f"TeX's lookup order selects {found[0]}.",
+                    severity="warning",
+                    status="passed",
+                    path=name,
+                    line=command.line,
+                    evidence="heuristic",
+                    suggestion="Name the intended file with an explicit extension "
+                    "to remove the dependence on lookup order.",
+                    details={
+                        "reference": value,
+                        "selected": found[0],
+                        "alternatives": found[1:],
+                        "resolved_by": "TeX lookup order",
+                    },
+                )
             )
-            self.dependencies.update(found)
-            return None
         if found:
             self.dependencies.add(found[0])
             return found[0]
@@ -1275,6 +1395,9 @@ class _Inspection:
         for name, source in self.sources.items():
             if self.main and name not in self.visited:
                 continue
+            # Template internals are not authored manuscript text.
+            if Path(name).suffix.lower() not in _MANUSCRIPT_SUFFIXES:
+                continue
             for match in re.finditer(r"\b(?:TODO|FIXME|XXX)\b|\?\?", source.masked):
                 self.findings.append(
                     Finding(
@@ -1342,14 +1465,24 @@ class _Inspection:
 def analyze_sources(root: Path, main: str | None = None) -> SourceAnalysis:
     """Inspect a selected root and report literal dependencies without editing files."""
     inspection = _Inspection(root, main)
+    # Every source file is read to discover roots, but a selected document is not
+    # described by lexical uncertainties of files outside its own graph.
+    outside = {
+        id(item)
+        for item in inspection.uncertainties
+        if inspection.main is not None
+        and item.path is not None
+        and item.path not in inspection.visited
+    }
+    findings = [item for item in inspection.findings if id(item) not in outside]
     return SourceAnalysis(
         inspection.roots,
         inspection.main,
-        inspection.findings,
+        findings,
         inspection.dependencies,
         complete=bool(inspection.main in inspection.visited)
-        and not inspection.uncertainties
-        and not any(finding.severity == "error" for finding in inspection.findings),
+        and all(id(item) in outside for item in inspection.uncertainties)
+        and not any(finding.severity == "error" for finding in findings),
     )
 
 

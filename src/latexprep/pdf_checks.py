@@ -22,10 +22,12 @@ from .models import Finding, PreparationError
 from .pdf import (
     _fields,
     _font_inventory,
+    _is_type3,
     _new_workspace,
     _page_count,
     _page_sizes,
     _require_complete,
+    _require_rendered_pages,
 )
 from .runtime import CommandResult, ToolRunner
 from .scheduler import ResourceBudget, run_in_thread
@@ -779,6 +781,7 @@ async def _sparse_findings(
 ) -> list[Finding]:
     result = []
     try:
+        _require_rendered_pages(pages, "Rendered sparse-page measurement")
         sizes = await session.measure(
             "raster-sizes",
             ["pdfinfo", "-box", "-f", "1", "-l", str(pages), "@PDF@"],
@@ -1457,13 +1460,16 @@ async def inspect_included_pdf_figures(
                     font
                     for font in inventory
                     if (figure_options.require_embedded_figure_fonts and not font["embedded"])
-                    or (figure_options.forbid_type3_figure_fonts and font["type"] == "Type 3")
+                    or (figure_options.forbid_type3_figure_fonts and _is_type3(font["type"]))
                 ]
+                # A figure without font resources (outlined or raster-only text) cannot
+                # violate an embedding or Type 3 policy.
                 return _result(
                     "pdf.included_figure_fonts",
-                    "Inspected font resources in an explicit input PDF figure.",
+                    "Inspected font resources in an explicit input PDF figure."
+                    if inventory
+                    else "No font resources in this figure; nothing to embed.",
                     violations,
-                    uncertain=not inventory,
                     font_count=len(inventory),
                     require_embedded=figure_options.require_embedded_figure_fonts,
                     forbid_type3=figure_options.forbid_type3_figure_fonts,

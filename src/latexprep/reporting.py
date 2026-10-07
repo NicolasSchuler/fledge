@@ -402,6 +402,81 @@ def review_marker(finding: Finding) -> str:
     )
 
 
+def is_scope_disclaimer(finding: Finding) -> bool:
+    """Informational notes that a check was out of scope; shown only on request."""
+    return finding.severity == "info" and finding.status in {"skipped", "not_applicable"}
+
+
+# Checkers keep their evidence in these detail lists behind a generic message.
+_EVIDENCE_KEYS = (
+    "matches",
+    "violations",
+    "missing",
+    "entries",
+    "changed_pages",
+    "differing_pages",
+    "nonembedded",
+    "below_minimum",
+    "candidates",
+)
+_EVIDENCE_PAGE_KEYS = frozenset({"changed_pages", "differing_pages"})
+_EVIDENCE_ITEMS = 3
+_EVIDENCE_LABEL_CHARS = 120
+_EVIDENCE_NAME_KEYS = ("name", "key", "reference", "label", "reason")
+
+
+def _evidence_label(item: object, pages: bool) -> str | None:
+    label: object = None
+    if isinstance(item, bool):
+        return None
+    if isinstance(item, int):
+        label = f"page {item}" if pages else str(item)
+    elif isinstance(item, str):
+        label = item
+    elif isinstance(item, Mapping):
+        location = next(
+            (item[key] for key in ("path", "file") if isinstance(item.get(key), str)), ""
+        )
+        if location and type(item.get("line")) is int:
+            location = f"{location}:{item['line']}"
+        if type(item.get("page")) is int:
+            location = f"{location} (page {item['page']})" if location else f"page {item['page']}"
+        label = location or next(
+            (item[key] for key in _EVIDENCE_NAME_KEYS if isinstance(item.get(key), str)), ""
+        )
+    if not isinstance(label, str) or not label:
+        return None
+    return (
+        label if len(label) <= _EVIDENCE_LABEL_CHARS else label[: _EVIDENCE_LABEL_CHARS - 1] + "…"
+    )
+
+
+def evidence_excerpt(finding: Finding) -> str:
+    """A short, display-only excerpt of recorded evidence for an unresolved finding.
+
+    Only the first few items of the first populated list among a fixed set of
+    detail keys are summarized; the caller must sanitize the text for its medium.
+    """
+    if finding.status == "passed":
+        return ""
+    for key in _EVIDENCE_KEYS:
+        items = finding.details.get(key)
+        if not isinstance(items, (list, tuple)) or not items:
+            continue
+        hidden = 0
+        count = finding.details.get("violation_count")
+        if key == "violations" and type(count) is int and count > len(items):
+            hidden = count - len(items)
+        labels = [_evidence_label(item, key in _EVIDENCE_PAGE_KEYS) for item in items]
+        shown = list(dict.fromkeys(label for label in labels if label is not None))[
+            :_EVIDENCE_ITEMS
+        ]
+        if shown:
+            hidden += sum(label not in shown for label in labels)
+            return ", ".join(shown) + (f" (+{hidden} more)" if hidden else "")
+    return ""
+
+
 def _text(value: object) -> str:
     rendered = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
     return "".join(
@@ -562,6 +637,8 @@ def render_html(report: Report) -> str:
                 f"<p>{_escape(finding.message)}</p>",
             ]
         )
+        if excerpt := evidence_excerpt(finding):
+            parts.append(f"<p>Evidence: {_escape(excerpt)}</p>")
         marker = review_marker(finding)
         if marker:
             parts.append(f'<p class="review">{_escape(marker)}. Original result retained.</p>')
@@ -636,7 +713,7 @@ def render_ci_annotations(report: Report, *, show_passed: bool = False) -> str:
     public = report.redacted_copy()
     lines = []
     for finding in public.sorted_findings():
-        if finding.status == "passed" and not show_passed:
+        if not show_passed and (finding.status == "passed" or is_scope_disclaimer(finding)):
             continue
         marker = review_marker(finding)
         level = (
@@ -650,6 +727,8 @@ def render_ci_annotations(report: Report, *, show_passed: bool = False) -> str:
             if type(finding.line) is int and finding.line > 0:
                 fields.append(f"line={finding.line}")
         message = f"{finding.severity}/{finding.status}: {finding.message}"
+        if excerpt := evidence_excerpt(finding):
+            message += f" | Evidence: {excerpt}"
         if marker:
             message += f" | {marker}; original result retained"
         if finding.next_step:

@@ -25,7 +25,7 @@ from .reporting import ReportingOptions
 from .source_transform import SourceTransformOptions
 from .structure_checks import StructureOptions
 from .submission_checks import SubmissionOptions
-from .workflow_options import WorkflowOptions
+from .workflow_options import PackageOptions, WorkflowOptions
 
 PARENT_MEMORY_MB = 128
 
@@ -70,6 +70,7 @@ class Settings:
     figure_artwork: PdfArtworkOptions = field(default_factory=PdfArtworkOptions)
     reporting: ReportingOptions = field(default_factory=ReportingOptions)
     workflow: WorkflowOptions = field(default_factory=WorkflowOptions)
+    package: PackageOptions = field(default_factory=PackageOptions)
     bibliography_checks: BibliographyOptions = field(default_factory=BibliographyOptions)
     build_checks: BuildCheckOptions = field(default_factory=BuildCheckOptions)
     manuscript_checks: ManuscriptCheckOptions = field(default_factory=ManuscriptCheckOptions)
@@ -133,6 +134,11 @@ class Settings:
         return PdfOptions(**{item.name: getattr(self, item.name) for item in fields(PdfOptions)})
 
 
+# Discovered per directory in this order; the latex-prep names remain supported.
+CONFIG_FILENAMES = (".fledge.toml", "fledge.toml", ".latex-prep.toml", "latex-prep.toml")
+PYPROJECT_TABLES = ("fledge", "latex-prep")
+
+
 def _read_settings(path: Path, *, required: bool = True) -> dict[str, object] | None:
     try:
         with path.open("rb") as stream:
@@ -142,13 +148,20 @@ def _read_settings(path: Path, *, required: bool = True) -> dict[str, object] | 
     if path.name != "pyproject.toml":
         return values
     tool = values.get("tool", {})
-    if not isinstance(tool, dict) or "latex-prep" not in tool:
+    tables = [name for name in PYPROJECT_TABLES if isinstance(tool, dict) and name in tool]
+    if not tables:
         if required:
-            raise PreparationError(f"Settings {path} has no [tool.latex-prep] table")
+            raise PreparationError(
+                f"Settings {path} has no [tool.fledge] or [tool.latex-prep] table"
+            )
         return None
-    settings = tool["latex-prep"]
+    if len(tables) > 1:
+        raise PreparationError(
+            f"{path} contains both [tool.fledge] and [tool.latex-prep]; keep only one"
+        )
+    settings = tool[tables[0]]
     if not isinstance(settings, dict):
-        raise PreparationError(f"[tool.latex-prep] in {path} must be a settings table")
+        raise PreparationError(f"[tool.{tables[0]}] in {path} must be a settings table")
     return settings
 
 
@@ -172,7 +185,7 @@ def resolve_config_path(
     for directory in (start, *start.parents):
         if directory != start and (directory == home or directory == directory.parent):
             break
-        for name in (".latex-prep.toml", "latex-prep.toml", "pyproject.toml"):
+        for name in (*CONFIG_FILENAMES, "pyproject.toml"):
             candidate = directory / name
             if candidate.is_file() and (
                 name != "pyproject.toml" or _read_settings(candidate, required=False) is not None
@@ -210,6 +223,7 @@ def load_settings(path: Path | None, overrides: dict[str, object]) -> Settings:
         "figure_artwork": PdfArtworkOptions,
         "reporting": ReportingOptions,
         "workflow": WorkflowOptions,
+        "package": PackageOptions,
         "bibliography_checks": BibliographyOptions,
         "build_checks": BuildCheckOptions,
         "manuscript_checks": ManuscriptCheckOptions,

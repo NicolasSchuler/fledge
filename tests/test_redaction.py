@@ -98,7 +98,10 @@ class RedactionTests(unittest.TestCase):
                 "message": password + " " + token + " username",
             }
         )
-        self.assert_hidden(result, password, quote(password, safe=""), token, "username")
+        self.assert_hidden(result, password, quote(password, safe=""), token)
+        # The user:password pair vanishes from the URL; a bare username is not secret.
+        self.assertNotIn("username:", result["settings"]["urls"][0])
+        self.assertEqual(result["message"], REDACTED + " " + REDACTED + " username")
         self.assertIn("example.org", result["settings"]["urls"][0])
         self.assertIn("page=2", result["settings"]["urls"][0])
 
@@ -154,6 +157,97 @@ class RedactionTests(unittest.TestCase):
             }
         )
         self.assert_hidden(result, "reader", "privatepass", "QuerySecret4825", "SecondSecret9284")
+        self.assertEqual(result["urls"][1], REDACTED + "@example.org/path")
+
+    def test_username_only_userinfo_and_mailto_are_not_credentials(self) -> None:
+        original = {
+            "log": "Cloning ssh://git@github.com/org/repo.git; contact mailto:alice@example.org",
+            "message": "A digital github repository by Malice, alice and git users",
+            "urls": [
+                "https://git@example.org/path",
+                "MAILTO:bob@example.org",
+                "<mailto:eve@x.org>",
+            ],
+        }
+        self.assertEqual(redact_data(original), original)
+
+    def test_token_like_username_without_password_is_redacted_everywhere(self) -> None:
+        token = "ghx9A7kQ2mZ4pL0vR8sT1uW3"
+        encoded = quote(token, safe="")
+        result = redact_data(
+            {
+                "log": "Cloning https://" + token + "@github.com/o/r.git",
+                "message": "Remote uses " + token + " and git@github.com",
+                "diff": "+url = https://" + token + "@github.com/o/r.git",
+                "metadata": {"remote": encoded, "other": "ssh://git@github.com/o/r.git"},
+            }
+        )
+        self.assert_hidden(result, token, encoded)
+        self.assertEqual(result["log"], "Cloning https://" + REDACTED + "@github.com/o/r.git")
+        self.assertEqual(result["metadata"]["other"], "ssh://git@github.com/o/r.git")
+        letters = redact_data({"log": "https://QpLzXkWmNvBtRyHsDf@github.com/o/r.git"})
+        self.assertEqual(letters["log"], "https://" + REDACTED + "@github.com/o/r.git")
+
+    def test_plain_usernames_in_authorities_stay_visible(self) -> None:
+        original = {
+            "urls": [
+                "ssh://git@github.com/org/repo.git",
+                "https://oauth2@gitlab.com/o/r.git",
+                "https://alice@example.org/",
+                "https://administratoraccount@example.org/",
+                "https://x-access-token@github.com/o/r.git",
+            ],
+            "message": "A digital github repository by Malice; git, alice and oauth2",
+        }
+        self.assertEqual(redact_data(original), original)
+
+    def test_authority_password_pair_is_redacted_for_any_user_including_schemes(self) -> None:
+        result = redact_data(
+            {
+                "log": "https://x-access-token:SECRETVALUE123@github.com/o/r.git "
+                "https://mailto:privatepass@example.org/",
+                "message": "x-access-token SECRETVALUE123 privatepass mailto",
+            }
+        )
+        self.assertEqual(
+            result["log"],
+            "https://" + REDACTED + "@github.com/o/r.git https://" + REDACTED + "@example.org/",
+        )
+        self.assertEqual(
+            result["message"], "x-access-token " + REDACTED + " " + REDACTED + " mailto"
+        )
+
+    def test_userinfo_password_is_secret_but_username_and_scheme_are_not(self) -> None:
+        result = redact_data(
+            {
+                "log": "Cloning https://git:hunter2@example.org/repo.git",
+                "message": "A digital github repository by Malice; user git; password hunter2",
+            }
+        )
+        self.assertEqual(result["log"], "Cloning https://" + REDACTED + "@example.org/repo.git")
+        self.assertEqual(
+            result["message"],
+            "A digital github repository by Malice; user git; password " + REDACTED,
+        )
+
+    def test_short_secrets_are_replaced_only_at_token_boundaries(self) -> None:
+        result = redact_data(
+            {
+                "settings": {"password": "git"},
+                "message": "A digital github repository; git, (git) and git.tex; Malice",
+            }
+        )
+        self.assertEqual(
+            result["message"],
+            "A digital github repository; "
+            + ", ".join([REDACTED, "(" + REDACTED + ")"])
+            + " and "
+            + REDACTED
+            + ".tex; Malice",
+        )
+        # Secrets of eight or more characters are still replaced inside other text.
+        long_result = redact_data({"password": "PrivateWord", "log": "xPrivateWordy"})
+        self.assertEqual(long_result["log"], "x" + REDACTED + "y")
 
     def test_private_key_blocks_and_truncated_blocks_hide_body_and_repeats(self) -> None:
         body = "MIIExamplePrivateBody9876543210+/="

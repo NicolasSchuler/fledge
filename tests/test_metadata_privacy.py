@@ -155,6 +155,22 @@ class MetadataPrivacyTests(unittest.TestCase):
             with patch("latexprep.metadata_privacy.MAX_COMMANDS", 1):
                 self.assertTrue(has_blockers(plan_metadata_sanitization(root, options).findings))
 
+    def test_conditionals_only_block_the_declarations_they_enclose(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "main.tex").write_text(
+                "\\newif\\ifanonymous\\anonymousfalse\n"
+                "\\iftrue\\usepackage{graphicx}\\fi\n"
+                "\\author{Alice}\n"
+                "\\begin{document}Body\\end{document}\n"
+            )
+            options = MetadataPrivacyOptions(
+                edits=(MetadataEdit("main.tex", "author", "Alice", "Anonymous"),)
+            )
+            plan = plan_metadata_sanitization(root, options)
+            self.assertFalse(has_blockers(plan.findings), plan.findings)
+            self.assertIn(b"\\author{Anonymous}", plan.contents["main.tex"])
+
     def test_final_pdf_recheck_requires_evidence_and_selected_values(self):
         options = MetadataPrivacyOptions(
             edits=(
@@ -230,6 +246,22 @@ def exif(value, *, tag=0x013B, kind=2):
     )
 
 
+def iptc(dataset, value, record=2):
+    return b"\x1c" + bytes([record, dataset]) + struct.pack(">H", len(value)) + value
+
+
+def photoshop(*datasets):
+    payload = b"".join(datasets)
+    return (
+        b"Photoshop 3.0\0"
+        + b"8BIM"
+        + struct.pack(">HBB", 0x0404, 0, 0)
+        + struct.pack(">I", len(payload))
+        + payload
+        + b"\0" * (len(payload) % 2)
+    )
+
+
 def jpeg(*segments):
     return (
         b"\xff\xd8"
@@ -288,9 +320,7 @@ class ImageMetadataTests(unittest.TestCase):
             (png((b"zTXt", b"Author\0\0invalid deflate")), ".png"),
             (png((b"iTXt", b"Author\0\0\0en\0\0\xff")), ".png"),
             (png((b"eXIf", cyclic_exif)), ".png"),
-            (jpeg((0xE1, b"Exif\0\0" + exif("Vendor note", tag=0x927C, kind=7))), ".jpg"),
-            (jpeg((0xE1, b"http://ns.adobe.com/xmp/extension/\0data")), ".jpg"),
-            (jpeg((0xED, b"Photoshop unsupported IPTC")), ".jpg"),
+            (jpeg((0xE1, b"http://ns.adobe.com/other/\0data")), ".jpg"),
             (b"\xff\xd8\xff\xda", ".jpg"),
             (jpeg() + b"trailer", ".jpg"),
         )
@@ -308,6 +338,61 @@ class ImageMetadataTests(unittest.TestCase):
                 (b"zTXt", b"b\0\0" + zlib.compress(b"B" * 40)),
             )
             self.assertEqual(self.scan(repeated).status, "inconclusive")
+
+    def test_vendor_blocks_are_limitations_rather_than_an_unusable_scan(self):
+        text = b"Alice Researcher"
+        camera = jpeg(
+            (
+                0xE1,
+                b"Exif\0\0"
+                + b"II\x2a\0"
+                + struct.pack("<I", 8)
+                + struct.pack("<H", 2)
+                + struct.pack("<HHI", 0x013B, 2, len(text) + 1)
+                + struct.pack("<I", 38)
+                + struct.pack("<HHI", 0x927C, 7, 8)
+                + b"\0" * 4
+                + struct.pack("<I", 0)
+                + text
+                + b"\0",
+            )
+        )
+        found = self.scan(camera, ".jpg")
+        self.assertEqual(found.status, "failed")
+        self.assertFalse(found.details["incomplete"])
+        self.assertEqual(
+            found.details["limitations"],
+            [{"path": "figure.jpg", "skipped": "EXIF MakerNote (vendor binary)"}],
+        )
+        self.assertNotIn(text.decode(), str(found))
+        clean = self.scan(camera, ".jpg", terms=("Bob Author",))
+        self.assertEqual(clean.status, "passed")
+        self.assertTrue(clean.details["limitations"])
+        self.assertFalse(clean.details["incomplete"])
+        for data in (
+            jpeg((0xED, b"Photoshop unsupported IPTC")),
+            jpeg((0xED, photoshop(iptc(0x50, b"\xff\xfe")))),
+            jpeg((0xED, photoshop(iptc(0x50, text, record=1)))),
+        ):
+            with self.subTest(data=data[:30]):
+                result = self.scan(data, ".jpg")
+                self.assertEqual(result.status, "passed")
+                self.assertFalse(result.details["incomplete"])
+
+    def test_iptc_application_records_and_extended_xmp_are_scanned(self):
+        text = b"Alice Researcher"
+        iim = jpeg((0xED, photoshop(iptc(0x00, b"\0\x04"), iptc(0x50, text))))
+        result = self.scan(iim, ".jpg")
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(
+            result.details["matches"],
+            [{"path": "figure.jpg", "channel": "JPEG IPTC 2:080", "term_index": 1}],
+        )
+        self.assertNotIn(text.decode(), str(result))
+        extended = jpeg(
+            (0xE1, b"http://ns.adobe.com/xmp/extension/\0" + b"a" * 32 + b"<x>" + text + b"</x>")
+        )
+        self.assertEqual(self.scan(extended, ".jpg").status, "failed")
 
     def test_default_no_scan_and_symlinks_never_prove_absence(self):
         with tempfile.TemporaryDirectory() as directory:

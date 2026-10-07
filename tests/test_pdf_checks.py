@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import tempfile
 import unittest
 from dataclasses import replace
@@ -19,6 +18,7 @@ from latexprep.pdf_checks import (
 )
 from latexprep.runtime import CommandResult, RuntimeLimits, ToolRunner
 from latexprep.scheduler import ResourceBudget
+from tests.support import live_tests_enabled
 
 
 def geometry(*, pages: int = 1, rotation: int = 0, crop: str = "0 0 612 792") -> str:
@@ -316,6 +316,24 @@ class PdfDetailTests(unittest.IsolatedAsyncioTestCase):
         await self.assert_status(options, "inconclusive", raster=blank[:-1])
         self.assertEqual(await self.check(replace(options, sparse_page_exemptions=(1,))), [])
 
+    async def test_documents_beyond_the_rendering_cap_keep_non_rendering_checks(self) -> None:
+        many = geometry(pages=301)
+        result = await self.check(
+            PdfCheckOptions(required_metadata=("Title",), min_page_ink_ratio=0.1),
+            DetailRunner(info="Pages: 301\nTitle: Paper\n", geometry=many),
+        )
+        states = {finding.rule: finding.status for finding in result}
+        self.assertEqual(states["pdf.required_metadata"], "passed")
+        sparse = next(finding for finding in result if finding.rule == "pdf.sparse_pages")
+        self.assertEqual(sparse.status, "inconclusive")
+        self.assertIn("supports at most 300 pages", sparse.message)
+        self.assertEqual(len([f for f in result if f.rule == "pdf.sparse_pages"]), 1)
+        unreadable = await self.check(
+            PdfCheckOptions(required_metadata=("Title",)),
+            DetailRunner(info="Pages: 5001\nTitle: Paper\n"),
+        )
+        self.assertEqual([item.status for item in unreadable], ["inconclusive"])
+
     async def test_raster_preflight_and_partial_output_cleanup_bound_artifacts(self) -> None:
         options = PdfCheckOptions(min_page_ink_ratio=0.1)
         runner = DetailRunner(raster=gray_raster()[:-1])
@@ -417,9 +435,10 @@ class PdfDetailTests(unittest.IsolatedAsyncioTestCase):
         for state, fonts in (
             ("passed", "Font Type 1 Builtin yes yes no 3 0\n"),
             ("failed", "Font Type 3 Custom no no no 3 0\n"),
-            ("inconclusive", ""),
+            # pdffonts keeps the original spacing inside the type column.
+            ("failed", "Font Type  3 Custom yes yes no 3 0\n"),
         ):
-            with self.subTest(state=state):
+            with self.subTest(state=state, fonts=fonts):
                 result = await inspect_included_pdf_figures(
                     (self.pdf,),
                     self.work(),
@@ -429,6 +448,29 @@ class PdfDetailTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(result[0].status, state)
                 self.assertEqual(result[0].path, str(self.pdf))
                 self.assertIn("attribution is not established", result[0].details["scope"])
+
+    async def test_figure_without_font_resources_has_nothing_to_embed(self) -> None:
+        for options in (
+            PdfCheckOptions(require_embedded_figure_fonts=True),
+            PdfCheckOptions(forbid_type3_figure_fonts=True),
+            PdfCheckOptions(require_embedded_figure_fonts=True, forbid_type3_figure_fonts=True),
+        ):
+            with self.subTest(options=options):
+                result = await inspect_included_pdf_figures(
+                    (self.pdf,),
+                    self.work(),
+                    DetailRunner(fonts="name type encoding emb sub uni object ID\n---\n"),
+                    options=options,
+                )
+                self.assertEqual(len(result), 1)
+                finding = result[0]
+                self.assertEqual((finding.severity, finding.status), ("info", "passed"))
+                self.assertEqual(
+                    finding.message, "No font resources in this figure; nothing to embed."
+                )
+                self.assertEqual(finding.details["font_count"], 0)
+                self.assertFalse(finding.details["incomplete"])
+                self.assertEqual(finding.path, str(self.pdf))
 
     async def test_stroke_width_applies_transform_and_rejects_hairline_or_anisotropic_measurements(
         self,
@@ -544,9 +586,7 @@ class PdfDetailTests(unittest.IsolatedAsyncioTestCase):
         async with budget.lease("after cancellation", memory_mb=128):
             pass
 
-    @unittest.skipUnless(
-        os.environ.get("LATEX_PREP_RUN_INTEGRATION") == "1", "Opt-in live PDF tools"
-    )
+    @unittest.skipUnless(live_tests_enabled(), "Opt-in live PDF tools")
     async def test_live_poppler_geometry_metadata_and_raster_measurements(self) -> None:
         self.pdf.write_bytes(simple_pdf())
         runner = ToolRunner(RuntimeLimits(timeout_seconds=30, memory_mb=512))

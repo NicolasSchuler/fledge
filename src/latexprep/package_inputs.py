@@ -19,9 +19,11 @@ def select_package_inputs(
 ) -> tuple[list[Change], list[Finding]]:
     """Copy supported literal and observed inputs plus explicit retained files.
 
-    A missing trace is different from an empty dependency set. The caller must
-    reject error findings; no partially selected destination is made on failure.
-    The subsequent exact archive rebuild remains required.
+    A missing trace is different from an empty dependency set. An incomplete
+    literal graph is advisory once the trace is complete, because the recorded
+    inputs are direct evidence. The caller must reject error findings; no
+    partially selected destination is made on failure. The subsequent exact
+    archive rebuild remains required.
     """
     findings: list[Finding] = []
     if observed is None or main not in observed:
@@ -36,17 +38,37 @@ def select_package_inputs(
         ]
     analysis = analyze_selected_sources(root, main)
     if not analysis.complete:
-        return [], [
-            *analysis.findings,
+        # Recorded inputs are direct evidence of what this build read, so an
+        # incomplete literal graph only widens the selection; the exact archive
+        # rebuild still verifies the result.
+        findings.extend(
+            Finding(
+                item.rule,
+                item.message,
+                "warning",
+                item.status,
+                path=item.path,
+                line=item.line,
+                evidence=item.evidence,
+                suggestion=item.suggestion,
+                details=item.details,
+            )
+            for item in analysis.findings
+            if item.status == "inconclusive"
+        )
+        findings.append(
             Finding(
                 "package.dependencies",
-                "The selected source dependency graph is incomplete or ambiguous.",
-                "error",
+                "The literal source dependency graph is incomplete or ambiguous; "
+                "the recorded build inputs were used to select this document's files.",
+                "warning",
                 "inconclusive",
-                suggestion="Resolve unsupported or ambiguous file references before preparing.",
-            ),
-        ]
+                suggestion="Review the source diagnostics above; "
+                "the rebuilt archive verifies the selected input set.",
+            )
+        )
     included = analysis.dependencies | observed | explicit
+    unusable: list[Finding] = []
     for name in sorted(included):
         cancellation_point()
         relative = PurePosixPath(name)
@@ -60,7 +82,7 @@ def select_package_inputs(
             or not path.is_file()
             or not path.resolve().is_relative_to(root.resolve())
         ):
-            findings.append(
+            unusable.append(
                 Finding(
                     "package.dependencies",
                     "A required input or explicit retained file is missing or unsafe.",
@@ -70,8 +92,8 @@ def select_package_inputs(
                     suggestion="Supply the project-relative file and repeat preparation.",
                 )
             )
-    if findings:
-        return [], findings
+    if unusable:
+        return [], [*findings, *unusable]
     files = {path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file()}
     changes = [
         Change(name, "exclude", "Not needed by the selected document or explicitly retained.")

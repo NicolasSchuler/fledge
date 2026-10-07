@@ -128,6 +128,21 @@ class AuthorRecordTests(unittest.TestCase):
             with self.subTest(source=source):
                 self.assertEqual(self.check(source)[0].status, "inconclusive")
 
+    def test_defined_conditional_names_do_not_block_author_records(self) -> None:
+        result = self.check(
+            "\\newif\\ifanonymous\\anonymousfalse\n"
+            "\\author{Ada}\\affiliation{Lab A}\\email{ada@example.org}"
+        )[0]
+        self.assertEqual(result.status, "passed", result.details["uncertainty"])
+
+    def test_failed_author_records_report_counts_and_locations(self) -> None:
+        result = self.check("\\author{Ada}\\affiliation{Lab A}\n\\author{Grace}")[0]
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(
+            result.message,
+            "2 of 2 literal author records lack a configured field: main.tex:2, main.tex:3.",
+        )
+
     def test_option_schema_is_explicit_and_frozen(self) -> None:
         parsed = read_options(
             StructureOptions,
