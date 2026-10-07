@@ -1,0 +1,5 @@
+/* Let long configuration keys wrap within the surrounding prose. */
+div.body code.literal > span.pre {
+    white-space: normal;
+    overflow-wrap: anywhere;
+}

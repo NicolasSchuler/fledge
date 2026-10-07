@@ -13,5 +13,5 @@ html_title = "Fledge"
 html_show_copyright = False
 html_logo = "_static/logo.png"
 html_static_path = ["_static"]
-html_css_files = ["logo.css"]
+html_css_files = ["logo.css", "layout.css"]
 html_context = {"logo_alt": "Fledge logo: an ink-blue origami swallow with an orange fold"}
