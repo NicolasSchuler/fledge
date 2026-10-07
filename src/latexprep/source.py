@@ -125,6 +125,9 @@ _UNSUPPORTED_COMMANDS = {
     "catcode",
     "scantokens",
     "csname",
+    "directlua",
+    "luadirect",
+    "luaexec",
 }
 _FONT_COMMANDS = {
     "setmainfont",
@@ -226,6 +229,8 @@ class SourceAnalysis:
     main: str | None
     findings: list[Finding] = field(default_factory=list)
     dependencies: set[str] = field(default_factory=set)
+    # Completeness is bounded by the supported literal subset, not arbitrary TeX execution.
+    complete: bool = False
 
 
 @dataclass
@@ -525,7 +530,9 @@ def _items(arg: _Argument, multiple: bool) -> list[_Argument]:
 
 
 class _Inspection:
-    def __init__(self, root: Path, main: str | None):
+    def __init__(self, root: Path, main: str | None, *, selected_only: bool = False):
+        if selected_only and main is None:
+            raise PreparationError("Selected source analysis requires an explicit main file.")
         self.root = root.resolve()
         self.files = _inventory(root)
         self.known_paths: set[str] = set()
@@ -550,19 +557,15 @@ class _Inspection:
         self._parsed_commands = 0
         self._unparsed: set[str] = set()
         self._events = 0
-        for name, path in self.files.items():
-            cancellation_point()
-            if path.is_symlink():
-                self._uncertain(
-                    "source-link",
-                    "Symbolic links are outside the supported source subset.",
-                    name,
-                    suggestion="Supply the actual project file inside the project.",
-                )
-            elif path.suffix.lower() in _SOURCE_SUFFIXES or name.endswith(
-                (".pdf_tex", ".eps_tex", ".pstex_t")
-            ):
-                self._load(name)
+        if not selected_only:
+            for name, path in self.files.items():
+                cancellation_point()
+                if (
+                    path.is_symlink()
+                    or path.suffix.lower() in _SOURCE_SUFFIXES
+                    or name.endswith((".pdf_tex", ".eps_tex", ".pstex_t"))
+                ):
+                    self._load(name)
         self.roots = [
             name
             for name, source in self.sources.items()
@@ -575,6 +578,12 @@ class _Inspection:
             self._visit(self.main, (), ())
         else:
             self.cwd = ""
+        if selected_only:
+            self.roots = [
+                name
+                for name, source in self.sources.items()
+                if Path(name).suffix.lower() in _ROOT_SUFFIXES and _is_root(source.commands)
+            ]
         self._source_checks()
 
     def _uncertain(
@@ -607,6 +616,12 @@ class _Inspection:
         self._unparsed.add(name)
         path = self.files[name]
         if path.is_symlink():
+            self._uncertain(
+                "source-link",
+                "Symbolic links are outside the supported source subset.",
+                name,
+                suggestion="Supply the actual project file inside the project.",
+            )
             return None
         size = path.stat().st_size
         if size > MAX_SOURCE_BYTES or self._source_bytes + size > MAX_TOTAL_SOURCE_BYTES:
@@ -923,6 +938,9 @@ class _Inspection:
                 if path in self.files and not self.files[path].is_symlink()
             }
         )
+        for candidate in candidates:
+            if candidate in self.files and self.files[candidate].is_symlink():
+                self._load(candidate)
         if len(found) > 1:
             self._error(
                 "source-ambiguous-dependency",
@@ -1325,7 +1343,31 @@ def analyze_sources(root: Path, main: str | None = None) -> SourceAnalysis:
     """Inspect a selected root and report literal dependencies without editing files."""
     inspection = _Inspection(root, main)
     return SourceAnalysis(
-        inspection.roots, inspection.main, inspection.findings, inspection.dependencies
+        inspection.roots,
+        inspection.main,
+        inspection.findings,
+        inspection.dependencies,
+        complete=bool(inspection.main in inspection.visited)
+        and not inspection.uncertainties
+        and not any(finding.severity == "error" for finding in inspection.findings),
+    )
+
+
+def analyze_selected_sources(root: Path, main: str) -> SourceAnalysis:
+    """Inspect only sources reached from an explicit main, leaving other sources unread.
+
+    Dependencies and completeness describe the supported literal subset. Runtime
+    input evidence and isolated rebuild verification remain necessary for packaging.
+    """
+    inspection = _Inspection(root, main, selected_only=True)
+    return SourceAnalysis(
+        inspection.roots,
+        inspection.main,
+        inspection.findings,
+        inspection.dependencies,
+        complete=bool(inspection.main in inspection.visited)
+        and not inspection.uncertainties
+        and not any(finding.severity == "error" for finding in inspection.findings),
     )
 
 

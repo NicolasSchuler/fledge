@@ -68,7 +68,9 @@ python -m build
 This creates a wheel and source archive in `dist/`; it does not publish them.
 The wheel installs the CLI. The source archive also carries the documentation,
 examples, tests, architecture, requirements, and benchmark script, so it can be
-used to build these docs and run the documented source checks.
+used to build these docs and run the documented source checks. It also includes
+the opt-in macOS installer; installer tests use controlled commands, not native
+Homebrew or MacTeX installation.
 
 ## Design and planning references
 

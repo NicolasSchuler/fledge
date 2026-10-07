@@ -7,8 +7,11 @@ architecture are available in the [development and design references](developmen
 
 ## Run locally
 
-Python 3.11 or later is required. The CLI uses Click and Rich. Install the local
-package and its declared Python dependencies into a virtual environment:
+For macOS setup, start with `bash install.sh`; see [installation](installation.md)
+for its confirmation flow and tool requirements. The commands below describe the
+manual development route. Python 3.11 or later is required; the CLI uses Click
+and Rich. Install the local package and its declared Python dependencies into a
+virtual environment:
 
 ```sh
 python3 -m venv .venv
@@ -23,7 +26,8 @@ latex-prep prepare examples/nested-paper \
 
 Alternatively, install the local package with your Python package manager
 (`uv tool install .`, for example) to expose the `latex-prep` executable.
-The application never installs tools automatically.
+Preparation commands never install tools automatically; the separate installer
+handles explicitly confirmed setup.
 
 Builds require `latexmk`, the selected TeX engine and its bibliography tools.
 PDF checks use Poppler's `pdfinfo`, `pdftotext`, `pdftoppm`, `pdffonts`,
@@ -63,7 +67,7 @@ adapters have controlled-output tests rather than live-tool validation.
 | PDF | Page/text/region and artwork measurements, explicit heading expectations, bounded Type 3/structure checks, configured contrast samples, grayscale previews and text/render comparisons |
 | Privacy and bundle | Configured identity scans, bounded image-metadata scans, guarded source metadata edits and final-PDF rechecks; filename/type/deliverable/size/template policies |
 | Online references | Separately enabled DOI, Crossref metadata/candidate/notice and public-link checks with request limits; no automatic corrections |
-| Packaging | Explicit independent document selections; deterministic ZIP, fresh extraction and rebuild for each; all selected packages must verify before release |
+| Packaging | Build-traced and literal dependencies plus explicit extra deliverables; independent document selections; deterministic ZIP, fresh extraction and rebuild for each; all selected packages must verify before release |
 | Interface | CLI and standalone PDF inspection; terminal/compact/JSON/HTML/CI reports, scoped review decisions, unverified diagnostic exports and a rule catalogue |
 | Concurrency | Shared CPU/memory/build/render admission; overlapping PDF branches and inventories; bounded page-pair and formatting workers; serial mode |
 
@@ -85,10 +89,31 @@ only when explicitly selected. Noncompiled deliverables receive their configured
 file checks; their content adequacy and separate delivery are not inferred.
 
 The output path must be new and outside the input. Reports and the delivered PDF
-are outside the source ZIP. Unknown source/data files are retained; this release
-does not infer that an unobserved file is globally unused.
+are outside the source ZIP. Each package contains the selected document's needed
+project inputs plus explicitly configured extra deliverables and template files.
+Unrelated drafts, images, and data are omitted from staging; originals are untouched.
 Source, manuscript and bibliography policies are checked again on the extracted
 archive so that transformed filenames or content cannot bypass a configured rule.
+
+### How package contents are selected
+
+Preparation combines complete, bounded build traces with the selected literal
+source-dependency graph. It first selects inputs needed for the requested
+transformations, retaining an explicitly selected bibliography-inlining `.bbl`
+when applicable. After transformations it recomputes the final input set before
+archiving; flattening applies to the reduced project. Missing or incomplete build
+traces and ambiguous static dependency evidence block preparation.
+
+This is dependency-based packaging for the selected build, not proof of a globally
+smallest bundle or of every possible TeX execution. The exact archive must still
+rebuild and pass the required text/render comparisons before release.
+
+**Changed default:** preparation no longer retains every unknown source/data file.
+Use `submission_checks.required_deliverables` for extra files that must ship;
+project-side `template_references` files are also retained. Their paths refer to
+the input project and follow its filename map when flattened. For independent
+documents, `include` restricts candidate inputs but does not force all matches
+into the final ZIP. See [package contents](configuration.md#package-contents).
 
 ## Commands and configuration
 
@@ -107,8 +132,9 @@ paper and supplements independently.
 
 Use `--layout flat` to flatten sources automatically, `--format` to run tex-fmt,
 and `--normalize-doi` to normalize recognized literal DOI prefixes. These operations
-are opt-in. Conservative auxiliary-file cleanup is enabled by default; use
-`--no-cleanup` to disable it. Further transformations require their own explicit
+are opt-in. Conservative preliminary auxiliary-file cleanup is enabled by default;
+`--no-cleanup` disables only that preliminary step. Dependency selection remains
+mandatory and still omits unrelated files. Further transformations require their own explicit
 settings; duplicate hints do not authorize a merge, and online evidence does not
 authorize metadata edits. All prepared changes pass through the configured PDF
 preservation gate and exact archive-rebuild verification.
@@ -170,9 +196,10 @@ and follow those files through flattening. A required PDF/ZIP deliverable is che
 signature, and a text deliverable by bounded UTF-8 decoding. Presence does not
 verify its content, a separate upload or an independent supplementary build.
 To require an independent supplementary build, select it in `workflow.documents`.
-During `prepare`, filename/type/deliverable policies are checked after the
-selected cleanup and flattening operations, then rechecked on the exact archive
-extraction. Supply the intended output paths for required deliverables.
+During `prepare`, filename/type/deliverable policies are checked after dependency
+selection and flattening, then rechecked on the exact archive extraction. Supply
+source-relative paths for required deliverables; flattening remaps them for the
+prepared and extracted checks.
 
 Online checks require both an individual switch, such as
 `online_checks.online_metadata = true`, and network permission through
@@ -267,8 +294,9 @@ latex-prep prepare ./paper --output /tmp/prepared-paper \
   --jobs 4 --render-jobs 2 --job-timeout-seconds 600
 ```
 
-Baseline PDF analysis begins when the build finishes; independent source checks
-can continue. PDF inventories, comparison sides and final verification branches
+For `check`, baseline PDF analysis can begin while source checks continue.
+For `prepare`, source checks and PDF analysis wait for baseline dependency
+selection. PDF inventories, comparison sides and final verification branches
 overlap. Page pairs and source-formatting files use bounded workers. Each file's
 two formatting passes and each pair's two renders remain ordered. The baseline,
 transformation, prepared build and archive rebuild gates remain ordered, and

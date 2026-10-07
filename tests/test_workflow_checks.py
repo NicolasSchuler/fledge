@@ -46,6 +46,7 @@ async def controlled_build(tree, main, work, engine, runner):
         success=True,
         pdf=pdf,
         dependencies={main},
+        submission_inputs={main},
         command=["controlled-build"],
         recorder_complete=True,
         loaded_packages=[

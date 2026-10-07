@@ -28,7 +28,13 @@ async def build(tree, main, work, engine, runner):
     pdf = work / "built.pdf"
     pdf.write_bytes(b"%PDF-1.4\ncontrolled orchestration fixture\n")
     return SimpleNamespace(
-        success=True, pdf=pdf, findings=[], dependencies={"main.tex"}, tools={}, command=[]
+        success=True,
+        pdf=pdf,
+        findings=[],
+        dependencies={main},
+        submission_inputs={main},
+        tools={},
+        command=[],
     )
 
 
@@ -224,7 +230,8 @@ class ParallelWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(stopped.is_set())
         self.assertEqual(report.outcome, "blocked")
         self.assertTrue(any(f.rule == "execution.deadline" for f in report.findings))
-        self.assertTrue(any(f.code == "TEX001" for f in report.findings))
+        stages = {stage["name"]: stage["status"] for stage in report.stages}
+        self.assertEqual(stages["source checks"], "cancelled")
         self.assertEqual(report.execution["resources"]["active_cpu"], 0)
         self.assertEqual(report.execution["resources"]["queued"], 0)
 

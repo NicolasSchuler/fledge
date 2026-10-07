@@ -29,6 +29,7 @@ from .metadata_privacy import (
 )
 from .models import Finding, PreparationError, Report, has_blockers
 from .online_checks import check_online_references
+from .package_inputs import select_package_inputs
 from .pdf import compare_pdfs, inspect_pdf
 from .project import ImportLimits, create_archive, import_project, plan_cleanup
 from .reporting import apply_reviews, has_unaccepted_blockers
@@ -310,6 +311,7 @@ def _transform_sources(
     selected: str,
     settings: Settings,
     dependencies: set[str],
+    retained: set[str],
 ) -> tuple[Path, str, list, list[Finding], dict[str, str]]:
     prepared = work / "prepared"
     shutil.copytree(snapshot, prepared)
@@ -318,10 +320,14 @@ def _transform_sources(
     path_mapping: dict[str, str] = {}
     cancellation_point()
     if settings.cleanup:
-        protected = dependencies | (
-            {settings.source_transforms.inline_bibliography}
-            if settings.source_transforms.inline_bibliography
-            else set()
+        protected = (
+            dependencies
+            | retained
+            | (
+                {settings.source_transforms.inline_bibliography}
+                if settings.source_transforms.inline_bibliography
+                else set()
+            )
         )
         cleanup = plan_cleanup(prepared, protected)
         for change in cleanup:
@@ -366,9 +372,23 @@ def _transform_sources(
                 ):
                     raise PreparationError("Source changed after removal was planned")
             _apply_contents(prepared, plan.contents, originals=plan.originals)
-            for name in sorted(plan.removals):
+            for name in sorted(plan.removals - retained):
                 cancellation_point()
                 (prepared / name).unlink()
+            changes = [
+                change
+                for change in changes
+                if not (change.kind == "exclude" and change.path in retained)
+            ]
+    return prepared, selected, changes, findings, path_mapping
+
+
+def _flatten_sources(
+    prepared: Path, work: Path, selected: str, settings: Settings
+) -> tuple[Path, str, list, list[Finding], dict[str, str]]:
+    changes = []
+    findings: list[Finding] = []
+    path_mapping: dict[str, str] = {}
     if settings.layout == "flat" and not has_blockers(findings):
         flatten = plan_flatten(
             prepared, selected, filename_overrides=settings.source_transforms.filename_overrides
@@ -473,7 +493,11 @@ async def _run_in_workspace(
         report.outcome = _outcome(report, settings)
         return None
 
-    roots = await _thread_operation(budget, "discover roots", discover_roots, snapshot)
+    roots = (
+        []
+        if settings.main
+        else await _thread_operation(budget, "discover roots", discover_roots, snapshot)
+    )
     selected = settings.main
     if selected is None and len(roots) == 1:
         selected = roots[0]
@@ -495,6 +519,14 @@ async def _run_in_workspace(
     if selected is not None:
         selected = Path(selected).as_posix()
     report.main = selected
+    baseline_source = snapshot
+    retained = {
+        name
+        for name, _ in (
+            *request.settings.submission_checks.required_deliverables,
+            *request.settings.submission_checks.template_references,
+        )
+    }
     completed: dict[str, TaskResult] = {}
 
     def collect_task(result: TaskResult) -> None:
@@ -513,6 +545,9 @@ async def _run_in_workspace(
                 "queue_seconds": result.queue_seconds,
             }
         )
+        if result.name == "select preparation inputs" and result.value is not None:
+            _record_findings(report, result.value, result.name)
+            return
         if result.status != "succeeded":
             report.findings.append(
                 Finding("execution.task", f"{result.name}: {result.error}", "error", "inconclusive")
@@ -627,7 +662,7 @@ async def _run_in_workspace(
             0,
             Task(
                 "baseline build",
-                lambda: _build(snapshot, selected, work / "baseline", settings, runner),
+                lambda: _build(baseline_source, selected, work / "baseline", settings, runner),
                 memory_mb=settings.build_memory_mb,
                 kind="build",
                 is_success=lambda value: value.success and value.pdf is not None,
@@ -665,6 +700,48 @@ async def _run_in_workspace(
                     memory_mb=0,
                 )
             )
+    if request.command == "prepare" and selected:
+
+        async def select_initial_inputs() -> list[Finding]:
+            nonlocal snapshot
+            baseline_build = completed["baseline build"].value
+            destination = work / "selected-inputs"
+            explicit = retained | (
+                {settings.source_transforms.inline_bibliography}
+                if settings.source_transforms.inline_bibliography
+                else set()
+            )
+            changes, findings = await _thread_operation(
+                budget,
+                "select preparation inputs",
+                select_package_inputs,
+                baseline_source,
+                destination,
+                selected,
+                getattr(baseline_build, "submission_inputs", None),
+                explicit,
+            )
+            report.changes.extend(changes)
+            if not has_blockers(findings):
+                snapshot = destination
+            return findings
+
+        tasks = [
+            task
+            if task.name == "baseline build"
+            else replace(task, requires=(*task.requires, "select preparation inputs"))
+            for task in tasks
+        ]
+        tasks.append(
+            Task(
+                "select preparation inputs",
+                select_initial_inputs,
+                requires=("baseline build",),
+                cpu=0,
+                memory_mb=0,
+                is_success=lambda findings: not has_blockers(findings),
+            )
+        )
     results = await scheduler.execute(tasks)
     if request.command == "inspect":
         report.scope = "source and bibliography checks; compilation and PDF checks not run"
@@ -683,7 +760,7 @@ async def _run_in_workspace(
                 f"repeat baseline {attempt}", memory_mb=settings.build_memory_mb, kind="build"
             ):
                 repeated = await _build(
-                    snapshot, selected, work / f"baseline-{attempt}", settings, runner
+                    baseline_source, selected, work / f"baseline-{attempt}", settings, runner
                 )
             _collect_build(report, repeated, f"baseline repeat {attempt}", settings)
             if not repeated.success or repeated.pdf is None:
@@ -732,16 +809,10 @@ async def _run_in_workspace(
         selected,
         settings,
         dependencies,
+        retained,
     )
     report.changes.extend(changes)
     report.findings.extend(findings)
-    prepared_submission = replace(
-        _source_submission_options(settings),
-        template_references=tuple(
-            (path_mapping.get(name, name), reference)
-            for name, reference in settings.submission_checks.template_references
-        ),
-    )
     if settings.format and not _blocked(report, settings):
         formatted = await format_project(
             prepared, work / "format-prepare", runner, settings, budget=budget
@@ -763,6 +834,83 @@ async def _run_in_workspace(
     if _blocked(report, settings):
         report.outcome = "blocked"
         return None
+    if request.dry_run:
+        report.scope = (
+            "preparation plan; baseline inputs selected and transformations previewed; "
+            "final input selection, layout and bundle not verified"
+        )
+        report.outcome = "planned"
+        return None
+
+    async def build_stage(tree: Path, directory: str, stage: str) -> BuildResult:
+        emit(f"Rebuilding {stage} sources")
+        async with budget.lease(f"{stage} build", memory_mb=settings.build_memory_mb, kind="build"):
+            result = await _build(tree, selected, work / directory, settings, runner)
+        _collect_build(report, result, stage, settings)
+        if result.success and getattr(result, "submission_inputs", None) is None:
+            _record_findings(
+                report,
+                [
+                    Finding(
+                        "package.dependencies",
+                        "Complete build dependency evidence is unavailable.",
+                        "error",
+                        "inconclusive",
+                        suggestion="Resolve the submission dependency diagnostic and retry.",
+                    )
+                ],
+                stage,
+            )
+        if settings.build_checks.check_local_package_shadows:
+            _record_findings(
+                report,
+                await check_local_package_shadows(
+                    result, work / f"shadows-{stage}", runner, budget=budget
+                ),
+                stage,
+            )
+        return result
+
+    staged = await build_stage(prepared, "transformed-build", "transformed")
+    if not staged.success or staged.pdf is None:
+        report.outcome = "blocked"
+        return None
+    emit("Selecting the transformed document's inputs for submission")
+    shipment = work / "shipment"
+    changes, findings = await _thread_operation(
+        budget,
+        "select submission inputs",
+        select_package_inputs,
+        prepared,
+        shipment,
+        selected,
+        getattr(staged, "submission_inputs", None),
+        retained,
+    )
+    report.changes.extend(changes)
+    _record_findings(report, findings, "select submission inputs")
+    if _blocked(report, settings):
+        report.outcome = "blocked"
+        return None
+    prepared, selected, changes, findings, path_mapping = await _thread_operation(
+        budget, "flatten selected inputs", _flatten_sources, shipment, work, selected, settings
+    )
+    report.changes.extend(changes)
+    report.findings.extend(findings)
+    if _blocked(report, settings):
+        report.outcome = "blocked"
+        return None
+    prepared_submission = replace(
+        _source_submission_options(settings),
+        required_deliverables=tuple(
+            (path_mapping.get(name, name), kind)
+            for name, kind in settings.submission_checks.required_deliverables
+        ),
+        template_references=tuple(
+            (path_mapping.get(name, name), reference)
+            for name, reference in settings.submission_checks.template_references
+        ),
+    )
     _record_findings(
         report,
         await _thread_operation(
@@ -778,32 +926,11 @@ async def _run_in_workspace(
     if _blocked(report, settings):
         report.outcome = "blocked"
         return None
-    if request.dry_run:
-        report.scope = (
-            "preparation plan; baseline built, transformations previewed, no bundle verified"
-        )
-        report.outcome = "planned"
-        return None
-
-    async def build_stage(tree: Path, directory: str, stage: str) -> BuildResult:
-        emit(f"Rebuilding {stage} sources")
-        async with budget.lease(f"{stage} build", memory_mb=settings.build_memory_mb, kind="build"):
-            result = await _build(tree, selected, work / directory, settings, runner)
-        _collect_build(report, result, stage, settings)
-        if settings.build_checks.check_local_package_shadows:
-            _record_findings(
-                report,
-                await check_local_package_shadows(
-                    result, work / f"shadows-{stage}", runner, budget=budget
-                ),
-                stage,
-            )
-        return result
-
-    staged = await build_stage(prepared, "staged-build", "prepared")
-    if not staged.success or staged.pdf is None:
-        report.outcome = "blocked"
-        return None
+    if settings.layout == "flat":
+        staged = await build_stage(prepared, "staged-build", "prepared")
+        if not staged.success or staged.pdf is None:
+            report.outcome = "blocked"
+            return None
     _record_findings(
         report,
         await compare_pdfs(
@@ -1007,7 +1134,12 @@ async def _run_documents(
             child_request = replace(
                 request,
                 source=source,
-                settings=child_settings,
+                settings=replace(
+                    request.settings,
+                    main=document.main,
+                    engine=document.engine or request.settings.engine,
+                    workflow=replace(request.settings.workflow, documents=()),
+                ),
                 reference_pdf=Path(document.reference_pdf) if document.reference_pdf else None,
             )
             child_work = work / "documents" / document.name

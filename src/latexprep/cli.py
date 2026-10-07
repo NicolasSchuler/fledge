@@ -163,10 +163,21 @@ def check_command(**options) -> int:
 @click.option(
     "--normalize-doi/--no-normalize-doi", default=None, help="Normalize literal DOI prefixes."
 )
-@click.option("--cleanup/--no-cleanup", default=None, help="Remove known unused/generated files.")
-@click.option("--dry-run", is_flag=True, help="Build the baseline and preview changes only.")
+@click.option(
+    "--cleanup/--no-cleanup",
+    default=None,
+    help="Remove known debris before edits; needed-input packaging always applies.",
+)
+@click.option(
+    "--dry-run", is_flag=True, help="Build the baseline and preview edits; no final bundle."
+)
 def prepare_command(**options) -> int:
-    """Transform, rebuild, compare, package and verify a submission copy."""
+    """Package the selected paper's needed inputs and explicit deliverables.
+
+    Unrelated files are omitted from the copy; originals stay unchanged. Complete
+    dependency evidence and an exact archive rebuild are required. Retain extra
+    files with submission_checks.required_deliverables in project configuration.
+    """
     return _execute("prepare", options)
 
 

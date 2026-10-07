@@ -147,7 +147,7 @@ such as reference identity, declaration adequacy and natural reading order.
 
 | Status | Priority | Requirement and remaining behavior | Current related behavior |
 | --- | --- | --- | --- |
-| Partial | Next | Remove known debris and identify unused assets without deleting uncertain dependencies. | `plan_cleanup` preserves observed dependencies and unknown files. Optional `PKG106` lists supported assets outside one selected literal graph as advisories; uncertain graphs are inconclusive. No global unused-file proof, all-root asset policy or automatic candidate deletion exists. |
+| Partial | Next | Remove known debris and select needed project inputs without guessing uncertain dependencies. | Preliminary `plan_cleanup` preserves observed dependencies and unknown files. Preparation separately selects inputs from complete build traces and the selected literal dependency graph, retaining explicit deliverables and template files and omitting unrelated files only in staging. Incomplete or ambiguous dependency evidence blocks packaging. Optional `PKG106` remains an advisory inventory. No global minimality or all-root unused-file proof is claimed. |
 | Partial | Next | Comment/private-note cleanup and unfinished-source checks. | `TEX001`/`TEX002` and optional `PRV005` inspect draft material. Opt-in `TEX201` proposes removal of selected comment bodies, retaining percent signs, line endings, literals, directives and license blocks. Dynamic lexical behavior and unclosed regions block proposals. Active editing-command removal and arbitrary TeX semantics remain unsupported. |
 | Implemented | None | Reject unsafe archive paths/links and supported literal external source paths. | Import rejects links, traversal and normalized collisions; `TEX006` rejects supported absolute/escaping references; build recorder checks undeclared external inputs. This does not scan arbitrary prose/private paths. |
 | Implemented | None | Explain source constructs that require shell escape before building. | Optional advisory `PRV006` flags supported literal `write18`/shell-execution constructs before building. Runtime still prohibits shell escape and confines processes; the lexical preflight does not replace enforcement. |
@@ -310,6 +310,11 @@ are exercised by {download}`ProjectTests <../tests/test_project.py>`:
 `test_zip_actual_stream_bytes_are_bounded_independently_of_metadata`,
 `test_cleanup_retains_dependencies_bibliography_styles_and_unknown_files`, and
 `test_archive_bytes_ignore_input_modes_timestamps_and_creation_order`.
+
+Those cleanup tests cover the preliminary debris pass. Preparation's mandatory
+dependency selection is a separate stage, described under
+[package contents](configuration.md#package-contents); `--no-cleanup` disables
+only the preliminary pass.
 
 ### Formatting evidence
 

@@ -1,92 +1,44 @@
-# Read reports and exit codes
+# Reports and exit codes
 
-Read the report's **scope and outcome first**, then resolve blocking findings.
-A successful `inspect` covers sources and bibliography; it does not establish
-that TeX compiles. A successful `prepare` covers the selected checks, preservation
-comparisons, and a fresh rebuild of the delivered ZIP. Neither establishes
-publisher acceptance, scientific correctness, anonymity, or general accessibility.
+Read **scope**, **outcome**, then blocking findings. `inspect` covers sources and
+bibliography; `prepare` also verifies PDF preservation and a fresh ZIP rebuild.
 
-## Outcomes and findings
+| Exit | Outcome | Meaning |
+| --- | --- | --- |
+| 0 | `passed` | Passed the command's stated scope |
+| 0 | `planned` | Dry-run plan only; no verified bundle |
+| 1 | `passed_with_advisories` | Required checks passed; review advisories (including `fmt` differences) |
+| 2 | `accepted_exceptions` | Explicit, eligible review decisions were used |
+| 3 | `blocked` | Required checks failed or lacked evidence |
+| 4 | `error` | Input, configuration, execution, or report-writing error |
+| 130 | `cancelled` | Job interrupted |
 
-| Outcome | Meaning |
-| --- | --- |
-| `passed` | The command passed its stated scope |
-| `passed_with_advisories` | The required scope passed, with findings still to review |
-| `accepted_exceptions` | Eligible, explicitly scoped review decisions were used; this is not an unqualified pass |
-| `planned` | A dry run produced a plan, without a verified bundle |
-| `blocked` | Required checks failed or lacked sufficient evidence |
-| `error` | An input, configuration, execution, or report-writing error prevented normal completion |
-| `cancelled` | The job was interrupted |
+Exit 2 also means a CLI syntax/usage error; check stderr or the JSON `outcome`.
+For automation, check both `command` and `outcome`, not just the exit code.
 
-A finding separates `severity` (`error`, `warning`, or `info`) from `status`:
+## Understand a finding
 
-| Status | How to read it |
-| --- | --- |
-| `failed` | The reported condition was found or a constraint was violated |
-| `inconclusive` | Evidence was missing, ambiguous, or outside the supported measurement scope |
-| `skipped` | The check did not run, for example because online permission was absent |
-| `passed` | The particular check or inventory completed; read its stated scope |
-
-An inventory without a configured threshold is not a compliance pass. Disabled
-checks do not become passes, and missing tools do not become successful checks.
-The default terminal report puts blockers first, then incomplete checks and
-warnings; use `--show-passed` to reveal passed findings and inventories.
-
-Each registered diagnostic has a `code`, descriptive `rule`, location, evidence,
-and suggested next step. Operational diagnostics and inventories can have
-`code: null`. For an explanation, run `latex-prep rule CODE` using the reported
-code, or browse the [check catalogue](checks.md). Suggestions are guidance;
-they do not automatically edit manuscript content.
-
-## Export and share
-
-Run these examples against your own `./paper` directory. Output files supplied
-through `--report`, `--html-report`, or `--diagnostics` must be new and outside
-the input tree.
+A finding has a code, location, evidence, and suggested next step. `severity`
+is `error`, `warning`, or `info`; `status` is `failed`, `inconclusive`, `skipped`,
+or `passed`. Incomplete or disabled checks do not become passes. Inventories
+without thresholds are measurements, not compliance claims. Operational findings
+may have `code: null`.
 
 ```sh
-latex-prep inspect ./paper --offline --output-format compact --quiet
-latex-prep inspect ./paper --offline --output-format json --quiet > inspection.json
-latex-prep check ./paper --offline --report build-report.json
-latex-prep check ./paper --offline --html-report build-report.html
-latex-prep check ./paper --offline --output-format ci --quiet
+latex-prep rule TEX001
+latex-prep inspect /path/to/paper --offline --show-passed
 ```
 
-Compact output contains one plain line per finding, suitable for an agent handoff.
-JSON includes findings, settings, changes and diffs, stages, tools, artifacts, and
-execution accounting. `--json` is an alias for `--output-format json`; progress
-uses stderr and `--quiet` suppresses it. Shell redirection can overwrite a file;
-use `--report` when you want the CLI's new-file check.
+## Save or share
 
-HTML is an escaped offline report with source diffs and recorded-region diagrams;
-it does not embed or annotate PDF pages. `--diagnostics NEW_ZIP` exports sanitized
-reports and diffs as **unverified diagnostic material**, not a submission bundle.
+```sh
+latex-prep check /path/to/paper --offline --report report.json
+latex-prep check /path/to/paper --offline --html-report report.html
+latex-prep inspect /path/to/paper --offline --output-format compact --quiet
+```
 
-Known credential patterns and credential-bearing URLs are redacted in all report
-formats. This does not sanitize the source bundle or prove anonymity. Inspect
-material before sharing. For multiple selected documents, findings identify the
-document and stage, and every package must verify before any is released.
-
-Review decisions require exact codes, optional location constraints, and reasons.
-The original findings remain visible. Missing evidence, build/isolation failures,
-and archive mismatches cannot be waived. See
-[preservation and explicit exceptions](preparation-options.md#preservation-and-explicit-exceptions).
-
-## Exit codes
-
-| Exit code | Meaning |
-| --- | --- |
-| 0 | `passed` or `planned` |
-| 1 | `passed_with_advisories`; for `fmt`, this includes formatting differences |
-| 2 | `accepted_exceptions`, or Click CLI syntax/usage error |
-| 3 | `blocked`; no verified bundle |
-| 4 | `error` |
-| 130 | `cancelled` |
-
-Exit code 2 has two meanings in the current CLI. Inspect the JSON `outcome` for a
-completed job or the usage error on stderr. Do not treat zero alone as proof of
-preparation: a dry run also returns zero with `outcome: planned`.
-
-For automation, decide explicitly whether advisories or accepted exceptions are
-acceptable, and check both `command` and `outcome` in the JSON report. Read its
-`scope`, `findings`, and `artifacts` before delivering a bundle.
+Report destinations must be new and outside the input. JSON retains full evidence
+and settings; compact output is suitable for agent handoff. Inspect reports before
+sharing: redaction does not sanitize source files. Diagnostic ZIPs are unverified
+material. See [detailed report behavior](workflow.md#readable-output-and-agent-handoff)
+and [review decisions](preparation-options.md#preservation-and-explicit-exceptions).

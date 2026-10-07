@@ -1,7 +1,8 @@
 # Preparation operations and review controls
 
-Every transformation writes a separate staging copy. `prepare --dry-run` shows
-the proposed changes after building the baseline; `prepare --output NEW_DIRECTORY`
+Every transformation writes a separate staging copy. `prepare --dry-run` previews
+source changes after building the baseline; final input selection, flattening and
+the bundle are not verified. `prepare --output NEW_DIRECTORY`
 also verifies the prepared and archive-rebuilt PDFs before release. Explicit edit
 values, key mappings and exception reasons in configuration constitute the user's
 reviewed choices. No remote metadata response is applied automatically.
@@ -90,7 +91,12 @@ engine = "lualatex"
 Each document gets its own source copy, baseline, transformed build, ZIP and
 fresh archive rebuild. Selection patterns are case-sensitive project-relative
 globs; each pattern must match a file and the selected root must be included.
-Omitting `include` retains every imported file in that document's source directory.
+These patterns restrict candidate inputs; they do not force every match into the
+final package. Omitting `include` makes every imported file in that document's
+source directory a candidate. Dependency selection retains the needed inputs;
+declare additional files with `submission_checks.required_deliverables` using
+paths relative to that document's source directory. Those paths follow any flat
+filename mapping. See [package contents](configuration.md#package-contents).
 Reference PDF paths resolve relative to the settings file. Use either `main` or
 `workflow.documents`, never both. All selected packages must verify before any
 are released:

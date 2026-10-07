@@ -32,7 +32,13 @@ async def build(tree, main, work, engine, runner):
     pdf = work / "built.pdf"
     pdf.write_bytes(b"%PDF-controlled-test\n")
     return SimpleNamespace(
-        success=True, pdf=pdf, findings=[], dependencies={main}, tools={}, command=[]
+        success=True,
+        pdf=pdf,
+        findings=[],
+        dependencies={main},
+        submission_inputs={main},
+        tools={},
+        command=[],
     )
 
 

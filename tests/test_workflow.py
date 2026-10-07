@@ -48,7 +48,8 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
                     success=True,
                     pdf=pdf,
                     findings=[],
-                    dependencies={"main.tex"},
+                    dependencies={main},
+                    submission_inputs={main},
                     tools={},
                     command=["test-build"],
                     log="",
@@ -82,13 +83,14 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 original, {p.relative_to(source): p.read_bytes() for p in source.rglob("*.tex")}
             )
-            self.assertEqual(len(build_inputs), 6)
+            self.assertEqual(len(build_inputs), 8)
             self.assertNotEqual(build_inputs[0][0], build_inputs[1][0])
             self.assertNotEqual(build_inputs[1][0], build_inputs[2][0])
-            self.assertEqual(build_inputs[1][2], build_inputs[2][2])
+            self.assertEqual(build_inputs[2][2], build_inputs[3][2])
             with zipfile.ZipFile(base / "serial/submission.zip") as archive:
                 self.assertTrue(all("/" not in name for name in archive.namelist()))
-                self.assertEqual(len(archive.namelist()), 4)
+                self.assertEqual(len(archive.namelist()), 3)
+                self.assertNotIn("data.txt", archive.namelist())
             self.assertTrue((base / "serial/report.json").is_file())
 
     async def test_failed_final_build_never_releases_output(self):
@@ -108,7 +110,8 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
                     success=count < 3,
                     pdf=pdf if count < 3 else None,
                     findings=[],
-                    dependencies=set(),
+                    dependencies={main},
+                    submission_inputs={main},
                     tools={},
                     command=["test-build"],
                     log="",

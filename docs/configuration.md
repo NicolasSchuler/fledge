@@ -152,6 +152,36 @@ keep their existing typed tables. See [the check catalogue](checks.md),
 {download}`constraint settings <../examples/settings.toml>`, and
 {download}`additional check settings <../examples/checks.toml>` for supported policies.
 
+## Package contents
+
+`prepare` now includes the selected document's needed project inputs by default,
+using complete build traces and its supported literal dependency graph. Unrelated
+files are omitted only from the staging copy. This replaces the former behavior
+of retaining unknown files; `--no-cleanup` does not restore that behavior.
+
+Declare extra files that must ship even when the build does not read them:
+
+```toml
+[submission_checks]
+required_deliverables = { "extras/cover-letter.txt" = "text", "data/results.csv" = "file" }
+# template_references = { "styles/template.cls" = "../approved/template.cls" }
+```
+
+Keys are paths relative to the input project (or selected document's source
+directory). Keep them source-relative when using flat layout: the tool remaps
+them through the filename map. Supported deliverable kinds are `file`, `text`,
+`pdf`, and `zip`; presence/type checks do not assess content adequacy. Project-side
+template-reference files are retained too; external reference paths resolve from
+the settings file's directory.
+
+For `workflow.documents`, `include` globs restrict the candidate inputs available
+to that document. They do not force unused matches into the archive; include the
+dependencies and any declared extras in that candidate set. Omitting the patterns
+makes all files in the source directory candidates, not automatic deliverables.
+Missing/incomplete traces or ambiguous dependencies block preparation. The
+[workflow reference](workflow.md#how-package-contents-are-selected) describes the
+selection and verification sequence.
+
 ## Select online evidence deliberately
 
 Offline is the default. An individual remote check and network permission are

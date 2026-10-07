@@ -71,7 +71,18 @@ class FakeBuildRunner(ToolRunner):
         output = workspace / "output"
         (output / f"{name}.pdf").write_bytes(b"%PDF-1.7\npartial or successful")
         (output / f"{name}.log").write_text(self.log)
-        (output / f"{name}.fls").write_text(self.trace or f"INPUT {cwd / argv[-1]}\n")
+        engine = (
+            "xelatex" if "-xelatex" in argv else "lualatex" if "-lualatex" in argv else "pdflatex"
+        )
+        primary = output / (name + (".xdv" if engine == "xelatex" else ".pdf"))
+        (output / f"{name}.fls").write_text(
+            self.trace if self.trace is not None else f"INPUT {cwd / argv[-1]}\nOUTPUT {primary}\n"
+        )
+        (output / f"{name}.fdb_latexmk").write_text(
+            f'# Fdb version 4\n["{engine}"] 1 "{cwd / argv[-1]}" "{primary}" "{name}" 1 0\n'
+            f'  "{cwd / argv[-1]}" 1 1 {"0" * 32} ""\n'
+            f'  (generated)\n  "{primary}"\n  (rewritten before read)\n'
+        )
         return CommandResult(self.returncode, "", "", False, argv)
 
 
@@ -116,6 +127,7 @@ class BuildTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(result.success)
         self.assertIn("-main.tex", result.dependencies)
+        self.assertEqual(result.submission_inputs, {"-main.tex"})
         command = runner.commands[-1]
         self.assertEqual(command[-1], "./-main.tex")
         self.assertIn("-norc", command)
@@ -123,6 +135,26 @@ class BuildTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("-use-make-", command)
         self.assertEqual((self.source / "-main.pdf").read_bytes(), b"%PDF-old")
         self.assertEqual((self.source / "-main.tex").read_text(), "test source")
+
+    async def test_missing_backend_trace_does_not_relabel_pdf_success(self) -> None:
+        class MissingDatabaseRunner(FakeBuildRunner):
+            async def run(self, argv, cwd, workspace, **kwargs):
+                result = await super().run(argv, cwd, workspace, **kwargs)
+                if argv[-1] not in {"-v", "--version"}:
+                    (workspace / "output/main.fdb_latexmk").unlink()
+                return result
+
+        result = await build_project(
+            self.source, "main.tex", self.root / "build", "pdflatex", MissingDatabaseRunner()
+        )
+        self.assertTrue(result.success)
+        self.assertTrue(result.recorder_complete)
+        self.assertIsNone(result.submission_inputs)
+        finding = next(
+            item for item in result.findings if item.rule == "build.submission_dependencies"
+        )
+        self.assertEqual((finding.status, finding.severity), ("inconclusive", "warning"))
+        self.assertIn("missing", str(finding.details["uncertainty"]))
 
     async def test_reused_workspace_and_escaping_main_are_rejected(self) -> None:
         work = self.root / "build"

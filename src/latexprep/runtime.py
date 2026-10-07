@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, TypeVar
 if TYPE_CHECKING:
     from .scheduler import ResourceBudget
 
+from .build_dependencies import collect_submission_dependencies
 from .loaded_options import (
     collect_loaded_options,
     loaded_options_unavailable,
@@ -71,6 +72,7 @@ class BuildResult:
     log: str = ""
     loaded_packages: list[dict[str, str | None]] = field(default_factory=list)
     recorder_complete: bool = False
+    submission_inputs: set[str] | None = None
 
 
 _CHILD_TOOLS = (
@@ -1631,6 +1633,32 @@ async def build_project(
                 "error",
                 "inconclusive",
                 path=main,
+            )
+        )
+    submission = collect_submission_dependencies(
+        source=source,
+        project=project,
+        cwd=cwd,
+        output=output,
+        main=main,
+        engine=engine,
+        recorder_inputs=recorder_inputs,
+        recorder_complete=result.recorder_complete,
+        resource_roots=declared_roots,
+        owned_inputs=(options_probe.hook,) if options_probe is not None else (),
+        max_bytes=runner.limits.max_output_bytes,
+    )
+    result.submission_inputs = submission.inputs
+    result.tools["submission_dependencies"] = submission.details
+    if submission.inputs is None:
+        result.findings.append(
+            Finding(
+                "build.submission_dependencies",
+                "Build dependency evidence is incomplete for submission packaging.",
+                "warning",
+                "inconclusive",
+                path=main,
+                details=submission.details,
             )
         )
     bibliography = _bibliography_evidence(output, runner.limits.max_output_bytes)

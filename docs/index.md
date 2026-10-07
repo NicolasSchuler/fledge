@@ -1,13 +1,7 @@
 # LaTeX preparation
 
-Check a LaTeX project, prepare a separate source bundle, and verify that the exact
-ZIP rebuilds while preserving the document's text and rendered pages. The input
-project is never edited. Constraints come from your settings; there are no
-maintained publisher profiles.
-
-Start with [installation](installation.md) and the [offline quick start](quickstart.md).
-Source and bibliography inspection work without TeX. Compilation and verified
-preparation also require external tools and a working isolation backend.
+Start with [installation](installation.md) and [prepare your paper](quickstart.md).
+Use the [offline demo](examples.md) to try source inspection without TeX.
 
 ```{toctree}
 :maxdepth: 2
@@ -27,6 +21,7 @@ troubleshooting
 
 workflow
 checks
+examples
 ```
 
 The documents below distinguish current behavior, measured local evidence, and

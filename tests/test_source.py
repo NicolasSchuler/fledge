@@ -3,9 +3,16 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from latexprep.models import has_blockers
-from latexprep.source import analyze_sources, discover_roots, mask_literals, plan_flatten
+from latexprep.source import (
+    analyze_selected_sources,
+    analyze_sources,
+    discover_roots,
+    mask_literals,
+    plan_flatten,
+)
 
 
 class SourceTests(unittest.TestCase):
@@ -47,6 +54,137 @@ class SourceTests(unittest.TestCase):
         self.assertEqual(result.findings[0].details["candidates"], ["a.tex", "b.tex"])
         self.assertEqual(analyze_sources(self.root, "b.tex").main, "b.tex")
         self.assertTrue(has_blockers(plan_flatten(self.root, "b.tex").findings))
+
+    def test_selected_analysis_does_not_read_unrelated_sources_or_spend_their_budget(self) -> None:
+        self.write("main.tex", "\\documentclass{article}\n\\input{body}\n")
+        self.write("body.tex", "Selected body.\n")
+        self.write("a-malformed.tex", "\\input{")
+        self.write("b-dynamic.tex", "\\directlua{require('private')}")
+        self.write("c-huge.tex", "x" * 129)
+        self.write("d-budget.tex", "x" * 110)
+        self.write("other.tex", "\\documentclass{book}")
+        read_bytes = Path.read_bytes
+
+        def read_selected(path: Path) -> bytes:
+            self.assertIn(path.relative_to(self.root).as_posix(), {"main.tex", "body.tex"})
+            return read_bytes(path)
+
+        with (
+            patch.object(Path, "read_bytes", read_selected),
+            patch("latexprep.source.MAX_SOURCE_BYTES", 128),
+            patch("latexprep.source.MAX_TOTAL_SOURCE_BYTES", 128),
+        ):
+            selected = analyze_selected_sources(self.root, "main.tex")
+        self.assertTrue(selected.complete, selected.findings)
+        self.assertEqual(selected.dependencies, {"main.tex", "body.tex"})
+        self.assertEqual(selected.roots, ["main.tex"])
+        self.assertEqual(selected.findings, [])
+
+        inspected = analyze_sources(self.root, "main.tex")
+        self.assertFalse(inspected.complete)
+        self.assertIn("other.tex", inspected.roots)
+        self.assertIn("source-argument-limit", {item.rule for item in inspected.findings})
+        flattened = plan_flatten(self.root, "main.tex")
+        self.assertIn("other.tex", flattened.mapping)
+        self.assertIn("flatten-multiple-roots", {item.rule for item in flattened.findings})
+
+    def test_selected_analysis_keeps_transitive_local_inputs_and_resources(self) -> None:
+        sources = {
+            "main.tex": "\\documentclass{styles/custom}\n\\bibliography{bib/references}\n"
+            "\\bibliographystyle{styles/custom}\n",
+            "styles/custom.cls": "\\ProvidesClass{custom}\n\\LoadClass{article}\n"
+            "\\RequirePackage{styles/helper}\n",
+            "styles/helper.sty": "\\ProvidesPackage{helper}\n\\input{parts/body}\n",
+            "parts/body.tex": "\\newcommand{\\titleword}{Plain}\n"
+            "\\pgfplotstableread{data/values.csv}\\datatable\n"
+            "\\includegraphics{figures/plot.pdf}\n"
+            "\\setmainfont[Path={fonts/}]{local.otf}\n",
+            "data/values.csv": "a,b\n1,2\n",
+            "figures/plot.pdf": "image",
+            "fonts/local.otf": "font",
+            "bib/references.bib": "@misc{reference,title={Reference}}",
+            "styles/custom.bst": "ENTRY {}{}{}",
+        }
+        for name, contents in sources.items():
+            self.write(name, contents)
+        self.write("unrelated.tex", "\\documentclass{book}")
+        selected = analyze_selected_sources(self.root, "main.tex")
+        self.assertTrue(selected.complete, selected.findings)
+        self.assertEqual(selected.dependencies, set(sources))
+        self.assertEqual(selected.roots, ["main.tex"])
+
+    def test_selected_analysis_keeps_subfile_roots_in_its_loaded_closure(self) -> None:
+        self.write(
+            "main.tex",
+            "\\documentclass{article}\n\\usepackage{subfiles}\n\\subfile{parts/body}\n",
+        )
+        self.write(
+            "parts/body.tex",
+            "\\documentclass[../main.tex]{subfiles}\n"
+            "\\begin{document}\n\\input{details}\n\\end{document}\n",
+        )
+        self.write("parts/details.tex", "Details.\n")
+        self.write("unrelated.tex", "\\documentclass{book}")
+        selected = analyze_selected_sources(self.root, "main.tex")
+        self.assertTrue(selected.complete, selected.findings)
+        self.assertEqual(selected.roots, ["main.tex", "parts/body.tex"])
+        self.assertEqual(selected.dependencies, {"main.tex", "parts/body.tex", "parts/details.tex"})
+
+    def test_selected_analysis_reports_unsupported_or_unresolved_dependencies_as_incomplete(
+        self,
+    ) -> None:
+        self.write("data/table.csv", "data")
+        self.write("figure.pdf", "pdf")
+        self.write("figure.png", "png")
+        for command, rule in (
+            (r"\input{\chosen}", "source-dynamic-path"),
+            (r"\input{missing}", "source-missing-dependency"),
+            (r"\includegraphics{figure}", "source-ambiguous-dependency"),
+            (r"\customreader{data/table.csv}", "source-custom-path"),
+            (r"\IfFileExists{data/table.csv}{}{}", "source-unsupported-command"),
+            (r"\directlua{require('reader')}", "source-unsupported-command"),
+            (r"\luadirect{require('reader')}", "source-unsupported-command"),
+            (r"\luaexec{require('reader')}", "source-unsupported-command"),
+        ):
+            with self.subTest(command=command):
+                self.write("main.tex", "\\documentclass{article}\n" + command)
+                selected = analyze_selected_sources(self.root, "main.tex")
+                self.assertFalse(selected.complete)
+                self.assertIn(rule, {item.rule for item in selected.findings})
+
+    def test_selected_analysis_requires_readable_sources_and_rejects_linked_dependencies(
+        self,
+    ) -> None:
+        self.write("main.tex", "\\documentclass{article}\n\\input{body}\n")
+        for body, rule in (
+            (b"caf\xe9", "source-encoding"),
+            (b"\\input{", "source-argument-limit"),
+        ):
+            with self.subTest(rule=rule):
+                self.write("body.tex", body)
+                selected = analyze_selected_sources(self.root, "main.tex")
+                self.assertFalse(selected.complete)
+                self.assertIn(rule, {item.rule for item in selected.findings})
+        self.write("main.tex", "\\documentclass{article}\n\\usepackage{helper}\n")
+        self.write("actual.sty", "\\ProvidesPackage{helper}")
+        (self.root / "helper.sty").symlink_to("actual.sty")
+        selected = analyze_selected_sources(self.root, "main.tex")
+        self.assertFalse(selected.complete)
+        self.assertIn("source-link", {item.rule for item in selected.findings})
+        missing = analyze_selected_sources(self.root, "missing.tex")
+        self.assertFalse(missing.complete)
+        self.assertIsNone(missing.main)
+
+    def test_source_advisories_do_not_make_literal_dependencies_incomplete(self) -> None:
+        self.write("main.tex", "\\documentclass{article}\nTODO \\ref{unresolved}\n")
+        for analyze in (analyze_sources, analyze_selected_sources):
+            with self.subTest(analyze=analyze.__name__):
+                result = analyze(self.root, "main.tex")
+                self.assertTrue(result.complete, result.findings)
+                self.assertEqual(
+                    {item.rule for item in result.findings},
+                    {"source-edit-marker", "source-unresolved-reference"},
+                )
 
     def test_all_literals_keep_offsets_and_escaped_percent_is_text(self) -> None:
         source = (
