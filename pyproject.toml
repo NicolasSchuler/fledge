@@ -12,6 +12,7 @@ dependencies = ["click>=8.1,<9", "rich>=13.7,<15"]
 
 [project.urls]
 Repository = "https://github.com/NicolasSchuler/fledge"
+Documentation = "https://nicolasschuler.github.io/fledge/"
 
 [project.optional-dependencies]
 docs = ["sphinx>=8,<10", "myst-parser>=4,<6"]

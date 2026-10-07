@@ -5,6 +5,9 @@
 Prepare and verify a LaTeX submission ZIP containing the selected paper's needed
 inputs. Your original files remain unchanged.
 
+[Read the documentation](https://nicolasschuler.github.io/fledge/) for installation,
+usage, configuration, and troubleshooting.
+
 ## Install on macOS
 
 From this checkout or an extracted source distribution:
@@ -14,7 +17,7 @@ bash install.sh
 ```
 
 The installer reuses available tools, shows its plan, and asks before installing.
-See [installation](docs/installation.md) for a preview, requirements, and manual setup.
+See [installation](https://nicolasschuler.github.io/fledge/installation.html) for a preview, requirements, and manual setup.
 
 ## Prepare your paper
 
@@ -29,9 +32,9 @@ The output directory must be new and outside the input; existing ZIPs are never
 overwritten. A verified run writes
 `sources/`, `submission.zip`, `manuscript.pdf`, and `report.json` after checking
 PDF preservation and rebuilding the exact ZIP. Unrelated files are omitted from
-the copy; [configure extra deliverables](docs/configuration.md#package-contents) explicitly.
+the copy; [configure extra deliverables](https://nicolasschuler.github.io/fledge/configuration.html#package-contents) explicitly.
 
-- [Quick start](docs/quickstart.md) · [offline demo](docs/examples.md)
-- [Configuration](docs/configuration.md) · [reports](docs/reports.md) · [troubleshooting](docs/troubleshooting.md)
-- [Detailed workflow and support limits](docs/workflow.md) · [all documentation](docs/index.md)
-- [Development, documentation builds, and design references](docs/development.md) · [source repository](https://github.com/NicolasSchuler/fledge)
+- [Quick start](https://nicolasschuler.github.io/fledge/quickstart.html) · [offline demo](https://nicolasschuler.github.io/fledge/examples.html)
+- [Configuration](https://nicolasschuler.github.io/fledge/configuration.html) · [reports](https://nicolasschuler.github.io/fledge/reports.html) · [troubleshooting](https://nicolasschuler.github.io/fledge/troubleshooting.html)
+- [Detailed workflow and support limits](https://nicolasschuler.github.io/fledge/workflow.html) · [all documentation](https://nicolasschuler.github.io/fledge/index.html)
+- [Development, documentation builds, and design references](https://nicolasschuler.github.io/fledge/development.html) · [source repository](https://github.com/NicolasSchuler/fledge)

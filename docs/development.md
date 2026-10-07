@@ -1,5 +1,8 @@
 # Development and documentation
 
+Read the [hosted documentation](https://nicolasschuler.github.io/fledge/) without
+installing Fledge or its documentation tools.
+
 Work from a source checkout or extracted source distribution. Keep private papers
 outside the repository or in `.local/`. Review the paths to be staged: generated
 outputs and environments are ignored, while manuscript PDFs, images, and other
@@ -35,6 +38,19 @@ The [Sphinx Markdown documentation](https://www.sphinx-doc.org/en/master/usage/m
 describes enabling MyST, and the
 [MyST cross-reference documentation](https://myst-parser.readthedocs.io/en/latest/syntax/cross-referencing.html)
 describes document and download links.
+
+## Publish the documentation
+
+The [Deploy documentation workflow](https://github.com/NicolasSchuler/fledge/actions/workflows/docs.yml)
+publishes this site to GitHub Pages from `main` when documentation or its included
+source, tests, examples, scripts, or project metadata change. It installs the
+`docs` extra and runs the strict Sphinx build above, then deploys the HTML in a
+separate job only after the build succeeds. Only `main` can publish.
+
+The repository's **Settings → Pages → Build and deployment → Source** must be
+**GitHub Actions**. To publish manually, open the workflow link, choose **Run
+workflow**, select `main`, and run it. The same page shows build and deployment
+status; the deployed site is at <https://nicolasschuler.github.io/fledge/>.
 
 ## Run checks
 
