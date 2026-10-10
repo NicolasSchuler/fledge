@@ -41,6 +41,9 @@ class _Rule:
 class SubmissionDependencies:
     inputs: set[str] | None
     details: dict[str, object]
+    # Generated files the build read, relative to the output directory or project
+    # that holds them (for example main.bbl written by BibTeX or Biber).
+    generated_reads: frozenset[str] = frozenset()
 
 
 def _inside(path: Path, root: Path) -> bool:
@@ -211,12 +214,14 @@ def collect_submission_dependencies(
         roots = tuple(root.resolve() for root in resource_roots)
         owned = set(owned_inputs)
         inputs: set[str] = set()
+        generated_reads: set[str] = set()
         generated_count = system_count = 0
         for path in sorted(observed_inputs):
             if _inside(path, project):
                 relative = path.relative_to(project).as_posix()
                 if path in generated:
                     generated_count += 1
+                    generated_reads.add(relative)
                 elif not _regular(path, project) or not _regular(source / relative, source):
                     raise PreparationError(
                         "Observed project input is missing, generated without evidence, "
@@ -226,6 +231,7 @@ def collect_submission_dependencies(
                     inputs.add(relative)
             elif path in generated and _inside(path, output):
                 generated_count += 1
+                generated_reads.add(path.relative_to(output).as_posix())
             elif path in owned and _regular(path, project.parent):
                 generated_count += 1
             elif any(_inside(path.resolve(), root) for root in roots):
@@ -242,7 +248,7 @@ def collect_submission_dependencies(
             toolchain_inputs=system_count,
             uncertainty=[],
         )
-        return SubmissionDependencies(inputs, details)
+        return SubmissionDependencies(inputs, details, frozenset(generated_reads))
     except (OSError, UnicodeError, ValueError, PreparationError) as error:
         details["uncertainty"] = [str(error)]
         return SubmissionDependencies(None, details)

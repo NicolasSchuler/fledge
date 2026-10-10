@@ -20,8 +20,8 @@ mkdir -p /path/to/paper/.claude/skills && cp -R skills/fledge /path/to/paper/.cl
 
 Other agents that support the Agent Skills format can load
 {download}`skills/fledge/SKILL.md <../skills/fledge/SKILL.md>` the same way. The
-`fledge` executable must be on the agent's `PATH` (or adapt the command to
-`~/.local/bin/fledge`); see [installation](installation.md).
+`fledge` executable must be on the agent's `PATH`; see
+[installation](installation.md) for the launcher location.
 
 ## What the agent runs
 
@@ -32,7 +32,9 @@ fledge check /path/to/paper --main main.tex --output-format compact --quiet
 fledge rule TEX005 --json
 ```
 
-Use `--json` when the agent needs complete evidence, diffs or tool versions. The
+Use `--json` when the agent needs complete evidence, diffs or tool versions. To
+apply venue-oriented checks, the skill uses `--preset NAME` and narrows runs with
+`--select` and `--ignore`. The
 skill tells the agent not to edit scientific content to silence heuristics, not to
 enable online checks without asking, and to report a submission as ready only after
 `prepare` released `submission.zip`. A test keeps every command and option named in

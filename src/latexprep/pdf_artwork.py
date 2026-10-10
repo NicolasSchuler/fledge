@@ -96,6 +96,7 @@ class PdfArtworkOptions:
     min_raster_region_coverage: float | None = None
     grayscale_preview: bool = False
     contrast_samples: tuple[PdfContrastSample, ...] = ()
+    required_color_space: str | None = None
     raster_dpi: int = 72
     background_gray: int = 255
     ink_difference: int = 5
@@ -158,6 +159,8 @@ class PdfArtworkOptions:
             _number(minimum, "Category minimum DPI")
         if self.category_min_dpi and self.artwork_category not in dict(self.category_min_dpi):
             raise PreparationError("Select an artwork category with an explicit DPI threshold")
+        if self.required_color_space not in {None, "rgb", "cmyk"}:
+            raise PreparationError("required_color_space must be 'rgb' or 'cmyk'")
         if type(self.raster_dpi) is not int or not 18 <= self.raster_dpi <= 144:
             raise PreparationError("Artwork raster DPI must be an integer from 18 to 144")
         if type(self.background_gray) is not int or not 0 <= self.background_gray <= 255:
@@ -186,6 +189,7 @@ def _configured(options: PdfArtworkOptions) -> list[str]:
             ("pdf.raster_region_candidates", bool(options.raster_regions)),
             ("pdf.grayscale_preview", options.grayscale_preview),
             ("pdf.rendered_sample_contrast", bool(options.contrast_samples)),
+            ("figure.color_space", options.required_color_space is not None),
         )
         if enabled
     ]
@@ -1532,6 +1536,75 @@ async def _sample_contrast_findings(
     return result
 
 
+_COLOR_OPERATIONS = frozenset(
+    {
+        "fill_path",
+        "stroke_path",
+        "fill_text",
+        "stroke_text",
+        "fill_image",
+        "fill_image_mask",
+        "fill_shade",
+    }
+)
+
+
+def _color_family(name: str) -> str | None:
+    """Map a MuPDF colour-space name to gray/rgb/cmyk; other spaces stay unknown."""
+    folded = name.casefold()
+    if folded.startswith(("separation", "devicen", "indexed", "lab")):
+        return None
+    if "cmyk" in folded:
+        return "cmyk"
+    if "rgb" in folded or "bgr" in folded:
+        return "rgb"
+    if "gray" in folded or "grey" in folded:
+        return "gray"
+    return None
+
+
+def _color_space_finding(output: str, pages: int, required: str) -> Finding:
+    """Compare every traced paint operation's colour family with the required one."""
+    root = _xml(output, "document")
+    traced = root.findall("page")
+    try:
+        numbers = [int(page.attrib["number"]) for page in traced]
+    except (ValueError, KeyError) as error:
+        raise PreparationError("MuPDF trace contains an invalid page number") from error
+    if numbers != list(range(1, pages + 1)):
+        raise PreparationError("MuPDF trace did not report every page exactly once")
+    violations: list[object] = []
+    spaces: dict[str, int] = {}
+    unknown: set[str] = set()
+    for page, number in zip(traced, numbers, strict=True):
+        cancellation_point()
+        for node in page.iter():
+            if node.tag not in _COLOR_OPERATIONS:
+                continue
+            space = node.get("colorspace")
+            if space is None:
+                unknown.add(f"{node.tag} without a colour-space name")
+                continue
+            spaces[space] = spaces.get(space, 0) + 1
+            family = _color_family(space)
+            if family is None:
+                unknown.add(space)
+            elif family not in {"gray", required}:
+                violations.append({"page": number, "operation": node.tag, "color_space": space})
+    return _result(
+        "figure.color_space",
+        f"Compared traced colour spaces with the required {required.upper()} family.",
+        violations,
+        uncertain=bool(unknown) or not spaces,
+        required=required,
+        color_spaces=dict(sorted(spaces.items())),
+        unclassified=sorted(unknown)[:_MAX_SAMPLES],
+        scope="MuPDF trace colour-space names of painted operations; grayscale satisfies "
+        "either family. Separation, DeviceN, Indexed, Lab and unnamed spaces are unclassified; "
+        "ICC profile contents are not interpreted.",
+    )
+
+
 async def inspect_pdf_artwork(
     pdf: Path,
     work: Path,
@@ -1572,6 +1645,7 @@ async def inspect_pdf_artwork(
             "pdf.grayscale_preview",
             "pdf.type3_glyph_programs",
             "pdf.rendered_sample_contrast",
+            "figure.color_space",
         }
     ]
     if trace_rules:
@@ -1650,6 +1724,18 @@ async def inspect_pdf_artwork(
         )
     if options.contrast_samples:
         result.extend(await _sample_contrast_findings(session, sizes, unsupported, options))
+    if options.required_color_space is not None:
+        required = options.required_color_space
+        try:
+            result.append(
+                await session.measure(
+                    "color-trace",
+                    ["mutool", "trace", "@PDF@", f"1-{pages}"],
+                    lambda execution, _: _color_space_finding(execution.stdout, pages, required),
+                )
+            )
+        except (PreparationError, OSError) as error:
+            result.append(_unavailable("figure.color_space", error))
     return result
 
 

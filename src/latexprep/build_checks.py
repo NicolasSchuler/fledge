@@ -25,6 +25,7 @@ class BuildCheckOptions:
     required_loaded_packages: tuple[str, ...] = ()
     minimum_package_dates: tuple[tuple[str, str], ...] = ()
     check_local_package_shadows: bool = False
+    expected_texlive_year: int | None = None
 
     def __post_init__(self) -> None:
         if self.overfull_tolerance_pt is not None and (
@@ -34,6 +35,11 @@ class BuildCheckOptions:
             or self.overfull_tolerance_pt < 0
         ):
             raise PreparationError("overfull_tolerance_pt must be a finite nonnegative number")
+        if self.expected_texlive_year is not None and (
+            type(self.expected_texlive_year) is not int
+            or not 1996 <= self.expected_texlive_year <= 2100
+        ):
+            raise PreparationError("expected_texlive_year must be a four-digit TeX Live year")
         for name in (
             "inventory_loaded_packages",
             "inventory_loaded_options",
@@ -109,6 +115,155 @@ def _finding(
         "error" if failed or incomplete else "info",
         "inconclusive" if incomplete else "failed" if failed else "passed",
         details=details or {},
+    )
+
+
+# Log warnings that only mean "not resolved yet" when a TeX error stopped the build:
+# rule, message noun, details field for the keys, key pattern, and what was not reached.
+_UNRESOLVED_AFTER_TEX_ERROR = (
+    (
+        "build.undefined_citation",
+        "Citation",
+        "citation_keys",
+        r"Citation [`']([^'`]+)'",
+        "the bibliography was resolved",
+    ),
+    (
+        "build.undefined_reference",
+        "Reference",
+        "reference_keys",
+        r"Reference [`']([^'`]+)'",
+        "labels were resolved",
+    ),
+)
+
+
+def qualify_citation_findings(findings: list[Finding], *, build_succeeded: bool) -> list[Finding]:
+    """Build-log findings, with citation and reference warnings qualified after a TeX error.
+
+    TeX reports every citation and cross-reference as undefined until a later
+    pass has read the bibliography backend's output and the .aux labels. When
+    the build stopped on a TeX error (BLD009), those warnings say nothing about
+    whether the keys are defined, so each kind becomes one inconclusive result
+    that points at the error.
+    """
+    findings = list(findings)
+    stopped = not build_succeeded and any(
+        item.rule == "build.tex_error" and item.status == "failed" for item in findings
+    )
+    if not stopped:
+        return findings
+    for rule, noun, keys_field, key_pattern, unreached in _UNRESOLVED_AFTER_TEX_ERROR:
+        findings = _merge_unresolved(findings, rule, noun, keys_field, key_pattern, unreached)
+    return findings
+
+
+def _merge_unresolved(
+    findings: list[Finding],
+    rule: str,
+    noun: str,
+    keys_field: str,
+    key_pattern: str,
+    unreached: str,
+) -> list[Finding]:
+    unresolved = [item for item in findings if item.rule == rule and item.status == "failed"]
+    if not unresolved:
+        return findings
+    first = unresolved[0]
+    keys = list(
+        dict.fromkeys(
+            match[1] for item in unresolved if (match := re.search(key_pattern, item.message))
+        )
+    )
+    listed = ", ".join(repr(key) for key in keys[:3]) + (
+        f" (+{len(keys) - 3} more)" if len(keys) > 3 else ""
+    )
+    qualified = Finding(
+        rule,
+        f"{noun} resolution was not checked"
+        + (f" for {listed}" if keys else "")
+        + f": the build stopped on a TeX error (BLD009) before {unreached}.",
+        "warning",
+        "inconclusive",
+        path=first.path,
+        line=first.line,
+        suggestion=f"Fix the TeX error reported as BLD009 and rebuild; {noun.lower()}s are "
+        "then checked again.",
+        details={
+            **first.details,
+            "blocked_by": "BLD009",
+            keys_field: keys,
+            "log_messages": [item.message for item in unresolved],
+        },
+    )
+    merged = {id(item) for item in unresolved[1:]}
+    return [qualified if item is first else item for item in findings if id(item) not in merged]
+
+
+_ENGINES = ("pdflatex", "xelatex", "lualatex")
+_TEXLIVE = re.compile(r"\(TeX Live (\d{4})(?:/([^)]*))?\)")
+_MIKTEX = re.compile(r"\(MiKTeX ([0-9][^)\s]*)\)")
+
+
+def check_tex_distribution(
+    result: BuildResult, options: BuildCheckOptions | None = None
+) -> Finding:
+    """Record the engine's TeX distribution from the build's single version probe.
+
+    The observation is informational. Only an explicit expected TeX Live year turns
+    a different or unidentified distribution into an advisory; unavailable version
+    evidence stays inconclusive and never passes that policy.
+    """
+    options = options or BuildCheckOptions()
+    expected = options.expected_texlive_year
+    engine = next((name for name in _ENGINES if isinstance(result.tools.get(name), dict)), None)
+    record = result.tools.get(engine) if engine else None
+    lines = record.get("version") if isinstance(record, dict) else None
+    banner = lines[0] if isinstance(lines, list) and lines and isinstance(lines[0], str) else None
+    details: dict[str, Any] = {"engine": engine, "version_banner": banner}
+    if expected is not None:
+        details["expected_texlive_year"] = expected
+    policy = (
+        f"; expected TeX Live {expected}"
+        if expected is not None
+        else ". Services that compile your sources, such as arXiv, use their own TeX Live "
+        "release, so package behaviour can differ; set build_checks.expected_texlive_year "
+        "to compare"
+    )
+    if banner is None:
+        return Finding(
+            "build.tex_distribution",
+            "The TeX distribution is unknown: the build recorded no engine version output"
+            + (f"; expected TeX Live {expected} cannot be confirmed." if expected else "."),
+            "warning" if expected is not None else "info",
+            "inconclusive",
+            details=details,
+        )
+    texlive = _TEXLIVE.search(banner)
+    miktex = _MIKTEX.search(banner)
+    if texlive:
+        year = int(texlive.group(1))
+        details.update(distribution="TeX Live", texlive_year=year, packager=texlive.group(2))
+        name = f"TeX Live {year}" + (f" ({texlive.group(2)})" if texlive.group(2) else "")
+    elif miktex:
+        details.update(distribution="MiKTeX", miktex_version=miktex.group(1))
+        name, year = f"MiKTeX {miktex.group(1)}", None
+    else:
+        return Finding(
+            "build.tex_distribution",
+            f"The TeX distribution could not be identified from {engine} output{policy}.",
+            "warning" if expected is not None else "info",
+            "inconclusive",
+            details=details,
+        )
+    mismatch = expected is not None and year != expected
+    return Finding(
+        "build.tex_distribution",
+        f"Built with {name} via {engine}{policy}.",
+        "warning" if mismatch else "info",
+        "failed" if mismatch else "passed",
+        evidence="direct",
+        details=details,
     )
 
 

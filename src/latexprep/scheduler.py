@@ -299,6 +299,9 @@ class TaskResult:
     error: str | None = None
     elapsed_seconds: float = 0.0
     queue_seconds: float = 0.0
+    # Names of failed prerequisites for a ``blocked`` result, so reports can
+    # group the tasks that one root failure prevented without parsing ``error``.
+    blocked_by: tuple[str, ...] = ()
 
 
 @dataclass
@@ -404,7 +407,10 @@ class Scheduler:
                     if failed:
                         record(
                             TaskResult(
-                                name, "blocked", error=f"Prerequisite failed: {', '.join(failed)}"
+                                name,
+                                "blocked",
+                                error=f"Prerequisite failed: {', '.join(failed)}",
+                                blocked_by=tuple(failed),
                             )
                         )
                     else:

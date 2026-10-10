@@ -147,6 +147,8 @@ class SubmissionDependenciesTests(unittest.TestCase):
         )
         self.assertEqual(result.details["toolchain_inputs"], 1)
         self.assertEqual(result.details["generated_inputs"], 3)
+        # Generated files the build read, relative to the directory that holds them.
+        self.assertEqual(result.generated_reads, {"main.aux", "main.bbl", "article/rebuilt.dat"})
 
     def test_new_project_outputs_and_rewritten_inputs_are_not_original_inputs(self):
         (self.cwd / "generated.tex").write_text("new generated input")

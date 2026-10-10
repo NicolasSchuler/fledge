@@ -140,4 +140,21 @@ RULE_DEFINITIONS = (
         ),
         "fix": "Adjust foreground/background colors or supply valid homogeneous sample patches.",
     },
+    {
+        "code": "PDF313",
+        "name": "figure.color_space",
+        "title": "Required figure colour space",
+        "description": "Opt-in required_color_space ('rgb' or 'cmyk'): classify MuPDF trace "
+        "colour-space names in each included PDF figure (figure_artwork) or the whole PDF "
+        "(pdf_artwork), and PNG/JPEG figure headers in the selected source graph. Grayscale "
+        "satisfies either family; unclassified spaces, EPS figures and missing tools are "
+        "inconclusive.",
+        "tests": (
+            "tests.test_pdf_artwork.PdfArtworkTests.test_traced_figure_color_families_against_required_space",
+            "tests.test_pdf_artwork.PdfArtworkTests.test_missing_trace_tool_is_inconclusive",
+            "tests.test_submission_readiness.FigureTests.test_raster_color_space_policy_parses_png_and_jpeg_headers",
+        ),
+        "fix": "Re-export the reported figures in the required colour space (grayscale is "
+        "accepted for either), or correct required_color_space.",
+    },
 )

@@ -31,6 +31,22 @@ class DocumentationTests(unittest.TestCase):
             "docs/checks.md is out of date; run scripts/generate_check_docs.py",
         )
 
+    def test_check_catalogue_lists_every_code_once_with_its_fix(self) -> None:
+        import re
+
+        from latexprep.rules import RULES
+
+        generator = _generator()
+        catalogue = generator.DOCUMENT.read_text(encoding="utf-8")
+        rows = re.findall(r"^\| `([A-Z]{3}\d{3})` \|", catalogue, flags=re.MULTILINE)
+        self.assertCountEqual(rows, [rule.code for rule in RULES])
+        kinds = {generator.classify(rule)[0] for rule in RULES}
+        self.assertEqual(kinds, {generator.ALWAYS, generator.DEFAULT, generator.OPT_IN})
+        for rule in RULES:
+            kind, setting = generator.classify(rule)
+            with self.subTest(code=rule.code):
+                self.assertEqual(kind == generator.OPT_IN, bool(setting))
+
     def test_agent_skill_uses_existing_commands_and_options(self) -> None:
         import re
 

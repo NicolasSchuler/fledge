@@ -11,7 +11,7 @@ output directory. It never edits the user's original files.
 
 Run it as `fledge` (the macOS installer puts it at `~/.local/bin/fledge`; from a
 source checkout, `python -m latexprep` works too). Check it is available with
-`fledge --version`.
+`fledge --version`. Documentation: https://nicolasschuler.github.io/fledge/
 
 ## Workflow
 
@@ -29,10 +29,18 @@ source checkout, `python -m latexprep` works too). Check it is available with
 `PAPER` is the project folder or a ZIP. Always pass `--main` when the project has
 more than one `.tex` file with `\documentclass`; Fledge never guesses the root.
 
+For a known destination, add a preset to any of these commands:
+`fledge check PAPER --main main.tex --preset arxiv` (also `anonymous-review`,
+`camera-ready`). A preset only switches on generic checks; it is not a venue
+policy. `fledge init PAPER --preset arxiv` writes it to `PAPER/fledge.toml` for
+editing (`fledge init --list` describes them); ask before writing files into the
+user's project.
+
 ## Read the results
 
 Prefer `--output-format compact --quiet`: the first line is
-`OUTCOME | counts | scope`, then one line per finding:
+`OUTCOME | counts | scope`, then one line per finding (lines starting with
+`not run:` name checks skipped because an earlier step failed):
 
 ```text
 TEX005 error/failed sections/intro.tex:12 | Missing source dependencies: Literal dependency 'fig/plot' is missing from the project. | evidence: … | next: Include the missing dependency or correct the literal file path.
@@ -57,7 +65,8 @@ Exit codes:
 | 130 | `cancelled` | Interrupted. |
 
 Explain any code with `fledge rule CODE` (add `--json` for structured output);
-list all codes with `fledge rules --json`.
+list all codes with `fledge rules --json`. Opt-in checks that did not run are in
+the JSON report's `execution.not_checked`; a pass covers only what ran.
 
 ## Act on findings
 
@@ -72,12 +81,18 @@ list all codes with `fledge rules --json`.
   enforced even if deselected; fix the cause instead of ignoring them.
 - Do not change scientific content, citations or wording to silence a heuristic
   (`TEX001` TODO markers, `MAN*` style advice) without asking the user.
+- `TEX009` (no generated `.bbl` shipped) is an info note by default and matters
+  only for services that do not run BibTeX or Biber, such as arXiv (the `arxiv`
+  preset makes it a warning). `prepare` ships a `main.bbl` that sits beside
+  `main.tex` automatically.
 
 ## Configure instead of working around
 
 Project policy lives in `fledge.toml` next to the paper (or `[tool.fledge]` in
-`pyproject.toml`; the older `latex-prep.toml` name still works). Command-line
-options override it; `--isolated` ignores it; `--config FILE` selects one.
+`pyproject.toml`). Command-line options override it, it overrides a `--preset`,
+`--isolated` ignores it and `--config FILE` selects one. For a one-off run,
+`fledge check PAPER --select TEX --ignore TEX001` filters checks without editing
+the file (`--select` replaces `checks.select`; `--ignore` adds to `checks.ignore`).
 
 ```toml
 main = "main.tex"

@@ -11,6 +11,7 @@ from latexprep.build_checks import (
     BuildCheckOptions,
     check_build_details,
     check_local_package_shadows,
+    check_tex_distribution,
 )
 from latexprep.models import Finding, PreparationError
 from latexprep.runtime import (
@@ -251,3 +252,74 @@ class BuildCheckTests(unittest.IsolatedAsyncioTestCase):
         ):
             with self.subTest(options=options), self.assertRaises(PreparationError):
                 BuildCheckOptions(**options)
+
+
+class VersionRunner(FakeBuildRunner):
+    """Answer the engine version probe with a fixed banner, or fail it."""
+
+    def __init__(self, banner: str | None) -> None:
+        super().__init__()
+        self.banner = banner
+
+    async def run(self, argv, cwd, workspace, *, readonly_inputs=(), memory_mb=None):
+        if argv[-1] == "--version":
+            if self.banner is None:
+                return CommandResult(127, "", "pdflatex: command not found", False, argv)
+            return CommandResult(0, self.banner + "\nkpathsea version 6.4.2\n", "", False, argv)
+        return await super().run(
+            argv, cwd, workspace, readonly_inputs=readonly_inputs, memory_mb=memory_mb
+        )
+
+
+class TexDistributionTests(unittest.IsolatedAsyncioTestCase):
+    async def build(self, banner: str | None) -> BuildResult:
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source"
+            source.mkdir()
+            (source / "main.tex").write_text("\\documentclass{article}")
+            return await build_project(
+                source, "main.tex", Path(directory) / "build", "pdflatex", VersionRunner(banner)
+            )
+
+    async def test_records_texlive_year_and_compares_explicit_expectation(self) -> None:
+        result = await self.build("pdfTeX 3.141592653-2.6-1.40.29 (TeX Live 2026)")
+        observed = check_tex_distribution(result)
+        self.assertEqual(
+            (observed.code, observed.severity, observed.status), ("BLD105", "info", "passed")
+        )
+        self.assertEqual(observed.details["texlive_year"], 2026)
+        self.assertIn("arXiv", observed.message)
+        same = check_tex_distribution(result, BuildCheckOptions(expected_texlive_year=2026))
+        self.assertEqual((same.severity, same.status), ("info", "passed"))
+        other = check_tex_distribution(result, BuildCheckOptions(expected_texlive_year=2023))
+        self.assertEqual((other.severity, other.status), ("warning", "failed"))
+        self.assertIn("expected TeX Live 2023", other.message)
+        packaged = BuildResult(
+            True, tools={"xelatex": {"version": ["XeTeX 3.14 (TeX Live 2022/Debian)"]}}
+        )
+        self.assertEqual(check_tex_distribution(packaged).details["packager"], "Debian")
+        miktex = BuildResult(
+            True, tools={"pdflatex": {"version": ["MiKTeX-pdfTeX 4.19 (MiKTeX 24.1)"]}}
+        )
+        self.assertEqual(check_tex_distribution(miktex).status, "passed")
+        self.assertEqual(
+            check_tex_distribution(miktex, BuildCheckOptions(expected_texlive_year=2024)).status,
+            "failed",
+        )
+        for value in (1995, 2101, "2024", True):
+            with self.subTest(value=value), self.assertRaises(PreparationError):
+                BuildCheckOptions(expected_texlive_year=value)  # type: ignore[arg-type]
+
+    async def test_missing_or_unrecognized_version_is_inconclusive(self) -> None:
+        missing = await self.build(None)
+        self.assertIn("build.execution_unavailable", {item.rule for item in missing.findings})
+        observed = check_tex_distribution(missing)
+        self.assertEqual((observed.severity, observed.status), ("info", "inconclusive"))
+        policy = check_tex_distribution(missing, BuildCheckOptions(expected_texlive_year=2026))
+        self.assertEqual((policy.severity, policy.status), ("warning", "inconclusive"))
+        unknown = BuildResult(True, tools={"pdflatex": {"version": ["pdfTeX 3.14 (custom)"]}})
+        self.assertEqual(check_tex_distribution(unknown).status, "inconclusive")
+        self.assertEqual(
+            check_tex_distribution(unknown, BuildCheckOptions(expected_texlive_year=2026)).status,
+            "inconclusive",
+        )

@@ -12,6 +12,7 @@ from latexprep.build_checks import BuildCheckOptions, check_build_details
 from latexprep.check_policy import (
     _GROUP_CHECKS,
     _ROOT_CHECKS,
+    DEFAULT_ADVISORY_CODES,
     MANDATORY_CODES,
     effective_settings,
     selected_findings,
@@ -544,8 +545,10 @@ class CheckPolicyTests(unittest.TestCase):
             "FMT001",
         }
         self.assertFalse(gated & MANDATORY_CODES)
+        self.assertFalse(DEFAULT_ADVISORY_CODES & (gated | MANDATORY_CODES))
         self.assertEqual(
-            set(BY_CODE), gated | shared | MANDATORY_CODES | produced_with_required_work
+            set(BY_CODE),
+            gated | shared | MANDATORY_CODES | produced_with_required_work | DEFAULT_ADVISORY_CODES,
         )
 
 
@@ -791,6 +794,27 @@ class CheckPolicyMapTests(unittest.TestCase):
                 for name in fields:
                     self.assertTrue(hasattr(options, name), (group, code, name))
         self.assertLessEqual(set(check_policy.MANDATORY_CODES), set(BY_CODE))
+
+    def test_opt_in_activation_names_existing_fields_for_every_gated_check(self) -> None:
+        from latexprep import check_policy
+        from latexprep.config import Settings
+
+        settings = Settings()
+        activation = check_policy.opt_in_activation()
+        gated = set(_ROOT_CHECKS).union(*(set(group) for group in _GROUP_CHECKS.values()))
+        self.assertEqual(set(activation), gated | {"PRV001", "PRV002"})
+        self.assertEqual(activation["PRV001"], [("submission_checks", {"identity_terms": ()})])
+        self.assertEqual(
+            [group for group, _ in activation["PDF313"]], ["pdf_artwork", "figure_artwork"]
+        )
+        for code, rows in activation.items():
+            for group, fields in rows:
+                options = settings if group is None else getattr(settings, group)
+                for name in fields:
+                    self.assertTrue(hasattr(options, name), (code, group, name))
+        # Callers receive copies, so they cannot change the policy tables.
+        activation["TEX101"][0][1]["expected_document_class"] = "changed"
+        self.assertIsNone(_ROOT_CHECKS["TEX101"]["expected_document_class"])
 
 
 if __name__ == "__main__":

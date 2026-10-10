@@ -64,6 +64,8 @@ class ManuscriptCheckOptions:
     require_float_references: bool = False
     check_float_reference_order: bool = False
     require_figure_descriptions: bool = False
+    require_line_numbers: bool = False
+    forbid_line_numbers: bool = False
 
     def __post_init__(self) -> None:
         for name in (
@@ -79,9 +81,13 @@ class ManuscriptCheckOptions:
             "require_float_references",
             "check_float_reference_order",
             "require_figure_descriptions",
+            "require_line_numbers",
+            "forbid_line_numbers",
         ):
             if type(getattr(self, name)) is not bool:
                 raise PreparationError(f"{name} must be a boolean")
+        if self.require_line_numbers and self.forbid_line_numbers:
+            raise PreparationError("Choose require_line_numbers or forbid_line_numbers, not both")
         for name in (
             "allowed_packages",
             "abstract_abbreviation_exceptions",
@@ -600,8 +606,9 @@ def _within(spans: list[tuple[int, int]], offset: int) -> bool:
     return index >= 0 and spans[index][0] <= offset < spans[index][1]
 
 
-def _read(root: Path, main: str | None) -> _Document:
-    inspection = _Inspection(root, main)
+def _read(root: Path, main: str | None, inspection: _Inspection | None = None) -> _Document:
+    """Expand the selected literal graph; reuse ``inspection`` when the caller has one."""
+    inspection = inspection or _Inspection(root, main)
     selected = _reachable_sources(inspection)
     document = _Document(inspection, selected)
     if inspection.main not in selected:
@@ -1495,6 +1502,90 @@ def _metadata_checks(document: _Document, options: ManuscriptCheckOptions) -> li
     return results
 
 
+_LINE_NUMBER_COMMANDS = {"linenumbers", "runninglinenumbers", "pagewiselinenumbers"}
+_LINE_NUMBER_OPTIONS = {"lineno", "linenumbers"}
+
+
+def _line_number_checks(document: _Document, options: ManuscriptCheckOptions) -> list[Finding]:
+    """Find literal lineno activation; class-specific review modes are not interpreted."""
+    if not (options.require_line_numbers or options.forbid_line_numbers):
+        return []
+    definitions = _definition_spans(document.text, document.commands)
+    activations: list[dict[str, object]] = []
+    loaded: list[dict[str, object]] = []
+    reasons = list(document.graph_uncertainty)
+    for command in document.commands:
+        cancellation_point()
+        options_text = [_literal_list(item.value) or [] for item in command.options]
+        option_names = {name for values in options_text for name in values}
+        environment = (
+            command.arguments[0].value.strip()
+            if command.name == "begin" and command.arguments
+            else None
+        )
+        packages = (
+            _literal_list(command.arguments[0].value) or []
+            if command.name in _PACKAGE_COMMANDS and command.arguments
+            else []
+        )
+        if command.name == "documentclass" and option_names & _LINE_NUMBER_OPTIONS:
+            kind = "class option " + ", ".join(sorted(option_names & _LINE_NUMBER_OPTIONS))
+        elif "lineno" in packages and "linenumbers" in option_names:
+            kind = "lineno package option linenumbers"
+        elif command.name in _LINE_NUMBER_COMMANDS:
+            kind = "\\" + command.name
+        elif environment in _LINE_NUMBER_COMMANDS:
+            kind = f"{environment} environment"
+        else:
+            if "lineno" in packages:
+                loaded.append(document.location(command.start))
+            continue
+        location = document.location(command.start)
+        if _within(definitions, command.start):
+            reasons.append(f"{_where([location])}: {kind} inside a macro definition")
+        elif command.depth or in_conditional(document.conditionals, command.start):
+            reasons.append(f"{_where([location])}: grouped or conditional {kind}")
+        else:
+            activations.append({**location, "activation": kind})
+    extra: dict[str, object] = {
+        "policy": "require" if options.require_line_numbers else "forbid",
+        "activations": activations,
+        "lineno_loaded": loaded,
+        "scope": "Literal lineno activation (\\linenumbers and its variants, the linenumbers "
+        "package option or a lineno/linenumbers class option); class-specific review modes "
+        "and macro-generated activation are not interpreted.",
+    }
+    if options.forbid_line_numbers:
+        return [
+            _finding(
+                "manuscript.line_numbers",
+                "No literal line-number activation was found.",
+                document,
+                activations,
+                reasons,
+                failure="Line numbering is active at {count} location(s)",
+                extra=extra,
+            )
+        ]
+    main = document.inspection.main
+    missing = (
+        []
+        if activations or reasons
+        else [{"path": main, "line": None, "reason": "no literal line-number activation"}]
+    )
+    return [
+        _finding(
+            "manuscript.line_numbers",
+            "Line numbering is activated literally.",
+            document,
+            missing,
+            [] if activations else reasons,
+            failure="No literal line-number activation was found",
+            extra=extra,
+        )
+    ]
+
+
 def _float_checks(document: _Document, options: ManuscriptCheckOptions) -> list[Finding]:
     rules = [
         (
@@ -1719,4 +1810,5 @@ def check_manuscript_details(
     results.extend(_structure_checks(document, options))
     results.extend(_metadata_checks(document, options))
     results.extend(_float_checks(document, options))
+    results.extend(_line_number_checks(document, options))
     return results

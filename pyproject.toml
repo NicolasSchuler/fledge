@@ -17,7 +17,8 @@ Documentation = "https://nicolasschuler.github.io/fledge/"
 [project.optional-dependencies]
 docs = ["sphinx>=8,<10", "myst-parser>=4,<6"]
 build = ["build>=1.2,<2"]
-dev = ["ruff>=0.9,<1", "ty>=0.0.1,<0.1"]
+# pytest 9 reports unittest subTest failures individually; xdist runs the suite in parallel.
+dev = ["ruff>=0.9,<1", "ty>=0.0.1,<0.1", "pytest>=9,<10", "pytest-xdist>=3.6,<4"]
 
 [project.scripts]
 fledge = "latexprep.cli:main"
@@ -27,6 +28,21 @@ latex-prep = "latexprep.cli:main"
 where = ["src"]
 include = ["latexprep*"]
 namespaces = false
+
+[tool.setuptools.package-data]
+# Example presets read through importlib.resources; tests fail if they do not ship.
+latexprep = ["presets/*.toml"]
+
+[tool.pytest.ini_options]
+# The tests are unittest.TestCase classes; pytest collects exactly the same tests as
+# `python -m unittest discover -s tests -t .` and adds parallel runs with pytest-xdist.
+minversion = "9.0"
+testpaths = ["tests"]
+addopts = ["-ra", "--strict-config", "--strict-markers"]
+xfail_strict = true
+# Dump every thread's traceback when a single test runs this long, so a hung test
+# names itself in CI logs instead of silently consuming the job timeout.
+faulthandler_timeout = 300
 
 [tool.ruff]
 target-version = "py311"

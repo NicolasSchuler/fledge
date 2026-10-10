@@ -17,10 +17,15 @@ import zipfile
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path, PurePosixPath
+from typing import TYPE_CHECKING
 from urllib.parse import quote
 
+from .check_policy import opt_in_activation
 from .models import Finding, PreparationError, Report
 from .rules import BY_CODE, BY_NAME
+
+if TYPE_CHECKING:
+    from .config import Settings
 
 # Explicitly enumerated presentation/content policies. New checks are ineligible
 # until their evidence and safety contract have been reviewed here.
@@ -405,6 +410,110 @@ def review_marker(finding: Finding) -> str:
 def is_scope_disclaimer(finding: Finding) -> bool:
     """Informational notes that a check was out of scope; shown only on request."""
     return finding.severity == "info" and finding.status in {"skipped", "not_applicable"}
+
+
+CONFIGURATION_GUIDE = "https://nicolasschuler.github.io/fledge/configuration.html"
+PRESET_COMMAND = "fledge init --preset arxiv|anonymous-review|camera-ready"
+# Opt-in areas named individually when they are not configured; every other
+# unconfigured opt-in check is counted together. Codes and settings come from
+# the check policy's activation tables, so a renamed setting cannot go stale here.
+_NOT_CHECKED_AREAS = (
+    ("anonymity", "anonymity", ("PRV001", "PRV002")),
+    ("page_limit", "page limit", ("PDF001",)),
+    ("archive_size", "ZIP size limit", ("PKG105",)),
+    ("forbidden_packages", "forbidden packages", ("TEX103", "BLD102")),
+    ("font_embedding", "strict font embedding", ("PDF104", "PDF105")),
+    ("image_resolution", "image resolution", ("PDF103",)),
+)
+
+
+def not_checked_areas(settings: Settings) -> list[dict[str, object]]:
+    """Opt-in checks that this run's effective settings leave unconfigured.
+
+    The first entries name the major areas; the final ``other_opt_in_checks``
+    entry lists the remaining unconfigured opt-in codes. A check disabled by
+    check selection is reported here too, because it did not run either.
+    """
+    activation = opt_in_activation()
+
+    def configured(code: str) -> bool:
+        return any(
+            getattr(settings if group is None else getattr(settings, group), name) != disabled
+            for group, fields in activation[code]
+            for name, disabled in fields.items()
+        )
+
+    def setting_names(codes: Sequence[str]) -> list[str]:
+        return list(
+            dict.fromkeys(
+                name if group is None else f"{group}.{name}"
+                for code in codes
+                for group, fields in activation[code]
+                for name in fields
+            )
+        )
+
+    entries: list[dict[str, object]] = []
+    named: set[str] = set()
+    for area, label, codes in _NOT_CHECKED_AREAS:
+        named.update(codes)
+        if not any(configured(code) for code in codes):
+            entries.append(
+                {
+                    "area": area,
+                    "label": label,
+                    "codes": list(codes),
+                    "settings": setting_names(codes),
+                }
+            )
+    others = sorted(code for code in activation if code not in named and not configured(code))
+    if others:
+        entries.append(
+            {
+                "area": "other_opt_in_checks",
+                "label": "other opt-in checks",
+                "codes": others,
+                "settings": setting_names(others),
+            }
+        )
+    return entries
+
+
+def not_checked_summary(entries: object, config_path: object = None) -> str | None:
+    """One line naming unconfigured opt-in areas and how to enable them.
+
+    ``config_path`` is the settings file this run loaded, if any (the report's
+    ``execution.config_path``). The ``fledge init`` hint is only offered when no
+    settings file was used.
+    """
+    if not isinstance(entries, list) or not entries:
+        return None
+    labels = [
+        str(item["label"])
+        for item in entries
+        if isinstance(item, Mapping) and item.get("area") != "other_opt_in_checks"
+    ]
+    others = next(
+        (
+            item.get("codes")
+            for item in entries
+            if isinstance(item, Mapping) and item.get("area") == "other_opt_in_checks"
+        ),
+        None,
+    )
+    if isinstance(others, list) and others:
+        labels.append(f"{len(others)} other opt-in check{'s' if len(others) != 1 else ''}")
+    if not labels:
+        return None
+    where = (
+        f"Add them to {config_path}"
+        if isinstance(config_path, str) and config_path
+        else f"Set them in fledge.toml (start with {PRESET_COMMAND})"
+    )
+    return (
+        f"Not checked (needs your settings): {', '.join(labels)}. "
+        f"{where}; see {CONFIGURATION_GUIDE}"
+    )
 
 
 # Checkers keep their evidence in these detail lists behind a generic message.

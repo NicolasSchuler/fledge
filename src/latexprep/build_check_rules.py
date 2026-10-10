@@ -62,4 +62,23 @@ RULE_DEFINITIONS = (
             "retain overrides only when deliberate."
         ),
     },
+    {
+        "code": "BLD105",
+        "name": "build.tex_distribution",
+        "title": "Local TeX distribution release",
+        "description": (
+            "Record the TeX distribution named by the baseline build's single engine version "
+            "probe (for example TeX Live 2026) as information. Opt-in "
+            "build_checks.expected_texlive_year turns a different or unidentified release into "
+            "a warning; missing version evidence is inconclusive, never a pass."
+        ),
+        "tests": (
+            "tests.test_build_checks.TexDistributionTests.test_records_texlive_year_and_compares_explicit_expectation",
+            "tests.test_build_checks.TexDistributionTests.test_missing_or_unrecognized_version_is_inconclusive",
+        ),
+        "fix": (
+            "Build with the TeX Live release the receiving service documents (arXiv lists its "
+            "current one), or correct expected_texlive_year; rerun after changing toolchains."
+        ),
+    },
 )

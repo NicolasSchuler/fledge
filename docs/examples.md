@@ -3,8 +3,7 @@
 Use this small fixture to try the CLI without your own manuscript, including
 from a wheel installation. After [installing](installation.md), run these commands
 in one POSIX shell. They create a fresh temporary directory; no TeX or PDF tools
-are needed. With the macOS installer, use `~/.local/bin/fledge` in place of
-`fledge` below unless its directory is on your `PATH`.
+are needed.
 
 ```sh
 demo_dir="$(mktemp -d)"
@@ -42,11 +41,12 @@ fledge inspect "$demo_dir/paper" --main main.tex --isolated --offline
 fledge bib check "$demo_dir/paper" --main main.tex --isolated --offline
 ```
 
-Both commands should return exit code 0 with `outcome: passed`, two passed
-results and two not-applicable checks (page-range and URL syntax have nothing to
-examine); add `--show-passed` to list them. Their scope is source/bibliography
-inspection; no build or bundle is verified. `--isolated` disables configuration
-discovery, while `--offline` disables reference-network requests.
+Both commands should exit with code 0 and outcome `passed`. `inspect` also
+shows a `TEX009` information note because the demo has no generated `.bbl`;
+it does not change the outcome. Add `--show-passed` to list the individual
+results. They inspect sources and bibliography only; no
+build or bundle is verified. `--isolated` ignores any configuration file, and
+`--offline` prevents network requests.
 
 ## Save a report
 
@@ -56,8 +56,7 @@ fledge inspect "$demo_dir/paper" --main main.tex --isolated --offline \
 fledge rule BIB001
 ```
 
-The report file must be new and outside the input. JSON also appears on stdout.
-Use the [report guide](reports.md) to interpret it.
+JSON also appears on stdout. The [report guide](reports.md) explains it.
 
 The source distribution includes a nested fixture too. From its root directory:
 

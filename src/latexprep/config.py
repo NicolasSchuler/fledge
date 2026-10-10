@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import difflib
 import tomllib
 from dataclasses import asdict, dataclass, field, fields, replace
 from pathlib import Path
@@ -21,6 +22,7 @@ from .option_config import read_options
 from .pdf import PdfOptions
 from .pdf_artwork import PdfArtworkOptions
 from .pdf_checks import PdfCheckOptions
+from .presets import preset_values
 from .reporting import ReportingOptions
 from .source_transform import SourceTransformOptions
 from .structure_checks import StructureOptions
@@ -28,6 +30,14 @@ from .submission_checks import SubmissionOptions
 from .workflow_options import PackageOptions, WorkflowOptions
 
 PARENT_MEMORY_MB = 128
+
+
+class RequestError(PreparationError):
+    """An invalid request or setting that names its source and a concrete next step."""
+
+    def __init__(self, message: str, suggestion: str) -> None:
+        super().__init__(message)
+        self.suggestion = suggestion
 
 
 def _bibliography_edit_tables(value: object) -> object:
@@ -165,6 +175,22 @@ def _read_settings(path: Path, *, required: bool = True) -> dict[str, object] | 
     return settings
 
 
+def _unknown_settings_error(unknown: list[str], known: set[str], path: Path | None) -> RequestError:
+    guesses = {
+        name: close[0]
+        for name in unknown
+        if (close := difflib.get_close_matches(name, sorted(known), n=1))
+    }
+    where = f" in {path}" if path is not None else ""
+    message = f"Unknown setting(s){where}: " + ", ".join(
+        f"{name} (did you mean {guesses[name]}?)" if name in guesses else name for name in unknown
+    )
+    fix = f"Rename or remove {'it' if len(unknown) == 1 else 'them'}{where}."
+    if len(guesses) < len(unknown):
+        fix += f" Valid top-level settings: {', '.join(sorted(known))}."
+    return RequestError(message, fix)
+
+
 def resolve_config_path(
     source: Path, explicit: Path | None = None, *, isolated: bool = False
 ) -> Path | None:
@@ -201,14 +227,29 @@ def resolve_config_path(
     return None
 
 
-def load_settings(path: Path | None, overrides: dict[str, object]) -> Settings:
-    """Load one selected file and apply non-None CLI/API overrides last."""
+def _layer_preset(preset: dict[str, object], selected: dict[str, object]) -> dict[str, object]:
+    """Let the settings file override the preset; a table overrides it key by key."""
+    merged = dict(preset)
+    for key, value in selected.items():
+        base = merged.get(key)
+        if isinstance(base, dict) and isinstance(value, dict):
+            value = {**base, **value}
+        merged[key] = value
+    return merged
+
+
+def load_settings(
+    path: Path | None, overrides: dict[str, object], *, preset: str | None = None
+) -> Settings:
+    """Layer an optional preset, then one selected file, then non-None CLI/API overrides."""
     values = _read_settings(path) if path is not None else {}
     assert values is not None
+    if preset is not None:
+        values = _layer_preset(preset_values(preset), values)
     known = {item.name for item in fields(Settings)}
     unknown = (set(values) | set(overrides)) - known
     if unknown:
-        raise PreparationError(f"Unknown setting(s): {', '.join(sorted(unknown))}")
+        raise _unknown_settings_error(sorted(unknown), known, path)
     values.update({key: value for key, value in overrides.items() if value is not None})
     defaults = Settings().to_dict()
     defaults.update(values)

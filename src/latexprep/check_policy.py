@@ -9,10 +9,14 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import replace
+from typing import TYPE_CHECKING
 
 from .check_selection import CheckSelection
-from .config import Settings
 from .models import Finding
+
+if TYPE_CHECKING:
+    # Type-only: the configuration module imports reporting, which imports this module.
+    from .config import Settings
 
 # These establish the safety of reading, transforming, building or publishing a
 # prepared copy. Bibliography syntax, key, macro and relationship checks are kept
@@ -61,6 +65,10 @@ MANDATORY_CODES = frozenset(
     }
 )
 
+# Cheap deterministic advisories that run by default without any option. Selection
+# filters their findings; they never block preparation on their own.
+DEFAULT_ADVISORY_CODES = frozenset({"TEX009", "TEX010", "TEX011", "PRV007"})
+
 # Each row clears every activation field for one check together. This matters for
 # dataclasses that reject a half-configured pair (regions/coverage, for example).
 _ROOT_CHECKS: dict[str, dict[str, object]] = {
@@ -102,6 +110,7 @@ _ARTWORK_CHECKS: dict[str, dict[str, object]] = {
     "PDF310": {"raster_regions": (), "min_raster_region_coverage": None},
     "PDF311": {"grayscale_preview": False},
     "PDF312": {"contrast_samples": ()},
+    "PDF313": {"required_color_space": None},
 }
 
 _GROUP_CHECKS: dict[str, dict[str, dict[str, object]]] = {
@@ -125,6 +134,8 @@ _GROUP_CHECKS: dict[str, dict[str, dict[str, object]]] = {
         "BLD103": {"minimum_package_dates": ()},
         "BLD104": {"check_local_package_shadows": False},
         "BLD301": {"inventory_loaded_options": False},
+        # The distribution observation itself is default-on and filtered by selection.
+        "BLD105": {"expected_texlive_year": None},
     },
     "manuscript_checks": {
         "MAN001": {"allowed_packages": None},
@@ -146,6 +157,7 @@ _GROUP_CHECKS: dict[str, dict[str, dict[str, object]]] = {
         "MAN014": {"require_float_references": False},
         "MAN015": {"check_float_reference_order": False},
         "MAN016": {"require_figure_descriptions": False},
+        "MAN017": {"require_line_numbers": False, "forbid_line_numbers": False},
     },
     "metadata_privacy": {"PRV103": {"image_identity_terms": ()}},
     "online_checks": {
@@ -197,8 +209,32 @@ _GROUP_CHECKS: dict[str, dict[str, dict[str, object]]] = {
         "PKG105": {"max_archive_bytes": None},
         "PKG106": {"report_unused_assets": False},
         "PKG107": {"template_references": ()},
+        "BIB109": {"check_bbl_coverage": False},
     },
 }
+
+
+# Settings section (None for top-level Settings fields) and the disabled value of
+# each field that activates an opt-in check.
+OptInActivation = dict[str, list[tuple[str | None, dict[str, object]]]]
+
+
+def opt_in_activation() -> OptInActivation:
+    """Every opt-in check code with the settings fields that activate it.
+
+    A check is configured when any listed field differs from its disabled value.
+    A code may be activated from more than one section (figure and PDF artwork).
+    Source and PDF identity checks (PRV001/PRV002) share submission identity terms.
+    """
+    activation: OptInActivation = {}
+    for code, fields in _ROOT_CHECKS.items():
+        activation.setdefault(code, []).append((None, dict(fields)))
+    for group, policies in _GROUP_CHECKS.items():
+        for code, fields in policies.items():
+            activation.setdefault(code, []).append((group, dict(fields)))
+    for code in ("PRV001", "PRV002"):
+        activation[code] = [("submission_checks", {"identity_terms": ()})]
+    return activation
 
 
 def _disabled_values(

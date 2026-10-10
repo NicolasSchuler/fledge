@@ -126,6 +126,15 @@ _GRAPH_FAILURES = frozenset(
 )
 
 
+# Source findings that leave no selected document; each is a blocking error.
+_ROOT_FAILURES = frozenset({"source-root-ambiguous", "source-root-missing", "source-main-invalid"})
+_SELECTION_UNAVAILABLE = "No complete bibliography resource selection is available"
+
+
+def _blocking(finding: Finding) -> bool:
+    return finding.severity == "error" and finding.status in {"failed", "inconclusive", "skipped"}
+
+
 @dataclass(frozen=True)
 class BibliographyOptions:
     check_citation_coverage: bool = True
@@ -213,6 +222,8 @@ class _Graph:
     nocite_all: bool = False
     reasons: list[str] = field(default_factory=list)
     unused_reasons: list[str] = field(default_factory=list)
+    # Reasons that restate a blocking source error the source checks already report.
+    reported_causes: set[str] = field(default_factory=set)
 
 
 def _keys(value: str) -> list[str] | None:
@@ -244,14 +255,22 @@ def _graph(inspection: _Inspection) -> _Graph:
     graph = _Graph(inspection.main)
     selected = _reachable_sources(inspection)
     if inspection.main not in selected:
-        graph.reasons.append("A unique readable main source could not be selected")
+        reason = "A unique readable main source could not be selected"
+        graph.reasons.append(reason)
+        if not inspection.main and any(
+            item.rule in _ROOT_FAILURES and _blocking(item) for item in inspection.findings
+        ):
+            graph.reported_causes.add(reason)
     if not inspection.main:
         return graph
     scope = selected | {inspection.main}
     for item in inspection.findings:
         # A resolved lookup-order or conditional dependency is evidence, not a gap.
         if item.path in scope and item.rule in _GRAPH_FAILURES and item.status != "passed":
-            graph.reasons.append(f"{item.path}: {item.message}")
+            reason = f"{item.path}: {item.message}"
+            graph.reasons.append(reason)
+            if _blocking(item):
+                graph.reported_causes.add(reason)
     resources, resource_reasons = _resource_declarations(inspection, selected)
     graph.resources.update(resources)
     graph.reasons.extend(resource_reasons)
@@ -969,7 +988,7 @@ def check_bibliography_details(
         # explicitly stated metadata scope is every local bibliography file.
         names = {name for name in inspection.files if Path(name).suffix.lower() == ".bib"}
     elif not names and any(graph.reasons for graph in graphs):
-        metadata_scope_reasons.append("No complete bibliography resource selection is available")
+        metadata_scope_reasons.append(_SELECTION_UNAVAILABLE)
     if inspection.roots or main is not None:
         metadata_scope_reasons.extend(reason for graph in graphs for reason in graph.reasons)
     documents, input_reasons = _load_documents(root, names)
@@ -997,4 +1016,50 @@ def check_bibliography_details(
     findings.extend(_metadata(references, metadata_scope_reasons, options, scope))
     if options.check_fuzzy_duplicates:
         findings.extend(_fuzzy(references, metadata_scope_reasons, options, scope))
-    return findings
+    return _collapse_reported_causes(findings, graphs, scope)
+
+
+def _collapse_reported_causes(
+    findings: list[Finding], graphs: list[_Graph], scope: dict[str, object]
+) -> list[Finding]:
+    """Replace summaries that only restate an already reported source error with one note.
+
+    A missing input or an ambiguous main file makes every bibliography summary
+    inconclusive with the same reason. The source checks report that error;
+    repeating it once per bibliography check buries it. Summaries with any other
+    uncertainty, and every per-item finding, are kept.
+    """
+    causes = set().union(*(graph.reported_causes for graph in graphs))
+    if not causes:
+        return findings
+    if all(set(graph.reasons) <= causes for graph in graphs):
+        # Derived only from the graph reasons above, so it adds no new uncertainty.
+        causes.add(_SELECTION_UNAVAILABLE)
+
+    def restated(item: Finding) -> list[str]:
+        """The uncertainty of a summary that only restates reported causes, else nothing."""
+        uncertainty = item.details.get("uncertainty")
+        if item.status != "inconclusive" or "checked" not in item.details:
+            return []
+        if not isinstance(uncertainty, list) or not set(uncertainty) <= causes:
+            return []
+        return [str(value) for value in uncertainty]
+
+    collapsed = [item for item in findings if restated(item)]
+    if not collapsed:
+        return findings
+    codes = list(dict.fromkeys(item.code or item.rule for item in collapsed))
+    reported = sorted({value for item in collapsed for value in restated(item)})
+    reported = [reason for reason in reported if reason != _SELECTION_UNAVAILABLE] or reported
+    note = Finding(
+        "bibliography.source_error",
+        f"Bibliography checks {', '.join(codes)} were inconclusive because of a source error "
+        f"reported above: {reported[0].rstrip('.')}.",
+        severity="warning",
+        status="inconclusive",
+        evidence="derived",
+        suggestion="Fix the reported source error; these bibliography checks then run in full.",
+        details={**scope, "inconclusive_checks": codes, "uncertainty": reported},
+    )
+    kept = [item for item in findings if not restated(item)]
+    return [*kept, note]

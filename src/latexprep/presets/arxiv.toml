@@ -1,0 +1,59 @@
+# Fledge preset "arxiv": a starting point for a public arXiv source upload.
+#
+# This is not an arXiv policy and passing it does not certify that arXiv will
+# accept the submission. Fledge maintains no venue rules: the settings below only
+# switch on generic checks that matter when the source itself is published. Read
+# arXiv's current submission instructions, fill in the commented placeholders
+# with the values that apply to you, and delete anything you do not want.
+#
+# `fledge init --preset arxiv` copies this file to fledge.toml for editing.
+# `--preset arxiv` on inspect, check and prepare applies it as the lowest layer:
+# your settings file overrides it and command-line options override both.
+# Codes such as PRV005 are explained by `fledge rule PRV005`.
+
+# Literal class and package declarations that should not reach a public build.
+forbidden_class_options = ["draft"] # TEX102: draft mode replaces figures with boxes.
+forbidden_packages = ["showframe"] # TEX103: page-frame debugging overlay.
+
+# Embedded fonts in your local build (PDF104). arXiv compiles its own PDF from the
+# source, so this checks the PDF you can inspect, not the one arXiv will serve.
+require_embedded_fonts = true
+# PDF105: also reject Type 3 fonts, which often come from bitmap fonts in figures.
+# forbid_type3_fonts = true
+
+# Venue-specific top-level settings: add them here, above the first [table].
+
+[submission_checks]
+# arXiv makes the uploaded source downloadable, so check what it reveals.
+scan_private_comments = true # PRV005: TODO and private notes inside TeX comments.
+scan_secrets = true # PRV004: credential-shaped tokens and private-key headers.
+check_shell_escape = true # PRV006: write18 and shell-escape constructs.
+report_unused_assets = true # PKG106: files outside the selected dependency graph.
+# PKG105: compressed size of the final ZIP in bytes. arXiv documents its own
+# upload limits; copy the current value rather than relying on a remembered one.
+# max_archive_bytes = 0
+# PKG102: allowed filename characters, if you want to check them. Copy the set
+# from arXiv's current instructions.
+# filename_allowed_characters = ""
+# TEX009: arXiv does not run BibTeX or Biber, so a missing generated <main>.bbl
+# beside the main file is a warning here. prepare ships an existing one that the
+# build used; build locally first so that it exists.
+require_bbl = true
+check_bbl_coverage = true # BIB109: the shipped .bbl contains every cited key.
+
+[source_transforms]
+# prepare only: remove TeX comments that contain TODO, FIXME, XXX, "private",
+# "internal", "confidential" or "note to self" from the separate copy. Licence
+# blocks and formatter directives are kept; the original is never changed.
+# Use "retain" to keep every comment or "all" to remove every removable comment.
+comment_policy = "private"
+
+[build_checks]
+# BLD105: TeX Live year arXiv compiles with; warns if your local release differs.
+# expected_texlive_year = 0
+
+# ---------------------------------------------------------------------------
+# Venue-specific additions
+# Add settings for requirements you have confirmed in arXiv's current
+# instructions below, under the matching [table] header.
+# ---------------------------------------------------------------------------

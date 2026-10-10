@@ -50,6 +50,9 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
         # A bare message loses the diagnosis whenever it is empty or just a path.
         self.assertEqual(results["build"].error, "RuntimeError: build failed")
         self.assertEqual(results["pdf"].status, "blocked")
+        # Reports group blocked tasks by their failed prerequisite.
+        self.assertEqual(results["pdf"].blocked_by, ("build",))
+        self.assertEqual(results["source"].blocked_by, ())
         self.assertEqual(results["report"].value, "diagnostics")
         self.assertEqual(results["source"].value, "diagnostics")
 

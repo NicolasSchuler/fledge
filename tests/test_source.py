@@ -647,6 +647,29 @@ class SourceTests(unittest.TestCase):
                 rules = {item.rule for item in analyze_sources(self.root, "main.tex").findings}
                 self.assertEqual("source-custom-path" in rules, expected)
 
+    def test_biblatex_bbl_version_guard_is_not_a_file_reference(self) -> None:
+        self.write(
+            "paper/main.tex",
+            "\\documentclass{article}\n\\usepackage{biblatex}\n\\addbibresource{refs.bib}\n"
+            "\\begin{document}\\cite{a}\\printbibliography\\end{document}\n",
+        )
+        self.write("paper/refs.bib", "@misc{a,title={A}}\n")
+        # The guard biber writes at the top of every biblatex .bbl.
+        self.write(
+            "paper/main.bbl",
+            "\\begingroup\n\\makeatletter\n\\@ifundefined{ver@biblatex.sty}\n"
+            "  {\\@latex@error{Missing 'biblatex' package}{}\\aftergroup\\endinput}\n"
+            "  {}\n\\endgroup\n",
+        )
+        rules = {item.rule for item in analyze_sources(self.root, "paper/main.tex").findings}
+        self.assertNotIn("source-custom-path", rules)
+        plan = plan_flatten(self.root, "paper/main.tex")
+        self.assert_usable(plan)
+        self.assertEqual(plan.mapping["paper/main.bbl"], "main.bbl")
+        self.write("paper/main.tex", "\\documentclass{article}\n\\mymacro{refs.bib}\n")
+        rules = {item.rule for item in analyze_sources(self.root, "paper/main.tex").findings}
+        self.assertIn("source-custom-path", rules)
+
     def test_conditional_uncertainty_covers_only_enclosed_project_references(self) -> None:
         self.write(
             "local/helper.sty",

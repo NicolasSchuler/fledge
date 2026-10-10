@@ -220,6 +220,9 @@ _RESERVED_NAMES = {
     *(f"LPT{i}" for i in range(1, 10)),
 }
 _TOKEN = re.compile(r"\\([A-Za-z@]+|[^\r\n])")
+# Arguments are control-sequence names, never files: biblatex's generated .bbl
+# guards itself with \@ifundefined{ver@biblatex.sty}.
+_MACRO_NAME_COMMANDS = {"@ifundefined", "@namedef", "@nameuse"}
 _PATH_LIKE = re.compile(
     r"(?:^|[\s,=])[^\s{}]+\.(?:tex|ltx|bib|bst|sty|cls|pdf|png|jpe?g|eps|svg|csv|tsv|dat|txt|json|xml|ttf|otf)(?:$|[\s,])",
     re.I,
@@ -870,6 +873,7 @@ class _Inspection:
         elif (
             command.name not in _FILE_COMMANDS
             and command.name not in _TEXT_COMMANDS
+            and command.name not in _MACRO_NAME_COMMANDS
             and command.name != "graphicspath"
         ):
             for argument in (*command.options, *command.arguments):

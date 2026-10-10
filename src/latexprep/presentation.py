@@ -11,11 +11,18 @@ from rich.table import Table
 from rich.text import Text
 
 from .models import Finding, Report
-from .reporting import evidence_excerpt, is_scope_disclaimer, review_marker
+from .reporting import (
+    evidence_excerpt,
+    is_scope_disclaimer,
+    not_checked_summary,
+    review_marker,
+)
 from .rules import BY_NAME, Rule
 
 # Larger change sets are summarized by kind; every entry remains in the JSON report.
 MAX_LISTED_CHANGES = 20
+# The scope of a report whose request was rejected before or while the job ran.
+REQUEST_SCOPE = "request validation"
 
 
 def _safe(value: str) -> str:
@@ -36,7 +43,7 @@ def _label(finding: Finding) -> str:
     return definition.title if definition else finding.rule.replace("_", " ").replace(".", " / ")
 
 
-def _location(finding: Finding) -> str:
+def _location(finding: Finding, stages: tuple[str, ...] = ()) -> str:
     location = finding.path or "project"
     if document := finding.details.get("document"):
         location = f"{document}: {location}"
@@ -47,7 +54,9 @@ def _location(finding: Finding) -> str:
     page = finding.details.get("page")
     if page is not None:
         location += f" (page {page})"
-    if "stage" in finding.details:
+    if stages:
+        location += f" [{', '.join(stages)}]"
+    elif "stage" in finding.details:
         location += f" [{finding.details['stage']}]"
     return location
 
@@ -65,23 +74,93 @@ def _hidden(finding: Finding) -> bool:
     return finding.status == "passed" or is_scope_disclaimer(finding)
 
 
-def _visible(report: Report, show_passed: bool) -> list[Finding]:
-    return sorted(
-        (item for item in report.sorted_findings() if show_passed or not _hidden(item)),
-        key=_priority,
+def _blocked_by(finding: Finding) -> tuple[str, ...]:
+    """Failed prerequisites of a task the scheduler never started, if this records one."""
+    prerequisites = finding.details.get("blocked_by")
+    if finding.rule != "execution.task" or finding.status != "skipped":
+        return ()
+    if not isinstance(prerequisites, list):
+        return ()
+    return tuple(str(item) for item in prerequisites)
+
+
+def _identity(finding: Finding) -> tuple[object, ...]:
+    # The same result re-checked at another stage (baseline, transformed, archive
+    # rebuild or final sources) is one issue for a reader; JSON keeps every stage.
+    details = finding.details
+    return (
+        finding.rule,
+        finding.severity,
+        finding.status,
+        finding.message,
+        str(details.get("document", "")),
+        finding.path,
+        finding.line,
+        str(details.get("page")),
+        str(details.get("input_line")),
     )
+
+
+def _unique(findings: list[Finding]) -> list[tuple[Finding, tuple[str, ...]]]:
+    """One entry per distinct finding with the stages its identical copies came from.
+
+    A copy without a stage (the initial source analysis) represents the group and
+    later identical re-checks are omitted; otherwise the stages are listed in the
+    order the job reached them.
+    """
+    groups: dict[tuple[object, ...], list[Finding]] = {}
+    for finding in findings:
+        groups.setdefault(_identity(finding), []).append(finding)
+    entries = []
+    for members in groups.values():
+        unstaged = next((item for item in members if "stage" not in item.details), None)
+        if unstaged is not None or len(members) == 1:
+            entries.append((unstaged or members[0], ()))
+            continue
+        stages = tuple(dict.fromkeys(str(item.details["stage"]) for item in members))
+        entries.append((members[0], stages if len(stages) > 1 else ()))
+    return entries
+
+
+def _visible(report: Report, show_passed: bool) -> list[tuple[Finding, tuple[str, ...]]]:
+    order = {id(item): index for index, item in enumerate(report.sorted_findings())}
+    entries = _unique(
+        [
+            item
+            for item in report.findings
+            if not _blocked_by(item) and (show_passed or not _hidden(item))
+        ]
+    )
+    return sorted(entries, key=lambda entry: (_priority(entry[0]), order[id(entry[0])]))
+
+
+def _blocked_summaries(report: Report) -> list[str]:
+    """One line per failed prerequisite instead of one note per task it prevented."""
+    groups: dict[tuple[str, tuple[str, ...]], list[str]] = {}
+    for finding in report.findings:
+        if prerequisites := _blocked_by(finding):
+            key = (str(finding.details.get("document", "")), prerequisites)
+            task = str(finding.details.get("task", finding.message))
+            if task not in groups.setdefault(key, []):
+                groups[key].append(task)
+    lines = []
+    for (document, prerequisites), tasks in groups.items():
+        count = len(tasks)
+        lines.append(
+            (f"{document}: " if document else "")
+            + f"{count} check{'s' if count != 1 else ''} did not run because "
+            + f"{' and '.join(prerequisites)} failed: {', '.join(sorted(tasks))}"
+        )
+    return lines
 
 
 def _counts(report: Report) -> str:
-    errors = sum(item.severity == "error" and item.status != "passed" for item in report.findings)
-    warnings = sum(
-        item.severity == "warning" and item.status != "passed" for item in report.findings
-    )
-    statuses = Counter(item.status for item in report.findings)
+    findings = [item for item, _stages in _unique(report.findings)]
+    errors = sum(item.severity == "error" and item.status != "passed" for item in findings)
+    warnings = sum(item.severity == "warning" and item.status != "passed" for item in findings)
+    statuses = Counter(item.status for item in findings)
     # Informational scope notes are neither failures nor missing evidence: count them apart.
-    skipped_notes = sum(
-        item.status == "skipped" and is_scope_disclaimer(item) for item in report.findings
-    )
+    skipped_notes = sum(item.status == "skipped" and is_scope_disclaimer(item) for item in findings)
     not_applicable = statuses["not_applicable"] + skipped_notes
     incomplete = statuses["inconclusive"] + statuses["skipped"] - skipped_notes
     return (
@@ -119,14 +198,17 @@ def print_report(
     report = report.redacted_copy()
     outcome = report.outcome.replace("_", " ").capitalize()
     style = "bold red" if report.outcome in {"blocked", "error"} else "bold"
-    console.print(Text(f"{outcome} — {_safe(report.scope)}", style=style))
+    if report.outcome == "error" and report.scope == REQUEST_SCOPE:
+        console.print(Text("Request error", style=style))
+    else:
+        console.print(Text(f"{outcome} — {_safe(report.scope)}", style=style))
     console.print(Text(_counts(report), style="dim"))
     if selection := _selection_description(report):
         console.print(Text(_safe(selection), style="dim"))
     if report.main:
         console.print(Text(f"Document: {_safe(report.main)}"))
     visible = _visible(report, show_passed)
-    for finding in visible:
+    for finding, stages in visible:
         console.print()
         code = finding.code or finding.rule
         status = {"skipped": "not checked", "not_applicable": "not applicable"}.get(
@@ -136,7 +218,7 @@ def print_report(
         heading = Text(f"{code}  {_label(finding)}", style=f"bold {color}".strip())
         heading.append(f"  [{finding.severity.upper()} / {status}]", style=color)
         console.print(heading)
-        console.print(Text(f"  Where: {_safe(_location(finding))}", style="dim"))
+        console.print(Text(f"  Where: {_safe(_location(finding, stages))}", style="dim"))
         console.print(Text(f"  {_safe(finding.message)}"))
         if evidence := evidence_excerpt(finding):
             console.print(Text(f"  Evidence: {_one_line(evidence)}"))
@@ -146,6 +228,11 @@ def print_report(
             console.print(Text(f"  Review: {_safe(marker)}"))
     if not visible:
         console.print(Text("No issues found within this command's stated scope."))
+    blocked = _blocked_summaries(report)
+    if blocked:
+        console.print()
+    for line in blocked:
+        console.print(Text(_safe(line), style="dim"), soft_wrap=True)
     if report.changes:
         console.print(
             Text(
@@ -172,7 +259,12 @@ def print_report(
             )
     for name, path in report.artifacts.items():
         console.print(Text(f"{name}: {_safe(path)}"))
-    if any(item.code and item.status != "passed" for item in visible):
+    if summary := not_checked_summary(
+        report.execution.get("not_checked"), report.execution.get("config_path")
+    ):
+        # One physical line: the terminal may wrap it, but it is never split.
+        console.print(Text(f"\n{_safe(summary)}", style="dim"), soft_wrap=True)
+    if any(item.code and item.status != "passed" for item, _stages in visible):
         console.print(Text("\nExplain a check: fledge rule CODE", style="dim"))
 
 
@@ -196,10 +288,10 @@ def render_compact(report: Report, *, show_passed: bool = False) -> str:
         lines.append(_one_line(selection))
     if report.main:
         lines.append(f"document: {_one_line(report.main)}")
-    for finding in _visible(report, show_passed):
+    for finding, stages in _visible(report, show_passed):
         code = finding.code or finding.rule
         line = (
-            f"{code} {finding.severity}/{finding.status} {_one_line(_location(finding))}"
+            f"{code} {finding.severity}/{finding.status} {_one_line(_location(finding, stages))}"
             f" | {_one_line(_label(finding))}: {_one_line(finding.message)}"
         )
         if evidence := evidence_excerpt(finding):
@@ -209,6 +301,7 @@ def render_compact(report: Report, *, show_passed: bool = False) -> str:
         if marker := review_marker(finding):
             line += f" | review: {_one_line(marker)}"
         lines.append(line)
+    lines.extend(f"not run: {_one_line(line)}" for line in _blocked_summaries(report))
     if report.changes:
         lines.append(
             f"changes: {len(report.changes)} ({_one_line(_change_summary(report))}; "

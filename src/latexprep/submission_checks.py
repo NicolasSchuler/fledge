@@ -106,6 +106,8 @@ class SubmissionOptions:
     report_unused_assets: bool = False
     template_references: tuple[tuple[str, str], ...] = ()
     identity_term_matching: str = "word"
+    check_bbl_coverage: bool = False
+    require_bbl: bool = False
 
     def __post_init__(self) -> None:
         if self.identity_term_matching not in IDENTITY_TERM_MATCHING:
@@ -116,6 +118,8 @@ class SubmissionOptions:
             "scan_private_comments",
             "check_shell_escape",
             "report_unused_assets",
+            "check_bbl_coverage",
+            "require_bbl",
         ):
             if type(getattr(self, name)) is not bool:
                 raise PreparationError(f"{name} must be a boolean.")

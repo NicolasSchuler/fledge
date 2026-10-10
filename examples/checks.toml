@@ -27,6 +27,7 @@ inventory_loaded_packages = true
 # forbidden_loaded_packages = ["draftwatermark.sty"]
 # minimum_package_dates = { "graphicx.sty" = "2020-01-01" }
 # check_local_package_shadows = true
+# expected_texlive_year = 2025 # Compare with the receiving service's documented TeX Live.
 
 [manuscript_checks]
 required_metadata = ["title"]
@@ -39,6 +40,7 @@ check_float_label_order = true
 # required_declarations = ["Data Availability", "Competing Interests"]
 # require_figure_descriptions = true
 # abstract_abbreviation_policy = "define" # Or "forbid"; heuristic.
+# require_line_numbers = true # Review copies; use forbid_line_numbers for final versions.
 
 [pdf_checks]
 # required_metadata = ["Title"] # Requires PDF Title metadata.
@@ -67,6 +69,7 @@ max_archive_bytes = 20000000 # Compressed output ZIP, separate from import limit
 # Reference paths resolve relative to this TOML file; keys are bundle-relative.
 # template_references = { "template.cls" = "../templates/template.cls" }
 # report_unused_assets = true # Advisory for one selected dependency graph only.
+# check_bbl_coverage = true # Shipped <main>.bbl must contain every literal cited key.
 
 [online_checks]
 # Permission and individual check selection are separate. This file stays offline.
@@ -83,3 +86,7 @@ online_max_requests = 20
 online_timeout_seconds = 10
 online_jobs = 2
 # online_replication_urls = ["https://example.org/artifact"]
+
+[figure_artwork]
+# Applies to each included PDF figure (needs MuPDF mutool) and to PNG/JPEG figure headers.
+# required_color_space = "rgb" # Or "cmyk"; grayscale figures satisfy either.

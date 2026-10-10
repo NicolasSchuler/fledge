@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import shutil
+import sys
 import tempfile
 import time
 from collections.abc import Callable
@@ -15,10 +17,15 @@ from typing import Any
 from .bibliography import check_bibliography, normalize_dois
 from .bibliography_checks import check_bibliography_details
 from .bibliography_transform import plan_bibliography
-from .build_checks import check_build_details, check_local_package_shadows
+from .build_checks import (
+    check_build_details,
+    check_local_package_shadows,
+    check_tex_distribution,
+    qualify_citation_findings,
+)
 from .check_pipeline import inspect_additional_pdf_checks, inspect_standalone_pdf
 from .check_policy import MANDATORY_CODES, effective_settings, selected_findings
-from .config import PARENT_MEMORY_MB, Settings, load_settings
+from .config import PARENT_MEMORY_MB, RequestError, Settings, load_settings
 from .formatting import format_project
 from .manuscript import check_manuscript
 from .manuscript_checks import check_manuscript_details
@@ -29,10 +36,10 @@ from .metadata_privacy import (
 )
 from .models import Finding, PreparationError, Report, has_blockers
 from .online_checks import check_online_references
-from .package_inputs import select_package_inputs
+from .package_inputs import generated_bibliography_inputs, select_package_inputs
 from .pdf import compare_pdfs, inspect_pdf
 from .project import ImportLimits, create_archive, import_project, plan_cleanup
-from .reporting import apply_reviews, has_unaccepted_blockers
+from .reporting import apply_reviews, has_unaccepted_blockers, not_checked_areas
 from .runtime import SELECTABLE_BUILD_ERRORS, BuildResult, RuntimeLimits, ToolRunner, build_project
 from .scheduler import (
     ResourceBudget,
@@ -47,6 +54,7 @@ from .source import analyze_sources, discover_roots, plan_flatten
 from .source_transform import plan_source_transforms
 from .structure_checks import check_author_records
 from .submission_checks import check_submission, check_submission_archive
+from .submission_readiness_checks import check_submission_readiness
 from .workflow_options import DocumentOptions, stage_document
 
 
@@ -132,9 +140,59 @@ def _outcome(report: Report, settings: Settings | None = None) -> str:
     return "passed"
 
 
+INSTALLATION_GUIDE = "https://nicolasschuler.github.io/fledge/installation.html"
+_TEX_TOOLS = frozenset({"latexmk", "pdflatex", "xelatex", "lualatex"})
+_UNAVAILABLE_TOOL = re.compile(r"Required tool is unavailable: (\S+)\.")
+
+
+def _missing_toolchain(findings: list[Finding], engine: str) -> list[Finding]:
+    """Explain a missing TeX toolchain once, with installation steps for this system."""
+    explained = []
+    for finding in findings:
+        match = _UNAVAILABLE_TOOL.match(finding.message)
+        if finding.rule != "build.execution_unavailable" or not match or match[1] not in _TEX_TOOLS:
+            explained.append(finding)
+            continue
+        missing = [name for name in ("latexmk", engine) if shutil.which(name) is None]
+        missing = missing or [match[1]]
+        found = " and ".join(missing)
+        install = (
+            "brew install --cask basictex (a small TeX distribution) or install MacTeX, then "
+            "open a new terminal so /Library/TeX/texbin is on PATH"
+            if sys.platform == "darwin"
+            else "install TeX Live and latexmk with the system package manager (for example "
+            "sudo apt install texlive latexmk on Debian or Ubuntu)"
+        )
+        explained.append(
+            replace(
+                finding,
+                message=(
+                    f"The TeX toolchain is unavailable: {found} "
+                    f"{'was' if len(missing) == 1 else 'were'} not found on PATH. "
+                    f"Building the PDF for check and prepare needs latexmk and {engine}."
+                ),
+                suggestion=(
+                    f"To install TeX, {install}. Installation guide: {INSTALLATION_GUIDE}. "
+                    "To check sources and bibliography without TeX, run fledge inspect."
+                ),
+                details={**finding.details, "missing_tools": missing},
+            )
+        )
+    return explained
+
+
 def _collect_build(report: Report, result: BuildResult, stage: str, settings: Settings) -> None:
-    _record_findings(report, result.findings, stage)
+    findings = _missing_toolchain(
+        qualify_citation_findings(result.findings, build_succeeded=result.success),
+        settings.engine,
+    )
+    toolchain_missing = any("missing_tools" in finding.details for finding in findings)
+    _record_findings(report, findings, stage)
     _record_findings(report, check_build_details(result, settings.build_checks), stage)
+    if stage == "baseline" and not toolchain_missing:
+        # One observation per document: later builds use the same toolchain. Without
+        # TeX the missing-toolchain finding already explains the absent version.
+        _record_findings(report, [check_tex_distribution(result, settings.build_checks)], stage)
     report.tools.update(result.tools)
     report.stages.append(
         {
@@ -143,7 +201,8 @@ def _collect_build(report: Report, result: BuildResult, stage: str, settings: Se
             "command": result.command,
         }
     )
-    if not result.success or result.pdf is None:
+    # A missing toolchain is already reported once; a failed-build finding would repeat it.
+    if (not result.success or result.pdf is None) and not toolchain_missing:
         report.findings.append(
             Finding(
                 f"build.{stage}", f"Required {stage} build did not succeed", "error", "inconclusive"
@@ -315,7 +374,18 @@ def _source_policies(root: Path, main: str, settings: Settings) -> list[Finding]
         *check_manuscript_details(root, main, settings.manuscript_checks),
         *check_image_metadata(root, settings.metadata_privacy),
         *check_author_records(root, main, settings.structure_checks),
+        *_readiness(root, main, settings),
     ]
+
+
+def _readiness(root: Path, main: str, settings: Settings) -> list[Finding]:
+    return check_submission_readiness(
+        root,
+        main,
+        check_bbl_coverage=settings.submission_checks.check_bbl_coverage,
+        require_bbl=settings.submission_checks.require_bbl,
+        required_color_space=settings.figure_artwork.required_color_space,
+    )
 
 
 def _transform_sources(
@@ -477,7 +547,7 @@ async def _bibliography_command(job: _Job) -> None:
         or ".." in Path(selected).parts
         or not (job.snapshot / selected).is_file()
     ):
-        raise PreparationError("main must name a source file inside the project")
+        raise _main_error(selected, roots)
     selected = Path(selected).as_posix() if selected else None
     report.main = selected
     report.findings.extend(
@@ -531,6 +601,13 @@ async def _select_main(job: _Job) -> str | None:
                 f"Select --main explicitly; found {len(roots)} candidate roots: {', '.join(roots)}",
                 "error",
                 "inconclusive",
+                suggestion=(
+                    "Rerun with --main set to one of the candidate roots, or set main in the "
+                    "configuration."
+                    if roots
+                    else "Check that INPUT is the paper's source folder or ZIP; no file with "
+                    "\\documentclass was found, so name the main file with --main."
+                ),
             )
         )
         return None
@@ -539,8 +616,22 @@ async def _select_main(job: _Job) -> str | None:
         or ".." in Path(selected).parts
         or not (job.snapshot / selected).is_file()
     ):
-        raise PreparationError(f"main must name a source file inside the project: {selected}")
+        roots = await _thread_operation(job.budget, "discover roots", discover_roots, job.snapshot)
+        raise _main_error(selected, roots)
     return Path(selected).as_posix()
+
+
+def _main_error(selected: str, roots: list[str]) -> RequestError:
+    found = (
+        f"documents found in the input: {', '.join(roots)}"
+        if roots
+        else "no file with \\documentclass was found in the input"
+    )
+    return RequestError(
+        f"main must name a source file inside the project: {selected}",
+        "Set --main (or main in the configuration) to a .tex path relative to the input "
+        f"folder or ZIP root; {found}.",
+    )
 
 
 def _collect_task(job: _Job, result: TaskResult) -> None:
@@ -571,7 +662,7 @@ def _collect_task(job: _Job, result: TaskResult) -> None:
                 f"{result.name} was not run: {result.error}",
                 "info",
                 "skipped",
-                details={"task": result.name},
+                details={"task": result.name, "blocked_by": list(result.blocked_by)},
             )
         )
     elif result.status != "succeeded":
@@ -579,7 +670,15 @@ def _collect_task(job: _Job, result: TaskResult) -> None:
             Finding("execution.task", f"{result.name}: {result.error}", "error", "inconclusive")
         )
     elif result.name == "source checks":
-        report.findings.extend(result.value.findings)
+        findings = result.value.findings
+        if any(item.rule == "project.main_selection" for item in report.findings):
+            # Root selection already reported the same ambiguity with its candidates.
+            findings = [
+                item
+                for item in findings
+                if item.rule not in {"source-root-ambiguous", "source-root-missing"}
+            ]
+        report.findings.extend(findings)
     elif result.name in {"bibliography checks", "manuscript checks"}:
         report.findings.extend(result.value)
     else:
@@ -663,6 +762,12 @@ def _analysis_tasks(job: _Job) -> list[Task]:
             lambda: run_in_thread(
                 check_manuscript, job.snapshot, selected, settings.manuscript_options()
             ),
+        )
+    )
+    tasks.append(
+        Task(
+            "submission readiness",
+            lambda: run_in_thread(_readiness, job.snapshot, selected, settings),
         )
     )
     if request.command == "inspect":
@@ -775,6 +880,7 @@ async def _select_initial_inputs(job: _Job) -> list[Finding]:
         # Absent evidence (None) is a blocking diagnostic in select_package_inputs.
         getattr(job.completed["baseline build"].value, "submission_inputs", None),
         explicit,
+        getattr(job.completed["baseline build"].value, "generated_reads", frozenset()),
     )
     job.report.changes.extend(changes)
     if not has_blockers(findings):
@@ -877,6 +983,13 @@ async def _plan_changes(job: _Job, baseline: BuildResult) -> Path | None:
     analysis = job.completed["source checks"].value
     if analysis:
         dependencies.update(analysis.dependencies)
+    # Cleanup must not remove a selected generated bibliography (.run.xml is otherwise
+    # rebuildable debris); the build reads the regenerated copy, not the supplied one.
+    dependencies.update(
+        generated_bibliography_inputs(
+            job.snapshot, job.selected, getattr(baseline, "generated_reads", frozenset())
+        )
+    )
     prepared, _, changes, findings, _ = await _thread_operation(
         job.budget,
         "transform sources",
@@ -929,6 +1042,7 @@ async def _ship(job: _Job, prepared: Path) -> tuple[Path, str, BuildResult, dict
         job.selected,
         getattr(staged, "submission_inputs", None),
         job.retained,
+        getattr(staged, "generated_reads", frozenset()),
     )
     report.changes.extend(changes)
     _record_findings(report, findings, "select submission inputs")
@@ -1478,6 +1592,8 @@ async def run_job(
         "ignore": list(settings.checks.ignore),
         "always_enforced_when_applicable": sorted(MANDATORY_CODES),
     }
+    if request.command in {"inspect", "check", "prepare"}:
+        report.execution["not_checked"] = not_checked_areas(settings)
     report.scope = "source analysis"
     if request.command not in {"inspect", "check", "prepare", "bib", "fmt", "pdf"}:
         raise PreparationError(f"Unknown job command: {request.command}")
@@ -1509,9 +1625,16 @@ async def run_job(
             "Grayscale previews require --preview-output, or a verified prepare --output"
         )
     if request.command == "prepare" and not request.dry_run and output is None:
-        raise PreparationError("prepare requires --output (or --dry-run)")
+        raise RequestError(
+            "prepare requires --output (or --dry-run)",
+            "Add --output with a new directory outside the input, or --dry-run to preview "
+            "the planned changes without writing a bundle.",
+        )
     if request.reference_pdf and not request.reference_pdf.is_file():
-        raise PreparationError(f"Reference PDF does not exist: {request.reference_pdf}")
+        raise RequestError(
+            f"Reference PDF does not exist: {request.reference_pdf}",
+            "Check the --reference-pdf path, or omit it to skip the PDF comparison.",
+        )
     budget = ResourceBudget(
         settings.jobs,
         settings.memory_mb,

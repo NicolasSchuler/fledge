@@ -27,6 +27,16 @@ PDF_TOOLS = (
 SYSTEM_DIRECTORIES = ("/usr/bin", "/bin", "/usr/sbin", "/sbin")
 INSTALLER_FALLBACKS = "local tool_dirs=(/Library/TeX/texbin /opt/homebrew/bin /usr/local/bin)"
 
+
+def resolved_unique_directories(*directories):
+    """Resolve directories in order and drop repeats, as the launcher does.
+
+    On merged-/usr Linux, /bin and /sbin resolve to /usr/bin and /usr/sbin, and
+    the launcher keeps only the first entry naming each directory.
+    """
+    return list(dict.fromkeys(os.path.realpath(directory) for directory in directories))
+
+
 MOCK_PROGRAM = r"""
 import json
 import os
@@ -423,10 +433,7 @@ class InstallerTests(unittest.TestCase):
         # caller's other PATH entries, including the transient one, are left out.
         self.assertEqual(
             self.launcher_path(),
-            [
-                os.path.realpath(path)
-                for path in (preferred, self.tools, fallback, *SYSTEM_DIRECTORIES)
-            ],
+            resolved_unique_directories(preferred, self.tools, fallback, *SYSTEM_DIRECTORIES),
         )
         # Invoke the installed launcher from a different directory and a PATH
         # that otherwise selects the unwanted copies. Execute tools, not merely
@@ -462,16 +469,13 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             self.launcher_path(),
-            [
-                os.path.realpath(path)
-                for path in (
-                    self.tools,
-                    "/Library/TeX/texbin",
-                    "/opt/homebrew/bin",
-                    "/usr/local/bin",
-                    *SYSTEM_DIRECTORIES,
-                )
-            ],
+            resolved_unique_directories(
+                self.tools,
+                "/Library/TeX/texbin",
+                "/opt/homebrew/bin",
+                "/usr/local/bin",
+                *SYSTEM_DIRECTORIES,
+            ),
         )
         self.assertNotIn(str(self.root / "relative entry"), self.launcher.read_text())
 
@@ -491,10 +495,7 @@ class InstallerTests(unittest.TestCase):
         self.assertNotIn("Reuse tex-fmt", result.stdout)
         self.assertEqual(
             self.launcher_path(),
-            [
-                os.path.realpath(path)
-                for path in (optional_directory, self.tools, *SYSTEM_DIRECTORIES)
-            ],
+            resolved_unique_directories(optional_directory, self.tools, *SYSTEM_DIRECTORIES),
         )
 
     def test_failed_dependency_command_stops_before_environment_creation(self):

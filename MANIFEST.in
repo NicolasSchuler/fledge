@@ -3,6 +3,7 @@ include .gitignore architecture.md requirements.md install.sh
 recursive-include docs *.md *.py
 recursive-include docs/_static *.png *.css
 recursive-include examples *.toml *.tex *.bib
+recursive-include src/latexprep/presets *.toml
 recursive-include tests *.py
 include scripts/benchmark_parallelism.py
 prune docs/_build

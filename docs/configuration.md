@@ -1,39 +1,61 @@
 # Configuration
 
-Place `fledge.toml` in the input project's directory. Start with only the
-constraints that apply to your submission. For example:
+Settings live in `fledge.toml` in the project directory. Configure only the
+constraints that apply to your submission; nothing is assumed by default. For
+example:
 
 ```toml
 main = "main.tex"
-max_pages = 10
-jobs = 2
+max_pages = 10  # replace with your venue's limit, including references and appendices
 
 [manuscript_checks]
 required_metadata = ["title", "author"]
-
-[online_checks]
-online = false
 ```
 
-Here, `10` is an example limit you must replace with your actual requirement.
-The page limit includes references and appendices; no page limit is assumed by
-default. Run source checks first, then compile to measure the PDF:
+`fledge init /path/to/paper` writes a commented starter file. The report's
+`execution.config_path` records which file was used (`null` means none). The
+{download}`example configuration <../examples/project-config.toml>` shows the
+defaults and a few alternatives. `fledge COMMAND --help` lists the common options
+first and the advanced ones after them.
+
+## Start from a preset
+
+A preset is a commented settings file that switches on existing generic checks
+for a common situation. Each one is a starting point, not a certification of
+venue compliance: values such as the page limit, ZIP size, identity terms and
+image resolution stay as placeholders for you to fill in.
+
+| Preset | Switches on |
+| --- | --- |
+| `arxiv` | Embedded fonts; private-comment, secret, shell-escape and unused-file scans; a required generated `.bbl` that covers every cited key; removes private comments from the prepared copy. Placeholders: ZIP size, filename characters, TeX Live year |
+| `anonymous-review` | Embedded fonts, no attachments; identity-hint, private-comment, secret and unused-file scans; layout-manipulation and float-structure checks. Placeholders: page limit, identity terms, image-metadata terms, ZIP size, review line numbers |
+| `camera-ready` | Embedded fonts without Type 3, consistent page size, no encryption, JavaScript or attachments; title and author metadata, ORCID, float structure and hygiene scans. Placeholders: page limit and size, document class, image resolution, declarations, PDF metadata, forbidden line numbers, TeX Live year, figure color space |
 
 ```sh
-fledge inspect path/to/paper
-fledge check path/to/paper
+fledge init --list
+fledge init /path/to/paper --preset arxiv
+fledge check /path/to/paper --preset arxiv
 ```
 
-The selected configuration path is
-recorded in the report's `execution.config_path`; `null` means built-in defaults
-and command-line options were used. The {download}`example configuration <../examples/project-config.toml>`
-shows the defaults and a few alternatives. Run `fledge rules` or
-`fledge rule TEX001` to discover available codes and their meanings.
+`fledge init [DIRECTORY]` writes `fledge.toml` in the directory (default: the
+current one): the preset's text with `--preset`, otherwise a minimal starter. It
+refuses to replace an existing `fledge.toml` unless you add `--force`, and warns
+when a higher-priority file such as `.fledge.toml` would shadow the new one.
+
+`--preset NAME` on `inspect`, `check` and `prepare` applies a preset without
+writing a file. The preset is the lowest layer: your settings file overrides it
+and command-line options override both. Tables merge key by key, so a file's
+`[submission_checks]` replaces only the keys it names and the preset's other keys
+stay in effect. Top-level keys and arrays replace the preset's value outright.
+The JSON report records the preset in `execution.preset`. The `arxiv` preset's
+comment removal (`source_transforms.comment_policy = "private"`) affects only
+`prepare`.
 
 ## Choose checks
 
-To suppress unfinished-text-marker diagnostics while preserving other defaults,
-use `[checks] ignore = ["TEX001"]`. For a narrower source/bibliography selection:
+Every check has a code, and [the catalogue](checks.md) shows which run by
+default and which are opt-in. Filter them in the configuration file or on the
+command line:
 
 ```toml
 [checks]
@@ -41,91 +63,90 @@ select = ["TEX", "BIB1"]
 ignore = ["TEX001", "BIB108"]
 ```
 
-`select` defaults to `["ALL"]`; `ignore` defaults to `[]`. Supported selectors
-are `ALL`, an exact public code such as `TEX001`, a complete family such as
-`TEX`, or a family plus numeric prefix such as `BIB1`. A prefix must match at
-least one registered code. Selectors are case-sensitive; empty strings, partial
-family names such as `TE`, and unknown codes are configuration errors. Use
-`select = []` to disable selectable checks.
+```sh
+fledge inspect /path/to/paper --ignore TEX001
+fledge check /path/to/paper --select TEX --select BIB1
+```
 
-The most specific matching selector wins, regardless of list order. `ignore`
-wins ties. For example, `select = ["ALL", "TEX001"]` with `ignore = ["TEX"]`
-keeps the unfinished-text-marker check while excluding the other selectable
-`TEX` checks. An exact ignored code overrides a selected family.
+`--select` replaces `checks.select` from the file; `--ignore` adds to
+`checks.ignore`. Both are repeatable and available on `inspect`, `check` and
+`prepare`. An unknown selector stops the run as a request error (exit code 4) and
+suggests the closest codes.
 
-Selection filters checks that the command and its existing options would run.
-It does not change the command's workflow or invent policy:
+`select` defaults to `["ALL"]` and `ignore` to `[]`. A selector is `ALL`, an
+exact code such as `TEX001`, a family such as `TEX`, or a family plus numeric
+prefix such as `BIB1`; it must match at least one registered code. Selectors are
+case-sensitive, and empty strings, partial family names such as `TE` and unknown
+codes are errors. `select = []` disables every selectable check.
 
-- Selecting `PDF` does not supply a page limit, region, font policy, or expected
-  metadata. Configure these values separately.
-- Selecting `NET` does not authorize requests. Network checks still require
-  `--online` or `online_checks.online = true` and their individual options.
-- Selecting transformation codes does not authorize changes. Preparation still
-  requires the relevant transformation options and writes a separate copy.
-- Source confinement, safe transformations, build integrity, required comparison
-  and archive verification remain enforced. Execution failures remain visible.
+The most specific matching selector wins, regardless of list order, and `ignore`
+wins ties. For example, `select = ["ALL", "TEX001"]` with `ignore = ["TEX"]` keeps
+the TODO-marker check while excluding the other `TEX` checks.
 
-Checks that are disabled do not become passes. A successful report describes
-the checks actually selected and configured, subject to required workflow
-invariants.
+Selection only filters what the command would run. It does not invent policy:
 
-Required guards include dependency resolution (`TEX005`–`TEX007`), bibliography
-parsing/key/relationship integrity (`BIB001`, `BIB002`, `BIB004`, `BIB005`),
-successful/converged builds, safe requested edits, and PDF/archive preservation
-(`CMP`). Ignoring their code does not bypass the corresponding guard. JSON
-reports list these codes under
-`execution.check_selection.always_enforced_when_applicable`; this is not a claim
-that every listed guard ran in a source-only command. Shared parsers may still
-collect optional observations during required work, but deselected observations
-are omitted before determining the outcome.
+- Selecting `PDF` supplies no page limit, region, font policy or expected
+  metadata; configure those values.
+- Selecting `NET` grants no network access; online checks still need
+  `--online` and their individual switches.
+- Selecting transformation codes changes nothing; edits still need their
+  options.
+- [Always-enforced guards](checks.md#always-enforced) stay on, and ignoring
+  their code does not bypass them. JSON reports list them under
+  `execution.check_selection.always_enforced_when_applicable`.
+
+Checks that are off do not become passes. Terminal reports end with a short
+**Not checked** line naming the opt-in areas that did not run, so a clean result
+is not mistaken for a full audit. JSON reports list the same areas in
+`execution.not_checked`, each with its codes and the settings that enable them.
+
+Some default checks concern submission readiness: a note when no generated
+`.bbl` is shipped for services that do not run BibTeX or Biber, such as arXiv
+(`TEX009`; `submission_checks.require_bbl = true` makes it a warning), packages
+declared before `hyperref` that must follow it (`TEX010`), EPS figures in a PDF
+build (`TEX011`) and private-note markers in comments (`PRV007`).
+Related opt-in policies check review line numbers (`MAN017`), figure color
+spaces (`PDF313`), the TeX Live release (`BLD105`) and whether a shipped `.bbl`
+covers every cited key (`BIB109`).
 
 ## Discovery and precedence
 
-The `fledge` names below are preferred. The earlier `latex-prep` file names and
-`[tool.latex-prep]` table still work, so there is no need to rename existing
-settings files.
-
-Discovery starts at the original input directory. For a ZIP or PDF input, it
-starts at that file's parent directory. Configuration inside a ZIP is never
-loaded automatically.
-
-The nearest directory containing a configuration wins. Within one directory,
-the priority is:
+Discovery starts at the input directory, or at the parent directory of a ZIP or
+PDF input; configuration inside a ZIP is never loaded. The nearest directory
+with a configuration file wins. Within one directory the order is:
 
 1. `.fledge.toml`
 2. `fledge.toml`
-3. `.latex-prep.toml` (legacy)
-4. `latex-prep.toml` (legacy)
-5. `pyproject.toml` containing `[tool.fledge]` or `[tool.latex-prep]` (legacy)
+3. `pyproject.toml` containing `[tool.fledge]`
 
-A `pyproject.toml` with both tables is a configuration error; keep one. An
-unrelated `pyproject.toml` is skipped. Discovery checks a repository root
-(a directory containing `.git` or `.hg`) and then stops. It stops before a home
-directory or filesystem-root ancestor, so there is no user-home fallback. When
-the input itself is the home directory or filesystem root, only that starting
-directory is checked. Configuration files are not merged.
+Older `latex-prep` names are read after these; see
+[migrating from latex-prep](installation.md#migrating-from-latex-prep). An
+unrelated `pyproject.toml` is skipped. Discovery stops at a repository root (a
+directory containing `.git` or `.hg`) and never climbs into your home directory
+or the filesystem root, so there is no user-wide configuration. Only one file is
+used; files from different directories are not merged.
 
-`--config path/to/settings.toml` uses exactly that file and skips discovery.
-Relative paths inside configuration, such as template references, resolve from
-the configuration file's directory. `--isolated` skips discovery and uses the
-defaults plus explicit CLI options; it cannot be combined with `--config`.
-Explicit CLI options override the chosen file, including negative options such
-as `--no-format` and `--offline`.
+Precedence, from highest to lowest: command-line options, the selected settings
+file, a `--preset`, and the built-in defaults. Negative options such as
+`--no-format` and `--offline` override the file too.
 
 ```sh
 fledge inspect paper --config review.toml
 fledge inspect paper --isolated --jobs 1
 ```
 
-Invalid TOML, unknown settings, invalid option types, and unknown selectors
-produce configuration errors before the job starts. Invalid discovered files
-are not silently replaced by an ancestor configuration.
+`--config FILE` uses exactly that file and skips discovery. `--isolated` skips
+discovery and uses the defaults plus command-line options; it cannot be combined
+with `--config`. Relative paths inside a file, such as template references,
+resolve from that file's directory. Invalid TOML, unknown settings, wrong types
+and unknown selectors stop the run before it starts. The message names the file
+or option the value came from and suggests the closest valid setting. An invalid file is never silently replaced by an
+ancestor's.
 
 ## Use pyproject.toml
 
-Only the `[tool.fledge]` table (or the legacy `[tool.latex-prep]`) and its
-subtables are loaded; unrelated project and tool settings are ignored. An
-explicitly supplied `pyproject.toml` must contain exactly one of these tables.
+Only the `[tool.fledge]` table and its subtables are loaded; unrelated project and tool settings are ignored. An
+explicitly supplied `pyproject.toml` must contain it.
 
 ```toml
 [tool.fledge]
@@ -161,9 +182,9 @@ keep their existing typed tables. See [the check catalogue](checks.md),
 
 ## Package contents
 
-`prepare` includes the selected document's needed project inputs by default,
-using complete build traces and its supported literal dependency graph. Unrelated
-files are omitted only from the staging copy; `--no-cleanup` does not retain them.
+`prepare` ships the inputs the build needs, using the build trace and the literal
+dependency graph. Unrelated files are left out of the copy, and `--no-cleanup`
+does not retain them.
 
 List extra files that must ship even when the build never reads them:
 
@@ -198,8 +219,8 @@ to that document. They do not force unused matches into the archive; include the
 dependencies and any listed extras in that candidate set. Omitting the patterns
 makes all files in the source directory candidates, not automatic deliverables.
 A missing or incomplete build trace blocks preparation. The
-[workflow reference](workflow.md#how-package-contents-are-selected) describes the
-selection and verification sequence.
+[workflow reference](workflow-reference.md#how-package-contents-are-selected)
+describes the selection and verification sequence.
 
 ## Select online evidence deliberately
 

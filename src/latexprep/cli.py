@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -13,10 +14,12 @@ from rich.console import Console
 from rich.text import Text
 
 from . import __version__
-from .config import Settings, load_settings, resolve_config_path
+from .config import RequestError, Settings, load_settings, resolve_config_path
 from .core import JobRequest, run_job, validate_destination
+from .init_command import init_command
 from .models import Finding, PreparationError, Report
-from .presentation import print_report, print_rules, render_compact
+from .presentation import REQUEST_SCOPE, print_report, print_rules, render_compact
+from .presets import preset_names
 from .rules import RULES, get_rule
 
 EXIT_CODES = {
@@ -71,9 +74,10 @@ def _common(function):
         ),
         click.option("--quiet", is_flag=True, help="Suppress progress on stderr."),
         click.option(
-            "--show-passed", is_flag=True, help="Also show passed results and inventories."
+            "--show-passed", is_flag=True, help="Also list passed findings and inventories."
         ),
-        click.option("--non-interactive", is_flag=True, help="Never prompt (also the default)."),
+        # Accepted for compatibility; Fledge never prompts.
+        click.option("--non-interactive", is_flag=True, hidden=True),
         click.option(
             "--jobs", type=int, help="Shared CPU slots for all operations; 1 runs serially."
         ),
@@ -101,9 +105,52 @@ def _online_option(function):
     )(function)
 
 
+def _preset_option(function):
+    return click.option(
+        "--preset",
+        type=click.Choice(preset_names()),
+        help=(
+            "Apply an example preset beneath the settings file and command-line options; "
+            "a starting point, not a compliance certification (fledge init --list)."
+        ),
+    )(function)
+
+
+def _selection_options(function):
+    options = [
+        click.option(
+            "--select",
+            "select_checks",
+            multiple=True,
+            metavar="CODE_OR_PREFIX",
+            help=(
+                "Run only these checks: a check code (TEX001), a code prefix (TEX, BIB1) or ALL. "
+                "Repeatable; replaces checks.select from configuration."
+            ),
+        ),
+        click.option(
+            "--ignore",
+            "ignore_checks",
+            multiple=True,
+            metavar="CODE_OR_PREFIX",
+            help=(
+                "Skip these checks; same syntax as --select. Repeatable; adds to checks.ignore "
+                "from configuration."
+            ),
+        ),
+    ]
+    for option in reversed(options):
+        function = option(function)
+    return function
+
+
 def _build_options(function):
     options = [
-        click.option("--engine", type=click.Choice(["pdflatex", "xelatex", "lualatex"])),
+        click.option(
+            "--engine",
+            type=click.Choice(["pdflatex", "xelatex", "lualatex"]),
+            help="TeX engine for the isolated build (default pdflatex).",
+        ),
         click.option(
             "--bibliography-backend",
             type=click.Choice(["auto", "bibtex", "biber"]),
@@ -119,6 +166,44 @@ def _build_options(function):
     return function
 
 
+# Expert knobs listed under "Advanced options" in command help; nothing is removed.
+ADVANCED_OPTIONS = frozenset(
+    {
+        "jobs",
+        "build_jobs",
+        "render_jobs",
+        "job_timeout_seconds",
+        "timeout_seconds",
+        "preview_output",
+        "diagnostics",
+        "html_report",
+        "report",
+        "isolated",
+        "bibliography_backend",
+        "normalize_doi",
+        "cleanup",
+    }
+)
+
+
+class _FledgeCommand(click.Command):
+    """Split long option lists into common and advanced help sections."""
+
+    def format_options(self, ctx: click.Context, formatter: click.HelpFormatter) -> None:
+        common, advanced = [], []
+        for parameter in self.get_params(ctx):
+            record = parameter.get_help_record(ctx)
+            if record is not None:
+                (advanced if parameter.name in ADVANCED_OPTIONS else common).append(record)
+        if not advanced:
+            super().format_options(ctx, formatter)
+            return
+        with formatter.section("Common options"):
+            formatter.write_dl(common)
+        with formatter.section("Advanced options"):
+            formatter.write_dl(advanced)
+
+
 def _command_line_error(error: click.UsageError) -> None:
     # Click declares exit_code as a class default; the instance value is what it reports.
     setattr(error, "exit_code", USAGE_EXIT_CODE)  # noqa: B010
@@ -126,6 +211,9 @@ def _command_line_error(error: click.UsageError) -> None:
 
 class _FledgeGroup(click.Group):
     """Report invalid command-line syntax with an exit code no outcome uses."""
+
+    command_class = _FledgeCommand
+    group_class = type
 
     def make_context(self, *args: Any, **kwargs: Any) -> click.Context:
         try:
@@ -149,9 +237,11 @@ class _FledgeGroup(click.Group):
 def cli() -> None:
     """Fledge checks and prepares a separate LaTeX submission copy.
 
-    INPUT is a source folder or ZIP. Originals are never edited. Check codes and
-    suggested next steps appear in reports. Check selection and generic limits
-    come from project TOML configuration; --config selects an explicit file.
+    INPUT is a source folder or ZIP. Originals are never edited. Each check has a
+    stable code such as TEX001; 'fledge rules' lists the checks and 'fledge rule
+    CODE' explains one. Reports list findings, the results of the checks, each with
+    its code and a suggested next step. Choose checks with [checks] in project TOML
+    configuration or with --select and --ignore; --config selects an explicit file.
     """
 
 
@@ -162,30 +252,40 @@ def _exit(result: int | None, **_kwargs) -> None:
 
 @cli.command("inspect")
 @_common
+@_selection_options
+@_preset_option
 @_online_option
 @click.option("--main", help="Relative path of the selected document.")
 def inspect_command(**options) -> int:
-    """Check source, manuscript constraints and bibliography without running TeX."""
+    """Run source, manuscript and bibliography checks without running TeX."""
     return _execute("inspect", options)
 
 
 @cli.command("check")
 @_common
+@_selection_options
+@_preset_option
 @_online_option
 @click.option("--main", help="Relative path of the selected document.")
 @_build_options
 def check_command(**options) -> int:
-    """Check source, build in isolation and inspect the PDF."""
+    """Run source checks, build the PDF in isolation and check the PDF."""
     return _execute("check", options)
 
 
 @cli.command("prepare")
 @_common
+@_selection_options
+@_preset_option
 @_online_option
 @click.option("--main", help="Relative path of the selected document.")
 @_build_options
 @click.option("--output", type=click.Path(path_type=Path), help="New directory outside the input.")
-@click.option("--layout", type=click.Choice(["preserve", "flat"]))
+@click.option(
+    "--layout",
+    type=click.Choice(["preserve", "flat"]),
+    help="Keep the folder structure (preserve, default) or move every file to the top level.",
+)
 @click.option("--format/--no-format", default=None, help="Apply tex-fmt to the separate copy.")
 @click.option(
     "--normalize-doi/--no-normalize-doi", default=None, help="Normalize literal DOI prefixes."
@@ -240,14 +340,17 @@ def pdf_group() -> None:
 @_common
 @_build_options
 def pdf_check(**options) -> int:
-    """Inspect PDF constraints; --reference-pdf adds an exact comparison."""
+    """Check PDF constraints; --reference-pdf adds an exact comparison."""
     return _execute("pdf", options)
 
 
+cli.add_command(init_command)
+
+
 @cli.command("rules")
-@click.option("--json", "json_output", is_flag=True, help="Print the complete catalogue as JSON.")
+@click.option("--json", "json_output", is_flag=True, help="Print every check as JSON.")
 def rules_command(json_output: bool) -> int:
-    """List stable check codes and descriptive names."""
+    """List every check with its stable code and title."""
     if json_output:
         click.echo(json.dumps([rule.to_dict() for rule in RULES], indent=2, ensure_ascii=False))
     else:
@@ -257,9 +360,9 @@ def rules_command(json_output: bool) -> int:
 
 @cli.command("rule")
 @click.argument("code")
-@click.option("--json", "json_output", is_flag=True)
+@click.option("--json", "json_output", is_flag=True, help="Print the explanation as JSON.")
 def rule_command(code: str, json_output: bool) -> int:
-    """Explain CODE, its limitations, suggested fix and behavioral unit tests."""
+    """Explain the check with code CODE: its scope, limits, suggested fix and tests."""
     try:
         definition = get_rule(code)
     except ValueError as error:
@@ -271,6 +374,47 @@ def rule_command(code: str, json_output: bool) -> int:
     return 0
 
 
+def _destination(source: Path, destination: Path, flag: str) -> Path:
+    """Validate a new output path and name the option to change when it is unusable."""
+    try:
+        return validate_destination(source, destination)
+    except PreparationError as error:
+        message = str(error)
+        if message.startswith("Output already exists"):
+            fix = f"Choose a new {flag} path, or remove {destination} if it is no longer needed."
+        elif message.startswith("Output must be outside"):
+            fix = f"Choose a {flag} path outside the input project; originals are never written."
+        else:
+            fix = f"Create the parent directory first, or choose a {flag} path in an existing one."
+        raise RequestError(message, fix) from error
+
+
+def _settings_suggestion(
+    message: str, overrides: dict[str, object], config_path: Path | None, preset: str | None
+) -> str:
+    """Name where each setting mentioned in a validation error was supplied."""
+    mentioned = sorted(
+        (match.start(), name)
+        for name in Settings.__dataclass_fields__
+        if (match := re.search(rf"(?<![\w.]){name}(?!\w)", message))
+    )
+    sources = []
+    for _, name in mentioned:
+        if name in overrides:
+            sources.append(f"--{name.replace('_', '-')} on the command line")
+        elif config_path is not None and preset is not None:
+            sources.append(f"{name} in {config_path} or the {preset} preset")
+        elif config_path is not None:
+            sources.append(f"{name} in {config_path}")
+        elif preset is not None:
+            sources.append(f"{name} in the {preset} preset")
+    if sources:
+        return f"Change {'; '.join(sources)}, then rerun the command."
+    if config_path is not None:
+        return f"Correct the settings in {config_path}, then rerun the command."
+    return "Correct the options named above, then rerun the command."
+
+
 def _execute(command: str, options: dict[str, Any]) -> int:
     if options.get("isolated") and options.get("config") is not None:
         raise click.UsageError("--isolated cannot be combined with --config")
@@ -279,17 +423,30 @@ def _execute(command: str, options: dict[str, Any]) -> int:
         if options.get("output_format") not in {None, "json"}:
             raise click.UsageError("--json conflicts with the chosen --output-format")
         output_format = "json"
-    report = Report(command, scope="request validation")
+    report = Report(command, scope=REQUEST_SCOPE)
     report_destination = None
     html_destination = diagnostic_destination = None
     source = options["source"]
     try:
         if options["report"]:
-            report_destination = validate_destination(source, options["report"])
+            report_destination = _destination(source, options["report"], "--report")
         if options.get("html_report"):
-            html_destination = validate_destination(source, options["html_report"])
+            html_destination = _destination(source, options["html_report"], "--html-report")
         if options.get("diagnostics"):
-            diagnostic_destination = validate_destination(source, options["diagnostics"])
+            diagnostic_destination = _destination(source, options["diagnostics"], "--diagnostics")
+        if not source.exists() and not source.is_symlink():
+            raise RequestError(
+                f"Input does not exist: {source}",
+                "Pass the path of an existing PDF file; check the spelling and the current "
+                "directory."
+                if command == "pdf"
+                else "Pass the path of the paper's LaTeX source folder or ZIP file; check the "
+                "spelling and the current directory.",
+            )
+        # The job validates these again; checking here names the option at fault.
+        for name in ("output", "preview_output"):
+            if options.get(name) is not None:
+                _destination(source, options[name], "--" + name.replace("_", "-"))
         destinations = [
             item
             for item in (
@@ -313,7 +470,27 @@ def _execute(command: str, options: dict[str, Any]) -> int:
             source, options.get("config"), isolated=options.get("isolated", False)
         )
         report.execution["config_path"] = str(config_path) if config_path is not None else None
-        settings = load_settings(config_path, overrides)
+        report.execution["preset"] = options.get("preset")
+        try:
+            settings = load_settings(config_path, overrides, preset=options.get("preset"))
+        except RequestError:
+            raise
+        except PreparationError as error:
+            raise RequestError(
+                str(error),
+                _settings_suggestion(str(error), overrides, config_path, options.get("preset")),
+            ) from error
+        select, ignore = options.get("select_checks", ()), options.get("ignore_checks", ())
+        if select or ignore:
+            try:
+                checks = settings.checks.with_command_line(tuple(select), tuple(ignore))
+            except PreparationError as error:
+                raise RequestError(
+                    str(error),
+                    "Correct the selector and rerun the command; fledge rule CODE explains "
+                    "a single check.",
+                ) from error
+            settings = replace(settings, checks=checks)
         if options.get("online") is not None:
             settings = replace(
                 settings,
@@ -343,7 +520,18 @@ def _execute(command: str, options: dict[str, Any]) -> int:
         )
     except (PreparationError, OSError, ValueError) as error:
         report.outcome = "error"
-        report.findings.append(Finding("execution.request", str(error), "error", "inconclusive"))
+        report.scope = REQUEST_SCOPE
+        report.findings.append(
+            Finding(
+                "execution.request",
+                str(error),
+                "error",
+                "inconclusive",
+                suggestion=error.suggestion
+                if isinstance(error, RequestError)
+                else "Correct the input, option or setting named above, then rerun the command.",
+            )
+        )
     except Exception as error:
         # A defect must still yield a machine-readable error report and exit code.
         report.outcome = "error"

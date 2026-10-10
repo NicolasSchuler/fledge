@@ -2,43 +2,37 @@
 
 ## macOS installer
 
-From the [source checkout](https://github.com/NicolasSchuler/fledge) or extracted source distribution:
+From the [source checkout](https://github.com/NicolasSchuler/fledge) or an
+extracted source distribution, preview the plan and then install:
 
 ```sh
 bash install.sh --dry-run
 bash install.sh
 ```
 
-The first command previews without changes. The installer reuses installed tools,
-shows its plan, and asks for confirmation. If TeX is absent, the plan includes
-MacTeX without GUI apps (`mactex-no-gui`): a multi-gigabyte installation that can
-require administrator access.
-A conflicting partial TeX installation stops with advice instead of replacement.
-Homebrew is required only when external tools are missing; the script does not
+The installer reuses tools you already have, shows its plan and asks before
+changing anything. It supplies Python 3.11+, `latexmk`, pdfLaTeX, BibTeX and
+Poppler as needed. If TeX is absent, the plan includes MacTeX without GUI apps
+(`mactex-no-gui`), a multi-gigabyte installation that can require administrator
+access. A conflicting partial TeX installation stops with advice instead of being
+replaced. Homebrew is needed only when tools are missing; the installer does not
 install Homebrew itself.
 
-The default prefix is `~/.local/share/fledge`, with a `venv` child;
-the launcher is `~/.local/bin/fledge`. An existing prefix or launcher, including
-a symlink, is refused; the installer never overwrites. No shell files are edited.
-The launcher's `PATH` contains only the directories of the detected tools
-(including optional tools that were already installed), in search order, then the
-fallback directories and the system directories. The rest of your shell's `PATH`,
-such as a virtual environment, is not saved.
-Use that full launcher path wherever these docs show `fledge` unless its
-directory is already on your `PATH`. Existing installations under the former
-name are left untouched.
+Fledge goes into `~/.local/share/fledge`, and the launcher is
+`~/.local/bin/fledge`. The installer refuses an existing prefix or launcher,
+including a symlink, and edits no shell files. **If `~/.local/bin` is not on your
+`PATH`, type `~/.local/bin/fledge` wherever these pages show `fledge`.** The
+launcher's own `PATH` contains only the detected tool directories, fallback
+directories and system directories, so a virtual environment active in your shell
+does not leak into builds.
 
 | Option | Purpose |
 | --- | --- |
 | `--dry-run` | Preview; make no changes |
-| `--yes` | Explicitly accept the displayed installation plan without a prompt |
-| `--with-optional` | Also install missing `qpdf`, MuPDF tools, and `tex-fmt` |
+| `--yes` | Accept the displayed plan without a prompt |
+| `--with-optional` | Also install missing `qpdf`, MuPDF tools and `tex-fmt` |
 | `--prefix DIR --bin-dir DIR` | Choose installation and launcher directories |
 | `--uninstall` | Remove the installation directory and launcher; works with `--dry-run` and `--yes` |
-
-The installer supplies Python 3.11+, `latexmk`, pdfLaTeX, BibTeX, and Poppler as
-needed. Installer logic has mock/dry-run coverage; live Homebrew and MacTeX
-installation remains unverified.
 
 ## Upgrade or uninstall
 
@@ -48,15 +42,15 @@ bash install.sh --uninstall
 ```
 
 Use the same `--prefix` and `--bin-dir` as for the installation. Uninstalling
-removes the prefix and the launcher, and only when the launcher was written by
-the installer for that prefix; otherwise nothing is removed. It refuses a symlinked
-prefix or one containing your home directory, and it leaves Homebrew, TeX and
-Poppler packages, shell files and your projects untouched. To upgrade, uninstall,
-then run the installer again from the newer source.
+removes the prefix and the launcher, and only when the installer wrote that
+launcher for that prefix; otherwise nothing is removed. It refuses a symlinked
+prefix or one containing your home directory, and it leaves Homebrew, TeX,
+Poppler, shell files and your projects untouched. To upgrade, uninstall, then run
+the installer from the newer source.
 
-## Manual Python installation
+## Other platforms and manual installation
 
-Use Python 3.11+ and install external tools separately:
+Use Python 3.11+ and install the external tools yourself:
 
 ```sh
 python3 -m venv .venv
@@ -65,31 +59,42 @@ python -m pip install .
 fledge --help
 ```
 
-For a wheel, use `python -m pip install /path/to/package.whl`; for development,
-use `python -m pip install -e .`. Installation may download Click and Rich; offline
-installation needs local copies. The wheel contains the CLI, while the source
-archive also includes the installer, docs, examples, tests, and the
-[agent skill](agents.md).
+For a wheel, use `python -m pip install /path/to/package.whl`. Installation
+downloads Click and Rich unless local copies are available. The wheel contains
+the CLI; the source archive also includes the installer, docs, examples, tests
+and the [agent skill](agents.md).
 
-The `fledge` distribution installs both `fledge` and the compatible `latex-prep`
-console entrypoints. The macOS installer exposes only the `fledge` launcher; the
-legacy entrypoint remains inside its private virtual environment. Existing
-[configuration names and tables](configuration.md#discovery-and-precedence) are
-retained. When replacing the former `latex-preparation` distribution, use a fresh
-Python environment: both distributions provide the same `latexprep` module and
-should not be installed together.
+Builds run in a sandbox: `sandbox-exec` on macOS, or Bubblewrap with working user
+namespaces on Linux. Windows has no build sandbox. See
+[limitations](limitations.md#platforms-and-tools) for what has been tested where.
 
-## Tools and platform support
+## Tools
 
 | Operation | Tools |
 | --- | --- |
 | `inspect`, `bib check` | Python package only |
-| `check`, `prepare` | `latexmk`, selected TeX engine/packages and bibliography backend (BibTeX or [Biber](workflow.md#biber-on-macos)), plus Poppler |
-| PDF analysis/comparison | `pdfinfo`, `pdftotext`, `pdftoppm`, `pdffonts`, `pdfdetach`, `pdfimages`; `pdftohtml` for text geometry |
-| Formatting / optional PDF checks | `tex-fmt` / `qpdf` and MuPDF's `mutool` |
+| `check`, `prepare` | `latexmk`, the selected TeX engine and packages, the bibliography backend (BibTeX or [Biber](workflow-reference.md#biber-on-macos)), plus Poppler |
+| PDF analysis and comparison | `pdfinfo`, `pdftotext`, `pdftoppm`, `pdffonts`, `pdfdetach`, `pdfimages`; `pdftohtml` for text geometry |
+| Formatting and optional PDF checks | `tex-fmt`; `qpdf` and MuPDF's `mutool` |
 
-The installer is macOS-only. Builds require macOS `sandbox-exec` or, with manual
-Linux setup, Bubblewrap and operational user namespaces. Host policy can block
-isolation; there is no unsandboxed fallback. Linux has no live validation;
-Windows build isolation is absent. `qpdf`/`mutool` lack live-tool validation on the
-development host. See [coverage and limitations](workflow.md#run-locally).
+A tool is needed only for the checks that use it. When a configured check's tool
+is missing, that check is reported as incomplete rather than passed. Fledge never
+installs tools during a run.
+
+## Migrating from latex-prep
+
+Fledge was previously named `latex-prep`. Existing setups keep working:
+
+- The `fledge` distribution also installs a `latex-prep` command. The macOS
+  installer exposes only `fledge`.
+- Configuration files named `.latex-prep.toml` and `latex-prep.toml`, and the
+  `[tool.latex-prep]` table in `pyproject.toml`, are still read, after the
+  `fledge` names in the same directory. A `pyproject.toml` with both
+  `[tool.fledge]` and `[tool.latex-prep]` is an error.
+- Formatter-off markers with the `latex-prep` prefix are still accepted.
+- Installations under the former name are left untouched by the installer.
+- For development, `LATEX_PREP_RUN_INTEGRATION=1` and
+  `LATEXPREP_RUN_SANDBOX_TESTS=1` still enable the live tests.
+- Do not install the former `latex-preparation` distribution next to `fledge`:
+  both provide the `latexprep` module. Use a fresh Python environment, or remove
+  it with `python -m pip uninstall latex-preparation`.

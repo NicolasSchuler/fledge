@@ -15,6 +15,7 @@ from latexprep.check_selection import CheckSelection
 from latexprep.config import Settings
 from latexprep.core import JobRequest, run_job
 from latexprep.models import Finding, PreparationError, Report
+from latexprep.package_inputs import generated_bibliography_inputs
 from latexprep.runtime import BuildResult
 from latexprep.source_transform import SourceTransformOptions
 from latexprep.submission_checks import SubmissionOptions
@@ -38,8 +39,10 @@ class RecordedBuild:
         *,
         legacy_result: bool = False,
         fail_archive_main: str | None = None,
+        generated_reads: frozenset[str] = frozenset(),
     ) -> None:
         self.traces = traces
+        self.generated_reads = generated_reads
         self.legacy_result = legacy_result
         self.fail_archive_main = fail_archive_main
         self.counts: Counter[str] = Counter()
@@ -62,12 +65,38 @@ class RecordedBuild:
             else [Finding("build.fixture", "Controlled archive rebuild failure", "error")],
             dependencies=set(trace or ()),
             submission_inputs=None if trace is None else set(trace),
+            generated_reads=self.generated_reads,
         )
         if self.legacy_result:
             return SimpleNamespace(
                 **{key: value for key, value in vars(result).items() if key != "submission_inputs"}
             )
         return result
+
+
+class GeneratedBibliographyInputTests(unittest.TestCase):
+    def test_only_regular_files_beside_the_main_file_with_its_name_are_retained(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "paper").mkdir()
+            for name in ("paper/main.bbl", "paper/main.run.xml", "main.bbl", "paper/other.bbl"):
+                (root / name).write_text("generated\n")
+            reads = frozenset({"main.bbl", "main.run.xml", "other.bbl"})
+            self.assertEqual(
+                generated_bibliography_inputs(root, "paper/main.tex", reads),
+                {"paper/main.bbl", "paper/main.run.xml"},
+            )
+            self.assertEqual(
+                generated_bibliography_inputs(root, "paper/main.tex", {"main.bbl"}),
+                {"paper/main.bbl"},
+            )
+            self.assertEqual(generated_bibliography_inputs(root, "main.tex", reads), {"main.bbl"})
+            (root / "paper/main.bbl").unlink()
+            (root / "paper/main.bbl").symlink_to(root / "main.bbl")
+            self.assertEqual(
+                generated_bibliography_inputs(root, "paper/main.tex", reads),
+                {"paper/main.run.xml"},
+            )
 
 
 class DependencyPackagingTests(unittest.IsolatedAsyncioTestCase):
@@ -206,6 +235,66 @@ class DependencyPackagingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("draft.tex", build.visits[0][2])
         self.assertEqual(set(build.visits[1][2]), selected)
         self.assertEqual(build.visits[-1][2], archived)
+
+    async def test_supplied_generated_bibliography_ships_when_the_build_consumed_it(self):
+        self.write(
+            "paper/main.tex",
+            "\\documentclass{article}\n\\usepackage{biblatex}\n\\addbibresource{refs.bib}\n"
+            "\\begin{document}\n\\cite{kept}\n\\printbibliography\n\\end{document}\n",
+        )
+        self.write("paper/refs.bib", "@misc{kept,title={Kept}}\n")
+        self.write("paper/main.bbl", "\\datalist[entry]{nty/global//global/global}\n")
+        self.write("paper/main.run.xml", "<requests/>\n")
+        self.write("paper/main.aux", "\\relax\n")
+        self.write("old/main.bbl", "stale bibliography beside another file\n")
+        selected = {"paper/main.tex", "paper/refs.bib"}
+        # The build regenerates both files in its output directory and reads those.
+        build = RecordedBuild(
+            {"paper/main.tex": (selected, selected, selected)},
+            generated_reads=frozenset({"main.bbl", "main.run.xml", "main.aux"}),
+        )
+        report, output = await self.prepare(Settings(main="paper/main.tex"), build)
+        self.assert_released(report)
+        retained = {"paper/main.bbl", "paper/main.run.xml"}
+        archived = self.archive_contents(output)
+        self.assertEqual(set(archived), selected | retained)
+        self.assertEqual(archived["paper/main.bbl"], (self.source / "paper/main.bbl").read_bytes())
+        self.assertEqual(build.visits[-1][2], archived)
+        inventories = [
+            item
+            for item in report.findings
+            if item.rule == "package.dependencies" and item.status == "passed"
+        ]
+        self.assertTrue(inventories, report.findings)
+        for inventory in inventories:
+            self.assertEqual(inventory.details["generated_bibliography"], sorted(retained))
+            self.assertIn("paper/main.bbl", inventory.message)
+        bbl = [item for item in report.findings if item.code == "TEX009"]
+        self.assertTrue(bbl and all(item.status == "passed" for item in bbl), bbl)
+
+    async def test_generated_bibliography_the_build_did_not_read_is_not_shipped(self):
+        self.write(
+            "main.tex",
+            "\\documentclass{article}\n\\begin{document}\n\\cite{kept}\n"
+            "\\bibliography{refs}\n\\end{document}\n",
+        )
+        self.write("refs.bib", "@misc{kept,title={Kept}}\n")
+        self.write("main.bbl", "\\begin{thebibliography}{1}\\end{thebibliography}\n")
+        self.write("main.run.xml", "<requests/>\n")
+        selected = {"main.tex", "refs.bib"}
+        for reads, expected in (
+            (frozenset(), selected),
+            (frozenset({"main.bbl"}), selected | {"main.bbl"}),
+        ):
+            with self.subTest(reads=sorted(reads)):
+                build = RecordedBuild(
+                    {"main.tex": (selected, selected, selected)}, generated_reads=reads
+                )
+                report, output = await self.prepare(
+                    Settings(main="main.tex"), build, name=f"out-{len(reads)}"
+                )
+                self.assert_released(report)
+                self.assertEqual(set(self.archive_contents(output)), expected)
 
     async def test_static_and_recorded_inputs_preserve_transitive_local_resources(self):
         files = {

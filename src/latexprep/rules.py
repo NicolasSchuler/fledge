@@ -31,6 +31,7 @@ from .runtime_rules import RULE_DEFINITIONS as RUNTIME_RULES
 from .source_transform_rules import SOURCE_TRANSFORM_RULES
 from .structure_rules import RULE_DEFINITIONS as STRUCTURE_RULES
 from .submission_check_rules import RULE_DEFINITIONS as SUBMISSION_RULES
+from .submission_readiness_rules import RULE_DEFINITIONS as SUBMISSION_READINESS_RULES
 from .workflow_rules import WORKFLOW_RULES
 
 
@@ -85,6 +86,7 @@ RULES = _catalogue(
     ONLINE_RULES,
     PDF_RULES,
     SUBMISSION_RULES,
+    SUBMISSION_READINESS_RULES,
     STRUCTURE_RULES,
     WORKFLOW_RULES,
     REPORTING_RULES,

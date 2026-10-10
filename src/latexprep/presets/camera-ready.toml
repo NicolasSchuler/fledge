@@ -1,0 +1,86 @@
+# Fledge preset "camera-ready": a starting point for a final, accepted version.
+#
+# This is not a publisher policy and passing it does not certify that the
+# publisher will accept the files. Fledge maintains no venue rules: the settings
+# below only switch on generic PDF, structure and hygiene checks. Read your
+# publisher's current instructions, fill in the commented placeholders with
+# their values, and delete anything you do not want.
+#
+# `fledge init --preset camera-ready` copies this file to fledge.toml for
+# editing. `--preset camera-ready` on inspect, check and prepare applies it as
+# the lowest layer: your settings file overrides it and command-line options
+# override both. Codes such as PDF104 are explained by `fledge rule PDF104`.
+
+# PDF001: page limit for the whole PDF, including references and appendices.
+# Copy the publisher's current rule; no limit is assumed.
+# max_pages = 0
+# PDF101: expected page size in PDF points, for example 612 x 792 (US Letter) or
+# 595 x 842 (A4). Supply both values from the publisher's instructions.
+# expected_page_width_pt = 0
+# expected_page_height_pt = 0
+require_consistent_page_size = true # PDF102: every page has the same size.
+
+# TEX101/TEX102: the publisher's class and any required options, if specified.
+# expected_document_class = ""
+# required_class_options = []
+forbidden_class_options = ["draft"] # TEX102: draft mode replaces figures with boxes.
+forbidden_packages = ["showframe"] # TEX103: page-frame debugging overlay.
+
+# Generic PDF production checks.
+require_embedded_fonts = true # PDF104: every font is embedded.
+forbid_type3_fonts = true # PDF105: no Type 3 fonts, often bitmap fonts from figures.
+forbid_encryption = true # PDF106: no password or permission restrictions.
+forbid_javascript = true # PDF108: no document JavaScript.
+forbid_attachments = true # PDF109: no embedded files.
+# PDF103: minimum effective raster image resolution, if the publisher sets one.
+# min_image_dpi = 0
+
+# Venue-specific top-level settings: add them here, above the first [table].
+
+[manuscript_checks]
+required_metadata = ["title", "author"] # MAN008: literal title and author commands.
+check_orcid = true # MAN009: checksum of any ORCID iD present.
+check_layout_manipulation = true # MAN002: negative spacing and layout overrides (advisory).
+check_empty_sections = true # MAN006: headings without content (advisory).
+check_hardcoded_references = true # MAN007: "Figure 2" typed instead of a reference (advisory).
+require_float_captions = true # MAN011: every figure and table has a caption.
+require_float_labels = true # MAN012: every figure and table has a label.
+check_float_label_order = true # MAN013: labels follow captions.
+require_float_references = true # MAN014: every labelled float is referenced.
+check_float_reference_order = true # MAN015: floats first referenced in source order.
+# MAN010: statements the publisher requires, by heading.
+# required_declarations = ["Data Availability", "Competing Interests"]
+# MAN017: reject line numbers left over from the review version.
+# forbid_line_numbers = true
+
+[submission_checks]
+scan_private_comments = true # PRV005: TODO and private notes inside TeX comments.
+scan_secrets = true # PRV004: credential-shaped tokens and private-key headers.
+check_shell_escape = true # PRV006: write18 and shell-escape constructs.
+report_unused_assets = true # PKG106: files outside the selected dependency graph.
+# PKG105: compressed size of the final ZIP in bytes, if the publisher limits it.
+# max_archive_bytes = 0
+
+[pdf_checks]
+# PDF206: PDF properties the publisher requires, typically set with hyperref.
+# required_metadata = ["Title", "Author"]
+
+[build_checks]
+# BLD105: TeX Live year the publisher compiles with; warns if yours differs.
+# expected_texlive_year = 0
+
+# PDF313: colour family ("rgb" or "cmyk") the publisher requires for figures;
+# grayscale satisfies either. Copy it from the publisher's instructions.
+[figure_artwork]
+# Each included PDF, PNG and JPEG figure.
+# required_color_space = ""
+
+[pdf_artwork]
+# The whole final PDF, including text and rules.
+# required_color_space = ""
+
+# ---------------------------------------------------------------------------
+# Venue-specific additions
+# Add settings for requirements you have confirmed in the publisher's current
+# instructions below, under the matching [table] header.
+# ---------------------------------------------------------------------------

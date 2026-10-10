@@ -59,12 +59,16 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
           cache-dependency-path: pyproject.toml
-      - name: Install package
-        run: python -m pip install -e .
+      - name: Install package and test tools
+        run: python -m pip install -e '.[dev]'
       # Tests that need TeX, Poppler or a live sandbox skip unless their
       # opt-in variables are set; the live-macos job sets them.
+      # pytest replaces `python -m unittest discover`: it collects the same
+      # unittest.TestCase tests, reports each failing subTest, and pytest-xdist
+      # spreads them over one worker process per CPU. `-ra` (also set in
+      # pyproject.toml) summarises every failure, error and skip reason.
       - name: Run unit tests
-        run: python -m unittest discover -s tests -t . -v
+        run: python -m pytest tests -n auto -ra -p no:cacheprovider
 
   live-macos:
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
@@ -101,17 +105,20 @@ jobs:
           biber --version
           pdfinfo -v
           tex-fmt --version
-      - name: Install package
-        run: python -m pip install -e .
+      - name: Install package and test tools
+        run: python -m pip install -e '.[dev]'
+      # Serial on purpose: these tests run real TeX, Biber and Seatbelt and
+      # check timing and process-group cleanup, so they should not compete
+      # with each other for CPU on the hosted runner.
       - name: Run live integration and sandbox tests
         env:
           LATEX_PREP_RUN_INTEGRATION: "1"
           LATEXPREP_RUN_SANDBOX_TESTS: "1"
         run: >-
-          python -m unittest
-          tests.test_integration
-          tests.test_integration_checks
-          tests.test_integration_remaining
-          tests.test_integration_backends
-          tests.test_runtime_parallel
-          -v
+          python -m pytest
+          tests/test_integration.py
+          tests/test_integration_checks.py
+          tests/test_integration_remaining.py
+          tests/test_integration_backends.py
+          tests/test_runtime_parallel.py
+          -v -ra -p no:cacheprovider

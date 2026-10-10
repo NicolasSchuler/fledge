@@ -75,6 +75,8 @@ class BuildResult:
     loaded_packages: list[dict[str, str | None]] = field(default_factory=list)
     recorder_complete: bool = False
     submission_inputs: set[str] | None = None
+    # Generated files read by the build (output- or project-relative), e.g. main.bbl.
+    generated_reads: frozenset[str] = frozenset()
 
 
 _CHILD_TOOLS = (
@@ -995,7 +997,10 @@ class ToolRunner:
             await _finish_cleanup(stop_probe())
             raise
         try:
-            output, _ = await asyncio.wait_for(probe.communicate(), 2)
+            # asyncio.wait_for in Python 3.11 can drop an external cancellation that
+            # arrives as the probe finishes (bpo-42130); asyncio.timeout does not.
+            async with asyncio.timeout(2):
+                output, _ = await probe.communicate()
         finally:
             if probe.returncode is None:
                 with contextlib.suppress(ProcessLookupError):
@@ -1143,6 +1148,11 @@ class ToolRunner:
         try:
             while True:
                 await self._sample_job()
+                # A sample that swallowed this task's cancellation must not keep the
+                # monitor alive, or job_scope would wait for it indefinitely.
+                current = asyncio.current_task()
+                if current is not None and current.cancelling():
+                    raise asyncio.CancelledError
                 interval = _sample_interval(start)
                 self._metrics.sample_interval_seconds = interval
                 await asyncio.sleep(interval)
@@ -1330,12 +1340,16 @@ class ToolRunner:
         async def collect(stream: asyncio.StreamReader, index: int) -> None:
             nonlocal output_limited
             while chunk := await stream.read(65_536):
+                if output_limited:
+                    # Keep draining after the kill: the process counts as finished
+                    # only once every pipe reaches end-of-file, and a reader that
+                    # stops early leaves buffered data that stalls its pipe forever.
+                    continue
                 remaining = self.limits.max_output_bytes - sum(map(len, buffers))
                 buffers[index].extend(chunk[: max(0, remaining)])
                 if len(chunk) > remaining:
                     output_limited = True
                     _kill_group(process.pid)
-                    return
 
         assert process.stdout is not None and process.stderr is not None
         readers = [
@@ -1897,6 +1911,7 @@ async def build_project(
         max_bytes=runner.limits.max_output_bytes,
     )
     result.submission_inputs = submission.inputs
+    result.generated_reads = submission.generated_reads
     result.tools["submission_dependencies"] = submission.details
     if submission.inputs is None:
         result.findings.append(

@@ -1,18 +1,29 @@
 # Fledge
 
-Start with [installation](installation.md) and [prepare your paper](quickstart.md).
-Use the [offline demo](examples.md) to try source inspection without TeX.
+Fledge turns a LaTeX project into a verified submission ZIP. It copies only the
+files your paper needs, rebuilds the PDF from that exact ZIP in a sandbox and
+checks that it matches your original. Your project is never edited.
+
+New here? [Install Fledge](installation.md), then [prepare your paper](quickstart.md).
+To try it without your own paper or TeX, use the [offline example](examples.md).
 
 ```{toctree}
 :maxdepth: 2
-:caption: Using the CLI
+:caption: Getting started
 
 installation
 quickstart
+```
+
+```{toctree}
+:maxdepth: 2
+:caption: Using Fledge
+
 configuration
 preparation-options
 reports
 troubleshooting
+examples
 agents
 ```
 
@@ -20,18 +31,16 @@ agents
 :maxdepth: 1
 :caption: Reference
 
-workflow
 checks
-examples
+workflow
+workflow-reference
+limitations
+glossary
 ```
-
-The documents below distinguish current behavior, measured local evidence, and
-remaining design work. Requirements and plans do not establish implementation or
-live-platform support.
 
 ```{toctree}
 :maxdepth: 1
-:caption: Development and planning
+:caption: Developer notes
 
 development
 check-backlog

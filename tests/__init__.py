@@ -2,8 +2,9 @@
 
 An old non-editable install in site-packages would otherwise be imported silently and
 the tests would pass or fail against stale code. Putting ``src`` first on ``sys.path``
-prevents that for ``python -m unittest discover -s tests -t .`` and for dotted test
-names; a copy that was already imported from elsewhere cannot be undone, so fail loudly.
+prevents that for ``python -m pytest`` (including its xdist workers), for
+``python -m unittest discover -s tests -t .`` and for dotted test names; a copy that
+was already imported from elsewhere cannot be undone, so fail loudly.
 """
 
 import importlib.util

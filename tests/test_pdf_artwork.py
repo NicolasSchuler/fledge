@@ -130,6 +130,11 @@ def contrast_sample(*, minimum: float = 4.5, tolerance: int = 0) -> PdfContrastS
     )
 
 
+def colored(space: str | None) -> str:
+    attribute = f' colorspace="{space}"' if space is not None else ""
+    return f'<fill_path{attribute} color="0" transform="1 0 0 1 0 0"></fill_path>'
+
+
 class ArtworkRunner(ToolRunner):
     def __init__(self, **values: object):
         super().__init__()
@@ -682,6 +687,43 @@ class PdfArtworkTests(unittest.IsolatedAsyncioTestCase):
         for values in invalid:
             with self.assertRaises(PreparationError):
                 PdfArtworkOptions(**values)
+
+    async def test_traced_figure_color_families_against_required_space(self) -> None:
+        rgb = PdfArtworkOptions(required_color_space="rgb")
+        cmyk = PdfArtworkOptions(required_color_space="cmyk")
+        mixed = trace(colored("DeviceRGB") + colored("DeviceGray") + colored("ICCBased(RGB)"))
+        passed = await self.status(rgb, "passed", trace=mixed)
+        self.assertEqual(passed.code, "PDF313")
+        self.assertEqual(passed.details["color_spaces"]["DeviceRGB"], 1)
+        failed = await self.status(cmyk, "failed", trace=mixed)
+        self.assertEqual(failed.severity, "error")
+        self.assertEqual(
+            [item["color_space"] for item in failed.details["violations"]],
+            ["DeviceRGB", "ICCBased(RGB)"],
+        )
+        await self.status(
+            cmyk, "passed", trace=trace(colored("DeviceCMYK") + colored("DeviceGray"))
+        )
+        # Separation/unnamed operations and an empty trace are never a pass.
+        for content in (colored("Separation(Gold)"), colored(None), ""):
+            with self.subTest(content=content):
+                await self.status(cmyk, "inconclusive", trace=trace(content))
+        findings = await inspect_artwork_inputs(
+            (self.pdf,), self.work(), ArtworkRunner(trace=mixed), options=cmyk
+        )
+        self.assertEqual(
+            [(item.status, item.path) for item in findings], [("failed", str(self.pdf))]
+        )
+        with self.assertRaises(PreparationError):
+            PdfArtworkOptions(required_color_space="srgb")
+
+    async def test_missing_trace_tool_is_inconclusive(self) -> None:
+        options = PdfArtworkOptions(required_color_space="rgb")
+        finding = await self.status(options, "inconclusive", missing="mutool")
+        self.assertEqual((finding.code, finding.severity), ("PDF313", "error"))
+        runner = ArtworkRunner()
+        self.assertEqual(await self.check(PdfArtworkOptions(), runner), [])
+        self.assertFalse(any(call[0][0] == "mutool" for call in runner.calls))
 
 
 if __name__ == "__main__":

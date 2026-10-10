@@ -1,0 +1,69 @@
+# Fledge preset "anonymous-review": a starting point for double-blind review.
+#
+# This is not a venue policy and passing it does not certify that a submission
+# is anonymous. Fledge cannot know who you are: the identity checks below only
+# search for the names, institutions, addresses and links you list yourself,
+# plus generic hints such as acknowledgement sections. Read your venue's current
+# instructions, fill in the commented placeholders, and delete anything you do
+# not want.
+#
+# `fledge init --preset anonymous-review` copies this file to fledge.toml for
+# editing. `--preset anonymous-review` on inspect, check and prepare applies it
+# as the lowest layer: your settings file overrides it and command-line options
+# override both. Codes such as PRV003 are explained by `fledge rule PRV003`.
+
+# PDF001: page limit for the whole PDF, including references and appendices.
+# Venues count pages differently; copy your venue's current rule.
+# max_pages = 0
+
+# Literal class and package declarations that should not reach reviewers.
+forbidden_class_options = ["draft"] # TEX102: draft mode replaces figures with boxes.
+forbidden_packages = ["showframe"] # TEX103: page-frame debugging overlay.
+
+# Embedded fonts (PDF104); many review systems reject PDFs with missing fonts.
+require_embedded_fonts = true
+# PDF105: also reject Type 3 fonts, which often come from bitmap fonts in figures.
+# forbid_type3_fonts = true
+forbid_attachments = true # PDF109: embedded files can carry names and source.
+
+# Venue-specific top-level settings: add them here, above the first [table].
+
+[submission_checks]
+scan_identity_hints = true # PRV003: acknowledgements and self-identifying phrases.
+scan_private_comments = true # PRV005: TODO and private notes inside TeX comments.
+scan_secrets = true # PRV004: credential-shaped tokens and private-key headers.
+report_unused_assets = true # PKG106: leftover files that may also identify you.
+# PRV001 (source) and PRV002 (PDF text and metadata): list every author name,
+# institution, email domain, grant number and repository or project URL that
+# would reveal the authors. Nothing is searched until you fill this in.
+# identity_terms = ["Your Name", "Your Institution", "your-lab.example.org"]
+# identity_term_matching = "word" # Or "substring" to match inside longer words.
+# PKG105: compressed size of the final ZIP in bytes, if the venue limits it.
+# max_archive_bytes = 0
+
+[metadata_privacy]
+# PRV103: search PNG and JPEG metadata of included images for the same terms.
+# image_identity_terms = ["Your Name", "Your Institution"]
+
+[manuscript_checks]
+check_layout_manipulation = true # MAN002: negative spacing and layout overrides (advisory).
+require_float_captions = true # MAN011: every figure and table has a caption.
+require_float_labels = true # MAN012: every figure and table has a label.
+check_float_label_order = true # MAN013: labels follow captions.
+require_float_references = true # MAN014: every labelled float is referenced.
+check_float_reference_order = true # MAN015: floats first referenced in source order.
+# MAN017: require line numbers (lineno or a class option) if the venue asks
+# reviewers to refer to them.
+# require_line_numbers = true
+
+[source_transforms]
+# prepare only: set to "private" to remove TeX comments containing TODO, FIXME,
+# XXX, "private", "internal", "confidential" or "note to self" from the separate
+# copy, if reviewers receive the source as well as the PDF.
+# comment_policy = "private"
+
+# ---------------------------------------------------------------------------
+# Venue-specific additions
+# Add settings for requirements you have confirmed in your venue's current
+# instructions below, under the matching [table] header.
+# ---------------------------------------------------------------------------

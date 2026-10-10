@@ -61,6 +61,31 @@ class CheckSelectionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Unknown public check code"):
             selection.enabled("TEX999")
 
+    def test_unknown_selector_suggests_the_closest_valid_selector(self) -> None:
+        with self.assertRaisesRegex(PreparationError, r"'tex001' \(did you mean TEX001\?\)"):
+            CheckSelection(select=("tex001",))
+        with self.assertRaisesRegex(PreparationError, "case-sensitive.*fledge rules"):
+            CheckSelection(ignore=("XYZ",))
+
+    def test_command_line_select_replaces_and_ignore_extends_configuration(self) -> None:
+        configured = CheckSelection(select=("TEX", "BIB"), ignore=("TEX001",))
+        layered = configured.with_command_line(select=("BIB1",), ignore=("BIB108", "TEX001"))
+        self.assertEqual(layered.select, ("BIB1",))
+        self.assertEqual(layered.ignore, ("TEX001", "BIB108"))
+        self.assertTrue(layered.enabled("BIB101"))
+        self.assertFalse(layered.enabled("BIB108"))
+        self.assertFalse(layered.enabled("TEX002"))
+        only_ignore = configured.with_command_line(ignore=("BIB",))
+        self.assertEqual(only_ignore.select, ("TEX", "BIB"))
+        self.assertFalse(only_ignore.enabled("BIB101"))
+        self.assertEqual(configured.with_command_line(), configured)
+
+    def test_command_line_selectors_are_validated_with_their_option_name(self) -> None:
+        for name, flag in (("select", "--select"), ("ignore", "--ignore")):
+            with self.subTest(flag=flag):
+                with self.assertRaisesRegex(PreparationError, f"Unknown {flag} selector 'TE'"):
+                    CheckSelection().with_command_line(**{name: ("TE",)})
+
     def test_selection_does_not_enable_network_edits_or_invent_policy(self) -> None:
         settings = load_settings(None, {"checks": {"select": ["ALL"]}})
         self.assertFalse(settings.online_checks.online)
@@ -240,6 +265,50 @@ class ConfigDiscoveryTests(unittest.TestCase):
         report = json.loads(result.output)
         self.assertIn("Unknown checks.select", report["findings"][0]["message"])
         self.assertIn("fledge rules", report["findings"][0]["message"])
+
+    def test_cli_select_and_ignore_layer_over_discovered_configuration(self) -> None:
+        self.write(self.source / ".fledge.toml", '[checks]\nselect = ["TEX"]\nignore = ["BIB1"]\n')
+        with patch(
+            "latexprep.cli.run_job", new=AsyncMock(return_value=Report("check", "passed"))
+        ) as run:
+            result = CliRunner().invoke(
+                cli,
+                [
+                    "check",
+                    str(self.source),
+                    "--select",
+                    "BIB",
+                    "--select",
+                    "TEX001",
+                    "--ignore",
+                    "BIB108",
+                    "--json",
+                ],
+            )
+        self.assertEqual(result.exit_code, 0, result.output)
+        assert run.await_args is not None
+        checks = run.await_args.args[0].settings.checks
+        self.assertEqual(checks.select, ("BIB", "TEX001"))
+        self.assertEqual(checks.ignore, ("BIB1", "BIB108"))
+
+    def test_cli_selection_options_exist_on_inspect_check_and_prepare(self) -> None:
+        for command in ("inspect", "check", "prepare"):
+            with self.subTest(command=command):
+                result = CliRunner().invoke(cli, [command, "--help"])
+                self.assertIn("--select CODE_OR_PREFIX", result.output)
+                self.assertIn("--ignore CODE_OR_PREFIX", result.output)
+
+    def test_cli_invalid_selector_option_prevents_dispatch(self) -> None:
+        with patch("latexprep.cli.run_job", new=AsyncMock()) as run:
+            result = CliRunner().invoke(
+                cli, ["inspect", str(self.source), "--ignore", "tex001", "--json"]
+            )
+        self.assertEqual(result.exit_code, 4, result.output)
+        run.assert_not_awaited()
+        [finding] = json.loads(result.output)["findings"]
+        self.assertIn("Unknown --ignore selector 'tex001'", finding["message"])
+        self.assertIn("did you mean TEX001?", finding["message"])
+        self.assertIn("fledge rule CODE", finding["suggestion"])
 
     def test_cli_help_explains_configuration_controls(self) -> None:
         result = CliRunner().invoke(cli, ["inspect", "--help"])

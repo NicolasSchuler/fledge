@@ -1,11 +1,11 @@
 # Preparation operations and review controls
 
-Every transformation writes a separate staging copy. `prepare --dry-run` previews
-source changes after building the baseline; final input selection, flattening and
-the bundle are not verified. `prepare --output NEW_DIRECTORY`
-also verifies the prepared and archive-rebuilt PDFs before release. Explicit edit
-values, key mappings and exception reasons in configuration constitute the user's
-reviewed choices. No remote metadata response is applied automatically.
+Every transformation applies to the separate copy, never to your project.
+`prepare --dry-run` previews source changes after building the baseline, without
+verifying input selection, flattening or the bundle; `prepare --output DIR`
+verifies the prepared and rebuilt PDFs before release. Edit values, key mappings
+and exception reasons in your configuration are your reviewed choices; no remote
+metadata response is applied automatically.
 
 The runnable {download}`preparation settings <../examples/preparation.toml>` select conservative
 bibliography formatting and private-comment removal. Other operations below are
@@ -68,8 +68,8 @@ markers, literal environments, license blocks and formatter/template directives.
 Comment removal edits only `.tex`, `.ltx` and `.latex` files; local class and
 style files are copied unchanged. Formatter output must preserve protected spans
 and pass a second idempotence run. A formatter-off region starts at a comment
-line `% tex-fmt: off` and ends at `% tex-fmt: on`; the prefixes `fmt`,
-`fledge` and the earlier `latex-prep` are accepted as well. Only `tex-fmt` itself
+line `% tex-fmt: off` and ends at `% tex-fmt: on`; the prefixes `fmt` and
+`fledge` are accepted as well. Only `tex-fmt` itself
 honors `% tex-fmt: off`; the other prefixes protect regions in Fledge's checks. An
 unmatched marker makes the result inconclusive.
 Filename overrides require `layout = "flat"` and retain flattening safety checks.
@@ -234,19 +234,8 @@ fledge prepare ./paper --config settings.toml --output ./prepared \
 fledge inspect ./paper --output-format ci
 ```
 
-Grayscale previews are PNG pages retained outside the source ZIP. Preparation
-stores them under `previews/` in the output; standalone checks require an explicit
-new preview directory. Preview export and bundle publication share a rollback
-barrier. HTML is offline and escaped, with source diffs, recorded region diagrams
-and local PDF page links. It does not embed annotated PDF page crops. CI output
-uses escaped GitHub Actions annotations. Diagnostics contain sanitized reports,
-recorded diffs and explicit text evidence, prominently marked unverified; they
-are not a submission bundle.
-
-macOS execution uses `sandbox-exec`; Linux uses a required Bubblewrap backend
-with private namespaces and read-only toolchain inputs. Backend unavailability
-blocks builds. Linux runtime behavior and optional qpdf/MuPDF adapters need their
-own live validation on hosts where they are available. No tool is installed
-automatically and no unsandboxed fallback is provided. On macOS, Biber runs from a
-sealed copy that Fledge prepares for the job; see
-[Biber on macOS](workflow.md#biber-on-macos).
+Grayscale previews are PNG pages kept outside the source ZIP: under `previews/`
+in a preparation output, or in a new `--preview-output` directory for `check` and
+`pdf check`. Preview export and bundle publication succeed or roll back together.
+[Report formats](workflow-reference.md#report-formats) describes the HTML, CI and
+diagnostic outputs.

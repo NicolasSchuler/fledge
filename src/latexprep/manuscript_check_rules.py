@@ -251,4 +251,25 @@ RULE_DEFINITIONS = (
             "conveys the information needed by readers."
         ),
     },
+    {
+        "code": "MAN017",
+        "name": "manuscript.line_numbers",
+        "title": "Required or forbidden review line numbers",
+        "description": (
+            "Opt-in (require_line_numbers or forbid_line_numbers): find literal lineno "
+            "activation, meaning \\linenumbers and its running/pagewise variants or "
+            "environments, the lineno linenumbers option, or a lineno/linenumbers class option. "
+            "Class-specific review modes and macro-generated activation are not interpreted; "
+            "conditional activation is inconclusive."
+        ),
+        "tests": (
+            "tests.test_submission_readiness.LineNumberTests.test_required_line_numbers",
+            "tests.test_submission_readiness.LineNumberTests.test_forbidden_line_numbers",
+        ),
+        "fix": (
+            "For review copies, load lineno and call \\linenumbers (or use the class option the "
+            "venue documents); for final versions, remove the activation. If the class numbers "
+            "lines through another option, confirm it in the PDF and suppress this finding."
+        ),
+    },
 )

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,6 +15,7 @@ from latexprep.cli import USAGE_EXIT_CODE, cli
 from latexprep.models import Change, Finding, Report
 from latexprep.presentation import render_compact, render_terminal
 from latexprep.rules import RULES
+from latexprep.runtime import BuildResult
 
 
 class CommandTests(unittest.TestCase):
@@ -160,6 +162,193 @@ class CommandTests(unittest.TestCase):
         )
         self.assertEqual(result.exit_code, USAGE_EXIT_CODE)
         self.assertIn("conflicts", result.output)
+
+
+class RequestErrorTests(unittest.TestCase):
+    """Rejected requests name the option or file at fault and a concrete next step."""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name).resolve()
+        self.source = self.root / "project"
+        self.source.mkdir()
+        (self.source / "main.tex").write_text(
+            "\\documentclass{article}\n\\begin{document}\nText.\n\\end{document}\n"
+        )
+        self.runner = CliRunner()
+
+    def request_error(self, *arguments: str) -> dict:
+        result = self.runner.invoke(cli, [*arguments, "--json", "--quiet"])
+        self.assertEqual(result.exit_code, 4, result.output)
+        report = json.loads(result.stdout)
+        self.assertEqual(report["outcome"], "error")
+        self.assertEqual(report["scope"], "request validation")
+        [finding] = [item for item in report["findings"] if item["rule"] == "execution.request"]
+        self.assertNotIn("missing or ambiguous evidence", finding["suggestion"])
+        return finding
+
+    def test_existing_output_directory_names_the_option_to_change(self):
+        existing = self.root / "existing"
+        existing.mkdir()
+        finding = self.request_error("prepare", str(self.source), "--output", str(existing))
+        self.assertIn("Output already exists", finding["message"])
+        self.assertIn("Choose a new --output path", finding["suggestion"])
+        self.assertIn(str(existing), finding["suggestion"])
+
+    def test_existing_report_file_names_the_report_option(self):
+        existing = self.root / "report.json"
+        existing.write_text("{}")
+        result = self.runner.invoke(
+            cli, ["inspect", str(self.source), "--report", str(existing), "--output-format", "json"]
+        )
+        self.assertEqual(result.exit_code, 4, result.output)
+        [finding] = json.loads(result.stdout)["findings"]
+        self.assertIn("Choose a new --report path", finding["suggestion"])
+
+    def test_missing_input_suggests_checking_the_path(self):
+        finding = self.request_error("inspect", str(self.root / "missing"))
+        self.assertIn("Input does not exist", finding["message"])
+        self.assertIn("LaTeX source folder or ZIP", finding["suggestion"])
+
+    def test_prepare_without_output_suggests_output_or_dry_run(self):
+        finding = self.request_error("prepare", str(self.source))
+        self.assertIn("--output", finding["suggestion"])
+        self.assertIn("--dry-run", finding["suggestion"])
+
+    def test_unknown_main_lists_the_documents_found(self):
+        finding = self.request_error("inspect", str(self.source), "--main", "nope.tex")
+        self.assertIn("nope.tex", finding["message"])
+        self.assertIn("--main", finding["suggestion"])
+        self.assertIn("documents found in the input: main.tex", finding["suggestion"])
+
+    def test_several_documents_suggest_choosing_one_with_main(self):
+        (self.source / "other.tex").write_text((self.source / "main.tex").read_text())
+        result = self.runner.invoke(cli, ["inspect", str(self.source), "--json", "--quiet"])
+        report = json.loads(result.stdout)
+        [finding] = [
+            item for item in report["findings"] if item["rule"] == "project.main_selection"
+        ]
+        self.assertIn("Rerun with --main set to one of the candidate roots", finding["suggestion"])
+
+    def test_invalid_command_line_value_names_the_flag(self):
+        finding = self.request_error("check", str(self.source), "--max-pages", "0")
+        self.assertIn("max_pages must be a positive integer", finding["message"])
+        self.assertIn("--max-pages on the command line", finding["suggestion"])
+
+    def test_invalid_configured_value_names_the_settings_file(self):
+        config = self.source / ".fledge.toml"
+        config.write_text("jobs = 100\n")
+        finding = self.request_error("inspect", str(self.source))
+        self.assertIn(f"jobs in {config}", finding["suggestion"])
+
+    def test_unknown_setting_names_the_file_and_the_closest_valid_key(self):
+        config = self.source / ".fledge.toml"
+        config.write_text("max_page = 3\n")
+        finding = self.request_error("inspect", str(self.source))
+        self.assertIn(str(config), finding["message"])
+        self.assertIn("max_page (did you mean max_pages?)", finding["message"])
+        self.assertIn(f"Rename or remove it in {config}", finding["suggestion"])
+
+    def test_unknown_setting_without_a_close_match_lists_valid_keys(self):
+        config = self.source / ".fledge.toml"
+        config.write_text("zzzz = 3\n")
+        finding = self.request_error("inspect", str(self.source))
+        self.assertIn("Valid top-level settings:", finding["suggestion"])
+        self.assertIn("max_pages", finding["suggestion"])
+
+    def test_terminal_report_is_headed_as_a_request_error(self):
+        result = self.runner.invoke(cli, ["prepare", str(self.source), "--quiet"])
+        self.assertEqual(result.exit_code, 4, result.output)
+        self.assertTrue(result.stdout.startswith("Request error\n"), result.stdout)
+        self.assertNotIn("source analysis", result.stdout)
+
+
+class MissingToolchainTests(unittest.TestCase):
+    def test_missing_tex_is_reported_once_with_installation_steps(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "project"
+            source.mkdir()
+            (source / "main.tex").write_text(
+                "\\documentclass{article}\n\\begin{document}\nText.\n\\end{document}\n"
+            )
+            unavailable = BuildResult(
+                False,
+                findings=[
+                    Finding(
+                        "build.execution_unavailable",
+                        "Required tool is unavailable: latexmk. Install it explicitly.",
+                        "error",
+                        "inconclusive",
+                    )
+                ],
+            )
+            with (
+                patch("latexprep.core.build_project", new=AsyncMock(return_value=unavailable)),
+                patch("latexprep.core.shutil.which", return_value=None),
+            ):
+                result = CliRunner().invoke(cli, ["check", str(source), "--json", "--quiet"])
+        self.assertEqual(result.exit_code, 3, result.output)
+        report = json.loads(result.stdout)
+        rules = [finding["rule"] for finding in report["findings"]]
+        self.assertNotIn("build.baseline", rules)
+        # The missing toolchain already explains why no TeX version was recorded.
+        self.assertNotIn("build.tex_distribution", rules)
+        [finding] = [
+            item for item in report["findings"] if item["rule"] == "build.execution_unavailable"
+        ]
+        self.assertIn("latexmk and pdflatex were not found", finding["message"])
+        self.assertEqual(finding["details"]["missing_tools"], ["latexmk", "pdflatex"])
+        self.assertIn("nicolasschuler.github.io/fledge/installation.html", finding["suggestion"])
+        self.assertIn("fledge inspect", finding["suggestion"])
+        self.assertIn("basictex" if sys.platform == "darwin" else "TeX Live", finding["suggestion"])
+
+
+class HelpTests(unittest.TestCase):
+    def help_text(self, *command: str) -> str:
+        result = CliRunner().invoke(cli, [*command, "--help"], terminal_width=200)
+        self.assertEqual(result.exit_code, 0, result.output)
+        return result.output
+
+    def test_prepare_help_separates_common_and_advanced_options(self):
+        text = self.help_text("prepare")
+        common, advanced = text.split("Advanced options:")
+        self.assertIn("Common options:", common)
+        for option in ("--output", "--main", "--select", "--ignore", "--dry-run", "--json"):
+            self.assertIn(option, common)
+        for option in (
+            "--jobs",
+            "--build-jobs",
+            "--render-jobs",
+            "--job-timeout-seconds",
+            "--timeout-seconds",
+            "--preview-output",
+            "--diagnostics",
+            "--html-report",
+            "--report",
+        ):
+            self.assertIn(option, advanced)
+            self.assertNotIn(f"{option} ", common)
+
+    def test_non_interactive_is_hidden_but_still_accepted(self):
+        self.assertNotIn("--non-interactive", self.help_text("prepare"))
+        with tempfile.TemporaryDirectory() as directory:
+            result = CliRunner().invoke(
+                cli, ["inspect", directory, "--non-interactive", "--quiet", "--json"]
+            )
+        self.assertNotEqual(result.exit_code, USAGE_EXIT_CODE, result.output)
+
+    def test_commands_without_advanced_options_keep_one_options_section(self):
+        text = self.help_text("rules")
+        self.assertIn("Options:", text)
+        self.assertNotIn("Advanced options:", text)
+
+    def test_help_uses_checks_codes_and_findings_consistently(self):
+        overview = self.help_text()
+        self.assertIn("'fledge rules' lists the checks", overview)
+        self.assertIn("Reports list findings", overview)
+        self.assertIn("List every check with its stable code", overview)
+        self.assertIn("Explain the check with code CODE", self.help_text("rule"))
 
 
 class PresentationTests(unittest.TestCase):

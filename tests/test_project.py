@@ -43,6 +43,11 @@ class ProjectTests(unittest.TestCase):
         ):
             warnings.simplefilter("ignore", UserWarning)
             for name, data in entries:
+                if name == "":
+                    # Python 3.11 rejects an empty arcname in writestr; an explicit
+                    # ZipInfo still writes the malformed empty entry name under test.
+                    name = zipfile.ZipInfo("placeholder")
+                    name.filename = ""
                 archive.writestr(name, data)
         return path
 
