@@ -1,5 +1,14 @@
 # Installation
 
+Fledge is a Python 3.11+ command-line tool. Building a paper (`check` and
+`prepare`) also needs TeX and Poppler; see [Tools](#tools).
+
+| System | Route |
+| --- | --- |
+| macOS | The [installer](#macos-installer), which also sets up TeX and Poppler, or [pipx or uv](#install-with-pipx-or-uv) if you have them |
+| Linux | [pipx or uv](#install-with-pipx-or-uv), plus the [Linux packages](#linux) |
+| Windows | [WSL 2](#windows) with the Linux route |
+
 ## macOS installer
 
 From the [source checkout](https://github.com/NicolasSchuler/fledge) or an
@@ -48,7 +57,32 @@ prefix or one containing your home directory, and it leaves Homebrew, TeX,
 Poppler, shell files and your projects untouched. To upgrade, uninstall, then run
 the installer from the newer source.
 
-## Other platforms and manual installation
+## Install with pipx or uv
+
+Fledge is published on PyPI as `fledge-latex`. Install it into its own
+environment with either tool:
+
+```sh
+pipx install fledge-latex
+# or
+uv tool install fledge-latex
+fledge --version
+```
+
+This installs the `fledge` command, and `latex-prep` for older scripts. It does
+not install TeX or Poppler; add them as described under [Tools](#tools), and for
+[Linux](#linux) and [Windows](#windows) below. The command finds them through
+your shell's `PATH`, unlike the macOS installer's launcher, which saves the tool
+directories it detected. To upgrade or remove it, use `pipx upgrade fledge-latex`
+or `uv tool upgrade fledge-latex`, and `pipx uninstall fledge-latex` or
+`uv tool uninstall fledge-latex`.
+
+```{warning}
+Install `fledge-latex`, not `fledge`. The PyPI package named `fledge` is an
+unrelated project, so `pip install fledge` does not install this tool.
+```
+
+## Manual installation from source
 
 Use Python 3.11+ and install the external tools yourself:
 
@@ -68,6 +102,41 @@ Builds run in a sandbox: `sandbox-exec` on macOS, or Bubblewrap with working use
 namespaces on Linux. Windows has no build sandbox. See
 [limitations](limitations.md#platforms-and-tools) for what has been tested where.
 
+## Linux
+
+Fledge's Linux sandbox has passed controlled-command tests only; it has **not yet
+been validated on a live Linux host**. On Debian or Ubuntu, the intended package
+set, which matches Fledge's Linux test job, is:
+
+```sh
+sudo apt-get install bubblewrap latexmk biber poppler-utils \
+  texlive-latex-base texlive-latex-recommended texlive-fonts-recommended \
+  texlive-bibtex-extra
+```
+
+Add `texlive-xetex` or `texlive-luatex` for those engines, and the TeX Live
+packages your paper needs. `tex-fmt` is not packaged by Ubuntu; to use it, put a
+[release binary](https://github.com/WGUNDERWOOD/tex-fmt/releases) in a system
+directory such as `/usr/local/bin`.
+
+Fledge refuses tools installed in your home directory or in the project, so use
+distribution packages or another installation under `/usr`.
+
+Ubuntu 24.04 can block unprivileged user namespaces with AppArmor
+(`kernel.apparmor_restrict_unprivileged_userns=1`), and Bubblewrap needs them. If
+the sandbox cannot start, Fledge blocks the build and never falls back to running
+unsandboxed. Allowing user namespaces is a security decision for your host: relax
+that setting, or add an AppArmor profile that permits `bwrap`. Fledge's own Linux
+test job sets it to `0` only on its disposable runner.
+
+## Windows
+
+Native Windows has no build sandbox, so `check` and `prepare` cannot build there;
+`inspect` and `bib check` need only Python. To build on Windows, use WSL 2 with a
+Linux distribution such as Ubuntu and follow the [Linux](#linux) instructions
+inside it. The same caveat applies: that route is not yet validated on a live
+host.
+
 ## Tools
 
 | Operation | Tools |
@@ -85,8 +154,8 @@ installs tools during a run.
 
 Fledge was previously named `latex-prep`. Existing setups keep working:
 
-- The `fledge` distribution also installs a `latex-prep` command. The macOS
-  installer exposes only `fledge`.
+- The `fledge-latex` distribution also installs a `latex-prep` command. The
+  macOS installer exposes only `fledge`.
 - Configuration files named `.latex-prep.toml` and `latex-prep.toml`, and the
   `[tool.latex-prep]` table in `pyproject.toml`, are still read, after the
   `fledge` names in the same directory. A `pyproject.toml` with both
@@ -95,6 +164,10 @@ Fledge was previously named `latex-prep`. Existing setups keep working:
 - Installations under the former name are left untouched by the installer.
 - For development, `LATEX_PREP_RUN_INTEGRATION=1` and
   `LATEXPREP_RUN_SANDBOX_TESTS=1` still enable the live tests.
-- Do not install the former `latex-preparation` distribution next to `fledge`:
-  both provide the `latexprep` module. Use a fresh Python environment, or remove
-  it with `python -m pip uninstall latex-preparation`.
+- Do not install the former `latex-preparation` distribution next to
+  `fledge-latex`: both provide the `latexprep` module. Use a fresh Python
+  environment, or remove it with `python -m pip uninstall latex-preparation`.
+- Before this package was published, installations from a source checkout were
+  registered as `fledge`. Remove such an installation with
+  `python -m pip uninstall fledge` before installing `fledge-latex` into the same
+  environment. The `fledge` package on PyPI is an unrelated project.

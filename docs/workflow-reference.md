@@ -167,6 +167,13 @@ job directory, runs a sandboxed warm-up that unpacks the payload there, makes th
 copy read-only and grants execution only to that sealed copy.
 `bibliography_backend = "bibtex"` skips this, and Linux needs no preparation.
 
+With `auto`, Fledge prepares Biber only when a source file (`.tex`, `.sty`,
+`.cls` and similar) mentions `biblatex`, even in a comment. Otherwise the build
+runs with Biber blocked. If that build still writes a `.bcf` file, because a
+class or package loads biblatex indirectly, Fledge discards it and rebuilds once
+with Biber prepared; `tools.bibliography.biber_preparation` in the JSON report
+records either decision.
+
 The copy costs about 175 MB of temporary space and about 10 seconds once per job.
 Both count against `max_temporary_bytes`; keep that above about 250 MB for Biber
 jobs. If preparation fails and the build needs Biber, Fledge reports a `BLD202`

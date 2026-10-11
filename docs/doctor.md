@@ -26,10 +26,15 @@ are not applied to the built-in document.
 
 The core tools are `latexmk`, the selected engine and Poppler's `pdfinfo`,
 `pdftotext`, `pdftoppm`, `pdffonts`, `pdfdetach` and `pdfimages`. XeLaTeX also
-needs `xdvipdfmx`. An explicit BibTeX or Biber backend selects a tiny bibliography
-fixture. With the default automatic bibliography strategy, bibliography tools
-are not exercised. If formatting is enabled, the built-in source is formatted
-through `tex-fmt`.
+needs `xdvipdfmx`. An explicit BibTeX or Biber backend makes that tool required
+and selects a tiny bibliography fixture. With the default automatic strategy,
+the doctor also compiles a tiny cited document through BibTeX and another
+through biblatex and Biber, each when its tool is installed. A missing tool or a
+failing fixture is an advisory, because papers that do not use that backend do
+not need it. The Biber fixture takes longest, often 15 to 35 seconds on macOS,
+where Biber first needs a prepared copy (see
+[Biber on macOS](workflow-reference.md#biber-on-macos)). If formatting is
+enabled, the built-in source is formatted through `tex-fmt`.
 
 Only enabled additional PDF measurements cause advisory probes of their optional
 tools, such as `qpdf`, MuPDF or `pdftohtml`. These probes establish installation

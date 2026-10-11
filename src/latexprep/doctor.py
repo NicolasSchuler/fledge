@@ -22,6 +22,7 @@ from .runtime import RuntimeLimits, ToolRunner, build_project
 from .scheduler import ResourceBudget
 
 _PDF_TOOLS = ("pdfinfo", "pdftotext", "pdftoppm", "pdffonts", "pdfdetach", "pdfimages")
+_BIBLIOGRAPHY_BACKENDS = ("bibtex", "biber")
 _DOCUMENT = "\\documentclass{article}\n\\begin{document}\nFledge setup test.\n"
 _REFERENCE = "@article{doctor,author={Example, Alice},title={Setup test},year={2026}}\n"
 
@@ -40,13 +41,17 @@ def _selected_tools(settings: Settings) -> tuple[set[str], set[str]]:
     required = {"latexmk", *diagnostic_engines(settings), *_PDF_TOOLS}
     if "xelatex" in required:
         required.add("xdvipdfmx")
-    if settings.bibliography_backend != "auto":
-        required.add(settings.bibliography_backend)
-    if settings.format:
-        required.add("tex-fmt")
     # Optional measurement adapters are advisory here; a version probe cannot
     # establish that a configured manuscript measurement is supported.
     optional: set[str] = set()
+    if settings.bibliography_backend != "auto":
+        required.add(settings.bibliography_backend)
+    else:
+        # The automatic strategy runs whichever backend a paper needs, so each
+        # installed backend is exercised; a missing one is only an advisory.
+        optional.update(_BIBLIOGRAPHY_BACKENDS)
+    if settings.format:
+        required.add("tex-fmt")
     pdf_rules = set(configured_pdf(settings.pdf_checks))
     if pdf_rules & {"pdf.document_language", "pdf.annotation_policy", "pdf.action_policy"}:
         optional.add("qpdf")
@@ -101,8 +106,10 @@ def _fixture(source: Path, backend: str) -> None:
         (source / "references.bib").write_text(_REFERENCE, encoding="utf-8")
 
 
-def _record_stage(report: Report, name: str, findings: list[Finding]) -> bool:
-    """Treat absent setup evidence as a blocker, independent of paper policy."""
+def _record_stage(
+    report: Report, name: str, findings: list[Finding], *, required: bool = True
+) -> bool:
+    """Treat absent setup evidence as a blocker, or as an advisory for optional stages."""
     bad = [
         item
         for item in findings
@@ -115,10 +122,15 @@ def _record_stage(report: Report, name: str, findings: list[Finding]) -> bool:
                 Finding(
                     "doctor.fixture_failed",
                     f"Built-in setup fixture, {name}: {item.message}",
-                    "error",
+                    "error" if required else "warning",
                     item.status,
                     suggestion="Repair the local toolchain or execution limits and rerun "
-                    "fledge doctor. This result does not diagnose your manuscript.",
+                    "fledge doctor. This result does not diagnose your manuscript."
+                    + (
+                        ""
+                        if required
+                        else " Only papers that need this stage's tools are affected."
+                    ),
                     details={"stage": name, "diagnostic_rule": item.rule, **item.details},
                 )
             )
@@ -436,6 +448,59 @@ async def _diagnose(
             )
         if _record_stage(report, f"{engine}: PDF pipeline", [*inspected, *compared]):
             _exercised(report, set(_PDF_TOOLS))
+    if settings.bibliography_backend == "auto":
+        await _diagnose_bibliographies(report, root, settings, runner, budget, emit)
+
+
+async def _diagnose_bibliographies(
+    report: Report,
+    root: Path,
+    settings: Settings,
+    runner: ToolRunner,
+    budget: ResourceBudget,
+    emit: Callable[[str], None],
+) -> None:
+    """Compile a tiny cited document through each installed backend as an optional stage.
+
+    Biber on macOS runs from a prepared toolchain copy, the most host-specific
+    part of a build, so this is where a broken installation shows up first.
+    """
+    engine = diagnostic_engines(settings)[0]
+    for backend in _BIBLIOGRAPHY_BACKENDS:
+        stage = f"{engine}: {backend} bibliography"
+        tools = {"latexmk", engine, backend}
+        if engine == "xelatex":
+            tools.add("xdvipdfmx")
+        if not _ready(report, tools):
+            report.stages.append({"name": stage, "status": "skipped"})
+            continue
+        source = root / f"source-{backend}"
+        _fixture(source, backend)
+        emit(f"Compiling the built-in {backend} bibliography fixture with {engine}")
+        async with budget.lease(
+            f"doctor {backend}", memory_mb=settings.build_memory_mb, kind="build"
+        ):
+            built = await build_project(
+                source,
+                "main.tex",
+                root / f"build-{backend}",
+                engine,
+                runner,
+                bibliography_backend=backend,
+            )
+        findings = built.findings
+        if (not built.success or built.pdf is None) and not has_blockers(findings):
+            findings = [
+                *findings,
+                Finding(
+                    "doctor.build_failed",
+                    "Build did not produce a successful PDF result.",
+                    "error",
+                ),
+            ]
+        if _record_stage(report, stage, findings, required=False) and built.success:
+            _exercised(report, tools)
+            report.execution["bibliography_exercised"] = True
 
 
 def _ready(report: Report, names: set[str]) -> bool:

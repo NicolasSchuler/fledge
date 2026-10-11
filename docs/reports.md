@@ -14,34 +14,23 @@ progress. `NO_COLOR` disables color. JSON, compact and selected submission-text
 fields remain suitable for scripts.
 
 This run passed with one advisory, a TODO marker: the bundle was written, but
-the warning needs a human decision. The `TEX009` entry is an information note
-and does not affect the outcome.
+the warning needs a human decision.
 
 ```text
 Passed with advisories — selected preparation checks, visual/text preservation and fresh ZIP rebuild
-0 errors, 1 warning, 0 incomplete, 3 not applicable, 23 passed results
+0 errors, 1 warning, 0 incomplete, 4 not applicable, 23 passed results
 Document: main.tex
 
 TEX001  Unfinished text markers  [WARNING / failed]
   Where: sections/results.tex:4
   Possible unfinished editing or placeholder text: 'TODO'.
   Next: Finish or remove the marked draft text after reviewing its context.
-
-TEX009  Generated bibliography shipped with the sources  [INFO / failed]
-  Where: main.tex:14 [submission readiness, final source checks]
-  main.tex reads references/library.bib through BibTeX, but main.bbl is not in the package. This
-only matters for services that compile without running BibTeX or Biber, such as arXiv; set
-submission_checks.require_bbl = true to require it.
-  Next: Only needed when the receiving service does not run BibTeX or Biber: build locally and keep
-the generated <main>.bbl next to the main file; prepare retains an existing <main>.bbl in the
-package automatically. Biber-generated .bbl files must match the biblatex version of the compiling
-service. For BibTeX, source_transforms.inline_bibliography (TEX203) can inline the .bbl instead.
 sources: /private/tmp/submission-advisory-final/sources
 archive: /private/tmp/submission-advisory-final/submission.zip
 pdf: /private/tmp/submission-advisory-final/manuscript.pdf
 report: /private/tmp/submission-advisory-final/report.json
 
-Not checked (needs your settings): anonymity, page limit, ZIP size limit, forbidden packages, strict font embedding, image resolution, 92 other opt-in checks. Set them in fledge.toml (start with fledge init --preset arxiv|anonymous-review|camera-ready); see https://nicolasschuler.github.io/fledge/configuration.html
+Not checked (needs your settings): anonymity, page limit, ZIP size limit, forbidden packages, strict font embedding, image resolution, 93 other opt-in checks. Set them in fledge.toml (start with fledge init --preset arxiv|anonymous-review|camera-ready); see https://nicolasschuler.github.io/fledge/configuration.html
 
 Explain a check: fledge rule CODE
 ```
@@ -133,6 +122,7 @@ findings, settings and tool details removed:
 
 ```json
 {
+  "schema_version": 1,
   "command": "prepare",
   "outcome": "blocked",
   "scope": "selected source, bibliography, privacy, isolated build and PDF checks",
@@ -188,12 +178,13 @@ findings, settings and tool details removed:
 
 | Field | What it holds |
 | --- | --- |
+| `schema_version` | The report format version, currently `1` |
 | `outcome`, `scope` | The result and what it covers |
 | `findings` | Every result, including passed ones and scope notes |
 | `changes` | Proposed or applied edits, with diffs |
 | `settings` | The effective settings after preset, file and command line |
 | `tools` | Versions and paths of the tools used |
-| `stages` | Each build and verification step with its status |
+| `stages` | Each build and verification step with its status and elapsed seconds |
 | `artifacts` | Paths of the published output; empty when blocked |
 | `package_contents` | Per-document inventory, verification status, selection reasons and measured file/ZIP sizes |
 | `execution` | Configuration file, preset, check selection, opt-in checks that did not run (`not_checked`), resource use and timing |
@@ -202,6 +193,14 @@ A finding's `code` is `null` for operational results such as `build.failed`;
 its `rule` always holds a descriptive name. A failed build's finding carries the
 last 60 lines of the TeX log (at most 8000 characters) in `details.log_tail`.
 The [glossary](glossary.md) defines severity, status and the other terms.
+
+`schema_version` increases only when a field is removed, renamed or changes
+meaning. New fields can appear within a version, so ignore fields you do not
+recognize. The {download}`JSON Schema <_static/report.schema.json>` describes the
+stable fields: the top-level layout, findings, changes and the allowed
+commands, outcomes, severities and statuses. The contents of `settings`,
+`tools`, `execution`, `stages`, `package_contents` and finding `details` are
+descriptive and may grow.
 
 ## Other formats
 

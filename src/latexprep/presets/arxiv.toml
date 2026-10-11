@@ -40,6 +40,11 @@ report_unused_assets = true # PKG106: files outside the selected dependency grap
 # build used; build locally first so that it exists.
 require_bbl = true
 check_bbl_coverage = true # BIB109: the shipped .bbl contains every cited key.
+# BIB110 (biblatex only): arXiv reads the shipped .bbl with its own biblatex, which
+# rejects other .bbl format versions. Look up the TeX Live release in arXiv's
+# current instructions and enter the format its biblatex writes (the second line
+# of a .bbl built with that release; TeX Live 2026 writes "3.3").
+# biblatex_bbl_format_version = ""
 
 [source_transforms]
 # prepare only: remove TeX comments that contain TODO, FIXME, XXX, "private",

@@ -23,7 +23,8 @@ _origin = Path(_origin).resolve() if _origin else None
 if _origin is not None and SOURCE_ROOT not in _origin.parents:
     raise ImportError(
         f"The tests would use latexprep from {_origin.parent}, not this checkout's {SOURCE_ROOT}. "
-        "Remove the stale install (python -m pip uninstall fledge latex-preparation) and run "
+        "Remove the stale install "
+        "(python -m pip uninstall fledge-latex fledge latex-preparation) and run "
         "`python -m pip install -e .`, or start Python with a fresh interpreter so that "
         "`import tests` runs before anything imports latexprep."
     )

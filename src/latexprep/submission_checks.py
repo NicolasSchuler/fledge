@@ -91,6 +91,17 @@ _VERSION = re.compile(
 )
 
 
+def validate_bbl_format_version(value: object) -> None:
+    """A biblatex .bbl format version such as "3.3", as written in the .bbl header."""
+    if value is not None and (
+        not isinstance(value, str) or not re.fullmatch(r"[0-9]{1,4}(?:\.[0-9]{1,4}){0,3}", value)
+    ):
+        raise PreparationError(
+            'biblatex_bbl_format_version must be a version such as "3.3", as written on the '
+            "second line of a biblatex .bbl file."
+        )
+
+
 @dataclass(frozen=True)
 class SubmissionOptions:
     identity_terms: tuple[str, ...] = ()
@@ -108,10 +119,12 @@ class SubmissionOptions:
     identity_term_matching: str = "word"
     check_bbl_coverage: bool = False
     require_bbl: bool = False
+    biblatex_bbl_format_version: str | None = None
 
     def __post_init__(self) -> None:
         if self.identity_term_matching not in IDENTITY_TERM_MATCHING:
             raise PreparationError("identity_term_matching must be 'word' or 'substring'.")
+        validate_bbl_format_version(self.biblatex_bbl_format_version)
         for name in (
             "scan_identity_hints",
             "scan_secrets",

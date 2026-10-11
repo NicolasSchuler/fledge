@@ -440,6 +440,11 @@ class ToolRunner:
         return self._source_date_epoch
 
     @property
+    def biber_needs_preparation(self) -> bool:
+        """Whether running Biber still requires the costly macOS toolchain copy."""
+        return sys.platform == "darwin" and not self._biber_ready
+
+    @property
     def resource_roots(self) -> frozenset[Path]:
         """Stable toolchain roots; command results carry their exact declared roots."""
         return self._tool_context(Path("/bin/sh")).resource_roots
@@ -889,6 +894,9 @@ class ToolRunner:
         # HOME and CODEX_HOME are deliberately neither inherited nor repurposed.
         env = {
             "PATH": os.pathsep.join(context.search_paths),
+            # A neutral account name: latexmk warns when USER is unset, and the
+            # real name never needs to reach a tool.
+            "USER": "fledge",
             "LANG": "C",
             "LC_ALL": "C",
             "TMPDIR": str(state / "tmp"),
@@ -1660,6 +1668,34 @@ def _bibliography_policy(evidence: dict[str, object], requested: str, main: str)
     )
 
 
+_BIBER_HINT_SUFFIXES = frozenset(
+    {".tex", ".ltx", ".latex", ".sty", ".cls", ".cfg", ".bbx", ".cbx", ".dbx"}
+)
+
+
+def _sources_may_use_biber(source: Path, max_bytes: int = 64 * 1024 * 1024) -> bool:
+    """Whether any TeX source mentions biblatex; unreadable or oversized input answers yes.
+
+    A literal hint, so mentions in comments count. A miss is safe because a
+    deferred build that writes a fresh .bcf is rebuilt with Biber prepared.
+    """
+    total = 0
+    try:
+        for path in source.rglob("*"):
+            if (
+                path.suffix.lower() not in _BIBER_HINT_SUFFIXES
+                or path.is_symlink()
+                or not path.is_file()
+            ):
+                continue
+            total += path.stat().st_size
+            if total > max_bytes or b"biblatex" in path.read_bytes():
+                return True
+    except OSError:
+        return True
+    return False
+
+
 async def build_project(
     source: Path,
     main: str,
@@ -1671,6 +1707,62 @@ async def build_project(
     inventory_loaded_options: bool = False,
     ignored_log_checks: tuple[str, ...] = (),
 ) -> BuildResult:
+    """Build ``main`` in isolation, preparing Biber for an automatic strategy only when needed.
+
+    On macOS, preparing Biber copies and unpacks an 84 MB binary, which costs
+    seconds per job. Unless the sources mention biblatex, an automatic build
+    first runs with Biber blocked. Only if that build writes a fresh .bcf is it
+    discarded and rebuilt in the same, emptied workspace with Biber prepared.
+    """
+    defer_biber = (
+        bibliography_backend == "auto"
+        and runner.biber_needs_preparation
+        and not _sources_may_use_biber(source)
+    )
+
+    async def attempt(defer: bool, biber_note: str | None) -> BuildResult | None:
+        return await _build_once(
+            source,
+            main,
+            work,
+            engine,
+            runner,
+            bibliography_backend=bibliography_backend,
+            inventory_loaded_options=inventory_loaded_options,
+            ignored_log_checks=ignored_log_checks,
+            defer_biber=defer,
+            biber_note=biber_note,
+        )
+
+    result = await attempt(
+        defer_biber,
+        "not prepared: no source mentions biblatex and the build wrote no .bcf"
+        if defer_biber
+        else None,
+    )
+    if result is None:
+        shutil.rmtree(work)
+        result = await attempt(
+            False, "prepared after a build without Biber wrote a .bcf; that build was discarded"
+        )
+        assert result is not None
+    return result
+
+
+async def _build_once(
+    source: Path,
+    main: str,
+    work: Path,
+    engine: str,
+    runner: ToolRunner,
+    *,
+    bibliography_backend: str,
+    inventory_loaded_options: bool,
+    ignored_log_checks: tuple[str, ...],
+    defer_biber: bool,
+    biber_note: str | None,
+) -> BuildResult | None:
+    """Run one isolated build; ``None`` means a deferred build needs Biber after all."""
     result = BuildResult(success=False)
     if engine not in {"pdflatex", "xelatex", "lualatex"}:
         raise PreparationError(f"Unsupported TeX engine: {engine}")
@@ -1718,7 +1810,7 @@ async def build_project(
     mode = {"pdflatex": "-pdf", "xelatex": "-xelatex", "lualatex": "-lualatex"}[engine]
     biber_error: str | None = None
     biber_executable = "biber"
-    if bibliography_backend != "bibtex":
+    if bibliography_backend != "bibtex" and not defer_biber:
         # Prepared once per runner and reused by every later build of the job.
         # A failure is reported through the bibliography-tool check below rather
         # than raised, because an auto build may never need Biber at all.
@@ -1745,7 +1837,15 @@ async def build_project(
                 "biber": "$bibtex='internal latexprep_backend_blocked';",
             }[bibliography_backend]
         )
-    if bibliography_backend != "bibtex":
+    if defer_biber:
+        # Fails like a blocked backend; the fresh .bcf left behind makes
+        # build_project discard this build and rebuild with Biber prepared.
+        controlled_rules += (
+            " sub latexprep_biber_deferred { "
+            "warn 'Biber is deferred until a build shows that it is needed'; return 1; } "
+            "$biber='internal latexprep_biber_deferred';"
+        )
+    elif bibliography_backend != "bibtex":
         # Only an application-generated path reaches this Perl literal, and
         # prepare_biber rejects any path that is not inert in Perl and the shell.
         controlled_rules += f" $biber='{biber_executable} --noconf %O %B';"
@@ -1927,10 +2027,18 @@ async def build_project(
             )
         )
     bibliography = _bibliography_evidence(output, runner.limits.max_output_bytes)
-    result.tools["bibliography"] = {"requested_backend": bibliography_backend, **bibliography}
-    result.findings.append(_bibliography_policy(bibliography, bibliography_backend, main))
     observed_backends = bibliography["observed_backends"]
     assert isinstance(observed_backends, list)
+    if defer_biber and "biber" in observed_backends:
+        return None
+    bibliography_tools: dict[str, object] = {
+        "requested_backend": bibliography_backend,
+        **bibliography,
+    }
+    if biber_note is not None:
+        bibliography_tools["biber_preparation"] = biber_note
+    result.tools["bibliography"] = bibliography_tools
+    result.findings.append(_bibliography_policy(bibliography, bibliography_backend, main))
     for name in observed_backends:
         if bibliography_backend != "auto" and name != bibliography_backend:
             continue

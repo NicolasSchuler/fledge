@@ -210,6 +210,7 @@ _GROUP_CHECKS: dict[str, dict[str, dict[str, object]]] = {
         "PKG106": {"report_unused_assets": False},
         "PKG107": {"template_references": ()},
         "BIB109": {"check_bbl_coverage": False},
+        "BIB110": {"biblatex_bbl_format_version": None},
     },
 }
 

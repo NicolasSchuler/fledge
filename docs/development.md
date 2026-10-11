@@ -6,7 +6,7 @@ installing Fledge or its documentation tools.
 Work from a source checkout or extracted source distribution. Keep private papers
 outside the repository or in `.local/`. Review the paths to be staged: generated
 outputs and environments are ignored, while manuscript PDFs, images, and other
-source assets remain trackable. The project has no selected license.
+source assets remain trackable. Fledge is released under the MIT License (`LICENSE`).
 
 ## Install from source
 
@@ -73,8 +73,9 @@ ty check src/latexprep
 
 `tests/__init__.py` puts `src/` first on the import path, so no `PYTHONPATH` is
 needed, and it fails loudly if a stale installed `latexprep` would shadow the
-checkout. Remove it with `python -m pip uninstall fledge latex-preparation`, then
-run `python -m pip install -e .`.
+checkout. Remove it with `python -m pip uninstall fledge-latex fledge latex-preparation`
+(the current distribution name and the two former ones), then run
+`python -m pip install -e .`.
 
 Live tests are opt-in with `FLEDGE_RUN_INTEGRATION=1`. Run them separately
 where application isolation and the relevant tools can actually start:
@@ -108,9 +109,84 @@ been validated live.
 The [Tests workflow](https://github.com/NicolasSchuler/fledge/actions/workflows/tests.yml)
 runs on pushes to `main`, pull requests, manual dispatch and weekly. It lints with
 Ruff and `ty`, then runs the unit tests with pytest on macOS and Ubuntu with Python 3.11 and
-3.13. Manual and weekly runs add a live macOS job that installs BasicTeX, Poppler,
-`tex-fmt` and Biber and runs the opt-in integration and sandbox tests. Every
-third-party action in both workflows is pinned to a commit SHA.
+3.13. Manual and weekly runs add two live jobs that run the opt-in integration
+tests without tool doubles:
+
+- `live-macos` installs BasicTeX, Poppler, `tex-fmt` and Biber and also runs the
+  macOS sandbox tests.
+- `live-linux` installs TeX Live, Biber, Poppler and Bubblewrap from apt plus a
+  pinned `tex-fmt` release, and runs the integration tests under Bubblewrap. It
+  leaves out `test_runtime_parallel.py`, whose live tests run only on macOS.
+  **This job is unvalidated until a maintainer has run it from the Actions tab
+  and it passes**; until then the documentation must keep saying that Linux has
+  not run live. On Ubuntu 24.04 it sets
+  `kernel.apparmor_restrict_unprivileged_userns=0` on the disposable runner, a
+  CI setting that users must decide on for their own hosts (see
+  [installation](installation.md#linux)).
+
+Every third-party action in every workflow is pinned to a commit SHA. The
+[Release workflow](https://github.com/NicolasSchuler/fledge/actions/workflows/release.yml)
+publishes to PyPI; see [release to PyPI](#release-to-pypi).
+
+To run Fledge on a paper repository rather than on Fledge itself, see
+[check your paper in CI](continuous-integration.md).
+
+## Release to PyPI
+
+Fledge is published on PyPI as `fledge-latex`. The PyPI project named `fledge` is
+an unrelated project, which is why the distribution has a different name from the
+command. The `fledge` and `latex-prep` commands and the `latexprep` module are
+unchanged. The Release workflow uses PyPI trusted publishing (OpenID Connect), so
+no PyPI token is stored in GitHub.
+
+### One-time setup
+
+1. On PyPI, sign in to the account that should own the project, which should have
+   two-factor authentication enabled. Open the account menu, choose
+   **Publishing**, and add a new **pending publisher** for GitHub Actions with
+   these values:
+
+   | Field | Value |
+   | --- | --- |
+   | PyPI project name | `fledge-latex` |
+   | Owner | `NicolasSchuler` |
+   | Repository name | `fledge` |
+   | Workflow name | `release.yml` |
+   | Environment name | `pypi` |
+
+2. On GitHub, open **Settings → Environments** for the repository and create an
+   environment named `pypi`. Adding yourself as a required reviewer makes every
+   release wait for your approval before it uploads.
+
+A pending publisher does not reserve the name, and the project does not exist
+until the first release uploads. Someone else could register `fledge-latex`
+first, so publish soon after registering. The first successful upload creates the
+project and turns the pending publisher into an ordinary one. Because the
+[installation guide](installation.md#install-with-pipx-or-uv) tells readers to run
+`pipx install fledge-latex`, publish the first release soon after that page
+reaches `main`.
+
+### Each release
+
+1. Set the same new version in `pyproject.toml` and in `__version__` in
+   `src/latexprep/__init__.py`. The workflow refuses to build if they differ or
+   if the release tag is not `v` followed by that version.
+2. Merge to `main` and wait for the Tests workflow to pass. Run the live jobs
+   from the Actions tab when the release depends on them.
+3. Optional dry run: on the Release workflow page choose **Run workflow** on
+   `main`. It builds the source archive and wheel, installs the wheel into a fresh
+   environment, checks `fledge --version` and the packaged presets, and uploads
+   the files as the `python-distributions` artifact, but never publishes.
+4. Create a GitHub release: choose or create the tag `vX.Y.Z` (for the current
+   version, `v0.2.0`) on `main` and publish the release. Publishing starts the
+   workflow, which verifies the tag, builds, smoke-tests and then uploads to PyPI
+   from the `pypi` environment. Approve the deployment if you added a reviewer.
+5. Check the result in a clean environment: `pipx install fledge-latex==X.Y.Z`,
+   then `fledge --version`.
+
+PyPI never accepts a replacement for a file it already has. If a release is
+wrong, fix the problem and publish a new version; yank the bad one on PyPI if
+needed.
 
 ## Agent skill
 

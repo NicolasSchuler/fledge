@@ -1,0 +1,178 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nicolasschuler.github.io/fledge/_static/report.schema.json",
+  "title": "Fledge JSON report",
+  "description": "Stable fields of a Fledge report at schema_version 1. New fields may appear within a version; consumers should ignore fields they do not know. The version increases only when a field is removed, renamed or changes meaning. Contents of settings, tools, execution, stages, package_contents and finding details are descriptive and may grow.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "command",
+    "outcome",
+    "scope",
+    "main",
+    "findings",
+    "changes",
+    "settings",
+    "tools",
+    "stages",
+    "artifacts",
+    "execution",
+    "package_contents"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "command": {
+      "description": "The command that produced the report.",
+      "enum": ["inspect", "check", "prepare", "bib", "fmt", "pdf", "report", "doctor"]
+    },
+    "outcome": {
+      "description": "Read this first; the exit code is derived from it.",
+      "enum": [
+        "passed",
+        "planned",
+        "passed_with_advisories",
+        "accepted_exceptions",
+        "blocked",
+        "error",
+        "cancelled"
+      ]
+    },
+    "scope": {
+      "description": "What the outcome covers.",
+      "type": "string"
+    },
+    "main": {
+      "type": ["string", "null"]
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/finding"
+      }
+    },
+    "changes": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/change"
+      }
+    },
+    "settings": {
+      "type": "object"
+    },
+    "tools": {
+      "type": "object"
+    },
+    "stages": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "status"],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "elapsed_seconds": {
+            "type": "number"
+          },
+          "queue_seconds": {
+            "type": "number"
+          }
+        }
+      }
+    },
+    "artifacts": {
+      "description": "Paths of published output; empty when nothing was published.",
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "execution": {
+      "type": "object"
+    },
+    "package_contents": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    }
+  },
+  "$defs": {
+    "finding": {
+      "type": "object",
+      "required": [
+        "rule",
+        "message",
+        "severity",
+        "status",
+        "path",
+        "line",
+        "evidence",
+        "suggestion",
+        "details",
+        "code"
+      ],
+      "properties": {
+        "rule": {
+          "description": "Descriptive check name; always present.",
+          "type": "string"
+        },
+        "code": {
+          "description": "Stable code such as BIB101; null for operational results.",
+          "type": ["string", "null"]
+        },
+        "message": {
+          "type": "string"
+        },
+        "severity": {
+          "enum": ["error", "warning", "info"]
+        },
+        "status": {
+          "enum": ["failed", "inconclusive", "skipped", "passed", "not_applicable"]
+        },
+        "path": {
+          "type": ["string", "null"]
+        },
+        "line": {
+          "type": ["integer", "null"]
+        },
+        "evidence": {
+          "type": "string"
+        },
+        "suggestion": {
+          "description": "The suggested next step, when one applies.",
+          "type": ["string", "null"]
+        },
+        "details": {
+          "type": "object"
+        }
+      }
+    },
+    "change": {
+      "type": "object",
+      "required": ["path", "kind", "reason", "destination", "diff"],
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "destination": {
+          "type": ["string", "null"]
+        },
+        "diff": {
+          "type": ["string", "null"]
+        }
+      }
+    }
+  }
+}

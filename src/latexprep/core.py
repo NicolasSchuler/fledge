@@ -388,6 +388,7 @@ def _readiness(root: Path, main: str, settings: Settings) -> list[Finding]:
         main,
         check_bbl_coverage=settings.submission_checks.check_bbl_coverage,
         require_bbl=settings.submission_checks.require_bbl,
+        biblatex_bbl_format_version=settings.submission_checks.biblatex_bbl_format_version,
         required_color_space=settings.figure_artwork.required_color_space,
     )
 
@@ -1004,9 +1005,18 @@ async def _build_stage(job: _Job, tree: Path, directory: str, stage: str) -> Bui
     settings = job.settings
     assert job.selected is not None
     job.emit(f"Rebuilding {stage} sources")
-    async with job.budget.lease(f"{stage} build", memory_mb=settings.build_memory_mb, kind="build"):
+    async with job.budget.lease(
+        f"{stage} build", memory_mb=settings.build_memory_mb, kind="build"
+    ) as lease:
+        started = time.monotonic()
         result = await _build(tree, job.selected, job.work / directory, settings, job.runner)
+        elapsed = time.monotonic() - started
     _collect_build(job.report, result, stage, settings)
+    # Like the scheduled baseline build, so every build's time appears in the report.
+    job.report.stages[-1].update(
+        elapsed_seconds=round(elapsed, 6), queue_seconds=round(lease.queue_seconds, 6)
+    )
+    job.emit(f"{stage} build: {job.report.stages[-1]['status']} ({elapsed:.1f}s)")
     if result.success and getattr(result, "submission_inputs", None) is None:
         _record_findings(
             job.report,

@@ -68,8 +68,18 @@ class DoctorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report.outcome, "passed", report.to_dict())
         self.assertEqual(report.command, "doctor")
         self.assertFalse(report.execution["manuscript_compiled"])
-        self.assertFalse(report.execution["bibliography_exercised"])
+        self.assertTrue(report.execution["bibliography_exercised"])
         self.assertEqual(report.execution["engines"], ["pdflatex"])
+        # The core fixture has no citations; each installed backend gets its own fixture.
+        self.assertNotIn("\\cite", self.builds[0][2])
+        self.assertEqual(
+            [(row[0], row[3]["bibliography_backend"]) for row in self.builds[1:]],
+            [("pdflatex", "bibtex"), ("pdflatex", "biber")],
+        )
+        self.assertTrue(all("\\cite{doctor}" in row[2] for row in self.builds[1:]))
+        for name in ("bibtex", "biber"):
+            self.assertFalse(report.tools[name]["required"])
+            self.assertTrue(report.tools[name]["exercised"])
         for name in ("latexmk", "pdflatex", "pdfinfo", "pdftoppm", "pdftotext"):
             self.assertTrue(report.tools[name]["installed"])
             self.assertTrue(report.tools[name]["version_verified"])
@@ -227,7 +237,10 @@ class DoctorTests(unittest.IsolatedAsyncioTestCase):
         report = await run_doctor(settings)
         self.assertEqual(report.outcome, "passed", report.to_dict())
         self.assertEqual(diagnostic_engines(settings), ("lualatex", "xelatex"))
-        self.assertEqual([row[0] for row in self.builds], ["lualatex", "xelatex"])
+        core = [row[0] for row in self.builds if "\\cite" not in row[2]]
+        self.assertEqual(core, ["lualatex", "xelatex"])
+        # Bibliography backends are engine-independent, so one engine exercises them.
+        self.assertEqual({row[0] for row in self.builds if "\\cite" in row[2]}, {"lualatex"})
         self.assertNotIn("pdflatex", report.tools)
         self.assertTrue(report.tools["xdvipdfmx"]["exercised"])
 
@@ -239,6 +252,39 @@ class DoctorTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(report.execution["bibliography_exercised"])
             self.assertIn("\\cite{doctor}", self.builds[-1][2])
             self.assertEqual(self.builds[-1][3]["bibliography_backend"], backend)
+
+    async def test_missing_or_failing_bibliography_backend_is_advisory_under_auto(self):
+        with patch(
+            "latexprep.doctor.shutil.which",
+            side_effect=lambda name: None if name == "biber" else f"/test-tools/{name}",
+        ):
+            report = await run_doctor()
+        self.assertEqual(report.outcome, "passed_with_advisories", report.to_dict())
+        missing = next(item for item in report.findings if item.rule == "doctor.tool_missing")
+        self.assertEqual((missing.severity, missing.details["tool"]), ("warning", "biber"))
+        stages = {stage["name"]: stage["status"] for stage in report.stages}
+        self.assertEqual(stages["pdflatex: biber bibliography"], "skipped")
+        self.assertEqual(stages["pdflatex: bibtex bibliography"], "passed")
+        self.assertTrue(report.tools["bibtex"]["exercised"])
+
+        async def failing_biber(source, main, work, engine, runner, **options):
+            if options["bibliography_backend"] == "biber":
+                return fake_build_result(
+                    work,
+                    success=False,
+                    findings=[Finding("build.failed", "biblatex.sty not found.", "error")],
+                )
+            return await self.build(source, main, work, engine, runner, **options)
+
+        with patch("latexprep.doctor.build_project", side_effect=failing_biber):
+            report = await run_doctor()
+        self.assertEqual(report.outcome, "passed_with_advisories", report.to_dict())
+        failure = next(item for item in report.findings if item.rule == "doctor.fixture_failed")
+        self.assertEqual(failure.severity, "warning")
+        self.assertIn("biber bibliography", failure.message)
+        self.assertIn("Only papers that need", failure.next_step)
+        self.assertFalse(report.tools["biber"]["exercised"])
+        self.assertTrue(report.tools["pdflatex"]["exercised"])
 
     async def test_optional_tools_are_advisory_only_when_enabled(self):
         from latexprep.pdf_checks import PdfCheckOptions

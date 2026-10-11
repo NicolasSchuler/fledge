@@ -24,6 +24,7 @@ preparation-options
 submission-text
 doctor
 reports
+continuous-integration
 troubleshooting
 examples
 agents

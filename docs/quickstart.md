@@ -15,6 +15,11 @@ Replace the paths and the root filename:
 fledge prepare /path/to/paper --main main.tex --output /path/to/submission
 ```
 
+The input can also be a ZIP of the project. From Overleaf, download the
+project's source as a ZIP and pass that file instead of the folder. Fledge
+compiles with your local TeX installation, which may be a different TeX Live
+release than the one Overleaf uses.
+
 The output directory must not exist yet and must lie outside the project.
 Fledge refuses to write anywhere else, so it never overwrites an earlier result
 or ZIP; the same rule applies to report, preview and diagnostic paths. Add
@@ -40,38 +45,31 @@ A passing run ends like this:
 
 ```text
 Passed — selected preparation checks, visual/text preservation and fresh ZIP rebuild
-0 errors, 0 warnings, 0 incomplete, 3 not applicable, 23 passed results
+0 errors, 0 warnings, 0 incomplete, 4 not applicable, 23 passed results
 Document: main.tex
-
-TEX009  Generated bibliography shipped with the sources  [INFO / failed]
-  Where: main.tex:14 [submission readiness, final source checks]
-  main.tex reads references/library.bib through BibTeX, but main.bbl is not in the package. This
-only matters for services that compile without running BibTeX or Biber, such as arXiv; set
-submission_checks.require_bbl = true to require it.
-  Next: Only needed when the receiving service does not run BibTeX or Biber: build locally and keep
-the generated <main>.bbl next to the main file; prepare retains an existing <main>.bbl in the
-package automatically. Biber-generated .bbl files must match the biblatex version of the compiling
-service. For BibTeX, source_transforms.inline_bibliography (TEX203) can inline the .bbl instead.
+No issues found within this command's stated scope.
+…
 sources: /private/tmp/submission/sources
 archive: /private/tmp/submission/submission.zip
 pdf: /private/tmp/submission/manuscript.pdf
 report: /private/tmp/submission/report.json
 
-Not checked (needs your settings): anonymity, page limit, ZIP size limit, forbidden packages, strict font embedding, image resolution, 92 other opt-in checks. Set them in fledge.toml (start with fledge init --preset arxiv|anonymous-review|camera-ready); see https://nicolasschuler.github.io/fledge/configuration.html
+Not checked (needs your settings): anonymity, page limit, ZIP size limit, forbidden packages, strict font embedding, image resolution, 93 other opt-in checks. Set them in fledge.toml (start with fledge init --preset arxiv|anonymous-review|camera-ready); see https://nicolasschuler.github.io/fledge/configuration.html
 ```
 
-The `TEX009` note is information and does not change the outcome: it matters
-only for services such as arXiv that compile without running BibTeX or Biber.
-For those, keep the generated `main.bbl` next to `main.tex`; `prepare` ships it
-automatically. The last line lists opt-in checks that did not run; step 4 below
-switches on the useful ones.
+The last line lists opt-in checks that did not run; step 4 below switches on
+the useful ones. Not-applicable results are notes about checks outside this
+run's scope. One of them, `TEX009`, records that no generated `main.bbl` is
+shipped. That matters only for services such as arXiv that compile without
+running BibTeX or Biber; the `arxiv` preset turns it into a warning. Add
+`--show-passed` to list these notes.
 
 A blocked run lists what to fix, errors first. Here the citation key
 `knuth1948` is misspelled (output shortened):
 
 ```text
 Blocked — selected source, bibliography, privacy, isolated build and PDF checks
-4 errors, 1 warning, 1 incomplete, 5 not applicable, 4 passed results
+4 errors, 1 warning, 1 incomplete, 6 not applicable, 4 passed results
 Document: main.tex
 …
 BIB101  Source citation coverage  [ERROR / failed]

@@ -18,6 +18,7 @@ from latexprep.runtime import (
     _host_macho_slice,
     _linux_process_groups,
     _seal_toolchain,
+    _sources_may_use_biber,
     _ToolContext,
     build_project,
 )
@@ -393,6 +394,103 @@ class ControlBuildRunner(FakeBuildRunner):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(text)
         return result
+
+
+class UnpreparedBiberRunner(ControlBuildRunner):
+    """Acts like macOS, where Biber runs only after its toolchain copy is prepared."""
+
+    def __init__(self, controls: dict[str, str]) -> None:
+        super().__init__(controls)
+        self.prepared = False
+
+    @property
+    def biber_needs_preparation(self) -> bool:
+        return not self.prepared
+
+    async def prepare_biber(self, root: Path) -> Path | None:
+        self.biber_preparations += 1
+        self.prepared = True
+        return None
+
+
+class DeferredBiberTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.source = self.root / "source"
+        self.source.mkdir()
+        (self.source / "main.tex").write_text("\\bibliography{references}\n")
+
+    async def asyncTearDown(self) -> None:
+        self.temporary.cleanup()
+
+    @staticmethod
+    def build_rules(runner: FakeBuildRunner) -> list[str]:
+        builds = [command for command in runner.commands if command[-1].endswith(".tex")]
+        return [command[command.index("-e") + 1] for command in builds]
+
+    async def test_bibtex_source_never_prepares_biber_under_the_automatic_strategy(self) -> None:
+        runner = UnpreparedBiberRunner({"main.aux": "\\bibdata{references}\n"})
+        result = await build_project(
+            self.source, "main.tex", self.root / "build", "pdflatex", runner
+        )
+        self.assertTrue(result.success, result.findings)
+        self.assertEqual(runner.biber_preparations, 0)
+        [rules] = self.build_rules(runner)
+        self.assertIn("$biber='internal latexprep_biber_deferred'", rules)
+        self.assertNotIn("--noconf", rules)
+        bibliography = result.tools["bibliography"]
+        assert isinstance(bibliography, dict)
+        self.assertIn("no source mentions biblatex", bibliography["biber_preparation"])
+
+    async def test_fresh_bcf_from_a_deferred_build_rebuilds_with_biber_prepared(self) -> None:
+        runner = UnpreparedBiberRunner({"main.bcf": _BCF})
+        work = self.root / "build"
+        result = await build_project(self.source, "main.tex", work, "pdflatex", runner)
+        self.assertTrue(result.success, result.findings)
+        self.assertEqual(runner.biber_preparations, 1)
+        deferred, prepared = self.build_rules(runner)
+        self.assertIn("latexprep_biber_deferred", deferred)
+        self.assertIn("$biber='biber --noconf %O %B'", prepared)
+        self.assertNotIn("latexprep_biber_deferred", prepared)
+        self.assertEqual(result.pdf, work.resolve() / "output" / "main.pdf")
+        bibliography = result.tools["bibliography"]
+        assert isinstance(bibliography, dict)
+        self.assertIn("that build was discarded", bibliography["biber_preparation"])
+        self.assertIn("biber", result.tools)
+
+    async def test_biblatex_sources_or_a_ready_toolchain_prepare_biber_before_one_build(
+        self,
+    ) -> None:
+        (self.source / "local.sty").write_text("\\RequirePackage[backend=biber]{biblatex}\n")
+        runner = UnpreparedBiberRunner({"main.bcf": _BCF})
+        result = await build_project(
+            self.source, "main.tex", self.root / "first", "pdflatex", runner
+        )
+        self.assertTrue(result.success, result.findings)
+        self.assertEqual(runner.biber_preparations, 1)
+        [rules] = self.build_rules(runner)
+        self.assertIn("$biber='biber --noconf %O %B'", rules)
+        bibliography = result.tools["bibliography"]
+        assert isinstance(bibliography, dict)
+        self.assertNotIn("biber_preparation", bibliography)
+        (self.source / "local.sty").unlink()
+        runner.commands.clear()
+        await build_project(self.source, "main.tex", self.root / "second", "pdflatex", runner)
+        [rules] = self.build_rules(runner)
+        self.assertNotIn("latexprep_biber_deferred", rules)
+
+    def test_biblatex_hint_reads_only_tex_sources_and_answers_yes_when_uncertain(self) -> None:
+        self.assertFalse(_sources_may_use_biber(self.source))
+        (self.source / "references.bib").write_text("% generated for biblatex\n")
+        (self.source / "notes.md").write_text("biblatex")
+        self.assertFalse(_sources_may_use_biber(self.source))
+        (self.source / "linked.sty").symlink_to(self.source / "notes.md")
+        self.assertFalse(_sources_may_use_biber(self.source))
+        self.assertTrue(_sources_may_use_biber(self.source, max_bytes=4))
+        (self.source / "style").mkdir()
+        (self.source / "style" / "paper.cls").write_text("\\RequirePackage{biblatex}\n")
+        self.assertTrue(_sources_may_use_biber(self.source))
 
 
 class BibliographyBackendTests(unittest.IsolatedAsyncioTestCase):

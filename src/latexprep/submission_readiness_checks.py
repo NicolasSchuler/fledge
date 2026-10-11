@@ -23,7 +23,14 @@ from .manuscript_checks import _read as _read_document
 from .models import Finding, PreparationError
 from .scheduler import cancellation_point
 from .source import MAX_SOURCE_BYTES, MAX_TOTAL_SOURCE_BYTES, _Inspection, in_conditional
-from .submission_checks import MAX_SCAN_MATCHES, _comments, _inventory, _read, _redact
+from .submission_checks import (
+    MAX_SCAN_MATCHES,
+    _comments,
+    _inventory,
+    _read,
+    _redact,
+    validate_bbl_format_version,
+)
 
 FIGURE_COLOR_SPACES = ("rgb", "cmyk")
 _MAX_LISTED = 3
@@ -157,6 +164,7 @@ def _bibliography_findings(
     selected: set[str],
     check_coverage: bool,
     require_bbl: bool,
+    bbl_format_version: str | None = None,
 ) -> list[Finding]:
     main = inspection.main
     assert main is not None
@@ -164,16 +172,20 @@ def _bibliography_findings(
     bib = sorted(name for name in resources if name.lower().endswith(".bib"))
     expected = (PurePosixPath(main).parent / (PurePosixPath(main).stem + ".bbl")).as_posix()
     if not bib:
-        if not check_coverage:
-            return []
+        unchecked = []
+        if check_coverage:
+            unchecked.append(("bibliography.bbl_coverage", "shipped .bbl coverage"))
+        if bbl_format_version is not None:
+            unchecked.append(("bibliography.bbl_format_version", "the biblatex .bbl format"))
         return [
             Finding(
-                "bibliography.bbl_coverage",
-                f"{main} declares no literal .bib resource; shipped .bbl coverage was not checked.",
+                rule,
+                f"{main} declares no literal .bib resource; {subject} was not checked.",
                 "info",
                 "not_applicable",
                 path=main,
             )
+            for rule, subject in unchecked
         ]
     backend = "biblatex" if _uses_biblatex(inspection, selected) else "BibTeX"
     path, line = _first_declaration(inspection, selected, {"bibliography", "addbibresource"})
@@ -209,14 +221,16 @@ def _bibliography_findings(
             if others
             else ""
         )
-        # Most venues run BibTeX or Biber themselves, so a missing .bbl is a note
-        # unless the user requires one (for services such as arXiv).
+        # Most venues run BibTeX or Biber themselves, so without an explicit
+        # requirement (for services such as arXiv) a missing .bbl is only a scope
+        # note, listed on request rather than as a failed result.
         consequence = (
             "Services that compile without running BibTeX or Biber, such as arXiv, would "
             "render empty citations."
             if require_bbl
-            else "This only matters for services that compile without running BibTeX or "
-            "Biber, such as arXiv; set submission_checks.require_bbl = true to require it."
+            else "Only services that compile without running BibTeX or Biber, such as arXiv, "
+            "need it; set submission_checks.require_bbl = true (the arxiv preset does) to "
+            "require it."
         )
         findings.append(
             Finding(
@@ -224,7 +238,7 @@ def _bibliography_findings(
                 f"{main} reads {', '.join(bib[:_MAX_LISTED])} through {backend}, but {expected} "
                 f"is not in the package. {consequence}{elsewhere}",
                 "warning" if require_bbl else "info",
-                "failed",
+                "failed" if require_bbl else "not_applicable",
                 path=path or main,
                 line=line,
                 evidence="derived",
@@ -233,7 +247,95 @@ def _bibliography_findings(
         )
     if check_coverage:
         findings.append(_coverage(root, inspection, expected, present))
+    if bbl_format_version is not None:
+        findings.append(_bbl_format(root, expected, present, backend, bbl_format_version))
     return findings
+
+
+# biblatex compares exactly these first two lines when it reads a .bbl.
+_BIBLATEX_BBL_SIGNATURE = "% $ biblatex auxiliary file $"
+_BIBLATEX_BBL_VERSION = re.compile(r"% \$ biblatex bbl format version (\S+) \$")
+
+
+def _bbl_format(root: Path, expected: str, present: bool, backend: str, target: str) -> Finding:
+    rule = "bibliography.bbl_format_version"
+    details: dict[str, object] = {"bbl": expected, "target_version": target, "backend": backend}
+    if not present:
+        if backend != "biblatex":
+            return Finding(
+                rule,
+                f"The document uses {backend}, so no biblatex .bbl format applies.",
+                "info",
+                "not_applicable",
+                path=expected,
+                details=details,
+            )
+        # TEX009 reports the missing file itself, as BIB109 coverage does.
+        return Finding(
+            rule,
+            f"The biblatex .bbl format was not checked: no {expected} is shipped (TEX009).",
+            "warning",
+            "inconclusive",
+            path=expected,
+            suggestion=f"Build locally and ship the generated {expected} beside the main file; "
+            "its format is then checked.",
+            details={**details, "blocked_by": "TEX009"},
+        )
+    try:
+        text = _read(root / expected, MAX_SOURCE_BYTES).decode("utf-8")
+    except (OSError, UnicodeDecodeError):
+        return Finding(
+            rule,
+            f"{expected} is unreadable, linked, not UTF-8 or over the scan limit.",
+            "error",
+            "inconclusive",
+            path=expected,
+            details=details,
+        )
+    lines = [line.rstrip() for line in text.splitlines()[:2]]
+    if not lines or lines[0] != _BIBLATEX_BBL_SIGNATURE:
+        return Finding(
+            rule,
+            f"{expected} was not written by biblatex, so no biblatex .bbl format applies.",
+            "info",
+            "not_applicable",
+            path=expected,
+            details=details,
+        )
+    match = _BIBLATEX_BBL_VERSION.fullmatch(lines[1]) if len(lines) == 2 else None
+    if match is None:
+        return Finding(
+            rule,
+            f"{expected} has the biblatex signature but no readable format version on line 2.",
+            "warning",
+            "inconclusive",
+            path=expected,
+            line=2,
+            details=details,
+        )
+    found = match[1]
+    details["found_version"] = found
+    if found != target:
+        return Finding(
+            rule,
+            f"{expected} has biblatex .bbl format {found}, but the target service expects "
+            f"{target}. biblatex there reports a wrong format version and the bibliography may "
+            "be missing or broken.",
+            "error",
+            "failed",
+            path=expected,
+            line=2,
+            details=details,
+        )
+    return Finding(
+        rule,
+        f"{expected} has the expected biblatex .bbl format {target}.",
+        "info",
+        "passed",
+        path=expected,
+        line=2,
+        details=details,
+    )
 
 
 def _coverage(root: Path, inspection: _Inspection, expected: str, present: bool) -> Finding:
@@ -606,6 +708,7 @@ def check_submission_readiness(
     *,
     check_bbl_coverage: bool = False,
     require_bbl: bool = False,
+    biblatex_bbl_format_version: str | None = None,
     required_color_space: str | None = None,
 ) -> list[Finding]:
     """Run default advisories and explicitly configured readiness policies."""
@@ -613,6 +716,7 @@ def check_submission_readiness(
         raise PreparationError("check_bbl_coverage must be a boolean")
     if type(require_bbl) is not bool:
         raise PreparationError("require_bbl must be a boolean")
+    validate_bbl_format_version(biblatex_bbl_format_version)
     if required_color_space is not None and required_color_space not in FIGURE_COLOR_SPACES:
         raise PreparationError("required_color_space must be 'rgb' or 'cmyk'")
     findings = _private_markers(root)
@@ -621,7 +725,14 @@ def check_submission_readiness(
         return findings
     selected = _reachable_sources(inspection)
     findings.extend(
-        _bibliography_findings(root, inspection, selected, check_bbl_coverage, require_bbl)
+        _bibliography_findings(
+            root,
+            inspection,
+            selected,
+            check_bbl_coverage,
+            require_bbl,
+            biblatex_bbl_format_version,
+        )
     )
     findings.extend(_hyperref_order(_read_document(root, inspection.main, inspection)))
     figures = _figures(inspection, selected)

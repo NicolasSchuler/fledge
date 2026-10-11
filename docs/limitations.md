@@ -14,7 +14,9 @@ direct. No Fledge result guarantees that a venue will accept a submission.
   namespaces. Its sandbox has controlled-command tests but has not run on a live
   Linux host.
 - **Windows** has no build sandbox, so `check` and `prepare` cannot build there.
-  `inspect` and `bib check` need only Python.
+  `inspect` and `bib check` need only Python. To build on Windows, use WSL 2 with
+  the Linux instructions in [installation](installation.md#windows); that route
+  carries the Linux caveat above and is not yet validated on a live host.
 - **No unsandboxed fallback exists.** If the sandbox cannot start, for example
   inside another sandbox or under a restrictive host policy, builds are blocked.
 - **Optional `qpdf` and MuPDF checks** are tested against recorded tool output,

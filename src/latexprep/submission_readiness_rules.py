@@ -6,13 +6,15 @@ RULE_DEFINITIONS = (
         "name": "source.bibliography_bbl",
         "title": "Generated bibliography shipped with the sources",
         "description": (
-            "Default note: the selected document reads a .bib file through BibTeX "
+            "Default check: the selected document reads a .bib file through BibTeX "
             "(\\bibliography) or biblatex (\\addbibresource), but no generated .bbl with the "
             "main file's name sits beside the main file. Services that compile without running "
             "BibTeX or Biber, arXiv among them, then produce empty citations; most other "
             "services run the bibliography backend themselves, so by default the missing file "
-            "is reported as information and does not change the outcome. Opt-in "
-            "submission_checks.require_bbl = true reports it as a warning."
+            "is recorded as a not-applicable scope note, listed only with --show-passed and "
+            "in JSON or HTML reports, and does not change the outcome. Opt-in "
+            "submission_checks.require_bbl = true (set by the arxiv preset) reports it as a "
+            "warning."
         ),
         "tests": (
             "tests.test_submission_readiness.BibliographyBblTests.test_bib_without_bbl_is_a_note_and_bbl_passes",
@@ -45,6 +47,30 @@ RULE_DEFINITIONS = (
         "fix": (
             "Rebuild the bibliography after the last citation change and ship the regenerated "
             "<main>.bbl, or correct the reported citation keys."
+        ),
+    },
+    {
+        "code": "BIB110",
+        "name": "bibliography.bbl_format_version",
+        "title": "Shipped biblatex .bbl matches the target format",
+        "description": (
+            "Opt-in (submission_checks.biblatex_bbl_format_version): compare the format "
+            "version on the second line of a shipped biblatex <main>.bbl, such as "
+            "'% $ biblatex bbl format version 3.3 $', with the version used by the service that "
+            "compiles the upload without running Biber, arXiv among them. biblatex there "
+            "reports a wrong format version for any other value. BibTeX .bbl files and "
+            "documents without a literal .bib resource are not applicable; without a shipped "
+            "<main>.bbl the result is an inconclusive warning "
+            "that defers to TEX009. Only the header is compared, not the entries."
+        ),
+        "tests": (
+            "tests.test_submission_readiness.BibliographyBblTests.test_bbl_format_version_matches_the_configured_target",
+            "tests.test_submission_readiness.BibliographyBblTests.test_bbl_format_version_setting_is_validated_and_reaches_the_check",
+        ),
+        "fix": (
+            "Build with the biblatex release of the target service's TeX Live (its "
+            "instructions name the release; TeX Live 2026 writes format 3.3), then ship the "
+            "regenerated <main>.bbl. Otherwise, choose a service or backend that runs Biber."
         ),
     },
     {

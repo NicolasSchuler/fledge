@@ -37,6 +37,8 @@ class PresetPackagingTests(unittest.TestCase):
         patterns = setuptools["package-data"]["latexprep"]
         manifest = (ROOT / "MANIFEST.in").read_text().splitlines()
         self.assertIn("recursive-include src/latexprep/presets *.toml", manifest)
+        # The report schema backs a docs download link and tests/test_report_schema.py.
+        self.assertIn("recursive-include docs/_static *.png *.css *.json", manifest)
         for name in PRESETS:
             with self.subTest(preset=name):
                 relative = f"presets/{name}.toml"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 import tempfile
 import unittest
 import zipfile
@@ -200,7 +201,10 @@ The complete fixture is included in this source package.
             self.assertLessEqual(observed["peak_temp_bytes"], settings.max_temporary_bytes)
             execution = report.tools["execution"]
             assert isinstance(execution, dict)
-            self.assertEqual(execution["backend"], "macOS sandbox-exec")
+            self.assertEqual(
+                execution["backend"],
+                {"darwin": "macOS sandbox-exec", "linux": "Linux Bubblewrap"}[sys.platform],
+            )
             self.assertEqual(execution["network"], "denied")
             self.assertEqual(execution["shell_escape"], "disabled")
             for tool in ("latexmk", "pdflatex", "pdfinfo", "pdftohtml", "pdftoppm", "pdftotext"):

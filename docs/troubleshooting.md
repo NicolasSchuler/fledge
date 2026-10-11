@@ -41,9 +41,10 @@ While a citation error is present, `BIB102` can be a side effect of it.
 
 The paper uses BibTeX or Biber, but no generated `main.bbl` sits beside the main
 file. Services that compile without running BibTeX or Biber, such as arXiv, then
-show empty citations. By default this is an information note that does not
-change the outcome; `[submission_checks] require_bbl = true`, which the `arxiv`
-preset sets, makes it a warning. To fix it, build locally and keep the generated
+show empty citations. By default this is a not-applicable note, listed only
+with `--show-passed`, that does not change the outcome;
+`[submission_checks] require_bbl = true`, which the `arxiv` preset sets, makes
+it a warning. To fix it, build locally and keep the generated
 `main.bbl` (and, for biblatex, `main.run.xml`) next to `main.tex`. `prepare`
 ships them automatically, also with `--layout flat`. With BibTeX you can instead
 inline the bibliography with `source_transforms.inline_bibliography`. A `.bbl`
@@ -53,6 +54,13 @@ from Biber must match the biblatex version of the compiling service.
 contains every cited key. A missing key is an error: rebuild the bibliography
 after your last citation change. Without a shipped `.bbl`, `BIB109` is
 inconclusive and defers to `TEX009`.
+
+`BIB110` compares the format version on the second line of a shipped biblatex
+`.bbl` with `submission_checks.biblatex_bbl_format_version`. biblatex rejects a
+`.bbl` written in another format, so a mismatch is an error. Look up the TeX
+Live release in the service's current instructions, then build with that
+release's biblatex; TeX Live 2026, for example, writes format `3.3`. The
+`arxiv` preset contains this setting as a commented placeholder.
 
 ### `PDF104`: fonts not embedded
 

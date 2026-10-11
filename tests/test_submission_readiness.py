@@ -14,6 +14,7 @@ from latexprep.config import load_settings
 from latexprep.core import JobRequest, _readiness, run_job
 from latexprep.manuscript_checks import ManuscriptCheckOptions, check_manuscript_details
 from latexprep.models import Finding, PreparationError
+from latexprep.reporting import is_scope_disclaimer
 from latexprep.submission_readiness_checks import check_submission_readiness
 
 from .support import fake_build
@@ -81,10 +82,11 @@ class BibliographyBblTests(ReadinessCase):
         self.write("refs.bib", "@book{knuth, title={The TeXbook}, year={1984}}")
         self.document(body="Text \\cite{knuth}.\n\\bibliographystyle{plain}\n\\bibliography{refs}")
         missing = self.one("source.bibliography_bbl")
-        # Most services run BibTeX themselves: an information note, not an advisory.
+        # Most services run BibTeX themselves: a scope note listed only on request.
         self.assertEqual(
-            (missing.code, missing.severity, missing.status), ("TEX009", "info", "failed")
+            (missing.code, missing.severity, missing.status), ("TEX009", "info", "not_applicable")
         )
+        self.assertTrue(is_scope_disclaimer(missing))
         self.assertEqual((missing.path, missing.line), ("main.tex", 5))
         self.assertIn("main.bbl is not in the package", missing.message)
         self.assertIn("submission_checks.require_bbl", missing.message)
@@ -145,6 +147,9 @@ class BibliographyBblTests(ReadinessCase):
             self.one("bibliography.bbl_coverage", check_bbl_coverage=True).status,
             "not_applicable",
         )
+        unchecked = self.one("bibliography.bbl_format_version", biblatex_bbl_format_version="3.3")
+        self.assertEqual((unchecked.code, unchecked.status), ("BIB110", "not_applicable"))
+        self.assertIn("no literal .bib resource", unchecked.message)
 
     def test_bbl_coverage_reports_missing_keys_and_parses_both_formats(self) -> None:
         self.write("refs.bib", "@book{knuth, title={T}}\n@book{lamport, title={L}}")
@@ -175,6 +180,61 @@ class BibliographyBblTests(ReadinessCase):
         passed = self.one("bibliography.bbl_coverage", check_bbl_coverage=True)
         self.assertEqual((passed.status, passed.details["bbl_format"]), ("passed", "biblatex"))
         self.assertEqual(self.findings("bibliography.bbl_coverage"), [])
+
+    def test_bbl_format_version_matches_the_configured_target(self) -> None:
+        rule = "bibliography.bbl_format_version"
+        self.write("refs.bib", "@book{knuth, title={T}}")
+        self.document("\\usepackage{biblatex}\n\\addbibresource{refs.bib}\n", "\\cite{knuth}")
+        self.assertEqual(self.findings(rule), [])
+        unshipped = self.one(rule, biblatex_bbl_format_version="3.3")
+        # The missing file is TEX009's finding; the format check only defers to it.
+        self.assertEqual(
+            (unshipped.code, unshipped.severity, unshipped.status),
+            ("BIB110", "warning", "inconclusive"),
+        )
+        self.assertEqual(unshipped.details["blocked_by"], "TEX009")
+        header = "% $ biblatex auxiliary file $\n% $ biblatex bbl format version {} $\n"
+        self.write("main.bbl", header.format("3.3") + "% Do not modify the above lines!\n")
+        passed = self.one(rule, biblatex_bbl_format_version="3.3")
+        self.assertEqual((passed.severity, passed.status, passed.line), ("info", "passed", 2))
+        mismatch = self.one(rule, biblatex_bbl_format_version="3.2")
+        self.assertEqual((mismatch.severity, mismatch.status), ("error", "failed"))
+        self.assertEqual(mismatch.details["found_version"], "3.3")
+        self.assertIn("format 3.3, but the target service expects 3.2", mismatch.message)
+        self.write("main.bbl", "% $ biblatex auxiliary file $\n% edited by hand\n")
+        unreadable = self.one(rule, biblatex_bbl_format_version="3.3")
+        self.assertEqual((unreadable.severity, unreadable.status), ("warning", "inconclusive"))
+        self.write("main.bbl", "\\begin{thebibliography}{1}\\end{thebibliography}\n")
+        bibtex_file = self.one(rule, biblatex_bbl_format_version="3.3")
+        self.assertEqual((bibtex_file.severity, bibtex_file.status), ("info", "not_applicable"))
+        (self.root / "main.bbl").unlink()
+        self.document(body="\\cite{knuth}\n\\bibliography{refs}")
+        bibtex_document = self.one(rule, biblatex_bbl_format_version="3.3")
+        self.assertEqual(bibtex_document.status, "not_applicable")
+        self.assertIn("uses BibTeX", bibtex_document.message)
+
+    def test_bbl_format_version_setting_is_validated_and_reaches_the_check(self) -> None:
+        self.write("refs.bib", "@book{knuth, title={T}}")
+        self.document("\\usepackage{biblatex}\n\\addbibresource{refs.bib}\n", "\\cite{knuth}")
+        self.write(
+            "main.bbl",
+            "% $ biblatex auxiliary file $\n% $ biblatex bbl format version 3.1 $\n",
+        )
+        config = self.root / "fledge.toml"
+        config.write_text('[submission_checks]\nbiblatex_bbl_format_version = "3.3"\n')
+        findings = [
+            item
+            for item in _readiness(self.root, "main.tex", load_settings(config, {}))
+            if item.rule == "bibliography.bbl_format_version"
+        ]
+        self.assertEqual([(item.code, item.status) for item in findings], [("BIB110", "failed")])
+        for value in ("3.3 beta", "", "3.3$"):
+            with self.subTest(value=value):
+                config.write_text(f'[submission_checks]\nbiblatex_bbl_format_version = "{value}"\n')
+                with self.assertRaisesRegex(PreparationError, "biblatex_bbl_format_version"):
+                    load_settings(config, {})
+        with self.assertRaisesRegex(PreparationError, "biblatex_bbl_format_version"):
+            check_submission_readiness(self.root, "main.tex", biblatex_bbl_format_version=3.3)  # type: ignore[arg-type]
 
     def test_arxiv_preset_without_a_bbl_is_an_advisory_not_a_block(self) -> None:
         self.write("refs.bib", "@book{knuth, title={The TeXbook}, year={1984}}")

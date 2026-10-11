@@ -13,6 +13,23 @@ Severity = Literal["error", "warning", "info"]
 Status = Literal["failed", "inconclusive", "skipped", "passed", "not_applicable"]
 SEVERITIES: frozenset[str] = frozenset(get_args(Severity))
 STATUSES: frozenset[str] = frozenset(get_args(Status))
+# Increases only when a JSON report field is removed, renamed or changes meaning;
+# new fields may appear within a version. docs/_static/report.schema.json describes it.
+REPORT_SCHEMA_VERSION = 1
+REPORT_COMMANDS: frozenset[str] = frozenset(
+    {"inspect", "check", "prepare", "bib", "fmt", "pdf", "report", "doctor"}
+)
+REPORT_OUTCOMES: frozenset[str] = frozenset(
+    {
+        "passed",
+        "planned",
+        "passed_with_advisories",
+        "accepted_exceptions",
+        "blocked",
+        "error",
+        "cancelled",
+    }
+)
 
 
 class PreparationError(Exception):
@@ -97,27 +114,9 @@ class Report:
         try:
             # These finite, application-defined enums and registered rule IDs are
             # control data, not manuscript content (a password could be "passed").
-            if self.command in {
-                "inspect",
-                "check",
-                "prepare",
-                "bib",
-                "fmt",
-                "pdf",
-                "report",
-                "doctor",
-            }:
+            if self.command in REPORT_COMMANDS:
                 values["command"] = self.command
-            outcomes = {
-                "passed",
-                "planned",
-                "passed_with_advisories",
-                "accepted_exceptions",
-                "blocked",
-                "error",
-                "cancelled",
-            }
-            if self.outcome in outcomes:
+            if self.outcome in REPORT_OUTCOMES:
                 values["outcome"] = self.outcome
             for item, original in zip(values["findings"], self.findings, strict=True):
                 if original.code is not None:
@@ -133,7 +132,7 @@ class Report:
             # A short credential can also occur in a schema key. Never reconstruct
             # from raw content or throw a diagnostic containing that content.
             return withheld()
-        if result.outcome not in outcomes:
+        if result.outcome not in REPORT_OUTCOMES:
             return withheld()
         if any(
             not isinstance(stage, dict) or not isinstance(stage.get("name"), str)
@@ -162,7 +161,7 @@ class Report:
 
     def to_dict(self) -> dict[str, object]:
         public = self.redacted_copy()
-        result = asdict(public)
+        result: dict[str, object] = {"schema_version": REPORT_SCHEMA_VERSION, **asdict(public)}
         result["findings"] = [
             {**asdict(finding), "code": finding.code, "suggestion": finding.next_step}
             for finding in public.sorted_findings()

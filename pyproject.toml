@@ -1,12 +1,15 @@
 [build-system]
-requires = ["setuptools>=68"]
+# 77 reads the SPDX license expression and license-files below.
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "fledge"
+name = "fledge-latex"
 version = "0.2.0"
 description = "Fledge prepares verified LaTeX submission bundles without changing the original project"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
 dependencies = ["click>=8.1,<9", "rich>=13.7,<15"]
 

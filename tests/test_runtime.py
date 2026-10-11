@@ -40,6 +40,9 @@ class LifecycleRunner(ToolRunner):
 
 
 class FakeBuildRunner(ToolRunner):
+    # Fakes never run Biber, so automatic builds behave alike on every host.
+    biber_needs_preparation = False
+
     def __init__(self, returncode: int = 0, log: str = "", trace: str | None = None) -> None:
         super().__init__()
         self._test_resource_roots: set[Path] = set()
@@ -418,10 +421,17 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_environment_discards_injection_and_private_variables(self) -> None:
         with patch.dict(
             os.environ,
-            {"TEXINPUTS": "/private/source//", "PERL5OPT": "danger", "OPENAI_API_KEY": "private"},
+            {
+                "TEXINPUTS": "/private/source//",
+                "PERL5OPT": "danger",
+                "OPENAI_API_KEY": "private",
+                "USER": "private-account",
+            },
         ):
             environment = ToolRunner()._environment(self.work, Path(self.perl))
         self.assertEqual(environment["TEXINPUTS"], ".:")
+        # latexmk warns when USER is unset; a neutral name keeps the real one private.
+        self.assertEqual(environment["USER"], "fledge")
         for key in ("HOME", "CODEX_HOME", "PERL5OPT", "OPENAI_API_KEY"):
             self.assertNotIn(key, environment)
         self.assertTrue(environment["TEXMFHOME"].startswith(str(self.work)))

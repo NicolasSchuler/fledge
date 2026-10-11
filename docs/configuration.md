@@ -100,14 +100,17 @@ Checks that are off do not become passes. Terminal reports end with a short
 is not mistaken for a full audit. JSON reports list the same areas in
 `execution.not_checked`, each with its codes and the settings that enable them.
 
-Some default checks concern submission readiness: a note when no generated
-`.bbl` is shipped for services that do not run BibTeX or Biber, such as arXiv
-(`TEX009`; `submission_checks.require_bbl = true` makes it a warning), packages
+Some default checks concern submission readiness: a note, listed only with
+`--show-passed`, when no generated `.bbl` is shipped for services that do not
+run BibTeX or Biber, such as arXiv (`TEX009`;
+`submission_checks.require_bbl = true` makes it a warning), packages
 declared before `hyperref` that must follow it (`TEX010`), EPS figures in a PDF
 build (`TEX011`) and private-note markers in comments (`PRV007`).
 Related opt-in policies check review line numbers (`MAN017`), figure color
-spaces (`PDF313`), the TeX Live release (`BLD105`) and whether a shipped `.bbl`
-covers every cited key (`BIB109`).
+spaces (`PDF313`), the TeX Live release (`BLD105`), whether a shipped `.bbl`
+covers every cited key (`BIB109`) and whether a shipped biblatex `.bbl` has the
+format version the receiving service expects (`BIB110`,
+`submission_checks.biblatex_bbl_format_version`).
 
 ## Discovery and precedence
 

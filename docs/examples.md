@@ -42,9 +42,9 @@ fledge bib check "$demo_dir/paper" --main main.tex --isolated --offline
 ```
 
 Both commands should exit with code 0 and outcome `passed`. `inspect` also
-shows a `TEX009` information note because the demo has no generated `.bbl`;
+records a `TEX009` not-applicable note because the demo has no generated `.bbl`;
 it does not change the outcome. Add `--show-passed` to list the individual
-results. They inspect sources and bibliography only; no
+results and notes. They inspect sources and bibliography only; no
 build or bundle is verified. `--isolated` ignores any configuration file, and
 `--offline` prevents network requests.
 

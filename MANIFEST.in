@@ -1,7 +1,7 @@
 # The source archive is the companion to the wheel: documentation, tests and examples.
 include .gitignore architecture.md requirements.md install.sh
 recursive-include docs *.md *.py
-recursive-include docs/_static *.png *.css
+recursive-include docs/_static *.png *.css *.json
 recursive-include examples *.toml *.tex *.bib
 recursive-include src/latexprep/presets *.toml
 recursive-include tests *.py
