@@ -13,7 +13,7 @@ from typing import Any
 from unittest.mock import patch
 
 from latexprep.models import PreparationError
-from latexprep.runtime import CommandResult, ToolRunner, _kill_group, _sample_interval
+from latexprep.runtime import CommandResult, ToolRunner, _kill_group, _sample_interval, _ToolContext
 from latexprep.scheduler import ResourceBudget
 from tests.support import live_tests_enabled
 
@@ -255,8 +255,17 @@ class VersionAndInputTests(unittest.IsolatedAsyncioTestCase):
         frozen = runner.freeze_input(source, self.root / "artifacts")
         workspace = self.root / "leaf"
         workspace.mkdir()
-        with patch("latexprep.runtime.sys.platform", "darwin"):
+        # Generate the Seatbelt profile on any host without requiring macOS tools.
+        context = _ToolContext(
+            Path("/usr/bin/perl"), frozenset({Path("/usr/bin/perl")}), frozenset(), ("/usr/bin",)
+        )
+        with (
+            patch("latexprep.runtime.sys.platform", "darwin"),
+            patch("latexprep.runtime.shutil.which", return_value="/usr/bin/sandbox-exec"),
+            patch.object(runner, "_tool_context", return_value=context),
+        ):
             command = runner._sandbox_command(["/usr/bin/perl", "-v"], workspace, (frozen,))
+        self.assertEqual(command[0], "/usr/bin/sandbox-exec")
         profile = command[2]
         self.assertIn(f'(literal "{frozen}")', profile)
         self.assertNotIn(f'(subpath "{frozen.parent}")', profile)
