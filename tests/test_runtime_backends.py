@@ -30,6 +30,57 @@ _BCF = (
 )
 
 
+class TeXLiveRuntimeTests(unittest.TestCase):
+    def test_full_and_basic_distributions_have_scoped_resources_and_tex_lookup(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            workspace = base / "workspace"
+            workspace.mkdir()
+            for name in ("2026", "2026basic"):
+                with self.subTest(distribution=name):
+                    distribution = base / "texlive" / name
+                    executable = distribution / "bin/universal-darwin/pdftex"
+                    executable.parent.mkdir(parents=True)
+                    executable.write_bytes(b"installed engine fixture")
+                    engine = executable.with_name("pdflatex")
+                    engine.symlink_to(executable)
+                    roots = _distribution_roots(engine)
+                    self.assertEqual(roots, {executable, distribution})
+                    context = _ToolContext(
+                        engine, frozenset({engine}), frozenset(roots), (str(engine.parent),)
+                    )
+                    runner = ToolRunner()
+                    with patch.object(runner, "_tool_context", return_value=context):
+                        environment = runner._environment(workspace, engine)
+                    self.assertEqual(
+                        environment["TEXMFCNF"], str(distribution / "texmf-dist/web2c")
+                    )
+                    self.assertEqual(
+                        environment["TEXMFSYSCONFIG"], str(distribution / "texmf-config")
+                    )
+                    self.assertEqual(environment["TEXMFSYSVAR"], str(distribution / "texmf-var"))
+                    self.assertIn(str(distribution / "texmf-dist"), environment["TEXMF"])
+                    self.assertTrue(Path(environment["TEXMFHOME"]).is_relative_to(workspace))
+
+    def test_other_directory_names_do_not_expand_distribution_grants(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            workspace = base / "workspace"
+            workspace.mkdir()
+            for name in ("2026basic-extra", "2026custom", "202", "20260", "２０２６"):
+                with self.subTest(directory=name):
+                    distribution = base / "texlive" / name
+                    executable = distribution / "bin/pdftex"
+                    self.assertEqual(_distribution_roots(executable), {executable})
+                    context = _ToolContext(
+                        executable, frozenset({executable}), frozenset({distribution}), ()
+                    )
+                    runner = ToolRunner()
+                    with patch.object(runner, "_tool_context", return_value=context):
+                        environment = runner._environment(workspace, executable)
+                    self.assertNotIn("TEXMFCNF", environment)
+
+
 class HomebrewRuntimeTests(unittest.TestCase):
     def test_declared_upgraded_nss_alias_is_granted_without_broad_homebrew_reads(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

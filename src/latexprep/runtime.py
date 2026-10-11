@@ -149,6 +149,8 @@ _FAT_CPU_TYPES = {"arm64": 0x0100000C, "x86_64": 0x01000007}
 # and into the command line latexmk builds for it, so its path must be inert in
 # both. Application-generated temporary paths satisfy this; nothing else is used.
 _INERT_PATH = re.compile(r"[A-Za-z0-9_./-]+")
+# MacTeX uses a year directory; BasicTeX adds the literal "basic" suffix.
+_TEXLIVE_DIRECTORY = re.compile(r"[0-9]{4}(?:basic)?")
 
 
 def _host_macho_slice(data: bytes) -> bytes:
@@ -258,7 +260,7 @@ def _distribution_roots(executable: Path) -> set[Path]:
     parts = resolved.parts
     if "texlive" in parts:
         index = parts.index("texlive")
-        if len(parts) > index + 1 and re.fullmatch(r"\d{4}", parts[index + 1]):
+        if len(parts) > index + 1 and _TEXLIVE_DIRECTORY.fullmatch(parts[index + 1]):
             roots.add(Path(*parts[: index + 2]))
     if "Cellar" in parts:
         index = parts.index("Cellar")
@@ -919,7 +921,7 @@ class ToolRunner:
             "FORCE_SOURCE_DATE": "1",
         }
         tex_roots = sorted(
-            root for root in context.resource_roots if re.fullmatch(r"\d{4}", root.name)
+            root for root in context.resource_roots if _TEXLIVE_DIRECTORY.fullmatch(root.name)
         )
         if tex_roots:
             root = tex_roots[0]
