@@ -37,7 +37,9 @@ from .metadata_privacy import (
 from .models import Finding, PreparationError, Report, has_blockers
 from .online_checks import check_online_references
 from .package_inputs import generated_bibliography_inputs, select_package_inputs
+from .package_inventory import PackageStatus, assemble_package_inventory
 from .pdf import compare_pdfs, inspect_pdf
+from .pdf_previews import PdfPreviewStore
 from .project import ImportLimits, create_archive, import_project, plan_cleanup
 from .reporting import apply_reviews, has_unaccepted_blockers, not_checked_areas
 from .runtime import SELECTABLE_BUILD_ERRORS, BuildResult, RuntimeLimits, ToolRunner, build_project
@@ -67,6 +69,8 @@ class JobRequest:
     dry_run: bool = False
     reference_pdf: Path | None = None
     preview_output: Path | None = None
+    pdf_previews: PdfPreviewStore | None = None
+    document_name: str | None = None
 
 
 @dataclass
@@ -514,12 +518,57 @@ class _Job:
     retained: set[str] = field(default_factory=set)
     completed: dict[str, TaskResult] = field(default_factory=dict)
     scheduler: Scheduler | None = None
+    input_inventories: list[list[dict]] = field(default_factory=list)
 
     def baseline_pdf(self) -> Path:
         return self.completed["baseline build"].value.pdf
 
     def block(self) -> None:
         self.report.outcome = "blocked"
+
+    def comparison_options(self, stage: str) -> dict[str, Any]:
+        if self.request.pdf_previews is None:
+            return {}
+        return {
+            "previews": self.request.pdf_previews.for_comparison(stage, self.request.document_name)
+        }
+
+    def inventory(
+        self,
+        status: PackageStatus,
+        *,
+        final_root: Path | None = None,
+        path_mapping: dict[str, str] | None = None,
+        archive: Path | None = None,
+    ) -> None:
+        self.report.package_contents = [
+            assemble_package_inventory(
+                selections=self.input_inventories,
+                changes=self.report.changes,
+                source_root=self.baseline_source,
+                final_root=final_root,
+                path_mapping=path_mapping,
+                archive=archive,
+                document=self.request.document_name or self.selected,
+                status=status,
+            )
+        ]
+
+    def selection_evidence(self, findings: list[Finding]) -> list[Finding]:
+        """Keep intermediate rows once; publish the reconciled inventory in the report."""
+        result = []
+        for finding in findings:
+            inventory = finding.details.get("inventory")
+            if isinstance(inventory, list):
+                self.input_inventories.append(inventory)
+                finding = replace(
+                    finding,
+                    details={
+                        key: value for key, value in finding.details.items() if key != "inventory"
+                    },
+                )
+            result.append(finding)
+        return result
 
 
 async def _standalone_pdf(job: _Job) -> None:
@@ -532,6 +581,7 @@ async def _standalone_pdf(job: _Job) -> None:
             job.settings,
             job.budget,
             job.request.reference_pdf,
+            **job.comparison_options("supplied PDF versus inspected PDF"),
         )
     )
     job.report.outcome = _outcome(job.report, job.settings)
@@ -840,6 +890,7 @@ def _analysis_tasks(job: _Job) -> list[Task]:
                     work / "reference-baseline",
                     runner,
                     budget=budget,
+                    **job.comparison_options("supplied PDF versus baseline"),
                 ),
             )
         )
@@ -883,8 +934,12 @@ async def _select_initial_inputs(job: _Job) -> list[Finding]:
         getattr(job.completed["baseline build"].value, "generated_reads", frozenset()),
     )
     job.report.changes.extend(changes)
+    findings = job.selection_evidence(findings)
     if not has_blockers(findings):
         job.snapshot = destination
+    # Scheduler collection occurs after this task returns. Record the inventory
+    # using the evidence returned here, without duplicating findings.
+    job.inventory("incomplete" if has_blockers(findings) else "proposed")
     return findings
 
 
@@ -913,12 +968,15 @@ async def _repeat_baselines(job: _Job, baseline: BuildResult) -> None:
             job.work / f"compare-baseline-{number}",
             job.runner,
             budget=job.budget,
+            **job.comparison_options(f"baseline repeat {number}"),
         )
         return number, repeated, compared
 
     # Independent repeats overlap up to the configured build concurrency.
     attempts = await bounded_map(
-        list(range(2, settings.workflow.baseline_runs + 1)), attempt, limit=settings.build_jobs
+        list(range(2, settings.workflow.baseline_runs + 1)),
+        attempt,
+        limit=1 if job.request.pdf_previews is not None else settings.build_jobs,
     )
     stable = True
     for number, repeated, compared in attempts:
@@ -1045,7 +1103,7 @@ async def _ship(job: _Job, prepared: Path) -> tuple[Path, str, BuildResult, dict
         getattr(staged, "generated_reads", frozenset()),
     )
     report.changes.extend(changes)
-    _record_findings(report, findings, "select submission inputs")
+    _record_findings(report, job.selection_evidence(findings), "select submission inputs")
     if _blocked(report, settings):
         return None
     shipped, selected, changes, findings, path_mapping = await _thread_operation(
@@ -1059,6 +1117,11 @@ async def _ship(job: _Job, prepared: Path) -> tuple[Path, str, BuildResult, dict
     )
     report.changes.extend(changes)
     report.findings.extend(findings)
+    job.inventory(
+        "incomplete" if _blocked(report, settings) else "prepared",
+        final_root=shipped,
+        path_mapping=path_mapping,
+    )
     if _blocked(report, settings):
         return None
     if settings.layout == "flat":
@@ -1076,6 +1139,7 @@ async def _ship(job: _Job, prepared: Path) -> tuple[Path, str, BuildResult, dict
             job.runner,
             budget=job.budget,
             options=settings.workflow.comparison,
+            **job.comparison_options("baseline versus prepared"),
         ),
         "baseline versus prepared",
     )
@@ -1127,6 +1191,7 @@ async def _package_and_verify(
     job.emit("Packaging sources and rebuilding a fresh extraction of the exact ZIP")
     archive = work / "submission.zip"
     await _thread_operation(budget, "create archive", create_archive, shipped, archive)
+    job.inventory("prepared", final_root=shipped, path_mapping=path_mapping, archive=archive)
     _record_findings(
         report,
         await _thread_operation(
@@ -1193,7 +1258,12 @@ async def _package_and_verify(
         Task(
             "prepared versus archive rebuild",
             lambda: compare_pdfs(
-                staged_pdf, final_pdf, work / "compare-archive", runner, budget=budget
+                staged_pdf,
+                final_pdf,
+                work / "compare-archive",
+                runner,
+                budget=budget,
+                **job.comparison_options("prepared versus archive rebuild"),
             ),
             cpu=0,
             memory_mb=0,
@@ -1230,8 +1300,16 @@ async def _package_and_verify(
             Task(
                 "supplied PDF versus archive rebuild",
                 lambda: compare_pdfs(
-                    reference, final_pdf, work / "reference-final", runner, budget=budget
+                    reference,
+                    final_pdf,
+                    work / "reference-final",
+                    runner,
+                    budget=budget,
+                    **job.comparison_options("supplied PDF versus archive rebuild"),
                 ),
+                after=("prepared versus archive rebuild",)
+                if job.request.pdf_previews is not None
+                else (),
                 cpu=0,
                 memory_mb=0,
             )
@@ -1250,6 +1328,12 @@ async def _package_and_verify(
         "final metadata sanitization",
     )
     report.scope = "selected preparation checks, visual/text preservation and fresh ZIP rebuild"
+    job.inventory(
+        "prepared" if _blocked(report, settings) else "verified",
+        final_root=shipped,
+        path_mapping=path_mapping,
+        archive=archive,
+    )
     return None if _blocked(report, settings) else (shipped, archive, final_pdf)
 
 
@@ -1292,6 +1376,7 @@ async def _prepare(job: _Job, baseline: BuildResult) -> tuple[Path, Path, Path] 
     if prepared is None:
         return None
     if job.request.dry_run:
+        job.inventory("proposed")
         report.scope = (
             "preparation plan; baseline inputs selected and transformations previewed; "
             "final input selection, layout and bundle not verified"
@@ -1449,6 +1534,7 @@ async def _run_documents(
                     workflow=replace(request.settings.workflow, documents=()),
                 ),
                 reference_pdf=Path(document.reference_pdf) if document.reference_pdf else None,
+                document_name=document.name,
             )
             child_work = work / "documents" / document.name
             child_work.mkdir(parents=True)
@@ -1469,7 +1555,11 @@ async def _run_documents(
         child = apply_reviews(child, child_settings.reporting)
         return DocumentResult(document.name, child, pending)
 
-    documents = await bounded_map(settings.workflow.documents, document_job, limit=settings.jobs)
+    documents = await bounded_map(
+        settings.workflow.documents,
+        document_job,
+        limit=1 if request.pdf_previews is not None else settings.jobs,
+    )
     for document in documents:
         child = document.report
         report.findings.extend(
@@ -1489,6 +1579,7 @@ async def _run_documents(
             for stage in child.stages
         )
         report.tools.update(child.tools)
+        report.package_contents.extend(child.package_contents)
     verified = all(document.pending is not None for document in documents)
     if request.command == "prepare" and not request.dry_run:
         report.findings.append(
@@ -1686,6 +1777,8 @@ async def run_job(
                 }
                 report.tools.update(runner.tool_versions)
                 report.stages.sort(key=lambda item: str(item["name"]))
+                if request.pdf_previews is not None:
+                    report.execution["pdf_previews"] = request.pdf_previews.summary()
             resource_failure = runner.statistics().get("resource_exceeded")
             if resource_failure:
                 report.findings.append(

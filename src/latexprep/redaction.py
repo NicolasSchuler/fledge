@@ -18,7 +18,10 @@ from urllib.parse import unquote, unquote_plus
 REDACTED = "[REDACTED]"
 LIMIT_REDACTION = "[REDACTED: report exceeds redaction limits]"
 MAX_TEXT_CHARS = 16 * 1024 * 1024
-MAX_NODES = 100_000
+# Leave room for the default 10,000 imported entries, each represented by a
+# selection/change record and its final inventory row. Text and replacement-work
+# limits still independently bound scanning and credential substitution.
+MAX_NODES = 250_000
 MAX_DEPTH = 64
 MAX_SECRETS = 1024
 MAX_DISCOVERIES = 100_000

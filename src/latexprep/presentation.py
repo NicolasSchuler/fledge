@@ -7,6 +7,8 @@ from collections import Counter
 from io import StringIO
 
 from rich.console import Console
+from rich.padding import Padding
+from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
@@ -23,6 +25,15 @@ from .rules import BY_NAME, Rule
 MAX_LISTED_CHANGES = 20
 # The scope of a report whose request was rejected before or while the job ran.
 REQUEST_SCOPE = "request validation"
+OUTCOME_STYLES = {
+    "passed": "bold green",
+    "planned": "bold cyan",
+    "passed_with_advisories": "bold yellow",
+    "accepted_exceptions": "bold yellow",
+    "blocked": "bold red",
+    "error": "bold red",
+    "cancelled": "bold yellow",
+}
 
 
 def _safe(value: str) -> str:
@@ -30,7 +41,9 @@ def _safe(value: str) -> str:
     value = re.sub(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)", "", value)
     value = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", value)
     return "".join(
-        char for char in value if char in "\n\t" or (ord(char) >= 32 and ord(char) != 127)
+        char
+        for char in value
+        if char in "\n\t" or (ord(char) >= 32 and not 127 <= ord(char) <= 159)
     )
 
 
@@ -192,21 +205,145 @@ def _selection_description(report: Report) -> str | None:
     )
 
 
+def _finding_style(finding: Finding) -> str:
+    if finding.status == "passed":
+        return "green"
+    return {"error": "red", "warning": "yellow", "info": "cyan"}.get(finding.severity, "cyan")
+
+
+def _detail(console: Console, label: str, value: str, *, style: str = "") -> None:
+    line = Text()
+    line.append(f"{label}: ", style="cyan")
+    line.append(_safe(value), style=style)
+    console.print(Padding(line, (0, 0, 0, 2), expand=False), overflow="fold")
+
+
+def _size(value: object) -> str:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        return "not measured"
+    if value < 1024:
+        return f"{value} B"
+    for unit in ("KiB", "MiB", "GiB", "TiB"):
+        value /= 1024
+        if value < 1024 or unit == "TiB":
+            return f"{value:.1f} {unit}"
+    raise AssertionError("size unit missing")
+
+
+def _measured_total(files: list[dict], field: str) -> str:
+    total = 0
+    for item in files:
+        value = item.get(field)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            return "not measured"
+        total += value
+    return _size(total)
+
+
+def _print_package_contents(report: Report, console: Console, show_files: bool) -> None:
+    for package in report.package_contents:
+        entries = package.get("files", [])
+        files = (
+            [item for item in entries if isinstance(item, dict)]
+            if isinstance(entries, list)
+            else []
+        )
+        included = [item for item in files if item.get("status") == "included"]
+        excluded = [item for item in files if item.get("status") == "excluded"]
+        status = str(package.get("status", "incomplete"))
+        style = "green" if status == "verified" else "yellow" if status == "incomplete" else "cyan"
+        console.print()
+        title = Text("Package contents", style="bold cyan")
+        title.append(f" — {_one_line(str(package.get('document', 'project')))}", style="default")
+        title.append(f" [{_safe(status)}]", style=style)
+        console.print(title, overflow="fold")
+        console.print(
+            Text(
+                f"  {len(included)} included, {len(excluded)} excluded; "
+                f"uncompressed: {_measured_total(included, 'size_bytes')}; "
+                f"compressed entries: {_measured_total(included, 'compressed_bytes')}"
+            ),
+            overflow="fold",
+        )
+        console.print(
+            Text(
+                f"  ZIP: {_size(package.get('archive_bytes'))}; "
+                f"ZIP overhead: {_size(package.get('overhead_bytes'))}"
+            ),
+            overflow="fold",
+        )
+        if status != "verified":
+            _detail(
+                console, "Verification", "Package inventory has not been verified.", style=style
+            )
+        renamed = [item for item in included if item.get("source") != item.get("path")]
+        for item in renamed:
+            _detail(
+                console,
+                "Rename",
+                _one_line(f"{item.get('source', '')} -> {item.get('path', '')}"),
+            )
+        contributors = sorted(
+            [item for item in included if isinstance(item.get("compressed_bytes"), int)],
+            key=lambda item: item["compressed_bytes"],
+            reverse=True,
+        )[:3]
+        if contributors:
+            console.print(Text("  Largest compressed entries:", style="cyan"))
+            for item in contributors:
+                _detail(
+                    console,
+                    _size(item["compressed_bytes"]),
+                    _one_line(str(item.get("path", ""))),
+                )
+        if show_files:
+            console.print(Text("  Files:", style="cyan"))
+            for item in files:
+                file_status = str(item.get("status", "unknown"))
+                text = Text(f"  [{_safe(file_status)}] ", style="cyan")
+                text.append(
+                    _one_line(str(item.get("path") or item.get("source", ""))), style="default"
+                )
+                if item.get("source") != item.get("path"):
+                    text.append(f" (source: {_one_line(str(item.get('source', '')))})")
+                text.append(
+                    f" — uncompressed {_size(item.get('size_bytes'))}; "
+                    f"compressed {_size(item.get('compressed_bytes'))}"
+                )
+                console.print(text, overflow="fold")
+                for reason in item.get("reasons", []):
+                    _detail(console, "Reason", str(reason))
+        elif files:
+            console.print(
+                Text("  Use --show-files for every file and inclusion reason.", style="dim")
+            )
+
+
 def print_report(
-    report: Report, console: Console, *, show_diff: bool = False, show_passed: bool = False
+    report: Report,
+    console: Console,
+    *,
+    show_diff: bool = False,
+    show_passed: bool = False,
+    show_files: bool = False,
 ) -> None:
     report = report.redacted_copy()
     outcome = report.outcome.replace("_", " ").capitalize()
-    style = "bold red" if report.outcome in {"blocked", "error"} else "bold"
-    if report.outcome == "error" and report.scope == REQUEST_SCOPE:
-        console.print(Text("Request error", style=style))
+    style = OUTCOME_STYLES.get(report.outcome, "bold cyan")
+    request_error = report.outcome == "error" and report.scope == REQUEST_SCOPE
+    summary = Text()
+    summary.append("Request error" if request_error else outcome, style=style)
+    if not request_error:
+        summary.append(f" — {_one_line(report.scope)}")
+    summary.append(f"\n{_counts(report)}", style="dim")
+    if request_error:
+        console.print(summary)
     else:
-        console.print(Text(f"{outcome} — {_safe(report.scope)}", style=style))
-    console.print(Text(_counts(report), style="dim"))
+        console.print(Panel(summary, border_style=style, padding=(0, 1), expand=False))
     if selection := _selection_description(report):
         console.print(Text(_safe(selection), style="dim"))
     if report.main:
-        console.print(Text(f"Document: {_safe(report.main)}"))
+        console.print(Text(f"Document: {_one_line(report.main)}"))
     visible = _visible(report, show_passed)
     for finding, stages in visible:
         console.print()
@@ -214,25 +351,25 @@ def print_report(
         status = {"skipped": "not checked", "not_applicable": "not applicable"}.get(
             finding.status, finding.status
         )
-        color = {"error": "red", "warning": "yellow", "info": "cyan"}.get(finding.severity, "")
-        heading = Text(f"{code}  {_label(finding)}", style=f"bold {color}".strip())
+        color = _finding_style(finding)
+        heading = Text(_one_line(f"{code}  {_label(finding)}"), style=f"bold {color}")
         heading.append(f"  [{finding.severity.upper()} / {status}]", style=color)
         console.print(heading)
-        console.print(Text(f"  Where: {_safe(_location(finding, stages))}", style="dim"))
-        console.print(Text(f"  {_safe(finding.message)}"))
+        _detail(console, "Where", _one_line(_location(finding, stages)), style="dim")
+        console.print(Padding(Text(_safe(finding.message)), (0, 0, 0, 2), expand=False))
         if evidence := evidence_excerpt(finding):
-            console.print(Text(f"  Evidence: {_one_line(evidence)}"))
+            _detail(console, "Evidence", _one_line(evidence))
         if finding.next_step:
-            console.print(Text(f"  Next: {_safe(finding.next_step)}"))
+            _detail(console, "Next", finding.next_step)
         if marker := review_marker(finding):
-            console.print(Text(f"  Review: {_safe(marker)}"))
+            _detail(console, "Review", marker, style="yellow")
     if not visible:
         console.print(Text("No issues found within this command's stated scope."))
     blocked = _blocked_summaries(report)
     if blocked:
         console.print()
     for line in blocked:
-        console.print(Text(_safe(line), style="dim"), soft_wrap=True)
+        console.print(Text(_safe(line), style="yellow"))
     if report.changes:
         console.print(
             Text(
@@ -257,25 +394,34 @@ def print_report(
                     style="dim",
                 )
             )
-    for name, path in report.artifacts.items():
-        console.print(Text(f"{name}: {_safe(path)}"))
+    _print_package_contents(report, console, show_files)
+    if report.artifacts:
+        console.print(Text("\nArtifacts", style="bold cyan"))
+        for name, path in report.artifacts.items():
+            console.print(Text(_one_line(f"{name}: {path}")), overflow="fold")
     if summary := not_checked_summary(
         report.execution.get("not_checked"), report.execution.get("config_path")
     ):
-        # One physical line: the terminal may wrap it, but it is never split.
-        console.print(Text(f"\n{_safe(summary)}", style="dim"), soft_wrap=True)
+        console.print(Text(f"\n{_safe(summary)}", style="dim"))
     if any(item.code and item.status != "passed" for item, _stages in visible):
         console.print(Text("\nExplain a check: fledge rule CODE", style="dim"))
 
 
-def render_terminal(report: Report, show_diff: bool = False, show_passed: bool = False) -> str:
+def render_terminal(
+    report: Report,
+    show_diff: bool = False,
+    show_passed: bool = False,
+    *,
+    show_files: bool = False,
+) -> str:
     """Plain rendering for tests/embedding; the live CLI retains terminal colors."""
     output = StringIO()
     print_report(
         report,
-        Console(file=output, width=100, color_system=None, markup=False, highlight=False),
+        Console(file=output, width=1000, color_system=None, markup=False, highlight=False),
         show_diff=show_diff,
         show_passed=show_passed,
+        show_files=show_files,
     )
     return output.getvalue().rstrip()
 
@@ -291,7 +437,8 @@ def render_compact(report: Report, *, show_passed: bool = False) -> str:
     for finding, stages in _visible(report, show_passed):
         code = finding.code or finding.rule
         line = (
-            f"{code} {finding.severity}/{finding.status} {_one_line(_location(finding, stages))}"
+            f"{_one_line(code)} {finding.severity}/{finding.status} "
+            f"{_one_line(_location(finding, stages))}"
             f" | {_one_line(_label(finding))}: {_one_line(finding.message)}"
         )
         if evidence := evidence_excerpt(finding):
@@ -308,7 +455,7 @@ def render_compact(report: Report, *, show_passed: bool = False) -> str:
             "use --json for full paths and diffs)"
         )
     for name, path in report.artifacts.items():
-        lines.append(f"{name}: {_one_line(path)}")
+        lines.append(f"{_one_line(name)}: {_one_line(path)}")
     return "\n".join(lines)
 
 

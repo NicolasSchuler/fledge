@@ -4,6 +4,8 @@
 
 On macOS, run `bash install.sh` from the source checkout and confirm the plan.
 [Installation](installation.md) covers other platforms and the launcher path.
+Run `fledge doctor` to exercise the installed tools with a tiny built-in document;
+see [setup diagnostics](doctor.md) for the scope of that check.
 
 ## 2. Prepare your project
 
@@ -28,6 +30,9 @@ A successful run writes:
 Your original project is never changed, and unrelated files are left out of the
 copy. To ship a file the build never reads, list it under
 [`[package] include`](configuration.md#package-contents).
+The terminal summarizes the included files, renames and compressed size. Add
+`--show-files` for the full inventory, or `--html-report review.html` to keep a
+report with file details and visual PDF differences when a comparison changes.
 
 ## 3. Read the result
 
@@ -116,6 +121,17 @@ preset without writing a file, pass `--preset arxiv` to `inspect`, `check` or
 in seconds without compiling, so it cannot see build or PDF problems.
 `fledge check` adds the isolated build and PDF checks without packaging, and
 `prepare --dry-run` previews requested changes without writing a bundle.
+
+## Copy the abstract into a submission form
+
+```sh
+fledge submission-text /path/to/paper --field abstract
+```
+
+This exports one line with supported LaTeX formatting removed. Omit `--field`
+to preview the title, abstract and keywords with any interpretation issues.
+Unknown macros and complex notation require review before export; see
+[submission text](submission-text.md).
 
 Next: [configuration](configuration.md), [preparation options](preparation-options.md)
 or the [offline example](examples.md).

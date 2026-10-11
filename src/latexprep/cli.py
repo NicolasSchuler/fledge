@@ -11,16 +11,19 @@ from typing import Any
 
 import click
 from rich.console import Console
-from rich.text import Text
 
 from . import __version__
 from .config import RequestError, Settings, load_settings, resolve_config_path
 from .core import JobRequest, run_job, validate_destination
+from .doctor_command import doctor_command
 from .init_command import init_command
 from .models import Finding, PreparationError, Report
+from .pdf_previews import PdfPreviewStore
 from .presentation import REQUEST_SCOPE, print_report, print_rules, render_compact
 from .presets import preset_names
 from .rules import RULES, get_rule
+from .submission_text_command import submission_text_command
+from .terminal_progress import TerminalProgress
 
 EXIT_CODES = {
     "passed": 0,
@@ -75,6 +78,9 @@ def _common(function):
         click.option("--quiet", is_flag=True, help="Suppress progress on stderr."),
         click.option(
             "--show-passed", is_flag=True, help="Also list passed findings and inventories."
+        ),
+        click.option(
+            "--show-files", is_flag=True, help="List every included and excluded submission file."
         ),
         # Accepted for compatibility; Fledge never prompts.
         click.option("--non-interactive", is_flag=True, hidden=True),
@@ -345,6 +351,8 @@ def pdf_check(**options) -> int:
 
 
 cli.add_command(init_command)
+cli.add_command(doctor_command)
+cli.add_command(submission_text_command)
 
 
 @cli.command("rules")
@@ -426,6 +434,7 @@ def _execute(command: str, options: dict[str, Any]) -> int:
     report = Report(command, scope=REQUEST_SCOPE)
     report_destination = None
     html_destination = diagnostic_destination = None
+    pdf_previews = None
     source = options["source"]
     try:
         if options["report"]:
@@ -496,6 +505,9 @@ def _execute(command: str, options: dict[str, Any]) -> int:
                 settings,
                 online_checks=replace(settings.online_checks, online=options["online"]),
             )
+        pdf_previews = (
+            PdfPreviewStore() if html_destination is not None or output_format == "html" else None
+        )
         request = JobRequest(
             command,
             source,
@@ -504,10 +516,11 @@ def _execute(command: str, options: dict[str, Any]) -> int:
             dry_run=options.get("dry_run", False),
             reference_pdf=options.get("reference_pdf"),
             preview_output=options.get("preview_output"),
+            pdf_previews=pdf_previews,
         )
         error_console = Console(stderr=True, markup=False, highlight=False)
-        progress = None if options["quiet"] else lambda message: error_console.print(Text(message))
-        report = asyncio.run(run_job(request, progress, report))
+        with TerminalProgress(error_console, quiet=options["quiet"]) as progress:
+            report = asyncio.run(run_job(request, progress, report))
     except KeyboardInterrupt:
         report.outcome = "cancelled"
         report.findings.append(
@@ -550,7 +563,11 @@ def _execute(command: str, options: dict[str, Any]) -> int:
     try:
         if html_destination is not None:
             with html_destination.open("x", encoding="utf-8") as stream:
-                stream.write(render_html(report))
+                stream.write(
+                    render_html(
+                        report, preview_images=pdf_previews.images if pdf_previews else None
+                    )
+                )
         if diagnostic_destination is not None:
             export_diagnostic_bundle(report, diagnostic_destination)
     except (PreparationError, OSError, ValueError) as error:
@@ -572,7 +589,9 @@ def _execute(command: str, options: dict[str, Any]) -> int:
     elif output_format == "compact":
         click.echo(render_compact(report, show_passed=options["show_passed"]))
     elif output_format == "html":
-        click.echo(render_html(report))
+        click.echo(
+            render_html(report, preview_images=pdf_previews.images if pdf_previews else None)
+        )
     elif output_format == "ci":
         click.echo(render_ci_annotations(report, show_passed=options["show_passed"]))
     else:
@@ -581,6 +600,7 @@ def _execute(command: str, options: dict[str, Any]) -> int:
             Console(markup=False, highlight=False),
             show_diff=options.get("diff", False),
             show_passed=options["show_passed"],
+            show_files=options.get("show_files", False),
         )
     return EXIT_CODES[report.outcome]
 

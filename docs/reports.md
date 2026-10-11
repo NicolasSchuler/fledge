@@ -7,6 +7,12 @@ build, PDF preservation and the fresh ZIP rebuild.
 
 ## The terminal summary
 
+Rich styles the outcome, groups findings and aligns artifacts without relying
+on color to convey status. Live terminals show the current stage and elapsed
+time on stderr. Redirected output uses plain stage lines; `--quiet` suppresses
+progress. `NO_COLOR` disables color. JSON, compact and selected submission-text
+fields remain suitable for scripts.
+
 This run passed with one advisory, a TODO marker: the bundle was written, but
 the warning needs a human decision. The `TEX009` entry is an information note
 and does not affect the outcome.
@@ -45,6 +51,7 @@ then shows its code and name, `[SEVERITY / status]`, where it is, what was
 observed and the next step. A finding repeated in several stages is shown once
 with all stage names in brackets; the counts line counts it once. Passed results
 and scope notes are counted but listed only with `--show-passed`.
+The example above omits the terminal's decorative borders and file summary.
 
 When a failed step prevents later checks, one line per failed step names the
 checks that did not run, as in the [blocked example](quickstart.md#3-read-the-result).
@@ -53,6 +60,28 @@ need your settings, or because selection turned them off. Without a settings
 file it suggests starting from a [preset](configuration.md#start-from-a-preset);
 with one, it names that file as the place to add them. This line appears in
 terminal output only; JSON reports list the same areas in `execution.not_checked`.
+
+## What is in the submission?
+
+Preparation reports summarize included and excluded files, filename changes,
+ZIP size and the largest compressed entries. Add `--show-files` to list every
+entry and its selection reason:
+
+```sh
+fledge prepare paper --output submission --show-files
+fledge prepare paper --dry-run --show-files
+```
+
+Each document has its own inventory. A `verified` inventory uses the exact ZIP
+that was rebuilt, including each entry's original and compressed sizes. ZIP
+overhead is reported separately from compressed file data. `prepared` means
+files were assembled but final verification has not passed. `proposed` marks a
+dry-run or initial selection; `incomplete` means dependency selection failed.
+These labels never turn a blocked run into a released submission. Unmeasured
+sizes are shown as such, including excluded archive metadata that was not imported.
+
+JSON stores these records in `package_contents`; HTML always includes the full
+table. Both include original source paths, final paths and selection reasons.
 
 ## Exit codes
 
@@ -166,6 +195,7 @@ findings, settings and tool details removed:
 | `tools` | Versions and paths of the tools used |
 | `stages` | Each build and verification step with its status |
 | `artifacts` | Paths of the published output; empty when blocked |
+| `package_contents` | Per-document inventory, verification status, selection reasons and measured file/ZIP sizes |
 | `execution` | Configuration file, preset, check selection, opt-in checks that did not run (`not_checked`), resource use and timing |
 
 A finding's `code` is `null` for operational results such as `build.failed`;
@@ -182,7 +212,8 @@ fledge check /path/to/paper --html-report report.html
 fledge check /path/to/paper --output-format compact --quiet
 ```
 
-HTML is a self-contained offline page with source diffs. Compact output writes
+HTML is a self-contained offline page with source diffs and, when PDF
+comparisons find differences, page previews. Compact output writes
 one line per finding, which suits pasting into an AI agent; checks that did not
 run after a failed step appear on lines starting with `not run:`. HTML and CI
 output list every stage's copy of a finding and have no Not checked line. Reports redact known
@@ -191,3 +222,30 @@ sharing it. The [workflow reference](workflow-reference.md#report-formats)
 describes every format and the redaction rules, and
 [preparation options](preparation-options.md#preservation-and-explicit-exceptions)
 describes accepted exceptions and suppressions.
+
+## Visual PDF differences
+
+Request HTML during the run to retain affected PDF pages:
+
+```sh
+fledge prepare paper --output submission --html-report review.html
+fledge pdf check revised.pdf --reference-pdf original.pdf --html-report review.html
+```
+
+The report shows before/after pages and an expandable difference overlay, with
+navigation between affected pages. Text-only differences, added or removed
+pages and changed page dimensions are labeled. The original images remain the
+reference for interpreting an overlay. Previews are available in a blocked
+report even when no submission ZIP is released.
+
+Capture is limited to eight page pairs and 12 MiB of PNG data across the whole
+run. The first affected pages in document/stage order receive that budget.
+Omitted, partial and unavailable previews are explicit; their absence does not
+change the comparison findings. HTML adds bounded rendering work and serializes
+comparisons and document workflows where needed for stable allocation. Runs
+without HTML do not capture these images.
+
+The HTML embeds its images and needs no server or external resources. JSON
+contains descriptors in `execution.pdf_previews`, not image bytes. Re-rendering
+JSON alone cannot recover previews. Page images contain manuscript content and
+are not credential-redacted; inspect the report before sharing it.

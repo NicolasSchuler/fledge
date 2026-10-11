@@ -69,6 +69,7 @@ class Report:
     stages: list[dict[str, object]] = field(default_factory=list)
     artifacts: dict[str, str] = field(default_factory=dict)
     execution: dict[str, object] = field(default_factory=dict)
+    package_contents: list[dict[str, object]] = field(default_factory=list)
 
     def redacted_copy(self) -> Report:
         """Sanitize every output field together, including settings and tool inventories."""
@@ -96,7 +97,16 @@ class Report:
         try:
             # These finite, application-defined enums and registered rule IDs are
             # control data, not manuscript content (a password could be "passed").
-            if self.command in {"inspect", "check", "prepare", "bib", "fmt", "pdf", "report"}:
+            if self.command in {
+                "inspect",
+                "check",
+                "prepare",
+                "bib",
+                "fmt",
+                "pdf",
+                "report",
+                "doctor",
+            }:
                 values["command"] = self.command
             outcomes = {
                 "passed",

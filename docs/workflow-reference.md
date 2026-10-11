@@ -102,7 +102,11 @@ TEX001 warning/failed main.tex:3 | Unfinished text markers: Possible unfinished 
 ```
 
 `--html-report FILE` writes an escaped offline report with recorded-region
-diagrams and source before/after diffs; it does not embed PDF pages.
+diagrams, source diffs, file inventories and bounded before/after PDF pages.
+Affected pages have an optional difference overlay. Eight page pairs and 12 MiB
+of PNG data are shared across the run; omitted or unavailable previews are
+labeled. Image bytes stay outside JSON and are embedded only in HTML. Capture
+does not change comparison verdicts. See [visual differences](reports.md#visual-pdf-differences).
 `--output-format html` writes the same document to stdout. `--output-format ci`
 emits escaped GitHub Actions annotations. `--diagnostics ZIP` exports sanitized
 reports and diffs as **unverified diagnostic material**, never a submission

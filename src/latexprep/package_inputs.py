@@ -6,6 +6,7 @@ import shutil
 from pathlib import Path, PurePosixPath
 
 from .models import Change, Finding
+from .package_inventory import selection_inventory
 from .scheduler import cancellation_point
 from .source import analyze_selected_sources
 
@@ -104,7 +105,8 @@ def select_package_inputs(
                 "the rebuilt archive verifies the selected input set.",
             )
         )
-    bibliography = generated_bibliography_inputs(root, main, generated_reads) - observed - explicit
+    generated = generated_bibliography_inputs(root, main, generated_reads)
+    bibliography = generated - observed - explicit
     included = analysis.dependencies | observed | explicit | bibliography
     unusable: list[Finding] = []
     for name in sorted(included):
@@ -160,6 +162,14 @@ def select_package_inputs(
                 "included": sorted(included),
                 "explicit": sorted(explicit),
                 "generated_bibliography": sorted(bibliography),
+                "inventory": selection_inventory(
+                    root,
+                    files=files,
+                    literal=analysis.dependencies,
+                    observed=observed,
+                    explicit=explicit,
+                    generated=generated,
+                ),
                 "scope": "Supported literal dependencies and recorded inputs for the selected "
                 "build configuration; not minimality across other TeX executions.",
             },

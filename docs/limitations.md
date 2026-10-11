@@ -52,6 +52,11 @@ These questions need a person, even when a related check passes:
 - PDF comparison checks page count, extracted text and 144-DPI renders. Details
   below that resolution and differences inside PDF internals can go unnoticed.
   Rendering stops at 300 pages.
+- HTML captures at most eight affected page pairs and 12 MiB of PNG data.
+  Visual previews explain recorded differences, not every page or PDF object.
+- Submission-text export supports literal declarations and common formatting.
+  Custom macros, citations, references and complex math remain unresolved and
+  require manual conversion; no TeX macro expansion is attempted.
 - Drawing checks handle a limited subset of PDF graphics; curves, complex clips,
   masks, OCR and automatic figure segmentation are not covered.
 - Online checks depend on the services' current data. Their tests use simulated
@@ -59,7 +64,7 @@ These questions need a person, even when a related check passes:
 
 ## Not yet implemented
 
-Image optimization, externalized-figure preparation, annotated PDF pages,
-rendered before/after views, Windows isolation and a web interface. The
+Image optimization, externalized-figure preparation, annotated PDF output,
+Windows isolation and a web interface. The
 [check backlog](check-backlog.md) separates partial implementations, missing
 validation and intentional exclusions in detail.

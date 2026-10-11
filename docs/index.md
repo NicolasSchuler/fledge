@@ -21,6 +21,8 @@ quickstart
 
 configuration
 preparation-options
+submission-text
+doctor
 reports
 troubleshooting
 examples

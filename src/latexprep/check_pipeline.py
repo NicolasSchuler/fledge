@@ -18,6 +18,7 @@ from .pdf_checks import (
     inspect_included_pdf_figures,
     inspect_pdf_details,
 )
+from .pdf_previews import PdfPreviewCollector
 from .runtime import ToolRunner
 from .scheduler import ResourceBudget, bounded_map, run_in_thread
 from .source import _Inspection
@@ -221,6 +222,8 @@ async def inspect_standalone_pdf(
     settings: Settings,
     budget: ResourceBudget,
     reference: Path | None = None,
+    *,
+    previews: PdfPreviewCollector | None = None,
 ) -> list[Finding]:
     """Run PDF-only constraints without implying that a source bundle was checked."""
 
@@ -240,8 +243,16 @@ async def inspect_standalone_pdf(
         )
 
     async def comparison() -> list[Finding]:
+        preview_options: dict[str, Any] = {"previews": previews} if previews is not None else {}
         return (
-            await compare_pdfs(reference, pdf, work / "comparison", runner, budget=budget)
+            await compare_pdfs(
+                reference,
+                pdf,
+                work / "comparison",
+                runner,
+                budget=budget,
+                **preview_options,
+            )
             if reference
             else []
         )

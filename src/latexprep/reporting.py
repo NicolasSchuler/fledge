@@ -14,6 +14,7 @@ import os
 import stat
 import unicodedata
 import zipfile
+from base64 import b64encode
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path, PurePosixPath
@@ -22,6 +23,7 @@ from urllib.parse import quote
 
 from .check_policy import opt_in_activation
 from .models import Finding, PreparationError, Report
+from .pdf_previews import png_dimensions
 from .rules import BY_CODE, BY_NAME
 
 if TYPE_CHECKING:
@@ -706,14 +708,188 @@ def _diff_html(diff: str) -> str:
     )
 
 
-def render_html(report: Report) -> str:
+def _bytes_label(value: object) -> str:
+    if type(value) is not int or value < 0:
+        return "Not measured"
+    amount = float(value)
+    for unit in ("B", "KiB", "MiB", "GiB"):
+        if amount < 1024 or unit == "GiB":
+            return f"{amount:.0f} {unit}" if unit == "B" else f"{amount:.1f} {unit}"
+        amount /= 1024
+    return "Not measured"
+
+
+def _package_contents_html(report: Report) -> str:
+    if not report.package_contents:
+        return ""
+    parts = ['<h2 id="package-contents">What is in the submission?</h2>']
+    for package in report.package_contents:
+        rows = package.get("files", [])
+        rows = [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+        included = sum(row.get("status") == "included" for row in rows)
+        parts.append(
+            f"<section><h3>{_escape(package.get('document') or 'Submission')}</h3>"
+            f"<p><strong>{_escape(package.get('status', 'incomplete'))}</strong> contents: "
+            f"{included} included, {len(rows) - included} excluded.</p>"
+        )
+        if package.get("status") == "proposed":
+            parts.append(
+                "<p>Initial selection and planned changes; final layout and ZIP not verified.</p>"
+            )
+        elif package.get("status") == "incomplete":
+            parts.append(
+                "<p>Selection is incomplete. These rows are not a verified package inventory.</p>"
+            )
+        elif package.get("status") == "prepared":
+            parts.append("<p>Files were prepared; final package verification has not passed.</p>")
+        if package.get("archive_bytes") is not None:
+            parts.append(
+                f"<p>ZIP: {_bytes_label(package.get('archive_bytes'))}; "
+                f"archive overhead: {_bytes_label(package.get('overhead_bytes'))}.</p>"
+            )
+        parts.append(
+            '<div class="file-table"><table><caption>Files and selection reasons</caption>'
+            '<thead><tr><th scope="col">Status</th><th scope="col">Source → package</th>'
+            '<th scope="col">Reason</th><th scope="col">File / compressed size</th>'
+            "</tr></thead><tbody>"
+        )
+        for row in rows:
+            path = _escape(row.get("source", ""))
+            if row.get("path") != row.get("source"):
+                path += "<br>→ " + _escape(row.get("path", ""))
+            reasons = row.get("reasons", [])
+            reasons = reasons if isinstance(reasons, list) else [reasons]
+            parts.append(
+                f"<tr><td>{_escape(row.get('status'))}</td><td>{path}</td>"
+                f"<td>{'<br>'.join(_escape(reason) for reason in reasons)}</td>"
+                f"<td>{_bytes_label(row.get('size_bytes'))}<br>"
+                f"{_bytes_label(row.get('compressed_bytes'))}</td></tr>"
+            )
+        parts.append("</tbody></table></div></section>")
+    return "".join(parts)
+
+
+def _pdf_previews_html(report: Report, images: Mapping[str, bytes]) -> str:
+    summary = report.execution.get("pdf_previews")
+    if not isinstance(summary, dict):
+        return ""
+    comparisons = summary.get("comparisons", [])
+    if not isinstance(comparisons, list) or not comparisons:
+        return ""
+    parts = [
+        '<h2 id="pdf-differences">PDF differences</h2>',
+        "<p>Page images show manuscript content. Preview limits do not change "
+        "the comparison result.</p>",
+    ]
+    navigation = []
+    sections = []
+    for index, comparison in enumerate(comparisons, 1):
+        if not isinstance(comparison, dict):
+            continue
+        title = str(comparison.get("stage", "PDF comparison"))
+        if comparison.get("document"):
+            title = f"{comparison['document']}: {title}"
+        sections.append(f"<section><h3>{_escape(title)}</h3>")
+        pages = comparison.get("pages", [])
+        if comparison.get("error"):
+            sections.append(f"<p>Preview unavailable: {_escape(comparison['error'])}</p>")
+        elif not pages:
+            sections.append(
+                f"<p>{_escape(comparison.get('status', 'incomplete')).capitalize()}.</p>"
+            )
+        omitted = comparison.get("omitted_pages", 0)
+        if type(omitted) is int and omitted > 0:
+            sections.append(
+                f"<p>{omitted} affected page pair(s) omitted because the shared preview limit "
+                "was reached. Their comparison results remain in the findings.</p>"
+            )
+        for page_index, page in enumerate(pages if isinstance(pages, list) else [], 1):
+            if not isinstance(page, dict) or page.get("status") == "omitted":
+                continue
+            page_number = page.get("page", "?")
+            anchor = f"comparison-{index}-page-{page_index}"
+            navigation.append(
+                f'<a href="#{anchor}">{_escape(title)} · page {_escape(page_number)}</a>'
+            )
+            sections.append(
+                f'<article id="{anchor}" class="page-comparison">'
+                f"<h4>Page {_escape(page_number)}</h4>"
+            )
+            if page.get("text_only"):
+                sections.append("<p>Extracted text differs although the rendered pages match.</p>")
+            if page.get("page_dimensions_changed"):
+                sections.append(
+                    "<p>Page dimensions differ. Images retain their own proportions.</p>"
+                )
+            if page.get("within_render_tolerance"):
+                sections.append(
+                    "<p>The measured visual difference is within the configured tolerance.</p>"
+                )
+            sections.append('<div class="page-pair">')
+            sources = {}
+            for side, label in (("left", "Before"), ("right", "After")):
+                descriptor = page.get(side, {})
+                descriptor = descriptor if isinstance(descriptor, dict) else {}
+                sections.append(f"<figure><figcaption>{label}</figcaption>")
+                image_id = descriptor.get("image_id")
+                data = images.get(image_id) if isinstance(image_id, str) else None
+                if isinstance(data, bytes) and len(data) <= 12 * 1024 * 1024:
+                    try:
+                        png_dimensions(data)
+                    except PreparationError:
+                        data = None
+                else:
+                    data = None
+                if data is not None:
+                    uri = "data:image/png;base64," + b64encode(data).decode("ascii")
+                    sources[side] = uri
+                    sections.append(
+                        f'<img src="{uri}" alt="{label}, page {_escape(page_number)}" '
+                        'loading="lazy">'
+                    )
+                elif descriptor.get("present") is False:
+                    sections.append("<p>This page does not exist in this PDF.</p>")
+                else:
+                    status = descriptor.get("status", page.get("status", "unavailable"))
+                    if status == "captured":
+                        status = "image unavailable in this export"
+                    sections.append(
+                        f"<p>Preview {_escape(status)}. {_escape(descriptor.get('error', ''))}</p>"
+                    )
+                sections.append("</figure>")
+            sections.append("</div>")
+            if len(sources) == 2 and not page.get("page_dimensions_changed"):
+                sections.append(
+                    "<details><summary>Difference overlay</summary>"
+                    "<p>Matching pixels are black; nonblack areas differ. "
+                    "The original images above "
+                    "remain the reference for interpreting the change.</p>"
+                    '<div class="difference-overlay" role="img" '
+                    'aria-label="Pixel difference overlay">'
+                    f'<img src="{sources["left"]}" alt="" loading="lazy">'
+                    f'<img class="difference-layer" src="{sources["right"]}" alt="" loading="lazy">'
+                    "</div></details>"
+                )
+            sections.append("</article>")
+        sections.append("</section>")
+    if navigation:
+        parts.append(
+            '<nav class="page-navigation" aria-label="Changed pages">'
+            + " ".join(navigation)
+            + "</nav>"
+        )
+    parts.extend(sections)
+    return "".join(parts)
+
+
+def render_html(report: Report, *, preview_images: Mapping[str, bytes] | None = None) -> str:
     """Render one offline document with escaped evidence and no executable resources."""
     public = report.redacted_copy()
     parts = [
         '<!doctype html><html lang="en"><head><meta charset="utf-8">',
         '<meta name="viewport" content="width=device-width,initial-scale=1">',
         '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; '
-        "style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'\">",
+        "style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'\">",
         "<title>Fledge report</title><style>",
         "body{font:16px/1.5 system-ui,sans-serif;max-width:1100px;margin:2rem auto;padding:0 1rem;"
         "color:#17202a;background:#fafafa}article,section{margin:1rem 0;padding:1rem;"
@@ -725,7 +901,22 @@ def render_html(report: Report) -> str:
         "#edf0f3}.review{border-left:4px solid #9a6200;padding:.5rem}.location{color:#42515e}"
         "svg{max-height:400px;max-width:100%;width:340px}.paper{fill:white;stroke:#526474;"
         "stroke-width:1}.region{fill:#eaa43b;fill-opacity:.3;stroke:#9a4900;stroke-width:1}"
-        "figcaption{font-size:.85rem}a{color:#005599}</style></head><body>",
+        "figcaption{font-size:.85rem}a{color:#005599}"
+        ".page-pair{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1rem}"
+        ".page-pair figure{margin:0;min-width:0}"
+        ".page-pair img{display:block;width:100%;height:auto}"
+        ".page-pair figcaption{font-weight:600;margin-bottom:.4rem}"
+        ".page-navigation{display:flex;flex-wrap:wrap;gap:.5rem 1rem}"
+        ".page-navigation a,summary{padding:.25rem 0}summary{cursor:pointer}"
+        "a:focus-visible,summary:focus-visible{outline:3px solid #006b9a;outline-offset:3px}"
+        ".difference-overlay{position:relative;isolation:isolate;background:black;max-width:700px}"
+        ".difference-overlay img{display:block;width:100%;height:auto}"
+        ".difference-overlay .difference-layer{position:absolute;inset:0;mix-blend-mode:difference}"
+        "caption{text-align:left;font-weight:600;padding:.5rem 0}"
+        "@media(max-width:650px){body{margin:1rem auto;padding:0 .5rem}"
+        "article,section{padding:.65rem}.page-pair{grid-template-columns:1fr}"
+        ".file-table{overflow-x:auto}.file-table table{min-width:480px}}"
+        "</style></head><body>",
         f"<h1>{_escape(public.outcome.replace('_', ' ').capitalize())}</h1>",
         f"<p>{_escape(public.scope)}</p>",
         "<p>Results cover the stated checks. Review decisions retain the original evidence; "
@@ -733,6 +924,8 @@ def render_html(report: Report) -> str:
     ]
     if public.main:
         parts.append(f"<p>Document: {_escape(public.main)}</p>")
+    parts.append(_pdf_previews_html(public, preview_images or {}))
+    parts.append(_package_contents_html(public))
     parts.append("<h2>Findings and actions</h2>")
     for index, finding in enumerate(public.sorted_findings(), 1):
         definition = BY_NAME.get(finding.rule)

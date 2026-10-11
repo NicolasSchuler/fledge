@@ -10,9 +10,10 @@ from contextlib import nullcontext
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import TypeVar
+from typing import Any, TypeVar, cast
 
 from .models import Finding, PreparationError
+from .pdf_previews import PdfPreviewCollector, PreviewLimitError, png_dimensions
 from .runtime import CommandResult, ToolRunner
 from .scheduler import ResourceBudget, bounded_map, cancellation_point, run_in_thread
 from .workflow_options import ComparisonOptions
@@ -951,6 +952,7 @@ async def compare_pdfs(
     *,
     budget: ResourceBudget | None = None,
     options: ComparisonOptions | None = None,
+    previews: PdfPreviewCollector | None = None,
 ) -> list[Finding]:
     findings: list[Finding] = []
     policy: dict[str, object] = {
@@ -966,6 +968,10 @@ async def compare_pdfs(
             work, {"left.pdf": left, "right.pdf": right}, runner, budget
         )
     except (PreparationError, OSError) as error:
+        if previews is not None:
+            previews.unavailable(
+                "PDF comparison inputs were unavailable; no previews were captured."
+            )
         return [_unavailable("compare.unavailable", error)]
     session = _PdfWork(work, documents, runner, budget)
     prepared = await _measurements(
@@ -1081,4 +1087,192 @@ async def compare_pdfs(
                 details={"tools": session.tools()},
             )
         )
+    if previews is not None:
+        await _capture_previews(session, sides, findings, previews)
     return findings
+
+
+async def _capture_png(
+    session: _PdfWork,
+    page: int,
+    side: str,
+    size: tuple[float, float],
+    collector: PdfPreviewCollector,
+    slot: int,
+) -> tuple[str, tuple[int, int]]:
+    """Render one optional image without retaining any scratch-file references."""
+    name = f"preview-{page:04d}-{side}"
+    memory_mb = _pair_memory_mb(size, size)
+
+    async def capture() -> tuple[str, tuple[int, int]]:
+        try:
+            maximum = min(session.runner.limits.max_file_bytes, collector.store.remaining_bytes)
+            if maximum < 57:
+                raise PreviewLimitError("Insufficient PNG preview or tool file byte allowance")
+            await session.run(
+                name,
+                [
+                    "pdftoppm",
+                    "-png",
+                    "-r",
+                    str(_DPI),
+                    "-f",
+                    str(page),
+                    "-l",
+                    str(page),
+                    "-singlefile",
+                    f"./{side}.pdf",
+                    "page",
+                ],
+                leased=True,
+                memory_mb=_RENDER_HEADROOM_MB,
+            )
+            path = session.work / name / "command/page.png"
+            if not path.is_file() or path.is_symlink():
+                raise PreparationError("Preview renderer did not produce a regular PNG image")
+            if path.stat().st_size > maximum:
+                raise PreviewLimitError("PNG image exceeds the preview or tool file byte limit")
+            with path.open("rb") as stream:
+                data = stream.read(maximum + 1)
+            if len(data) > maximum:
+                raise PreviewLimitError("PNG image exceeds the preview or tool file byte limit")
+            pixels = png_dimensions(data)
+            if pixels[0] * pixels[1] > _raster_pixel_count(size):
+                raise PreparationError("Preview PNG dimensions exceed the geometry reservation")
+            return collector.add_image(slot, side, data), pixels
+        finally:
+            preview_work = session.work / name
+            if preview_work.exists():
+                shutil.rmtree(preview_work)
+
+    if session.budget is None:
+        return await capture()
+    async with session.budget.lease(
+        f"{session.work.name}: preview PDF page {page} {side}",
+        memory_mb=memory_mb,
+        kind="render",
+    ):
+        return await capture()
+
+
+async def _capture_previews(
+    session: _PdfWork,
+    sides: dict[str, _ComparisonSide],
+    findings: list[Finding],
+    collector: PdfPreviewCollector,
+) -> None:
+    """Capture only identified differences; preview failures never change findings."""
+    if len(sides) != 2:
+        collector.unavailable(
+            "PDF comparison preflight was unavailable; affected pages are unknown."
+        )
+        return
+    by_rule = {finding.rule: finding for finding in findings}
+    text_finding = by_rule.get("compare.text")
+    text_changes = (
+        set(cast(list[int], text_finding.details["changed_pages"])) if text_finding else set()
+    )
+    common = min(side.pages for side in sides.values())
+    missing_pages = set(range(common + 1, max(side.pages for side in sides.values()) + 1))
+    rendering = by_rule.get("compare.rendering") or by_rule.get("compare.unavailable")
+    measurements = (
+        {
+            item["page"]: item
+            for item in cast(list[dict[str, Any]], rendering.details.get("measurements", []))
+        }
+        if rendering
+        else {}
+    )
+    completed = (
+        set(range(1, common + 1))
+        if "compare.rendering" in by_rule
+        else set(cast(list[int], rendering.details.get("completed_pages", [])))
+        if rendering
+        else set()
+    )
+    dimensions_changed = {
+        page
+        for page in range(1, common + 1)
+        if sides["left"].dimensions is not None
+        and sides["right"].dimensions is not None
+        and sides["left"].dimensions[page - 1] != sides["right"].dimensions[page - 1]
+    }
+    affected = sorted(text_changes | measurements.keys() | missing_pages | dimensions_changed)
+    async with collector.store._lock:
+        for page in affected:
+            descriptors: dict[str, Any] = {}
+            for name, side in sides.items():
+                present = page <= side.pages
+                descriptors[name] = {
+                    "present": present,
+                    "dimensions_pt": list(side.dimensions[page - 1])
+                    if present and side.dimensions is not None
+                    else None,
+                    "image_id": None,
+                    "status": "pending" if present else "missing",
+                }
+            descriptor: dict[str, Any] = {
+                "page": page,
+                "text_changed": page in text_changes if text_finding else None,
+                "rendering_changed": page in measurements or page in missing_pages
+                if page in completed or page in missing_pages
+                else None,
+                "text_only": page in text_changes
+                and page in completed
+                and page not in measurements
+                and page not in dimensions_changed,
+                "page_dimensions_changed": page in dimensions_changed
+                if page <= common
+                and sides["left"].dimensions is not None
+                and sides["right"].dimensions is not None
+                else None,
+                "page_count_changed": page in missing_pages,
+                "within_render_tolerance": measurements.get(page, {}).get("within_tolerance"),
+                "status": "pending",
+                **descriptors,
+            }
+            collector.pages.append(descriptor)
+            slot = collector.reserve_page()
+            if slot is None:
+                descriptor["status"] = "omitted"
+                descriptor["omission_reason"] = "The shared preview page or byte limit was reached."
+                for side_descriptor in descriptors.values():
+                    if side_descriptor["present"]:
+                        side_descriptor["status"] = "omitted"
+                continue
+            for name, side in sides.items():
+                side_descriptor = descriptors[name]
+                if not side_descriptor["present"]:
+                    continue
+                if side.dimensions is None:
+                    side_descriptor.update(
+                        status="unavailable", error="Page dimensions were unavailable."
+                    )
+                    continue
+                try:
+                    image_id, pixels = await _capture_png(
+                        session, page, name, side.dimensions[page - 1], collector, slot
+                    )
+                    side_descriptor.update(
+                        status="captured", image_id=image_id, pixels=list(pixels)
+                    )
+                except PreviewLimitError:
+                    side_descriptor.update(
+                        status="omitted",
+                        error="The PNG preview or tool file byte limit was reached.",
+                    )
+                except (PreparationError, OSError):
+                    # Raw tool diagnostics can name scratch files. Keep only a
+                    # safe, actionable capture status in the descriptor store.
+                    side_descriptor.update(
+                        status="unavailable", error="The PNG preview renderer was unavailable."
+                    )
+            statuses = {
+                side_descriptor["status"]
+                for side_descriptor in descriptors.values()
+                if side_descriptor["present"]
+            }
+            descriptor["status"] = next(iter(statuses)) if len(statuses) == 1 else "partial"
+        collector.finished = True
+        if not affected and "compare.unavailable" in by_rule:
+            collector.unavailable("Comparison evidence was incomplete; affected pages are unknown.")
