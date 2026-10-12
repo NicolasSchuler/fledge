@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import types
 from dataclasses import fields, is_dataclass
-from typing import Any, Union, get_args, get_origin, get_type_hints
+from typing import Any, Literal, TypeVar, Union, get_args, get_origin, get_type_hints
 
 from .models import PreparationError
 
+T = TypeVar("T")
 
-def read_options(kind: type, value: object, location: str) -> Any:
+
+def read_options(kind: type[T], value: object, location: str) -> T:
+    """Convert one TOML table into the option dataclass ``kind``; reuse an instance as is."""
     if isinstance(value, kind):
         return value
     if not isinstance(value, dict):
@@ -32,18 +35,33 @@ def read_options(kind: type, value: object, location: str) -> Any:
         raise PreparationError(f"Invalid {location} settings: {error}") from error
 
 
+def require_booleans(options: object, *names: str) -> None:
+    """Reject option fields that hold anything but ``True`` or ``False``, such as ``1``."""
+    for name in names:
+        if type(getattr(options, name)) is not bool:
+            raise PreparationError(f"{name} must be a boolean")
+
+
 def _convert(annotation: Any, value: object, location: str) -> object:
     origin, args = get_origin(annotation), get_args(annotation)
     if origin in {Union, types.UnionType}:
         if value is None and type(None) in args:
             return None
         variants = [item for item in args if item is not type(None)]
+        if len(variants) == 1:
+            # An optional value keeps its variant's message, such as the allowed choices.
+            return _convert(variants[0], value, location)
         for variant in variants:
             try:
                 return _convert(variant, value, location)
             except PreparationError:
                 pass
         raise PreparationError(f"{location} has an invalid value type")
+    if origin is Literal:
+        # Compare types too: TOML true must not match a literal 1, nor 1 a literal True.
+        if not any(type(value) is type(choice) and value == choice for choice in args):
+            raise PreparationError(f"{location} must be one of {', '.join(map(str, args))}")
+        return value
     if isinstance(annotation, type) and is_dataclass(annotation):
         return read_options(annotation, value, location)
     if origin is tuple:

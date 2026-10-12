@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
+import fnmatch
 import tempfile
+import tomllib
 import unittest
 from dataclasses import FrozenInstanceError
+from importlib import resources
 from pathlib import Path
 
 from latexprep.build_checks import BuildCheckOptions, check_build_details
+from latexprep.latexmk_build import BuildResult, build_project
 from latexprep.loaded_options import _native_string, _parse_options, stage_loaded_options
 from latexprep.models import PreparationError
-from latexprep.pdf import compare_pdfs
-from latexprep.runtime import BuildResult, ToolRunner, build_project
+from latexprep.pdf_comparison import compare_pdfs
+from latexprep.runtime import ToolRunner
 from tests.support import live_tests_enabled
 from tests.test_runtime import FakeBuildRunner
 
@@ -149,7 +153,7 @@ class LoadedOptionsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.pdf.name, "main.pdf")
         self.assertEqual(result.command[-1], "./main.tex")
         self.assertIn("-no-shell-escape", result.command)
-        self.assertEqual(result.dependencies, {self.main, "paper/local.sty"})
+        self.assertEqual(result.recorder_project_inputs, {self.main, "paper/local.sty"})
         copied = (self.root / "build/project" / self.main).read_bytes()
         self.assertEqual(copied.count(b"\n"), self.original.count(b"\n"))
         self.assertTrue(copied.endswith(self.original))
@@ -239,10 +243,23 @@ class LoadedOptionsTests(unittest.IsolatedAsyncioTestCase):
         for engine in ("pdflatex", "xelatex", "lualatex"):
             self.assertEqual(_native_string(_units(value, engine), engine), value)
             data = _parse_options(_evidence("a" * 32, engine), "a" * 32, engine)
-            self.assertEqual(data["packages"][1]["options"], "forwarded=actual,value={a,b|c}")
+            self.assertEqual(data.packages[1].options, "forwarded=actual,value={a,b|c}")
         for value in ("!", "00", "G" * 8, "FFFFFFFF", "00000000" * 16_385):
             with self.subTest(value=value[:20]), self.assertRaises(PreparationError):
                 _native_string(value, "pdflatex")
+
+    def test_hook_ships_as_package_data_with_its_token_placeholders(self):
+        root = Path(__file__).resolve().parents[1]
+        hook = resources.files("latexprep").joinpath("loaded_options_hook.tex")
+        text = hook.read_text(encoding="ascii")
+        self.assertTrue(text.startswith("\\ifdefined\\ExplSyntaxOn"))
+        self.assertIn("START|TOKEN", text)
+        self.assertIn("END|TOKEN", text)
+        with (root / "pyproject.toml").open("rb") as stream:
+            patterns = tomllib.load(stream)["tool"]["setuptools"]["package-data"]["latexprep"]
+        self.assertTrue(any(fnmatch.fnmatch("loaded_options_hook.tex", item) for item in patterns))
+        manifest = (root / "MANIFEST.in").read_text().splitlines()
+        self.assertIn("include src/latexprep/loaded_options_hook.tex", manifest)
 
     def test_bom_and_line_numbers_are_preserved_and_hook_stays_outside_project(self):
         work = self.root / "staging"
@@ -298,7 +315,7 @@ class LiveLoadedOptionsTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(records["graphics.sty"]["options"].strip(","), "draft")
             self.assertEqual(records["graphicx.sty"]["origin"], "toolchain")
             self.assertEqual((source / "main.tex").read_bytes(), original)
-            self.assertEqual(measured.dependencies, baseline.dependencies)
+            self.assertEqual(measured.recorder_project_inputs, baseline.recorder_project_inputs)
             comparison = await compare_pdfs(baseline.pdf, measured.pdf, root / "comparison", runner)
             self.assertTrue(comparison, comparison)
             self.assertTrue(all(item.status == "passed" for item in comparison), comparison)

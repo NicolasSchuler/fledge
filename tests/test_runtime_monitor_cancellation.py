@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from latexprep.resource_monitor import JobScope
 from latexprep.runtime import ToolRunner
 
 
@@ -15,9 +16,10 @@ class SwallowingSampleRunner(ToolRunner):
         super().__init__(source_date_epoch=0)
         self.monitor_sampling = asyncio.Event()
         self.swallowed_cancellations = 0
+        self._monitor._sample_job = self.sample_job
 
-    async def _sample_job(self) -> None:
-        if asyncio.current_task() is not self._job_monitor or self.swallowed_cancellations:
+    async def sample_job(self, scope: JobScope) -> None:
+        if asyncio.current_task() is not scope.monitor or self.swallowed_cancellations:
             # The final sample in job_scope and later monitor samples return at once.
             return
         self.monitor_sampling.set()
@@ -40,8 +42,9 @@ class JobMonitorCancellationTests(unittest.IsolatedAsyncioTestCase):
 
             scope = asyncio.create_task(use_scope())
             done, _ = await asyncio.wait({scope}, timeout=5)
-            monitor = runner._job_monitor
-            if not done and monitor is not None:
+            job_scope = runner._monitor.scope
+            if not done and job_scope is not None:
+                monitor = job_scope.monitor
                 # Unblock the hung scope so a regression fails instead of hanging.
                 while not scope.done():
                     monitor.cancel()
@@ -49,7 +52,7 @@ class JobMonitorCancellationTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn(scope, done, "job_scope did not close after the monitor was cancelled")
             await scope
         self.assertEqual(runner.swallowed_cancellations, 1)
-        self.assertIsNone(runner._job_monitor)
+        self.assertIsNone(runner._monitor.scope)
 
 
 if __name__ == "__main__":

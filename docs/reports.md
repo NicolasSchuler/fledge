@@ -122,7 +122,7 @@ findings, settings and tool details removed:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "command": "prepare",
   "outcome": "blocked",
   "scope": "selected source, bibliography, privacy, isolated build and PDF checks",
@@ -135,8 +135,8 @@ findings, settings and tool details removed:
       "status": "failed",
       "path": "sections/results.tex",
       "line": 5,
-      "evidence": "derived",
-      "suggestion": "Correct the citation key or declared bibliography resource, then compile to verify the rendered citations. Resolve reported source uncertainty before claiming coverage.",
+      "evidence_kind": "derived",
+      "incomplete": false,
       "details": {
         "key": "knuth1948",
         "document": "main.tex",
@@ -146,7 +146,8 @@ findings, settings and tool details removed:
         "uncertainty": [],
         "stage": "bibliography coverage and fields"
       },
-      "code": "BIB101"
+      "code": "BIB101",
+      "next_step": "Correct the citation key or declared bibliography resource, then compile to verify the rendered citations. Resolve reported source uncertainty before claiming coverage."
     }
   ],
   "changes": [],
@@ -178,11 +179,11 @@ findings, settings and tool details removed:
 
 | Field | What it holds |
 | --- | --- |
-| `schema_version` | The report format version, currently `1` |
+| `schema_version` | The report format version, currently `2` |
 | `outcome`, `scope` | The result and what it covers |
 | `findings` | Every result, including passed ones and scope notes |
 | `changes` | Proposed or applied edits, with diffs |
-| `settings` | The effective settings after preset, file and command line |
+| `settings` | The effective settings after preset, file and command line, under their current names (`apply_formatting`, `rendered_pdf_artwork` and `included_figure_artwork` replace `format`, `pdf_artwork` and `figure_artwork`) |
 | `tools` | Versions and paths of the tools used |
 | `stages` | Each build and verification step with its status and elapsed seconds |
 | `artifacts` | Paths of the published output; empty when blocked |
@@ -190,7 +191,14 @@ findings, settings and tool details removed:
 | `execution` | Configuration file, preset, check selection, opt-in checks that did not run (`not_checked`), resource use and timing |
 
 A finding's `code` is `null` for operational results such as `build.failed`;
-its `rule` always holds a descriptive name. A failed build's finding carries the
+its `rule` always holds a descriptive name. `evidence_kind` says how directly
+the evidence supports the result (`direct`, `derived` or `heuristic`), and
+`next_step` gives the suggested action when one applies. `incomplete` is `true`
+when the check's evidence was partial, unavailable or bounded, for example an
+unreadable file, an unmeasured page or a capped list of matches. Unlike the
+*incomplete* count of the terminal summary, which counts results that reached no
+decision, this flag can also mark a confirmed failure; such a failure can be
+neither accepted nor suppressed. A failed build's finding carries the
 last 60 lines of the TeX log (at most 8000 characters) in `details.log_tail`.
 The [glossary](glossary.md) defines severity, status and the other terms.
 
@@ -201,6 +209,15 @@ stable fields: the top-level layout, findings, changes and the allowed
 commands, outcomes, severities and statuses. The contents of `settings`,
 `tools`, `execution`, `stages`, `package_contents` and finding `details` are
 descriptive and may grow.
+
+Version 2 renamed the finding fields `evidence` to `evidence_kind` and
+`suggestion` to `next_step`, and added `incomplete`. Hyphenated rule names such
+as `source-edit-marker` became dotted names such as `source.edit_marker`, and
+`settings` records `format`, `pdf_artwork` and `figure_artwork` as
+`apply_formatting`, `rendered_pdf_artwork` and `included_figure_artwork`. In
+`fledge doctor` reports, a rejected request is now `execution.request` and an
+internal error `execution.internal`; they were `configuration.invalid` and
+`execution.error`.
 
 ## Other formats
 
@@ -215,7 +232,8 @@ HTML is a self-contained offline page with source diffs and, when PDF
 comparisons find differences, page previews. Compact output writes
 one line per finding, which suits pasting into an AI agent; checks that did not
 run after a failed step appear on lines starting with `not run:`. HTML and CI
-output list every stage's copy of a finding and have no Not checked line. Reports redact known
+output also show a finding repeated in several stages once, but have no Not
+checked line. Reports redact known
 credential patterns but do not sanitize your sources, so read a report before
 sharing it. The [workflow reference](workflow-reference.md#report-formats)
 describes every format and the redaction rules, and

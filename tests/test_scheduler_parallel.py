@@ -7,9 +7,10 @@ import unittest
 from pathlib import Path
 from typing import Any
 
+from latexprep.latexmk_build import BuildResult
 from latexprep.models import Finding, PreparationError
-from latexprep.runtime import BuildResult
 from latexprep.scheduler import (
+    AnalysisCancelled,
     ResourceBudget,
     Scheduler,
     Task,
@@ -37,10 +38,10 @@ class SharedBudgetTests(unittest.IsolatedAsyncioTestCase):
             self.fail("A cancelled prerequisite must not start its dependent")
 
         with self.assertRaises(asyncio.CancelledError):
-            await Scheduler(2, 128, on_result=collected.append, budget=budget).execute(
+            await Scheduler(budget, on_result=collected.append).execute(
                 [
                     Task("producer", cancelled),
-                    Task("consumer", forbidden, requires=("producer",)),
+                    Task("consumer", forbidden, needs_success_of=("producer",)),
                     Task("independent", independent),
                 ]
             )
@@ -67,20 +68,20 @@ class SharedBudgetTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_each_resource_cap_blocks_atomically_without_partial_reservations(self):
         cases: list[tuple[str, dict[str, int], dict[str, Any]]] = [
-            ("CPU", {"jobs": 1, "memory_mb": 512}, {"cpu": 1, "memory_mb": 64}),
+            ("CPU", {"cpu_slots": 1, "memory_mb": 512}, {"cpu": 1, "memory_mb": 64}),
             (
                 "memory",
-                {"jobs": 4, "memory_mb": 256, "parent_memory_mb": 64},
+                {"cpu_slots": 4, "memory_mb": 256, "coordinator_memory_mb": 64},
                 {"cpu": 1, "memory_mb": 128},
             ),
             (
                 "builds",
-                {"jobs": 4, "memory_mb": 512, "build_jobs": 1},
+                {"cpu_slots": 4, "memory_mb": 512, "build_jobs": 1},
                 {"cpu": 1, "memory_mb": 64, "kind": "build"},
             ),
             (
                 "renders",
-                {"jobs": 4, "memory_mb": 512, "render_jobs": 1},
+                {"cpu_slots": 4, "memory_mb": 512, "render_jobs": 1},
                 {"cpu": 1, "memory_mb": 64, "kind": "render"},
             ),
         ]
@@ -137,11 +138,11 @@ class SharedBudgetTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(statistics["peak_reserved_cpu"], request["cpu"])
                 self.assertEqual(
                     statistics["peak_reserved_memory_mb"],
-                    request["memory_mb"] + settings.get("parent_memory_mb", 0),
+                    request["memory_mb"] + settings.get("coordinator_memory_mb", 0),
                 )
 
     async def test_build_and_render_overlap_under_one_combined_budget(self):
-        budget = ResourceBudget(2, 320, build_jobs=1, render_jobs=1, parent_memory_mb=64)
+        budget = ResourceBudget(2, 320, build_jobs=1, render_jobs=1, coordinator_memory_mb=64)
         entered = {kind: asyncio.Event() for kind in ("build", "render")}
         release = asyncio.Event()
 
@@ -176,7 +177,7 @@ class SharedBudgetTests(unittest.IsolatedAsyncioTestCase):
             {"cpu": True, "memory_mb": 64},
             {"cpu": 1, "memory_mb": 64, "kind": "unknown"},
         ]
-        budget = ResourceBudget(2, 256, parent_memory_mb=64)
+        budget = ResourceBudget(2, 256, coordinator_memory_mb=64)
         for request in requests:
             with self.subTest(request=request), self.assertRaises(PreparationError):
                 async with budget.lease("invalid", **request):
@@ -418,10 +419,10 @@ class SharedBudgetTests(unittest.IsolatedAsyncioTestCase):
             return "read complete result"
 
         execution = asyncio.create_task(
-            Scheduler(1, 64, budget=budget).execute(
+            Scheduler(budget).execute(
                 [
                     Task("composite", composite, cpu=0, memory_mb=0),
-                    Task("dependent", dependent, requires=("composite",)),
+                    Task("dependent", dependent, needs_success_of=("composite",)),
                 ]
             )
         )
@@ -446,7 +447,7 @@ class SharedBudgetTests(unittest.IsolatedAsyncioTestCase):
     async def test_false_artifact_outcome_retains_diagnostics_and_only_blocks_requires(self):
         failed_build = BuildResult(
             success=False,
-            findings=[Finding("build.failed", "The build produced no valid PDF", "error")],
+            findings=[Finding("build.failed", "The build produced no valid PDF", severity="error")],
         )
         consumer_called, report_called = asyncio.Event(), asyncio.Event()
         callbacks = []
@@ -461,10 +462,10 @@ class SharedBudgetTests(unittest.IsolatedAsyncioTestCase):
             report_called.set()
             return "diagnostics assembled"
 
-        results = await Scheduler(2, 128, on_result=callbacks.append).execute(
+        results = await Scheduler(ResourceBudget(2, 128), on_result=callbacks.append).execute(
             [
-                Task("report", report, after=("build", "pdf")),
-                Task("pdf", consume, requires=("build",)),
+                Task("report", report, waits_for=("build", "pdf")),
+                Task("pdf", consume, needs_success_of=("build",)),
                 Task("build", build, is_success=lambda value: value.success),
             ]
         )
@@ -487,9 +488,9 @@ class SharedBudgetTests(unittest.IsolatedAsyncioTestCase):
         async def worker():
             called.set()
 
-        budget = ResourceBudget(2, 256, parent_memory_mb=64)
+        budget = ResourceBudget(2, 256, coordinator_memory_mb=64)
         with self.assertRaises(PreparationError):
-            await Scheduler(2, 256, budget=budget).execute(
+            await Scheduler(budget).execute(
                 [Task("fits", worker), Task("too large", worker, memory_mb=193)]
             )
         self.assertFalse(called.is_set())
@@ -515,11 +516,11 @@ class SharedBudgetTests(unittest.IsolatedAsyncioTestCase):
             queued_started.set()
 
         execution = asyncio.create_task(
-            Scheduler(1, 64, budget=budget, on_result=callbacks.append).execute(
+            Scheduler(budget, on_result=callbacks.append).execute(
                 [
                     Task("active", active),
                     Task("queued", queued),
-                    Task("dependent", queued, requires=("active",)),
+                    Task("dependent", queued, needs_success_of=("active",)),
                 ]
             )
         )
@@ -567,7 +568,7 @@ class SharedBudgetTests(unittest.IsolatedAsyncioTestCase):
                 observed_contents.append(path.read_text())
                 try:
                     cancellation_point()
-                except PreparationError:
+                except AnalysisCancelled:
                     observed_cancellation.set()
                     raise
             finally:

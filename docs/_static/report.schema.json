@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://nicolasschuler.github.io/fledge/_static/report.schema.json",
   "title": "Fledge JSON report",
-  "description": "Stable fields of a Fledge report at schema_version 1. New fields may appear within a version; consumers should ignore fields they do not know. The version increases only when a field is removed, renamed or changes meaning. Contents of settings, tools, execution, stages, package_contents and finding details are descriptive and may grow.",
+  "description": "Stable fields of a Fledge report at schema_version 2. New fields may appear within a version; consumers should ignore fields they do not know. The version increases only when a field is removed, renamed or changes meaning. Contents of settings, tools, execution, stages, package_contents and finding details are descriptive and may grow.",
   "type": "object",
   "required": [
     "schema_version",
@@ -21,7 +21,7 @@
   ],
   "properties": {
     "schema_version": {
-      "const": 1
+      "const": 2
     },
     "command": {
       "description": "The command that produced the report.",
@@ -112,8 +112,9 @@
         "status",
         "path",
         "line",
-        "evidence",
-        "suggestion",
+        "evidence_kind",
+        "incomplete",
+        "next_step",
         "details",
         "code"
       ],
@@ -141,10 +142,15 @@
         "line": {
           "type": ["integer", "null"]
         },
-        "evidence": {
-          "type": "string"
+        "evidence_kind": {
+          "description": "How directly the evidence supports the conclusion.",
+          "enum": ["direct", "derived", "heuristic"]
         },
-        "suggestion": {
+        "incomplete": {
+          "description": "The check's evidence was partial, unavailable or bounded; such a failure can be neither accepted nor suppressed.",
+          "type": "boolean"
+        },
+        "next_step": {
           "description": "The suggested next step, when one applies.",
           "type": ["string", "null"]
         },
@@ -161,7 +167,17 @@
           "type": "string"
         },
         "kind": {
-          "type": "string"
+          "enum": [
+            "exclude",
+            "remove",
+            "move",
+            "rewrite",
+            "unwrap",
+            "format",
+            "bibliography_transform",
+            "normalize_doi",
+            "metadata_sanitization"
+          ]
         },
         "reason": {
           "type": "string"

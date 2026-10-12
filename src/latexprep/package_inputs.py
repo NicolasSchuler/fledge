@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import shutil
+from dataclasses import replace
 from pathlib import Path, PurePosixPath
 
-from .models import Change, Finding
+from .file_safety import is_contained_regular_file, is_plain_relative_name
+from .models import Change, ChangeKind, Finding
 from .package_inventory import selection_inventory
 from .scheduler import cancellation_point
 from .source import analyze_selected_sources
@@ -33,13 +35,7 @@ def generated_bibliography_inputs(
     for suffix in GENERATED_BIBLIOGRAPHY_SUFFIXES:
         name = main_path.stem + suffix
         candidate = (main_path.parent / name).as_posix()
-        path = root / candidate
-        if (
-            name in read
-            and not path.is_symlink()
-            and path.is_file()
-            and path.resolve().is_relative_to(root.resolve())
-        ):
+        if name in read and is_contained_regular_file(root, root / candidate):
             retained.add(candidate)
     return retained
 
@@ -69,8 +65,8 @@ def select_package_inputs(
             Finding(
                 "package.dependencies",
                 "Complete build dependency evidence is unavailable; no input set was selected.",
-                "error",
-                "inconclusive",
+                severity="error",
+                status="inconclusive",
                 suggestion="Resolve the build's submission dependency diagnostic and retry.",
             )
         ]
@@ -80,17 +76,7 @@ def select_package_inputs(
         # incomplete literal graph only widens the selection; the exact archive
         # rebuild still verifies the result.
         findings.extend(
-            Finding(
-                item.rule,
-                item.message,
-                "warning",
-                item.status,
-                path=item.path,
-                line=item.line,
-                evidence=item.evidence,
-                suggestion=item.suggestion,
-                details=item.details,
-            )
+            replace(item, severity="warning")
             for item in analysis.findings
             if item.status == "inconclusive"
         )
@@ -99,8 +85,8 @@ def select_package_inputs(
                 "package.dependencies",
                 "The literal source dependency graph is incomplete or ambiguous; "
                 "the recorded build inputs were used to select this document's files.",
-                "warning",
-                "inconclusive",
+                severity="warning",
+                status="inconclusive",
                 suggestion="Review the source diagnostics above; "
                 "the rebuilt archive verifies the selected input set.",
             )
@@ -111,23 +97,13 @@ def select_package_inputs(
     unusable: list[Finding] = []
     for name in sorted(included):
         cancellation_point()
-        relative = PurePosixPath(name)
-        path = root / name
-        if (
-            relative.is_absolute()
-            or ".." in relative.parts
-            or relative.as_posix() != name
-            or "\\" in name
-            or path.is_symlink()
-            or not path.is_file()
-            or not path.resolve().is_relative_to(root.resolve())
-        ):
+        if not is_plain_relative_name(name) or not is_contained_regular_file(root, root / name):
             unusable.append(
                 Finding(
                     "package.dependencies",
                     "A required input or explicit retained file is missing or unsafe.",
-                    "error",
-                    "inconclusive",
+                    severity="error",
+                    status="inconclusive",
                     path=name,
                     suggestion="Supply the project-relative file and repeat preparation.",
                 )
@@ -136,7 +112,11 @@ def select_package_inputs(
         return [], [*findings, *unusable]
     files = {path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file()}
     changes = [
-        Change(name, "exclude", "Not needed by the selected document or explicitly retained.")
+        Change(
+            name,
+            kind=ChangeKind.EXCLUDE,
+            reason="Not needed by the selected document or explicitly retained.",
+        )
         for name in sorted(files - included)
     ]
     destination.mkdir()
@@ -156,8 +136,8 @@ def select_package_inputs(
             "package.dependencies",
             f"Selected {len(included)} project inputs; omitted {len(changes)} unrelated files."
             + retained_bibliography,
-            "info",
-            "passed",
+            severity="info",
+            status="passed",
             details={
                 "included": sorted(included),
                 "explicit": sorted(explicit),

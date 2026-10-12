@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from latexprep.config import PARENT_MEMORY_MB, load_settings
+from latexprep.config import COORDINATOR_MEMORY_MB, load_settings
 from latexprep.models import PreparationError
 
 
@@ -17,7 +17,9 @@ class ParallelConfigTests(unittest.TestCase):
         self.assertEqual(settings.job_timeout_seconds, 600)
         self.assertEqual(settings.max_temporary_bytes, 2_147_483_648)
         self.assertIsNone(settings.source_date_epoch)
-        self.assertGreaterEqual(settings.memory_mb, settings.build_memory_mb + PARENT_MEMORY_MB)
+        self.assertGreaterEqual(
+            settings.memory_mb, settings.build_memory_mb + COORDINATOR_MEMORY_MB
+        )
 
     def test_parallel_file_settings_and_explicit_overrides_round_trip(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -74,12 +76,14 @@ class ParallelConfigTests(unittest.TestCase):
 
     def test_build_reservation_leaves_room_for_coordinator_at_exact_boundary(self):
         for build_memory in (128, 1024):
-            total = build_memory + PARENT_MEMORY_MB
+            total = build_memory + COORDINATOR_MEMORY_MB
             with self.subTest(build_memory=build_memory):
                 settings = load_settings(
                     None, {"memory_mb": total, "build_memory_mb": build_memory}
                 )
-                self.assertEqual(settings.memory_mb - settings.build_memory_mb, PARENT_MEMORY_MB)
+                self.assertEqual(
+                    settings.memory_mb - settings.build_memory_mb, COORDINATOR_MEMORY_MB
+                )
                 with self.assertRaises(PreparationError):
                     load_settings(None, {"memory_mb": total - 1, "build_memory_mb": build_memory})
         with self.assertRaisesRegex(PreparationError, "coordinator"):

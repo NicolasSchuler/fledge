@@ -8,9 +8,9 @@ from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 from unittest.mock import patch
 
-from latexprep.bibliography import _Document, _Parser
 from latexprep.bibliography_transform import BibliographyTransformOptions, plan_bibliography
-from latexprep.bibliography_transform_rules import RULE_DEFINITIONS
+from latexprep.bibliography_transform_rules import RULES
+from latexprep.bibtex_syntax import BibDocument, parse_bibtex
 from latexprep.models import Change, Finding, PreparationError, has_blockers
 
 
@@ -43,8 +43,8 @@ class BibliographyTransformTests(unittest.TestCase):
 
     def code(self, rows: list[Finding]) -> str:
         self.assertEqual(len(rows), 1)
-        definition = next(item for item in RULE_DEFINITIONS if item["name"] == rows[0].rule)
-        return str(definition["code"])
+        definition = next(item for item in RULES if item.name == rows[0].rule)
+        return definition.code
 
     def assert_blocked(
         self,
@@ -59,10 +59,9 @@ class BibliographyTransformTests(unittest.TestCase):
         self.assertTrue(has_blockers(rows))
         self.assertIn("no requested transformation", rows[0].next_step or "")
 
-    def parsed(self, text: bytes) -> _Document:
-        document = _Document("result.bib", text.decode("utf-8"))
-        _Parser(document).parse()
-        self.assertTrue(document.valid, document.findings)
+    def parsed(self, text: bytes) -> BibDocument:
+        document = parse_bibtex("result.bib", text.decode("utf-8"))
+        self.assertTrue(document.valid, document.syntax_error)
         return document
 
     def test_disabled_options_are_empty_and_immutable(self) -> None:
@@ -94,11 +93,11 @@ class BibliographyTransformTests(unittest.TestCase):
         self.assertEqual(
             [
                 [(f.name, [(a.kind, a.value) for a in f.atoms]) for f in e.fields]
-                for e in before.entries
+                for e in before.records
             ],
             [
                 [(f.name, [(a.kind, a.value) for a in f.atoms]) for f in e.fields]
-                for e in after.entries
+                for e in after.records
             ],
         )
         path.write_bytes(proposed["references.bib"])
@@ -412,7 +411,7 @@ class BibliographyTransformTests(unittest.TestCase):
 
     def test_resource_limits_and_links_refuse_proposals(self) -> None:
         self.write("references.bib", "@misc{k,title={A}}")
-        with patch("latexprep.bibliography_transform._MAX_TOTAL_BYTES", 5):
+        with patch("latexprep.bibliography_transform.MAX_RESOURCES_TOTAL_BYTES", 5):
             self.assert_blocked(self.plan(format_entries=True), "BIB201")
         link = self.root / "alias.bib"
         link.symlink_to(self.root / "references.bib")

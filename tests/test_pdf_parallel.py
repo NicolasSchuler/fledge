@@ -9,12 +9,15 @@ from dataclasses import asdict, replace
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-from latexprep.check_pipeline import inspect_standalone_pdf
 from latexprep.config import Settings
+from latexprep.job_context import pdf_check_settings
 from latexprep.models import PreparationError, has_blockers
-from latexprep.pdf import PdfOptions, _pair_memory_mb, _read_raster, compare_pdfs, inspect_pdf
 from latexprep.pdf_artwork import PdfArtworkOptions
+from latexprep.pdf_check_pipeline import inspect_standalone_pdf
 from latexprep.pdf_checks import PdfCheckOptions
+from latexprep.pdf_comparison import _pair_memory_mb, compare_pdfs
+from latexprep.pdf_inspection import PdfInspectionOptions, inspect_pdf
+from latexprep.pdf_support import read_rgb_raster
 from latexprep.runtime import CommandResult, ToolRunner
 from latexprep.scheduler import ResourceBudget
 from tests.test_pdf import FakePdfRunner
@@ -100,7 +103,7 @@ class ParallelPdfTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_serial_parallel_and_standalone_findings_are_identical(self) -> None:
         results = []
-        options = PdfOptions(
+        options = PdfInspectionOptions(
             expected_page_width_pt=612,
             expected_page_height_pt=792,
             require_embedded_fonts=True,
@@ -120,7 +123,7 @@ class ParallelPdfTests(unittest.IsolatedAsyncioTestCase):
             results.append(
                 ([asdict(item) for item in inspected], [asdict(item) for item in compared])
             )
-            if budget is None or budget.jobs == 1:
+            if budget is None or budget.cpu_slots == 1:
                 self.assertEqual(runner.peak, 1)
         self.assertEqual(results[0], results[1])
         self.assertEqual(results[1], results[2])
@@ -273,7 +276,7 @@ class ParallelPdfTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("pdftoppm", inspection_tools)
         tools["pdfinfo"]["version"].append("edited report")
-        self.assertNotIn("edited report", runner.tool_versions["pdfinfo"]["version"])
+        self.assertNotIn("edited report", runner.tool_versions["pdfinfo"].version)
         other_tools = next(item.details["tools"] for item in second if item.rule == "compare.tools")
         self.assertNotIn("edited report", other_tools["pdfinfo"]["version"])
 
@@ -295,7 +298,7 @@ class ParallelPdfTests(unittest.IsolatedAsyncioTestCase):
                 self.left,
                 self.root / "inspect",
                 runner,
-                options=PdfOptions(require_embedded_fonts=True),
+                options=PdfInspectionOptions(require_embedded_fonts=True),
                 budget=ResourceBudget(4, 1024),
             )
         )
@@ -456,17 +459,21 @@ class ParallelPdfTests(unittest.IsolatedAsyncioTestCase):
         settings = Settings(
             match_source_pdf_metadata=("title",),
             pdf_checks=PdfCheckOptions(require_embedded_figure_fonts=True),
-            figure_artwork=PdfArtworkOptions(classify_artwork=True),
+            included_figure_artwork=PdfArtworkOptions(classify_artwork=True),
         )
         empty = AsyncMock(return_value=[])
         with (
-            patch("latexprep.check_pipeline.inspect_pdf", new=empty),
-            patch("latexprep.check_pipeline.inspect_pdf_details", new=empty),
-            patch("latexprep.check_pipeline.inspect_pdf_artwork", new=empty),
-            patch("latexprep.check_pipeline.inspect_pdf_structure", new=empty),
+            patch("latexprep.pdf_check_pipeline.inspect_pdf", new=empty),
+            patch("latexprep.pdf_check_pipeline.inspect_pdf_details", new=empty),
+            patch("latexprep.pdf_check_pipeline.inspect_pdf_artwork", new=empty),
+            patch("latexprep.pdf_check_pipeline.inspect_pdf_structure", new=empty),
         ):
             findings = await inspect_standalone_pdf(
-                self.left, self.root / "standalone", ToolRunner(), settings, ResourceBudget(2, 1024)
+                self.left,
+                self.root / "standalone",
+                ToolRunner(),
+                pdf_check_settings(settings),
+                ResourceBudget(2, 1024),
             )
         self.assertEqual(
             [item.rule for item in findings],
@@ -481,7 +488,7 @@ class ParallelPdfTests(unittest.IsolatedAsyncioTestCase):
         raster = self.root / "oversized.ppm"
         raster.write_bytes(b"P6\n2 2\n255\n" + b"\0" * 12)
         with self.assertRaisesRegex(PreparationError, "oversized raster dimensions"):
-            _read_raster(raster, max_pixels=1)
+            read_rgb_raster(raster, max_pixels=1)
 
 
 if __name__ == "__main__":

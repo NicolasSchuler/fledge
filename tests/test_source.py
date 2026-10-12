@@ -10,9 +10,9 @@ from latexprep.source import (
     analyze_selected_sources,
     analyze_sources,
     discover_roots,
-    mask_literals,
     plan_flatten,
 )
+from latexprep.tex_lexer import mask_literals
 
 
 class SourceTests(unittest.TestCase):
@@ -71,8 +71,8 @@ class SourceTests(unittest.TestCase):
 
         with (
             patch.object(Path, "read_bytes", read_selected),
-            patch("latexprep.source.MAX_SOURCE_BYTES", 128),
-            patch("latexprep.source.MAX_TOTAL_SOURCE_BYTES", 128),
+            patch("latexprep.source_graph.MAX_SOURCE_BYTES", 128),
+            patch("latexprep.source_graph.MAX_TOTAL_SOURCE_BYTES", 128),
         ):
             selected = analyze_selected_sources(self.root, "main.tex")
         self.assertTrue(selected.complete, selected.findings)
@@ -85,12 +85,12 @@ class SourceTests(unittest.TestCase):
         inspected = analyze_sources(self.root, "main.tex")
         self.assertTrue(inspected.complete, inspected.findings)
         self.assertIn("other.tex", inspected.roots)
-        self.assertNotIn("source-argument-limit", {item.rule for item in inspected.findings})
+        self.assertNotIn("source.argument_limit", {item.rule for item in inspected.findings})
         flattened = plan_flatten(self.root, "main.tex")
         self.assertIn("other.tex", flattened.mapping)
-        self.assertIn("flatten-multiple-roots", {item.rule for item in flattened.findings})
+        self.assertIn("flatten.multiple_roots", {item.rule for item in flattened.findings})
         self.assertIn(
-            "source-argument-limit",
+            "source.argument_limit",
             {item.details.get("source_rule") for item in flattened.findings},
         )
 
@@ -141,13 +141,13 @@ class SourceTests(unittest.TestCase):
     ) -> None:
         self.write("data/table.csv", "data")
         for command, rule in (
-            (r"\input{\chosen}", "source-dynamic-path"),
-            (r"\input{missing}", "source-missing-dependency"),
-            (r"\customreader{data/table.csv}", "source-custom-path"),
-            (r"\IfFileExists{data/table.csv}{}{}", "source-unsupported-command"),
-            (r"\directlua{require('reader')}", "source-unsupported-command"),
-            (r"\luadirect{require('reader')}", "source-unsupported-command"),
-            (r"\luaexec{require('reader')}", "source-unsupported-command"),
+            (r"\input{\chosen}", "source.dynamic_path"),
+            (r"\input{missing}", "source.missing_dependency"),
+            (r"\customreader{data/table.csv}", "source.custom_path"),
+            (r"\IfFileExists{data/table.csv}{}{}", "source.unsupported_command"),
+            (r"\directlua{require('reader')}", "source.unsupported_command"),
+            (r"\luadirect{require('reader')}", "source.unsupported_command"),
+            (r"\luaexec{require('reader')}", "source.unsupported_command"),
         ):
             with self.subTest(command=command):
                 self.write("main.tex", "\\documentclass{article}\n" + command)
@@ -160,8 +160,8 @@ class SourceTests(unittest.TestCase):
     ) -> None:
         self.write("main.tex", "\\documentclass{article}\n\\input{body}\n")
         for body, rule in (
-            (b"caf\xe9", "source-encoding"),
-            (b"\\input{", "source-argument-limit"),
+            (b"caf\xe9", "source.encoding"),
+            (b"\\input{", "source.argument_limit"),
         ):
             with self.subTest(rule=rule):
                 self.write("body.tex", body)
@@ -173,7 +173,7 @@ class SourceTests(unittest.TestCase):
         (self.root / "helper.sty").symlink_to("actual.sty")
         selected = analyze_selected_sources(self.root, "main.tex")
         self.assertFalse(selected.complete)
-        self.assertIn("source-link", {item.rule for item in selected.findings})
+        self.assertIn("source.link", {item.rule for item in selected.findings})
         missing = analyze_selected_sources(self.root, "missing.tex")
         self.assertFalse(missing.complete)
         self.assertIsNone(missing.main)
@@ -186,7 +186,7 @@ class SourceTests(unittest.TestCase):
                 self.assertTrue(result.complete, result.findings)
                 self.assertEqual(
                     {item.rule for item in result.findings},
-                    {"source-edit-marker", "source-unresolved-reference"},
+                    {"source.edit_marker", "source.unresolved_reference"},
                 )
 
     def test_all_literals_keep_offsets_and_escaped_percent_is_text(self) -> None:
@@ -203,8 +203,8 @@ class SourceTests(unittest.TestCase):
         masked = mask_literals(source)
         self.assertEqual(len(masked), len(source))
         self.assertEqual(
-            [i for i, c in enumerate(source) if c == "\n"],
-            [i for i, c in enumerate(masked) if c == "\n"],
+            [offset for offset, char in enumerate(source) if char == "\n"],
+            [offset for offset, char in enumerate(masked) if char == "\n"],
         )
         self.assertNotIn("\\input", masked)
         self.assertEqual(masked.count("TODO"), 1)
@@ -256,7 +256,7 @@ class SourceTests(unittest.TestCase):
         )
         self.write("images/result.pdf", b"image")
         self.assertIn(
-            "source-missing-dependency", {item.rule for item in analyze_sources(self.root).findings}
+            "source.missing_dependency", {item.rule for item in analyze_sources(self.root).findings}
         )
 
     def test_compilation_cwd_is_not_included_file_parent(self) -> None:
@@ -282,7 +282,7 @@ class SourceTests(unittest.TestCase):
         self.write("fig/result.png", b"png")
         plan = plan_flatten(self.root, "main.tex")
         self.assert_usable(plan)
-        finding = next(item for item in plan.findings if item.rule == "source-ambiguous-dependency")
+        finding = next(item for item in plan.findings if item.rule == "source.ambiguous_dependency")
         self.assertEqual(finding.code, "TEX008")
         self.assertEqual((finding.severity, finding.status), ("warning", "passed"))
         self.assertEqual(finding.details["selected"], "fig/result.pdf")
@@ -302,7 +302,7 @@ class SourceTests(unittest.TestCase):
         self.write("b/result.pdf", b"b")
         plan = plan_flatten(self.root, "main.tex")
         self.assert_usable(plan)
-        finding = next(item for item in plan.findings if item.rule == "source-ambiguous-dependency")
+        finding = next(item for item in plan.findings if item.rule == "source.ambiguous_dependency")
         self.assertEqual(finding.details["selected"], "a/result.pdf")
         self.assertEqual(finding.details["alternatives"], ["b/result.pdf"])
         self.assertIn(b"\\includegraphics{a-result.pdf}", plan.contents["main.tex"])
@@ -326,7 +326,7 @@ class SourceTests(unittest.TestCase):
             {
                 item.details["reference"]: item.details["selected"]
                 for item in plan.findings
-                if item.rule == "source-ambiguous-dependency"
+                if item.rule == "source.ambiguous_dependency"
             },
             {"plot.pdf": "plot.pdf", "body": "body.tex"},
         )
@@ -340,7 +340,7 @@ class SourceTests(unittest.TestCase):
         self.write("a/result.pdf", b"a")
         self.write("b/result.pdf", b"b")
         plan = plan_flatten(self.root, "main.tex")
-        self.assertIn("source-context-ambiguity", {item.rule for item in plan.findings})
+        self.assertIn("source.context_ambiguity", {item.rule for item in plan.findings})
 
     def test_include_and_bibliography_keep_naming_contract(self) -> None:
         self.write(
@@ -379,7 +379,7 @@ class SourceTests(unittest.TestCase):
         self.write("a/helper.sty", "\\ProvidesPackage{helper}")
         self.write("b/helper.sty", "\\ProvidesPackage{helper}")
         plan = plan_flatten(self.root, "main.tex")
-        self.assertIn("flatten-identity-collision", {item.rule for item in plan.findings})
+        self.assertIn("flatten.identity_collision", {item.rule for item in plan.findings})
         self.assertIn("PKG001", {item.code for item in plan.findings})
         self.assertTrue(has_blockers(plan.findings))
 
@@ -400,7 +400,7 @@ class SourceTests(unittest.TestCase):
         self.write("main.tex", "\\documentclass{article}\n\\usepackage{helper}")
         self.write("unused/helper.sty", "\\ProvidesPackage{helper}")
         plan = plan_flatten(self.root, "main.tex")
-        self.assertIn("flatten-system-shadowing", {item.rule for item in plan.findings})
+        self.assertIn("flatten.system_shadowing", {item.rule for item in plan.findings})
         self.assertIn("PKG003", {item.code for item in plan.findings})
 
     def test_main_basename_and_bbl_jobname_are_preserved(self) -> None:
@@ -458,7 +458,7 @@ class SourceTests(unittest.TestCase):
                 self.assertTrue(has_blockers(plan.findings))
                 self.assertTrue(
                     any(
-                        item.rule == "flatten-unsupported-source" and item.line == 2
+                        item.rule == "flatten.unsupported_source" and item.line == 2
                         for item in plan.findings
                     )
                 )
@@ -471,7 +471,7 @@ class SourceTests(unittest.TestCase):
         plan = plan_flatten(self.root, "main.tex")
         self.assertTrue(
             any(
-                item.rule == "flatten-unsupported-source" and item.path == "styles/helper.sty"
+                item.rule == "flatten.unsupported_source" and item.path == "styles/helper.sty"
                 for item in plan.findings
             )
         )
@@ -496,14 +496,14 @@ class SourceTests(unittest.TestCase):
         self.write("body.tex", "\\label{x}")
         result = analyze_sources(self.root)
         rules = [item.rule for item in result.findings]
-        self.assertEqual(rules.count("source-duplicate-label"), 2)
-        self.assertEqual(rules.count("source-edit-marker"), 1)
-        self.assertIn("source-edit-command", rules)
-        self.assertIn("source-unresolved-reference", rules)
+        self.assertEqual(rules.count("source.duplicate_label"), 2)
+        self.assertEqual(rules.count("source.edit_marker"), 1)
+        self.assertIn("source.edit_command", rules)
+        self.assertIn("source.unresolved_reference", rules)
         self.assertEqual(
             {item.code for item in result.findings}, {"TEX001", "TEX002", "TEX003", "TEX004"}
         )
-        self.assertTrue(all(item.evidence == "heuristic" for item in result.findings))
+        self.assertTrue(all(item.evidence_kind == "heuristic" for item in result.findings))
         self.assertFalse(has_blockers(result.findings))
         self.write("body.tex", "\\label{body}")
         self.write("main.tex", "\\documentclass{article}\\input{body}\\ref{body}")
@@ -525,7 +525,7 @@ class SourceTests(unittest.TestCase):
         self.write("main.tex", "\\documentclass{article}\n\\input{Body}")
         self.write("body.tex", "Text")
         result = analyze_sources(self.root)
-        self.assertIn("source-case-mismatch", {item.rule for item in result.findings})
+        self.assertIn("source.case_mismatch", {item.rule for item in result.findings})
         self.assertIn("TEX007", {item.code for item in result.findings})
 
     def test_comments_between_command_and_argument_are_preserved(self) -> None:
@@ -574,11 +574,11 @@ class SourceTests(unittest.TestCase):
         self.write("main.tex", "\\documentclass{article}\n\\input{body}")
         self.write("body.tex", b"caf\xe9")
         plan = plan_flatten(self.root, "main.tex")
-        self.assertIn("source-encoding", {item.rule for item in plan.findings})
+        self.assertIn("source.encoding", {item.rule for item in plan.findings})
         self.assertTrue(has_blockers(plan.findings))
         self.write("body.tex", b"x" * (8 * 1024 * 1024 + 1))
         plan = plan_flatten(self.root, "main.tex")
-        self.assertIn("source-size-limit", {item.rule for item in plan.findings})
+        self.assertIn("source.size_limit", {item.rule for item in plan.findings})
         self.assertTrue(has_blockers(plan.findings))
 
     def test_invalid_main_does_not_read_external_file(self) -> None:
@@ -598,7 +598,7 @@ class SourceTests(unittest.TestCase):
             "PKG004", {item.code for item in plan_flatten(self.root, "main.tex").findings}
         )
         self.assertIn(
-            "flatten-companion-identity",
+            "flatten.companion_identity",
             {item.rule for item in plan_flatten(self.root, "main.tex").findings},
         )
 
@@ -645,7 +645,7 @@ class SourceTests(unittest.TestCase):
                     "\\documentclass{article}\n\\mymacro{x}" + separator + "{data/table.csv}\n",
                 )
                 rules = {item.rule for item in analyze_sources(self.root, "main.tex").findings}
-                self.assertEqual("source-custom-path" in rules, expected)
+                self.assertEqual("source.custom_path" in rules, expected)
 
     def test_biblatex_bbl_version_guard_is_not_a_file_reference(self) -> None:
         self.write(
@@ -662,13 +662,13 @@ class SourceTests(unittest.TestCase):
             "  {}\n\\endgroup\n",
         )
         rules = {item.rule for item in analyze_sources(self.root, "paper/main.tex").findings}
-        self.assertNotIn("source-custom-path", rules)
+        self.assertNotIn("source.custom_path", rules)
         plan = plan_flatten(self.root, "paper/main.tex")
         self.assert_usable(plan)
         self.assertEqual(plan.mapping["paper/main.bbl"], "main.bbl")
         self.write("paper/main.tex", "\\documentclass{article}\n\\mymacro{refs.bib}\n")
         rules = {item.rule for item in analyze_sources(self.root, "paper/main.tex").findings}
-        self.assertIn("source-custom-path", rules)
+        self.assertIn("source.custom_path", rules)
 
     def test_conditional_uncertainty_covers_only_enclosed_project_references(self) -> None:
         self.write(
@@ -683,7 +683,7 @@ class SourceTests(unittest.TestCase):
         findings = [
             item
             for item in analyze_sources(self.root, "main.tex").findings
-            if item.rule == "source-conditional-dependency"
+            if item.rule == "source.conditional_dependency"
         ]
         self.assertEqual([(item.path, item.line) for item in findings], [("main.tex", 5)])
         self.assertTrue(findings[0].suggestion.startswith("Make the dependency unconditional"))
@@ -707,7 +707,7 @@ class SourceTests(unittest.TestCase):
                 self.write("main.tex", "\\documentclass{article}\n\\input{" + argument)
                 plan = plan_flatten(self.root, "main.tex")
                 self.assertTrue(has_blockers(plan.findings))
-                self.assertIn("source-argument-limit", {item.rule for item in plan.findings})
+                self.assertIn("source.argument_limit", {item.rule for item in plan.findings})
 
     def test_long_unicode_collisions_keep_counter_and_byte_limit(self) -> None:
         self.write("main.tex", "\\documentclass{article}")
@@ -729,7 +729,7 @@ class SourceTests(unittest.TestCase):
     def test_subfiles_parent_path_option_is_explicitly_unsupported(self) -> None:
         self.write("chapter.tex", "\\documentclass[../main.tex]{subfiles}\nText")
         result = plan_flatten(self.root, "chapter.tex")
-        self.assertIn("source-path-option", {item.rule for item in result.findings})
+        self.assertIn("source.path_option", {item.rule for item in result.findings})
         self.assertTrue(has_blockers(result.findings))
 
     def test_deep_input_chains_stop_before_python_recursion_limit(self) -> None:
@@ -738,7 +738,7 @@ class SourceTests(unittest.TestCase):
             self.write(f"part{index}.tex", "\\input{part" + str(index + 1) + "}")
         self.write("part130.tex", "End")
         result = plan_flatten(self.root, "main.tex")
-        self.assertIn("source-input-depth", {item.rule for item in result.findings})
+        self.assertIn("source.input_depth", {item.rule for item in result.findings})
         self.assertTrue(has_blockers(result.findings))
 
     def test_truncated_unicode_names_keep_distinct_collision_suffixes(self) -> None:
@@ -800,7 +800,7 @@ class SourceTests(unittest.TestCase):
         self.assert_usable(shadowed)
         self.assertIn(b"\\input{paper-inside.tex}", shadowed.contents["paper/chapters/body.tex"])
         finding = next(
-            item for item in shadowed.findings if item.rule == "source-ambiguous-dependency"
+            item for item in shadowed.findings if item.rule == "source.ambiguous_dependency"
         )
         self.assertEqual(finding.details["selected"], "paper/inside.tex")
 
@@ -913,7 +913,7 @@ class SourceTests(unittest.TestCase):
 
     def test_imported_metadata_is_visible_and_subfile_content_is_explicitly_uncertain(self) -> None:
         from latexprep.manuscript import ManuscriptOptions, check_manuscript
-        from latexprep.manuscript_checks import ManuscriptCheckOptions, check_manuscript_details
+        from latexprep.manuscript_checks import ManuscriptCheckOptions, check_manuscript_policies
 
         self.write("main.tex", "\\documentclass{article}\n\\import{parts/}{metadata}\n")
         self.write(
@@ -924,7 +924,7 @@ class SourceTests(unittest.TestCase):
         self.assertEqual(
             next(f for f in findings if f.rule == "manuscript.abstract_required").status, "passed"
         )
-        detailed = check_manuscript_details(
+        detailed = check_manuscript_policies(
             self.root, "main.tex", ManuscriptCheckOptions(required_metadata=("title",))
         )
         self.assertFalse(has_blockers(detailed))

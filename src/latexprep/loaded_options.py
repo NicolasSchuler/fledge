@@ -7,132 +7,60 @@ commands.  Recorder agreement is required before reporting a complete inventory.
 
 from __future__ import annotations
 
+import functools
 import os
 import re
 import secrets
 import stat
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, replace
+from datetime import date
+from importlib import resources
 from pathlib import Path
 
-from .models import Finding, PreparationError
+from .build_dependencies import (
+    PACKAGE_FILENAME,
+    LoadedPackage,
+    PackageOrigin,
+    parse_declared_date,
+)
+from .file_safety import MIB
+from .models import Engine, Finding, PreparationError
 
 _MAX_PACKAGES = 2048
 _MAX_FIELD_UNITS = 16_384
-_MAX_EVIDENCE_BYTES = 2_097_152
-_MAX_MAIN_BYTES = 8_388_608
-_PACKAGE = re.compile(r"[A-Za-z0-9_.-]+\.(?:cls|sty)")
-
-# Application-owned TeX only.  The substitutions below are generated lowercase
-# hexadecimal, never source text or paths.  Detokenization expands each register
-# once, not the commands held in its option values; transport is native character
-# units encoded as UTF-32BE hex so braces, pipes and newlines cannot forge rows.
-# The kernel clears @filelist at begin-document unless listfiles was requested.
-# File hooks retain our own bounded names without changing that user setting;
-# the values themselves are still read only after document execution.
-_HOOK = r"""\ifdefined\ExplSyntaxOn\else\expandafter\endinput\fi
-\ifdefined\AddToHook\else\expandafter\endinput\fi
-\ifdefined\CurrentFileUsed\else\expandafter\endinput\fi
-\ExplSyntaxOn
-\iow_new:N \g__latexprep_options_stream
-\str_new:N \l__latexprep_options_value_str
-\str_new:N \l__latexprep_options_encoded_str
-\seq_new:N \g__latexprep_options_files_seq
-\bool_new:N \g__latexprep_options_unsupported_bool
-\int_new:N \l__latexprep_options_units_int
-\iow_open:Nn \g__latexprep_options_stream { latexprep-loaded-options-TOKEN.lpo }
-\iow_now:Nn \g__latexprep_options_stream { START|TOKEN }
-\sys_if_engine_pdftex:TF
-  { \iow_now:Nn \g__latexprep_options_stream { ENGINE|pdflatex } }
-  {
-    \sys_if_engine_xetex:TF
-      { \iow_now:Nn \g__latexprep_options_stream { ENGINE|xelatex } }
-      {
-        \sys_if_engine_luatex:TF
-          { \iow_now:Nn \g__latexprep_options_stream { ENGINE|lualatex } }
-          { \iow_now:Nn \g__latexprep_options_stream { ENGINE|unsupported } }
-      }
-  }
-\cs_new_protected:Npn \__latexprep_options_file:
-  {
-    \group_begin:
-    \str_set:Nx \l__latexprep_options_value_str { \tl_to_str:V \CurrentFileUsed }
-    \exp_args:NnV \regex_match:nnT { \.(cls|sty)\Z } \l__latexprep_options_value_str
-      {
-        \exp_args:NnV \regex_match:nnTF { \A [A-Za-z0-9_.-]+ \.(cls|sty)\Z }
-          \l__latexprep_options_value_str
-          {
-            \seq_if_in:NVF \g__latexprep_options_files_seq \l__latexprep_options_value_str
-              {
-                \int_compare:nNnTF { \seq_count:N \g__latexprep_options_files_seq } < { 2048 }
-                  { \seq_gput_right:NV \g__latexprep_options_files_seq
-                      \l__latexprep_options_value_str }
-                  { \bool_gset_true:N \g__latexprep_options_unsupported_bool }
-              }
-          }
-          { \bool_gset_true:N \g__latexprep_options_unsupported_bool }
-      }
-    \group_end:
-  }
-\cs_new_protected:Npn \__latexprep_options_field:nn #1#2
-  {
-    \cs_if_exist:cTF {#2}
-      {
-        \exp_args:Nc \token_if_macro:NTF {#2}
-          {
-            \tl_if_empty:eTF { \exp_args:Nc \cs_parameter_spec:N {#2} }
-              {
-                \str_set:Nx \l__latexprep_options_value_str { \tl_to_str:v {#2} }
-                \int_add:Nn \l__latexprep_options_units_int
-                  { \str_count:N \l__latexprep_options_value_str }
-                \bool_lazy_or:nnTF
-                  { \int_compare_p:nNn
-                      { \str_count:N \l__latexprep_options_value_str } > { 16384 } }
-                  { \int_compare_p:nNn { \l__latexprep_options_units_int } > { 200000 } }
-                  { \iow_now:Nn \g__latexprep_options_stream { #1|! } }
-                  {
-                    \exp_args:NNV \str_set_convert:Nnnn
-                      \l__latexprep_options_encoded_str
-                      \l__latexprep_options_value_str { } { utf32be/hex }
-                    \iow_now:Nx \g__latexprep_options_stream
-                      { #1|\l__latexprep_options_encoded_str }
-                  }
-              }
-              { \iow_now:Nn \g__latexprep_options_stream { #1|! } }
-          }
-          { \iow_now:Nn \g__latexprep_options_stream { #1|! } }
-      }
-      { \iow_now:Nn \g__latexprep_options_stream { #1|! } }
-  }
-\cs_new_protected:Npn \__latexprep_options_finish:
-  {
-    \group_begin:
-    \int_zero:N \l__latexprep_options_units_int
-    \__latexprep_options_field:nn { FORMAT } { fmtversion }
-    \__latexprep_options_field:nn { GLOBAL } { @classoptionslist }
-    \__latexprep_options_field:nn { UNUSED } { @unusedoptionlist }
-    \bool_if:NT \g__latexprep_options_unsupported_bool
-      {
-        \iow_now:Nn \g__latexprep_options_stream
-          { UNSUPPORTED|package-filename-or-count }
-      }
-    \seq_map_inline:Nn \g__latexprep_options_files_seq
-      {
-        \iow_now:Nn \g__latexprep_options_stream { PACKAGE|##1 }
-        \__latexprep_options_field:nn { OPTIONS } { opt@##1 }
-        \__latexprep_options_field:nn { RAW } { @raw@opt@##1 }
-      }
-    \iow_now:Nn \g__latexprep_options_stream { END|TOKEN }
-    \iow_close:N \g__latexprep_options_stream
-    \group_end:
-  }
-\AddToHook{file/after}[latexprep-loaded-options]{\__latexprep_options_file:}
-\AddToHook{enddocument/end}[latexprep-loaded-options]{\__latexprep_options_finish:}
-\ExplSyntaxOff
-\endinput
-"""
+_MAX_EVIDENCE_BYTES = 2 * MIB
+_MAX_MAIN_BYTES = 8 * MIB
+# The oldest kernel whose post-document option registers the hook reads.
+_MINIMUM_FORMAT_DATE = date(2020, 10, 1)
+_HOOK_RESOURCE = "loaded_options_hook.tex"
+_UPPERCASE_HEX = re.compile(r"[0-9A-F]*")
+_HOOK_ARGUMENT = re.compile(r"(?:\.\./)+latexprep-loaded-options-[0-9a-f]{32}\.tex")
+_METADATA_REORDERED = "Kernel option metadata is incomplete or reordered"
+_VALUES_REORDERED = "Kernel package option values are absent or reordered"
+_SCOPE = (
+    "Post-document detokenized kernel opt@ and raw option lists; "
+    "global class options are separate. Options include explicit and forwarded "
+    "kernel state, not every consumed global option, package defaults, token "
+    "category codes, or later setup commands. File origins come from the recorder."
+)
 
 
-@dataclass(frozen=True)
+@functools.cache
+def _hook_template() -> str:
+    """The hook in loaded_options_hook.tex, application-owned TeX only.
+
+    The TOKEN substitutions are generated lowercase hexadecimal, never source
+    text or paths. Detokenization expands each register once, not the commands
+    held in its option values; transport is native character units encoded as
+    UTF-32BE hex so braces, pipes and newlines cannot forge rows. The kernel
+    clears @filelist at begin-document unless listfiles was requested. File hooks
+    retain our own bounded names without changing that user setting; the values
+    themselves are still read only after document execution.
+    """
+    return resources.files("latexprep").joinpath(_HOOK_RESOURCE).read_text(encoding="ascii")
+
+
+@dataclass(frozen=True, slots=True)
 class LoadedOptionsProbe:
     token: str
     hook: Path
@@ -150,12 +78,12 @@ def stage_loaded_options(project: Path, main: str, work: Path) -> LoadedOptionsP
     original = main_path.read_bytes()
     token = secrets.token_hex(16)
     hook = work / f"latexprep-loaded-options-{token}.tex"
-    hook_bytes = _HOOK.replace("TOKEN", token).encode("ascii")
+    hook_bytes = _hook_template().replace("TOKEN", token).encode("ascii")
     hook.write_bytes(hook_bytes)
     relative_hook = Path(os.path.relpath(hook, main_path.parent)).as_posix()
     # Workspaces and all path components from main are runtime-validated.  Only
     # the generated basename and ../ segments enter this TeX argument.
-    if not re.fullmatch(r"(?:\.\./)+latexprep-loaded-options-[0-9a-f]{32}\.tex", relative_hook):
+    if not _HOOK_ARGUMENT.fullmatch(relative_hook):
         raise PreparationError("Loaded-option hook is not outside the disposable project")
     prefix = (r"\input{" + relative_hook + r"}\relax ").encode("ascii")
     # Preserve a UTF-8 BOM and every original newline, including diagnostics on
@@ -168,81 +96,143 @@ def stage_loaded_options(project: Path, main: str, work: Path) -> LoadedOptionsP
     )
 
 
-def _native_string(value: str, engine: str) -> str:
-    if len(value) > 8 * _MAX_FIELD_UNITS or len(value) % 8 or re.search(r"[^0-9A-F]", value):
+@dataclass(frozen=True, slots=True)
+class PackageOptions:
+    """One class or package's kernel option lists, with its recorder origin once joined."""
+
+    name: str
+    options: str
+    raw_options: str
+    path: str | None = None
+    origin: PackageOrigin | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class KernelOptions:
+    """Post-document kernel option registers of one build."""
+
+    engine: Engine
+    format_date: str
+    global_class_options: str
+    unused_options: str
+    packages: tuple[PackageOptions, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class LoadedOptionsEvidence:
+    """Kernel options joined with recorder origins, or why they are unavailable."""
+
+    kernel: KernelOptions | None = None
+    uncertainty: str = ""
+
+    @property
+    def complete(self) -> bool:
+        return self.kernel is not None
+
+    def details(self) -> dict[str, object]:
+        kernel = self.kernel
+        if kernel is None:
+            return {"coverage_complete": False, "uncertainty": [self.uncertainty]}
+        return {
+            "format_date": kernel.format_date,
+            "global_class_options": kernel.global_class_options,
+            "unused_options": kernel.unused_options,
+            "packages": [asdict(package) for package in kernel.packages],
+            "coverage_complete": True,
+            "engine": kernel.engine,
+            "scope": _SCOPE,
+        }
+
+    def finding(self, main: str) -> Finding:
+        if self.kernel is None:
+            return Finding(
+                "build.loaded_options",
+                f"Actual loaded class/package options are inconclusive: {self.uncertainty}.",
+                severity="error",
+                status="inconclusive",
+                path=main or None,
+                details=self.details(),
+            )
+        return Finding(
+            "build.loaded_options",
+            f"Recorded post-document kernel options for {len(self.kernel.packages)} "
+            "loaded classes/packages.",
+            severity="info",
+            status="passed",
+            path=main,
+            details=self.details(),
+        )
+
+
+def _native_string(value: str, engine: Engine) -> str:
+    if len(value) > 8 * _MAX_FIELD_UNITS or len(value) % 8 or not _UPPERCASE_HEX.fullmatch(value):
         raise PreparationError("Option field is unavailable, oversized or malformed")
     units = [int(value[index : index + 8], 16) for index in range(0, len(value), 8)]
-    try:
-        if engine == "pdflatex":
+    unsupported = PreparationError("Option field contains unsupported native character units")
+    if engine == "pdflatex":
+        # pdfTeX reports bytes; together they must form UTF-8 text.
+        try:
             return bytes(units).decode("utf-8")
-        return "".join(chr(unit) for unit in units).encode("utf-8").decode("utf-8")
-    except (ValueError, UnicodeError) as error:
-        raise PreparationError(
-            "Option field contains unsupported native character units"
-        ) from error
+        except (ValueError, UnicodeError) as error:
+            raise unsupported from error
+    # XeTeX and LuaTeX report code points; surrogates and values beyond Unicode
+    # are not characters.
+    if any(unit > 0x10FFFF or 0xD800 <= unit <= 0xDFFF for unit in units):
+        raise unsupported
+    return "".join(map(chr, units))
 
 
-def _parse_options(text: str, token: str, engine: str) -> dict[str, object]:
+def _tagged_value(row: str, tag: str, engine: Engine, reordered: str) -> str:
+    if not row.startswith(tag + "|"):
+        raise PreparationError(reordered)
+    return _native_string(row.removeprefix(tag + "|"), engine)
+
+
+def _parse_options(text: str, token: str, engine: Engine) -> KernelOptions:
     rows = text.splitlines()
     if not rows or rows[0] != f"START|{token}" or rows[-1] != f"END|{token}":
         raise PreparationError("Complete current-build option start/end markers are absent")
     if len(rows) < 6 or rows[1] != f"ENGINE|{engine}":
         raise PreparationError("Option instrumentation used an unsupported or different engine")
-    result: dict[str, object] = {}
-    for index, (tag, field) in enumerate(
-        (
-            ("FORMAT", "format_date"),
-            ("GLOBAL", "global_class_options"),
-            ("UNUSED", "unused_options"),
-        ),
-        2,
-    ):
-        if not rows[index].startswith(tag + "|"):
-            raise PreparationError("Kernel option metadata is incomplete or reordered")
-        result[field] = _native_string(rows[index][len(tag) + 1 :], engine)
-    if (
-        not re.fullmatch(r"20\d{2}[-/]\d{2}[-/]\d{2}", str(result["format_date"]))
-        or str(result["format_date"]).replace("/", "-") < "2020-10-01"
-    ):
+    records = iter(rows[2:-1])
+    format_date = _tagged_value(next(records), "FORMAT", engine, _METADATA_REORDERED)
+    global_options = _tagged_value(next(records), "GLOBAL", engine, _METADATA_REORDERED)
+    unused_options = _tagged_value(next(records), "UNUSED", engine, _METADATA_REORDERED)
+    declared = parse_declared_date(format_date)
+    if declared is None or declared < _MINIMUM_FORMAT_DATE:
         raise PreparationError("This LaTeX format does not establish supported kernel option state")
-    records: list[dict[str, object]] = []
+    packages: list[PackageOptions] = []
     names: set[str] = set()
-    index = 5
-    while index < len(rows) - 1:
-        if rows[index].startswith("UNSUPPORTED|"):
-            raise PreparationError(f"Unsupported option instrumentation: {rows[index][12:200]}")
-        name = rows[index].removeprefix("PACKAGE|")
+    for row in records:
+        if row.startswith("UNSUPPORTED|"):
+            reason = row[:200].removeprefix("UNSUPPORTED|")
+            raise PreparationError(f"Unsupported option instrumentation: {reason}")
+        name = row.removeprefix("PACKAGE|")
+        options, raw_options = next(records, None), next(records, None)
         if (
-            not rows[index].startswith("PACKAGE|")
-            or not _PACKAGE.fullmatch(name)
+            not row.startswith("PACKAGE|")
+            or not PACKAGE_FILENAME.fullmatch(name)
             or name in names
             or len(names) >= _MAX_PACKAGES
-            or index + 3 > len(rows) - 1
+            or options is None
+            or raw_options is None
         ):
             raise PreparationError("Kernel package option records are invalid or duplicated")
         names.add(name)
-        record: dict[str, object] = {"name": name}
-        for shift, tag, key in ((1, "OPTIONS", "options"), (2, "RAW", "raw_options")):
-            if not rows[index + shift].startswith(tag + "|"):
-                raise PreparationError("Kernel package option values are absent or reordered")
-            record[key] = _native_string(rows[index + shift][len(tag) + 1 :], engine)
-        records.append(record)
-        index += 3
+        packages.append(
+            PackageOptions(
+                name,
+                _tagged_value(options, "OPTIONS", engine, _VALUES_REORDERED),
+                _tagged_value(raw_options, "RAW", engine, _VALUES_REORDERED),
+            )
+        )
     if not any(name.endswith(".cls") for name in names):
         raise PreparationError("No loaded document class was established by the kernel hook")
-    result["packages"] = records
-    return result
+    return KernelOptions(engine, format_date, global_options, unused_options, tuple(packages))
 
 
 def loaded_options_unavailable(reason: str, main: str) -> Finding:
-    return Finding(
-        "build.loaded_options",
-        f"Actual loaded class/package options are inconclusive: {reason}.",
-        "error",
-        "inconclusive",
-        path=main or None,
-        details={"coverage_complete": False, "uncertainty": [reason]},
-    )
+    return LoadedOptionsEvidence(uncertainty=reason).finding(main)
 
 
 def _unchanged_regular_file(path: Path, expected: bytes) -> bool:
@@ -256,15 +246,14 @@ def _unchanged_regular_file(path: Path, expected: bytes) -> bool:
 
 def collect_loaded_options(
     probe: LoadedOptionsProbe,
-    packages: list[dict[str, str | None]],
+    packages: list[LoadedPackage],
     recorder_inputs: set[Path],
     *,
-    main: str,
-    engine: str,
+    engine: Engine,
     recorder_complete: bool,
     build_complete: bool,
     max_bytes: int,
-) -> Finding:
+) -> LoadedOptionsEvidence:
     """Require fresh complete evidence and a one-to-one recorder/kernel graph."""
     try:
         if not build_complete or not recorder_complete:
@@ -278,42 +267,20 @@ def collect_loaded_options(
         info = probe.sidecar.lstat()
         if not stat.S_ISREG(info.st_mode) or info.st_size > min(max_bytes, _MAX_EVIDENCE_BYTES):
             raise PreparationError("Option evidence is not a bounded regular output file")
-        data = _parse_options(probe.sidecar.read_text(encoding="ascii"), probe.token, engine)
-        recorded = {item["name"]: item for item in packages}
-        records = data["packages"]
-        assert isinstance(records, list)
-        observed = {item["name"] for item in records}
+        kernel = _parse_options(probe.sidecar.read_text(encoding="ascii"), probe.token, engine)
+        recorded = {package.name: package for package in packages}
         if len(recorded) != len(packages):
             raise PreparationError("Multiple recorder paths make a package origin ambiguous")
-        if observed != set(recorded):
+        if {item.name for item in kernel.packages} != set(recorded):
             raise PreparationError("Kernel class/package graph does not match the final recorder")
-        for record in records:
-            origin = recorded[record["name"]]
-            if origin.get("origin") not in {"project", "toolchain"} or not origin.get("path"):
-                raise PreparationError("A loaded package lacks an established recorder origin")
-            record.update({"path": origin["path"], "origin": origin["origin"]})
-        unresolved = [record["name"] for record in records if "\\" in str(record["options"])]
-        if unresolved or "\\" in str(data["global_class_options"]):
+        joined = tuple(
+            replace(item, path=recorded[item.name].path, origin=recorded[item.name].origin)
+            for item in kernel.packages
+        )
+        if any("\\" in item.options for item in joined) or "\\" in kernel.global_class_options:
             raise PreparationError(
                 "Unexpanded control sequences remain in normalized kernel options"
             )
-        data.update(
-            {
-                "coverage_complete": True,
-                "engine": engine,
-                "scope": "Post-document detokenized kernel opt@ and raw option lists; "
-                "global class options are separate. Options include explicit and forwarded "
-                "kernel state, not every consumed global option, package defaults, token "
-                "category codes, or later setup commands. File origins come from the recorder.",
-            }
-        )
-        return Finding(
-            "build.loaded_options",
-            f"Recorded post-document kernel options for {len(records)} loaded classes/packages.",
-            "info",
-            "passed",
-            path=main,
-            details=data,
-        )
+        return LoadedOptionsEvidence(replace(kernel, packages=joined))
     except (OSError, UnicodeError, PreparationError) as error:
-        return loaded_options_unavailable(str(error), main)
+        return LoadedOptionsEvidence(uncertainty=str(error))

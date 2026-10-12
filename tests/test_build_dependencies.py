@@ -4,7 +4,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from latexprep.build_dependencies import collect_submission_dependencies
+from latexprep.build_dependencies import collect_submission_dependencies, read_recorder_trace
+from latexprep.models import PreparationError
 
 
 def rule(
@@ -42,7 +43,6 @@ class SubmissionDependenciesTests(unittest.TestCase):
         self.pdf = "../../output/main.pdf"
         self.fls = self.output / "main.fls"
         self.fdb = self.output / "main.fdb_latexmk"
-        self.observed: set[Path] = set()
         self.evidence()
 
     def original(self, name: str) -> None:
@@ -61,7 +61,6 @@ class SubmissionDependenciesTests(unittest.TestCase):
         producers: dict[str, str] | None = None,
     ) -> None:
         names = ("main.tex", *inputs)
-        self.observed = {(self.cwd / name).resolve() for name in names}
         self.fls.write_text(
             f"PWD {self.cwd}\n"
             + "".join(f"INPUT {name}\n" for name in names)
@@ -88,7 +87,7 @@ class SubmissionDependenciesTests(unittest.TestCase):
             output=self.output,
             main="article/main.tex",
             engine="pdflatex",
-            recorder_inputs=self.observed,
+            recorder=read_recorder_trace(self.fls, self.output, self.cwd, max_bytes),
             recorder_complete=complete,
             resource_roots=(self.toolchain,),
             max_bytes=max_bytes,
@@ -191,10 +190,6 @@ class SubmissionDependenciesTests(unittest.TestCase):
                 target = root / "article/data.dat"
                 target.unlink()
                 target.symlink_to(root / "article/main.tex")
-                self.observed = {
-                    (self.cwd / "main.tex").resolve(),
-                    (self.cwd / "data.dat").resolve(),
-                }
                 self.assert_incomplete("unsafe")
                 target.unlink()
                 target.write_text("restored")
@@ -257,9 +252,17 @@ class SubmissionDependenciesTests(unittest.TestCase):
         self.assert_incomplete()
         self.fls.write_text(valid)
         self.assertIsNone(self.collect(complete=False).inputs)
-        self.assertIsNone(self.collect(max_bytes=1).inputs)
+        # An oversized, missing or foreign recorder is not a trace at all.
+        with self.assertRaisesRegex(PreparationError, "size limit"):
+            read_recorder_trace(self.fls, self.output, self.cwd, 1)
+        elsewhere = self.root / "recorder"
+        elsewhere.write_text(valid)
         self.fls.unlink()
-        self.assert_incomplete("missing")
+        with self.assertRaisesRegex(PreparationError, "missing"):
+            read_recorder_trace(self.fls, self.output, self.cwd, 2_097_152)
+        self.fls.symlink_to(elsewhere)
+        with self.assertRaisesRegex(PreparationError, "owned regular"):
+            read_recorder_trace(self.fls, self.output, self.cwd, 2_097_152)
 
     def test_oversized_database_and_path_are_rejected(self):
         self.fdb.write_text(self.fdb.read_text() + " " * 3000 + "\n")

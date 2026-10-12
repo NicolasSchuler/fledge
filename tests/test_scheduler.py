@@ -4,7 +4,7 @@ import asyncio
 import unittest
 
 from latexprep.models import PreparationError
-from latexprep.scheduler import Scheduler, Task
+from latexprep.scheduler import ResourceBudget, Scheduler, Task
 
 
 class SchedulerTests(unittest.IsolatedAsyncioTestCase):
@@ -23,9 +23,9 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
             return name
 
         tasks = [Task(str(i), lambda i=i: worker(str(i)), memory_mb=64) for i in range(5)]
-        concurrent = await Scheduler(3, 128).execute(tasks)
+        concurrent = await Scheduler(ResourceBudget(3, 128)).execute(tasks)
         self.assertEqual(peak, 2)
-        serial = await Scheduler(1, 128).execute(tasks)
+        serial = await Scheduler(ResourceBudget(1, 128)).execute(tasks)
         self.assertEqual(
             [(name, result.value) for name, result in serial.items()],
             [(name, result.value) for name, result in concurrent.items()],
@@ -38,11 +38,11 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
         async def succeed():
             return "diagnostics"
 
-        results = await Scheduler(2, 128).execute(
+        results = await Scheduler(ResourceBudget(2, 128)).execute(
             [
                 Task("build", fail),
-                Task("pdf", succeed, requires=("build",)),
-                Task("report", succeed, after=("build", "pdf")),
+                Task("pdf", succeed, needs_success_of=("build",)),
+                Task("report", succeed, waits_for=("build", "pdf")),
                 Task("source", succeed),
             ]
         )
@@ -60,7 +60,7 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
         async def fail():
             raise OSError
 
-        results = await Scheduler(1, 128).execute([Task("build", fail)])
+        results = await Scheduler(ResourceBudget(1, 128)).execute([Task("build", fail)])
         self.assertEqual(results["build"].status, "failed")
         self.assertEqual(results["build"].error, "OSError: ")
 
@@ -69,13 +69,16 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
             return None
 
         for tasks in [
-            [Task("a", nothing, requires=("missing",))],
-            [Task("a", nothing, requires=("b",)), Task("b", nothing, requires=("a",))],
+            [Task("a", nothing, needs_success_of=("missing",))],
+            [
+                Task("a", nothing, needs_success_of=("b",)),
+                Task("b", nothing, needs_success_of=("a",)),
+            ],
             [Task("a", nothing, memory_mb=200)],
             [Task("a", nothing), Task("a", nothing)],
         ]:
             with self.subTest(tasks=tasks), self.assertRaises(PreparationError):
-                await Scheduler(1, 128).execute(tasks)
+                await Scheduler(ResourceBudget(1, 128)).execute(tasks)
 
     async def test_cancellation_stops_active_work_and_keeps_queued_work_unstarted(self):
         started = asyncio.Event()
@@ -94,7 +97,9 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
             queued_started = True
 
         execution = asyncio.create_task(
-            Scheduler(1, 128).execute([Task("active", long_running), Task("queued", queued)])
+            Scheduler(ResourceBudget(1, 128)).execute(
+                [Task("active", long_running), Task("queued", queued)]
+            )
         )
         await started.wait()
         execution.cancel()

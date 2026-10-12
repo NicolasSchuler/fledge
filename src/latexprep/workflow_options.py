@@ -2,15 +2,12 @@
 
 from __future__ import annotations
 
-import fnmatch
 import math
 import re
-import shutil
 from dataclasses import dataclass, field
-from pathlib import Path, PurePosixPath
+from pathlib import PurePosixPath
 
-from .models import PreparationError
-from .scheduler import cancellation_point
+from .models import ENGINES, Engine, PreparationError
 
 
 @dataclass(frozen=True)
@@ -64,7 +61,7 @@ class DocumentOptions:
     main: str
     source_directory: str = "."
     include: tuple[str, ...] = ()
-    engine: str | None = None
+    engine: Engine | None = None
     reference_pdf: str | None = None
 
     def __post_init__(self) -> None:
@@ -82,7 +79,7 @@ class DocumentOptions:
             raise PreparationError("Document include must be a tuple of unique relative patterns")
         for pattern in self.include:
             _relative(pattern, "Document include pattern")
-        if self.engine not in {None, "pdflatex", "xelatex", "lualatex"}:
+        if self.engine is not None and self.engine not in ENGINES:
             raise PreparationError("Unsupported document engine")
         if self.reference_pdf is not None and (
             not isinstance(self.reference_pdf, str) or not self.reference_pdf.strip()
@@ -108,46 +105,3 @@ class WorkflowOptions:
         names = [document.name.casefold() for document in self.documents]
         if len(set(names)) != len(names):
             raise PreparationError("Document names must be unique, ignoring case")
-
-
-def stage_document(snapshot: Path, destination: Path, document: DocumentOptions) -> Path:
-    """Materialize one explicit file selection from an already validated import."""
-    source = snapshot / document.source_directory
-    if (
-        not source.is_dir()
-        or source.is_symlink()
-        or not source.resolve().is_relative_to(snapshot.resolve())
-    ):
-        raise PreparationError(f"Missing or external source_directory for document {document.name}")
-    files = sorted(path for path in source.rglob("*") if path.is_file() or path.is_symlink())
-    matched: set[str] = set()
-    selected: list[tuple[Path, str]] = []
-    for path in files:
-        cancellation_point()
-        relative = path.relative_to(source).as_posix()
-        patterns = {
-            pattern for pattern in document.include if fnmatch.fnmatchcase(relative, pattern)
-        }
-        if document.include and not patterns:
-            continue
-        if path.is_symlink() or not path.resolve().is_relative_to(source.resolve()):
-            raise PreparationError(f"Document {document.name} contains an unsafe input")
-        matched.update(patterns)
-        selected.append((path, relative))
-    missing = set(document.include) - matched
-    if missing:
-        raise PreparationError(
-            f"Document {document.name} include patterns matched no files: "
-            f"{', '.join(sorted(missing))}"
-        )
-    if document.main not in {relative for _, relative in selected}:
-        raise PreparationError(
-            f"Document {document.name} does not include its main file {document.main}"
-        )
-    destination.mkdir(parents=True)
-    for path, relative in selected:
-        cancellation_point()
-        target = destination / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(path, target)
-    return destination

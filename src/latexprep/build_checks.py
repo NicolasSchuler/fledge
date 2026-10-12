@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import math
 import re
-from dataclasses import dataclass
-from datetime import date
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
+from .build_dependencies import PACKAGE_FILENAME, LoadedPackage, parse_declared_date
+from .latexmk_build import BuildResult
 from .loaded_options import loaded_options_unavailable
-from .models import Finding, PreparationError
-from .runtime import BuildResult, ToolRunner
+from .models import ENGINES, EvidenceKind, Finding, PreparationError, Status
+from .runtime import CommandRunner
 from .scheduler import ResourceBudget, bounded_map, cancellation_point
 
 
@@ -57,8 +58,7 @@ class BuildCheckOptions:
             if (
                 not isinstance(names, tuple)
                 or any(
-                    not isinstance(name, str)
-                    or not re.fullmatch(r"[A-Za-z0-9_.-]+\.(?:cls|sty)", name)
+                    not isinstance(name, str) or not PACKAGE_FILENAME.fullmatch(name)
                     for name in names
                 )
                 or len(set(names)) != len(names)
@@ -81,58 +81,49 @@ class BuildCheckOptions:
             if not isinstance(item, tuple) or len(item) != 2:
                 raise PreparationError("minimum_package_dates must contain filename/date pairs")
             name, value = item
-            if (
-                not isinstance(name, str)
-                or not re.fullmatch(r"[A-Za-z0-9_.-]+\.(?:cls|sty)", name)
-                or name in seen
-            ):
+            if not isinstance(name, str) or not PACKAGE_FILENAME.fullmatch(name) or name in seen:
                 raise PreparationError("Minimum package dates require unique .sty/.cls filenames")
-            if not isinstance(value, str) or _date(value) is None:
+            if not isinstance(value, str) or parse_declared_date(value) is None:
                 raise PreparationError("Minimum package dates must use YYYY-MM-DD or YYYY/MM/DD")
             seen.add(name)
 
 
-def _date(value: str) -> date | None:
-    if not re.fullmatch(r"\d{4}[-/]\d{2}[-/]\d{2}", value):
-        return None
-    try:
-        return date.fromisoformat(value.replace("/", "-"))
-    except ValueError:
-        return None
-
-
 def _finding(
-    rule: str,
-    message: str,
-    *,
-    failed: bool = False,
-    incomplete: bool = False,
-    details: dict[str, Any] | None = None,
+    rule: str, message: str, status: Status, *, details: dict[str, Any] | None = None
 ) -> Finding:
+    """A configured build policy result; anything but a pass blocks as an error."""
     return Finding(
         rule,
         message,
-        "error" if failed or incomplete else "info",
-        "inconclusive" if incomplete else "failed" if failed else "passed",
+        severity="info" if status == "passed" else "error",
+        status=status,
         details=details or {},
     )
 
 
-# Log warnings that only mean "not resolved yet" when a TeX error stopped the build:
-# rule, message noun, details field for the keys, key pattern, and what was not reached.
+class _UnresolvedAfterTeXError(NamedTuple):
+    """A log warning that only means "not resolved yet" once a TeX error stopped the build."""
+
+    rule: str
+    noun: str
+    keys_field: str
+    key_pattern: re.Pattern[str]
+    unreached: str
+
+
 _UNRESOLVED_AFTER_TEX_ERROR = (
-    (
+    _UnresolvedAfterTeXError(
         "build.undefined_citation",
         "Citation",
         "citation_keys",
-        r"Citation [`']([^'`]+)'",
+        re.compile(r"Citation [`']([^'`]+)'"),
         "the bibliography was resolved",
     ),
-    (
+    _UnresolvedAfterTeXError(
         "build.undefined_reference",
         "Reference",
         "reference_keys",
-        r"Reference [`']([^'`]+)'",
+        re.compile(r"Reference [`']([^'`]+)'"),
         "labels were resolved",
     ),
 )
@@ -153,38 +144,32 @@ def qualify_citation_findings(findings: list[Finding], *, build_succeeded: bool)
     )
     if not stopped:
         return findings
-    for rule, noun, keys_field, key_pattern, unreached in _UNRESOLVED_AFTER_TEX_ERROR:
-        findings = _merge_unresolved(findings, rule, noun, keys_field, key_pattern, unreached)
+    for kind in _UNRESOLVED_AFTER_TEX_ERROR:
+        findings = _merge_unresolved(findings, kind)
     return findings
 
 
-def _merge_unresolved(
-    findings: list[Finding],
-    rule: str,
-    noun: str,
-    keys_field: str,
-    key_pattern: str,
-    unreached: str,
-) -> list[Finding]:
-    unresolved = [item for item in findings if item.rule == rule and item.status == "failed"]
+def _merge_unresolved(findings: list[Finding], kind: _UnresolvedAfterTeXError) -> list[Finding]:
+    unresolved = [item for item in findings if item.rule == kind.rule and item.status == "failed"]
     if not unresolved:
         return findings
     first = unresolved[0]
+    noun = kind.noun
     keys = list(
         dict.fromkeys(
-            match[1] for item in unresolved if (match := re.search(key_pattern, item.message))
+            found[1] for item in unresolved if (found := kind.key_pattern.search(item.message))
         )
     )
     listed = ", ".join(repr(key) for key in keys[:3]) + (
         f" (+{len(keys) - 3} more)" if len(keys) > 3 else ""
     )
     qualified = Finding(
-        rule,
+        kind.rule,
         f"{noun} resolution was not checked"
         + (f" for {listed}" if keys else "")
-        + f": the build stopped on a TeX error (BLD009) before {unreached}.",
-        "warning",
-        "inconclusive",
+        + f": the build stopped on a TeX error (BLD009) before {kind.unreached}.",
+        severity="warning",
+        status="inconclusive",
         path=first.path,
         line=first.line,
         suggestion=f"Fix the TeX error reported as BLD009 and rebuild; {noun.lower()}s are "
@@ -192,7 +177,7 @@ def _merge_unresolved(
         details={
             **first.details,
             "blocked_by": "BLD009",
-            keys_field: keys,
+            kind.keys_field: keys,
             "log_messages": [item.message for item in unresolved],
         },
     )
@@ -200,7 +185,6 @@ def _merge_unresolved(
     return [qualified if item is first else item for item in findings if id(item) not in merged]
 
 
-_ENGINES = ("pdflatex", "xelatex", "lualatex")
 _TEXLIVE = re.compile(r"\(TeX Live (\d{4})(?:/([^)]*))?\)")
 _MIKTEX = re.compile(r"\(MiKTeX ([0-9][^)\s]*)\)")
 
@@ -216,10 +200,9 @@ def check_tex_distribution(
     """
     options = options or BuildCheckOptions()
     expected = options.expected_texlive_year
-    engine = next((name for name in _ENGINES if isinstance(result.tools.get(name), dict)), None)
-    record = result.tools.get(engine) if engine else None
-    lines = record.get("version") if isinstance(record, dict) else None
-    banner = lines[0] if isinstance(lines, list) and lines and isinstance(lines[0], str) else None
+    versions = result.tools.versions
+    engine = next((name for name in ENGINES if name in versions), None)
+    banner = versions[engine].version[0] if engine and versions[engine].version else None
     details: dict[str, Any] = {"engine": engine, "version_banner": banner}
     if expected is not None:
         details["expected_texlive_year"] = expected
@@ -235,8 +218,8 @@ def check_tex_distribution(
             "build.tex_distribution",
             "The TeX distribution is unknown: the build recorded no engine version output"
             + (f"; expected TeX Live {expected} cannot be confirmed." if expected else "."),
-            "warning" if expected is not None else "info",
-            "inconclusive",
+            severity="warning" if expected is not None else "info",
+            status="inconclusive",
             details=details,
         )
     texlive = _TEXLIVE.search(banner)
@@ -252,17 +235,17 @@ def check_tex_distribution(
         return Finding(
             "build.tex_distribution",
             f"The TeX distribution could not be identified from {engine} output{policy}.",
-            "warning" if expected is not None else "info",
-            "inconclusive",
+            severity="warning" if expected is not None else "info",
+            status="inconclusive",
             details=details,
         )
     mismatch = expected is not None and year != expected
     return Finding(
         "build.tex_distribution",
         f"Built with {name} via {engine}{policy}.",
-        "warning" if mismatch else "info",
-        "failed" if mismatch else "passed",
-        evidence="direct",
+        severity="warning" if mismatch else "info",
+        status="failed" if mismatch else "passed",
+        evidence_kind=EvidenceKind.DIRECT,
         details=details,
     )
 
@@ -279,187 +262,218 @@ def check_build_details(
             loaded_options_unavailable("The build did not collect kernel option evidence", "")
         )
     if options.overfull_tolerance_pt is not None:
-        threshold = options.overfull_tolerance_pt
-        overflows = [finding for finding in result.findings if finding.rule == "build.overfull_box"]
-        unreadable = any("overflow_pt" not in finding.details for finding in overflows)
-        log_complete = result.success and not any(
-            finding.rule == "build.log_unavailable" for finding in result.findings
-        )
-        violations = [
-            finding
-            for finding in overflows
-            if isinstance(overflow := finding.details.get("overflow_pt"), (int, float))
-            and overflow > threshold
-        ]
-        findings.append(
-            _finding(
-                "build.overfull_tolerance",
-                f"{len(violations)} overfull boxes exceed {threshold:g} TeX pt.",
-                failed=bool(violations),
-                incomplete=(unreadable or not log_complete) and not violations,
-                details={
-                    "tolerance_tex_pt": threshold,
-                    "measurements": [
-                        {
-                            "path": item.path,
-                            "line": item.line,
-                            "overflow_tex_pt": item.details.get("overflow_pt"),
-                            "direction": item.details.get("direction"),
-                        }
-                        for item in overflows
-                    ],
-                },
-            )
-        )
-    policies = options.allowed_loaded_packages is not None or bool(
-        options.forbidden_loaded_packages
-        or options.required_loaded_packages
-        or options.minimum_package_dates
-    )
-    if not (policies or options.inventory_loaded_packages):
-        return findings
-    records = result.loaded_packages
-    complete = result.recorder_complete and result.success
-    # Every recorder entry carries a literal filename; only its declared release
-    # date and version may be absent, so a policy never compares against None.
-    names = {name for record in records if isinstance(name := record["name"], str)}
+        findings.append(_overfull_tolerance(result, options.overfull_tolerance_pt))
     if options.inventory_loaded_packages:
-        findings.append(
-            Finding(
-                "build.package_inventory",
-                f"{len(names)} class/package filenames were observed in the build recorder.",
-                "info",
-                "passed" if complete else "inconclusive",
-                details={
-                    "packages": records,
-                    "scope": "Recorder-observed .cls/.sty inputs; header dates are declarations, "
-                    "not authenticity checks.",
-                },
-            )
-        )
+        findings.append(_package_inventory(result))
     if (
         options.allowed_loaded_packages is not None
         or options.forbidden_loaded_packages
         or options.required_loaded_packages
     ):
-        forbidden = sorted(names & set(options.forbidden_loaded_packages))
-        disallowed = (
-            sorted(names - set(options.allowed_loaded_packages))
-            if options.allowed_loaded_packages is not None
-            else []
-        )
-        missing = sorted(set(options.required_loaded_packages) - names)
-        findings.append(
-            _finding(
-                "build.loaded_package_policy",
-                f"Loaded package policy: {len(forbidden)} forbidden, "
-                f"{len(disallowed)} outside allowlist, {len(missing)} required names unobserved.",
-                failed=bool(forbidden or disallowed or (missing and complete)),
-                incomplete=not complete and not (forbidden or disallowed),
-                details={
-                    "forbidden": forbidden,
-                    "not_allowed": disallowed,
-                    "unobserved_required": missing,
-                    "recorder_complete": complete,
-                },
-            )
-        )
+        findings.append(_loaded_package_policy(result, options))
     for name, minimum in options.minimum_package_dates:
         cancellation_point()
-        selected = [record for record in records if record["name"] == name]
-        observed = {_date(str(record.get("declared_date", ""))) for record in selected}
-        incomplete = not complete or len(observed) != 1 or None in observed
-        required_date = _date(minimum)
-        earlier = (
-            any(
-                value is not None and required_date is not None and value < required_date
-                for value in observed
-            )
-            and not incomplete
-        )
-        observed_text = ", ".join(str(item) for item in sorted(observed, key=str)) or "not loaded"
-        findings.append(
-            _finding(
-                "build.package_date",
-                f"{name}: required declared release date at least {minimum}; "
-                f"observed {observed_text}.",
-                failed=earlier,
-                incomplete=incomplete,
-                details={
-                    "package": name,
-                    "minimum_date": minimum,
-                    "observed_dates": [
-                        str(item) if item else None for item in sorted(observed, key=str)
-                    ],
-                },
-            )
-        )
+        findings.append(_package_date(result, name, minimum))
     return findings
 
 
+def _recorder_complete(result: BuildResult) -> bool:
+    return result.recorder_complete and result.success
+
+
+def _overfull_tolerance(result: BuildResult, threshold: float) -> Finding:
+    overflows = [finding for finding in result.findings if finding.rule == "build.overfull_box"]
+    unreadable = any("overflow_pt" not in finding.details for finding in overflows)
+    log_complete = result.success and not any(
+        finding.rule == "build.log_unavailable" for finding in result.findings
+    )
+    violations = [
+        finding
+        for finding in overflows
+        if isinstance(overflow := finding.details.get("overflow_pt"), (int, float))
+        and overflow > threshold
+    ]
+    if violations:
+        status: Status = "failed"
+    else:
+        status = "inconclusive" if unreadable or not log_complete else "passed"
+    return _finding(
+        "build.overfull_tolerance",
+        f"{len(violations)} overfull boxes exceed {threshold:g} TeX pt.",
+        status,
+        details={
+            "tolerance_tex_pt": threshold,
+            "measurements": [
+                {
+                    "path": item.path,
+                    "line": item.line,
+                    "overflow_tex_pt": item.details.get("overflow_pt"),
+                    "direction": item.details.get("direction"),
+                }
+                for item in overflows
+            ],
+        },
+    )
+
+
+def _package_inventory(result: BuildResult) -> Finding:
+    names = {package.name for package in result.loaded_packages}
+    return Finding(
+        "build.package_inventory",
+        f"{len(names)} class/package filenames were observed in the build recorder.",
+        severity="info",
+        status="passed" if _recorder_complete(result) else "inconclusive",
+        details={
+            "packages": [asdict(package) for package in result.loaded_packages],
+            "scope": "Recorder-observed .cls/.sty inputs; header dates are declarations, "
+            "not authenticity checks.",
+        },
+    )
+
+
+def _loaded_package_policy(result: BuildResult, options: BuildCheckOptions) -> Finding:
+    complete = _recorder_complete(result)
+    names = {package.name for package in result.loaded_packages}
+    forbidden = sorted(names & set(options.forbidden_loaded_packages))
+    disallowed = (
+        sorted(names - set(options.allowed_loaded_packages))
+        if options.allowed_loaded_packages is not None
+        else []
+    )
+    missing = sorted(set(options.required_loaded_packages) - names)
+    # Directly observed forbidden input is evidence even in a partial build; a
+    # required package can only be reported missing from a complete one.
+    if forbidden or disallowed:
+        status: Status = "failed"
+    elif not complete:
+        status = "inconclusive"
+    else:
+        status = "failed" if missing else "passed"
+    return _finding(
+        "build.loaded_package_policy",
+        f"Loaded package policy: {len(forbidden)} forbidden, "
+        f"{len(disallowed)} outside allowlist, {len(missing)} required names unobserved.",
+        status,
+        details={
+            "forbidden": forbidden,
+            "not_allowed": disallowed,
+            "unobserved_required": missing,
+            "recorder_complete": complete,
+        },
+    )
+
+
+def _package_date(result: BuildResult, name: str, minimum: str) -> Finding:
+    observed = {
+        parse_declared_date(package.declared_date or "")
+        for package in result.loaded_packages
+        if package.name == name
+    }
+    required_date = parse_declared_date(minimum)
+    if not _recorder_complete(result) or len(observed) != 1 or None in observed:
+        status: Status = "inconclusive"
+    elif any(
+        value is not None and required_date is not None and value < required_date
+        for value in observed
+    ):
+        status = "failed"
+    else:
+        status = "passed"
+    observed_text = ", ".join(str(item) for item in sorted(observed, key=str)) or "not loaded"
+    return _finding(
+        "build.package_date",
+        f"{name}: required declared release date at least {minimum}; observed {observed_text}.",
+        status,
+        details={
+            "package": name,
+            "minimum_date": minimum,
+            "observed_dates": [str(item) if item else None for item in sorted(observed, key=str)],
+        },
+    )
+
+
 async def check_local_package_shadows(
-    result: BuildResult, work: Path, runner: ToolRunner, *, budget: ResourceBudget | None = None
+    result: BuildResult, work: Path, runner: CommandRunner, *, budget: ResourceBudget | None = None
 ) -> list[Finding]:
     """Resolve system counterparts from an empty sandboxed directory, never user cwd."""
-    records = [item for item in result.loaded_packages if item.get("origin") == "project"]
-    if not result.recorder_complete or not result.success:
+    if not _recorder_complete(result):
         return [
             _finding(
                 "build.local_package_shadow",
                 "Local package shadow checks need a complete successful recorder trace.",
-                incomplete=True,
+                "inconclusive",
             )
         ]
-    if not records:
-        return [_finding("build.local_package_shadow", "No local class/package files were loaded.")]
+    by_name: dict[str, list[LoadedPackage]] = {}
+    for package in result.loaded_packages:
+        if package.origin == "project":
+            by_name.setdefault(package.name, []).append(package)
+    if not by_name:
+        return [
+            _finding(
+                "build.local_package_shadow", "No local class/package files were loaded.", "passed"
+            )
+        ]
 
-    async def inspect(record: dict[str, Any]) -> Finding:
-        leaf = work / record["name"]
-        leaf.mkdir(parents=True)
-        try:
-            (leaf / "version").mkdir()
-            await runner.tool_version(["kpsewhich", "--version"], leaf / "version")
-            command_work = leaf / "lookup"
-            command_work.mkdir()
-            execution = await runner.run(
-                ["kpsewhich", "--format=tex", record["name"]],
-                cwd=command_work,
-                workspace=command_work,
-            )
-            if (
-                execution.timed_out
-                or execution.output_limited
-                or execution.resource_exceeded
-                or execution.returncode not in {0, 1}
-            ):
-                raise PreparationError("System package lookup did not complete")
-            paths = execution.stdout.strip().splitlines()
-            if execution.returncode == 1 and not paths:
-                return _finding(
-                    "build.local_package_shadow",
-                    f"{record['name']}: no system counterpart was found.",
-                    details={"project_path": record["path"]},
-                )
-            if len(paths) != 1 or not Path(paths[0]).is_absolute():
-                raise PreparationError("System package lookup returned ambiguous evidence")
-            return Finding(
-                "build.local_package_shadow",
-                f"Local {record['path']} shadows a system file of the same name; "
-                "review whether that override is intended.",
-                "warning",
-                "failed",
-                path=record["path"],
-                evidence="derived",
-                details={"system_file": paths[0]},
-                suggestion="Compare the local file with the intended toolchain or template.",
-            )
-        except (PreparationError, OSError) as error:
+    async def inspect(name: str) -> Finding:
+        packages = by_name[name]
+        if len(packages) > 1:
+            # One lookup cannot tell which of several same-named local files a
+            # system counterpart shadows, and they must not share a workspace.
             return _finding(
                 "build.local_package_shadow",
-                f"Cannot establish the system counterpart for {record['name']}: {error}",
-                incomplete=True,
+                f"Cannot establish the system counterpart for {name}: "
+                f"{len(packages)} loaded local files share this name.",
+                "inconclusive",
+                details={"project_paths": [package.path for package in packages]},
             )
+        return await _local_package_shadow(packages[0], work, runner)
 
-    # Multiple paths with one basename are themselves ambiguous; do not share a workspace.
-    by_name = {record["name"]: record for record in records}
-    return await bounded_map(list(by_name.values()), inspect, limit=budget.jobs if budget else 1)
+    return await bounded_map(list(by_name), inspect, limit=budget.cpu_slots if budget else 1)
+
+
+async def _local_package_shadow(
+    package: LoadedPackage, work: Path, runner: CommandRunner
+) -> Finding:
+    leaf = work / package.name
+    leaf.mkdir(parents=True)
+    try:
+        (leaf / "version").mkdir()
+        await runner.tool_version(["kpsewhich", "--version"], leaf / "version")
+        command_work = leaf / "lookup"
+        command_work.mkdir()
+        execution = await runner.run(
+            ["kpsewhich", "--format=tex", package.name],
+            cwd=command_work,
+            workspace=command_work,
+        )
+        # kpsewhich exits with status 1 when it finds no file.
+        if not execution.within_limits or execution.returncode not in {0, 1}:
+            raise PreparationError("System package lookup did not complete")
+        paths = execution.stdout.strip().splitlines()
+        if execution.returncode == 1 and not paths:
+            return _finding(
+                "build.local_package_shadow",
+                f"{package.name}: no system counterpart was found.",
+                "passed",
+                details={"project_path": package.path},
+            )
+        if len(paths) != 1 or not Path(paths[0]).is_absolute():
+            raise PreparationError("System package lookup returned ambiguous evidence")
+        return Finding(
+            "build.local_package_shadow",
+            f"Local {package.path} shadows a system file of the same name; "
+            "review whether that override is intended.",
+            severity="warning",
+            status="failed",
+            path=package.path,
+            evidence_kind=EvidenceKind.DERIVED,
+            details={"system_file": paths[0]},
+            suggestion="Compare the local file with the intended toolchain or template.",
+        )
+    except (PreparationError, OSError) as error:
+        return _finding(
+            "build.local_package_shadow",
+            f"Cannot establish the system counterpart for {package.name}: {error}",
+            "inconclusive",
+        )

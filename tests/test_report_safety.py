@@ -12,10 +12,12 @@ from click.testing import CliRunner
 
 from latexprep.cli import cli
 from latexprep.config import Settings
-from latexprep.core import JobRequest, run_job
-from latexprep.models import Change, Finding, Report
+from latexprep.core import run_job
+from latexprep.finding_view import RenderOptions
+from latexprep.job_context import JobRequest
+from latexprep.models import Change, ChangeKind, Finding, Outcome, Report
 from latexprep.online_checks import OnlineOptions
-from latexprep.presentation import render_compact, render_terminal
+from latexprep.terminal_report import render_compact, render_terminal
 from tests.test_workflow_checks import controlled_build, source_project
 
 
@@ -24,8 +26,8 @@ class ReportSafetyTests(unittest.TestCase):
         credential = "SyntheticCredentialValue_1234"
         return credential, Report(
             "check",
-            "passed_with_advisories",
-            "fixture",
+            outcome=Outcome.PASSED_WITH_ADVISORIES,
+            scope="fixture",
             settings={
                 "online_checks": {
                     "online_replication_urls": (
@@ -37,18 +39,20 @@ class ReportSafetyTests(unittest.TestCase):
                 Finding(
                     "pdf.metadata",
                     "Metadata inventory",
-                    "info",
-                    "passed",
+                    severity="info",
+                    status="passed",
                     details={"Title": credential},
                 ),
                 Finding(
-                    "source-edit-marker",
+                    "source.edit_marker",
                     "Review " + credential,
                     path="main.tex",
                     suggestion="Remove " + credential,
                 ),
             ],
-            changes=[Change("main.tex", "format", "Layout", diff="-" + credential)],
+            changes=[
+                Change("main.tex", kind=ChangeKind.FORMAT, reason="Layout", diff="-" + credential)
+            ],
             tools={"diagnostic": credential},
         )
 
@@ -56,8 +60,8 @@ class ReportSafetyTests(unittest.TestCase):
         credential, report = self.report()
         for rendered in (
             json.dumps(report.to_dict()),
-            render_terminal(report, show_diff=True, show_passed=True),
-            render_compact(report, show_passed=True),
+            render_terminal(report, options=RenderOptions(show_diff=True, show_passed=True)),
+            render_compact(report, options=RenderOptions(show_passed=True)),
         ):
             self.assertNotIn(credential, rendered)
             self.assertIn("REDACTED", rendered)
@@ -106,10 +110,12 @@ class ReportSafetyTests(unittest.TestCase):
     def test_common_credential_text_never_corrupts_operational_status_or_check_codes(self):
         report = Report(
             "check",
-            "passed_with_advisories",
-            "fixture",
+            outcome=Outcome.PASSED_WITH_ADVISORIES,
+            scope="fixture",
             settings={"password": "passed"},
-            findings=[Finding("pdf.metadata_agreement", "passed", "info", "passed")],
+            findings=[
+                Finding("pdf.metadata_agreement", "passed", severity="info", status="passed")
+            ],
         )
         result = report.to_dict()
         self.assertEqual(result["outcome"], "passed_with_advisories")
@@ -125,8 +131,8 @@ class ReportSafetyTests(unittest.TestCase):
     def test_nested_stage_key_collision_returns_a_safe_error_report(self):
         report = Report(
             "prepare",
-            "passed",
-            "fixture",
+            outcome=Outcome.PASSED,
+            scope="fixture",
             settings={"password": "name"},
             stages=[{"name": "baseline", "status": "succeeded"}],
         )
@@ -145,9 +151,9 @@ class ReportPublicationSafetyTests(unittest.IsolatedAsyncioTestCase):
             source_project(source)
             output = root / "out?token=findings&"
             with (
-                patch("latexprep.core.build_project", side_effect=controlled_build),
-                patch("latexprep.core.inspect_pdf", new=AsyncMock(return_value=[])),
-                patch("latexprep.core.compare_pdfs", new=AsyncMock(return_value=[])),
+                patch("latexprep.document_tasks.build_project", side_effect=controlled_build),
+                patch("latexprep.document_tasks.inspect_pdf", new=AsyncMock(return_value=[])),
+                patch("latexprep.document_tasks.compare_pdfs", new=AsyncMock(return_value=[])),
             ):
                 report = await run_job(JobRequest("prepare", source, Settings(), output))
             self.assertEqual(report.outcome, "error")
@@ -168,9 +174,9 @@ class ReportPublicationSafetyTests(unittest.IsolatedAsyncioTestCase):
                 )
             )
             with (
-                patch("latexprep.core.build_project", side_effect=controlled_build),
-                patch("latexprep.core.inspect_pdf", new=AsyncMock(return_value=[])),
-                patch("latexprep.core.compare_pdfs", new=AsyncMock(return_value=[])),
+                patch("latexprep.document_tasks.build_project", side_effect=controlled_build),
+                patch("latexprep.document_tasks.inspect_pdf", new=AsyncMock(return_value=[])),
+                patch("latexprep.document_tasks.compare_pdfs", new=AsyncMock(return_value=[])),
             ):
                 report = await run_job(JobRequest("prepare", source, settings, root / "out"))
             self.assertEqual(report.outcome, "passed", report.to_dict())

@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+from latexprep import __version__
 from latexprep.models import PreparationError
 from latexprep.online_checks import (
     NetworkFailure,
@@ -22,7 +23,7 @@ from latexprep.online_checks import (
     _target,
     check_online_references,
 )
-from latexprep.scheduler import ResourceBudget, cancellation_point
+from latexprep.scheduler import AnalysisCancelled, ResourceBudget, cancellation_point
 
 
 def metadata(**changes):
@@ -148,12 +149,12 @@ class OnlineCheckTests(unittest.IsolatedAsyncioTestCase):
         _, _, calls = await self.run_check(
             options(online_doi_resolution=True), Response(200), "online.doi_resolution", "NET001"
         )
-        self.assertEqual(calls[0][4], "fledge/0.1 (explicit reference checks)")
+        self.assertEqual(calls[0][4], f"fledge/{__version__} (explicit reference checks)")
         selected = options(online_doi_resolution=True, online_contact_email="paper@example.org")
         _, findings, calls = await self.run_check(
             selected, Response(200), "online.doi_resolution", "NET001"
         )
-        self.assertEqual(calls[0][4], "fledge/0.1 (mailto:paper@example.org)")
+        self.assertEqual(calls[0][4], f"fledge/{__version__} (mailto:paper@example.org)")
         self.assertNotIn("paper@example.org", repr(findings))
         for value in (
             "",
@@ -211,7 +212,7 @@ class OnlineCheckTests(unittest.IsolatedAsyncioTestCase):
                     selected, document(work), "online.metadata", "NET002"
                 )
                 self.assertEqual(finding.status, expected)
-                self.assertEqual(finding.evidence, "heuristic")
+                self.assertEqual(finding.evidence_kind, "heuristic")
                 self.assertEqual(finding.path, "references.bib")
                 if expected == "failed":
                     self.assertTrue(
@@ -239,7 +240,7 @@ class OnlineCheckTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual((finding.status, finding.details["outcome"]), (status, outcome))
                 self.assertFalse(finding.details["identity_confirmed"])
                 self.assertIn("query.bibliographic", calls[0][0].path)
-                self.assertEqual(finding.evidence, "heuristic")
+                self.assertEqual(finding.evidence_kind, "heuristic")
         finding, _, _ = await self.run_check(
             selected, document({"items": [{"title": ["No DOI"]}]}), "online.missing_doi", "NET003"
         )
@@ -454,7 +455,7 @@ class OnlineCheckTests(unittest.IsolatedAsyncioTestCase):
                 release.wait(3)
                 try:
                     cancellation_point()
-                except PreparationError:
+                except AnalysisCancelled:
                     return [], [], []
                 return [], [], []
             finally:

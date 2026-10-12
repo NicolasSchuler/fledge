@@ -8,11 +8,17 @@ from dataclasses import dataclass
 from .models import PreparationError
 from .rules import BY_CODE
 
-_SELECTORS = frozenset(
-    code[:length]
-    for code in BY_CODE
-    for length in range(len(code.rstrip("0123456789")), len(code) + 1)
-) | {"ALL"}
+
+def _prefixes(code: str) -> list[str]:
+    """The selectors matching ``code``: its family, each longer prefix and the code itself.
+
+    ``TEX101`` yields ``TEX``, ``TEX1``, ``TEX10`` and ``TEX101``.
+    """
+    family = len(code.rstrip("0123456789"))
+    return [code[:length] for length in range(family, len(code) + 1)]
+
+
+_SELECTORS = frozenset(prefix for code in BY_CODE for prefix in _prefixes(code)) | {"ALL"}
 
 
 def validate_selectors(selectors: tuple[str, ...], source: str) -> None:
@@ -67,7 +73,7 @@ class CheckSelection:
     def enabled(self, code: str) -> bool:
         """Use the most specific selector; ignore wins equally specific matches."""
         if code not in BY_CODE:
-            raise ValueError(f"Unknown public check code: {code}")
+            raise PreparationError(f"Unknown public check code: {code}")
 
         def specificity(selectors: tuple[str, ...]) -> int:
             return max(

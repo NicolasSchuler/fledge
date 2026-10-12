@@ -4,40 +4,78 @@ from __future__ import annotations
 
 import difflib
 import tomllib
-from dataclasses import asdict, dataclass, field, fields, replace
+from collections.abc import Mapping
+from dataclasses import asdict, dataclass, field, fields, is_dataclass, replace
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, get_type_hints
 
 from .bibliography_checks import BibliographyOptions
 from .bibliography_transform import BibliographyTransformOptions
 from .build_checks import BuildCheckOptions
+from .check_policy import unselected_policy_updates
 from .check_selection import CheckSelection
 from .formatting import FormattingOptions
 from .manuscript import ManuscriptOptions
 from .manuscript_checks import ManuscriptCheckOptions
 from .metadata_privacy import MetadataPrivacyOptions
-from .models import PreparationError
+from .models import (
+    BIBLIOGRAPHY_BACKENDS,
+    ENGINES,
+    LAYOUTS,
+    BibliographyBackend,
+    Engine,
+    Layout,
+    PreparationError,
+    RequestError,
+)
 from .online_checks import OnlineOptions
-from .option_config import read_options
-from .pdf import PdfOptions
+from .option_config import read_options, require_booleans
 from .pdf_artwork import PdfArtworkOptions
 from .pdf_checks import PdfCheckOptions
+from .pdf_inspection import PdfInspectionOptions
+from .pdf_structure_checks import StructureOptions
 from .presets import preset_values
-from .reporting import ReportingOptions
+from .review_policy import ReportingOptions
 from .source_transform import SourceTransformOptions
-from .structure_checks import StructureOptions
 from .submission_checks import SubmissionOptions
 from .workflow_options import PackageOptions, WorkflowOptions
 
-PARENT_MEMORY_MB = 128
+# Memory reserved for the coordinating process beside every build reservation.
+COORDINATOR_MEMORY_MB = 128
+# Upper bound of jobs, build_jobs and render_jobs.
+MAX_CONCURRENCY = 64
+MIN_MEMORY_MB = 256
+MIN_BUILD_MEMORY_MB = 128
+# 9999-12-31T23:59:59Z, the last second with a four-digit year.
+MAX_SOURCE_DATE_EPOCH = 253_402_300_799
 
+# Former setting names, still accepted and normalized to their replacements.
+RENAMED_SETTINGS: dict[str, str] = {
+    "pdf_artwork": "rendered_pdf_artwork",
+    "figure_artwork": "included_figure_artwork",
+    "format": "apply_formatting",
+}
 
-class RequestError(PreparationError):
-    """An invalid request or setting that names its source and a concrete next step."""
-
-    def __init__(self, message: str, suggestion: str) -> None:
-        super().__init__(message)
-        self.suggestion = suggestion
+_CHOICES: dict[str, tuple[str, ...]] = {
+    "layout": LAYOUTS,
+    "engine": ENGINES,
+    "bibliography_backend": BIBLIOGRAPHY_BACKENDS,
+}
+_SWITCHES = ("apply_formatting", "normalize_doi", "cleanup")
+_POSITIVE_INTEGERS = (
+    "jobs",
+    "build_jobs",
+    "render_jobs",
+    "memory_mb",
+    "build_memory_mb",
+    "timeout_seconds",
+    "job_timeout_seconds",
+    "max_temporary_bytes",
+    "max_files",
+    "max_bytes",
+    "max_depth",
+)
+_PDF_METADATA_SOURCES = frozenset({"title", "author"})
 
 
 def _bibliography_edit_tables(value: object) -> object:
@@ -66,8 +104,14 @@ def _bibliography_edit_tables(value: object) -> object:
     return {**value, "field_edits": rows}
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class Settings:
+    """Validated settings of one job.
+
+    ``manuscript`` and ``pdf`` hold constraints that TOML and reports spell as
+    top-level keys, as do ``formatting_options.wrap_length`` and ``tab_size``.
+    """
+
     checks: CheckSelection = field(default_factory=CheckSelection)
     structure_checks: StructureOptions = field(default_factory=StructureOptions)
     metadata_privacy: MetadataPrivacyOptions = field(default_factory=MetadataPrivacyOptions)
@@ -76,8 +120,9 @@ class Settings:
     bibliography_transform: BibliographyTransformOptions = field(
         default_factory=BibliographyTransformOptions
     )
-    pdf_artwork: PdfArtworkOptions = field(default_factory=PdfArtworkOptions)
-    figure_artwork: PdfArtworkOptions = field(default_factory=PdfArtworkOptions)
+    # Artwork policies for the rendered document and, separately, each included PDF figure.
+    rendered_pdf_artwork: PdfArtworkOptions = field(default_factory=PdfArtworkOptions)
+    included_figure_artwork: PdfArtworkOptions = field(default_factory=PdfArtworkOptions)
     reporting: ReportingOptions = field(default_factory=ReportingOptions)
     workflow: WorkflowOptions = field(default_factory=WorkflowOptions)
     package: PackageOptions = field(default_factory=PackageOptions)
@@ -87,12 +132,14 @@ class Settings:
     online_checks: OnlineOptions = field(default_factory=OnlineOptions)
     pdf_checks: PdfCheckOptions = field(default_factory=PdfCheckOptions)
     submission_checks: SubmissionOptions = field(default_factory=SubmissionOptions)
+    manuscript: ManuscriptOptions = field(default_factory=ManuscriptOptions)
+    pdf: PdfInspectionOptions = field(default_factory=PdfInspectionOptions)
     match_source_pdf_metadata: tuple[str, ...] = ()
     main: str | None = None
-    layout: str = "preserve"
-    engine: str = "pdflatex"
-    bibliography_backend: str = "auto"
-    format: bool = False
+    layout: Layout = "preserve"
+    engine: Engine = "pdflatex"
+    bibliography_backend: BibliographyBackend = "auto"
+    apply_formatting: bool = False
     normalize_doi: bool = False
     cleanup: bool = True
     jobs: int = 2
@@ -108,40 +155,144 @@ class Settings:
     max_bytes: int = 268435456
     max_depth: int = 32
     max_pages: int | None = None
-    wrap_length: int = 80
-    tab_size: int = 2
-    expected_document_class: str | None = None
-    required_class_options: tuple[str, ...] = ()
-    forbidden_class_options: tuple[str, ...] = ()
-    forbidden_packages: tuple[str, ...] = ()
-    require_abstract: bool = False
-    abstract_min_words: int | None = None
-    abstract_max_words: int | None = None
-    keywords_min_count: int | None = None
-    keywords_max_count: int | None = None
-    required_sections: tuple[str, ...] = ()
-    expected_page_width_pt: float | None = None
-    expected_page_height_pt: float | None = None
-    page_size_tolerance_pt: float = 1.0
-    require_consistent_page_size: bool = False
-    min_image_dpi: float | None = None
-    require_embedded_fonts: bool = False
-    forbid_type3_fonts: bool = False
-    forbid_encryption: bool = False
-    forbid_forms: bool = False
-    forbid_javascript: bool = False
-    forbid_attachments: bool = False
+
+    def __post_init__(self) -> None:
+        for name, kind in _OPTION_TYPES.items():
+            if not isinstance(getattr(self, name), kind):
+                raise PreparationError(f"{name} must be a settings table")
+        metadata = self.match_source_pdf_metadata
+        if (
+            not isinstance(metadata, tuple)
+            or any(
+                not isinstance(item, str) or item not in _PDF_METADATA_SOURCES for item in metadata
+            )
+            or len(set(metadata)) != len(metadata)
+        ):
+            raise PreparationError("match_source_pdf_metadata must list unique title/author fields")
+        if self.main is not None and (not isinstance(self.main, str) or not self.main.strip()):
+            raise PreparationError("main must be a nonempty relative filename")
+        for name, allowed in _CHOICES.items():
+            value = getattr(self, name)
+            if not isinstance(value, str) or value not in allowed:
+                raise PreparationError(f"{name} must be one of {', '.join(sorted(allowed))}")
+        require_booleans(self, *_SWITCHES)
+        for name in _POSITIVE_INTEGERS:
+            value = getattr(self, name)
+            if type(value) is not int or value < 1:
+                raise PreparationError(f"{name} must be a positive integer")
+        epoch = self.source_date_epoch
+        if epoch is not None and (
+            type(epoch) is not int or not 0 <= epoch <= MAX_SOURCE_DATE_EPOCH
+        ):
+            raise PreparationError(
+                "source_date_epoch must be a nonnegative supported Unix timestamp"
+            )
+        if self.max_pages is not None and (type(self.max_pages) is not int or self.max_pages < 1):
+            raise PreparationError("max_pages must be a positive integer")
+        self._validate_combinations()
+
+    def _validate_combinations(self) -> None:
+        if self.workflow.documents and self.main is not None:
+            raise PreparationError("Choose workflow.documents or one main, not both")
+        if self.source_transforms.filename_overrides and self.layout != "flat":
+            raise PreparationError("filename_overrides requires layout='flat'")
+        if {name.title() for name in self.match_source_pdf_metadata} & {
+            name for name, _ in self.pdf_checks.expected_metadata
+        }:
+            raise PreparationError(
+                "Choose source matching or an explicit expected PDF value for each metadata field"
+            )
+        if self.jobs > MAX_CONCURRENCY:
+            raise PreparationError(f"jobs must be at most {MAX_CONCURRENCY}")
+        if self.build_jobs > MAX_CONCURRENCY or self.render_jobs > MAX_CONCURRENCY:
+            raise PreparationError(f"build_jobs and render_jobs must be at most {MAX_CONCURRENCY}")
+        if self.memory_mb < MIN_MEMORY_MB or self.build_memory_mb < MIN_BUILD_MEMORY_MB:
+            raise PreparationError(
+                f"memory_mb must be >={MIN_MEMORY_MB} and "
+                f"build_memory_mb must be >={MIN_BUILD_MEMORY_MB}"
+            )
+        if self.build_memory_mb + COORDINATOR_MEMORY_MB > self.memory_mb:
+            raise PreparationError(
+                f"memory_mb must allow build_memory_mb plus {COORDINATOR_MEMORY_MB} MiB "
+                "for the coordinator"
+            )
 
     def to_dict(self) -> dict[str, object]:
-        return asdict(self)
+        """The settings in their TOML layout, as reports record them."""
+        values = asdict(self)
+        formatting = values["formatting_options"]
+        line_format = {name: formatting.pop(name) for name in _FORMATTING_KEYS}
+        return {
+            **{name: value for name, value in values.items() if name not in _FLATTENED_GROUPS},
+            **line_format,
+            **values["manuscript"],
+            **values["pdf"],
+        }
 
-    def manuscript_options(self) -> ManuscriptOptions:
-        return ManuscriptOptions(
-            **{item.name: getattr(self, item.name) for item in fields(ManuscriptOptions)}
-        )
+    def top_level_values(self) -> dict[str, object]:
+        """Every top-level TOML setting with its value; a table maps to its option object."""
+        values = {
+            item.name: getattr(self, item.name)
+            for item in fields(self)
+            if item.name not in _FLATTENED_GROUPS
+        }
+        for name, group in _TOP_LEVEL_FIELDS.items():
+            values[name] = getattr(getattr(self, group), name)
+        return values
 
-    def pdf_options(self) -> PdfOptions:
-        return PdfOptions(**{item.name: getattr(self, item.name) for item in fields(PdfOptions)})
+    def with_top_level_values(self, updates: Mapping[str, object]) -> Settings:
+        """A copy with top-level TOML settings replaced, as ``top_level_values`` names them."""
+        changes: dict[str, Any] = {
+            name: value for name, value in updates.items() if name not in _TOP_LEVEL_FIELDS
+        }
+        grouped: dict[str, dict[str, object]] = {}
+        for name, value in updates.items():
+            if name in _TOP_LEVEL_FIELDS:
+                grouped.setdefault(_TOP_LEVEL_FIELDS[name], {})[name] = value
+        for group, values in grouped.items():
+            changes[group] = replace(changes.get(group, getattr(self, group)), **values)
+        return replace(self, **changes)
+
+
+# Option groups whose fields are top-level TOML keys rather than a table.
+_FLATTENED_GROUPS = ("manuscript", "pdf")
+# Formatting options spelled as top-level TOML keys.
+_FORMATTING_KEYS = ("wrap_length", "tab_size")
+_TOP_LEVEL_FIELDS: dict[str, str] = {
+    **{item.name: "manuscript" for item in fields(ManuscriptOptions)},
+    **{item.name: "pdf" for item in fields(PdfInspectionOptions)},
+    **dict.fromkeys(_FORMATTING_KEYS, "formatting_options"),
+}
+# Every option-object field of Settings, and those read from a TOML table.
+_OPTION_TYPES: dict[str, type] = {
+    name: kind
+    for name, kind in get_type_hints(Settings).items()
+    if isinstance(kind, type) and is_dataclass(kind)
+}
+_OPTION_TABLES = {
+    name: kind for name, kind in _OPTION_TYPES.items() if name not in _FLATTENED_GROUPS
+}
+# Manuscript name lists that TOML supplies as arrays.
+_NAME_LISTS = (
+    "required_class_options",
+    "forbidden_class_options",
+    "forbidden_packages",
+    "required_sections",
+)
+# The top-level TOML settings, in their current spelling.
+SETTING_NAMES: frozenset[str] = frozenset(
+    {item.name for item in fields(Settings) if item.name not in _FLATTENED_GROUPS}
+    | set(_TOP_LEVEL_FIELDS)
+)
+
+
+def effective_settings(settings: Settings) -> Settings:
+    """Disable unselected configured policies without changing the user's Settings.
+
+    Unchanged objects are returned by identity, including the default ALL policy.
+    """
+    updates = unselected_policy_updates(settings.top_level_values(), settings.checks)
+    return settings.with_top_level_values(updates) if updates else settings
 
 
 # Discovered per directory in this order; the latex-prep names remain supported.
@@ -149,21 +300,21 @@ CONFIG_FILENAMES = (".fledge.toml", "fledge.toml", ".latex-prep.toml", "latex-pr
 PYPROJECT_TABLES = ("fledge", "latex-prep")
 
 
-def _read_settings(path: Path, *, required: bool = True) -> dict[str, object] | None:
+def _load_toml(path: Path) -> dict[str, object]:
     try:
         with path.open("rb") as stream:
-            values = tomllib.load(stream)
+            return tomllib.load(stream)
     except (OSError, tomllib.TOMLDecodeError) as error:
         raise PreparationError(f"Cannot read settings {path}: {error}") from error
-    if path.name != "pyproject.toml":
-        return values
+
+
+def _pyproject_settings(path: Path, values: dict[str, object]) -> dict[str, object] | None:
+    """The [tool.fledge] or [tool.latex-prep] table, or None when neither exists."""
     tool = values.get("tool", {})
-    tables = [name for name in PYPROJECT_TABLES if isinstance(tool, dict) and name in tool]
+    if not isinstance(tool, dict):
+        return None
+    tables = [name for name in PYPROJECT_TABLES if name in tool]
     if not tables:
-        if required:
-            raise PreparationError(
-                f"Settings {path} has no [tool.fledge] or [tool.latex-prep] table"
-            )
         return None
     if len(tables) > 1:
         raise PreparationError(
@@ -175,7 +326,19 @@ def _read_settings(path: Path, *, required: bool = True) -> dict[str, object] | 
     return settings
 
 
-def _unknown_settings_error(unknown: list[str], known: set[str], path: Path | None) -> RequestError:
+def _read_settings_file(path: Path) -> dict[str, object]:
+    values = _load_toml(path)
+    if path.name != "pyproject.toml":
+        return values
+    settings = _pyproject_settings(path, values)
+    if settings is None:
+        raise PreparationError(f"Settings {path} has no [tool.fledge] or [tool.latex-prep] table")
+    return settings
+
+
+def _unknown_settings_error(
+    unknown: list[str], known: frozenset[str], path: Path | None
+) -> RequestError:
     guesses = {
         name: close[0]
         for name in unknown
@@ -214,7 +377,8 @@ def resolve_config_path(
         for name in (*CONFIG_FILENAMES, "pyproject.toml"):
             candidate = directory / name
             if candidate.is_file() and (
-                name != "pyproject.toml" or _read_settings(candidate, required=False) is not None
+                name != "pyproject.toml"
+                or _pyproject_settings(candidate, _load_toml(candidate)) is not None
             ):
                 return candidate
         if (
@@ -238,141 +402,123 @@ def _layer_preset(preset: dict[str, object], selected: dict[str, object]) -> dic
     return merged
 
 
-def load_settings(
-    path: Path | None, overrides: dict[str, object], *, preset: str | None = None
-) -> Settings:
-    """Layer an optional preset, then one selected file, then non-None CLI/API overrides."""
-    values = _read_settings(path) if path is not None else {}
-    assert values is not None
-    if preset is not None:
-        values = _layer_preset(preset_values(preset), values)
-    known = {item.name for item in fields(Settings)}
-    unknown = (set(values) | set(overrides)) - known
-    if unknown:
-        raise _unknown_settings_error(sorted(unknown), known, path)
-    values.update({key: value for key, value in overrides.items() if value is not None})
-    defaults = Settings().to_dict()
-    defaults.update(values)
-    grouped = {
-        "checks": CheckSelection,
-        "structure_checks": StructureOptions,
-        "metadata_privacy": MetadataPrivacyOptions,
-        "formatting_options": FormattingOptions,
-        "source_transforms": SourceTransformOptions,
-        "bibliography_transform": BibliographyTransformOptions,
-        "pdf_artwork": PdfArtworkOptions,
-        "figure_artwork": PdfArtworkOptions,
-        "reporting": ReportingOptions,
-        "workflow": WorkflowOptions,
-        "package": PackageOptions,
-        "bibliography_checks": BibliographyOptions,
-        "build_checks": BuildCheckOptions,
-        "manuscript_checks": ManuscriptCheckOptions,
-        "online_checks": OnlineOptions,
-        "pdf_checks": PdfCheckOptions,
-        "submission_checks": SubmissionOptions,
-    }
-    for name, kind in grouped.items():
-        if name == "bibliography_transform":
-            defaults[name] = _bibliography_edit_tables(defaults[name])
-        defaults[name] = read_options(kind, defaults[name], name)
-    match_metadata = defaults["match_source_pdf_metadata"]
-    if (
-        not isinstance(match_metadata, (tuple, list))
-        or any(
-            not isinstance(item, str) or item not in {"title", "author"} for item in match_metadata
+def _current_names(values: Mapping[str, object]) -> dict[str, Any]:
+    """Accept each former setting name as an alias of its replacement, but not both."""
+    result: dict[str, Any] = {}
+    for name, value in values.items():
+        current = RENAMED_SETTINGS.get(name, name)
+        if current in result:
+            former = next(old for old, new in RENAMED_SETTINGS.items() if new == current)
+            raise PreparationError(f"Set {current} only; {former} is its former name")
+        result[current] = value
+    return result
+
+
+def _line_format(values: dict[str, Any], table: object) -> dict[str, Any]:
+    """Top-level wrap_length and tab_size, which belong to the formatting options."""
+    if isinstance(table, dict) and (nested := sorted(set(_FORMATTING_KEYS) & set(table))):
+        raise PreparationError(
+            f"Set {', '.join(nested)} at the top level, not in formatting_options"
         )
-        or len(set(match_metadata)) != len(match_metadata)
-    ):
-        raise PreparationError("match_source_pdf_metadata must list unique title/author fields")
-    defaults["match_source_pdf_metadata"] = tuple(match_metadata)
-    if path is not None:
-        workflow = cast(WorkflowOptions, defaults["workflow"])
-        defaults["workflow"] = replace(
+    return {name: values.pop(name) for name in _FORMATTING_KEYS if name in values}
+
+
+def _build_settings(values: dict[str, Any], path: Path | None) -> Settings:
+    """Construct Settings from TOML-layout values that use only current names."""
+    line_format = _line_format(values, values.get("formatting_options"))
+    tables: dict[str, Any] = {}
+    for name, kind in _OPTION_TABLES.items():
+        if name in values:
+            value = values.pop(name)
+            if name == "bibliography_transform":
+                value = _bibliography_edit_tables(value)
+            tables[name] = read_options(kind, value, name)
+    if line_format:
+        # The options validate these values with the messages of top-level settings.
+        formatting = tables.get("formatting_options", FormattingOptions())
+        tables["formatting_options"] = replace(formatting, **line_format)
+    grouped: dict[str, dict[str, Any]] = {group: {} for group in _FLATTENED_GROUPS}
+    for name in [name for name in values if _TOP_LEVEL_FIELDS.get(name) in grouped]:
+        grouped[_TOP_LEVEL_FIELDS[name]][name] = values.pop(name)
+    for name in _NAME_LISTS:
+        if name in grouped["manuscript"]:
+            value = grouped["manuscript"][name]
+            if not isinstance(value, (tuple, list)):
+                raise PreparationError(f"{name} must be an array of unique nonempty strings")
+            grouped["manuscript"][name] = tuple(value)
+    if isinstance(metadata := values.get("match_source_pdf_metadata"), list):
+        values["match_source_pdf_metadata"] = tuple(metadata)
+    settings = Settings(
+        **values,
+        **tables,
+        manuscript=ManuscriptOptions(**grouped["manuscript"]),
+        pdf=PdfInspectionOptions(**grouped["pdf"]),
+    )
+    return settings if path is None else _resolve_relative_paths(settings, path.parent)
+
+
+def _resolve_relative_paths(settings: Settings, directory: Path) -> Settings:
+    """Resolve file references in a settings file from that file's directory."""
+
+    def resolved(name: str) -> str:
+        return str((directory / Path(name).expanduser()).resolve())
+
+    workflow, submission = settings.workflow, settings.submission_checks
+    return replace(
+        settings,
+        workflow=replace(
             workflow,
             documents=tuple(
-                replace(
-                    document,
-                    reference_pdf=str(
-                        (path.parent / Path(document.reference_pdf).expanduser()).resolve()
-                    ),
-                )
+                replace(document, reference_pdf=resolved(document.reference_pdf))
                 if document.reference_pdf is not None
                 else document
                 for document in workflow.documents
             ),
-        )
-        submission = cast(SubmissionOptions, defaults["submission_checks"])
-        defaults["submission_checks"] = replace(
+        ),
+        submission_checks=replace(
             submission,
             template_references=tuple(
-                (project, str((path.parent / Path(reference).expanduser()).resolve()))
+                (project, resolved(reference))
                 for project, reference in submission.template_references
             ),
-        )
-    constraint_names = {item.name for item in fields(ManuscriptOptions)} | {
-        item.name for item in fields(PdfOptions)
-    }
-    for key in (
-        "required_class_options",
-        "forbidden_class_options",
-        "forbidden_packages",
-        "required_sections",
-    ):
-        value = defaults[key]
-        if not isinstance(value, (tuple, list)):
-            raise PreparationError(f"{key} must be an array of unique nonempty strings")
-        defaults[key] = tuple(value)
-    for key, value in defaults.items():
-        if key in constraint_names or key in grouped or key == "match_source_pdf_metadata":
-            # The typed option objects validate direct API and TOML use identically.
-            continue
-        elif key == "main":
-            if value is not None and (not isinstance(value, str) or not value.strip()):
-                raise PreparationError("main must be a nonempty relative filename")
-        elif key in {"layout", "engine", "bibliography_backend"}:
-            allowed = {
-                "layout": {"preserve", "flat"},
-                "engine": {"pdflatex", "xelatex", "lualatex"},
-                "bibliography_backend": {"auto", "bibtex", "biber"},
-            }[key]
-            if not isinstance(value, str) or value not in allowed:
-                raise PreparationError(f"{key} must be one of {', '.join(sorted(allowed))}")
-        elif key in {"format", "normalize_doi", "cleanup"}:
-            if type(value) is not bool:
-                raise PreparationError(f"{key} must be a boolean")
-        elif key == "max_pages" and value is None:
-            continue
-        elif key == "source_date_epoch":
-            if value is not None and (type(value) is not int or not 0 <= value <= 253402300799):
-                raise PreparationError(
-                    "source_date_epoch must be a nonnegative supported Unix timestamp"
-                )
-        elif type(value) is not int or value < 1:
-            raise PreparationError(f"{key} must be a positive integer")
-    settings = Settings(**cast(dict[str, Any], defaults))
-    if settings.workflow.documents and settings.main is not None:
-        raise PreparationError("Choose workflow.documents or one main, not both")
-    if settings.source_transforms.filename_overrides and settings.layout != "flat":
-        raise PreparationError("filename_overrides requires layout='flat'")
-    if {name.title() for name in settings.match_source_pdf_metadata} & {
-        name for name, _ in settings.pdf_checks.expected_metadata
-    }:
-        raise PreparationError(
-            "Choose source matching or an explicit expected PDF value for each metadata field"
-        )
-    settings.manuscript_options()
-    settings.pdf_options()
-    if settings.jobs > 64:
-        raise PreparationError("jobs must be at most 64")
-    if settings.build_jobs > 64 or settings.render_jobs > 64:
-        raise PreparationError("build_jobs and render_jobs must be at most 64")
-    if settings.memory_mb < 256 or settings.build_memory_mb < 128:
-        raise PreparationError("memory_mb must be >=256 and build_memory_mb must be >=128")
-    if settings.build_memory_mb + PARENT_MEMORY_MB > settings.memory_mb:
-        raise PreparationError(
-            f"memory_mb must allow build_memory_mb plus {PARENT_MEMORY_MB} MiB for the coordinator"
-        )
-    if settings.wrap_length < 20 or settings.tab_size > 16:
-        raise PreparationError("wrap_length must be >=20 and tab_size must be <=16")
-    return settings
+        ),
+    )
+
+
+def _settings_from_values(
+    values: Mapping[str, object],
+    overrides: Mapping[str, object],
+    *,
+    path: Path | None,
+    preset: str | None,
+) -> Settings:
+    selected = _current_names(values)
+    if preset is not None:
+        selected = _layer_preset(_current_names(preset_values(preset)), selected)
+    # An override of None means "not given", so it cannot conflict with its alias.
+    requested = _current_names(
+        {key: value for key, value in overrides.items() if value is not None}
+    )
+    named = {RENAMED_SETTINGS.get(key, key) for key in overrides}
+    unknown = (set(selected) | named) - SETTING_NAMES
+    if unknown:
+        raise _unknown_settings_error(sorted(unknown), SETTING_NAMES, path)
+    selected.update(requested)
+    return _build_settings(selected, path)
+
+
+def load_settings(
+    path: Path | None, overrides: Mapping[str, object], *, preset: str | None = None
+) -> Settings:
+    """Layer an optional preset, then one selected file, then non-None CLI/API overrides."""
+    values = _read_settings_file(path) if path is not None else {}
+    return _settings_from_values(values, overrides, path=path, preset=preset)
+
+
+def parse_settings_text(text: str, path: Path) -> Settings:
+    """Validate settings text as ``load_settings`` would read it from the file ``path``."""
+    try:
+        values = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as error:
+        raise PreparationError(f"Cannot read settings {path}: {error}") from error
+    return _settings_from_values(values, {}, path=path, preset=None)

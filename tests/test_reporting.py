@@ -12,23 +12,23 @@ from html.parser import HTMLParser
 from pathlib import Path
 from unittest.mock import patch
 
-from latexprep.models import Change, Finding, PreparationError, Report
+from latexprep.ci_annotations import render_ci_annotations
+from latexprep.diagnostic_bundle import export_diagnostic_bundle
+from latexprep.file_scan import read_regular_file
+from latexprep.finding_view import RenderOptions, evidence_excerpt, is_scope_disclaimer
+from latexprep.html_report import render_html
+from latexprep.models import Change, ChangeKind, Finding, Outcome, PreparationError, Report
 from latexprep.option_config import read_options
-from latexprep.reporting import (
+from latexprep.pdf_support import heuristic_finding, measurement_finding
+from latexprep.review_policy import (
     ReportingOptions,
     ReviewRule,
     apply_reviews,
-    evidence_excerpt,
-    export_diagnostic_bundle,
     has_unaccepted_blockers,
-    is_scope_disclaimer,
-    render_ci_annotations,
-    render_html,
     review_marker,
     reviewed_findings,
 )
 from latexprep.submission_checks import SubmissionOptions, check_pdf_identity, check_submission
-from latexprep.submission_checks import _read as read_submission_file
 
 
 class ReviewTests(unittest.TestCase):
@@ -36,8 +36,8 @@ class ReviewTests(unittest.TestCase):
         finding = Finding(
             "pdf.rendered_text_size",
             "Caption text is small",
-            "error",
-            "failed",
+            severity="error",
+            status="failed",
             path="paper.pdf",
             details={"stage": "final", "document": "main.tex", "page": 4},
         )
@@ -117,7 +117,7 @@ class ReviewTests(unittest.TestCase):
 
     def test_source_line_scope_is_literal_and_inclusive(self):
         finding = Finding(
-            "manuscript.abstract_citations", "Citation", "error", path="main.tex", line=12
+            "manuscript.abstract_citations", "Citation", severity="error", path="main.tex", line=12
         )
         options = ReportingOptions(
             accepted_exceptions=(
@@ -138,11 +138,11 @@ class ReviewTests(unittest.TestCase):
         for rule in (
             "build.tex_error",
             "build.rerun_required",
-            "source-external-path",
-            "flatten-identity-collision",
+            "source.external_path",
+            "flatten.identity_collision",
             "pdf.javascript_policy",
         ):
-            finding = Finding(rule, "Original evidence", "error")
+            finding = Finding(rule, "Original evidence", severity="error")
             options = ReportingOptions(accepted_exceptions=(ReviewRule(finding.code, "Reviewed"),))
             self.assertTrue(has_unaccepted_blockers([finding], options))
             result = reviewed_findings([finding], options)
@@ -152,18 +152,43 @@ class ReviewTests(unittest.TestCase):
         for finding in (
             self.finding(status="inconclusive"),
             self.finding(status="skipped"),
-            self.finding(details={"incomplete": True}),
-            self.finding(details={"unsupported_pages": [2]}),
-            self.finding(details={"nested": {"unmeasured": ["figure"]}}),
+            self.finding(incomplete=True, details={"incomplete": True}),
+            self.finding(incomplete=True, details={"unsupported_pages": [2]}),
+            self.finding(incomplete=True, details={"nested": {"unmeasured": ["figure"]}}),
         ):
             self.assertTrue(has_unaccepted_blockers([finding], options))
+
+    def test_explicitly_incomplete_failures_cannot_be_accepted_or_suppressed(self):
+        accept = ReportingOptions(accepted_exceptions=(ReviewRule("PDF202", "Reviewed size"),))
+        suppress = ReportingOptions(suppressions=(ReviewRule("PDF204", "Reviewed overlay"),))
+        for incomplete in (False, True):
+            with self.subTest(incomplete=incomplete):
+                error = measurement_finding(
+                    "pdf.rendered_text_size", "Small text", [{"page": 4}], incomplete=incomplete
+                )
+                advisory = heuristic_finding(
+                    "pdf.text_overlap", "Overlapping text", [{"page": 4}], incomplete=incomplete
+                )
+                self.assertEqual((error.status, error.incomplete), ("failed", incomplete))
+                self.assertEqual((advisory.status, advisory.severity), ("failed", "warning"))
+                self.assertEqual(has_unaccepted_blockers([error], accept), incomplete)
+                for finding, options, label in (
+                    (error, accept, "Accepted exception: Reviewed size"),
+                    (advisory, suppress, "Suppressed advisory: Reviewed overlay"),
+                ):
+                    reviewed = reviewed_findings([finding], options)
+                    if incomplete:
+                        self.assertEqual(reviewed[0], finding)
+                        self.assertEqual(reviewed[-1].rule, "report.review_ineligible")
+                    else:
+                        self.assertEqual(review_marker(reviewed[0]), label)
 
     def test_comparison_exceptions_cannot_accept_archive_changes(self):
         options = ReportingOptions(accepted_exceptions=(ReviewRule("CMP003", "Intended edit"),))
         finding = Finding(
             "compare.rendering",
             "Changed",
-            "error",
+            severity="error",
             details={
                 "stage": "baseline versus prepared",
                 "changed_pages": [1],
@@ -173,7 +198,9 @@ class ReviewTests(unittest.TestCase):
         for stage in ("prepared versus archive rebuild", "archive", None):
             modified = replace(finding, details={**finding.details, "stage": stage})
             self.assertTrue(has_unaccepted_blockers([modified], options))
-        unavailable = Finding("compare.unavailable", "Renderer failed", "error", "inconclusive")
+        unavailable = Finding(
+            "compare.unavailable", "Renderer failed", severity="error", status="inconclusive"
+        )
         self.assertTrue(has_unaccepted_blockers([finding, unavailable], options))
 
     def test_real_privacy_aggregates_with_missing_channels_cannot_be_waived(self):
@@ -204,9 +231,9 @@ class ReviewTests(unittest.TestCase):
             def read(path, *args, **kwargs):
                 if path.name == "unreadable.tex":
                     raise OSError("Unreadable fixture")
-                return read_submission_file(path, *args, **kwargs)
+                return read_regular_file(path, *args, **kwargs)
 
-            with patch("latexprep.submission_checks._read", side_effect=read):
+            with patch("latexprep.file_scan.read_regular_file", side_effect=read):
                 findings = check_submission(
                     root, "main.tex", SubmissionOptions(identity_terms=("Alice",))
                 )
@@ -219,14 +246,14 @@ class ReviewTests(unittest.TestCase):
             self.assertEqual(reviewed_findings([finding], options)[0], finding)
 
     def test_suppression_retains_original_evidence_and_cannot_suppress_errors(self):
-        finding = Finding("source-edit-marker", "TODO quotation", path="main.tex", line=2)
+        finding = Finding("source.edit_marker", "TODO quotation", path="main.tex", line=2)
         options = ReportingOptions(
             suppressions=(
                 ReviewRule("TEX001", "Intentional example", path="main.tex", line_start=2),
             )
         )
         report = apply_reviews(
-            Report("inspect", "passed_with_advisories", findings=[finding]), options
+            Report("inspect", outcome=Outcome.PASSED_WITH_ADVISORIES, findings=[finding]), options
         )
         reviewed = report.findings[0]
         self.assertEqual(reviewed.status, "failed")
@@ -258,9 +285,11 @@ class ReviewTests(unittest.TestCase):
         )
         options = ReportingOptions(accepted_exceptions=(ReviewRule("PDF202", "Reviewed"),))
         for outcome in ("blocked", "error", "cancelled", "planned"):
-            report = apply_reviews(Report("prepare", outcome, findings=[finding]), options)
+            report = apply_reviews(Report("prepare", outcome=outcome, findings=[finding]), options)
             self.assertEqual(report.outcome, outcome)
-        complete = apply_reviews(Report("check", "passed", findings=[finding]), options)
+        complete = apply_reviews(
+            Report("check", outcome=Outcome.PASSED, findings=[finding]), options
+        )
         self.assertEqual(complete.outcome, "accepted_exceptions")
         self.assertEqual(complete.findings[0].status, "failed")
         self.assertEqual(apply_reviews(complete, options).to_dict(), complete.to_dict())
@@ -269,11 +298,13 @@ class ReviewTests(unittest.TestCase):
         options = ReportingOptions(
             accepted_exceptions=(ReviewRule("PDF202", "Reviewed", page_start=99),)
         )
-        report = apply_reviews(Report("check", "blocked", findings=[self.finding()]), options)
+        report = apply_reviews(
+            Report("check", outcome=Outcome.BLOCKED, findings=[self.finding()]), options
+        )
         self.assertEqual(report.outcome, "blocked")
         self.assertEqual(report.findings[-1].rule, "report.review_unmatched")
         self.assertEqual(report.findings[-1].details["requested_review"]["reason"], "Reviewed")
-        no_findings = apply_reviews(Report("check", "passed"), options)
+        no_findings = apply_reviews(Report("check", outcome=Outcome.PASSED), options)
         self.assertEqual(no_findings.outcome, "passed_with_advisories")
 
 
@@ -294,8 +325,8 @@ class RenderTests(unittest.TestCase):
         payload = '</pre><script>alert(1)</script><img src="https://attacker.invalid" onerror="x">'
         report = Report(
             "check",
-            "blocked",
-            payload,
+            outcome=Outcome.BLOCKED,
+            scope=payload,
             main=payload,
             settings={"password": secret},
             findings=[
@@ -310,8 +341,8 @@ class RenderTests(unittest.TestCase):
             changes=[
                 Change(
                     payload,
-                    "format",
-                    payload,
+                    kind=ChangeKind.FORMAT,
+                    reason=payload,
                     diff=f"--- a\n+++ b\n@@ -1 +1 @@\n-{payload}\n+{secret}\n",
                 )
             ],
@@ -347,8 +378,8 @@ class RenderTests(unittest.TestCase):
                 Finding(
                     "pdf.geometry",
                     "Dimensions",
-                    "info",
-                    "passed",
+                    severity="info",
+                    status="passed",
                     details={"dimensions_pt": [[100, 200], [300, 400]], "stage": "final"},
                 ),
                 Finding(
@@ -383,7 +414,7 @@ class RenderTests(unittest.TestCase):
             settings={"password": "Credential_1"},
             findings=[
                 Finding(
-                    "source-edit-marker",
+                    "source.edit_marker",
                     "Credential_1\n::error::injected\r\x1b[2J %0A",
                     path="main,part.tex",
                     line=5,
@@ -396,7 +427,7 @@ class RenderTests(unittest.TestCase):
         self.assertNotIn("\x1b", annotation)
         self.assertIn("%0A::error::injected%0D%1B", annotation)
         self.assertIn("file=main%2Cpart.tex,line=5", annotation)
-        literal = Report("check", findings=[Finding("source-edit-marker", "literal %0A")])
+        literal = Report("check", findings=[Finding("source.edit_marker", "literal %0A")])
         self.assertIn("%250A", render_ci_annotations(literal))
         report.findings[0] = replace(report.findings[0], path="../../outside.tex")
         self.assertNotIn("file=", render_ci_annotations(report))
@@ -405,20 +436,25 @@ class RenderTests(unittest.TestCase):
         report = Report(
             "check",
             findings=[
-                Finding("online.metadata", "Offline run.", "info", "skipped"),
-                Finding("build.bibliography_backend", "No backend.", "info", "not_applicable"),
-                Finding("pdf.pages", "1 page", "info", "passed"),
-                Finding("pdf.fonts", "Fonts unavailable", "error", "skipped"),
-                Finding("source-edit-marker", "Marker", path="main.tex", line=2),
+                Finding("online.metadata", "Offline run.", severity="info", status="skipped"),
+                Finding(
+                    "build.bibliography_backend",
+                    "No backend.",
+                    severity="info",
+                    status="not_applicable",
+                ),
+                Finding("pdf.pages", "1 page", severity="info", status="passed"),
+                Finding("pdf.fonts", "Fonts unavailable", severity="error", status="skipped"),
+                Finding("source.edit_marker", "Marker", path="main.tex", line=2),
             ],
         )
         annotations = render_ci_annotations(report)
         self.assertEqual(len(annotations.splitlines()), 2)
         for hidden in ("Offline run", "No backend", "1 page"):
             self.assertNotIn(hidden, annotations)
-        everything = render_ci_annotations(report, show_passed=True)
+        everything = render_ci_annotations(report, options=RenderOptions(show_passed=True))
         self.assertEqual(len(everything.splitlines()), 5)
-        self.assertIn("info/not_applicable: No backend.", everything)
+        self.assertIn("info/not applicable: No backend.", everything)
         self.assertTrue(is_scope_disclaimer(report.findings[0]))
         self.assertFalse(is_scope_disclaimer(report.findings[3]))
         self.assertFalse(is_scope_disclaimer(replace(report.findings[0], status="failed")))
@@ -465,7 +501,9 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(excerpt(matches=[{"unknown": 1}], violations=[{"page": 2}]), "page 2")
         self.assertEqual(excerpt(matches=[True, None, 1.5, [1]]), "")
         self.assertEqual(len(excerpt(matches=["x" * 500])), 120)
-        passed = Finding("pdf.fonts", "ok", "info", "passed", details={"matches": ["a.tex"]})
+        passed = Finding(
+            "pdf.fonts", "ok", severity="info", status="passed", details={"matches": ["a.tex"]}
+        )
         self.assertEqual(evidence_excerpt(passed), "")
 
     def test_ci_and_html_show_sanitized_evidence_excerpts(self):
@@ -497,15 +535,65 @@ class RenderTests(unittest.TestCase):
         self.assertIn("&lt;script&gt;.tex", rendered)
         self.assertNotIn("<script>.tex", rendered)
 
+    def test_html_retains_distinct_violation_evidence_across_stages(self):
+        baseline_violation = {"page": 1, "reported_size_pt": 8}
+        for final_violation in (
+            {"page": 2, "reported_size_pt": 8},
+            {"page": 1, "reported_size_pt": 9},
+        ):
+            with self.subTest(final_violation=final_violation):
+                report = Report(
+                    "prepare",
+                    findings=[
+                        measurement_finding(
+                            "pdf.rendered_text_size",
+                            "Compared reported text sizes with configured minima.",
+                            [violation],
+                            stage=stage,
+                        )
+                        for stage, violation in (
+                            ("baseline", baseline_violation),
+                            ("final verification", final_violation),
+                        )
+                    ],
+                )
+                rendered = render_html(report)
+                self.assertEqual(rendered.count("<summary>Recorded evidence</summary>"), 2)
+                self.assertIn("[baseline]", rendered)
+                self.assertIn("[final verification]", rendered)
+                for violation in (baseline_violation, final_violation):
+                    for key, value in violation.items():
+                        self.assertIn(f"&quot;{key}&quot;: {value}", rendered)
+
+    def test_html_merges_identical_stage_evidence_regardless_of_key_order(self):
+        report = Report(
+            "prepare",
+            findings=[
+                measurement_finding(
+                    "pdf.rendered_text_size",
+                    "Compared reported text sizes with configured minima.",
+                    [violation],
+                    stage=stage,
+                )
+                for stage, violation in (
+                    ("baseline", {"page": 1, "reported_size_pt": 8}),
+                    ("final verification", {"reported_size_pt": 8, "page": 1}),
+                )
+            ],
+        )
+        rendered = render_html(report)
+        self.assertEqual(rendered.count("<summary>Recorded evidence</summary>"), 1)
+        self.assertIn("[baseline, final verification]", rendered)
+
     def test_review_reasons_are_visible_and_redacted_in_html_and_ci(self):
         report = Report(
             "check",
-            "passed",
+            outcome=Outcome.PASSED,
             findings=[
                 Finding(
                     "manuscript.abstract_citations",
                     "Citation",
-                    "error",
+                    severity="error",
                     path="main.tex",
                 )
             ],
@@ -521,6 +609,28 @@ class RenderTests(unittest.TestCase):
             self.assertIn("failed", output)
         self.assertTrue(render_ci_annotations(report).startswith("::notice "))
 
+    def test_accepted_stage_copy_does_not_hide_an_unaccepted_copy(self):
+        copies = [
+            Finding(
+                "manuscript.abstract_citations",
+                "Citation",
+                severity="error",
+                path="main.tex",
+                details={"stage": stage},
+            )
+            for stage in ("baseline", "final source checks")
+        ]
+        options = ReportingOptions(
+            accepted_exceptions=(ReviewRule("MAN003", "Reviewed baseline", stage="baseline"),)
+        )
+        report = apply_reviews(Report("check", findings=copies), options)
+        self.assertEqual(report.outcome, Outcome.BLOCKED)
+        annotations = render_ci_annotations(report).splitlines()
+        self.assertEqual(len(annotations), 2)
+        self.assertTrue(any(line.startswith("::error ") for line in annotations))
+        self.assertTrue(any("Accepted exception" in line for line in annotations))
+        self.assertEqual(render_html(report).count("Citation"), 2)
+
 
 class DiagnosticBundleTests(unittest.TestCase):
     def test_bundle_is_unverified_and_cross_redacted(self):
@@ -529,10 +639,17 @@ class DiagnosticBundleTests(unittest.TestCase):
             (root / "tool.log").write_text("password=CrossFileSecret\n", encoding="utf-8")
             report = Report(
                 "prepare",
-                "passed",
-                "Verified workflow scope",
-                findings=[Finding("source-edit-marker", "CrossFileSecret")],
-                changes=[Change("main.tex", "edit", "Reason", diff="-CrossFileSecret\n+value")],
+                outcome=Outcome.PASSED,
+                scope="Verified workflow scope",
+                findings=[Finding("source.edit_marker", "CrossFileSecret")],
+                changes=[
+                    Change(
+                        "main.tex",
+                        kind=ChangeKind.REWRITE,
+                        reason="Reason",
+                        diff="-CrossFileSecret\n+value",
+                    )
+                ],
                 stages=[{"name": "baseline", "log": "CrossFileSecret"}],
             )
             destination = root / "diagnostics.zip"
@@ -609,7 +726,7 @@ class DiagnosticBundleTests(unittest.TestCase):
                 export_diagnostic_bundle(Report("check"), destination)
             self.assertEqual(destination.read_bytes(), b"user data")
             (root / "big.log").write_text("oversized")
-            with patch("latexprep.reporting._MAX_ARTIFACT_BYTES", 2):
+            with patch("latexprep.diagnostic_bundle._MAX_ARTIFACT_BYTES", 2):
                 with self.assertRaises(PreparationError):
                     export_diagnostic_bundle(
                         Report("check"), root / "new.zip", scratch_root=root, artifacts=("big.log",)

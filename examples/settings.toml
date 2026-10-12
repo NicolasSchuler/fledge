@@ -2,7 +2,7 @@
 main = "main.tex"
 layout = "flat"
 engine = "pdflatex"
-format = false
+apply_formatting = false
 normalize_doi = false
 cleanup = true
 jobs = 2

@@ -8,7 +8,8 @@ import unittest
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-from latexprep.runtime import ToolRunner, build_project
+from latexprep.latexmk_build import build_project
+from latexprep.runtime import ToolRunner
 from tests.support import live_tests_enabled
 
 
@@ -82,9 +83,13 @@ class LiveBackendIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bcf.tag.rsplit("}", 1)[-1], "controlfile")
         self.assertRegex((build / "output/main.bbl").read_text(), r"\\entry\{used\}\{article\}")
         self.assertIn("Biber", (build / "output/main.blg").read_text())
-        self.assertEqual(result.tools["bibliography"]["observed_backends"], ["biber"])
-        self.assertTrue(result.tools["biber"]["version"])
-        self.assertEqual(result.tools["biber"]["version_arguments"], ["--noconf", "--version"])
+        bibliography = result.tools.bibliography
+        assert bibliography is not None
+        self.assertEqual(bibliography.evidence.observed_backends, ("biber",))
+        self.assertTrue(result.tools.versions["biber"].version)
+        self.assertEqual(
+            result.tools.versions["biber"].version_arguments, ("--noconf", "--version")
+        )
         for code in ("BLD201", "BLD202"):
             self.assertTrue(
                 any(item.code == code and item.status == "passed" for item in result.findings),
@@ -109,7 +114,7 @@ class LiveBackendIntegrationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(result.success, (result.findings, self.runner.diagnostics))
         self.assertTrue(result.pdf.read_bytes().startswith(b"%PDF-"))
-        self.assertTrue(result.tools[engine]["version"])
+        self.assertTrue(result.tools.versions[engine].version)
         inventory = next(item for item in result.findings if item.code == "BLD301")
         self.assertEqual(inventory.status, "passed")
         self.assertEqual(inventory.details["engine"], engine)

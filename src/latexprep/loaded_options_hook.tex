@@ -1,0 +1,100 @@
+\ifdefined\ExplSyntaxOn\else\expandafter\endinput\fi
+\ifdefined\AddToHook\else\expandafter\endinput\fi
+\ifdefined\CurrentFileUsed\else\expandafter\endinput\fi
+\ExplSyntaxOn
+\iow_new:N \g__latexprep_options_stream
+\str_new:N \l__latexprep_options_value_str
+\str_new:N \l__latexprep_options_encoded_str
+\seq_new:N \g__latexprep_options_files_seq
+\bool_new:N \g__latexprep_options_unsupported_bool
+\int_new:N \l__latexprep_options_units_int
+\iow_open:Nn \g__latexprep_options_stream { latexprep-loaded-options-TOKEN.lpo }
+\iow_now:Nn \g__latexprep_options_stream { START|TOKEN }
+\sys_if_engine_pdftex:TF
+  { \iow_now:Nn \g__latexprep_options_stream { ENGINE|pdflatex } }
+  {
+    \sys_if_engine_xetex:TF
+      { \iow_now:Nn \g__latexprep_options_stream { ENGINE|xelatex } }
+      {
+        \sys_if_engine_luatex:TF
+          { \iow_now:Nn \g__latexprep_options_stream { ENGINE|lualatex } }
+          { \iow_now:Nn \g__latexprep_options_stream { ENGINE|unsupported } }
+      }
+  }
+\cs_new_protected:Npn \__latexprep_options_file:
+  {
+    \group_begin:
+    \str_set:Nx \l__latexprep_options_value_str { \tl_to_str:V \CurrentFileUsed }
+    \exp_args:NnV \regex_match:nnT { \.(cls|sty)\Z } \l__latexprep_options_value_str
+      {
+        \exp_args:NnV \regex_match:nnTF { \A [A-Za-z0-9_.-]+ \.(cls|sty)\Z }
+          \l__latexprep_options_value_str
+          {
+            \seq_if_in:NVF \g__latexprep_options_files_seq \l__latexprep_options_value_str
+              {
+                \int_compare:nNnTF { \seq_count:N \g__latexprep_options_files_seq } < { 2048 }
+                  { \seq_gput_right:NV \g__latexprep_options_files_seq
+                      \l__latexprep_options_value_str }
+                  { \bool_gset_true:N \g__latexprep_options_unsupported_bool }
+              }
+          }
+          { \bool_gset_true:N \g__latexprep_options_unsupported_bool }
+      }
+    \group_end:
+  }
+\cs_new_protected:Npn \__latexprep_options_field:nn #1#2
+  {
+    \cs_if_exist:cTF {#2}
+      {
+        \exp_args:Nc \token_if_macro:NTF {#2}
+          {
+            \tl_if_empty:eTF { \exp_args:Nc \cs_parameter_spec:N {#2} }
+              {
+                \str_set:Nx \l__latexprep_options_value_str { \tl_to_str:v {#2} }
+                \int_add:Nn \l__latexprep_options_units_int
+                  { \str_count:N \l__latexprep_options_value_str }
+                \bool_lazy_or:nnTF
+                  { \int_compare_p:nNn
+                      { \str_count:N \l__latexprep_options_value_str } > { 16384 } }
+                  { \int_compare_p:nNn { \l__latexprep_options_units_int } > { 200000 } }
+                  { \iow_now:Nn \g__latexprep_options_stream { #1|! } }
+                  {
+                    \exp_args:NNV \str_set_convert:Nnnn
+                      \l__latexprep_options_encoded_str
+                      \l__latexprep_options_value_str { } { utf32be/hex }
+                    \iow_now:Nx \g__latexprep_options_stream
+                      { #1|\l__latexprep_options_encoded_str }
+                  }
+              }
+              { \iow_now:Nn \g__latexprep_options_stream { #1|! } }
+          }
+          { \iow_now:Nn \g__latexprep_options_stream { #1|! } }
+      }
+      { \iow_now:Nn \g__latexprep_options_stream { #1|! } }
+  }
+\cs_new_protected:Npn \__latexprep_options_finish:
+  {
+    \group_begin:
+    \int_zero:N \l__latexprep_options_units_int
+    \__latexprep_options_field:nn { FORMAT } { fmtversion }
+    \__latexprep_options_field:nn { GLOBAL } { @classoptionslist }
+    \__latexprep_options_field:nn { UNUSED } { @unusedoptionlist }
+    \bool_if:NT \g__latexprep_options_unsupported_bool
+      {
+        \iow_now:Nn \g__latexprep_options_stream
+          { UNSUPPORTED|package-filename-or-count }
+      }
+    \seq_map_inline:Nn \g__latexprep_options_files_seq
+      {
+        \iow_now:Nn \g__latexprep_options_stream { PACKAGE|##1 }
+        \__latexprep_options_field:nn { OPTIONS } { opt@##1 }
+        \__latexprep_options_field:nn { RAW } { @raw@opt@##1 }
+      }
+    \iow_now:Nn \g__latexprep_options_stream { END|TOKEN }
+    \iow_close:N \g__latexprep_options_stream
+    \group_end:
+  }
+\AddToHook{file/after}[latexprep-loaded-options]{\__latexprep_options_file:}
+\AddToHook{enddocument/end}[latexprep-loaded-options]{\__latexprep_options_finish:}
+\ExplSyntaxOff
+\endinput

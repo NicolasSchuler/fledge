@@ -13,7 +13,8 @@ import zlib
 from pathlib import Path
 
 from latexprep.config import Settings
-from latexprep.core import JobRequest, run_job
+from latexprep.core import run_job
+from latexprep.job_context import JobRequest
 from latexprep.models import Report
 from tests.support import live_tests_enabled, write_project
 

@@ -14,8 +14,11 @@ from unittest.mock import AsyncMock, patch
 
 from latexprep.cli import main
 from latexprep.config import Settings
-from latexprep.core import JobRequest, run_job, validate_destination
+from latexprep.core import run_job
+from latexprep.job_context import JobRequest
+from latexprep.latexmk_build import BuildTools
 from latexprep.models import Finding, PreparationError
+from latexprep.publication import validate_destination
 
 
 def project(root: Path) -> None:
@@ -39,7 +42,7 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
             original = {p.relative_to(source): p.read_bytes() for p in source.rglob("*.tex")}
             build_inputs = []
 
-            async def build(tree, main, work, engine, runner):
+            async def build(tree, main, work, engine, runner, **_options):
                 build_inputs.append((tree, main, sorted(p.name for p in tree.rglob("*.tex"))))
                 work.mkdir()
                 pdf = work / "built.pdf"
@@ -48,18 +51,21 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
                     success=True,
                     pdf=pdf,
                     findings=[],
-                    dependencies={main},
+                    recorder_project_inputs={main},
                     submission_inputs={main},
-                    tools={},
+                    tools=BuildTools(),
                     command=["test-build"],
+                    generated_reads=frozenset(),
                     log="",
                 )
 
-            passed = [Finding("pdf.comparison", "Controlled comparison", "info", "passed")]
+            passed = [
+                Finding("pdf.comparison", "Controlled comparison", severity="info", status="passed")
+            ]
             with (
-                patch("latexprep.core.build_project", side_effect=build),
-                patch("latexprep.core.inspect_pdf", new=AsyncMock(return_value=[])),
-                patch("latexprep.core.compare_pdfs", new=AsyncMock(return_value=passed)),
+                patch("latexprep.document_tasks.build_project", side_effect=build),
+                patch("latexprep.document_tasks.inspect_pdf", new=AsyncMock(return_value=[])),
+                patch("latexprep.document_tasks.compare_pdfs", new=AsyncMock(return_value=passed)),
             ):
                 first = await run_job(
                     JobRequest(
@@ -100,7 +106,7 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
             project(source)
             count = 0
 
-            async def build(tree, main, work, engine, runner):
+            async def build(tree, main, work, engine, runner, **_options):
                 nonlocal count
                 count += 1
                 work.mkdir()
@@ -110,17 +116,18 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
                     success=count < 3,
                     pdf=pdf if count < 3 else None,
                     findings=[],
-                    dependencies={main},
+                    recorder_project_inputs={main},
                     submission_inputs={main},
-                    tools={},
+                    tools=BuildTools(),
                     command=["test-build"],
+                    generated_reads=frozenset(),
                     log="",
                 )
 
             with (
-                patch("latexprep.core.build_project", side_effect=build),
-                patch("latexprep.core.inspect_pdf", new=AsyncMock(return_value=[])),
-                patch("latexprep.core.compare_pdfs", new=AsyncMock(return_value=[])),
+                patch("latexprep.document_tasks.build_project", side_effect=build),
+                patch("latexprep.document_tasks.inspect_pdf", new=AsyncMock(return_value=[])),
+                patch("latexprep.document_tasks.compare_pdfs", new=AsyncMock(return_value=[])),
             ):
                 result = await run_job(
                     JobRequest("prepare", source, Settings(layout="flat"), base / "output")
@@ -139,22 +146,25 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
                 success=False,
                 pdf=None,
                 findings=[],
-                dependencies=set(),
-                tools={},
+                recorder_project_inputs=set(),
+                tools=BuildTools(),
                 command=[],
+                generated_reads=frozenset(),
                 log="failure",
             )
-            with patch("latexprep.core.build_project", new=AsyncMock(return_value=failure)):
+            with patch(
+                "latexprep.document_tasks.build_project", new=AsyncMock(return_value=failure)
+            ):
                 result = await run_job(JobRequest("check", base / "input", Settings()))
             self.assertEqual(result.outcome, "blocked")
-            self.assertTrue(any(item.rule == "source-edit-marker" for item in result.findings))
+            self.assertTrue(any(item.rule == "source.edit_marker" for item in result.findings))
 
     async def test_ambiguous_root_blocks_without_running_tools(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
             project(base / "input")
             (base / "input/other.tex").write_bytes((base / "input/main.tex").read_bytes())
-            with patch("latexprep.core.build_project", new=AsyncMock()) as build:
+            with patch("latexprep.document_tasks.build_project", new=AsyncMock()) as build:
                 result = await run_job(JobRequest("check", base / "input", Settings()))
             self.assertEqual(result.outcome, "blocked")
             build.assert_not_called()
@@ -199,7 +209,7 @@ class CliTests(unittest.TestCase):
             project(base / "input")
             for output in (base / "input", base / "input/new"):
                 with self.subTest(output=output), self.assertRaises(PreparationError):
-                    validate_destination(base / "input", output)
+                    validate_destination(base / "input", output, "--output")
 
 
 if __name__ == "__main__":

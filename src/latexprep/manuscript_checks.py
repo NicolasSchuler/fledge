@@ -8,40 +8,54 @@ violations. No source is modified and no manuscript content is generated.
 from __future__ import annotations
 
 import re
-from bisect import bisect_left, bisect_right
-from collections.abc import Mapping, Sequence
+from collections import Counter
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TypedDict
+from typing import Literal, NamedTuple, TypedDict, get_args
 
-from .manuscript import (
-    _KNOWN_TEXT_COMMANDS,
-    _PACKAGE_COMMANDS,
-    _TEXT_WRAPPERS,
-    _commands_before_end,
-    _literal_list,
-    _normalize_heading,
-    _plain_text,
-    _reachable_sources,
+from .expanded_document import (
+    MACRO_DEFINITION_COMMANDS,
+    EnvironmentRegion,
+    ExpandedDocument,
+    Location,
+    command_end,
+    commands_before_end,
+    definition_spans,
+    environment_regions,
+    expand_document,
 )
-from .models import Finding, PreparationError
+from .file_scan import check_status, format_locations
+from .literal_text import (
+    HEADING_DEPTHS,
+    KNOWN_TEXT_COMMANDS,
+    MATH_ENVIRONMENT_PATTERN,
+    PACKAGE_COMMANDS,
+    REFERENCE_COMMANDS,
+    TEXT_WRAPPERS,
+    Declaration,
+    first_argument_names,
+    is_placeholder_text,
+    literal_list,
+    normalize_heading,
+    plain_argument_text,
+    plain_text,
+)
+from .models import EvidenceKind, Finding, PreparationError, Severity
+from .option_config import require_booleans
 from .scheduler import cancellation_point
-from .source import (
-    _DEFINITION_COMMANDS,
-    _IMPORT_COMMANDS,
-    _TOKEN,
-    MAX_COMMANDS,
-    MAX_INPUT_DEPTH,
-    MAX_TOTAL_SOURCE_BYTES,
-    _Command,
-    _commands,
-    _group,
-    _Inspection,
-    _items,
-    _ParseLimit,
+from .tex_lexer import (
+    Command,
     conditional_spans,
+    in_closed_span,
     in_conditional,
+    in_half_open_span,
+    merge_spans,
+    split_argument_items,
 )
+
+AbbreviationPolicy = Literal["forbid", "define"]
+_ABBREVIATION_POLICIES: tuple[AbbreviationPolicy, ...] = get_args(AbbreviationPolicy)
 
 
 @dataclass(frozen=True)
@@ -50,7 +64,7 @@ class ManuscriptCheckOptions:
     inventory_packages: bool = False
     check_layout_manipulation: bool = False
     forbid_abstract_citations: bool = False
-    abstract_abbreviation_policy: str | None = None
+    abstract_abbreviation_policy: AbbreviationPolicy | None = None
     abstract_abbreviation_exceptions: tuple[str, ...] = ()
     max_heading_depth: int | None = None
     check_empty_sections: bool = False
@@ -68,7 +82,8 @@ class ManuscriptCheckOptions:
     forbid_line_numbers: bool = False
 
     def __post_init__(self) -> None:
-        for name in (
+        require_booleans(
+            self,
             "inventory_packages",
             "check_layout_manipulation",
             "forbid_abstract_citations",
@@ -83,9 +98,7 @@ class ManuscriptCheckOptions:
             "require_figure_descriptions",
             "require_line_numbers",
             "forbid_line_numbers",
-        ):
-            if type(getattr(self, name)) is not bool:
-                raise PreparationError(f"{name} must be a boolean")
+        )
         if self.require_line_numbers and self.forbid_line_numbers:
             raise PreparationError("Choose require_line_numbers or forbid_line_numbers, not both")
         for name in (
@@ -107,10 +120,11 @@ class ManuscriptCheckOptions:
             ):
                 raise PreparationError(f"{name} must contain unique nonempty strings")
         if self.allowed_packages is not None and any(
-            _literal_list(value) != [value] for value in self.allowed_packages
+            literal_list(value) != [value] for value in self.allowed_packages
         ):
             raise PreparationError("allowed_packages must contain single literal package names")
-        if self.abstract_abbreviation_policy not in {None, "forbid", "define"}:
+        # A tuple, not a set: an unhashable configured value must reach this message.
+        if self.abstract_abbreviation_policy not in (None, *_ABBREVIATION_POLICIES):
             raise PreparationError("abstract_abbreviation_policy must be 'forbid' or 'define'")
         if self.max_heading_depth is not None and (
             type(self.max_heading_depth) is not int or not -1 <= self.max_heading_depth <= 5
@@ -130,15 +144,6 @@ _METADATA = {
     "email": {"email"},
     "corresponding_author": {"correspondingauthor"},
 }
-_HEADINGS = {
-    "part": -1,
-    "chapter": 0,
-    "section": 1,
-    "subsection": 2,
-    "subsubsection": 3,
-    "paragraph": 4,
-    "subparagraph": 5,
-}
 _CITATIONS = {
     "cite",
     "citep",
@@ -155,7 +160,6 @@ _CITATIONS = {
     "Cite",
     "supercite",
 }
-_REFERENCES = {"ref", "pageref", "eqref", "autoref", "cref", "Cref", "nameref", "vref"}
 _ORCID = {"orcid", "ORCID", "orcidlink"}
 _LAYOUT = {
     "newpage",
@@ -195,18 +199,21 @@ _LENGTHS = {
     "textfloatsep",
     "intextsep",
 }
-_SAFE_COMMANDS = (
-    set(_HEADINGS)
+_FLOAT_ENVIRONMENTS = frozenset({"figure", "figure*", "table", "table*"})
+# Every command these policies interpret; anything else in the document body is
+# an unexpanded construct that may hide or generate what a policy looks for.
+_INTERPRETED_COMMANDS = (
+    set(HEADING_DEPTHS)
     | _CITATIONS
-    | _REFERENCES
+    | REFERENCE_COMMANDS
     | _ORCID
     | _LAYOUT
     | _LENGTHS
-    | _PACKAGE_COMMANDS
-    | _TEXT_WRAPPERS
+    | PACKAGE_COMMANDS
+    | TEXT_WRAPPERS
     # One canonical non-content inventory is shared with the literal text scan so
-    # the two modules cannot disagree about which commands are merely structural.
-    | set(_KNOWN_TEXT_COMMANDS)
+    # the two cannot disagree about which commands are merely structural.
+    | KNOWN_TEXT_COMMANDS
     | {name for names in _METADATA.values() for name in names}
     | {
         "documentclass",
@@ -352,7 +359,7 @@ _SAFE_COMMANDS = (
         "]",
     }
 )
-_SAFE_ENVS = {
+_INTERPRETED_ENVIRONMENTS = {
     "document",
     "abstract",
     "keywords",
@@ -395,7 +402,20 @@ _SAFE_ENVS = {
     "lstlisting",
     "minted",
 }
-_NONCONTENT = {"label", "nocite", "centering", "raggedright", "raggedleft", "noindent"}
+_COUNTER_CHANGES = {"setcounter", "addtocounter", "refstepcounter", "stepcounter"}
+# Commands blanked before judging whether a section body has content.
+_BLANKED_IN_CONTENT = frozenset(
+    {
+        *HEADING_DEPTHS,
+        "label",
+        "nocite",
+        "centering",
+        "raggedright",
+        "raggedleft",
+        "noindent",
+        "declaration",
+    }
+)
 _GENERATED_CONTENT = {
     "includegraphics",
     "rule",
@@ -405,42 +425,9 @@ _GENERATED_CONTENT = {
     "listoffigures",
     "listoftables",
 }
-_IGNORED_SOURCE_RULES = {
-    "source-edit-marker",
-    "source-edit-command",
-    "source-duplicate-label",
-    "source-unresolved-reference",
-}
-# Commands whose arguments declare a macro or environment. Neither the command nor
-# its replacement body is executed where it stands, so it is never an unknown
-# construct in the surrounding manuscript.
-_DEFINITIONS = _DEFINITION_COMMANDS | {
-    "newcommand",
-    "renewcommand",
-    "providecommand",
-    "DeclareRobustCommand",
-    "newcommandx",
-    "renewcommandx",
-    "newenvironment",
-    "renewenvironment",
-    "NewDocumentCommand",
-    "RenewDocumentCommand",
-    "ProvideDocumentCommand",
-    "DeclareDocumentCommand",
-    "NewDocumentEnvironment",
-    "RenewDocumentEnvironment",
-    "DeclareMathOperator",
-    "DeclarePairedDelimiter",
-    "newtheorem",
-    "declaretheorem",
-    "newcolumntype",
-    "newlength",
-    "newsavebox",
-    "newcounter",
-}
-# Definitions written with TeX primitives take their name and replacement text
-# without braces around the name, so the lexer records no arguments for them.
-_PRIMITIVE_DEFINITIONS = _DEFINITION_COMMANDS
+# Mathematics makes a section nonempty. The environment names are matched as
+# prefixes, so starred and related environments such as aligned count as well.
+_MATH_CONTENT = re.compile(rf"(?<!\\)\$|\\[([]|\\begin\{{(?:{MATH_ENVIRONMENT_PATTERN})")
 # Constructs that could construct, rename or conditionally execute a package
 # declaration. Macro definitions cannot: they only name a replacement body.
 _PACKAGE_GENERATORS = {
@@ -468,13 +455,44 @@ _PACKAGE_GENERATORS = {
     "AtEndOfPackage",
     "AtEndOfClass",
 }
-_MAX_REPORTED_LOCATIONS = 3
+# Inside a conditional, only these commands cannot generate a package declaration.
+_INERT_IN_PACKAGE_CONDITIONALS = (
+    _INTERPRETED_COMMANDS
+    | MACRO_DEFINITION_COMMANDS
+    | {"ProvidesPackage", "ProvidesClass", "ProvidesFile", "NeedsTeXFormat"}
+)
+_ABBREVIATION = re.compile(r"\b[A-Z][A-Z0-9]{1,}\b")
+# Expanded words directly before "(" that may define the abbreviation that follows.
+_ABBREVIATION_DEFINITION = re.compile(
+    r"""
+    (                                     # the expanded words:
+        (?:\b[A-Za-z][A-Za-z-]*\s+){1,10} # up to ten words, each followed by space,
+        [A-Za-z][A-Za-z-]*                # then the last word
+    )
+    \s*\($                                # directly before an opening parenthesis
+    """,
+    re.VERBOSE,
+)
+_HARDCODED_REFERENCE = re.compile(
+    r"""
+    \b(?:Figures?|Figs?\.?|Tables?|Sections?|Secs?\.?|Equations?|Eqs?\.?)  # object kind
+    \s*[~ ]\s*                                                          # space or tie
+    \(?\d+(?:\.\d+)*\)?                                                 # number, as in (5)
+    """,
+    re.VERBOSE,
+)
+_ORCID_IDENTIFIER = re.compile(r"\d{4}-\d{4}-\d{4}-\d{3}[\dX]", re.ASCII)
+_LINE_NUMBER_COMMANDS = {"linenumbers", "runninglinenumbers", "pagewiselinenumbers"}
+_LINE_NUMBER_OPTIONS = {"lineno", "linenumbers"}
 _MAX_REPORTED_CONSTRUCTS = 20
+_SCOPE = (
+    "Selected literal source graph; macros are not expanded and rendered output is not inferred."
+)
 
 
 class _Heading(TypedDict):
-    path: object
-    line: object
+    path: str | None
+    line: int | None
     title: str
     depth: int
     start: int
@@ -484,291 +502,34 @@ class _Heading(TypedDict):
 
 
 class _MetadataValue(TypedDict):
-    path: object
-    line: object
+    path: str | None
+    line: int | None
     value: str
     uncertainty: list[str]
     placeholder: bool
 
 
-class _PackageValue(TypedDict):
-    path: str
-    line: int
-    names: list[str] | None
-    options: list[str]
-    uncertainty: list[str]
+class _Weight(NamedTuple):
+    """The severity and evidence kind a check reports when it does not pass."""
+
+    severity: Severity
+    evidence_kind: EvidenceKind
 
 
-@dataclass(frozen=True)
-class _Segment:
-    start: int
-    end: int
-    path: str
-    line: int
+_POLICY = _Weight("error", EvidenceKind.DERIVED)
+_ADVISORY = _Weight("warning", EvidenceKind.HEURISTIC)
 
 
-@dataclass
-class _Document:
-    inspection: _Inspection
-    selected: set[str]
-    text: str = ""
-    commands: list[_Command] = field(default_factory=list)
-    segments: list[_Segment] = field(default_factory=list)
-    # Everything a document-wide scan cannot interpret.
-    uncertainty: list[str] = field(default_factory=list)
-    # Source-graph gaps: missing inputs, unparsable files, bounded-limit stops.
-    graph_uncertainty: list[str] = field(default_factory=list)
-    # Graph gaps plus conditional control flow, which can add or remove any
-    # declaration and therefore defeats every claim that something is absent.
-    presence_uncertainty: list[str] = field(default_factory=list)
-    # Offset and label of each unexpanded body construct, in source order.
-    unknown: list[tuple[int, str]] = field(default_factory=list)
-    conditionals: list[tuple[int, int]] = field(default_factory=list)
-    body_start: int = 0
-    starts: list[int] = field(default_factory=list)
-    command_starts: list[int] = field(default_factory=list)
-    newlines: list[int] = field(default_factory=list)
+class _CheckOutcome(NamedTuple):
+    """What one check established: confirmed violations and the gaps that remain."""
 
-    def location(self, offset: int) -> dict[str, object]:
-        if not self.segments:
-            return {"path": self.inspection.main, "line": None}
-        index = max(0, bisect_right(self.starts, offset) - 1)
-        segment = self.segments[index]
-        return {
-            "path": segment.path,
-            "line": segment.line
-            + bisect_left(self.newlines, offset)
-            - bisect_left(self.newlines, segment.start),
-        }
-
-    def between(self, start: int, end: int) -> list[_Command]:
-        return self.commands[
-            bisect_left(self.command_starts, start) : bisect_left(self.command_starts, end)
-        ]
+    violations: Sequence[Mapping[str, object]]
+    uncertainty: Iterable[str]
 
 
-@dataclass
-class _Region:
-    kind: str
-    command: _Command
-    start: int
-    end: int
-    commands: list[_Command] = field(default_factory=list)
-    uncertainty: list[str] = field(default_factory=list)
-
-
-def _stop(command: _Command) -> int:
-    return max(
-        (arg.end + 1 for arg in (*command.arguments, *command.options)),
-        default=command.start + len(command.name) + 1,
-    )
-
-
-def _definition_end(text: str, command: _Command) -> int:
-    """Return the offset after a definition's name, parameters and replacement body."""
-    stop = _stop(command)
-    if command.name not in _PRIMITIVE_DEFINITIONS:
-        return stop
-    line_end = text.find("\n", stop)
-    line_end = len(text) if line_end < 0 else line_end
-    cursor = stop
-    # \let\a\b and \def\x#1{…} place the defined name outside any group.
-    for _ in range(2 if command.name in {"let", "futurelet"} else 1):
-        token = _TOKEN.match(text, cursor)
-        if token is None:
-            break
-        cursor = stop = token.end()
-    opening = text.find("{", cursor, line_end)
-    if opening >= 0:
-        body = _group(text, opening)
-        if body is not None:
-            return body.end + 1
-    return stop
-
-
-def _definition_spans(text: str, commands: Sequence[_Command]) -> list[tuple[int, int]]:
-    """Return merged offset ranges covering definition commands and their bodies."""
-    merged: list[tuple[int, int]] = []
-    for command in commands:
-        if command.name not in _DEFINITIONS:
-            continue
-        span = (command.start, _definition_end(text, command))
-        if merged and span[0] <= merged[-1][1]:
-            merged[-1] = (merged[-1][0], max(merged[-1][1], span[1]))
-        else:
-            merged.append(span)
-    return merged
-
-
-def _within(spans: list[tuple[int, int]], offset: int) -> bool:
-    """Whether ``offset`` lies at or inside one of the merged ``spans``."""
-    index = bisect_right(spans, (offset, float("inf"))) - 1
-    return index >= 0 and spans[index][0] <= offset < spans[index][1]
-
-
-def _read(root: Path, main: str | None, inspection: _Inspection | None = None) -> _Document:
-    """Expand the selected literal graph; reuse ``inspection`` when the caller has one."""
-    inspection = inspection or _Inspection(root, main)
-    selected = _reachable_sources(inspection)
-    document = _Document(inspection, selected)
-    if inspection.main not in selected:
-        document.graph_uncertainty.append("no inspectable selected main source")
-    if inspection.subfile_targets:
-        document.graph_uncertainty.append(
-            "subfile body/preamble content interpretation is not supported by this check"
-        )
-    scope = selected | {inspection.main}
-    document.graph_uncertainty.extend(
-        f"{finding.path}: {finding.message}"
-        for finding in inspection.findings
-        if finding.rule not in _IGNORED_SOURCE_RULES
-        and finding.rule.startswith("source-")
-        and (finding.path in scope or finding.path is None)
-        and finding.status in {"failed", "inconclusive"}
-    )
-    chunks: list[str] = []
-    size = 0
-    events = 0
-    stopped = False
-
-    def append(value: str, path: str, line: int) -> None:
-        nonlocal size
-        if not value:
-            return
-        if size + len(value) > MAX_TOTAL_SOURCE_BYTES:
-            raise _ParseLimit
-        document.segments.append(_Segment(size, size + len(value), path, line))
-        chunks.append(value)
-        size += len(value)
-
-    def expand(path: str, stack: tuple[str, ...]) -> None:
-        nonlocal events, stopped
-        cancellation_point()
-        if path in stack or len(stack) >= MAX_INPUT_DEPTH:
-            document.graph_uncertainty.append("cyclic or excessively deep literal input graph")
-            return
-        source = inspection.sources.get(path)
-        if source is None:
-            document.graph_uncertainty.append(f"{path}: included source was not inspectable")
-            return
-        cursor = 0
-        newlines = [index for index, char in enumerate(source.masked) if char == "\n"]
-        for command in _commands_before_end(source):
-            events += 1
-            if events > MAX_COMMANDS:
-                raise _ParseLimit
-            if command.name == "endinput":
-                if command.depth or source.masked[_stop(command) :].split("\n", 1)[0].strip():
-                    document.graph_uncertainty.append(f"{path}: unresolved endinput context")
-                append(
-                    source.masked[cursor : command.start],
-                    path,
-                    bisect_right(newlines, cursor - 1) + 1,
-                )
-                return
-            if command.name not in {"input", "include", *_IMPORT_COMMANDS}:
-                continue
-            argument_index = 1 if command.name in _IMPORT_COMMANDS else 0
-            if command.depth or len(command.arguments) <= argument_index:
-                document.graph_uncertainty.append(f"{path}: nonliteral or grouped inclusion")
-                continue
-            arguments = _items(command.arguments[argument_index], False)
-            argument = arguments[0]
-            resolved = inspection.references.get((path, argument.start, argument.end))
-            if resolved is None:
-                document.graph_uncertainty.append(f"{path}: unresolved literal inclusion")
-                continue
-            if len(command.arguments) > argument_index + 1 or command.options:
-                document.graph_uncertainty.append(
-                    f"{path}: trailing grouped or optional syntax follows a source inclusion"
-                )
-            append(
-                source.masked[cursor : command.start], path, bisect_right(newlines, cursor - 1) + 1
-            )
-            expand(resolved[0], (*stack, path))
-            # The shared lexer records subsequent groups as possible arguments.
-            # Input has only one: preserve later groups and bare-input terminators.
-            cursor = command.arguments[argument_index].end
-            if source.masked[cursor : cursor + 1] == "}":
-                cursor += 1
-            if stopped:
-                return
-        closing = next(
-            (
-                command
-                for command in source.commands
-                if command.name == "end"
-                and not command.depth
-                and command.arguments
-                and command.arguments[0].value.strip() == "document"
-            ),
-            None,
-        )
-        end = closing.start if closing else len(source.masked)
-        append(source.masked[cursor:end], path, bisect_right(newlines, cursor - 1) + 1)
-        if closing:
-            stopped = True
-
-    try:
-        if inspection.main in selected:
-            assert inspection.main is not None
-            expand(inspection.main, ())
-        document.text = "".join(chunks)
-        document.starts = [segment.start for segment in document.segments]
-        document.commands = _commands(document.text)
-        if len(document.commands) > MAX_COMMANDS:
-            raise _ParseLimit
-    except _ParseLimit:
-        document.graph_uncertainty.append("expanded manuscript exceeded a bounded parsing limit")
-        document.text = "".join(chunks)
-        document.starts = [segment.start for segment in document.segments]
-        document.commands = []
-    document.graph_uncertainty = sorted(set(document.graph_uncertainty))
-    document.command_starts = [command.start for command in document.commands]
-    document.newlines = [index for index, char in enumerate(document.text) if char == "\n"]
-    document.conditionals = conditional_spans(document.commands)
-    # Preamble declarations configure the toolchain; they are not manuscript
-    # content, and a macro definition only names a replacement body.
-    opening = next(
-        (
-            command
-            for command in document.commands
-            if command.name == "begin"
-            and not command.depth
-            and command.arguments
-            and command.arguments[0].value.strip() == "document"
-        ),
-        None,
-    )
-    document.body_start = _stop(opening) if opening is not None else 0
-    definitions = _definition_spans(document.text, document.commands)
-    for command in document.commands:
-        cancellation_point()
-        if command.start < document.body_start or _within(definitions, command.start):
-            continue
-        if command.name not in _SAFE_COMMANDS:
-            document.unknown.append((command.start, "\\" + command.name))
-        if command.name in {"begin", "end"} and command.arguments:
-            environment = command.arguments[0].value.strip()
-            if environment not in _SAFE_ENVS:
-                document.unknown.append((command.start, "environment " + environment))
-        if command.name in {"setcounter", "addtocounter", "refstepcounter", "stepcounter"}:
-            document.unknown.append((command.start, "explicit counter modification"))
-    document.presence_uncertainty = list(document.graph_uncertainty)
-    if document.conditionals:
-        document.presence_uncertainty.append(
-            "conditional source control flow can add or remove declarations"
-        )
-    document.uncertainty = [
-        *document.presence_uncertainty,
-        *_unknown_reasons(document, 0, len(document.text)),
-    ]
-    return document
-
-
-def _unknown_reasons(document: _Document, start: int, end: int) -> list[str]:
+def _unknown_reasons(unknown: Sequence[tuple[int, str]], start: int, end: int) -> list[str]:
     """Describe unexpanded body constructs inside one checked region only."""
-    labels = sorted({label for offset, label in document.unknown if start <= offset < end})
+    labels = sorted({label for offset, label in unknown if start <= offset < end})
     if not labels:
         return []
     return [
@@ -777,168 +538,138 @@ def _unknown_reasons(document: _Document, start: int, end: int) -> list[str]:
     ]
 
 
-def _value(command: _Command, argument: int = 0) -> tuple[str, list[str]]:
-    if len(command.arguments) <= argument:
-        return "", ["missing literal argument"]
-    value, uncertainty = _plain_text(command.arguments[argument].value)
-    if not value.strip() and re.search(r"(?<!\\)\$|\\[([]", command.arguments[argument].value):
-        uncertainty.append("only mathematical content is observable")
-    return " ".join(value.split()), uncertainty
+@dataclass(frozen=True, slots=True)
+class _Reading:
+    """The expanded document and the body constructs these checks cannot interpret."""
+
+    document: ExpandedDocument
+    # Offset and label of each unexpanded body construct, in source order.
+    unknown: list[tuple[int, str]]
+    # Everything a document-wide scan cannot interpret.
+    uncertainty: list[str]
+
+    def unknown_reasons(self, start: int, end: int) -> list[str]:
+        return _unknown_reasons(self.unknown, start, end)
+
+    def scope(self, region: EnvironmentRegion) -> None:
+        """Attach only the interpretation gaps that fall inside this region."""
+        if in_conditional(self.document.conditionals, region.command.start):
+            region.uncertainty.append("conditional source control flow")
+        region.uncertainty.extend(self.unknown_reasons(region.start, region.end))
 
 
-def _placeholder(value: str) -> bool:
-    normalized = value.casefold().strip(" .<>[]")
-    return bool(
-        re.search(r"\b(?:todo|tbd|fixme|xxx)\b|\?\?", normalized)
-        or normalized
-        in {
-            "placeholder",
-            "description",
-            "figure description",
-            "author name",
-            "your name",
-            "your title",
-            "your affiliation",
-            "email address",
-        }
-        or re.fullmatch(
-            r"(?:insert|add|enter|replace with|your) .*(?:here|description|text)", normalized
-        )
-    )
+def _interpret(document: ExpandedDocument) -> _Reading:
+    """Find body constructs outside the interpreted inventory.
 
-
-def _where(violations: Sequence[Mapping[str, object]]) -> str:
-    """Name the first few distinct violation locations, counting the remainder."""
-    places: list[str] = []
-    for item in violations:
-        path, line = item.get("path"), item.get("line")
-        if not isinstance(path, str):
+    Preamble declarations configure the toolchain; they are not manuscript content,
+    and a macro definition only names a replacement body.
+    """
+    definitions = definition_spans(document.text, document.commands)
+    unknown: list[tuple[int, str]] = []
+    for command in document.commands:
+        cancellation_point()
+        if command.start < document.body_start or in_half_open_span(definitions, command.start):
             continue
-        place = f"{path}:{line}" if isinstance(line, int) else path
-        if place not in places:
-            places.append(place)
-    if not places:
-        return ""
-    extra = len(places) - _MAX_REPORTED_LOCATIONS
-    return ", ".join(places[:_MAX_REPORTED_LOCATIONS]) + (f", +{extra} more" if extra > 0 else "")
+        if command.name not in _INTERPRETED_COMMANDS:
+            unknown.append((command.start, "\\" + command.name))
+        if command.name in {"begin", "end"} and command.arguments:
+            environment = command.arguments[0].value.strip()
+            if environment not in _INTERPRETED_ENVIRONMENTS:
+                unknown.append((command.start, "environment " + environment))
+        if command.name in _COUNTER_CHANGES:
+            unknown.append((command.start, "explicit counter modification"))
+    uncertainty = [
+        *document.presence_uncertainty,
+        *_unknown_reasons(unknown, 0, len(document.text)),
+    ]
+    return _Reading(document, unknown, uncertainty)
 
 
-def _finding(
+def _policy_finding(
     rule: str,
     title: str,
-    document: _Document,
-    violations: Sequence[Mapping[str, object]],
-    uncertainty: list[str],
+    outcome: _CheckOutcome,
     *,
-    advisory: bool = False,
-    extra: dict[str, object] | None = None,
     failure: str | None = None,
-    total: int | None = None,
+    weight: _Weight = _POLICY,
+    details: Mapping[str, object] | None = None,
+    other_gaps: bool = False,
 ) -> Finding:
     """Report confirmed violations as failures even when other constructs are unclear.
 
     Callers only record a violation for a construct they could interpret, so a
     violation is never in doubt. Remaining interpretation gaps stay in the details
-    and decide the outcome only when nothing was confirmed.
+    and decide the outcome only when nothing was confirmed. ``failure`` summarizes
+    the violations; it defaults to the title. Any remaining gap, or ``other_gaps``
+    reported in ``details`` beyond the outcome's own, marks the evidence incomplete.
     """
-    reasons = sorted(set(uncertainty))
-    status = "failed" if violations else "inconclusive" if reasons else "passed"
-    details: dict[str, object] = {
-        "matches": [dict(item) for item in violations],
-        "uncertainty": reasons,
-        "scope": "Selected literal source graph; macros are not expanded "
-        "and rendered output is not inferred.",
-    }
-    if extra:
-        details.update(extra)
+    violations = outcome.violations
+    reasons = sorted(set(outcome.uncertainty))
+    status = check_status(failed=bool(violations), incomplete=bool(reasons))
     location = violations[0] if len(violations) == 1 else {}
-    path = location.get("path")
-    line = location.get("line")
-    if status == "failed":
-        summary = (failure or title.rstrip(".")).format(
-            count=len(violations), total=len(violations) if total is None else total
-        )
-        where = _where(violations)
-        message = summary + (": " + where if where else "") + "."
-        if reasons:
-            message += " Other constructs remain inconclusive: " + reasons[0].rstrip(".") + "."
-    elif status == "inconclusive":
-        message = title + " Inconclusive: " + reasons[0].rstrip(".") + "."
-    else:
-        message = title
+    path, line = location.get("path"), location.get("line")
+    match status:
+        case "failed":
+            where = format_locations(violations)
+            message = (failure or title.rstrip(".")) + (": " + where if where else "") + "."
+            if reasons:
+                message += " Other constructs remain inconclusive: " + reasons[0].rstrip(".") + "."
+        case "inconclusive":
+            message = title + " Inconclusive: " + reasons[0].rstrip(".") + "."
+        case _:
+            message = title
     return Finding(
         rule,
         message,
-        "info" if status == "passed" else "warning" if advisory else "error",
-        status,
+        severity="info" if status == "passed" else weight.severity,
+        status=status,
         path=path if isinstance(path, str) else None,
         line=line if isinstance(line, int) else None,
-        evidence="heuristic" if advisory else "derived",
-        details=details,
+        evidence_kind=weight.evidence_kind,
+        incomplete=bool(reasons) or other_gaps,
+        details={
+            "matches": [dict(item) for item in violations],
+            "uncertainty": reasons,
+            "scope": _SCOPE,
+            **(details or {}),
+        },
     )
 
 
-def _regions(document: _Document, kinds: set[str]) -> tuple[list[_Region], list[str]]:
-    result: list[_Region] = []
-    stack: list[_Region] = []
-    reasons: list[str] = []
-    for command in document.commands:
-        cancellation_point()
-        environment = command.arguments[0].value.strip() if command.arguments else ""
-        if command.name == "begin" and environment in kinds:
-            region = _Region(environment, command, _stop(command), len(document.text))
-            if command.depth:
-                region.uncertainty.append("environment declared inside a group or macro argument")
-            if stack:
-                region.uncertainty.append("nested manuscript environments")
-                stack[-1].uncertainty.append("nested manuscript environments")
-            stack.append(region)
-        elif command.name == "end" and environment in kinds:
-            if not stack or stack[-1].kind != environment:
-                reasons.append("unmatched or crossed environment delimiters")
-                continue
-            region = stack.pop()
-            region.end = command.start
-            result.append(region)
-        elif stack:
-            stack[-1].commands.append(command)
-    for region in stack:
-        region.uncertainty.append("environment has no closing delimiter")
-        result.append(region)
-    for region in result:
-        _scope_region(document, region)
-    return sorted(result, key=lambda region: region.command.start), reasons
+def _scoped_regions(
+    reading: _Reading, kinds: Iterable[str]
+) -> tuple[list[EnvironmentRegion], list[str]]:
+    """Environment regions with the unexpanded constructs inside each one."""
+    regions, reasons = environment_regions(reading.document, frozenset(kinds))
+    for region in regions:
+        region.uncertainty.extend(reading.unknown_reasons(region.start, region.end))
+    return regions, reasons
 
 
-def _scope_region(document: _Document, region: _Region) -> None:
-    """Attach only the interpretation gaps that fall inside this region."""
-    if in_conditional(document.conditionals, region.command.start):
-        region.uncertainty.append("conditional source control flow")
-    region.uncertainty.extend(_unknown_reasons(document, region.start, region.end))
-
-
-def _headings(document: _Document) -> list[_Heading]:
-    commands = [command for command in document.commands if command.name in _HEADINGS]
+def _headings(document: ExpandedDocument) -> list[_Heading]:
     result: list[_Heading] = []
     pending: list[int] = []
-    for command in commands:
+    for command in document.commands:
+        if command.name not in HEADING_DEPTHS:
+            continue
         cancellation_point()
-        value, reasons = _value(command)
+        depth = HEADING_DEPTHS[command.name]
+        value, reasons = plain_argument_text(command)
         if command.depth:
             reasons.append("heading inside a group or macro argument")
         if in_conditional(document.conditionals, command.start):
             reasons.append("conditional source control flow")
-        while pending and result[pending[-1]]["depth"] >= _HEADINGS[command.name]:
+        while pending and result[pending[-1]]["depth"] >= depth:
             result[pending.pop()]["end"] = command.start
         location = document.location(command.start)
         result.append(
             {
-                "path": location["path"],
-                "line": location["line"],
+                "path": location.path,
+                "line": location.line,
                 "title": value,
-                "depth": _HEADINGS[command.name],
+                "depth": depth,
                 "start": command.start,
-                "body_start": _stop(command),
+                "body_start": command_end(command),
                 "end": len(document.text),
                 "uncertainty": reasons,
             }
@@ -947,26 +678,27 @@ def _headings(document: _Document) -> list[_Heading]:
     return result
 
 
-def _content(document: _Document, start: int, end: int) -> tuple[bool, list[str]]:
+def _content(document: ExpandedDocument, start: int, end: int) -> tuple[bool, list[str]]:
     text = document.text[start:end]
     commands = document.between(start, end)
-    edits = []
-    for command in commands:
-        if command.name in set(_HEADINGS) | _NONCONTENT | {"declaration"}:
-            edits.append((command.start - start, min(_stop(command), end) - start))
+    edits = [
+        (command.start - start, min(command_end(command), end) - start)
+        for command in commands
+        if command.name in _BLANKED_IN_CONTENT
+    ]
     for opening, closing in reversed(edits):
         text = text[:opening] + " " * (closing - opening) + text[closing:]
-    plain, reasons = _plain_text(text)
+    plain, reasons = plain_text(text)
     if any(command.name in _GENERATED_CONTENT for command in commands):
         return True, []
-    if re.search(r"(?<!\\)\$|\\[([]|\\begin\{(?:equation|align|displaymath|math)", text):
+    if _MATH_CONTENT.search(text):
         return True, []
     # Unknown commands prevent an empty-content claim even when their arguments
     # happen to contain text; semantic content cannot be inferred from an argument.
     return bool(plain.strip()), reasons
 
 
-def _metadata(document: _Document) -> tuple[dict[str, list[_MetadataValue]], list[str]]:
+def _metadata(document: ExpandedDocument) -> tuple[dict[str, list[_MetadataValue]], list[str]]:
     values: dict[str, list[_MetadataValue]] = {name: [] for name in _METADATA}
     # Metadata lives in the preamble, so only the declarations' own arguments and
     # control flow that could add or remove a declaration bear on this reading.
@@ -975,7 +707,7 @@ def _metadata(document: _Document) -> tuple[dict[str, list[_MetadataValue]], lis
         for name, commands in _METADATA.items():
             if command.name not in commands:
                 continue
-            value, unknown = _value(command)
+            value, unknown = plain_argument_text(command)
             if command.depth:
                 unknown.append("metadata inside a group or macro argument")
             if in_conditional(document.conditionals, command.start):
@@ -983,11 +715,11 @@ def _metadata(document: _Document) -> tuple[dict[str, list[_MetadataValue]], lis
             location = document.location(command.start)
             values[name].append(
                 {
-                    "path": location["path"],
-                    "line": location["line"],
+                    "path": location.path,
+                    "line": location.line,
                     "value": value,
                     "uncertainty": unknown,
-                    "placeholder": _placeholder(value),
+                    "placeholder": is_placeholder_text(value),
                 }
             )
     return values, reasons
@@ -1004,8 +736,7 @@ def read_literal_metadata(
     selected, only their values and field-specific uncertainty are returned;
     uncertainty about the source graph still applies to every selection.
     """
-    document = _read(root, main)
-    metadata, reasons = _metadata(document)
+    metadata, reasons = _metadata(expand_document(root, main))
     values: dict[str, str] = {}
     for key, declarations in metadata.items():
         if fields is not None and key not in fields:
@@ -1013,62 +744,52 @@ def read_literal_metadata(
         if len(declarations) > 1:
             reasons.append(f"multiple {key} declarations have unresolved combination semantics")
         for declaration in declarations:
-            reasons.extend(str(reason) for reason in declaration["uncertainty"])
+            reasons.extend(declaration["uncertainty"])
         if (
             len(declarations) == 1
             and not declarations[0]["uncertainty"]
             and not declarations[0]["placeholder"]
             and declarations[0]["value"]
         ):
-            values[key] = str(declarations[0]["value"])
+            values[key] = declarations[0]["value"]
     return values, sorted(set(reasons))
 
 
-def _package_checks(document: _Document, options: ManuscriptCheckOptions) -> list[Finding]:
-    if options.allowed_packages is None and not options.inventory_packages:
-        return []
-    declarations: list[_PackageValue] = []
+def _package_declarations(document: ExpandedDocument) -> tuple[list[Declaration], list[str]]:
+    """Direct package declarations in each selected source, and what could hide others."""
+    declarations: list[Declaration] = []
     reasons = list(document.graph_uncertainty)
     for path in sorted(document.selected):
-        source = document.inspection.sources[path]
-        commands = _commands_before_end(source)
+        source = document.graph.sources[path]
         # Only constructs that could build, rename or conditionally execute a
         # declaration matter here. An ordinary macro definition cannot, so its
         # presence must not turn the whole inventory inconclusive.
         conditionals = conditional_spans(source.commands)
-        definitions = _definition_spans(source.masked, source.commands)
-        for command in commands:
+        definitions = definition_spans(source.masked, source.commands)
+        for command in commands_before_end(source):
             conditional = in_conditional(conditionals, command.start)
             if command.name == "endinput" and (
                 command.depth
                 or conditional
-                or source.masked[_stop(command) :].split("\n", 1)[0].strip()
+                or source.masked[command_end(command) :].split("\n", 1)[0].strip()
             ):
                 reasons.append(f"{path}: package declarations have unresolved endinput context")
             if command.name in _PACKAGE_GENERATORS:
                 reasons.append(
                     f"{path}:{command.line}: \\{command.name} can generate a package declaration"
                 )
-            if command.name not in _PACKAGE_COMMANDS:
+            if command.name not in PACKAGE_COMMANDS:
                 if (
                     conditional
-                    and not _within(definitions, command.start)
-                    and command.name
-                    not in _SAFE_COMMANDS
-                    | _DEFINITIONS
-                    | {
-                        "ProvidesPackage",
-                        "ProvidesClass",
-                        "ProvidesFile",
-                        "NeedsTeXFormat",
-                    }
+                    and not in_half_open_span(definitions, command.start)
+                    and command.name not in _INERT_IN_PACKAGE_CONDITIONALS
                 ):
                     reasons.append(
                         f"{path}:{command.line}: unexpanded constructs inside a conditional "
                         "can generate package declarations"
                     )
                 continue
-            names = _literal_list(command.arguments[0].value) if command.arguments else None
+            names = first_argument_names(command)
             unknown = []
             if command.depth or conditional:
                 unknown.append("grouped, macro-generated or conditional package declaration")
@@ -1084,6 +805,13 @@ def _package_checks(document: _Document, options: ManuscriptCheckOptions) -> lis
                     "uncertainty": unknown,
                 }
             )
+    return declarations, reasons
+
+
+def _package_checks(document: ExpandedDocument, options: ManuscriptCheckOptions) -> list[Finding]:
+    if options.allowed_packages is None and not options.inventory_packages:
+        return []
+    declarations, reasons = _package_declarations(document)
     scope = (
         "Direct literal package declarations in selected local sources, classes and styles; "
         "transitive system package loading and effective options are not established."
@@ -1092,9 +820,9 @@ def _package_checks(document: _Document, options: ManuscriptCheckOptions) -> lis
         Finding(
             "manuscript.package_inventory",
             "Inventoried direct local package declarations.",
-            "info",
-            "inconclusive" if reasons else "passed",
-            evidence="direct",
+            severity="info",
+            status="inconclusive" if reasons else "passed",
+            evidence_kind=EvidenceKind.DIRECT,
             details={
                 "declarations": declarations,
                 "uncertainty": sorted(set(reasons)),
@@ -1102,103 +830,113 @@ def _package_checks(document: _Document, options: ManuscriptCheckOptions) -> lis
             },
         )
     ]
-    if options.allowed_packages is not None:
-        matches = [
-            {
-                **declaration,
-                "disallowed": [
-                    name for name in declaration["names"] if name not in options.allowed_packages
-                ],
-            }
-            for declaration in declarations
-            if declaration["names"] is not None
-            and not declaration["uncertainty"]
-            and any(name not in options.allowed_packages for name in declaration["names"])
-        ]
+    allowed = options.allowed_packages
+    if allowed is not None:
+        matches = []
+        for declaration in declarations:
+            names = declaration["names"]
+            if names is None or declaration["uncertainty"]:
+                continue
+            disallowed = [name for name in names if name not in allowed]
+            if disallowed:
+                matches.append({**declaration, "disallowed": disallowed})
         findings.append(
-            _finding(
+            _policy_finding(
                 "manuscript.package_allowlist",
                 "Checked the configured direct-package allowlist.",
-                document,
-                matches,
-                reasons,
-                failure="{count} of {total} direct package declarations are not allowed",
-                total=len(declarations),
-                extra={
-                    "allowed": list(options.allowed_packages),
-                    "declarations": declarations,
-                    "scope": scope,
-                },
+                _CheckOutcome(matches, reasons),
+                failure=f"{len(matches)} of {len(declarations)} direct package declarations "
+                "are not allowed",
+                details={"allowed": list(allowed), "declarations": declarations, "scope": scope},
             )
         )
     return findings
 
 
-def _layout(document: _Document) -> list[dict[str, object]]:
-    matches = []
-    for command in document.commands:
-        selected = command.name in _LAYOUT
-        if command.name in {"hspace", "vspace", "hskip", "vskip", "kern"}:
+def _is_layout_override(document: ExpandedDocument, command: Command) -> bool:
+    match command.name:
+        case "hspace" | "vspace" | "hskip" | "vskip" | "kern":
             value = (
                 command.arguments[0].value
                 if command.arguments
-                else document.text[command.start + len(command.name) + 1 :][:80]
+                else document.text[command.name_end :][:80]
             )
-            selected = bool(re.match(r"\s*-", value))
-        elif command.name in {"setlength", "addtolength"} and command.arguments:
-            selected = command.arguments[0].value.strip().lstrip("\\") in _LENGTHS
-        elif command.name in _LENGTHS:
-            selected = bool(re.match(r"\s*(?:=\s*)?[-+]?\d", document.text[_stop(command) :][:80]))
-        elif command.name == "begin" and command.arguments:
-            selected = command.arguments[0].value in {
-                "figure",
-                "figure*",
-                "table",
-                "table*",
-            } and any(
+            return bool(re.match(r"\s*-", value))
+        case "setlength" | "addtolength" if command.arguments:
+            return command.arguments[0].value.strip().lstrip("\\") in _LENGTHS
+        case name if name in _LENGTHS:
+            following = document.text[command_end(command) :][:80]
+            return bool(re.match(r"\s*(?:=\s*)?[-+]?\d", following))
+        case "begin" if command.arguments:
+            return command.arguments[0].value in _FLOAT_ENVIRONMENTS and any(
                 "H" in argument.value or "!" in argument.value for argument in command.options
             )
-        # A command inside a conditional may never execute, so it is reported as an
-        # interpretation gap rather than as a confirmed override.
-        if selected and not in_conditional(document.conditionals, command.start):
-            matches.append(
-                {
-                    **document.location(command.start),
-                    "command": command.name,
-                    "source": document.text[
-                        command.start : min(_stop(command), command.start + 160)
-                    ],
-                }
-            )
-    return matches
+        case name:
+            return name in _LAYOUT
 
 
-def _abstract_checks(document: _Document, options: ManuscriptCheckOptions) -> list[Finding]:
+def _layout(document: ExpandedDocument) -> list[dict[str, object]]:
+    # A command inside a conditional may never execute, so it is reported as an
+    # interpretation gap rather than as a confirmed override.
+    return [
+        document.located(
+            command.start,
+            command=command.name,
+            source=document.text[command.start : min(command_end(command), command.start + 160)],
+        )
+        for command in document.commands
+        if _is_layout_override(document, command)
+        and not in_conditional(document.conditionals, command.start)
+    ]
+
+
+def _abstract_regions(reading: _Reading) -> tuple[list[EnvironmentRegion], list[str]]:
+    """Abstract environments and \\abstract{...} declarations, each with its own gaps."""
+    regions, reasons = _scoped_regions(reading, {"abstract"})
+    for command in reading.document.commands:
+        if command.name != "abstract":
+            continue
+        start = command.arguments[0].start if command.arguments else command_end(command)
+        end = command.arguments[0].end if command.arguments else command_end(command)
+        unknown = (
+            [] if command.arguments and not command.depth else ["ambiguous abstract declaration"]
+        )
+        region = EnvironmentRegion("abstract", command, start, end, uncertainty=unknown)
+        reading.scope(region)
+        regions.append(region)
+    return regions, reasons
+
+
+def _abbreviation_candidates(value: str, options: ManuscriptCheckOptions) -> list[tuple[str, bool]]:
+    """First occurrences of uppercase tokens that the policy reports, with definition status."""
+    candidates = []
+    seen: set[str] = set(options.abstract_abbreviation_exceptions)
+    for match in _ABBREVIATION.finditer(value):
+        token = match.group()
+        if token in seen:
+            continue
+        seen.add(token)
+        # This is a review candidate, never proof of a scientifically adequate definition.
+        definition = _ABBREVIATION_DEFINITION.search(value[: match.start()])
+        initials = "".join(word[0].upper() for word in definition[1].split()) if definition else ""
+        defined = bool(
+            definition and value[match.end() :].startswith(")") and initials.endswith(token)
+        )
+        if options.abstract_abbreviation_policy == "forbid" or not defined:
+            candidates.append((token, defined))
+    return candidates
+
+
+def _abstract_checks(reading: _Reading, options: ManuscriptCheckOptions) -> list[Finding]:
     if not options.forbid_abstract_citations and options.abstract_abbreviation_policy is None:
         return []
-    regions, reasons = _regions(document, {"abstract"})
-    for command in document.commands:
-        if command.name == "abstract":
-            unknown = (
-                []
-                if command.arguments and not command.depth
-                else ["ambiguous abstract declaration"]
-            )
-            region = _Region(
-                "abstract",
-                command,
-                command.arguments[0].start if command.arguments else _stop(command),
-                command.arguments[0].end if command.arguments else _stop(command),
-                uncertainty=unknown,
-            )
-            _scope_region(document, region)
-            regions.append(region)
-    reasons = [*document.graph_uncertainty, *reasons]
+    document = reading.document
+    regions, delimiter_reasons = _abstract_regions(reading)
+    reasons = [*document.graph_uncertainty, *delimiter_reasons]
     for region in regions:
         reasons.extend(region.uncertainty)
     citations = []
     abbreviations = []
-    text_reasons = []
     for region in regions:
         cancellation_point()
         if region.uncertainty:
@@ -1206,62 +944,35 @@ def _abstract_checks(document: _Document, options: ManuscriptCheckOptions) -> li
         literal = list(document.text[region.start : region.end])
         for command in document.between(region.start, region.end):
             if command.name in _CITATIONS:
-                citations.append({**document.location(command.start), "command": command.name})
-                start, end = (
-                    command.start - region.start,
-                    min(_stop(command), region.end) - region.start,
-                )
+                citations.append(document.located(command.start, command=command.name))
+                start = command.start - region.start
+                end = min(command_end(command), region.end) - region.start
                 literal[start:end] = [" "] * (end - start)
-        value, unknown = _plain_text("".join(literal))
-        text_reasons.extend(unknown)
-        seen: set[str] = set(options.abstract_abbreviation_exceptions)
-        for match in re.finditer(r"\b[A-Z][A-Z0-9]{1,}\b", value):
-            token = match.group()
-            if token in seen:
-                continue
-            seen.add(token)
-            prefix = value[: match.start()]
-            # This is a review candidate, never proof of a scientifically adequate definition.
-            definition = re.search(
-                r"((?:\b[A-Za-z][A-Za-z-]*\s+){1,10}[A-Za-z][A-Za-z-]*)\s*\($", prefix
-            )
-            initials = (
-                "".join(word[0].upper() for word in definition[1].split()) if definition else ""
-            )
-            defined = bool(
-                definition and value[match.end() :].startswith(")") and initials.endswith(token)
-            )
-            if options.abstract_abbreviation_policy == "forbid" or not defined:
-                abbreviations.append(
-                    {
-                        **document.location(region.command.start),
-                        "abbreviation": token,
-                        "definition_candidate": defined,
-                    }
-                )
+        value, unknown = plain_text("".join(literal))
+        reasons.extend(unknown)
+        abbreviations.extend(
+            document.located(region.command.start, abbreviation=token, definition_candidate=defined)
+            for token, defined in _abbreviation_candidates(value, options)
+        )
     results = []
     if options.forbid_abstract_citations:
         results.append(
-            _finding(
+            _policy_finding(
                 "manuscript.abstract_citations",
                 "Checked the abstract citation policy.",
-                document,
-                citations,
-                [*reasons, *text_reasons],
-                failure="{count} citation commands appear in the abstract",
+                _CheckOutcome(citations, reasons),
+                failure=f"{len(citations)} citation commands appear in the abstract",
             )
         )
     if options.abstract_abbreviation_policy:
         results.append(
-            _finding(
+            _policy_finding(
                 "manuscript.abstract_abbreviations",
                 "Checked uppercase abbreviation candidates in abstracts.",
-                document,
-                abbreviations,
-                [*reasons, *text_reasons],
-                advisory=True,
-                failure="{count} abstract abbreviation candidates need review",
-                extra={
+                _CheckOutcome(abbreviations, reasons),
+                failure=f"{len(abbreviations)} abstract abbreviation candidates need review",
+                weight=_ADVISORY,
+                details={
                     "policy": options.abstract_abbreviation_policy,
                     "exceptions": list(options.abstract_abbreviation_exceptions),
                     "method": "Uppercase tokens of two or more characters; first occurrence "
@@ -1273,281 +984,284 @@ def _abstract_checks(document: _Document, options: ManuscriptCheckOptions) -> li
     return results
 
 
-def _structure_checks(document: _Document, options: ManuscriptCheckOptions) -> list[Finding]:
+def _heading_depth_finding(headings: list[_Heading], reasons: list[str], maximum: int) -> Finding:
+    deep = [
+        heading for heading in headings if heading["depth"] > maximum and not heading["uncertainty"]
+    ]
+    return _policy_finding(
+        "manuscript.heading_depth",
+        "Checked the configured literal heading depth.",
+        _CheckOutcome(deep, reasons),
+        failure=f"{len(deep)} of {len(headings)} literal headings exceed depth {maximum}",
+        details={"maximum_depth": maximum, "headings": headings, "depths": dict(HEADING_DEPTHS)},
+    )
+
+
+def _empty_sections_finding(document: ExpandedDocument, headings: list[_Heading]) -> Finding:
+    empty = []
+    # Only the section's own heading and body decide whether it looks empty;
+    # unexpanded constructs elsewhere cannot fill this subtree.
+    unknown = list(document.graph_uncertainty)
+    for heading in headings:
+        nonempty, content_reasons = _content(document, heading["body_start"], heading["end"])
+        local = [*heading["uncertainty"], *content_reasons]
+        unknown.extend(local)
+        if not nonempty and not local:
+            empty.append(heading)
+    return _policy_finding(
+        "manuscript.empty_sections",
+        "Checked apparently empty section subtrees.",
+        _CheckOutcome(empty, unknown),
+        failure=f"{len(empty)} of {len(headings)} section subtrees have no observable content",
+        weight=_ADVISORY,
+    )
+
+
+def _hardcoded_references_finding(reading: _Reading) -> Finding:
+    document = reading.document
+    # Blank command invocations and their arguments, preserving source offsets.
+    buffer = list(document.text)
+    for command in document.commands:
+        start, stop = command.start, command_end(command)
+        buffer[start:stop] = [" "] * (stop - start)
+    matches = [
+        document.located(match.start(), text=match.group())
+        for match in _HARDCODED_REFERENCE.finditer("".join(buffer))
+        if not in_conditional(document.conditionals, match.start())
+    ]
+    return _policy_finding(
+        "manuscript.hardcoded_references",
+        "Checked hard-coded reference candidates.",
+        _CheckOutcome(matches, reading.uncertainty),
+        failure=f"{len(matches)} hard-coded reference candidates",
+        weight=_ADVISORY,
+    )
+
+
+def _required_declarations_finding(
+    document: ExpandedDocument,
+    headings: list[_Heading],
+    reasons: list[str],
+    required: tuple[str, ...],
+) -> Finding:
+    declarations: list[dict[str, object]] = []
+    unknown = list(reasons)
+    required_names = {normalize_heading(name) for name in required}
+    for heading in headings:
+        if normalize_heading(heading["title"]) not in required_names:
+            continue
+        nonempty, content_reasons = _content(document, heading["body_start"], heading["end"])
+        unknown.extend(content_reasons)
+        declarations.append({**heading, "nonempty": nonempty})
+    for command in document.commands:
+        if command.name != "declaration":
+            continue
+        name, name_reasons = plain_argument_text(command)
+        value, content_reasons = plain_argument_text(command, 1)
+        unknown.extend([*name_reasons, *content_reasons])
+        if command.depth:
+            unknown.append("declaration inside a group or macro argument")
+        if in_conditional(document.conditionals, command.start):
+            unknown.append("conditional source control flow")
+        declarations.append(
+            document.located(
+                command.start, title=name, nonempty=bool(value) and not is_placeholder_text(value)
+            )
+        )
+    # An absent declaration could be generated by anything the scan could not
+    # interpret, so a confirmed absence requires a fully interpreted source.
+    missing = (
+        [
+            {"declaration": name, "reason": "missing or empty literal declaration"}
+            for name in required
+            if not any(
+                normalize_heading(str(item["title"])) == normalize_heading(name)
+                and item["nonempty"]
+                for item in declarations
+            )
+        ]
+        if not unknown
+        else []
+    )
+    return _policy_finding(
+        "manuscript.required_declarations",
+        "Checked required nonempty declarations.",
+        _CheckOutcome(missing, unknown),
+        failure=f"{len(missing)} of {len(required)} required declarations are missing or empty",
+        details={
+            "declarations": declarations,
+            "required": list(required),
+            "adequacy": "Presence only; applicability and content require human review.",
+        },
+    )
+
+
+def _heading_and_declaration_checks(
+    reading: _Reading, options: ManuscriptCheckOptions
+) -> list[Finding]:
+    document = reading.document
     findings = []
     headings = _headings(document)
     reasons = [
-        *document.uncertainty,
+        *reading.uncertainty,
         *(reason for heading in headings for reason in heading["uncertainty"]),
     ]
     if options.max_heading_depth is not None:
-        findings.append(
-            _finding(
-                "manuscript.heading_depth",
-                "Checked the configured literal heading depth.",
-                document,
-                [
-                    heading
-                    for heading in headings
-                    if heading["depth"] > options.max_heading_depth and not heading["uncertainty"]
-                ],
-                reasons,
-                failure="{count} of {total} literal headings exceed depth "
-                + str(options.max_heading_depth),
-                total=len(headings),
-                extra={
-                    "maximum_depth": options.max_heading_depth,
-                    "headings": headings,
-                    "depths": dict(_HEADINGS),
-                },
-            )
-        )
+        findings.append(_heading_depth_finding(headings, reasons, options.max_heading_depth))
     if options.check_empty_sections:
-        empty = []
-        # Only the section's own heading and body decide whether it looks empty;
-        # unexpanded constructs elsewhere cannot fill this subtree.
-        unknown = list(document.graph_uncertainty)
-        for heading in headings:
-            nonempty, content_reasons = _content(document, heading["body_start"], heading["end"])
-            local = [*heading["uncertainty"], *content_reasons]
-            unknown.extend(local)
-            if not nonempty and not local:
-                empty.append(heading)
-        findings.append(
-            _finding(
-                "manuscript.empty_sections",
-                "Checked apparently empty section subtrees.",
-                document,
-                empty,
-                unknown,
-                advisory=True,
-                failure="{count} of {total} section subtrees have no observable content",
-                total=len(headings),
-            )
-        )
+        findings.append(_empty_sections_finding(document, headings))
     if options.check_hardcoded_references:
-        # Blank command invocations and their arguments, preserving source offsets.
-        buffer = list(document.text)
-        for command in document.commands:
-            start, stop = command.start, _stop(command)
-            buffer[start:stop] = [" "] * (stop - start)
-        plain = "".join(buffer)
-        matches = [
-            {**document.location(match.start()), "text": match.group()}
-            for match in re.finditer(
-                r"\b(?:Figures?|Figs?\.?|Tables?|Sections?|Secs?\.?|"
-                r"Equations?|Eqs?\.?)\s*[~ ]\s*\(?\d+(?:\.\d+)*\)?",
-                plain,
-            )
-            if not in_conditional(document.conditionals, match.start())
-        ]
-        findings.append(
-            _finding(
-                "manuscript.hardcoded_references",
-                "Checked hard-coded reference candidates.",
-                document,
-                matches,
-                document.uncertainty,
-                advisory=True,
-                failure="{count} hard-coded reference candidates",
-            )
-        )
+        findings.append(_hardcoded_references_finding(reading))
     if options.required_declarations:
-        declarations = []
-        unknown = list(reasons)
-        required_names = {_normalize_heading(name) for name in options.required_declarations}
-        for heading in headings:
-            if _normalize_heading(str(heading["title"])) not in required_names:
-                continue
-            nonempty, content_reasons = _content(document, heading["body_start"], heading["end"])
-            unknown.extend(content_reasons)
-            declarations.append({**heading, "nonempty": nonempty})
-        for command in document.commands:
-            if command.name != "declaration":
-                continue
-            name, name_reasons = _value(command)
-            value, content_reasons = _value(command, 1)
-            unknown.extend([*name_reasons, *content_reasons])
-            if command.depth:
-                unknown.append("declaration inside a group or macro argument")
-            if in_conditional(document.conditionals, command.start):
-                unknown.append("conditional source control flow")
-            declarations.append(
-                {
-                    **document.location(command.start),
-                    "title": name,
-                    "nonempty": bool(value) and not _placeholder(value),
-                }
-            )
-        # An absent declaration could be generated by anything the scan could not
-        # interpret, so a confirmed absence requires a fully interpreted source.
-        missing = (
-            [
-                {"declaration": required, "reason": "missing or empty literal declaration"}
-                for required in options.required_declarations
-                if not any(
-                    _normalize_heading(str(item["title"])) == _normalize_heading(required)
-                    and item["nonempty"]
-                    for item in declarations
-                )
-            ]
-            if not unknown
-            else []
-        )
         findings.append(
-            _finding(
-                "manuscript.required_declarations",
-                "Checked required nonempty declarations.",
-                document,
-                missing,
-                unknown,
-                failure="{count} of {total} required declarations are missing or empty",
-                total=len(options.required_declarations),
-                extra={
-                    "declarations": declarations,
-                    "required": list(options.required_declarations),
-                    "adequacy": "Presence only; applicability and content require human review.",
-                },
+            _required_declarations_finding(
+                document, headings, reasons, options.required_declarations
             )
         )
     return findings
 
 
-def _metadata_checks(document: _Document, options: ManuscriptCheckOptions) -> list[Finding]:
+def _required_metadata_finding(document: ExpandedDocument, required: tuple[str, ...]) -> Finding:
+    metadata, reasons = _metadata(document)
+    for name in required:
+        reasons.extend(reason for item in metadata[name] for reason in item["uncertainty"])
+        if len(metadata[name]) > 1:
+            reasons.append(f"multiple {name} declarations have unresolved combination semantics")
+    # Absent metadata could be declared by any construct the scan could not
+    # read, so only a fully interpreted preamble confirms that it is missing.
+    missing = (
+        [
+            {"field": name, "reason": "missing, empty or placeholder literal metadata"}
+            for name in required
+            if not any(item["value"] and not item["placeholder"] for item in metadata[name])
+        ]
+        if not reasons
+        else []
+    )
+    return _policy_finding(
+        "manuscript.required_metadata",
+        "Checked configured literal metadata presence.",
+        _CheckOutcome(missing, reasons),
+        failure=f"{len(missing)} of {len(required)} required metadata fields are missing or empty",
+        details={
+            "metadata": metadata,
+            "required": list(required),
+            "coverage": "Document-level presence; per-author completeness "
+            "and identity are not established.",
+        },
+        # The details list every metadata field, so an unclear optional field is
+        # reported evidence too and keeps the result from being waived.
+        other_gaps=any(item["uncertainty"] for items in metadata.values() for item in items),
+    )
+
+
+def _orcid_checksum_valid(identifier: str) -> bool:
+    """Check the ISO 7064 MOD 11-2 character of a syntactically valid ORCID identifier."""
+    digits = identifier.replace("-", "")
+    total = 0
+    for digit in digits[:15]:
+        total = (total + int(digit)) * 2
+    check = (12 - total % 11) % 11
+    return digits[-1] == ("X" if check == 10 else str(check))
+
+
+def _orcid_finding(reading: _Reading) -> Finding:
+    document = reading.document
+    identifiers = []
+    invalid = []
+    reasons = list(reading.uncertainty)
+    for command in document.commands:
+        if command.name not in _ORCID:
+            continue
+        value = command.arguments[0].value.strip() if command.arguments else ""
+        if "\\" in value or not command.arguments:
+            reasons.append("ORCID is not a literal argument")
+            continue
+        if in_conditional(document.conditionals, command.start):
+            reasons.append("ORCID declared inside conditional source control flow")
+            continue
+        identifier = re.sub(r"^https://orcid\.org/", "", value)
+        syntax = bool(_ORCID_IDENTIFIER.fullmatch(identifier))
+        checksum = syntax and _orcid_checksum_valid(identifier)
+        item = document.located(
+            command.start, identifier=value, syntax_valid=syntax, checksum_valid=checksum
+        )
+        identifiers.append(item)
+        if not syntax or not checksum:
+            invalid.append(item)
+    return _policy_finding(
+        "manuscript.orcid",
+        "Checked literal ORCID syntax and checksums.",
+        _CheckOutcome(invalid, reasons),
+        failure=f"{len(invalid)} of {len(identifiers)} literal ORCID identifiers are invalid",
+        details={
+            "identifiers": identifiers,
+            "identity": "Checksum validity does not establish ownership or identity.",
+        },
+    )
+
+
+def _metadata_checks(reading: _Reading, options: ManuscriptCheckOptions) -> list[Finding]:
     results = []
     if options.required_metadata:
-        metadata, reasons = _metadata(document)
-        for name in options.required_metadata:
-            reasons.extend(reason for item in metadata[name] for reason in item["uncertainty"])
-            if len(metadata[name]) > 1:
-                reasons.append(
-                    f"multiple {name} declarations have unresolved combination semantics"
-                )
-        # Absent metadata could be declared by any construct the scan could not
-        # read, so only a fully interpreted preamble confirms that it is missing.
-        missing = (
-            [
-                {"field": name, "reason": "missing, empty or placeholder literal metadata"}
-                for name in options.required_metadata
-                if not any(item["value"] and not item["placeholder"] for item in metadata[name])
-            ]
-            if not reasons
-            else []
-        )
-        results.append(
-            _finding(
-                "manuscript.required_metadata",
-                "Checked configured literal metadata presence.",
-                document,
-                missing,
-                reasons,
-                failure="{count} of {total} required metadata fields are missing or empty",
-                total=len(options.required_metadata),
-                extra={
-                    "metadata": metadata,
-                    "required": list(options.required_metadata),
-                    "coverage": "Document-level presence; per-author completeness "
-                    "and identity are not established.",
-                },
-            )
-        )
+        results.append(_required_metadata_finding(reading.document, options.required_metadata))
     if options.check_orcid:
-        identifiers = []
-        invalid = []
-        reasons = list(document.uncertainty)
-        for command in document.commands:
-            if command.name not in _ORCID:
-                continue
-            value = command.arguments[0].value.strip() if command.arguments else ""
-            if "\\" in value or not command.arguments:
-                reasons.append("ORCID is not a literal argument")
-                continue
-            if in_conditional(document.conditionals, command.start):
-                reasons.append("ORCID declared inside conditional source control flow")
-                continue
-            identifier = re.sub(r"^https://orcid\.org/", "", value)
-            syntax = bool(re.fullmatch(r"\d{4}-\d{4}-\d{4}-\d{3}[\dX]", identifier, re.ASCII))
-            checksum = False
-            if syntax:
-                digits = identifier.replace("-", "")
-                total = 0
-                for digit in digits[:15]:
-                    total = (total + int(digit)) * 2
-                check = (12 - total % 11) % 11
-                checksum = digits[-1] == ("X" if check == 10 else str(check))
-            item = {
-                **document.location(command.start),
-                "identifier": value,
-                "syntax_valid": syntax,
-                "checksum_valid": checksum,
-            }
-            identifiers.append(item)
-            if not syntax or not checksum:
-                invalid.append(item)
-        results.append(
-            _finding(
-                "manuscript.orcid",
-                "Checked literal ORCID syntax and checksums.",
-                document,
-                invalid,
-                reasons,
-                failure="{count} of {total} literal ORCID identifiers are invalid",
-                total=len(identifiers),
-                extra={
-                    "identifiers": identifiers,
-                    "identity": "Checksum validity does not establish ownership or identity.",
-                },
-            )
-        )
+        results.append(_orcid_finding(reading))
     return results
 
 
-_LINE_NUMBER_COMMANDS = {"linenumbers", "runninglinenumbers", "pagewiselinenumbers"}
-_LINE_NUMBER_OPTIONS = {"lineno", "linenumbers"}
+def _declared_packages(command: Command) -> list[str]:
+    if command.name not in PACKAGE_COMMANDS:
+        return []
+    return first_argument_names(command) or []
 
 
-def _line_number_checks(document: _Document, options: ManuscriptCheckOptions) -> list[Finding]:
+def _line_number_activation(command: Command) -> str | None:
+    """Name the literal line-number activation a command performs, if any."""
+    option_names = {name for item in command.options for name in literal_list(item.value) or []}
+    environment = (
+        command.arguments[0].value.strip()
+        if command.name == "begin" and command.arguments
+        else None
+    )
+    packages = _declared_packages(command)
+    if command.name == "documentclass" and option_names & _LINE_NUMBER_OPTIONS:
+        return "class option " + ", ".join(sorted(option_names & _LINE_NUMBER_OPTIONS))
+    if "lineno" in packages and "linenumbers" in option_names:
+        return "lineno package option linenumbers"
+    if command.name in _LINE_NUMBER_COMMANDS:
+        return "\\" + command.name
+    if environment in _LINE_NUMBER_COMMANDS:
+        return f"{environment} environment"
+    return None
+
+
+def _line_number_checks(
+    document: ExpandedDocument, options: ManuscriptCheckOptions
+) -> list[Finding]:
     """Find literal lineno activation; class-specific review modes are not interpreted."""
     if not (options.require_line_numbers or options.forbid_line_numbers):
         return []
-    definitions = _definition_spans(document.text, document.commands)
+    definitions = definition_spans(document.text, document.commands)
     activations: list[dict[str, object]] = []
     loaded: list[dict[str, object]] = []
     reasons = list(document.graph_uncertainty)
     for command in document.commands:
         cancellation_point()
-        options_text = [_literal_list(item.value) or [] for item in command.options]
-        option_names = {name for values in options_text for name in values}
-        environment = (
-            command.arguments[0].value.strip()
-            if command.name == "begin" and command.arguments
-            else None
-        )
-        packages = (
-            _literal_list(command.arguments[0].value) or []
-            if command.name in _PACKAGE_COMMANDS and command.arguments
-            else []
-        )
-        if command.name == "documentclass" and option_names & _LINE_NUMBER_OPTIONS:
-            kind = "class option " + ", ".join(sorted(option_names & _LINE_NUMBER_OPTIONS))
-        elif "lineno" in packages and "linenumbers" in option_names:
-            kind = "lineno package option linenumbers"
-        elif command.name in _LINE_NUMBER_COMMANDS:
-            kind = "\\" + command.name
-        elif environment in _LINE_NUMBER_COMMANDS:
-            kind = f"{environment} environment"
-        else:
-            if "lineno" in packages:
-                loaded.append(document.location(command.start))
+        kind = _line_number_activation(command)
+        if kind is None:
+            if "lineno" in _declared_packages(command):
+                loaded.append(document.location(command.start).as_dict())
             continue
         location = document.location(command.start)
-        if _within(definitions, command.start):
-            reasons.append(f"{_where([location])}: {kind} inside a macro definition")
+        where = format_locations([location.as_dict()])
+        if in_half_open_span(definitions, command.start):
+            reasons.append(f"{where}: {kind} inside a macro definition")
         elif command.depth or in_conditional(document.conditionals, command.start):
-            reasons.append(f"{_where([location])}: grouped or conditional {kind}")
+            reasons.append(f"{where}: grouped or conditional {kind}")
         else:
-            activations.append({**location, "activation": kind})
-    extra: dict[str, object] = {
+            activations.append({**location.as_dict(), "activation": kind})
+    details: dict[str, object] = {
         "policy": "require" if options.require_line_numbers else "forbid",
         "activations": activations,
         "lineno_loaded": loaded,
@@ -1557,258 +1271,344 @@ def _line_number_checks(document: _Document, options: ManuscriptCheckOptions) ->
     }
     if options.forbid_line_numbers:
         return [
-            _finding(
+            _policy_finding(
                 "manuscript.line_numbers",
                 "No literal line-number activation was found.",
-                document,
-                activations,
-                reasons,
-                failure="Line numbering is active at {count} location(s)",
-                extra=extra,
+                _CheckOutcome(activations, reasons),
+                failure=f"Line numbering is active at {len(activations)} location(s)",
+                details=details,
             )
         ]
-    main = document.inspection.main
     missing = (
         []
         if activations or reasons
-        else [{"path": main, "line": None, "reason": "no literal line-number activation"}]
+        else [
+            {
+                "path": document.graph.main,
+                "line": None,
+                "reason": "no literal line-number activation",
+            }
+        ]
     )
     return [
-        _finding(
+        _policy_finding(
             "manuscript.line_numbers",
             "Line numbering is activated literally.",
-            document,
-            missing,
-            [] if activations else reasons,
+            _CheckOutcome(missing, [] if activations else reasons),
             failure="No literal line-number activation was found",
-            extra=extra,
+            details=details,
         )
     ]
 
 
-def _float_checks(document: _Document, options: ManuscriptCheckOptions) -> list[Finding]:
-    rules = [
-        (
-            options.require_float_captions,
-            "float_captions",
-            "Checked literal figure/table captions.",
-            "{count} of {total} floats lack a caption",
-        ),
-        (
-            options.require_float_labels,
-            "float_labels",
-            "Checked literal figure/table labels.",
-            "{count} of {total} floats lack a label",
-        ),
-        (
-            options.check_float_label_order,
-            "float_label_order",
-            "Checked float label/caption source order.",
-            "{count} float labels do not follow their caption",
-        ),
-        (
-            options.require_float_references,
-            "float_references",
-            "Checked external literal float references.",
-            "{count} of {total} floats have no external reference",
-        ),
-        (
-            options.check_float_reference_order,
-            "float_reference_order",
-            "Checked first-reference source order.",
-            "{count} of {total} floats are first referenced out of source order",
-        ),
-        (
-            options.require_figure_descriptions,
-            "figure_descriptions",
-            "Checked literal figure descriptions.",
-            "{count} figures lack a usable Description",
-        ),
-    ]
-    if not any(enabled for enabled, _, _, _ in rules):
-        return []
-    floats, structure_reasons = _regions(document, {"figure", "figure*", "table", "table*"})
-    # Unexpanded constructs outside every float cannot caption, label or hide one.
-    reasons = [*document.graph_uncertainty, *structure_reasons]
-    for region in floats:
-        reasons.extend(region.uncertainty)
-    records = []
-    violations: dict[str, list[dict[str, object]]] = {name: [] for _, name, _, _ in rules}
-    extra_reasons: dict[str, list[str]] = {name: [] for _, name, _, _ in rules}
-    labels_seen: set[str] = set()
-    all_label_counts: dict[str, int] = {}
-    for command in document.commands:
-        if command.name == "label" and command.arguments:
-            label = command.arguments[0].value.strip()
-            all_label_counts[label] = all_label_counts.get(label, 0) + 1
-    first_references: dict[str, int] = {}
-    float_intervals: list[tuple[int, int]] = []
-    for region in floats:
-        if float_intervals and region.command.start <= float_intervals[-1][1]:
-            float_intervals[-1] = (float_intervals[-1][0], max(float_intervals[-1][1], region.end))
-        else:
-            float_intervals.append((region.command.start, region.end))
-    float_starts = [interval[0] for interval in float_intervals]
-    for command in document.commands:
-        if command.name not in _REFERENCES:
-            continue
-        interval_index = bisect_right(float_starts, command.start) - 1
-        if interval_index >= 0 and command.start <= float_intervals[interval_index][1]:
-            continue
-        names = _literal_list(command.arguments[0].value) if command.arguments else None
-        if names is None or command.depth:
-            for name in ("float_references", "float_reference_order"):
-                extra_reasons[name].append("grouped or nonliteral reference")
-            continue
-        for argument in _items(command.arguments[0], True):
-            first_references.setdefault(argument.value, argument.start)
-    for region in floats:
-        cancellation_point()
+class _FloatRule(NamedTuple):
+    """One float policy: its rule, the title it reports, and its failure summary."""
+
+    rule: str
+    title: str
+    # {count} and {total} name the violations and the inspected floats.
+    failure: str
+
+
+_FLOAT_CAPTIONS = _FloatRule(
+    "manuscript.float_captions",
+    "Checked literal figure/table captions.",
+    "{count} of {total} floats lack a caption",
+)
+_FLOAT_LABELS = _FloatRule(
+    "manuscript.float_labels",
+    "Checked literal figure/table labels.",
+    "{count} of {total} floats lack a label",
+)
+_FLOAT_LABEL_ORDER = _FloatRule(
+    "manuscript.float_label_order",
+    "Checked float label/caption source order.",
+    "{count} float labels do not follow their caption",
+)
+_FLOAT_REFERENCES = _FloatRule(
+    "manuscript.float_references",
+    "Checked external literal float references.",
+    "{count} of {total} floats have no external reference",
+)
+_FLOAT_REFERENCE_ORDER = _FloatRule(
+    "manuscript.float_reference_order",
+    "Checked first-reference source order.",
+    "{count} of {total} floats are first referenced out of source order",
+)
+_FIGURE_DESCRIPTIONS = _FloatRule(
+    "manuscript.figure_descriptions",
+    "Checked literal figure descriptions.",
+    "{count} figures lack a usable Description",
+)
+_FLOAT_RULES = (
+    _FLOAT_CAPTIONS,
+    _FLOAT_LABELS,
+    _FLOAT_LABEL_ORDER,
+    _FLOAT_REFERENCES,
+    _FLOAT_REFERENCE_ORDER,
+    _FIGURE_DESCRIPTIONS,
+)
+
+
+@dataclass(slots=True)
+class _FloatRecord:
+    """What the source shows about one figure or table environment."""
+
+    location: Location
+    kind: str
+    # False when the float's own region could not be interpreted.
+    confirmed: bool
+    source_offset: int
+    captions: list[dict[str, object]]
+    labels: list[str]
+    first_reference_offset: int | None
+    # Labels that precede the float's first caption, as reported violations.
+    misplaced_labels: list[dict[str, object]]
+    # Whether a figure has a nonempty, non-placeholder Description; None for tables.
+    described: bool | None
+
+    def summary(self) -> dict[str, object]:
+        return {
+            **self.location.as_dict(),
+            "kind": self.kind,
+            "confirmed": self.confirmed,
+            "source_offset": self.source_offset,
+        }
+
+    def details(self) -> dict[str, object]:
+        return {
+            **self.summary(),
+            "captions": self.captions,
+            "labels": self.labels,
+            "first_reference_offset": self.first_reference_offset,
+        }
+
+
+@dataclass
+class _FloatScan:
+    """Reads each float region while collecting per-rule interpretation gaps."""
+
+    document: ExpandedDocument
+    floats: list[EnvironmentRegion]
+    uncertainty: dict[_FloatRule, list[str]] = field(
+        default_factory=lambda: {rule: [] for rule in _FLOAT_RULES}
+    )
+    first_references: dict[str, int] = field(default_factory=dict)
+    label_counts: Counter[str] = field(default_factory=Counter)
+    labels_seen: set[str] = field(default_factory=set)
+    records: list[_FloatRecord] = field(default_factory=list)
+
+    def note(self, reasons: Iterable[str], *rules: _FloatRule) -> None:
+        for rule in rules:
+            self.uncertainty[rule].extend(reasons)
+
+    def run(self) -> None:
+        self.label_counts.update(
+            command.arguments[0].value.strip()
+            for command in self.document.commands
+            if command.name == "label" and command.arguments
+        )
+        self._collect_first_references()
+        for region in self.floats:
+            cancellation_point()
+            self.records.append(self._record(region))
+
+    def _collect_first_references(self) -> None:
+        float_spans = merge_spans((region.command.start, region.end) for region in self.floats)
+        for command in self.document.commands:
+            if command.name not in REFERENCE_COMMANDS:
+                continue
+            if in_closed_span(float_spans, command.start):
+                continue
+            names = first_argument_names(command)
+            if names is None or command.depth:
+                self.note(
+                    ["grouped or nonliteral reference"], _FLOAT_REFERENCES, _FLOAT_REFERENCE_ORDER
+                )
+                continue
+            for argument in split_argument_items(command.arguments[0]):
+                self.first_references.setdefault(argument.value, argument.start)
+
+    def _record(self, region: EnvironmentRegion) -> _FloatRecord:
+        document = self.document
         # A float whose own region could not be interpreted contributes reasons,
         # never violations: an unexpanded construct inside it may be the caption,
         # label or description that appears to be missing.
         confirmed = not region.uncertainty
-        record: dict[str, object] = {
-            **document.location(region.command.start),
-            "kind": region.kind.rstrip("*"),
-            "confirmed": confirmed,
-            "source_offset": region.command.start,
-        }
+        kind = region.kind.rstrip("*")
         captions = [command for command in region.commands if command.name == "caption"]
-        labels = [command for command in region.commands if command.name == "label"]
-        descriptions = [command for command in region.commands if command.name == "Description"]
         caption_data = []
         for command in captions:
-            value, unknown = _value(command)
-            extra_reasons["float_captions"].extend(unknown)
+            value, unknown = plain_argument_text(command)
+            self.note(unknown, _FLOAT_CAPTIONS)
             if command.depth:
-                extra_reasons["float_captions"].append("caption inside a group or macro argument")
-            caption_data.append({**document.location(command.start), "value": value})
+                self.note(["caption inside a group or macro argument"], _FLOAT_CAPTIONS)
+            caption_data.append(document.located(command.start, value=value))
         if len(captions) > 1:
-            extra_reasons["float_label_order"].append("multiple captions within one float")
-        first_caption_end = min((_stop(command) for command in captions), default=None)
-        if confirmed and not any(item["value"] for item in caption_data):
-            violations["float_captions"].append(record)
-        literal_labels = []
-        for command in labels:
-            names = _literal_list(command.arguments[0].value) if command.arguments else None
+            self.note(["multiple captions within one float"], _FLOAT_LABEL_ORDER)
+        first_caption_end = min((command_end(command) for command in captions), default=None)
+        labels = []
+        misplaced = []
+        for command in region.commands:
+            if command.name != "label":
+                continue
+            names = first_argument_names(command)
             if command.arguments and not command.arguments[0].value.strip():
                 continue
             if names is None or len(names) != 1 or command.depth:
-                for name in (
-                    "float_labels",
-                    "float_label_order",
-                    "float_references",
-                    "float_reference_order",
-                ):
-                    extra_reasons[name].append("grouped, empty or nonliteral float label")
+                self.note(
+                    ["grouped, empty or nonliteral float label"],
+                    _FLOAT_LABELS,
+                    _FLOAT_LABEL_ORDER,
+                    _FLOAT_REFERENCES,
+                    _FLOAT_REFERENCE_ORDER,
+                )
                 continue
             label = names[0]
-            literal_labels.append(label)
-            if label in labels_seen or all_label_counts.get(label, 0) > 1:
-                for name in ("float_references", "float_reference_order"):
-                    extra_reasons[name].append(
-                        "duplicate float labels have ambiguous reference targets"
-                    )
-            labels_seen.add(label)
-            if confirmed and (first_caption_end is None or first_caption_end > command.start):
-                violations["float_label_order"].append(
-                    {**document.location(command.start), "label": label, "kind": record["kind"]}
+            labels.append(label)
+            if label in self.labels_seen or self.label_counts[label] > 1:
+                self.note(
+                    ["duplicate float labels have ambiguous reference targets"],
+                    _FLOAT_REFERENCES,
+                    _FLOAT_REFERENCE_ORDER,
                 )
-        if confirmed and not literal_labels:
-            violations["float_labels"].append(record)
+            self.labels_seen.add(label)
+            if confirmed and (first_caption_end is None or first_caption_end > command.start):
+                misplaced.append(document.located(command.start, label=label, kind=kind))
         first = min(
-            (first_references[label] for label in literal_labels if label in first_references),
+            (self.first_references[label] for label in labels if label in self.first_references),
             default=None,
         )
         if first is None:
-            if confirmed:
-                violations["float_references"].append({**record, "labels": literal_labels})
-            extra_reasons["float_reference_order"].append(
-                "a float lacks a label or external first reference"
-            )
-        if region.kind.startswith("figure"):
-            valid_descriptions = []
-            if len(descriptions) > 1:
-                extra_reasons["figure_descriptions"].append(
-                    "multiple descriptions within one figure"
-                )
-            for command in descriptions:
-                value, unknown = _value(command)
-                extra_reasons["figure_descriptions"].extend(unknown)
-                if command.depth:
-                    extra_reasons["figure_descriptions"].append(
-                        "description inside a group or macro argument"
-                    )
-                valid_descriptions.append(bool(value) and not _placeholder(value))
-            if confirmed and not any(valid_descriptions):
-                violations["figure_descriptions"].append(
-                    {**record, "reason": "missing, empty or placeholder Description"}
-                )
-        record.update(
-            {"captions": caption_data, "labels": literal_labels, "first_reference_offset": first}
+            self.note(["a float lacks a label or external first reference"], _FLOAT_REFERENCE_ORDER)
+        return _FloatRecord(
+            location=document.location(region.command.start),
+            kind=kind,
+            confirmed=confirmed,
+            source_offset=region.command.start,
+            captions=caption_data,
+            labels=labels,
+            first_reference_offset=first,
+            misplaced_labels=misplaced,
+            described=self._described(region) if kind == "figure" else None,
         )
-        records.append(record)
+
+    def _described(self, region: EnvironmentRegion) -> bool:
+        descriptions = [command for command in region.commands if command.name == "Description"]
+        if len(descriptions) > 1:
+            self.note(["multiple descriptions within one figure"], _FIGURE_DESCRIPTIONS)
+        usable = False
+        for command in descriptions:
+            value, unknown = plain_argument_text(command)
+            self.note(unknown, _FIGURE_DESCRIPTIONS)
+            if command.depth:
+                self.note(["description inside a group or macro argument"], _FIGURE_DESCRIPTIONS)
+            usable = usable or (bool(value) and not is_placeholder_text(value))
+        return usable
+
+
+def _float_violations(records: list[_FloatRecord]) -> dict[_FloatRule, list[dict[str, object]]]:
+    confirmed = [record for record in records if record.confirmed]
+    out_of_order: list[dict[str, object]] = []
     for kind in ("figure", "table"):
         previous = -1
         for record in records:
-            if record["kind"] != kind or record["first_reference_offset"] is None:
+            position = record.first_reference_offset
+            if record.kind != kind or position is None:
                 continue
-            position = record["first_reference_offset"]
-            if not isinstance(position, int):
-                continue
-            if position < previous and record["confirmed"]:
-                violations["float_reference_order"].append(record)
+            if position < previous and record.confirmed:
+                out_of_order.append(record.details())
             previous = max(previous, position)
-    return [
-        _finding(
-            "manuscript." + name,
-            message,
-            document,
-            violations[name],
-            [*reasons, *extra_reasons[name]],
-            failure=failure,
-            total=len(floats),
-            extra={
-                "floats": records,
-                "order": "Source appearance and source first reference only; "
-                "rendered float order is not measured.",
-                "description_quality": "Presence and obvious placeholders only; "
-                "human review is needed for adequacy.",
-            },
+    return {
+        _FLOAT_CAPTIONS: [
+            record.details()
+            for record in confirmed
+            if not any(caption["value"] for caption in record.captions)
+        ],
+        _FLOAT_LABELS: [record.details() for record in confirmed if not record.labels],
+        _FLOAT_LABEL_ORDER: [label for record in records for label in record.misplaced_labels],
+        _FLOAT_REFERENCES: [
+            {**record.summary(), "labels": record.labels}
+            for record in confirmed
+            if record.first_reference_offset is None
+        ],
+        _FLOAT_REFERENCE_ORDER: out_of_order,
+        _FIGURE_DESCRIPTIONS: [
+            {**record.summary(), "reason": "missing, empty or placeholder Description"}
+            for record in confirmed
+            if record.described is False
+        ],
+    }
+
+
+def _float_checks(reading: _Reading, options: ManuscriptCheckOptions) -> list[Finding]:
+    enabled = [
+        rule
+        for rule, selected in (
+            (_FLOAT_CAPTIONS, options.require_float_captions),
+            (_FLOAT_LABELS, options.require_float_labels),
+            (_FLOAT_LABEL_ORDER, options.check_float_label_order),
+            (_FLOAT_REFERENCES, options.require_float_references),
+            (_FLOAT_REFERENCE_ORDER, options.check_float_reference_order),
+            (_FIGURE_DESCRIPTIONS, options.require_figure_descriptions),
         )
-        for enabled, name, message, failure in rules
-        if enabled
+        if selected
+    ]
+    if not enabled:
+        return []
+    floats, structure_reasons = _scoped_regions(reading, _FLOAT_ENVIRONMENTS)
+    # Unexpanded constructs outside every float cannot caption, label or hide one.
+    reasons = [*reading.document.graph_uncertainty, *structure_reasons]
+    for region in floats:
+        reasons.extend(region.uncertainty)
+    scan = _FloatScan(reading.document, floats)
+    scan.run()
+    violations = _float_violations(scan.records)
+    details = {
+        "floats": [record.details() for record in scan.records],
+        "order": "Source appearance and source first reference only; "
+        "rendered float order is not measured.",
+        "description_quality": "Presence and obvious placeholders only; "
+        "human review is needed for adequacy.",
+    }
+    return [
+        _policy_finding(
+            rule.rule,
+            rule.title,
+            _CheckOutcome(violations[rule], [*reasons, *scan.uncertainty[rule]]),
+            failure=rule.failure.format(count=len(violations[rule]), total=len(floats)),
+            details=details,
+        )
+        for rule in enabled
     ]
 
 
 _DEFAULT_OPTIONS = ManuscriptCheckOptions()
 
 
-def check_manuscript_details(
+def check_manuscript_policies(
     root: Path,
     main: str | None,
     options: ManuscriptCheckOptions = _DEFAULT_OPTIONS,
 ) -> list[Finding]:
-    """Run selected source checks; defaults enable no additional manuscript policy."""
+    """Run selected source policy checks; defaults enable no additional manuscript policy."""
     if options == ManuscriptCheckOptions():
         return []
-    document = _read(root, main)
+    document = expand_document(root, main)
+    reading = _interpret(document)
     results = _package_checks(document, options)
     if options.check_layout_manipulation:
         results.append(
-            _finding(
+            _policy_finding(
                 "manuscript.layout_manipulation",
                 "Checked layout override candidates.",
-                document,
-                _layout(document),
-                document.uncertainty,
-                advisory=True,
+                _CheckOutcome(_layout(document), reading.uncertainty),
+                weight=_ADVISORY,
             )
         )
-    results.extend(_abstract_checks(document, options))
-    results.extend(_structure_checks(document, options))
-    results.extend(_metadata_checks(document, options))
-    results.extend(_float_checks(document, options))
+    results.extend(_abstract_checks(reading, options))
+    results.extend(_heading_and_declaration_checks(reading, options))
+    results.extend(_metadata_checks(reading, options))
+    results.extend(_float_checks(reading, options))
     results.extend(_line_number_checks(document, options))
     return results

@@ -183,6 +183,18 @@ keep their existing typed tables. See [the check catalogue](checks.md),
 {download}`constraint settings <../examples/settings.toml>`, and
 {download}`additional check settings <../examples/checks.toml>` for supported policies.
 
+## Renamed settings
+
+Three settings have clearer names. Their former names are still accepted, but
+a settings file or preset layer must not use both spellings of one setting.
+Reports record the current names.
+
+| Former name | Current name |
+| --- | --- |
+| `format` | `apply_formatting` (the `--format` option is unchanged) |
+| `pdf_artwork` | `rendered_pdf_artwork`: artwork checks of the final PDF |
+| `figure_artwork` | `included_figure_artwork`: artwork checks of each included PDF figure |
+
 ## Package contents
 
 `prepare` ships the inputs the build needs, using the build trace and the literal

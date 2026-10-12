@@ -233,7 +233,8 @@ Follow the current option and dispatch paths rather than treating the design
 documents as an implemented plugin API. A check usually needs its typed options,
 family rule metadata, execution dispatch, and selection policy in
 {download}`check_policy.py <../src/latexprep/check_policy.py>` to agree. If it is
-eligible for a reviewed exception, check the review policy too.
+eligible for a reviewed exception, check the review policy in
+{download}`review_policy.py <../src/latexprep/review_policy.py>` too.
 
 Add an explicit code, descriptive title, scope and fix text to the applicable
 data-only `*_rules.py` module, registered by
@@ -252,6 +253,18 @@ default, opt-in or always enforced) and its enabling settings from
 `check_policy.py`, and shows the rule's fix text. A test fails while
 `docs/checks.md` is stale; the generated tables are never edited by hand.
 
+The job workflow starts at `run_job` in
+{download}`core.py <../src/latexprep/core.py>`, which validates the request and
+publishes the result.
+{download}`document_run.py <../src/latexprep/document_run.py>` carries one
+document through analysis, baseline, staged transformations and verification;
+{download}`document_tasks.py <../src/latexprep/document_tasks.py>` builds its
+scheduled tasks; {download}`documents.py <../src/latexprep/documents.py>` runs
+configured `workflow.documents`; and
+{download}`publication.py <../src/latexprep/publication.py>` writes verified
+outputs. A new scheduled check needs a task in `document_tasks.py`, named in
+`models.TaskName`.
+
 For normal preparation, online checks run once on the fresh archive extraction;
 source inspection and dry runs use the initial snapshot. Preserve the request
 budget per document when changing this dispatch. Controlled tests should make
@@ -260,7 +273,30 @@ the inspected content and phase explicit.
 The architecture document includes target design: per-task timeout/artifact
 descriptors and a structured progress-event schema are not implemented as
 described there. Current execution uses progress strings and a shared whole-job
-deadline alongside per-tool limits. Some evidence is parsed repeatedly, and
-checker modules share private parsers. Extracting shared evidence or parser
-interfaces is a future maintenance tradeoff; extending a check does not require
-a new plugin framework.
+deadline alongside per-tool limits. Some evidence is parsed repeatedly. Checkers
+that read TeX source share two public modules:
+{download}`tex_lexer.py <../src/latexprep/tex_lexer.py>` provides the bounded
+lexical subset (commands and their argument groups, comment and verbatim
+masking, conditional spans), and
+{download}`source_graph.py <../src/latexprep/source_graph.py>` builds the literal
+dependency graph of one selected main file with `SourceGraph.build`.
+{download}`expanded_document.py <../src/latexprep/expanded_document.py>` splices
+that graph into one document whose offsets map back to file and line
+(`expand_document`), and
+{download}`literal_text.py <../src/latexprep/literal_text.py>` holds the shared
+command tables and plain-text reading used by manuscript, author-record and
+submission-text checks. Checks that scan every supplied file use the bounded
+inventory, reads, comment extraction and redaction in
+{download}`file_scan.py <../src/latexprep/file_scan.py>`. Bibliography checks,
+transformations and online lookups share the bounded BibTeX reader in
+{download}`bibtex_syntax.py <../src/latexprep/bibtex_syntax.py>` and the literal
+citation graph of the selected main file in
+{download}`citation_graph.py <../src/latexprep/citation_graph.py>`
+(`build_citation_graph`).
+PDF checkers share
+{download}`pdf_support.py <../src/latexprep/pdf_support.py>`: a tool session that
+freezes the inputs and runs each Poppler, qpdf or MuPDF command in its own
+directory, the parsers for their output, and the builders for measurement and
+unavailable-evidence findings. Sharing further parsed
+evidence between checkers is a future maintenance tradeoff; extending a check does
+not require a new plugin framework.

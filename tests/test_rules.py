@@ -32,7 +32,7 @@ class RuleRegistryTests(unittest.TestCase):
         rows = {row["rule"]: row for row in report.to_dict()["findings"]}
         self.assertEqual(rows[finding.rule]["code"], "BIB005")
         self.assertEqual(rows[finding.rule]["rule"], "bibliography.relationship_unresolved")
-        self.assertIn("missing or ambiguous", rows[finding.rule]["suggestion"])
+        self.assertIn("missing or ambiguous", rows[finding.rule]["next_step"])
         self.assertIsNone(rows["execution.task"]["code"])
         self.assertEqual(get_rule("tex001").code, "TEX001")
         with self.assertRaisesRegex(ValueError, "Unknown check code"):

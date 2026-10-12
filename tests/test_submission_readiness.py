@@ -11,10 +11,13 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from latexprep.config import load_settings
-from latexprep.core import JobRequest, _readiness, run_job
-from latexprep.manuscript_checks import ManuscriptCheckOptions, check_manuscript_details
+from latexprep.core import run_job
+from latexprep.document_tasks import _submission_readiness
+from latexprep.finding_view import is_scope_disclaimer
+from latexprep.job_context import JobRequest
+from latexprep.manuscript_checks import ManuscriptCheckOptions, check_manuscript_policies
 from latexprep.models import Finding, PreparationError
-from latexprep.reporting import is_scope_disclaimer
+from latexprep.submission_checks import SubmissionOptions
 from latexprep.submission_readiness_checks import check_submission_readiness
 
 from .support import fake_build
@@ -63,13 +66,19 @@ class ReadinessCase(unittest.TestCase):
         )
 
     def findings(
-        self, rule: str, main: str | None = "main.tex", **options: object
+        self,
+        rule: str,
+        main: str | None = "main.tex",
+        required_color_space: str | None = None,
+        **options: object,
     ) -> list[Finding]:
-        return [
-            item
-            for item in check_submission_readiness(self.root, main, **options)  # type: ignore[arg-type]
-            if item.rule == rule
-        ]
+        readiness = check_submission_readiness(
+            self.root,
+            main,
+            SubmissionOptions(**options),  # type: ignore[arg-type]
+            required_color_space=required_color_space,
+        )
+        return [item for item in readiness if item.rule == rule]
 
     def one(self, rule: str, **options: object) -> Finding:
         findings = self.findings(rule, **options)
@@ -114,7 +123,7 @@ class BibliographyBblTests(ReadinessCase):
         shipped = self.one("source.bibliography_bbl", require_bbl=True)
         self.assertEqual((shipped.severity, shipped.status), ("info", "passed"))
         with self.assertRaisesRegex(PreparationError, "require_bbl must be a boolean"):
-            check_submission_readiness(self.root, "main.tex", require_bbl="yes")  # type: ignore[arg-type]
+            SubmissionOptions(require_bbl="yes")  # type: ignore[arg-type]
 
     def test_require_bbl_is_read_from_project_settings_and_reaches_the_check(self) -> None:
         self.write("refs.bib", "@book{knuth, title={The TeXbook}, year={1984}}")
@@ -128,7 +137,7 @@ class BibliographyBblTests(ReadinessCase):
             with self.subTest(severity=severity):
                 findings = [
                     item
-                    for item in _readiness(self.root, "main.tex", settings)
+                    for item in _submission_readiness(self.root, "main.tex", settings)
                     if item.rule == "source.bibliography_bbl"
                 ]
                 self.assertEqual([item.severity for item in findings], [severity])
@@ -224,7 +233,7 @@ class BibliographyBblTests(ReadinessCase):
         config.write_text('[submission_checks]\nbiblatex_bbl_format_version = "3.3"\n')
         findings = [
             item
-            for item in _readiness(self.root, "main.tex", load_settings(config, {}))
+            for item in _submission_readiness(self.root, "main.tex", load_settings(config, {}))
             if item.rule == "bibliography.bbl_format_version"
         ]
         self.assertEqual([(item.code, item.status) for item in findings], [("BIB110", "failed")])
@@ -234,15 +243,15 @@ class BibliographyBblTests(ReadinessCase):
                 with self.assertRaisesRegex(PreparationError, "biblatex_bbl_format_version"):
                     load_settings(config, {})
         with self.assertRaisesRegex(PreparationError, "biblatex_bbl_format_version"):
-            check_submission_readiness(self.root, "main.tex", biblatex_bbl_format_version=3.3)  # type: ignore[arg-type]
+            SubmissionOptions(biblatex_bbl_format_version=3.3)  # type: ignore[arg-type]
 
     def test_arxiv_preset_without_a_bbl_is_an_advisory_not_a_block(self) -> None:
         self.write("refs.bib", "@book{knuth, title={The TeXbook}, year={1984}}")
         self.document(body="Text \\cite{knuth}.\n\\bibliography{refs}")
         settings = load_settings(None, {}, preset="arxiv")
         with (
-            patch("latexprep.core.build_project", side_effect=fake_build),
-            patch("latexprep.core.inspect_pdf", new=AsyncMock(return_value=[])),
+            patch("latexprep.document_tasks.build_project", side_effect=fake_build),
+            patch("latexprep.document_tasks.inspect_pdf", new=AsyncMock(return_value=[])),
         ):
             report = asyncio.run(run_job(JobRequest("check", self.root, settings)))
         bbl = {item.code: item for item in report.findings if item.code in {"TEX009", "BIB109"}}
@@ -359,7 +368,7 @@ class PrivateMarkerTests(ReadinessCase):
         self.write("style.sty", "% Do not distribute modified copies of this file.\n")
         finding = self.one("submission.private_comment_markers")
         self.assertEqual(
-            (finding.code, finding.severity, finding.status, finding.evidence),
+            (finding.code, finding.severity, finding.status, finding.evidence_kind),
             ("PRV007", "warning", "failed", "heuristic"),
         )
         self.assertEqual(
@@ -395,7 +404,7 @@ class LineNumberTests(ReadinessCase):
     def check(self, **options: bool) -> Finding:
         findings = [
             item
-            for item in check_manuscript_details(
+            for item in check_manuscript_policies(
                 self.root, "main.tex", ManuscriptCheckOptions(**options)
             )
             if item.rule == "manuscript.line_numbers"
@@ -427,7 +436,7 @@ class LineNumberTests(ReadinessCase):
         self.assertEqual(self.check(require_line_numbers=True).status, "passed")
         self.document("\\usepackage{lineno}\n\\ifdefined\\review\\linenumbers\\fi\n")
         self.assertEqual(self.check(require_line_numbers=True).status, "inconclusive")
-        self.assertEqual(check_manuscript_details(self.root, "main.tex"), [])
+        self.assertEqual(check_manuscript_policies(self.root, "main.tex"), [])
 
     def test_forbidden_line_numbers(self) -> None:
         self.document("\\usepackage{lineno}\n", "Text.\n\\linenumbers")

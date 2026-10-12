@@ -9,7 +9,8 @@ from pathlib import Path
 
 from latexprep.bibliography_transform import BibliographyTransformOptions
 from latexprep.config import Settings
-from latexprep.core import JobRequest, run_job
+from latexprep.core import run_job
+from latexprep.job_context import JobRequest
 from latexprep.source_transform import SourceTransformOptions
 from latexprep.workflow_options import DocumentOptions, WorkflowOptions
 from tests.support import live_tests_enabled

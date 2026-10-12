@@ -56,7 +56,7 @@ class PresetContentTests(unittest.TestCase):
             with self.subTest(preset=name):
                 settings = load_settings(None, {}, preset=name)
                 self.assertIsNone(settings.max_pages)
-                self.assertIsNone(settings.expected_page_width_pt)
+                self.assertIsNone(settings.pdf.expected_page_width_pt)
                 self.assertIsNone(settings.submission_checks.max_archive_bytes)
                 self.assertEqual(settings.submission_checks.identity_terms, ())
                 self.assertEqual(settings.metadata_privacy.image_identity_terms, ())
@@ -69,7 +69,7 @@ class PresetContentTests(unittest.TestCase):
 
     def test_presets_enable_their_documented_generic_checks(self):
         arxiv = load_settings(None, {}, preset="arxiv")
-        self.assertTrue(arxiv.require_embedded_fonts)
+        self.assertTrue(arxiv.pdf.require_embedded_fonts)
         self.assertTrue(arxiv.submission_checks.scan_private_comments)
         self.assertTrue(arxiv.submission_checks.report_unused_assets)
         self.assertEqual(arxiv.source_transforms.comment_policy, "private")
@@ -78,18 +78,18 @@ class PresetContentTests(unittest.TestCase):
         self.assertIsNone(arxiv.build_checks.expected_texlive_year)
         review = load_settings(None, {}, preset="anonymous-review")
         self.assertTrue(review.submission_checks.scan_identity_hints)
-        self.assertTrue(review.forbid_attachments)
+        self.assertTrue(review.pdf.forbid_attachments)
         self.assertTrue(review.manuscript_checks.require_float_references)
         self.assertEqual(review.source_transforms.comment_policy, "retain")
         self.assertFalse(review.manuscript_checks.require_line_numbers)
         self.assertFalse(review.submission_checks.require_bbl)
         final = load_settings(None, {}, preset="camera-ready")
-        self.assertTrue(final.forbid_type3_fonts and final.require_consistent_page_size)
+        self.assertTrue(final.pdf.forbid_type3_fonts and final.pdf.require_consistent_page_size)
         self.assertEqual(final.manuscript_checks.required_metadata, ("title", "author"))
         self.assertTrue(final.manuscript_checks.check_float_reference_order)
         self.assertFalse(final.manuscript_checks.forbid_line_numbers)
-        self.assertIsNone(final.figure_artwork.required_color_space)
-        self.assertIsNone(final.pdf_artwork.required_color_space)
+        self.assertIsNone(final.included_figure_artwork.required_color_space)
+        self.assertIsNone(final.rendered_pdf_artwork.required_color_space)
         self.assertIsNone(final.build_checks.expected_texlive_year)
 
     def test_venue_value_placeholders_are_commented_out_with_their_codes(self):
@@ -110,7 +110,7 @@ class PresetContentTests(unittest.TestCase):
                 for fragment in fragments:
                     self.assertIn(fragment, text)
         camera = preset_text("camera-ready")
-        for table in ("[figure_artwork]", "[pdf_artwork]"):
+        for table in ("[included_figure_artwork]", "[rendered_pdf_artwork]"):
             section = camera.split(table, 1)[1].split("\n[", 1)[0]
             self.assertIn('# required_color_space = ""', section)
         self.assertIn("require_bbl = true", preset_text("arxiv"))
@@ -141,12 +141,12 @@ class PresetPrecedenceTests(unittest.TestCase):
             "scan_identity_hints = false\n"
         )
         settings = load_settings(path, {}, preset="anonymous-review")
-        self.assertFalse(settings.require_embedded_fonts)
+        self.assertFalse(settings.pdf.require_embedded_fonts)
         self.assertFalse(settings.submission_checks.scan_identity_hints)
         self.assertEqual(settings.submission_checks.identity_terms, ("Ada Lovelace",))
         # Keys the file does not mention keep the preset's value.
         self.assertTrue(settings.submission_checks.scan_private_comments)
-        self.assertTrue(settings.forbid_attachments)
+        self.assertTrue(settings.pdf.forbid_attachments)
 
     def test_command_line_overrides_beat_preset_and_settings_file(self):
         path = self.config('layout = "preserve"\n')
@@ -154,8 +154,8 @@ class PresetPrecedenceTests(unittest.TestCase):
             path, {"layout": "flat", "forbid_type3_fonts": False}, preset="camera-ready"
         )
         self.assertEqual(settings.layout, "flat")
-        self.assertFalse(settings.forbid_type3_fonts)
-        self.assertTrue(settings.require_embedded_fonts)
+        self.assertFalse(settings.pdf.forbid_type3_fonts)
+        self.assertTrue(settings.pdf.require_embedded_fonts)
 
     def test_settings_file_errors_are_still_reported_with_a_preset(self):
         path = self.config("[submission_checks]\nscan_secrets = 1\n")

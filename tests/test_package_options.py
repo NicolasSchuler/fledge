@@ -10,7 +10,8 @@ from unittest.mock import AsyncMock, patch
 
 from latexprep.check_selection import CheckSelection
 from latexprep.config import Settings, load_settings
-from latexprep.core import JobRequest, run_job
+from latexprep.core import run_job
+from latexprep.job_context import JobRequest
 from latexprep.models import PreparationError
 from latexprep.workflow_options import PackageOptions
 from tests.support import MINIMAL_DOCUMENT, fake_build, write_project
@@ -32,9 +33,9 @@ class PackageOptionTests(unittest.IsolatedAsyncioTestCase):
 
     async def prepare(self, settings: Settings) -> zipfile.ZipFile:
         with (
-            patch("latexprep.core.build_project", side_effect=fake_build),
-            patch("latexprep.core.inspect_pdf", new=AsyncMock(return_value=[])),
-            patch("latexprep.core.compare_pdfs", new=AsyncMock(return_value=[])),
+            patch("latexprep.document_tasks.build_project", side_effect=fake_build),
+            patch("latexprep.document_tasks.inspect_pdf", new=AsyncMock(return_value=[])),
+            patch("latexprep.document_tasks.compare_pdfs", new=AsyncMock(return_value=[])),
         ):
             report = await run_job(JobRequest("prepare", self.source, settings, self.base / "out"))
         self.assertIn(report.outcome, {"passed", "passed_with_advisories"}, report.to_dict())

@@ -55,9 +55,9 @@ class SubmissionTextTests(unittest.TestCase):
         )
         (self.root / "body.tex").write_text("foo% comment\nbar $n=100$", encoding="utf-8")
         fields = read_submission_text(self.root, "main.tex")
-        self.assertEqual(fields["title"]["draft"], "A title")
-        self.assertEqual(fields["abstract"]["draft"], "foobar n=100")
-        self.assertEqual(fields["abstract"]["status"], "ready")
+        self.assertEqual(fields["title"].draft, "A title")
+        self.assertEqual(fields["abstract"].draft, "foobar n=100")
+        self.assertEqual(fields["abstract"].status, "ready")
 
     def test_multiple_conditional_and_missing_graph_are_unresolved(self) -> None:
         for text in (
@@ -67,7 +67,7 @@ class SubmissionTextTests(unittest.TestCase):
         ):
             self.write(r"\documentclass{article}" + text)
             fields = read_submission_text(self.root, "main.tex")
-            self.assertEqual(fields["title"]["status"], "unresolved")
+            self.assertEqual(fields["title"].status, "unresolved")
 
     def test_cli_ready_stdout_and_unresolved_stderr(self) -> None:
         self.write(r"\documentclass{article}\title{A \emph{title}}\abstract{\cite{key}}")
@@ -102,8 +102,8 @@ class SubmissionTextTests(unittest.TestCase):
             r"\begin{document}\begin{abstract}Unclosed"
         )
         fields = read_submission_text(self.root, "main.tex")
-        self.assertEqual(fields["title"]["status"], "missing")
-        self.assertEqual(fields["abstract"]["status"], "unresolved")
+        self.assertEqual(fields["title"].status, "missing")
+        self.assertEqual(fields["abstract"].status, "unresolved")
 
     def test_grouped_prose_accents_and_urls_in_environment(self) -> None:
         self.write(
@@ -112,8 +112,8 @@ class SubmissionTextTests(unittest.TestCase):
             r"\end{abstract}\end{document}"
         )
         abstract = read_submission_text(self.root, "main.tex")["abstract"]
-        self.assertEqual(abstract["status"], "ready", abstract)
-        self.assertEqual(abstract["draft"], "A café at https://example.org/a_b. α")
+        self.assertEqual(abstract.status, "ready", abstract)
+        self.assertEqual(abstract.draft, "A café at https://example.org/a_b. α")
 
     def test_keywords_preserve_explicit_phrase_separators(self) -> None:
         self.write(
@@ -121,10 +121,8 @@ class SubmissionTextTests(unittest.TestCase):
             r" formal verification\and reproducibility}"
         )
         keywords = read_submission_text(self.root, "main.tex")["keywords"]
-        self.assertEqual(keywords["status"], "ready")
-        self.assertEqual(
-            keywords["draft"], "machine learning; formal verification; reproducibility"
-        )
+        self.assertEqual(keywords.status, "ready")
+        self.assertEqual(keywords.draft, "machine learning; formal verification; reproducibility")
 
     def test_abstract_spans_include_boundary(self) -> None:
         self.write(
@@ -133,8 +131,8 @@ class SubmissionTextTests(unittest.TestCase):
         )
         (self.root / "opening.tex").write_text(r"\begin{abstract}An included", encoding="utf-8")
         abstract = read_submission_text(self.root, "main.tex")["abstract"]
-        self.assertEqual(abstract["status"], "ready", abstract)
-        self.assertEqual(abstract["draft"], "An included final result.")
+        self.assertEqual(abstract.status, "ready", abstract)
+        self.assertEqual(abstract.draft, "An included final result.")
 
     def test_control_text_is_visible_and_blocks_plain_export(self) -> None:
         self.write("\\documentclass{article}\\title{Safe\x1b[31m text\u202e}")
@@ -150,7 +148,7 @@ class SubmissionTextTests(unittest.TestCase):
         self.assertNotIn("\u202e", preview.stdout)
         self.assertIn(r"\u001b", preview.stdout)
         fields = read_submission_text(self.root, "main.tex")
-        self.assertEqual(fields["title"]["status"], "unresolved")
+        self.assertEqual(fields["title"].status, "unresolved")
 
     def test_cli_conflicting_config_and_import_budget(self) -> None:
         self.write(r"\documentclass{article}\title{A paper}")
@@ -178,8 +176,8 @@ class SubmissionTextTests(unittest.TestCase):
             with self.subTest(definition=definition):
                 self.write(r"\documentclass{article}" + definition + r"\title{A \emph{method}}")
                 title = read_submission_text(self.root, "main.tex")["title"]
-                self.assertEqual(title["status"], "unresolved", title)
-                self.assertEqual(title["draft"], r"A \emph{method}")
+                self.assertEqual(title.status, "unresolved", title)
+                self.assertEqual(title.draft, r"A \emph{method}")
                 output = CliRunner().invoke(
                     submission_text_command, [str(self.root), "--isolated", "--field", "title"]
                 )
@@ -192,11 +190,11 @@ class SubmissionTextTests(unittest.TestCase):
             r"\renewcommand{\emph}[1]{#1 extra}", encoding="utf-8"
         )
         title = read_submission_text(self.root, "main.tex")["title"]
-        self.assertEqual(title["status"], "unresolved")
+        self.assertEqual(title.status, "unresolved")
         (self.root / "macros.tex").write_text(r"\newcommand{\unrelated}{Extra}", encoding="utf-8")
         title = read_submission_text(self.root, "main.tex")["title"]
-        self.assertEqual(title["status"], "ready", title)
-        self.assertEqual(title["draft"], "A method")
+        self.assertEqual(title.status, "ready", title)
+        self.assertEqual(title.draft, "A method")
 
     def test_nested_accent_and_math_shortcuts_respect_local_definitions(self) -> None:
         for command, fragment in (("i", r"\'{\i}"), ("j", r"\'{\j}"), ("alpha", r"$\alpha$")):
@@ -211,8 +209,8 @@ class SubmissionTextTests(unittest.TestCase):
                     + " example}"
                 )
                 title = read_submission_text(self.root, "main.tex")["title"]
-                self.assertEqual(title["status"], "unresolved", title)
-                self.assertEqual(title["draft"], "An " + fragment + " example")
+                self.assertEqual(title.status, "unresolved", title)
+                self.assertEqual(title.draft, "An " + fragment + " example")
                 output = CliRunner().invoke(
                     submission_text_command, [str(self.root), "--isolated", "--field", "title"]
                 )
@@ -236,8 +234,8 @@ class SubmissionTextTests(unittest.TestCase):
                         + "}"
                     )
                     title = read_submission_text(self.root, "main.tex")["title"]
-                    self.assertEqual(title["status"], "unresolved", title)
-                    self.assertEqual(title["draft"], field)
+                    self.assertEqual(title.status, "unresolved", title)
+                    self.assertEqual(title.draft, field)
                     output = CliRunner().invoke(
                         submission_text_command,
                         [str(self.root), "--isolated", "--field", "title"],
@@ -248,7 +246,7 @@ class SubmissionTextTests(unittest.TestCase):
             with self.subTest(prefix=prefix):
                 self.write(r"\documentclass{article}" + prefix + r"\title{" + field + "}")
                 title = read_submission_text(self.root, "main.tex")["title"]
-                self.assertEqual((title["status"], title["draft"]), ("ready", expected))
+                self.assertEqual((title.status, title.draft), ("ready", expected))
 
     def test_typewriter_punctuation_survives_nested_formatting_and_cli_export(self) -> None:
         literal = r"\texttt{--jobs foo--bar \emph{---} {``x''} a\_b}"
@@ -256,7 +254,7 @@ class SubmissionTextTests(unittest.TestCase):
         self.write(r"\documentclass{article}\title{" + field + "}")
         title = read_submission_text(self.root, "main.tex")["title"]
         expected = "Configuring --jobs foo--bar --- ``x'' a_b – ordinary prose"
-        self.assertEqual((title["status"], title["draft"]), ("ready", expected))
+        self.assertEqual((title.status, title.draft), ("ready", expected))
         output = CliRunner().invoke(
             submission_text_command, [str(self.root), "--isolated", "--field", "title"]
         )

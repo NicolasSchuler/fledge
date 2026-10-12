@@ -6,9 +6,27 @@ from pathlib import Path
 from unittest.mock import patch
 
 from latexprep.config import Settings
-from latexprep.formatting import FormattingOptions, format_project
+from latexprep.formatting import FormattingOptions, FormattingResult, format_project
 from latexprep.models import has_blockers
-from latexprep.runtime import CommandResult, ToolRunner
+from latexprep.runtime import CommandResult, CommandRunner, ToolRunner, ToolVersion
+
+
+async def format_with(
+    source: Path,
+    work: Path,
+    runner: CommandRunner,
+    settings: Settings | None = None,
+    **options,
+) -> FormattingResult:
+    """Format with the formatting settings of ``settings``, as the job core passes them."""
+    settings = settings or Settings()
+    return await format_project(
+        source,
+        work,
+        runner,
+        settings.formatting_options,
+        **options,
+    )
 
 
 class FakeFormatter(ToolRunner):
@@ -16,12 +34,12 @@ class FakeFormatter(ToolRunner):
         super().__init__()
         self.results = iter(results)
 
-    async def tool_version(self, argv, workspace) -> dict[str, object]:
-        return {"version": "test formatter", "executable": argv[0]}
+    async def tool_version(self, argv, workspace) -> ToolVersion:
+        return ToolVersion(("test formatter",), argv[0], ("--version",))
 
     async def run(self, argv, cwd, workspace, *, readonly_inputs=(), memory_mb=None):
         if "--version" in argv:
-            return CommandResult(0, "test formatter", "", False, argv)
+            return CommandResult(0, "test formatter", "", resolved_command=argv)
         return next(self.results)
 
 
@@ -32,9 +50,9 @@ class FormattingTests(unittest.IsolatedAsyncioTestCase):
             source = base / "source"
             source.mkdir()
             (source / "main.tex").write_text(source_text)
-            output = CommandResult(0, output_text, "", False, [])
+            output = CommandResult(0, output_text, "", resolved_command=[])
             with patch("latexprep.formatting.shutil.which", return_value="/fake/tex-fmt"):
-                result = await format_project(
+                result = await format_with(
                     source,
                     base / "work",
                     FakeFormatter([output, output]),
@@ -75,13 +93,13 @@ class FormattingTests(unittest.IsolatedAsyncioTestCase):
             (source / "generated").mkdir(parents=True)
             (source / "main.tex").write_text("original\n")
             (source / "generated/auto.tex").write_text("generated\n")
-            output = CommandResult(0, "formatted\n", "", False, [])
+            output = CommandResult(0, "formatted\n", "", resolved_command=[])
             with patch("latexprep.formatting.shutil.which", return_value="/fake/tex-fmt"):
                 settings = Settings(formatting_options=FormattingOptions(exclude=("generated/*",)))
-                result = await format_project(
+                result = await format_with(
                     source, base / "work", FakeFormatter([output, output]), settings
                 )
-                unmatched = await format_project(
+                unmatched = await format_with(
                     source,
                     base / "other",
                     FakeFormatter([output] * 4),
@@ -96,7 +114,7 @@ class FormattingTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual((source / "generated/auto.tex").read_text(), "generated\n")
             (source / "linked.tex").symlink_to(source / "main.tex")
-            linked = await format_project(source, base / "linked", FakeFormatter([]), Settings())
+            linked = await format_with(source, base / "linked", FakeFormatter([]), Settings())
             self.assertEqual(
                 next(f for f in linked.findings if f.code == "FMT102").status, "inconclusive"
             )
@@ -129,13 +147,12 @@ class FormattingTests(unittest.IsolatedAsyncioTestCase):
                         source.mkdir()
                         original = b"\\begin{document}text\\end{document}\n"
                         (source / "main.tex").write_bytes(original)
-                        good = CommandResult(0, "\\endinput\n", "", False, [])
+                        good = CommandResult(0, "\\endinput\n", "", resolved_command=[])
                         bad = CommandResult(
                             0,
                             "\\endinput\n",
                             "",
-                            False,
-                            [],
+                            resolved_command=[],
                             output_limited=limit == "output",
                             resource_exceeded="memory" if limit == "memory" else None,
                         )
@@ -143,7 +160,7 @@ class FormattingTests(unittest.IsolatedAsyncioTestCase):
                         with patch(
                             "latexprep.formatting.shutil.which", return_value="/fake/tex-fmt"
                         ):
-                            result = await format_project(source, base / "work", runner, Settings())
+                            result = await format_with(source, base / "work", runner, Settings())
                         self.assertTrue(has_blockers(result.findings))
                         self.assertEqual(result.contents, {})
                         self.assertEqual(result.originals, {})
@@ -156,10 +173,10 @@ class FormattingTests(unittest.IsolatedAsyncioTestCase):
             source = base / "source"
             source.mkdir()
             (source / "main.tex").write_text("a\n")
-            first = CommandResult(0, "b\n", "", False, [])
-            second = CommandResult(0, "c\n", "", False, [])
+            first = CommandResult(0, "b\n", "", resolved_command=[])
+            second = CommandResult(0, "c\n", "", resolved_command=[])
             with patch("latexprep.formatting.shutil.which", return_value="/fake/tex-fmt"):
-                result = await format_project(
+                result = await format_with(
                     source, base / "work", FakeFormatter([first, second]), Settings()
                 )
             self.assertTrue(has_blockers(result.findings))
@@ -178,9 +195,9 @@ class FormattingTests(unittest.IsolatedAsyncioTestCase):
                     source = base / "source"
                     source.mkdir()
                     (source / "main.tex").write_text("a\n")
-                    output = CommandResult(0, formatted_text, "", False, [])
+                    output = CommandResult(0, formatted_text, "", resolved_command=[])
                     with patch("latexprep.formatting.shutil.which", return_value="/fake/tex-fmt"):
-                        result = await format_project(
+                        result = await format_with(
                             source, base / "work", FakeFormatter([output, output]), Settings()
                         )
                     finding = next(item for item in result.findings if item.code == "FMT001")

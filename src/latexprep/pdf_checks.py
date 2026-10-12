@@ -8,55 +8,78 @@ Neither adapter asserts reading order, description quality or full accessibility
 
 from __future__ import annotations
 
-import json
 import math
 import re
 import xml.etree.ElementTree as ET
-from collections.abc import Callable
-from contextlib import nullcontext
+from collections.abc import Awaitable, Callable, Collection, Iterator
 from dataclasses import dataclass, replace
+from functools import partial
 from pathlib import Path
-from typing import TypeVar
 
-from .models import Finding, PreparationError
-from .pdf import (
-    _fields,
-    _font_inventory,
-    _is_type3,
-    _new_workspace,
-    _page_count,
-    _page_sizes,
-    _require_complete,
-    _require_rendered_pages,
+from .models import Finding, PreparationError, Severity
+from .option_config import require_booleans
+from .pdf_support import (
+    COLOR_OPERATIONS,
+    DOCUMENT,
+    MAX_FIGURE_INPUTS,
+    MAX_PAIR_CHECKS,
+    MAX_PARSED_NODES,
+    MAX_SAMPLES,
+    METADATA_FIELDS,
+    PageFrames,
+    PdfRegion,
+    PdfToolSession,
+    QpdfObjectGraph,
+    contains,
+    exceeds_measurement_raster,
+    finite_number,
+    font_inventory,
+    heuristic_finding,
+    intersection_area,
+    is_type3,
+    layout_text_argv,
+    measurement_finding,
+    measurement_raster_size,
+    mupdf_trace_argv,
+    open_measurement_session,
+    page_boxes_argv,
+    page_count,
+    page_frames,
+    page_sizes,
+    parse_mupdf_trace,
+    parse_tool_xml,
+    pdfinfo_properties,
+    qpdf_objects_argv,
+    read_gray_raster,
+    relative_luminance,
+    require_distinct_strings,
+    require_number,
+    require_rendered_pages,
+    unavailable_finding,
 )
-from .runtime import CommandResult, ToolRunner
-from .scheduler import ResourceBudget, run_in_thread
+from .runtime import CommandResult, CommandRunner
+from .scheduler import ResourceBudget
 
-_T = TypeVar("_T")
-_MAX_NODES = 50_000
-_MAX_SAMPLES = 100
-_MAX_PIXELS = 4_000_000
-_MAX_PAIR_CHECKS = 250_000
-_METADATA_FIELDS = frozenset({"Title", "Author", "Subject", "Keywords", "Creator", "Producer"})
-
-
-def _number(value: object, name: str, *, zero: bool = False) -> None:
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, (float, int))
-        or not math.isfinite(value)
-        or (value < 0 if zero else value <= 0)
-    ):
-        raise PreparationError(f"{name} must be a {'nonnegative' if zero else 'positive'} number")
-
-
-def _strings(values: tuple[str, ...], name: str) -> None:
-    if not isinstance(values, tuple) or any(
-        not isinstance(value, str) or not value.strip() or "\0" in value for value in values
-    ):
-        raise PreparationError(f"{name} must be an immutable tuple of nonempty strings")
-    if len(values) != len(set(values)):
-        raise PreparationError(f"{name} cannot contain duplicates")
+_PROPERTIES_ARGV = ("pdfinfo", "-enc", "UTF-8", "-isodates", DOCUMENT)
+# Rules measured from one evidence source; doctor maps them to optional tools.
+TEXT_GEOMETRY_RULES = frozenset(
+    {"pdf.rendered_text_size", "pdf.printable_text_bounds", "pdf.text_overlap"}
+)
+OBJECT_STRUCTURE_RULES = frozenset(
+    {"pdf.document_language", "pdf.annotation_policy", "pdf.action_policy"}
+)
+PAINT_TRACE_RULES = frozenset(
+    {
+        "pdf.stroke_width",
+        "pdf.color_space_policy",
+        "pdf.assumed_text_contrast",
+        "pdf.grayscale_separation",
+    }
+)
+_LAYOUT_SCOPE = (
+    "Extractable Poppler text boxes only. Outlined/raster text, figures, tables, "
+    "equations and clipping paths are not identified semantically."
+)
 
 
 @dataclass(frozen=True)
@@ -67,7 +90,7 @@ class PdfSectionBudget:
     max_pages: int
 
     def __post_init__(self) -> None:
-        _strings((self.name,), "Section name")
+        require_distinct_strings((self.name,), "Section name")
         if (
             any(
                 type(n) is not int or n < 1
@@ -76,32 +99,6 @@ class PdfSectionBudget:
             or self.start_page > self.end_page
         ):
             raise PreparationError("Section budgets need positive, ordered inclusive page ranges")
-
-
-@dataclass(frozen=True)
-class PdfRegion:
-    name: str
-    page: int
-    left_pt: float
-    top_pt: float
-    right_pt: float
-    bottom_pt: float
-    min_text_size_pt: float | None = None
-
-    def __post_init__(self) -> None:
-        _strings((self.name,), "Region name")
-        if type(self.page) is not int or self.page < 1:
-            raise PreparationError("Region pages must be positive integers")
-        for value in self.box:
-            _number(value, "Region coordinates", zero=True)
-        if self.left_pt >= self.right_pt or self.top_pt >= self.bottom_pt:
-            raise PreparationError("Regions must have positive width and height")
-        if self.min_text_size_pt is not None:
-            _number(self.min_text_size_pt, "Region minimum text size")
-
-    @property
-    def box(self) -> tuple[float, float, float, float]:
-        return self.left_pt, self.top_pt, self.right_pt, self.bottom_pt
 
 
 @dataclass(frozen=True)
@@ -134,14 +131,13 @@ class PdfCheckOptions:
     forbid_type3_figure_fonts: bool = False
 
     def __post_init__(self) -> None:
-        for name in (
+        require_booleans(
+            self,
             "require_tagged",
             "require_language",
             "require_embedded_figure_fonts",
             "forbid_type3_figure_fonts",
-        ):
-            if type(getattr(self, name)) is not bool:
-                raise PreparationError(f"{name} must be a boolean")
+        )
         for name, kind in (
             ("section_budgets", PdfSectionBudget),
             ("text_size_regions", PdfRegion),
@@ -156,8 +152,8 @@ class PdfCheckOptions:
             raise PreparationError("Every text-size region needs a minimum text size")
         for name in ("min_text_size_pt", "min_stroke_width_pt"):
             if getattr(self, name) is not None:
-                _number(getattr(self, name), name)
-        _number(self.geometry_tolerance_pt, "Geometry tolerance", zero=True)
+                require_number(getattr(self, name), name)
+        require_number(self.geometry_tolerance_pt, "Geometry tolerance", allow_zero=True)
         for name in (
             "overlap_min_area_ratio",
             "min_page_ink_ratio",
@@ -165,11 +161,11 @@ class PdfCheckOptions:
         ):
             value = getattr(self, name)
             if value is not None:
-                _number(value, name)
+                require_number(value, name)
                 if value > 1:
                     raise PreparationError(f"{name} cannot exceed one")
         if self.min_text_contrast is not None:
-            _number(self.min_text_contrast, "Minimum text contrast")
+            require_number(self.min_text_contrast, "Minimum text contrast")
             if not 1 <= self.min_text_contrast <= 21 or self.contrast_background_rgb is None:
                 raise PreparationError(
                     "Text contrast requires a ratio from 1 to 21 and background RGB"
@@ -183,7 +179,7 @@ class PdfCheckOptions:
                     "Contrast background RGB must have three immutable components"
                 )
             for value in self.contrast_background_rgb:
-                _number(value, "Contrast background component", zero=True)
+                require_number(value, "Contrast background component", allow_zero=True)
                 if value > 1:
                     raise PreparationError("Contrast background components must be in [0, 1]")
         if self.printable_margins_pt is not None:
@@ -193,7 +189,7 @@ class PdfCheckOptions:
             ):
                 raise PreparationError("Printable margins must be (left, top, right, bottom)")
             for value in self.printable_margins_pt:
-                _number(value, "Printable margins", zero=True)
+                require_number(value, "Printable margins", allow_zero=True)
         if not isinstance(self.sparse_page_exemptions, tuple) or any(
             type(page) is not int or page < 1 for page in self.sparse_page_exemptions
         ):
@@ -210,14 +206,14 @@ class PdfCheckOptions:
             "forbidden_action_types",
             "allowed_color_spaces",
         ):
-            _strings(getattr(self, name), name)
-        if not set(self.required_metadata) <= _METADATA_FIELDS:
+            require_distinct_strings(getattr(self, name), name)
+        if not set(self.required_metadata) <= METADATA_FIELDS:
             raise PreparationError("Required metadata must name supported pdfinfo text fields")
         if not isinstance(self.expected_metadata, tuple) or any(
             not isinstance(pair, tuple)
             or len(pair) != 2
             or not isinstance(pair[0], str)
-            or pair[0] not in _METADATA_FIELDS
+            or pair[0] not in METADATA_FIELDS
             or not isinstance(pair[1], str)
             or not pair[1].strip()
             or "\0" in pair[1]
@@ -229,13 +225,13 @@ class PdfCheckOptions:
         if len({key for key, _ in self.expected_metadata}) != len(self.expected_metadata):
             raise PreparationError("Expected metadata fields cannot repeat")
         if self.expected_language is not None:
-            _strings((self.expected_language,), "Expected language")
+            require_distinct_strings((self.expected_language,), "Expected language")
         for name in ("forbidden_annotation_types", "forbidden_action_types"):
             if any(not re.fullmatch(r"[A-Za-z][A-Za-z0-9]*", item) for item in getattr(self, name)):
                 raise PreparationError(f"{name} uses PDF names without a leading slash")
 
 
-def _configured(options: PdfCheckOptions) -> list[str]:
+def configured_pdf_check_rules(options: PdfCheckOptions) -> list[str]:
     settings = {
         "pdf.section_page_budget": bool(options.section_budgets),
         "pdf.rendered_text_size": options.min_text_size_pt is not None
@@ -258,120 +254,15 @@ def _configured(options: PdfCheckOptions) -> list[str]:
     return [name for name, enabled in settings.items() if enabled]
 
 
-def _result(
-    rule: str,
-    message: str,
-    violations: list[object],
-    *,
-    uncertain: bool = False,
-    advisory: bool = False,
-    total_violations: int | None = None,
-    **details: object,
-) -> Finding:
-    status = "failed" if violations else "inconclusive" if uncertain else "passed"
-    return Finding(
-        rule,
-        message,
-        "warning" if advisory else "error" if violations or uncertain else "info",
-        status,
-        evidence="heuristic" if advisory else "derived",
-        details={
-            **details,
-            "violations": violations[:_MAX_SAMPLES],
-            "violation_count": len(violations) if total_violations is None else total_violations,
-            "incomplete": uncertain,
-        },
-    )
-
-
-def _unavailable(rule: str, error: Exception, *, advisory: bool = False) -> Finding:
-    return Finding(
-        rule,
-        str(error),
-        "warning" if advisory else "error",
-        "inconclusive",
-        suggestion="Resolve the stated evidence/tool limitation and repeat the configured check.",
-    )
-
-
-@dataclass
-class _Session:
-    work: Path
-    pdf: Path
-    runner: ToolRunner
-    budget: ResourceBudget | None
-
-    async def measure(
-        self,
-        name: str,
-        argv: list[str],
-        parser: Callable[[CommandResult, Path], _T],
-        *,
-        render: bool = False,
-        memory_mb: int = 64,
-        threaded_parser: bool = False,
-    ) -> _T:
-        """Keep command output parsing within the same bounded resource lease."""
-        async with (
-            self.budget.lease(
-                f"{self.work.name}: {name}",
-                memory_mb=memory_mb,
-                kind="render" if render else None,
-            )
-            if self.budget is not None
-            else nullcontext()
-        ):
-            version_work = self.work / name / "version"
-            command_work = self.work / name / "command"
-            version_work.mkdir(parents=True)
-            command_work.mkdir()
-            version_args = ["--version"] if argv[0] == "qpdf" else ["-v"]
-            try:
-                await self.runner.tool_version([argv[0], *version_args], version_work)
-                actual = [str(self.pdf) if part == "@PDF@" else part for part in argv]
-                result = await self.runner.run(
-                    actual,
-                    cwd=command_work,
-                    workspace=command_work,
-                    readonly_inputs=(self.pdf,),
-                    memory_mb=memory_mb,
-                )
-                _require_complete(result, argv[0])
-                if len(result.stdout.encode("utf-8")) > self.runner.limits.max_output_bytes:
-                    raise PreparationError("PDF measurement exceeds the diagnostic output limit")
-                if threaded_parser:
-                    return await run_in_thread(parser, result, command_work)
-                return parser(result, command_work)
-            finally:
-                if render:
-                    # Remove only this disposable render, including partial output.
-                    (command_work / "page.pgm").unlink(missing_ok=True)
-
-
-async def _session(
-    pdf: Path,
-    work: Path,
-    runner: ToolRunner,
-    budget: ResourceBudget | None,
-) -> _Session:
-    budget = budget or runner.budget
-    work, documents = await _new_workspace(work, {"document.pdf": pdf}, runner, budget)
-    return _Session(work, documents["document.pdf"], runner, budget)
-
-
-def _properties(output: str) -> dict[str, str]:
-    fields = _fields(output)
-    keys = [line.split(":", 1)[0].strip() for line in output.splitlines() if ":" in line]
-    if any(keys.count(key) != 1 for key in (*_METADATA_FIELDS, "Pages", "Tagged") if key in keys):
-        raise PreparationError("Ambiguous duplicate pdfinfo properties prevent reliable comparison")
-    _page_count(fields)
-    return fields
+def figure_font_checks_enabled(options: PdfCheckOptions) -> bool:
+    """Input-figure font policies need the source graph's included PDF figures."""
+    return options.require_embedded_figure_fonts or options.forbid_type3_figure_fonts
 
 
 async def extract_pdf_evidence(
     pdf: Path,
     work: Path,
-    runner: ToolRunner,
+    runner: CommandRunner,
     *,
     budget: ResourceBudget | None = None,
 ) -> tuple[str, dict[str, str]]:
@@ -380,24 +271,18 @@ async def extract_pdf_evidence(
     Empty pages remain empty evidence, not proof of anonymity or readability.
     No PDF text or metadata is copied into diagnostic messages by this helper.
     """
-    session = await _session(pdf, work, runner, budget)
+    session = await open_measurement_session(pdf, work, runner, budget)
     fields = await session.measure(
-        "properties",
-        ["pdfinfo", "-enc", "UTF-8", "-isodates", "@PDF@"],
-        lambda result, _: _properties(result.stdout),
+        "properties", _PROPERTIES_ARGV, lambda result: pdfinfo_properties(result.stdout)
     )
-    pages = _page_count(fields)
+    pages = page_count(fields)
 
-    def extract(result: CommandResult, _: Path) -> str:
+    def extract(result: CommandResult) -> str:
         if result.stdout.count("\f") != pages:
             raise PreparationError("Text extraction did not report every PDF page boundary")
         return result.stdout
 
-    text = await session.measure(
-        "text",
-        ["pdftotext", "-enc", "UTF-8", "-layout", "@PDF@", "-"],
-        extract,
-    )
+    text = await session.measure("text", layout_text_argv(), extract)
     return text, fields
 
 
@@ -408,7 +293,7 @@ def _metadata_findings(fields: dict[str, str], options: PdfCheckOptions) -> list
             key for key in options.required_metadata if not fields.get(key, "").strip()
         ]
         result.append(
-            _result(
+            measurement_finding(
                 "pdf.required_metadata",
                 "Compared nonempty PDF properties with configured required fields.",
                 missing,
@@ -427,7 +312,7 @@ def _metadata_findings(fields: dict[str, str], options: PdfCheckOptions) -> list
             if normalize(fields.get(key, "")) != normalize(expected)
         ]
         result.append(
-            _result(
+            measurement_finding(
                 "pdf.metadata_agreement",
                 "Compared PDF properties with supplied expected text.",
                 different,
@@ -440,11 +325,11 @@ def _metadata_findings(fields: dict[str, str], options: PdfCheckOptions) -> list
     if options.require_tagged:
         value = fields.get("Tagged", "").lower()
         result.append(
-            _result(
+            measurement_finding(
                 "pdf.tagging_presence",
                 "Checked the reported presence of PDF tagging.",
                 ["Tagged: no"] if value == "no" else [],
-                uncertain=value not in {"yes", "no"},
+                incomplete=value not in {"yes", "no"},
                 reported=value or None,
                 scope="Tagging presence only; reading order, links, tables and PDF/UA "
                 "are not validated.",
@@ -458,11 +343,11 @@ def _section_findings(pages: int, options: PdfCheckOptions) -> list[Finding]:
     for section in options.section_budgets:
         actual = section.end_page - section.start_page + 1
         result.append(
-            _result(
+            measurement_finding(
                 "pdf.section_page_budget",
                 f"Checked the supplied page range for {section.name}.",
                 [actual] if actual > section.max_pages and section.end_page <= pages else [],
-                uncertain=section.end_page > pages,
+                incomplete=section.end_page > pages,
                 section=section.name,
                 start_page=section.start_page,
                 end_page=section.end_page,
@@ -474,30 +359,6 @@ def _section_findings(pages: int, options: PdfCheckOptions) -> list[Finding]:
             )
         )
     return result
-
-
-def _xml(output: str, root_name: str) -> ET.Element:
-    if "<!ENTITY" in output.upper() or re.search(r"<!DOCTYPE[^>]*\[", output, re.I):
-        raise PreparationError("PDF tool XML contains unsupported entity declarations")
-    try:
-        root = ET.fromstring(output)
-    except (ET.ParseError, RecursionError) as error:
-        raise PreparationError("PDF tool returned malformed XML") from error
-    if root.tag != root_name:
-        raise PreparationError(f"PDF tool did not return a {root_name} XML document")
-    if sum(1 for _ in root.iter()) > _MAX_NODES:
-        raise PreparationError("PDF XML exceeds the bounded element limit")
-    return root
-
-
-def _finite(value: str | None) -> float:
-    try:
-        number = float(value) if value is not None else math.nan
-    except ValueError as error:
-        raise PreparationError("PDF tool returned an invalid numerical measurement") from error
-    if not math.isfinite(number):
-        raise PreparationError("PDF tool returned an invalid numerical measurement")
-    return number
 
 
 @dataclass(frozen=True)
@@ -517,7 +378,7 @@ class _TextPage:
 
 
 def _text_pages(output: str, pages: int) -> list[_TextPage]:
-    root = _xml(output, "pdf2xml")
+    root = parse_tool_xml(output, "pdf2xml")
     fonts: dict[str, float] = {}
     result = []
     for page in root.findall("page"):
@@ -525,12 +386,12 @@ def _text_pages(output: str, pages: int) -> list[_TextPage]:
             number = int(page.attrib["number"])
         except (KeyError, ValueError) as error:
             raise PreparationError("Text geometry lacks a valid page number") from error
-        width, height = _finite(page.get("width")), _finite(page.get("height"))
+        width, height = finite_number(page.get("width")), finite_number(page.get("height"))
         if min(width, height) <= 0:
             raise PreparationError("Text geometry contains an invalid page size")
         for font in page.findall("fontspec"):
             key = font.get("id")
-            size = _finite(font.get("size"))
+            size = finite_number(font.get("size"))
             if key is None or size <= 0 or (key in fonts and fonts[key] != size):
                 raise PreparationError("Text geometry contains ambiguous font-size identifiers")
             fonts[key] = size
@@ -538,8 +399,11 @@ def _text_pages(output: str, pages: int) -> list[_TextPage]:
         for index, node in enumerate(page.findall("text"), 1):
             if not "".join(node.itertext()).strip():
                 continue
-            left, top = _finite(node.get("left")), _finite(node.get("top"))
-            box_width, box_height = _finite(node.get("width")), _finite(node.get("height"))
+            left, top = finite_number(node.get("left")), finite_number(node.get("top"))
+            box_width, box_height = (
+                finite_number(node.get("width")),
+                finite_number(node.get("height")),
+            )
             if min(box_width, box_height) <= 0 or node.get("font") not in fonts:
                 raise PreparationError("Text geometry has unmeasured text size or bounds")
             boxes.append(
@@ -556,45 +420,7 @@ def _text_pages(output: str, pages: int) -> list[_TextPage]:
     return result
 
 
-def _geometry_support(output: str, pages: int) -> tuple[set[int], list[tuple[float, float]]]:
-    """Reject coordinate frames that the Poppler XML adapter cannot align reliably."""
-    rotations: dict[int, int] = {}
-    boxes: dict[int, dict[str, tuple[float, ...]]] = {}
-    for line in output.splitlines():
-        rotation = re.match(r"^Page\s+(?:(\d+)\s+)?rot:\s*(-?\d+)\s*$", line)
-        if rotation:
-            rotations[int(rotation[1] or "1")] = int(rotation[2])
-        box = re.match(r"^(?:Page\s+(\d+)\s+)?(MediaBox|CropBox):\s+(.+)$", line)
-        if box:
-            values = tuple(_finite(value) for value in box[3].split())
-            if len(values) != 4:
-                raise PreparationError("Page boxes have an unrecognized coordinate format")
-            boxes.setdefault(int(box[1] or "1"), {})[box[2]] = values
-    unsupported = set()
-    for page in range(1, pages + 1):
-        entry = boxes.get(page, {})
-        media, crop = entry.get("MediaBox"), entry.get("CropBox")
-        if rotations.get(page) != 0 or media is None or crop != media or media[:2] != (0.0, 0.0):
-            unsupported.add(page)
-    return unsupported, _page_sizes(output, pages)
-
-
-def _contains(outer: tuple[float, ...], inner: tuple[float, ...], tolerance: float) -> bool:
-    return (
-        inner[0] >= outer[0] - tolerance
-        and inner[1] >= outer[1] - tolerance
-        and inner[2] <= outer[2] + tolerance
-        and inner[3] <= outer[3] + tolerance
-    )
-
-
-def _intersection(first: tuple[float, ...], second: tuple[float, ...]) -> float:
-    return max(0.0, min(first[2], second[2]) - max(first[0], second[0])) * max(
-        0.0, min(first[3], second[3]) - max(first[1], second[1])
-    )
-
-
-def _sample(box: _TextBox) -> dict[str, object]:
+def _text_box_sample(box: _TextBox) -> dict[str, object]:
     return {
         "page": box.page,
         "text_box": box.index,
@@ -603,496 +429,416 @@ def _sample(box: _TextBox) -> dict[str, object]:
     }
 
 
+@dataclass(frozen=True, slots=True)
+class _TextLayout:
+    """Extracted text pages and the pages whose coordinate frame cannot be aligned."""
+
+    pages: tuple[_TextPage, ...]
+    unsupported: frozenset[int]
+    options: PdfCheckOptions
+
+    def measurable_pages(self) -> Iterator[_TextPage]:
+        return (page for page in self.pages if page.page not in self.unsupported)
+
+
+def _text_size_finding(layout: _TextLayout) -> Finding:
+    options = layout.options
+    violations: list[object] = []
+    uncertain = bool(layout.unsupported)
+    measured = 0
+    regions_seen: set[int] = set()
+    for page in layout.measurable_pages():
+        if not page.boxes and options.min_text_size_pt is not None:
+            uncertain = True
+        for box in page.boxes:
+            minimum = options.min_text_size_pt
+            selected = []
+            for index, region in enumerate(options.text_size_regions):
+                if region.page == page.page and intersection_area(region.box, box.box):
+                    regions_seen.add(index)
+                    if contains(region.box, box.box, options.geometry_tolerance_pt):
+                        selected.append(region.min_text_size_pt)
+                    else:
+                        uncertain = True
+            if selected:
+                minimum = max(value for value in selected if value is not None)
+            if minimum is None:
+                continue
+            measured += 1
+            # Poppler fontspec sizes are integer-rounded even with -noroundcoord.
+            if box.size + 0.5 < minimum:
+                violations.append({**_text_box_sample(box), "minimum_pt": minimum})
+            elif box.size - 0.5 < minimum:
+                uncertain = True
+    uncertain |= len(regions_seen) != len(options.text_size_regions) or measured == 0
+    return measurement_finding(
+        "pdf.rendered_text_size",
+        "Compared reported text sizes with configured minima.",
+        violations,
+        incomplete=uncertain,
+        measured_text_boxes=measured,
+        unsupported_pages=sorted(layout.unsupported),
+        precision_pt=0.5,
+        scope=_LAYOUT_SCOPE,
+    )
+
+
+def _printable_regions(page: _TextPage, options: PdfCheckOptions) -> list[tuple[float, ...]]:
+    regions: list[tuple[float, ...]] = [
+        region.box for region in options.printable_regions if region.page == page.page
+    ]
+    if options.printable_margins_pt is not None and not regions:
+        left, top, right, bottom = options.printable_margins_pt
+        regions = [(left, top, page.width - right, page.height - bottom)]
+    return regions
+
+
+def _printable_bounds_finding(layout: _TextLayout) -> Finding:
+    options = layout.options
+    violations: list[object] = []
+    page_numbers = {page.page for page in layout.pages}
+    uncertain = bool(layout.unsupported) or any(
+        region.page not in page_numbers for region in options.printable_regions
+    )
+    measured = 0
+    for page in layout.measurable_pages():
+        regions = _printable_regions(page, options)
+        if not regions:
+            continue
+        if any(
+            box[0] >= box[2] or box[1] >= box[3] or box[2] > page.width or box[3] > page.height
+            for box in regions
+        ):
+            uncertain = True
+            continue
+        if not page.boxes:
+            uncertain = True
+        for box in page.boxes:
+            measured += 1
+            if not any(
+                contains(region, box.box, options.geometry_tolerance_pt) for region in regions
+            ):
+                violations.append(_text_box_sample(box))
+    return heuristic_finding(
+        "pdf.printable_text_bounds",
+        "Checked text boxes against supplied printable regions.",
+        violations,
+        incomplete=uncertain or measured == 0,
+        measured_text_boxes=measured,
+        unsupported_pages=sorted(layout.unsupported),
+        tolerance_pt=options.geometry_tolerance_pt,
+        scope=_LAYOUT_SCOPE,
+    )
+
+
+def _vertically_overlapping_pairs(
+    layout: _TextLayout,
+) -> Iterator[tuple[int, _TextBox, _TextBox]]:
+    """Sweep each page top to bottom, pairing boxes whose vertical extents overlap."""
+    for page in layout.measurable_pages():
+        active: list[_TextBox] = []
+        for box in sorted(page.boxes, key=lambda item: item.box[1]):
+            active = [other for other in active if other.box[3] > box.box[1]]
+            for other in active:
+                yield page.page, other, box
+            active.append(box)
+
+
+def _overlap_finding(layout: _TextLayout, minimum_ratio: float) -> Finding:
+    overlaps: list[object] = []
+    comparisons = overlap_count = 0
+    uncertain = bool(layout.unsupported)
+    measured = sum(len(page.boxes) for page in layout.measurable_pages())
+    for comparisons, (page, other, box) in enumerate(_vertically_overlapping_pairs(layout), 1):
+        if comparisons > MAX_PAIR_CHECKS:
+            uncertain = True
+            break
+        area = intersection_area(box.box, other.box)
+        smaller = min(
+            (item.box[2] - item.box[0]) * (item.box[3] - item.box[1]) for item in (box, other)
+        )
+        if area / smaller >= minimum_ratio:
+            overlap_count += 1
+            if len(overlaps) < MAX_SAMPLES:
+                overlaps.append(
+                    {
+                        "page": page,
+                        "text_boxes": [other.index, box.index],
+                        "bounds_pt": [other.box, box.box],
+                        "area_ratio": area / smaller,
+                    }
+                )
+    return heuristic_finding(
+        "pdf.text_overlap",
+        "Measured intersections between extractable text boxes.",
+        overlaps,
+        incomplete=uncertain or measured == 0,
+        total_violations=overlap_count,
+        minimum_area_ratio=minimum_ratio,
+        comparisons=comparisons,
+        scope=_LAYOUT_SCOPE
+        + " Overlaps are candidates, including legitimate mathematical overlays.",
+    )
+
+
 def _layout_findings(
-    pages: list[_TextPage],
-    geometry: tuple[set[int], list[tuple[float, float]]],
-    options: PdfCheckOptions,
+    pages: list[_TextPage], frames: PageFrames, options: PdfCheckOptions
 ) -> list[Finding]:
-    unsupported, sizes = geometry
-    unsupported = unsupported.copy()
-    for page, size in zip(pages, sizes, strict=True):
+    unsupported = set(frames.unsupported_pages)
+    for page, size in zip(pages, frames.sizes, strict=True):
         if abs(page.width - size[0]) > 1 or abs(page.height - size[1]) > 1:
             unsupported.add(page.page)
+    layout = _TextLayout(tuple(pages), frozenset(unsupported), options)
     result: list[Finding] = []
-    page_numbers = {page.page for page in pages}
-    scope = (
-        "Extractable Poppler text boxes only. Outlined/raster text, figures, tables, "
-        "equations and clipping paths are not identified semantically."
-    )
     if options.min_text_size_pt is not None or options.text_size_regions:
-        violations: list[object] = []
-        uncertain = bool(unsupported)
-        measured = 0
-        regions_seen: set[int] = set()
-        for page in pages:
-            if page.page in unsupported:
-                continue
-            if not page.boxes and options.min_text_size_pt is not None:
-                uncertain = True
-            for box in page.boxes:
-                minimum = options.min_text_size_pt
-                selected = []
-                for index, region in enumerate(options.text_size_regions):
-                    if region.page == page.page and _intersection(region.box, box.box):
-                        regions_seen.add(index)
-                        if _contains(region.box, box.box, options.geometry_tolerance_pt):
-                            selected.append(region.min_text_size_pt)
-                        else:
-                            uncertain = True
-                if selected:
-                    minimum = max(value for value in selected if value is not None)
-                if minimum is None:
-                    continue
-                measured += 1
-                # Poppler fontspec sizes are integer-rounded even with -noroundcoord.
-                if box.size + 0.5 < minimum:
-                    violations.append({**_sample(box), "minimum_pt": minimum})
-                elif box.size - 0.5 < minimum:
-                    uncertain = True
-        uncertain |= len(regions_seen) != len(options.text_size_regions) or measured == 0
-        result.append(
-            _result(
-                "pdf.rendered_text_size",
-                "Compared reported text sizes with configured minima.",
-                violations,
-                uncertain=uncertain,
-                measured_text_boxes=measured,
-                unsupported_pages=sorted(unsupported),
-                precision_pt=0.5,
-                scope=scope,
-            )
-        )
+        result.append(_text_size_finding(layout))
     if options.printable_margins_pt is not None or options.printable_regions:
-        violations = []
-        uncertain = bool(unsupported) or any(
-            region.page not in page_numbers for region in options.printable_regions
-        )
-        measured = 0
-        for page in pages:
-            if page.page in unsupported:
-                continue
-            regions = [
-                region.box for region in options.printable_regions if region.page == page.page
-            ]
-            if options.printable_margins_pt is not None and not regions:
-                left, top, right, bottom = options.printable_margins_pt
-                regions = [(left, top, page.width - right, page.height - bottom)]
-            if not regions:
-                continue
-            if any(
-                box[0] >= box[2] or box[1] >= box[3] or box[2] > page.width or box[3] > page.height
-                for box in regions
-            ):
-                uncertain = True
-                continue
-            if not page.boxes:
-                uncertain = True
-            for box in page.boxes:
-                measured += 1
-                if not any(
-                    _contains(region, box.box, options.geometry_tolerance_pt) for region in regions
-                ):
-                    violations.append(_sample(box))
-        result.append(
-            _result(
-                "pdf.printable_text_bounds",
-                "Checked text boxes against supplied printable regions.",
-                violations,
-                uncertain=uncertain or measured == 0,
-                advisory=True,
-                measured_text_boxes=measured,
-                unsupported_pages=sorted(unsupported),
-                tolerance_pt=options.geometry_tolerance_pt,
-                scope=scope,
-            )
-        )
+        result.append(_printable_bounds_finding(layout))
     if options.overlap_min_area_ratio is not None:
-        overlaps: list[object] = []
-        comparisons = measured = overlap_count = 0
-        uncertain = bool(unsupported)
-        for page in pages:
-            if page.page in unsupported:
-                continue
-            measured += len(page.boxes)
-            active: list[_TextBox] = []
-            for box in sorted(page.boxes, key=lambda item: item.box[1]):
-                active = [other for other in active if other.box[3] > box.box[1]]
-                for other in active:
-                    comparisons += 1
-                    if comparisons > _MAX_PAIR_CHECKS:
-                        uncertain = True
-                        break
-                    area = _intersection(box.box, other.box)
-                    smaller = min(
-                        (item.box[2] - item.box[0]) * (item.box[3] - item.box[1])
-                        for item in (box, other)
-                    )
-                    if area / smaller >= options.overlap_min_area_ratio:
-                        overlap_count += 1
-                        if len(overlaps) < _MAX_SAMPLES:
-                            overlaps.append(
-                                {
-                                    "page": page.page,
-                                    "text_boxes": [other.index, box.index],
-                                    "bounds_pt": [other.box, box.box],
-                                    "area_ratio": area / smaller,
-                                }
-                            )
-                if comparisons > _MAX_PAIR_CHECKS:
-                    break
-                active.append(box)
-            if comparisons > _MAX_PAIR_CHECKS:
-                break
-        result.append(
-            _result(
-                "pdf.text_overlap",
-                "Measured intersections between extractable text boxes.",
-                overlaps,
-                uncertain=uncertain or measured == 0,
-                advisory=True,
-                total_violations=overlap_count,
-                minimum_area_ratio=options.overlap_min_area_ratio,
-                comparisons=comparisons,
-                scope=scope
-                + " Overlaps are candidates, including legitimate mathematical overlays.",
-            )
-        )
+        result.append(_overlap_finding(layout, options.overlap_min_area_ratio))
     return result
 
 
-def _gray_raster(path: Path, limit: int) -> tuple[int, int, bytes]:
-    if not path.is_file() or path.is_symlink() or path.stat().st_size > limit:
-        raise PreparationError("A complete bounded grayscale render was not produced")
-    data = path.read_bytes()
-    header = re.match(rb"P5\s+(\d+)\s+(\d+)\s+255(?:\r\n|\s)", data)
-    if header is None:
-        raise PreparationError("Renderer did not produce supported 8-bit grayscale PGM data")
-    width, height = int(header[1]), int(header[2])
-    if min(width, height) < 1 or width * height > _MAX_PIXELS:
-        raise PreparationError("Grayscale render exceeds the safe pixel limit")
-    pixels = data[header.end() :]
-    if len(pixels) != width * height:
-        raise PreparationError("Grayscale render is truncated or contains unexpected trailing data")
-    return width, height, pixels
+async def _layout_measurement(
+    session: PdfToolSession, pages: int, options: PdfCheckOptions
+) -> list[Finding]:
+    frames = await session.measure(
+        "page-boxes",
+        page_boxes_argv(pages),
+        lambda execution: page_frames(execution.stdout, pages),
+    )
+    # -i excludes image extraction, -nomerge preserves smaller text boxes.
+    return await session.measure(
+        "text-geometry",
+        [
+            "pdftohtml",
+            "-xml",
+            "-stdout",
+            "-i",
+            "-zoom",
+            "1",
+            "-noroundcoord",
+            "-nomerge",
+            "-enc",
+            "UTF-8",
+            DOCUMENT,
+        ],
+        lambda execution: _layout_findings(_text_pages(execution.stdout, pages), frames, options),
+    )
+
+
+def _ink_coverage(
+    path: Path,
+    *,
+    expected: tuple[int, int],
+    options: PdfCheckOptions,
+    max_file_bytes: int,
+) -> tuple[int, int, float]:
+    width, height, pixels = read_gray_raster(path, max_file_bytes)
+    if not (
+        all(
+            abs(actual - target) <= 1
+            for actual, target in zip((width, height), expected, strict=True)
+        )
+        or all(
+            abs(actual - target) <= 1
+            for actual, target in zip((height, width), expected, strict=True)
+        )
+    ):
+        raise PreparationError("Rendered dimensions disagree with the page-size preflight")
+    ink = sum(abs(value - options.background_gray) >= options.ink_difference for value in pixels)
+    return width, height, ink / len(pixels)
+
+
+async def _sparse_page_finding(
+    session: PdfToolSession,
+    page: int,
+    pages: int,
+    size: tuple[float, float],
+    options: PdfCheckOptions,
+) -> Finding:
+    expected = measurement_raster_size(size, options.raster_dpi)
+    if exceeds_measurement_raster(expected):
+        return unavailable_finding(
+            "pdf.sparse_pages",
+            PreparationError("Page exceeds the bounded raster dimensions at configured DPI"),
+            severity="warning",
+            details={"page": page},
+        )
+    try:
+        width, height, ratio = await session.render_page(
+            f"raster-{page}",
+            page,
+            options.raster_dpi,
+            partial(
+                _ink_coverage,
+                expected=expected,
+                options=options,
+                max_file_bytes=session.runner.limits.max_file_bytes,
+            ),
+            raster="gray",
+        )
+    except (PreparationError, OSError) as error:
+        return unavailable_finding(
+            "pdf.sparse_pages", error, severity="warning", details={"page": page}
+        )
+    return heuristic_finding(
+        "pdf.sparse_pages",
+        f"Measured rendered ink coverage on page {page}.",
+        [ratio]
+        if options.min_page_ink_ratio is not None and ratio < options.min_page_ink_ratio
+        else [],
+        page=page,
+        last_page=page == pages,
+        ink_ratio=ratio,
+        minimum=options.min_page_ink_ratio,
+        raster_pixels=[width, height],
+        background_gray=options.background_gray,
+        ink_difference=options.ink_difference,
+        raster_dpi=options.raster_dpi,
+        scope="Rendered pixel coverage; intentional blank/image-only pages "
+        "are not inferred. "
+        "Pages above four million pixels are inconclusive before rendering.",
+    )
 
 
 async def _sparse_findings(
-    session: _Session, pages: int, options: PdfCheckOptions
+    session: PdfToolSession, pages: int, options: PdfCheckOptions
 ) -> list[Finding]:
-    result = []
     try:
-        _require_rendered_pages(pages, "Rendered sparse-page measurement")
+        require_rendered_pages(pages, "Rendered sparse-page measurement")
         sizes = await session.measure(
             "raster-sizes",
-            ["pdfinfo", "-box", "-f", "1", "-l", str(pages), "@PDF@"],
-            lambda execution, _: _page_sizes(execution.stdout, pages),
+            page_boxes_argv(pages),
+            lambda execution: page_sizes(execution.stdout, pages),
         )
     except (PreparationError, OSError) as error:
-        return [_unavailable("pdf.sparse_pages", error, advisory=True)]
+        return [unavailable_finding("pdf.sparse_pages", error, severity="warning")]
+    result = []
     if any(page > pages for page in options.sparse_page_exemptions):
         result.append(
-            _unavailable(
+            unavailable_finding(
                 "pdf.sparse_pages",
                 PreparationError("A configured sparse-page exemption is outside the document"),
-                advisory=True,
+                severity="warning",
             )
         )
     for page in range(1, pages + 1):
-        if page in options.sparse_page_exemptions:
-            continue
-        expected = tuple(math.ceil(size * options.raster_dpi / 72) for size in sizes[page - 1])
-        if math.prod(expected) > _MAX_PIXELS or max(expected) > 4000:
+        if page not in options.sparse_page_exemptions:
             result.append(
-                replace(
-                    _unavailable(
-                        "pdf.sparse_pages",
-                        PreparationError(
-                            "Page exceeds the bounded raster dimensions at configured DPI"
-                        ),
-                        advisory=True,
-                    ),
-                    details={"page": page},
-                )
-            )
-            continue
-
-        def measure(
-            _execution: CommandResult,
-            directory: Path,
-            expected: tuple[int, ...] = expected,
-        ) -> tuple[int, int, float]:
-            width, height, pixels = _gray_raster(
-                directory / "page.pgm", min(session.runner.limits.max_file_bytes, _MAX_PIXELS + 100)
-            )
-            if not (
-                all(
-                    abs(actual - target) <= 1
-                    for actual, target in zip((width, height), expected, strict=True)
-                )
-                or all(
-                    abs(actual - target) <= 1
-                    for actual, target in zip((height, width), expected, strict=True)
-                )
-            ):
-                raise PreparationError("Rendered dimensions disagree with the page-size preflight")
-            ink = sum(
-                abs(value - options.background_gray) >= options.ink_difference for value in pixels
-            )
-            return width, height, ink / len(pixels)
-
-        try:
-            width, height, ratio = await session.measure(
-                f"raster-{page}",
-                [
-                    "pdftoppm",
-                    "-f",
-                    str(page),
-                    "-l",
-                    str(page),
-                    "-singlefile",
-                    "-gray",
-                    "-r",
-                    str(options.raster_dpi),
-                    "@PDF@",
-                    "page",
-                ],
-                measure,
-                render=True,
-                memory_mb=128,
-            )
-            result.append(
-                _result(
-                    "pdf.sparse_pages",
-                    f"Measured rendered ink coverage on page {page}.",
-                    [ratio]
-                    if options.min_page_ink_ratio is not None and ratio < options.min_page_ink_ratio
-                    else [],
-                    advisory=True,
-                    page=page,
-                    last_page=page == pages,
-                    ink_ratio=ratio,
-                    minimum=options.min_page_ink_ratio,
-                    raster_pixels=[width, height],
-                    background_gray=options.background_gray,
-                    ink_difference=options.ink_difference,
-                    raster_dpi=options.raster_dpi,
-                    scope="Rendered pixel coverage; intentional blank/image-only pages "
-                    "are not inferred. "
-                    "Pages above four million pixels are inconclusive before rendering.",
-                )
-            )
-        except (PreparationError, OSError) as error:
-            result.append(
-                replace(
-                    _unavailable("pdf.sparse_pages", error, advisory=True), details={"page": page}
-                )
+                await _sparse_page_finding(session, page, pages, sizes[page - 1], options)
             )
     return result
 
 
-class _Objects:
-    """qpdf JSON v2 object access with bounded, cycle-aware reference traversal."""
-
-    def __init__(self, output: str, pages: int):
-        try:
-            document = json.loads(output)
-            entries = document["qpdf"]
-            if (
-                document["version"] != 2
-                or len(entries) != 2
-                or entries[0]["jsonversion"] != 2
-                or not isinstance(entries[1], dict)
-            ):
-                raise ValueError("unsupported JSON shape")
-            self.objects = entries[1]
-            self.pages = document["pages"]
-            if (
-                not isinstance(self.pages, list)
-                or len(self.pages) != pages
-                or len(self.objects) > _MAX_NODES
-            ):
-                raise ValueError("incomplete page/object data")
-        except (ValueError, KeyError, TypeError, RecursionError) as error:
-            raise PreparationError(
-                "qpdf did not return complete supported JSON v2 object data"
-            ) from error
-        self.root = self.dictionary(self.dictionary(self.lookup("trailer")).get("/Root"))
-        if self.root.get("/Type") != "/Catalog":
-            raise PreparationError("qpdf object data lacks a valid catalog")
-
-    def lookup(self, key: str) -> object:
-        try:
-            entry = self.objects[key]
-            value = entry["value"] if "value" in entry else entry["stream"]["dict"]
-        except (KeyError, TypeError) as error:
-            raise PreparationError("qpdf contains an unresolved or malformed object") from error
-        return value
-
-    def resolve(self, value: object) -> object:
-        seen: set[str] = set()
-        while isinstance(value, str) and re.fullmatch(r"\d+ \d+ R", value):
-            if value in seen or len(seen) > 100:
-                raise PreparationError("qpdf contains a cyclic direct-reference chain")
-            seen.add(value)
-            value = self.lookup("obj:" + value)
-        return value
-
-    def dictionary(self, value: object) -> dict[str, object]:
-        value = self.resolve(value)
-        if not isinstance(value, dict):
-            raise PreparationError("qpdf contains an unexpected non-dictionary object")
-        return value
-
-    def reachable_dictionaries(self) -> list[dict[str, object]]:
-        pending: list[tuple[object, int]] = [(self.root, 0)]
-        references: set[str] = set()
-        result = []
-        visited = 0
-        while pending:
-            value, depth = pending.pop()
-            visited += 1
-            if visited > _MAX_NODES or depth > 100:
-                raise PreparationError("qpdf object graph exceeds the bounded traversal limit")
-            if isinstance(value, str) and re.fullmatch(r"\d+ \d+ R", value):
-                if value in references:
-                    continue
-                references.add(value)
-                value = self.resolve(value)
-            if isinstance(value, dict):
-                result.append(value)
-                pending.extend((child, depth + 1) for child in value.values())
-            elif isinstance(value, list):
-                pending.extend((child, depth + 1) for child in value)
-            if len(pending) > _MAX_NODES:
-                raise PreparationError("qpdf object graph exceeds the bounded traversal limit")
-        return result
-
-
-def _object_measurements(objects: _Objects, options: PdfCheckOptions) -> list[Finding]:
-    result = []
-    if options.require_language or options.expected_language is not None:
-        raw = objects.resolve(objects.root.get("/Lang"))
-        language = raw[2:].strip() if isinstance(raw, str) and raw.startswith("u:") else None
-        uncertain = raw is not None and language is None
-        violations: list[object] = []
-        if raw is None or language == "":
-            violations.append("Missing nonempty catalog language")
-        elif (
-            language is not None
-            and options.expected_language is not None
-            and language.casefold() != options.expected_language.casefold()
-        ):
-            violations.append("Catalog language differs from configured language")
-        result.append(
-            _result(
-                "pdf.document_language",
-                "Checked the catalog language declaration.",
-                violations,
-                uncertain=uncertain,
-                declared_language=language,
-                expected=options.expected_language,
-                scope="Declaration presence/exact language-tag agreement, "
-                "not the language of the prose.",
-            )
-        )
-    if options.forbidden_annotation_types:
-        annotations: list[object] = []
-        count = 0
-        for page_number, page in enumerate(objects.pages, 1):
-            if not isinstance(page, dict) or "object" not in page:
-                raise PreparationError("qpdf page inventory lacks a page object reference")
-            page_object = objects.dictionary(page["object"])
-            values = objects.resolve(page_object.get("/Annots", []))
-            if not isinstance(values, list):
-                raise PreparationError("qpdf page annotation inventory is malformed")
-            for value in values:
-                annotation = objects.dictionary(value)
-                subtype = objects.resolve(annotation.get("/Subtype"))
-                if not isinstance(subtype, str) or not subtype.startswith("/"):
-                    raise PreparationError("An annotation has no measurable subtype")
-                count += 1
-                if count > _MAX_NODES:
-                    raise PreparationError("Page annotations exceed the bounded traversal limit")
-                if subtype[1:] in options.forbidden_annotation_types:
-                    annotations.append({"page": page_number, "type": subtype[1:]})
-        result.append(
-            _result(
-                "pdf.annotation_policy",
-                "Inspected page annotation object subtypes.",
-                annotations,
-                annotation_count=count,
-                forbidden_types=list(options.forbidden_annotation_types),
-                scope="Page Annots arrays; content-stream drawings and inaccessible "
-                "orphan objects excluded.",
-            )
-        )
-    if options.forbidden_action_types:
-        actions: list[object] = []
-        # A matching /S in reachable objects is intentionally conservative: qpdf
-        # resolves compressed dictionaries but does not classify executable semantics.
-        for node in objects.reachable_dictionaries():
-            subtype = objects.resolve(node.get("/S"))
-            if (
-                isinstance(subtype, str)
-                and subtype.startswith("/")
-                and subtype[1:] in options.forbidden_action_types
-            ):
-                actions.append(subtype[1:])
-        result.append(
-            _result(
-                "pdf.action_policy",
-                "Scanned reachable object dictionaries for configured action names.",
-                actions,
-                advisory=True,
-                forbidden_types=list(options.forbidden_action_types),
-                scope="Reachable /S names; a match is an action candidate requiring "
-                "context review. "
-                "Opaque streams and unreferenced objects are excluded; no malware-free claim.",
-            )
-        )
-    return result
-
-
-def _object_findings(output: str, pages: int, options: PdfCheckOptions) -> list[Finding]:
-    objects = _Objects(output, pages)
-    # Preserve completed observations if another part of the object graph is incomplete.
-    selections = (
-        (
-            "pdf.document_language",
-            replace(options, forbidden_annotation_types=(), forbidden_action_types=()),
-        ),
-        (
-            "pdf.annotation_policy",
-            replace(
-                options, require_language=False, expected_language=None, forbidden_action_types=()
-            ),
-        ),
-        (
-            "pdf.action_policy",
-            replace(
-                options,
-                require_language=False,
-                expected_language=None,
-                forbidden_annotation_types=(),
-            ),
-        ),
+def _language_finding(objects: QpdfObjectGraph, options: PdfCheckOptions) -> Finding:
+    raw = objects.resolve(objects.root.get("/Lang"))
+    language = raw[2:].strip() if isinstance(raw, str) and raw.startswith("u:") else None
+    violations: list[object] = []
+    if raw is None or language == "":
+        violations.append("Missing nonempty catalog language")
+    elif (
+        language is not None
+        and options.expected_language is not None
+        and language.casefold() != options.expected_language.casefold()
+    ):
+        violations.append("Catalog language differs from configured language")
+    return measurement_finding(
+        "pdf.document_language",
+        "Checked the catalog language declaration.",
+        violations,
+        incomplete=raw is not None and language is None,
+        declared_language=language,
+        expected=options.expected_language,
+        scope="Declaration presence/exact language-tag agreement, not the language of the prose.",
     )
+
+
+def _annotation_finding(objects: QpdfObjectGraph, options: PdfCheckOptions) -> Finding:
+    annotations: list[object] = []
+    count = 0
+    for page_number, page in enumerate(objects.pages, 1):
+        if not isinstance(page, dict) or "object" not in page:
+            raise PreparationError("qpdf page inventory lacks a page object reference")
+        page_object = objects.dictionary(page["object"])
+        values = objects.resolve(page_object.get("/Annots", []))
+        if not isinstance(values, list):
+            raise PreparationError("qpdf page annotation inventory is malformed")
+        for value in values:
+            annotation = objects.dictionary(value)
+            subtype = objects.resolve(annotation.get("/Subtype"))
+            if not isinstance(subtype, str) or not subtype.startswith("/"):
+                raise PreparationError("An annotation has no measurable subtype")
+            count += 1
+            if count > MAX_PARSED_NODES:
+                raise PreparationError("Page annotations exceed the bounded traversal limit")
+            if subtype[1:] in options.forbidden_annotation_types:
+                annotations.append({"page": page_number, "type": subtype[1:]})
+    return measurement_finding(
+        "pdf.annotation_policy",
+        "Inspected page annotation object subtypes.",
+        annotations,
+        annotation_count=count,
+        forbidden_types=list(options.forbidden_annotation_types),
+        scope="Page Annots arrays; content-stream drawings and inaccessible "
+        "orphan objects excluded.",
+    )
+
+
+def _action_finding(objects: QpdfObjectGraph, options: PdfCheckOptions) -> Finding:
+    actions: list[object] = []
+    # A matching /S in reachable objects is intentionally conservative: qpdf
+    # resolves compressed dictionaries but does not classify executable semantics.
+    for node in objects.reachable_dictionaries():
+        subtype = objects.resolve(node.get("/S"))
+        if (
+            isinstance(subtype, str)
+            and subtype.startswith("/")
+            and subtype[1:] in options.forbidden_action_types
+        ):
+            actions.append(subtype[1:])
+    return heuristic_finding(
+        "pdf.action_policy",
+        "Scanned reachable object dictionaries for configured action names.",
+        actions,
+        forbidden_types=list(options.forbidden_action_types),
+        scope="Reachable /S names; a match is an action candidate requiring "
+        "context review. "
+        "Opaque streams and unreferenced objects are excluded; no malware-free claim.",
+    )
+
+
+# Each object check, and the severity of its finding when its evidence is unavailable.
+_OBJECT_CHECKS: tuple[
+    tuple[str, Callable[[QpdfObjectGraph, PdfCheckOptions], Finding], Severity], ...
+] = (
+    ("pdf.document_language", _language_finding, "error"),
+    ("pdf.annotation_policy", _annotation_finding, "error"),
+    ("pdf.action_policy", _action_finding, "warning"),
+)
+
+
+def _object_findings(
+    output: str, pages: int, options: PdfCheckOptions, rules: Collection[str]
+) -> list[Finding]:
+    objects = QpdfObjectGraph(output, pages)
+    # Preserve completed observations if another part of the object graph is incomplete.
     result = []
-    for rule, selected in selections:
-        if rule not in _configured(selected):
+    for rule, check, unavailable_severity in _OBJECT_CHECKS:
+        if rule not in rules:
             continue
         try:
-            result.extend(_object_measurements(objects, selected))
+            result.append(check(objects, options))
         except PreparationError as error:
-            result.append(_unavailable(rule, error, advisory=rule == "pdf.action_policy"))
+            result.append(unavailable_finding(rule, error, severity=unavailable_severity))
     return result
 
 
 def _simple_rgb(node: ET.Element) -> tuple[float, float, float] | None:
     """Interpret only opaque DeviceRGB/Gray values under an explicit sRGB assumption."""
-    if _finite(node.get("alpha", "1")) != 1:
+    if finite_number(node.get("alpha", "1")) != 1:
         return None
-    values = tuple(_finite(value) for value in node.get("color", "").split())
+    values = tuple(finite_number(value) for value in node.get("color", "").split())
     if node.get("colorspace") == "DeviceGray" and len(values) == 1:
         values = values * 3
     elif node.get("colorspace") != "DeviceRGB":
@@ -1100,15 +846,6 @@ def _simple_rgb(node: ET.Element) -> tuple[float, float, float] | None:
     if len(values) != 3 or any(value < 0 or value > 1 for value in values):
         return None
     return values[0], values[1], values[2]
-
-
-def _luminance(rgb: tuple[float, float, float]) -> float:
-    linear = [
-        value / 12.92 if value <= 0.04045 else ((value + 0.055) / 1.055) ** 2.4 for value in rgb
-    ]
-    return sum(
-        value * weight for value, weight in zip(linear, (0.2126, 0.7152, 0.0722), strict=True)
-    )
 
 
 def _contrast_findings(root: ET.Element, options: PdfCheckOptions) -> list[Finding]:
@@ -1128,7 +865,8 @@ def _contrast_findings(root: ET.Element, options: PdfCheckOptions) -> list[Findi
                     contrast_uncertain = True
                 elif options.contrast_background_rgb is not None:
                     contrast_count += 1
-                    fg, bg = _luminance(foreground), _luminance(options.contrast_background_rgb)
+                    fg = relative_luminance(foreground)
+                    bg = relative_luminance(options.contrast_background_rgb)
                     ratio = (max(fg, bg) + 0.05) / (min(fg, bg) + 0.05)
                     if ratio < options.min_text_contrast:
                         contrast.append(
@@ -1138,15 +876,10 @@ def _contrast_findings(root: ET.Element, options: PdfCheckOptions) -> list[Findi
                                 "contrast_ratio": ratio,
                             }
                         )
-            if options.min_grayscale_luminance_difference is not None and node.tag in {
-                "fill_text",
-                "stroke_text",
-                "fill_path",
-                "stroke_path",
-                "fill_image",
-                "fill_image_mask",
-                "fill_shade",
-            }:
+            if (
+                options.min_grayscale_luminance_difference is not None
+                and node.tag in COLOR_OPERATIONS
+            ):
                 rgb = _simple_rgb(node)
                 if rgb is None:
                     separation_uncertain = True
@@ -1159,16 +892,16 @@ def _contrast_findings(root: ET.Element, options: PdfCheckOptions) -> list[Findi
         for index, first in enumerate(colors):
             for second in colors[index + 1 :]:
                 pairs += 1
-                if pairs > _MAX_PAIR_CHECKS:
+                if pairs > MAX_PAIR_CHECKS:
                     separation_uncertain = True
                     break
-                difference = abs(_luminance(first) - _luminance(second))
+                difference = abs(relative_luminance(first) - relative_luminance(second))
                 if (
                     options.min_grayscale_luminance_difference is not None
                     and difference < options.min_grayscale_luminance_difference
                 ):
                     separation_count += 1
-                    if len(separation) < _MAX_SAMPLES:
+                    if len(separation) < MAX_SAMPLES:
                         separation.append(
                             {
                                 "page": page_number,
@@ -1176,17 +909,16 @@ def _contrast_findings(root: ET.Element, options: PdfCheckOptions) -> list[Findi
                                 "luminance_difference": difference,
                             }
                         )
-            if pairs > _MAX_PAIR_CHECKS:
+            if pairs > MAX_PAIR_CHECKS:
                 break
     result = []
     if options.min_text_contrast is not None:
         result.append(
-            _result(
+            heuristic_finding(
                 "pdf.assumed_text_contrast",
                 "Compared opaque text colors with the supplied background.",
                 contrast,
-                uncertain=contrast_uncertain or contrast_count == 0,
-                advisory=True,
+                incomplete=contrast_uncertain or contrast_count == 0,
                 measured_text_operations=contrast_count,
                 minimum_ratio=options.min_text_contrast,
                 assumed_background_rgb=options.contrast_background_rgb,
@@ -1197,15 +929,14 @@ def _contrast_findings(root: ET.Element, options: PdfCheckOptions) -> list[Findi
         )
     if options.min_grayscale_luminance_difference is not None:
         result.append(
-            _result(
+            heuristic_finding(
                 "pdf.grayscale_separation",
                 "Compared distinct observed page colors by nominal luminance.",
                 separation,
-                uncertain=separation_uncertain or palette_count == 0,
-                advisory=True,
+                incomplete=separation_uncertain or palette_count == 0,
                 total_violations=separation_count,
                 page_palette_entries=palette_count,
-                compared_pairs=min(pairs, _MAX_PAIR_CHECKS),
+                compared_pairs=min(pairs, MAX_PAIR_CHECKS),
                 minimum_difference=options.min_grayscale_luminance_difference,
                 scope="Opaque DeviceRGB/Gray colors treated as sRGB. A close pair is advisory; "
                 "semantic color-only encoding, visual proximity and perceptual discrimination "
@@ -1216,37 +947,20 @@ def _contrast_findings(root: ET.Element, options: PdfCheckOptions) -> list[Findi
 
 
 def _trace_findings(output: str, pages: int, options: PdfCheckOptions) -> list[Finding]:
-    root = _xml(output, "document")
-    traced_pages = root.findall("page")
-    try:
-        numbers = [int(page.attrib["number"]) for page in traced_pages]
-    except (ValueError, KeyError) as error:
-        raise PreparationError("MuPDF trace contains an invalid page number") from error
-    if numbers != list(range(1, pages + 1)):
-        raise PreparationError("MuPDF trace did not report every page exactly once")
+    trace = parse_mupdf_trace(output, pages)
     strokes: list[object] = []
     colors: list[object] = []
     stroke_uncertain = color_uncertain = False
     stroke_count = color_count = 0
-    color_ops = {
-        "fill_path",
-        "stroke_path",
-        "fill_text",
-        "stroke_text",
-        "fill_image",
-        "fill_image_mask",
-        "fill_shade",
-    }
-    for page in traced_pages:
-        number = int(page.attrib["number"])
+    for number, page in trace.pages:
         for node in page.iter():
             if options.min_stroke_width_pt is not None and node.tag in {
                 "stroke_path",
                 "stroke_text",
             }:
                 stroke_count += 1
-                width = _finite(node.get("linewidth"))
-                transform = [_finite(value) for value in node.get("transform", "").split()]
+                width = finite_number(node.get("linewidth"))
+                transform = [finite_number(value) for value in node.get("transform", "").split()]
                 if len(transform) != 6 or width < 0:
                     raise PreparationError("MuPDF stroke measurement lacks a valid transform/width")
                 a, b, c, d, _, _ = transform
@@ -1267,7 +981,7 @@ def _trace_findings(output: str, pages: int, options: PdfCheckOptions) -> list[F
                             "transform": transform,
                         }
                     )
-            if options.allowed_color_spaces and node.tag in color_ops:
+            if options.allowed_color_spaces and node.tag in COLOR_OPERATIONS:
                 space = node.get("colorspace")
                 if space is None:
                     color_uncertain = True
@@ -1278,12 +992,11 @@ def _trace_findings(output: str, pages: int, options: PdfCheckOptions) -> list[F
     result = []
     if options.min_stroke_width_pt is not None:
         result.append(
-            _result(
+            heuristic_finding(
                 "pdf.stroke_width",
                 "Compared uniformly transformed stroke widths with the supplied minimum.",
                 strokes,
-                uncertain=stroke_uncertain or stroke_count == 0,
-                advisory=True,
+                incomplete=stroke_uncertain or stroke_count == 0,
                 stroke_count=stroke_count,
                 minimum_pt=options.min_stroke_width_pt,
                 scope="Stroke operators including placement scale; raster lines "
@@ -1293,192 +1006,144 @@ def _trace_findings(output: str, pages: int, options: PdfCheckOptions) -> list[F
         )
     if options.allowed_color_spaces:
         result.append(
-            _result(
+            measurement_finding(
                 "pdf.color_space_policy",
                 "Compared rendered operation color-space names with the supplied list.",
                 colors,
-                uncertain=color_uncertain or color_count == 0,
+                incomplete=color_uncertain or color_count == 0,
                 measured_operations=color_count,
                 allowed=list(options.allowed_color_spaces),
                 scope="MuPDF rendering color-space names; source encoding, contrast, color-only "
                 "meaning and perceptual accessibility are not established.",
             )
         )
-    result.extend(_contrast_findings(root, options))
+    result.extend(_contrast_findings(trace.root, options))
     return result
+
+
+async def _findings_or_unavailable(
+    rules: list[str], measurement: Awaitable[list[Finding]]
+) -> list[Finding]:
+    """One measurement's findings, or each of its configured rules as unavailable."""
+    try:
+        return await measurement
+    except (PreparationError, OSError) as error:
+        return [unavailable_finding(rule, error) for rule in rules]
 
 
 async def inspect_pdf_details(
     pdf: Path,
     work: Path,
-    runner: ToolRunner,
+    runner: CommandRunner,
     *,
     options: PdfCheckOptions | None = None,
     budget: ResourceBudget | None = None,
 ) -> list[Finding]:
     """Run only configured checks; unsupported or partial evidence is inconclusive."""
     options = options or PdfCheckOptions()
-    configured = _configured(options)
+    configured = configured_pdf_check_rules(options)
     if not configured:
         return []
     try:
-        session = await _session(pdf, work, runner, budget)
+        session = await open_measurement_session(pdf, work, runner, budget)
         fields = await session.measure(
-            "properties",
-            ["pdfinfo", "-enc", "UTF-8", "-isodates", "@PDF@"],
-            lambda execution, _: _properties(execution.stdout),
+            "properties", _PROPERTIES_ARGV, lambda execution: pdfinfo_properties(execution.stdout)
         )
-        pages = _page_count(fields)
+        pages = page_count(fields)
     except (PreparationError, OSError) as error:
-        return [_unavailable(rule, error) for rule in configured]
+        return [unavailable_finding(rule, error) for rule in configured]
     result = [*_metadata_findings(fields, options), *_section_findings(pages, options)]
-    layout_rules = [
-        rule
-        for rule in configured
-        if rule
-        in {
-            "pdf.rendered_text_size",
-            "pdf.printable_text_bounds",
-            "pdf.text_overlap",
-        }
-    ]
-    if layout_rules:
-        try:
-            unsupported = await session.measure(
-                "page-boxes",
-                ["pdfinfo", "-box", "-f", "1", "-l", str(pages), "@PDF@"],
-                lambda execution, _: _geometry_support(execution.stdout, pages),
+    if layout_rules := [rule for rule in configured if rule in TEXT_GEOMETRY_RULES]:
+        result.extend(
+            await _findings_or_unavailable(
+                layout_rules, _layout_measurement(session, pages, options)
             )
-            # -i excludes image extraction, -nomerge preserves smaller text boxes.
-            layout = await session.measure(
-                "text-geometry",
-                [
-                    "pdftohtml",
-                    "-xml",
-                    "-stdout",
-                    "-i",
-                    "-zoom",
-                    "1",
-                    "-noroundcoord",
-                    "-nomerge",
-                    "-enc",
-                    "UTF-8",
-                    "@PDF@",
-                ],
-                lambda execution, _: _layout_findings(
-                    _text_pages(execution.stdout, pages), unsupported, options
-                ),
-            )
-            result.extend(layout)
-        except (PreparationError, OSError) as error:
-            result.extend(_unavailable(rule, error) for rule in layout_rules)
+        )
     if options.min_page_ink_ratio is not None:
         result.extend(await _sparse_findings(session, pages, options))
-    object_rules = [
-        rule
-        for rule in configured
-        if rule
-        in {
-            "pdf.document_language",
-            "pdf.annotation_policy",
-            "pdf.action_policy",
-        }
-    ]
-    if object_rules:
-        try:
-            result.extend(
-                await session.measure(
+    if object_rules := [rule for rule in configured if rule in OBJECT_STRUCTURE_RULES]:
+        result.extend(
+            await _findings_or_unavailable(
+                object_rules,
+                session.measure(
                     "objects",
-                    [
-                        "qpdf",
-                        "--json=2",
-                        "--json-key=qpdf",
-                        "--json-key=pages",
-                        "--json-stream-data=none",
-                        "@PDF@",
-                    ],
-                    lambda execution, _: _object_findings(execution.stdout, pages, options),
-                )
+                    qpdf_objects_argv(),
+                    lambda execution: _object_findings(
+                        execution.stdout, pages, options, object_rules
+                    ),
+                ),
             )
-        except (PreparationError, OSError) as error:
-            result.extend(_unavailable(rule, error) for rule in object_rules)
-    trace_rules = [
-        rule
-        for rule in configured
-        if rule
-        in {
-            "pdf.stroke_width",
-            "pdf.color_space_policy",
-            "pdf.assumed_text_contrast",
-            "pdf.grayscale_separation",
-        }
-    ]
-    if trace_rules:
-        try:
-            result.extend(
-                await session.measure(
+        )
+    if trace_rules := [rule for rule in configured if rule in PAINT_TRACE_RULES]:
+        result.extend(
+            await _findings_or_unavailable(
+                trace_rules,
+                session.measure(
                     "trace",
-                    ["mutool", "trace", "@PDF@", f"1-{pages}"],
-                    lambda execution, _: _trace_findings(execution.stdout, pages, options),
-                )
+                    mupdf_trace_argv(pages),
+                    lambda execution: _trace_findings(execution.stdout, pages, options),
+                ),
             )
-        except (PreparationError, OSError) as error:
-            result.extend(_unavailable(rule, error) for rule in trace_rules)
+        )
     return result
+
+
+def _figure_font_finding(execution: CommandResult, *, options: PdfCheckOptions) -> Finding:
+    inventory = font_inventory(execution.stdout)
+    violations: list[object] = [
+        font
+        for font in inventory
+        if (options.require_embedded_figure_fonts and not font["embedded"])
+        or (options.forbid_type3_figure_fonts and is_type3(font["type"]))
+    ]
+    # A figure without font resources (outlined or raster-only text) cannot
+    # violate an embedding or Type 3 policy.
+    return measurement_finding(
+        "pdf.included_figure_fonts",
+        "Inspected font resources in an explicit input PDF figure."
+        if inventory
+        else "No font resources in this figure; nothing to embed.",
+        violations,
+        font_count=len(inventory),
+        require_embedded=options.require_embedded_figure_fonts,
+        forbid_type3=options.forbid_type3_figure_fonts,
+        scope="Input-figure font resources; final-PDF attribution is not established. "
+        "Type 3 does not imply bitmap glyphs.",
+    )
 
 
 async def inspect_included_pdf_figures(
     figures: tuple[Path, ...],
     work: Path,
-    runner: ToolRunner,
+    runner: CommandRunner,
     *,
     options: PdfCheckOptions | None = None,
     budget: ResourceBudget | None = None,
 ) -> list[Finding]:
     """Inspect explicit source figure files without claiming final-PDF object attribution."""
     figure_options = options or PdfCheckOptions()
-    if not (
-        figure_options.require_embedded_figure_fonts or figure_options.forbid_type3_figure_fonts
-    ):
+    if not figure_font_checks_enabled(figure_options):
         return []
     if (
         not isinstance(figures, tuple)
-        or len(figures) > 300
+        or len(figures) > MAX_FIGURE_INPUTS
         or any(not isinstance(figure, Path) for figure in figures)
     ):
-        raise PreparationError("Included PDF figure inspection requires at most 300 explicit paths")
+        raise PreparationError(
+            f"Included PDF figure inspection requires at most {MAX_FIGURE_INPUTS} explicit paths"
+        )
     if work.exists():
         raise PreparationError("Included figure inspection requires a new workspace")
     result = []
     for index, figure in enumerate(dict.fromkeys(figures), 1):
         try:
-            session = await _session(figure, work / str(index), runner, budget)
-
-            def fonts(execution: CommandResult, _directory: Path) -> Finding:
-                inventory = _font_inventory(execution.stdout)
-                violations: list[object] = [
-                    font
-                    for font in inventory
-                    if (figure_options.require_embedded_figure_fonts and not font["embedded"])
-                    or (figure_options.forbid_type3_figure_fonts and _is_type3(font["type"]))
-                ]
-                # A figure without font resources (outlined or raster-only text) cannot
-                # violate an embedding or Type 3 policy.
-                return _result(
-                    "pdf.included_figure_fonts",
-                    "Inspected font resources in an explicit input PDF figure."
-                    if inventory
-                    else "No font resources in this figure; nothing to embed.",
-                    violations,
-                    font_count=len(inventory),
-                    require_embedded=figure_options.require_embedded_figure_fonts,
-                    forbid_type3=figure_options.forbid_type3_figure_fonts,
-                    scope="Input-figure font resources; final-PDF attribution is not established. "
-                    "Type 3 does not imply bitmap glyphs.",
-                )
-
-            finding = await session.measure("fonts", ["pdffonts", "@PDF@"], fonts)
+            session = await open_measurement_session(figure, work / str(index), runner, budget)
+            finding = await session.measure(
+                "fonts",
+                ["pdffonts", DOCUMENT],
+                partial(_figure_font_finding, options=figure_options),
+            )
         except (PreparationError, OSError) as error:
-            finding = _unavailable("pdf.included_figure_fonts", error)
+            finding = unavailable_finding("pdf.included_figure_fonts", error)
         result.append(replace(finding, path=str(figure)))
     return result

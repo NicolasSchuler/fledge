@@ -1,68 +1,41 @@
 """Stable public check codes, descriptions, and behavioral test associations.
 
 Codes are assigned explicitly and are never recycled. Execution diagnostics and
-raw inventories are not checks and intentionally have no code. Existing internal
-rule names remain in reports for compatibility and more detailed context.
+raw inventories are not checks and intentionally have no code. Reports carry the
+descriptive rule name (``family.check_name``); renamed rules keep their former
+names as aliases so selectors and lookups that use them still resolve.
 
-Every family keeps its entries in a data-only ``*_rules.py`` module with the same
-shape: code, name, title, description, tests, fix and optional aliases.
+Every family keeps its entries in a data-only ``*_rules.py`` module that exports
+``RULES``, a tuple of :class:`Rule` values.
 """
 
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Iterable, Mapping
-from dataclasses import asdict, dataclass
 from types import MappingProxyType
-from typing import Any
 
-from .bibliography_check_rules import RULE_DEFINITIONS as BIBLIOGRAPHY_RULES
-from .bibliography_transform_rules import RULE_DEFINITIONS as BIBLIOGRAPHY_TRANSFORM_RULES
-from .build_check_rules import RULE_DEFINITIONS as BUILD_RULES
-from .core_rules import RULE_DEFINITIONS as CORE_RULES
-from .loaded_options_rules import RULE_DEFINITIONS as LOADED_OPTIONS_RULES
-from .manuscript_check_rules import RULE_DEFINITIONS as MANUSCRIPT_RULES
-from .metadata_privacy_rules import RULE_DEFINITIONS as METADATA_PRIVACY_RULES
-from .online_check_rules import RULE_DEFINITIONS as ONLINE_RULES
-from .pdf_artwork_rules import RULE_DEFINITIONS as PDF_ARTWORK_RULES
-from .pdf_check_rules import RULE_DEFINITIONS as PDF_RULES
-from .reporting_rules import RULE_DEFINITIONS as REPORTING_RULES
-from .runtime_rules import RULE_DEFINITIONS as RUNTIME_RULES
-from .source_transform_rules import SOURCE_TRANSFORM_RULES
-from .structure_rules import RULE_DEFINITIONS as STRUCTURE_RULES
-from .submission_check_rules import RULE_DEFINITIONS as SUBMISSION_RULES
-from .submission_readiness_rules import RULE_DEFINITIONS as SUBMISSION_READINESS_RULES
-from .workflow_rules import WORKFLOW_RULES
-
-
-@dataclass(frozen=True)
-class Rule:
-    code: str
-    name: str
-    title: str
-    description: str
-    tests: tuple[str, ...]
-    fix: str
-    aliases: tuple[str, ...] = ()
-
-    def to_dict(self) -> dict[str, object]:
-        return asdict(self)
+from .bibliography_check_rules import RULES as BIBLIOGRAPHY_RULES
+from .bibliography_transform_rules import RULES as BIBLIOGRAPHY_TRANSFORM_RULES
+from .build_check_rules import RULES as BUILD_RULES
+from .core_rules import RULES as CORE_RULES
+from .loaded_options_rules import RULES as LOADED_OPTIONS_RULES
+from .manuscript_check_rules import RULES as MANUSCRIPT_RULES
+from .metadata_privacy_rules import RULES as METADATA_PRIVACY_RULES
+from .online_check_rules import RULES as ONLINE_RULES
+from .pdf_artwork_rules import RULES as PDF_ARTWORK_RULES
+from .pdf_check_rules import RULES as PDF_RULES
+from .reporting_rules import RULES as REPORTING_RULES
+from .rule_definition import Rule
+from .runtime_rules import RULES as RUNTIME_RULES
+from .source_transform_rules import RULES as SOURCE_TRANSFORM_RULES
+from .structure_rules import RULES as STRUCTURE_RULES
+from .submission_check_rules import RULES as SUBMISSION_RULES
+from .submission_readiness_rules import RULES as SUBMISSION_READINESS_RULES
+from .workflow_rules import RULES as WORKFLOW_RULES
 
 
-def _rule(definition: Mapping[str, Any]) -> Rule:
-    return Rule(
-        code=str(definition["code"]),
-        name=str(definition["name"]),
-        title=str(definition["title"]),
-        description=str(definition["description"]),
-        tests=tuple(definition["tests"]),
-        fix=str(definition["fix"]),
-        aliases=tuple(definition.get("aliases", ())),
-    )
-
-
-def _catalogue(*families: Iterable[Mapping[str, Any]]) -> tuple[Rule, ...]:
-    rules = tuple(_rule(definition) for family in families for definition in family)
+def _catalogue(*families: tuple[Rule, ...]) -> tuple[Rule, ...]:
+    rules = tuple(rule for family in families for rule in family)
     duplicates = [
         value
         for value, count in Counter(

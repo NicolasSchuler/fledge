@@ -7,16 +7,12 @@ Uncoded execution diagnostics and explicit inventories always remain visible.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import replace
-from typing import TYPE_CHECKING
+from typing import Any
 
 from .check_selection import CheckSelection
 from .models import Finding
-
-if TYPE_CHECKING:
-    # Type-only: the configuration module imports reporting, which imports this module.
-    from .config import Settings
 
 # These establish the safety of reading, transforming, building or publishing a
 # prepared copy. Bibliography syntax, key, macro and relationship checks are kept
@@ -187,8 +183,8 @@ _GROUP_CHECKS: dict[str, dict[str, dict[str, object]]] = {
         "PDF215": {"min_text_contrast": None, "contrast_background_rgb": None},
         "PDF216": {"min_grayscale_luminance_difference": None},
     },
-    "pdf_artwork": _ARTWORK_CHECKS,
-    "figure_artwork": _ARTWORK_CHECKS,
+    "rendered_pdf_artwork": _ARTWORK_CHECKS,
+    "included_figure_artwork": _ARTWORK_CHECKS,
     "structure_checks": {
         "MAN201": {"required_author_fields": ()},
         "PDF401": {"heading_expectations": ()},
@@ -215,16 +211,20 @@ _GROUP_CHECKS: dict[str, dict[str, dict[str, object]]] = {
 }
 
 
-# Settings section (None for top-level Settings fields) and the disabled value of
-# each field that activates an opt-in check.
+# Settings table (None for top-level settings) and the disabled value of each
+# field that activates an opt-in check. Names are the TOML setting names.
 OptInActivation = dict[str, list[tuple[str | None, dict[str, object]]]]
+
+# The policies read the settings as ``Settings.top_level_values`` returns them:
+# top-level setting names mapped to their values, table names to option objects.
+SettingValues = Mapping[str, Any]
 
 
 def opt_in_activation() -> OptInActivation:
     """Every opt-in check code with the settings fields that activate it.
 
     A check is configured when any listed field differs from its disabled value.
-    A code may be activated from more than one section (figure and PDF artwork).
+    A code may be activated from more than one table (figure and PDF artwork).
     Source and PDF identity checks (PRV001/PRV002) share submission identity terms.
     """
     activation: OptInActivation = {}
@@ -238,6 +238,23 @@ def opt_in_activation() -> OptInActivation:
     return activation
 
 
+def _current(values: SettingValues, group: str | None, name: str) -> object:
+    return values[name] if group is None else getattr(values[group], name)
+
+
+def configured_opt_in_codes(values: SettingValues) -> frozenset[str]:
+    """Opt-in check codes with an activating field that differs from its disabled value."""
+    return frozenset(
+        code
+        for code, sections in opt_in_activation().items()
+        if any(
+            _current(values, group, name) != disabled
+            for group, fields in sections
+            for name, disabled in fields.items()
+        )
+    )
+
+
 def _disabled_values(
     policies: dict[str, dict[str, object]], selection: CheckSelection
 ) -> dict[str, object]:
@@ -249,37 +266,41 @@ def _disabled_values(
     }
 
 
-def effective_settings(settings: Settings) -> Settings:
-    """Disable unselected configured policies without changing the user's Settings.
+def unselected_policy_updates(
+    values: SettingValues, selection: CheckSelection
+) -> dict[str, object]:
+    """Replacement values that disable unselected configured policies.
 
-    Unchanged objects are returned by identity, including the default ALL policy.
-    Context shared with a selected check is retained. PRV001/PRV002 share identity
-    terms: their individual source/PDF dispatchers must also clear terms for their
-    own unselected producer. Source heuristics, bibliography parse diagnostics and
-    ordinary build-log findings arise during required work and are filtered only
-    after their dependent checks have consumed that evidence.
+    Keys are those of ``values``; only changed entries are returned, so the
+    default ALL policy yields none. A table is replaced by a modified copy of its
+    option object. Context shared with a selected check is retained. PRV001/PRV002
+    share identity terms: their individual source/PDF dispatchers must also clear
+    terms for their own unselected producer. Source heuristics, bibliography parse
+    diagnostics and ordinary build-log findings arise during required work and
+    are filtered only after their dependent checks have consumed that evidence.
     """
-    selection = settings.checks
     updates = {
         name: value
         for name, value in _disabled_values(_ROOT_CHECKS, selection).items()
-        if getattr(settings, name) != value
+        if values[name] != value
     }
     for group_name, policies in _GROUP_CHECKS.items():
-        current = getattr(settings, group_name)
-        values = _disabled_values(policies, selection)
+        current = values[group_name]
+        disabled = _disabled_values(policies, selection)
         if group_name == "submission_checks" and not any(
             selection.enabled(code) for code in ("PRV001", "PRV002")
         ):
-            values["identity_terms"] = ()
-        if group_name in {"pdf_artwork", "figure_artwork"} and not any(
+            disabled["identity_terms"] = ()
+        if group_name in {"rendered_pdf_artwork", "included_figure_artwork"} and not any(
             selection.enabled(code) for code in ("PDF302", "PDF303")
         ):
-            values["figure_regions"] = ()
-        changed = {name: value for name, value in values.items() if getattr(current, name) != value}
+            disabled["figure_regions"] = ()
+        changed = {
+            name: value for name, value in disabled.items() if getattr(current, name) != value
+        }
         if changed:
             updates[group_name] = replace(current, **changed)
-    return replace(settings, **updates) if updates else settings
+    return updates
 
 
 def selected_findings(findings: Iterable[Finding], selection: CheckSelection) -> list[Finding]:

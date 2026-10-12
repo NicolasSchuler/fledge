@@ -1,138 +1,345 @@
-"""Bounded, source-preserving bibliography coverage and metadata diagnostics.
+"""Offline bibliography checks: file integrity, citation coverage and field details.
 
-Only declared local resources contribute to a selected manuscript's evidence.
-This lexical subset does not execute TeX, expand bibliography string macros,
-apply a bibliography backend's inheritance rules, contact URLs, or propose edits.
+``check_bibliography_integrity`` inspects the bibliography files themselves:
+syntax, duplicate keys and DOIs, repeated fields, undefined string macros,
+missing relationship targets and DOI syntax. ``check_bibliography_coverage_and_fields``
+relates a selected manuscript's literal citations to its declared resources and
+applies the configured field checks and heuristics; only declared local resources
+contribute to a selected manuscript's evidence.
+
+Both are bounded lexical subsets. They do not execute TeX, expand bibliography
+string macros, apply a bibliography backend's inheritance rules, contact URLs,
+or propose edits.
 """
 
 from __future__ import annotations
 
 import re
 import unicodedata
-from collections import defaultdict, deque
+from collections import defaultdict
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from pathlib import Path
+from typing import Literal, NamedTuple
 from urllib.parse import urlsplit
 
-from .bibliography import (
-    _MAX_FILE_BYTES,
-    _Document,
-    _doi_value,
-    _Entry,
-    _Field,
-    _Parser,
-    _resource_declarations,
+from .bibtex_syntax import (
+    LOWERCASE_NAME,
+    MAX_BIB_ENTRIES,
+    MAX_BIB_FILE_BYTES,
+    MAX_RESOURCE_FILES,
+    MAX_RESOURCES_TOTAL_BYTES,
+    BibDocument,
+    BibFileReader,
+    Declaration,
+    Entry,
+    Field,
+    field_literal,
+    read_doi,
 )
-from .manuscript import _commands_before_end, _reachable_sources
-from .models import Finding, PreparationError, Severity, Status
+from .citation_graph import (
+    RELATIONSHIP_FIELDS,
+    CitationGraph,
+    EntryIndex,
+    LocatedEntry,
+    Uncertainty,
+    bounded_uncertainties,
+    build_citation_graph,
+    index_entries,
+    located_entries,
+    selected_resources,
+    uncertainty_messages,
+)
+from .file_scan import more_suffix
+from .models import EvidenceKind, Finding, PreparationError, Severity, Status
+from .option_config import require_booleans
 from .scheduler import cancellation_point
-from .source import _Inspection, conditional_spans, in_conditional
+from .source_graph import SourceGraph
 
-_MAX_TOTAL_BYTES = 32 * 1024 * 1024
-_MAX_DOCUMENTS = 128
+_MONTHS = frozenset("jan feb mar apr may jun jul aug sep oct nov dec".split())
 _MAX_ROOTS = 32
-_MAX_ENTRIES = 100_000
 _MAX_FUZZY_ENTRIES = 2_000
 _MAX_FUZZY_PAIRS = 20_000
 _MAX_FUZZY_TEXT = 2_000
-_MAX_FIELD_CHARS = 64 * 1024
-_MAX_REASONS = 32
 _MAX_LISTED_ENTRIES = 3
-_NAME = re.compile(r"[a-z][a-z0-9_-]*")
-_CITATIONS = frozenset(
-    "cite citep citet citealp citealt citeauthor citeyear citeyearpar "
-    "parencite textcite autocite footcite footcitetext smartcite supercite "
-    "fullcite footfullcite notecite pnotecite fnotecite citeurl citetitle nocite".split()
-)
-_MULTICITES = frozenset(
-    "cites parencites textcites autocites footcites footcitetexts smartcites supercites".split()
-)
-_RELATIONS = frozenset({"crossref", "xref", "xdata", "related", "entryset"})
 _INHERITANCE = frozenset({"crossref", "xref", "xdata"})
-_DEFINITIONS = frozenset(
+# Source findings on a .tex file that leave all-root discovery incomplete.
+_DISCOVERY_FAILURES = frozenset(
     {
-        "newcommand",
-        "renewcommand",
-        "providecommand",
-        "DeclareRobustCommand",
-        "NewDocumentCommand",
-        "RenewDocumentCommand",
-        "ProvideDocumentCommand",
-        "DeclareDocumentCommand",
-        "def",
-        "gdef",
-        "edef",
-        "xdef",
-        "let",
-        "futurelet",
+        "source.encoding",
+        "source.size_limit",
+        "source.argument_limit",
+        "source.command_limit",
+        "source.link",
     }
 )
-# Expansion, category codes and bibliography-backend declarations can reach any
-# citation; no lexical argument inspection bounds what they may later execute.
-_EXECUTION = frozenset(
-    {
-        "csname",
-        "catcode",
-        "directlua",
-        "DeclareCiteCommand",
-        "DeclareMultiCiteCommand",
-        "DeclareSourcemap",
-        "DeclareStyleSourcemap",
-        "DeclareDatamodelEntryfields",
-    }
-)
-_DYNAMIC = _DEFINITIONS | _EXECUTION
-# Substrings that make a command name or a definition body citation-relevant. A
-# plain \newcommand{\R}{\mathbb{R}} cannot influence bibliography evidence.
-_CITATION_MARKERS = ("cite", "nocite", "bibitem", "addbibresource", "bibliography")
-_FILTERS = frozenset(
-    {
-        "defbibfilter",
-        "defbibcheck",
-        "DeclareBibliographyCategory",
-        "addtocategory",
-        "DeclareEntrySet",
-        "includeonly",
-        "refsection",
-        "refsegment",
-    }
-)
-_GRAPH_FAILURES = frozenset(
-    {
-        "source-encoding",
-        "source-size-limit",
-        "source-argument-limit",
-        "source-command-limit",
-        "source-literal-unclosed",
-        "source-input-cycle",
-        "source-input-depth",
-        "source-expansion-limit",
-        "source-dynamic-path",
-        "source-nested-file-command",
-        "source-conditional-dependency",
-        "source-path-literal-context",
-        "source-external-path",
-        "source-ambiguous-dependency",
-        "source-case-mismatch",
-        "source-custom-path",
-        "source-unsupported-command",
-        "source-missing-dependency",
-        "source-link",
-        "source-context-ambiguity",
-        "source-subfile-structure",
-        "source-font-options",
-    }
-)
-
-
-# Source findings that leave no selected document; each is a blocking error.
-_ROOT_FAILURES = frozenset({"source-root-ambiguous", "source-root-missing", "source-main-invalid"})
 _SELECTION_UNAVAILABLE = "No complete bibliography resource selection is available"
+_OVER_BUDGET = "resource exceeds the per-file or total bibliography byte budget"
+
+# --- File integrity ---------------------------------------------------------------
 
 
-def _blocking(finding: Finding) -> bool:
-    return finding.severity == "error" and finding.status in {"failed", "inconclusive", "skipped"}
+def _load_bibliographies(
+    root: Path, only: set[str] | None
+) -> tuple[list[BibDocument], list[Finding]]:
+    """Parse every .bib file below ``root``, or only the named ones."""
+    if not root.is_dir():
+        raise PreparationError(f"Bibliography input is not a directory: {root}")
+    paths = (
+        sorted(
+            (path for path in root.rglob("*") if path.suffix.lower() == ".bib"),
+            key=lambda path: path.relative_to(root).as_posix(),
+        )
+        if only is None
+        else [root / name for name in sorted(only)]
+    )
+    reader = BibFileReader()
+    documents: list[BibDocument] = []
+    findings: list[Finding] = []
+    for path in paths:
+        cancellation_point()
+        relative = path.relative_to(root).as_posix()
+        if path.is_symlink():
+            findings.append(
+                Finding(
+                    "bibliography.input",
+                    "Symbolic-link bibliographies are not read or normalized.",
+                    severity="error",
+                    status="skipped",
+                    path=relative,
+                )
+            )
+            continue
+        if not path.is_file():
+            continue
+        try:
+            document = reader.read(path, relative)
+            if document is None:
+                raise ValueError(
+                    f"Bibliography exceeds the {MAX_BIB_FILE_BYTES}-byte parser limit."
+                )
+        except (OSError, UnicodeError, ValueError) as error:
+            findings.append(
+                Finding(
+                    "bibliography.input",
+                    f"Bibliography could not be inspected: {error}",
+                    severity="error",
+                    status="inconclusive",
+                    path=relative,
+                    suggestion=(
+                        "Use a readable UTF-8 bibliography within the documented parser limit."
+                    ),
+                )
+            )
+            continue
+        documents.append(document)
+    return documents, findings
+
+
+def _plain_value(bib_field: Field) -> str | None:
+    """A single brace-free literal, as relationship and alias fields must be."""
+    return field_literal(bib_field, numbers=False, braces=False, max_chars=None)
+
+
+def _defined_keys(documents: list[BibDocument]) -> set[str]:
+    keys = {entry.key for document in documents for entry in document.entries}
+    # biblatex's literal ids field supplies alternate entry keys.
+    for document in documents:
+        cancellation_point()
+        for record in document.records:
+            for bib_field in record.fields:
+                if bib_field.name == "ids" and (value := _plain_value(bib_field)) is not None:
+                    keys.update(key.strip() for key in value.split(",") if key.strip())
+    return keys
+
+
+def _field_values(entry: Entry) -> dict[str, tuple[tuple[str, str], ...]]:
+    return {
+        item.name: tuple((atom.kind, atom.value) for atom in item.atoms) for item in entry.fields
+    }
+
+
+def _conflicts(first: Entry, second: Entry) -> list[str]:
+    first_values = _field_values(first)
+    second_values = _field_values(second)
+    return sorted(
+        name
+        for name in first_values.keys() & second_values.keys()
+        if name != "doi" and first_values[name] != second_values[name]
+    )
+
+
+class _IntegrityCheck:
+    """Cross-file consistency of keys, string macros, relationships and DOIs."""
+
+    def __init__(self, documents: list[BibDocument], *, complete: bool) -> None:
+        self.macro_names = _MONTHS | {
+            bib_field.name
+            for document in documents
+            for record in document.records
+            if isinstance(record, Declaration) and record.kind == "string"
+            for bib_field in record.fields
+        }
+        self.keys = _defined_keys(documents)
+        # A missing definition is only certain when every inspected file parsed.
+        self.severity: Severity = "error" if complete else "warning"
+        self.status: Status = "failed" if complete else "inconclusive"
+        self.seen_keys: dict[str, tuple[BibDocument, Entry]] = {}
+        self.seen_dois: dict[str, tuple[BibDocument, Entry]] = {}
+
+    def findings(self, document: BibDocument, record: Entry | Declaration) -> Iterator[Finding]:
+        if isinstance(record, Declaration):
+            for bib_field in record.fields:
+                yield from self._undefined_macros(document, bib_field)
+            return
+        yield from self._duplicate_key(document, record)
+        names: set[str] = set()
+        for bib_field in record.fields:
+            if bib_field.name in names:
+                yield document.finding(
+                    "bibliography.repeated_field",
+                    f"Field {bib_field.name!r} is repeated in entry {record.key!r}.",
+                    bib_field.start,
+                    severity="error",
+                    suggestion="Choose the intended value; no field is removed automatically.",
+                )
+            names.add(bib_field.name)
+            yield from self._undefined_macros(document, bib_field)
+            if bib_field.name in RELATIONSHIP_FIELDS:
+                yield from self._relationship(document, bib_field)
+            if bib_field.name == "doi":
+                yield from self._doi(document, record, bib_field)
+
+    def _duplicate_key(self, document: BibDocument, entry: Entry) -> Iterator[Finding]:
+        first = self.seen_keys.get(entry.key)
+        if first is None:
+            self.seen_keys[entry.key] = (document, entry)
+            return
+        first_document, first_entry = first
+        yield document.finding(
+            "bibliography.duplicate_key",
+            f"Citation key {entry.key!r} occurs more than once.",
+            entry.start,
+            severity="error",
+            suggestion="Review the entries and all uses before renaming or merging.",
+            details={
+                "first_path": first_document.path,
+                "first_line": first_document.line(first_entry.start),
+                "conflicting_fields": _conflicts(first_entry, entry),
+            },
+        )
+
+    def _undefined_macros(self, document: BibDocument, bib_field: Field) -> Iterator[Finding]:
+        for atom in bib_field.atoms:
+            if atom.kind == "macro" and atom.value.lower() not in self.macro_names:
+                yield document.finding(
+                    "bibliography.undefined_macro",
+                    f"String macro {atom.value!r} has no definition in the inspected files.",
+                    atom.start,
+                    severity=self.severity,
+                    status=self.status,
+                )
+
+    def _relationship(self, document: BibDocument, bib_field: Field) -> Iterator[Finding]:
+        value = _plain_value(bib_field)
+        if value is None:
+            yield document.finding(
+                "bibliography.relationship_unresolved",
+                f"Field {bib_field.name!r} is not a plain literal; relationships are unverified.",
+                bib_field.start,
+                status="inconclusive",
+            )
+            return
+        targets = [value] if bib_field.name in {"crossref", "xref"} else value.split(",")
+        for target in targets:
+            if target.strip() not in self.keys:
+                yield document.finding(
+                    "bibliography.missing_relationship",
+                    f"Field {bib_field.name!r} refers to missing key {target.strip()!r}.",
+                    bib_field.start,
+                    severity=self.severity,
+                    status=self.status,
+                )
+
+    def _doi(self, document: BibDocument, entry: Entry, bib_field: Field) -> Iterator[Finding]:
+        reading = read_doi(bib_field)
+        if reading.uncertainty:
+            yield document.finding(
+                "bibliography.doi_unresolved",
+                reading.uncertainty,
+                bib_field.start,
+                status="inconclusive",
+                suggestion="Inspect this DOI manually; it remains unchanged.",
+            )
+            return
+        if reading.identifier is None:
+            yield document.finding(
+                "bibliography.invalid_doi",
+                "The DOI field is not a recognized bare DOI or supported DOI URL.",
+                bib_field.start,
+                suggestion="Verify the identifier; no metadata will be guessed or replaced.",
+            )
+            return
+        first = self.seen_dois.get(reading.identifier)
+        if first is None:
+            self.seen_dois[reading.identifier] = (document, entry)
+            return
+        first_document, first_entry = first
+        if first_entry is not entry:
+            yield document.finding(
+                "bibliography.duplicate_doi",
+                f"Entries {first_entry.key!r} and {entry.key!r} have the same exact DOI.",
+                bib_field.start,
+                suggestion="Review the matching works and conflicts before any merge.",
+                details={
+                    "doi": reading.identifier,
+                    "first_path": first_document.path,
+                    "first_line": first_document.line(first_entry.start),
+                    "conflicting_fields": _conflicts(first_entry, entry),
+                },
+            )
+
+
+def _integrity_findings(
+    documents: list[BibDocument], input_findings: list[Finding]
+) -> list[Finding]:
+    findings = list(input_findings)
+    check = _IntegrityCheck(
+        documents, complete=all(document.valid for document in documents) and not findings
+    )
+    for document in documents:
+        cancellation_point()
+        if document.syntax_error is not None:
+            findings.append(document.syntax_error)
+        for record in document.records:
+            findings.extend(check.findings(document, record))
+    return findings
+
+
+def inspect_bibliography_integrity(
+    root: Path, main: str | None = None
+) -> tuple[list[BibDocument], list[Finding]]:
+    """The parsed documents of :func:`check_bibliography_integrity` with its findings."""
+    documents, findings = _load_bibliographies(root, selected_resources(root, main))
+    return documents, _integrity_findings(documents, findings)
+
+
+def check_bibliography_integrity(root: Path, main: str | None = None) -> list[Finding]:
+    """Inspect UTF-8 .bib files without changing them or accessing the network.
+
+    When ``main`` names a source whose selected literal graph declares resolvable
+    bibliography resources, only those resources are inspected, so duplicate keys
+    and DOIs are reported within that declared set. Without such a selection every
+    .bib file below ``root`` is inspected, including unreferenced spare copies.
+
+    No findings means no problem was found by these checks, not that metadata,
+    macro expansion order, style requirements, or rendered citations are valid.
+    """
+    return inspect_bibliography_integrity(root, main)[1]
+
+
+# --- Citation coverage and field details ------------------------------------------
 
 
 @dataclass(frozen=True)
@@ -149,7 +356,8 @@ class BibliographyOptions:
     fuzzy_duplicate_threshold: float = 0.93
 
     def __post_init__(self) -> None:
-        for name in (
+        require_booleans(
+            self,
             "check_citation_coverage",
             "check_uncited_entries",
             "all_roots",
@@ -157,16 +365,14 @@ class BibliographyOptions:
             "check_urls",
             "check_capitalization",
             "check_fuzzy_duplicates",
-        ):
-            if type(getattr(self, name)) is not bool:
-                raise PreparationError(f"{name} must be a boolean")
+        )
         threshold = self.fuzzy_duplicate_threshold
         if type(threshold) not in {float, int} or not 0 < threshold <= 1:
             raise PreparationError("fuzzy_duplicate_threshold must be greater than 0 and at most 1")
         if (
             not isinstance(self.doi_entry_types, tuple)
             or any(
-                not isinstance(value, str) or (value != "*" and not _NAME.fullmatch(value))
+                not isinstance(value, str) or (value != "*" and not LOWERCASE_NAME.fullmatch(value))
                 for value in self.doi_entry_types
             )
             or len(set(self.doi_entry_types)) != len(self.doi_entry_types)
@@ -179,7 +385,7 @@ class BibliographyOptions:
             if not isinstance(row, tuple) or len(row) != 2:
                 raise PreparationError("Each required_fields row must contain a type and fields")
             kind, fields = row
-            if not isinstance(kind, str) or (kind != "*" and not _NAME.fullmatch(kind)):
+            if not isinstance(kind, str) or (kind != "*" and not LOWERCASE_NAME.fullmatch(kind)):
                 raise PreparationError("Required-field entry types must be lowercase or '*'")
             if kind in kinds:
                 raise PreparationError("Required-field entry types must be unique")
@@ -189,7 +395,7 @@ class BibliographyOptions:
                 or not fields
                 or any(
                     not isinstance(spec, str)
-                    or any(not _NAME.fullmatch(name) for name in spec.split("|"))
+                    or any(not LOWERCASE_NAME.fullmatch(name) for name in spec.split("|"))
                     or len(set(spec.split("|"))) != len(spec.split("|"))
                     for spec in fields
                 )
@@ -199,226 +405,210 @@ class BibliographyOptions:
                     "Required fields must be unique lowercase names or 'field|alternative'"
                 )
 
+    @property
+    def any_enabled(self) -> bool:
+        """Whether any check runs; ``all_roots`` and the threshold only refine them."""
+        return any(
+            (
+                self.check_citation_coverage,
+                self.check_uncited_entries,
+                self.required_fields,
+                self.doi_entry_types,
+                self.check_page_ranges,
+                self.check_urls,
+                self.check_capitalization,
+                self.check_fuzzy_duplicates,
+            )
+        )
+
 
 _DEFAULT_OPTIONS = BibliographyOptions()
 
 
-@dataclass(frozen=True)
-class _Reference:
-    document: _Document
-    entry: _Entry
+@dataclass(frozen=True, slots=True)
+class _Scope:
+    """What the coverage and field findings describe; repeated in each summary's details."""
 
-    @property
-    def identity(self) -> tuple[str, int]:
-        return self.document.path, self.entry.start
+    description: str
+    documents: tuple[str, ...]
+    resources: tuple[str, ...]
 
-
-@dataclass
-class _Graph:
-    main: str | None
-    resources: set[str] = field(default_factory=set)
-    citations: list[tuple[str, str, int]] = field(default_factory=list)
-    inline_keys: set[str] = field(default_factory=set)
-    nocite_all: bool = False
-    reasons: list[str] = field(default_factory=list)
-    unused_reasons: list[str] = field(default_factory=list)
-    # Reasons that restate a blocking source error the source checks already report.
-    reported_causes: set[str] = field(default_factory=set)
+    def details(self, **extra: object) -> dict[str, object]:
+        """The scope details; ``extra`` adds keys or replaces values in place."""
+        return {
+            "scope": self.description,
+            "documents": list(self.documents),
+            "resources": list(self.resources),
+            "source_expansion": "not performed",
+            "network": "not used",
+            **extra,
+        }
 
 
-def _keys(value: str) -> list[str] | None:
-    keys = [part.strip() for part in value.split(",")]
-    if not keys or any(
-        not key or any(char.isspace() or char in "\\{}#$^~&%\x00" for char in key) for key in keys
-    ):
-        return None
-    return keys
+def _finding(
+    rule: str,
+    message: str,
+    status: Status,
+    *,
+    reference: LocatedEntry | None = None,
+    severity: Severity = "warning",
+    evidence: EvidenceKind = EvidenceKind.DERIVED,
+    incomplete: bool = False,
+    details: dict[str, object] | None = None,
+) -> Finding:
+    data = dict(details or {})
+    if reference:
+        data.update({"entry": reference.entry.key, "entry_type": reference.entry.entry_type})
+    return Finding(
+        f"bibliography.{rule}",
+        message,
+        severity="info" if status == "passed" else severity,
+        status=status,
+        path=reference.document.path if reference else None,
+        line=reference.document.line(reference.entry.start) if reference else None,
+        evidence_kind=evidence,
+        incomplete=incomplete,
+        details=data,
+    )
 
 
-def _citation_marked(text: str) -> bool:
-    """Whether a command name or definition body can reach citation machinery."""
-    lowered = text.lower()
-    return any(marker in lowered for marker in _CITATION_MARKERS)
+@dataclass(slots=True)
+class _Results:
+    """Findings in report order; summaries that only restate reported source errors wait.
 
+    A missing input or an ambiguous main file makes every bibliography summary
+    inconclusive with the same reason. The source checks report that error;
+    repeating it once per bibliography check buries it, so such summaries become
+    one note. Summaries with any other uncertainty, and every per-item finding, stay.
+    """
 
-def _reason_details(reasons: list[str]) -> list[str]:
-    unique = sorted(set(reasons))
-    if len(unique) > _MAX_REASONS:
-        return [
-            *unique[:_MAX_REASONS],
-            f"{len(unique) - _MAX_REASONS} further uncertainties omitted",
-        ]
-    return unique
+    scope: _Scope
+    findings: list[Finding] = field(default_factory=list)
+    # Held-back summaries with the uncertainty messages each lists.
+    restated: list[tuple[Finding, list[str]]] = field(default_factory=list)
 
-
-def _graph(inspection: _Inspection) -> _Graph:
-    graph = _Graph(inspection.main)
-    selected = _reachable_sources(inspection)
-    if inspection.main not in selected:
-        reason = "A unique readable main source could not be selected"
-        graph.reasons.append(reason)
-        if not inspection.main and any(
-            item.rule in _ROOT_FAILURES and _blocking(item) for item in inspection.findings
-        ):
-            graph.reported_causes.add(reason)
-    if not inspection.main:
-        return graph
-    scope = selected | {inspection.main}
-    for item in inspection.findings:
-        # A resolved lookup-order or conditional dependency is evidence, not a gap.
-        if item.path in scope and item.rule in _GRAPH_FAILURES and item.status != "passed":
-            reason = f"{item.path}: {item.message}"
-            graph.reasons.append(reason)
-            if _blocking(item):
-                graph.reported_causes.add(reason)
-    resources, resource_reasons = _resource_declarations(inspection, selected)
-    graph.resources.update(resources)
-    graph.reasons.extend(resource_reasons)
-    for name in sorted(selected):
-        cancellation_point()
-        source = inspection.sources[name]
-        commands = _commands_before_end(source)
-        spans = conditional_spans(source.commands)
-        for command in commands:
-            if command.name == "subfile":
-                graph.reasons.append(
-                    f"{name}:{command.line}: subfile bibliography content context is unsupported"
-                )
-            if _citation_marked(command.name) and in_conditional(spans, command.start):
-                graph.reasons.append(
-                    f"{name}:{command.line}: conditional citation or bibliography "
-                    "execution is not expanded"
-                )
-            if command.name in _DEFINITIONS and _citation_marked(
-                " ".join(item.value for item in (*command.arguments, *command.options))
-            ):
-                graph.reasons.append(
-                    f"{name}:{command.line}: a macro definition of citation markup is not expanded"
-                )
-            if command.name in _EXECUTION:
-                graph.reasons.append(
-                    f"{name}:{command.line}: macro or category-code execution is not expanded"
-                )
-            if command.name == "endinput":
-                # Tokens on its physical line may still run, even though lexical
-                # traversal deliberately stops before them.
-                graph.reasons.append(
-                    f"{name}:{command.line}: endinput token buffering is unverified"
-                )
-            if command.name in _FILTERS or (
-                command.name == "begin"
-                and command.arguments
-                and command.arguments[0].value.strip() in {"refsection", "refsegment"}
-            ):
-                graph.reasons.append(
-                    f"{name}:{command.line}: bibliography scope/filter is unsupported"
-                )
-            if command.name == "printbibliography" and command.options:
-                graph.unused_reasons.append(
-                    f"{name}:{command.line}: bibliography print filters/options are not interpreted"
-                )
-            citation = command.name.lower() in _CITATIONS | _MULTICITES
-            inline = command.name == "bibitem"
-            if not citation and not inline:
-                if "cite" in command.name.lower() and command.name not in _DYNAMIC:
-                    graph.reasons.append(
-                        f"{name}:{command.line}: unsupported citation-like command \\{command.name}"
-                    )
-                continue
-            arguments = (
-                command.arguments if command.name.lower() in _MULTICITES else command.arguments[:1]
+    def summarize(
+        self,
+        rule: str,
+        items: list[Finding],
+        checked: int,
+        uncertainties: list[Uncertainty],
+        *,
+        description: str,
+        severity: Severity = "warning",
+        details: dict[str, object] | None = None,
+    ) -> None:
+        """Add a check's item findings and its summary for ``checked`` supported items."""
+        base = self.scope.details() if details is None else details
+        self.findings.extend(items)
+        if uncertainties:
+            bounded = bounded_uncertainties(uncertainties)
+            messages = uncertainty_messages(bounded)
+            summary = _finding(
+                rule,
+                f"{description} is incomplete: {uncertainties[0].message}.",
+                "inconclusive",
+                severity=severity,
+                incomplete=True,
+                details={**base, "checked": checked, "uncertainty": messages},
             )
-            if not arguments:
-                graph.reasons.append(
-                    f"{name}:{command.line}: citation has no supported key argument"
+            if all(item.already_reported for item in bounded):
+                self.restated.append((summary, messages))
+            else:
+                self.findings.append(summary)
+        elif items:
+            return
+        elif not checked:
+            # Reporting "passed" for an empty inspection would overstate the evidence.
+            self.findings.append(
+                _finding(
+                    rule,
+                    "No supported items to check.",
+                    "not_applicable",
+                    severity="info",
+                    details={**base, "checked": 0},
                 )
-            if command.depth:
-                graph.reasons.append(
-                    f"{name}:{command.line}: grouped citation execution is unverified"
+            )
+        else:
+            self.findings.append(
+                _finding(
+                    rule,
+                    f"{description}: no issue found in {checked} supported item(s).",
+                    "passed",
+                    details={**base, "checked": checked},
                 )
-            if (
-                command.name.lower() in _MULTICITES
-                and len(command.arguments) + len(command.options) >= 6
-            ):
-                graph.reasons.append(
-                    f"{name}:{command.line}: multicite exceeds lexical argument coverage"
-                )
-            for argument in arguments:
-                keys = _keys(argument.value)
-                if keys is None or source.text[argument.start : argument.end] != argument.value:
-                    graph.reasons.append(
-                        f"{name}:{command.line}: citation key contains dynamic markup"
-                    )
-                    continue
-                for key in keys:
-                    if key == "*" and command.name.lower() == "nocite":
-                        graph.nocite_all = True
-                    elif inline:
-                        graph.inline_keys.add(key)
-                    else:
-                        graph.citations.append((key, name, command.line))
-    graph.reasons = _reason_details(graph.reasons)
-    graph.unused_reasons = _reason_details(graph.unused_reasons)
-    return graph
+            )
+
+    def report(self) -> list[Finding]:
+        if not self.restated:
+            return self.findings
+        codes = list(dict.fromkeys(summary.code or summary.rule for summary, _ in self.restated))
+        reported = sorted({message for _, messages in self.restated for message in messages})
+        # An unavailable selection only follows from the causes; name a cause instead.
+        reported = [reason for reason in reported if reason != _SELECTION_UNAVAILABLE] or reported
+        note = Finding(
+            "bibliography.source_error",
+            f"Bibliography checks {', '.join(codes)} were inconclusive because of a source "
+            f"error reported above: {reported[0].rstrip('.')}.",
+            severity="warning",
+            status="inconclusive",
+            evidence_kind=EvidenceKind.DERIVED,
+            suggestion="Fix the reported source error; these bibliography checks then run in full.",
+            details=self.scope.details(inconclusive_checks=codes, uncertainty=reported),
+        )
+        return [*self.findings, note]
 
 
-def _load_documents(root: Path, names: set[str]) -> tuple[list[_Document], list[str]]:
-    documents: list[_Document] = []
-    reasons: list[str] = []
-    total = entries = 0
+def _load_resources(root: Path, names: set[str]) -> tuple[list[BibDocument], list[Uncertainty]]:
+    """Parse the declared resources within the shared resource-set budget."""
+    documents: list[BibDocument] = []
+    uncertainties: list[Uncertainty] = []
+    reader = BibFileReader(max_total_bytes=MAX_RESOURCES_TOTAL_BYTES)
+    entries = 0
     for index, name in enumerate(sorted(names)):
         cancellation_point()
-        if index >= _MAX_DOCUMENTS:
-            reasons.append(f"Bibliography resource count exceeds {_MAX_DOCUMENTS}")
+        if index >= MAX_RESOURCE_FILES:
+            uncertainties.append(
+                Uncertainty(f"Bibliography resource count exceeds {MAX_RESOURCE_FILES}")
+            )
             break
         path = root / name
         try:
             if path.is_symlink() or not path.is_file():
                 raise ValueError("resource is missing or is a symbolic link")
-            allowance = min(_MAX_FILE_BYTES, _MAX_TOTAL_BYTES - total)
-            if path.stat().st_size > allowance:
-                raise ValueError("resource exceeds the per-file or total bibliography byte budget")
-            with path.open("rb") as stream:
-                raw = stream.read(allowance + 1)
-            if len(raw) > allowance:
-                raise ValueError("resource exceeds the per-file or total bibliography byte budget")
-            total += len(raw)
-            document = _Document(name, raw.decode("utf-8-sig"))
-            _Parser(document).parse()
+            if path.stat().st_size > reader.allowance:
+                raise ValueError(_OVER_BUDGET)
+            document = reader.read(path, name)
+            if document is None:
+                raise ValueError(_OVER_BUDGET)
         except (OSError, UnicodeError, ValueError) as error:
-            reasons.append(f"{name}: {error}")
+            uncertainties.append(Uncertainty(f"{name}: {error}"))
             continue
         if not document.valid:
-            reasons.append(f"{name}: bibliography syntax is incomplete")
-        entries += len(document.entries)
-        if entries > _MAX_ENTRIES:
-            reasons.append(f"Bibliography entry count exceeds {_MAX_ENTRIES}")
+            uncertainties.append(Uncertainty(f"{name}: bibliography syntax is incomplete"))
+        entries += len(document.records)
+        if entries > MAX_BIB_ENTRIES:
+            uncertainties.append(Uncertainty(f"Bibliography entry count exceeds {MAX_BIB_ENTRIES}"))
             break
         documents.append(document)
-    return documents, reasons
+    return documents, uncertainties
 
 
-def _scalar(value: _Field) -> str | None:
-    if len(value.atoms) != 1 or value.atoms[0].kind not in {"literal", "number"}:
-        return None
-    text = value.atoms[0].value.strip()
-    if len(text) > _MAX_FIELD_CHARS or "\\" in text:
-        return None
-    return text
-
-
-def _fields(entry: _Entry, name: str) -> list[_Field]:
+def _fields(entry: Entry, name: str) -> list[Field]:
     return [item for item in entry.fields if item.name == name]
 
 
-def _content_state(entry: _Entry, names: list[str]) -> str:
+_Presence = Literal["present", "unknown", "missing"]
+
+
+def _content_state(entry: Entry, names: list[str]) -> _Presence:
     uncertain = False
     for name in names:
         matches = _fields(entry, name)
         if len(matches) > 1:
             uncertain = True
         elif matches:
-            value = _scalar(matches[0])
+            value = field_literal(matches[0])
             if value is None:
                 uncertain = True
             elif value.translate(str.maketrans("", "", "{}")).strip():
@@ -428,228 +618,129 @@ def _content_state(entry: _Entry, names: list[str]) -> str:
     return "missing"
 
 
-def _finding(
-    rule: str,
-    message: str,
-    status: Status,
-    *,
-    reference: _Reference | None = None,
-    severity: Severity = "warning",
-    evidence: str = "derived",
-    details: dict[str, object] | None = None,
-) -> Finding:
-    data = dict(details or {})
-    if reference:
-        data.update({"entry": reference.entry.key, "entry_type": reference.entry.kind})
-    return Finding(
-        f"bibliography.{rule}",
-        message,
-        severity="info" if status == "passed" else severity,
-        status=status,
-        path=reference.document.path if reference else None,
-        line=reference.document.line(reference.entry.start) if reference else None,
-        evidence=evidence,
-        details=data,
+def _missing_citations(
+    graph: CitationGraph, index: EntryIndex, uncertain: list[Uncertainty]
+) -> list[Finding]:
+    details = uncertainty_messages(bounded_uncertainties(uncertain))
+    missing: list[Finding] = []
+    for key, path, line in graph.citations:
+        cancellation_point()
+        if key in index.keys or key in graph.inline_keys:
+            continue
+        missing.append(
+            Finding(
+                "bibliography.citation_coverage",
+                f"Citation key {key!r} has no entry in this root's inspected resources.",
+                severity="warning" if uncertain else "error",
+                status="inconclusive" if uncertain else "failed",
+                path=path,
+                line=line,
+                evidence_kind=EvidenceKind.DERIVED,
+                details={
+                    "key": key,
+                    "document": graph.main,
+                    "resources": sorted(graph.resources),
+                    "uncertainty": details,
+                },
+            )
+        )
+    return missing
+
+
+def _uncited_entries(
+    references: list[LocatedEntry],
+    used: set[tuple[str, int]],
+    uncertainties: list[Uncertainty],
+    results: _Results,
+) -> None:
+    candidates = [item for item in references if item.identity not in used]
+    unused: list[Finding] = []
+    if candidates:
+        cancellation_point()
+        # One aggregate keeps a shared master bibliography readable; every
+        # candidate stays individually addressable through the details.
+        rows = [
+            {
+                "entry": item.entry.key,
+                "entry_type": item.entry.entry_type,
+                "path": item.document.path,
+                "line": item.document.line(item.entry.start),
+            }
+            for item in candidates
+        ]
+        listed = ", ".join(item.entry.key for item in candidates[:_MAX_LISTED_ENTRIES])
+        unused.append(
+            Finding(
+                "bibliography.uncited_entries",
+                f"{len(candidates)} of {len(references)} entries have no scanned use: "
+                + listed
+                + more_suffix(len(candidates) - _MAX_LISTED_ENTRIES),
+                severity="warning",
+                status="inconclusive" if uncertainties else "failed",
+                path=candidates[0].document.path,
+                line=candidates[0].document.line(candidates[0].entry.start),
+                evidence_kind=EvidenceKind.HEURISTIC,
+                incomplete=bool(uncertainties),
+                details=results.scope.details(
+                    entries=rows,
+                    uncertainty=uncertainty_messages(bounded_uncertainties(uncertainties)),
+                ),
+            )
+        )
+    results.summarize(
+        "uncited_entries",
+        unused,
+        len(references),
+        uncertainties,
+        description="Citation and relationship reachability",
     )
 
 
-def _summarize(
-    rule: str,
-    findings: list[Finding],
-    checked: int,
-    reasons: list[str],
-    *,
-    scope: dict[str, object],
-    description: str,
-    severity: Severity = "warning",
-) -> list[Finding]:
-    if reasons:
-        findings.append(
-            _finding(
-                rule,
-                f"{description} is incomplete: {reasons[0]}.",
-                "inconclusive",
-                severity=severity,
-                details={**scope, "checked": checked, "uncertainty": _reason_details(reasons)},
-            )
-        )
-    elif findings:
-        return findings
-    elif not checked:
-        # Reporting "passed" for an empty inspection would overstate the evidence.
-        findings.append(
-            _finding(
-                rule,
-                "No supported items to check.",
-                "not_applicable",
-                severity="info",
-                details={**scope, "checked": 0},
-            )
-        )
-    else:
-        findings.append(
-            _finding(
-                rule,
-                f"{description}: no issue found in {checked} supported item(s).",
-                "passed",
-                details={**scope, "checked": checked},
-            )
-        )
-    return findings
-
-
-def _entry_index(
-    references: list[_Reference],
-) -> tuple[dict[str, list[_Reference]], dict[tuple[str, int], set[str]], list[str]]:
-    keys: dict[str, list[_Reference]] = defaultdict(list)
-    relationships: dict[tuple[str, int], set[str]] = defaultdict(set)
-    reasons: list[str] = []
-    sets: list[tuple[str, list[str]]] = []
-    for reference in references:
-        cancellation_point()
-        entry = reference.entry
-        if entry.key:
-            keys[entry.key].append(reference)
-        for item in entry.fields:
-            if item.name not in _RELATIONS | {"ids"}:
-                continue
-            value = _scalar(item)
-            targets = _keys(value) if value is not None else None
-            if targets is None:
-                reasons.append(f"{reference.document.path}: {entry.key} has dynamic {item.name}")
-            elif item.name == "ids":
-                for target in targets:
-                    keys[target].append(reference)
-            else:
-                relationships[reference.identity].update(targets)
-                if item.name == "entryset" and entry.key:
-                    sets.append((entry.key, targets))
-    for key, targets in keys.items():
-        if len({target.identity for target in targets}) > 1:
-            reasons.append(f"Citation key or alias {key!r} identifies multiple entries")
-    for targets in relationships.values():
-        for key in targets:
-            if key not in keys:
-                reasons.append(f"Bibliography relationship target {key!r} is unresolved")
-    # A backend may render a set when one member is cited. Retaining both
-    # directions avoids calling its set or sibling entries definitely unused.
-    for key, members in sets:
-        for member in members:
-            for reference in keys.get(member, []):
-                relationships[reference.identity].add(key)
-    return keys, relationships, _reason_details(reasons)
-
-
 def _coverage(
-    graphs: list[_Graph],
-    references: list[_Reference],
-    reasons: list[str],
+    graphs: list[CitationGraph],
+    references: list[LocatedEntry],
+    uncertainties: list[Uncertainty],
     options: BibliographyOptions,
-    scope: dict[str, object],
-) -> list[Finding]:
-    findings: list[Finding] = []
+    results: _Results,
+) -> None:
     used: set[tuple[str, int]] = set()
-    unused_reasons = list(reasons)
+    unused_uncertainties = list(uncertainties)
     for graph in graphs:
-        local = [item for item in references if item.document.path in graph.resources]
-        keys, relationships, key_reasons = _entry_index(local)
-        uncertain = [*reasons, *graph.reasons, *key_reasons]
-        uncertainty_details = _reason_details(uncertain)
-        unused_reasons.extend([*uncertain, *graph.unused_reasons])
-        coverage: list[Finding] = []
-        queue: deque[_Reference] = deque(local if graph.nocite_all else [])
-        for key, path, line in graph.citations:
-            cancellation_point()
-            if key in keys:
-                queue.extend(keys[key])
-            elif key not in graph.inline_keys:
-                coverage.append(
-                    Finding(
-                        "bibliography.citation_coverage",
-                        f"Citation key {key!r} has no entry in this root's inspected resources.",
-                        severity="warning" if uncertain else "error",
-                        status="inconclusive" if uncertain else "failed",
-                        path=path,
-                        line=line,
-                        evidence="derived",
-                        details={
-                            "key": key,
-                            "document": graph.main,
-                            "resources": sorted(graph.resources),
-                            "uncertainty": uncertainty_details,
-                        },
-                    )
-                )
-        if options.check_citation_coverage:
-            findings.extend(
-                _summarize(
-                    "citation_coverage",
-                    coverage,
-                    len(graph.citations),
-                    uncertain,
-                    scope={**scope, "document": graph.main, "resources": sorted(graph.resources)},
-                    description="Supported literal citation coverage",
-                )
-            )
-        reached: set[tuple[str, int]] = set()
-        while queue:
-            cancellation_point()
-            reference = queue.popleft()
-            if reference.identity in reached:
-                continue
-            reached.add(reference.identity)
-            for target in relationships.get(reference.identity, set()):
-                queue.extend(keys.get(target, []))
-        used.update(reached)
-    if options.check_uncited_entries:
-        unused: list[Finding] = []
-        uncertainty_details = _reason_details(unused_reasons)
-        candidates = [item for item in references if item.identity not in used]
-        if candidates:
-            cancellation_point()
-            # One aggregate keeps a shared master bibliography readable; every
-            # candidate stays individually addressable through the details.
-            rows = [
-                {
-                    "entry": item.entry.key,
-                    "entry_type": item.entry.kind,
-                    "path": item.document.path,
-                    "line": item.document.line(item.entry.start),
-                }
-                for item in candidates
-            ]
-            listed = ", ".join(str(item.entry.key) for item in candidates[:_MAX_LISTED_ENTRIES])
-            remaining = max(0, len(candidates) - _MAX_LISTED_ENTRIES)
-            unused.append(
-                Finding(
-                    "bibliography.uncited_entries",
-                    f"{len(candidates)} of {len(references)} entries have no scanned use: "
-                    + listed
-                    + (f" (+{remaining} more)" if remaining else ""),
-                    severity="warning",
-                    status="inconclusive" if unused_reasons else "failed",
-                    path=candidates[0].document.path,
-                    line=candidates[0].document.line(candidates[0].entry.start),
-                    evidence="heuristic",
-                    details={**scope, "entries": rows, "uncertainty": uncertainty_details},
-                )
-            )
-        findings.extend(
-            _summarize(
-                "uncited_entries",
-                unused,
-                len(references),
-                unused_reasons,
-                scope=scope,
-                description="Citation and relationship reachability",
-            )
+        # Keys resolve per root, against only the resources that root declares.
+        index = index_entries(
+            [item for item in references if item.document.path in graph.resources]
         )
-    return findings
+        uncertain = [*uncertainties, *graph.uncertainties, *index.uncertainties]
+        unused_uncertainties.extend([*uncertain, *graph.unused_uncertainties])
+        if options.check_citation_coverage:
+            results.summarize(
+                "citation_coverage",
+                _missing_citations(graph, index, uncertain),
+                len(graph.citations),
+                uncertain,
+                description="Supported literal citation coverage",
+                details=results.scope.details(
+                    document=graph.main, resources=sorted(graph.resources)
+                ),
+            )
+        used.update(index.reachable(graph))
+    if options.check_uncited_entries:
+        _uncited_entries(references, used, unused_uncertainties, results)
 
 
-def _page_state(value: str) -> tuple[Status, str]:
-    if not value or any(character in value for character in "{}"):
-        return ("failed", "empty page field") if not value else ("inconclusive", "brace markup")
+class _Verdict(NamedTuple):
+    """The outcome of one literal field syntax check."""
+
+    status: Status
+    reason: str = ""
+    tokens: tuple[str, ...] = ()
+
+
+def _page_verdict(value: str) -> _Verdict:
+    if not value:
+        return _Verdict("failed", "empty page field")
+    if any(character in value for character in "{}"):
+        return _Verdict("inconclusive", "brace markup")
     unknown = False
     for part in value.split(","):
         part = part.strip()
@@ -664,36 +755,38 @@ def _page_state(value: str) -> tuple[Status, str]:
                 len(last.lstrip("0")),
                 last.lstrip("0"),
             ):
-                return "failed", "descending page endpoints"
+                return _Verdict("failed", "descending page endpoints")
         elif not part or re.fullmatch(r"[\d\s–—-]+", part):
-            return "failed", "malformed numeric page range"
+            return _Verdict("failed", "malformed numeric page range")
         else:
             unknown = True
-    return ("inconclusive", "unsupported page notation") if unknown else ("passed", "")
+    return _Verdict("inconclusive", "unsupported page notation") if unknown else _Verdict("passed")
 
 
-def _url_state(value: str) -> tuple[Status, str]:
+def _url_verdict(value: str) -> _Verdict:
     if any(character in value for character in "{}"):
-        return "inconclusive", "brace markup"
+        return _Verdict("inconclusive", "brace markup")
     if not value or any(
         character.isspace() or ord(character) < 32 or ord(character) == 127 for character in value
     ):
-        return "failed", "empty URL, whitespace or control characters"
+        return _Verdict("failed", "empty URL, whitespace or control characters")
     if re.search(r"%(?![0-9a-fA-F]{2})", value) or any(char in value for char in '<>"'):
-        return "failed", "invalid percent escape or reserved delimiter"
+        return _Verdict("failed", "invalid percent escape or reserved delimiter")
     try:
         parts = urlsplit(value)
         if not parts.scheme:
-            return "failed", "an absolute URL scheme is missing"
+            return _Verdict("failed", "an absolute URL scheme is missing")
         if parts.scheme.lower() not in {"http", "https", "ftp"}:
-            return "inconclusive", "URL scheme is outside the supported HTTP/HTTPS/FTP subset"
+            return _Verdict(
+                "inconclusive", "URL scheme is outside the supported HTTP/HTTPS/FTP subset"
+            )
         if not parts.netloc or not parts.hostname:
-            return "failed", "a network host is missing"
+            return _Verdict("failed", "a network host is missing")
         parts.hostname.encode("idna")
         _ = parts.port
     except (ValueError, UnicodeError):
-        return "failed", "host or port syntax is malformed"
-    return "passed", ""
+        return _Verdict("failed", "host or port syntax is malformed")
+    return _Verdict("passed")
 
 
 def _unprotected_tokens(value: str) -> list[str]:
@@ -720,13 +813,84 @@ def _unprotected_tokens(value: str) -> list[str]:
     )
 
 
+def _capitalization_verdict(value: str) -> _Verdict:
+    tokens = _unprotected_tokens(value)
+    if tokens:
+        return _Verdict("failed", "case-sensitive tokens may need brace protection", tuple(tokens))
+    return _Verdict("passed")
+
+
+# Literal field syntax checks: the field each reads, its verdict and its evidence kind.
+_FIELD_CHECKS: dict[str, tuple[str, Callable[[str], _Verdict], EvidenceKind]] = {
+    "page_ranges": ("pages", _page_verdict, EvidenceKind.DERIVED),
+    "url_syntax": ("url", _url_verdict, EvidenceKind.DERIVED),
+    "capitalization": ("title", _capitalization_verdict, EvidenceKind.HEURISTIC),
+}
+_METADATA_DESCRIPTIONS = {
+    "required_fields": "Configured field presence",
+    "missing_doi": "Requested DOI presence",
+    "page_ranges": "Literal page-range syntax",
+    "url_syntax": "Literal URL syntax (offline)",
+    "capitalization": "Style-dependent capitalization advisory",
+}
+
+
+def _required_field(reference: LocatedEntry, spec: str, *, uncertain: bool) -> Finding | None:
+    state = _content_state(reference.entry, spec.split("|"))
+    if state == "missing" and uncertain:
+        state = "unknown"
+    if state == "present":
+        return None
+    return _finding(
+        "required_fields",
+        f"Entry {reference.entry.key!r}: required field {spec!r} is "
+        + ("missing or empty." if state == "missing" else "not statically established."),
+        "failed" if state == "missing" else "inconclusive",
+        reference=reference,
+        severity="error",
+        details={"requirement": spec},
+    )
+
+
+def _doi_presence(reference: LocatedEntry) -> Finding | None:
+    state = _content_state(reference.entry, ["doi"])
+    if state == "present":
+        return None
+    return _finding(
+        "missing_doi",
+        f"Entry {reference.entry.key!r}: DOI presence is "
+        + ("missing or empty; a DOI may not exist." if state == "missing" else "unverified."),
+        "failed" if state == "missing" else "inconclusive",
+        reference=reference,
+    )
+
+
+def _field_syntax(reference: LocatedEntry, rule: str, bib_fields: list[Field]) -> Finding | None:
+    name, verdict_of, evidence = _FIELD_CHECKS[rule]
+    value = field_literal(bib_fields[0]) if len(bib_fields) == 1 else None
+    verdict = (
+        _Verdict("inconclusive", "macro, concatenation, markup or repeated field")
+        if value is None
+        else verdict_of(value)
+    )
+    if verdict.status == "passed":
+        return None
+    return _finding(
+        rule,
+        f"Entry {reference.entry.key!r}: {name} check found {verdict.reason}.",
+        verdict.status,
+        reference=reference,
+        evidence=evidence,
+        details={"field": name, **({"tokens": list(verdict.tokens)} if verdict.tokens else {})},
+    )
+
+
 def _metadata(
-    references: list[_Reference],
-    reasons: list[str],
+    references: list[LocatedEntry],
+    uncertainties: list[Uncertainty],
     options: BibliographyOptions,
-    scope: dict[str, object],
-) -> list[Finding]:
-    findings: list[Finding] = []
+    results: _Results,
+) -> None:
     requirements = dict(options.required_fields)
     enabled = {
         "required_fields": bool(requirements),
@@ -737,104 +901,31 @@ def _metadata(
     }
     rows: dict[str, list[Finding]] = {name: [] for name, active in enabled.items() if active}
     counts: dict[str, int] = defaultdict(int)
+
+    def add(rule: str, finding: Finding | None) -> None:
+        counts[rule] += 1
+        if finding is not None:
+            rows[rule].append(finding)
+
     for reference in references:
         cancellation_point()
         entry = reference.entry
-        for spec in (*requirements.get("*", ()), *requirements.get(entry.kind, ())):
-            counts["required_fields"] += 1
-            state = _content_state(entry, spec.split("|"))
-            if state == "missing" and reasons:
-                state = "unknown"
-            if state != "present":
-                rows["required_fields"].append(
-                    _finding(
-                        "required_fields",
-                        f"Entry {entry.key!r}: required field {spec!r} is "
-                        + (
-                            "missing or empty."
-                            if state == "missing"
-                            else "not statically established."
-                        ),
-                        "failed" if state == "missing" else "inconclusive",
-                        reference=reference,
-                        severity="error",
-                        details={"requirement": spec},
-                    )
-                )
-        if "*" in options.doi_entry_types or entry.kind in options.doi_entry_types:
-            counts["missing_doi"] += 1
-            state = _content_state(entry, ["doi"])
-            if state != "present":
-                rows["missing_doi"].append(
-                    _finding(
-                        "missing_doi",
-                        f"Entry {entry.key!r}: DOI presence is "
-                        + (
-                            "missing or empty; a DOI may not exist."
-                            if state == "missing"
-                            else "unverified."
-                        ),
-                        "failed" if state == "missing" else "inconclusive",
-                        reference=reference,
-                    )
-                )
-        for rule, name, active in (
-            ("page_ranges", "pages", options.check_page_ranges),
-            ("url_syntax", "url", options.check_urls),
-            ("capitalization", "title", options.check_capitalization),
-        ):
-            if not active:
-                continue
-            fields = _fields(entry, name)
-            if not fields:
-                continue
-            counts[rule] += 1
-            value = _scalar(fields[0]) if len(fields) == 1 else None
-            status: Status
-            tokens: list[str] = []
-            if value is None:
-                status, reason = "inconclusive", "macro, concatenation, markup or repeated field"
-            elif rule == "page_ranges":
-                status, reason = _page_state(value)
-            elif rule == "url_syntax":
-                status, reason = _url_state(value)
-            else:
-                tokens = _unprotected_tokens(value)
-                status, reason = (
-                    ("failed", "case-sensitive tokens may need brace protection")
-                    if tokens
-                    else ("passed", "")
-                )
-            if status != "passed":
-                rows[rule].append(
-                    _finding(
-                        rule,
-                        f"Entry {entry.key!r}: {name} check found {reason}.",
-                        status,
-                        reference=reference,
-                        evidence="heuristic" if rule == "capitalization" else "derived",
-                        details={"field": name, **({"tokens": tokens} if tokens else {})},
-                    )
-                )
+        for spec in (*requirements.get("*", ()), *requirements.get(entry.entry_type, ())):
+            add("required_fields", _required_field(reference, spec, uncertain=bool(uncertainties)))
+        if "*" in options.doi_entry_types or entry.entry_type in options.doi_entry_types:
+            add("missing_doi", _doi_presence(reference))
+        for rule, (name, _, _) in _FIELD_CHECKS.items():
+            if enabled[rule] and (bib_fields := _fields(entry, name)):
+                add(rule, _field_syntax(reference, rule, bib_fields))
     for rule, row in rows.items():
-        findings.extend(
-            _summarize(
-                rule,
-                row,
-                counts[rule],
-                reasons,
-                scope=scope,
-                description={
-                    "required_fields": "Configured field presence",
-                    "missing_doi": "Requested DOI presence",
-                    "page_ranges": "Literal page-range syntax",
-                    "url_syntax": "Literal URL syntax (offline)",
-                    "capitalization": "Style-dependent capitalization advisory",
-                }[rule],
-                severity="error" if rule == "required_fields" else "warning",
-            )
+        results.summarize(
+            rule,
+            row,
+            counts[rule],
+            uncertainties,
+            description=_METADATA_DESCRIPTIONS[rule],
+            severity="error" if rule == "required_fields" else "warning",
         )
-    return findings
 
 
 def _normalized(value: str) -> str:
@@ -842,26 +933,28 @@ def _normalized(value: str) -> str:
     return " ".join(re.findall(r"[^\W_]+", value, re.UNICODE))
 
 
-def _fuzzy(
-    references: list[_Reference],
-    reasons: list[str],
-    options: BibliographyOptions,
-    scope: dict[str, object],
-) -> list[Finding]:
-    findings: list[Finding] = []
-    reasons = list(reasons)
-    groups: dict[tuple[str, str], list[tuple[_Reference, str, str | None]]] = defaultdict(list)
+class _FuzzyCandidate(NamedTuple):
+    reference: LocatedEntry
+    title: str
+    doi: str | None
+
+
+def _fuzzy_candidates(
+    references: list[LocatedEntry], uncertainties: list[Uncertainty]
+) -> dict[tuple[str, str], list[_FuzzyCandidate]]:
+    """Entries with literal title, author and year, grouped by normalized author and year."""
+    groups: dict[tuple[str, str], list[_FuzzyCandidate]] = defaultdict(list)
     for index, reference in enumerate(references):
         cancellation_point()
         if index >= _MAX_FUZZY_ENTRIES:
-            reasons.append(f"Fuzzy entry count exceeds {_MAX_FUZZY_ENTRIES}")
+            uncertainties.append(Uncertainty(f"Fuzzy entry count exceeds {_MAX_FUZZY_ENTRIES}"))
             break
         values: dict[str, str] = {}
         for name in ("title", "author", "year"):
-            fields = _fields(reference.entry, name)
-            if name == "year" and not fields:
-                fields = _fields(reference.entry, "date")
-            value = _scalar(fields[0]) if len(fields) == 1 else None
+            bib_fields = _fields(reference.entry, name)
+            if name == "year" and not bib_fields:
+                bib_fields = _fields(reference.entry, "date")
+            value = field_literal(bib_fields[0]) if len(bib_fields) == 1 else None
             if value is not None and len(value) <= _MAX_FUZZY_TEXT:
                 values[name] = _normalized(value)
         if (
@@ -869,63 +962,105 @@ def _fuzzy(
             or not all(values.values())
             or re.fullmatch(r"\d{4}(?: \d{2}){0,2}", values["year"]) is None
         ):
-            reasons.append(
-                f"{reference.document.path}: {reference.entry.key} "
-                "lacks supported title/author/year evidence"
+            uncertainties.append(
+                Uncertainty(
+                    f"{reference.document.path}: {reference.entry.key} "
+                    "lacks supported title/author/year evidence"
+                )
             )
             continue
         doi_fields = _fields(reference.entry, "doi")
-        doi = _doi_value(doi_fields[0])[0] if len(doi_fields) == 1 else None
-        groups[(values["author"], values["year"][:4])].append((reference, values["title"], doi))
-    comparisons = 0
+        doi = read_doi(doi_fields[0]).identifier if len(doi_fields) == 1 else None
+        groups[(values["author"], values["year"][:4])].append(
+            _FuzzyCandidate(reference, values["title"], doi)
+        )
+    return groups
+
+
+def _candidate_pairs(
+    groups: dict[tuple[str, str], list[_FuzzyCandidate]],
+) -> Iterator[tuple[_FuzzyCandidate, _FuzzyCandidate]]:
+    """Each earlier candidate with each later one of the same group."""
     for group in groups.values():
-        for index, (reference, title, doi) in enumerate(group):
-            for previous, other_title, other_doi in group[:index]:
-                cancellation_point()
-                if comparisons >= _MAX_FUZZY_PAIRS:
-                    reasons.append(f"Fuzzy comparison count exceeds {_MAX_FUZZY_PAIRS}")
-                    return _summarize(
-                        "fuzzy_duplicates",
-                        findings,
-                        comparisons,
-                        reasons,
-                        scope=scope,
-                        description="Likely-work duplicate search",
-                    )
-                comparisons += 1
-                if doi is not None and doi == other_doi:
-                    continue  # Exact DOI identity belongs to BIB007, not a title heuristic.
-                similarity = SequenceMatcher(None, title, other_title, autojunk=False).ratio()
-                if similarity >= options.fuzzy_duplicate_threshold:
-                    findings.append(
-                        _finding(
-                            "fuzzy_duplicates",
-                            f"Entries {previous.entry.key!r} and {reference.entry.key!r} "
-                            "may describe the same work; identity and version require review.",
-                            "failed",
-                            reference=reference,
-                            evidence="heuristic",
-                            details={
-                                "first_entry": previous.entry.key,
-                                "first_path": previous.document.path,
-                                "first_line": previous.document.line(previous.entry.start),
-                                "title_similarity": similarity,
-                                "threshold": options.fuzzy_duplicate_threshold,
-                                "matching": "normalized author and year",
-                            },
-                        )
-                    )
-    return _summarize(
+        for index, current in enumerate(group):
+            for previous in group[:index]:
+                yield previous, current
+
+
+def _fuzzy(
+    references: list[LocatedEntry],
+    uncertainties: list[Uncertainty],
+    options: BibliographyOptions,
+    results: _Results,
+) -> None:
+    uncertain = list(uncertainties)
+    findings: list[Finding] = []
+    comparisons = 0
+    for previous, current in _candidate_pairs(_fuzzy_candidates(references, uncertain)):
+        cancellation_point()
+        if comparisons >= _MAX_FUZZY_PAIRS:
+            uncertain.append(Uncertainty(f"Fuzzy comparison count exceeds {_MAX_FUZZY_PAIRS}"))
+            break
+        comparisons += 1
+        if current.doi is not None and current.doi == previous.doi:
+            continue  # Exact DOI identity belongs to BIB007, not a title heuristic.
+        similarity = SequenceMatcher(None, current.title, previous.title, autojunk=False).ratio()
+        if similarity >= options.fuzzy_duplicate_threshold:
+            first = previous.reference
+            findings.append(
+                _finding(
+                    "fuzzy_duplicates",
+                    f"Entries {first.entry.key!r} and {current.reference.entry.key!r} "
+                    "may describe the same work; identity and version require review.",
+                    "failed",
+                    reference=current.reference,
+                    evidence=EvidenceKind.HEURISTIC,
+                    details={
+                        "first_entry": first.entry.key,
+                        "first_path": first.document.path,
+                        "first_line": first.document.line(first.entry.start),
+                        "title_similarity": similarity,
+                        "threshold": options.fuzzy_duplicate_threshold,
+                        "matching": "normalized author and year",
+                    },
+                )
+            )
+    results.summarize(
         "fuzzy_duplicates",
         findings,
         comparisons,
-        reasons,
-        scope=scope,
+        uncertain,
         description="Likely-work duplicate search",
     )
 
 
-def check_bibliography_details(
+def _all_root_graphs(
+    root: Path, inspection: SourceGraph, selected: CitationGraph, uncertainties: list[Uncertainty]
+) -> list[CitationGraph]:
+    """One graph per discovered root; ``selected`` is the graph of ``inspection``."""
+    for item in inspection.findings:
+        if (
+            item.path
+            and Path(item.path).suffix.lower() in {".tex", ".ltx", ".latex"}
+            and item.rule in _DISCOVERY_FAILURES
+        ):
+            uncertainties.append(
+                Uncertainty(f"All-root discovery is incomplete: {item.path}: {item.message}")
+            )
+    if len(inspection.roots) > _MAX_ROOTS:
+        uncertainties.append(Uncertainty(f"Document root count exceeds {_MAX_ROOTS}"))
+    graphs: list[CitationGraph] = []
+    for main in inspection.roots[:_MAX_ROOTS]:
+        cancellation_point()
+        graphs.append(
+            selected
+            if inspection.main == main
+            else build_citation_graph(SourceGraph.build(root, main))
+        )
+    return graphs or [selected]
+
+
+def check_bibliography_coverage_and_fields(
     root: Path,
     main: str | None = None,
     options: BibliographyOptions = _DEFAULT_OPTIONS,
@@ -939,127 +1074,50 @@ def check_bibliography_details(
     """
     if not isinstance(options, BibliographyOptions):
         raise PreparationError("Bibliography checks require BibliographyOptions")
-    if not any(
-        (
-            options.check_citation_coverage,
-            options.check_uncited_entries,
-            options.required_fields,
-            options.doi_entry_types,
-            options.check_page_ranges,
-            options.check_urls,
-            options.check_capitalization,
-            options.check_fuzzy_duplicates,
-        )
-    ):
+    if not options.any_enabled:
         return []
-    inspection = _Inspection(root, main)
-    graphs = [_graph(inspection)]
-    reasons: list[str] = []
+    inspection = SourceGraph.build(root, main)
+    graphs = [build_citation_graph(inspection)]
+    uncertainties: list[Uncertainty] = []
     if options.all_roots:
-        roots = inspection.roots
-        for item in inspection.findings:
-            if (
-                item.path
-                and Path(item.path).suffix.lower() in {".tex", ".ltx", ".latex"}
-                and item.rule
-                in {
-                    "source-encoding",
-                    "source-size-limit",
-                    "source-argument-limit",
-                    "source-command-limit",
-                    "source-link",
-                }
-            ):
-                reasons.append(f"All-root discovery is incomplete: {item.path}: {item.message}")
-        if len(roots) > _MAX_ROOTS:
-            reasons.append(f"Document root count exceeds {_MAX_ROOTS}")
-        graphs = []
-        for selected in roots[:_MAX_ROOTS]:
-            cancellation_point()
-            graphs.append(
-                _graph(inspection if inspection.main == selected else _Inspection(root, selected))
-            )
-        if not graphs:
-            graphs = [_graph(inspection)]
+        graphs = _all_root_graphs(root, inspection, graphs[0], uncertainties)
     names = set().union(*(graph.resources for graph in graphs))
-    metadata_scope_reasons = list(reasons)
-    if not names and not inspection.roots and main is None:
+    metadata_uncertainties = list(uncertainties)
+    standalone = not inspection.roots and main is None
+    if not names and standalone:
         # A standalone .bib command has no manuscript resource selection. Its
         # explicitly stated metadata scope is every local bibliography file.
         names = {name for name in inspection.files if Path(name).suffix.lower() == ".bib"}
-    elif not names and any(graph.reasons for graph in graphs):
-        metadata_scope_reasons.append(_SELECTION_UNAVAILABLE)
-    if inspection.roots or main is not None:
-        metadata_scope_reasons.extend(reason for graph in graphs for reason in graph.reasons)
-    documents, input_reasons = _load_documents(root, names)
-    reasons.extend(input_reasons)
-    metadata_scope_reasons.extend(input_reasons)
-    references = [
-        _Reference(document, entry)
-        for document in documents
-        if document.valid
-        for entry in document.entries
-        if entry.key is not None
-    ]
-    scope: dict[str, object] = {
-        "scope": "all literal document roots"
-        if options.all_roots
-        else "selected literal document graph",
-        "documents": [graph.main for graph in graphs if graph.main],
-        "resources": sorted(names),
-        "source_expansion": "not performed",
-        "network": "not used",
-    }
-    if not inspection.roots and main is None:
-        scope["scope"] = "bibliography-only directory; citation scope unavailable"
-    findings = _coverage(graphs, references, reasons, options, scope)
-    findings.extend(_metadata(references, metadata_scope_reasons, options, scope))
-    if options.check_fuzzy_duplicates:
-        findings.extend(_fuzzy(references, metadata_scope_reasons, options, scope))
-    return _collapse_reported_causes(findings, graphs, scope)
-
-
-def _collapse_reported_causes(
-    findings: list[Finding], graphs: list[_Graph], scope: dict[str, object]
-) -> list[Finding]:
-    """Replace summaries that only restate an already reported source error with one note.
-
-    A missing input or an ambiguous main file makes every bibliography summary
-    inconclusive with the same reason. The source checks report that error;
-    repeating it once per bibliography check buries it. Summaries with any other
-    uncertainty, and every per-item finding, are kept.
-    """
-    causes = set().union(*(graph.reported_causes for graph in graphs))
-    if not causes:
-        return findings
-    if all(set(graph.reasons) <= causes for graph in graphs):
-        # Derived only from the graph reasons above, so it adds no new uncertainty.
-        causes.add(_SELECTION_UNAVAILABLE)
-
-    def restated(item: Finding) -> list[str]:
-        """The uncertainty of a summary that only restates reported causes, else nothing."""
-        uncertainty = item.details.get("uncertainty")
-        if item.status != "inconclusive" or "checked" not in item.details:
-            return []
-        if not isinstance(uncertainty, list) or not set(uncertainty) <= causes:
-            return []
-        return [str(value) for value in uncertainty]
-
-    collapsed = [item for item in findings if restated(item)]
-    if not collapsed:
-        return findings
-    codes = list(dict.fromkeys(item.code or item.rule for item in collapsed))
-    reported = sorted({value for item in collapsed for value in restated(item)})
-    reported = [reason for reason in reported if reason != _SELECTION_UNAVAILABLE] or reported
-    note = Finding(
-        "bibliography.source_error",
-        f"Bibliography checks {', '.join(codes)} were inconclusive because of a source error "
-        f"reported above: {reported[0].rstrip('.')}.",
-        severity="warning",
-        status="inconclusive",
-        evidence="derived",
-        suggestion="Fix the reported source error; these bibliography checks then run in full.",
-        details={**scope, "inconclusive_checks": codes, "uncertainty": reported},
+    elif not names and any(graph.uncertainties for graph in graphs):
+        graph_uncertainties = [item for graph in graphs for item in graph.uncertainties]
+        # Derived only from the graph uncertainties, so it restates nothing new.
+        metadata_uncertainties.append(
+            Uncertainty(
+                _SELECTION_UNAVAILABLE,
+                already_reported=all(item.already_reported for item in graph_uncertainties),
+            )
+        )
+    if not standalone:
+        metadata_uncertainties.extend(item for graph in graphs for item in graph.uncertainties)
+    documents, input_uncertainties = _load_resources(root, names)
+    uncertainties.extend(input_uncertainties)
+    metadata_uncertainties.extend(input_uncertainties)
+    references = located_entries(document for document in documents if document.valid)
+    if standalone:
+        description = "bibliography-only directory; citation scope unavailable"
+    elif options.all_roots:
+        description = "all literal document roots"
+    else:
+        description = "selected literal document graph"
+    results = _Results(
+        _Scope(
+            description,
+            tuple(graph.main for graph in graphs if graph.main),
+            tuple(sorted(names)),
+        )
     )
-    kept = [item for item in findings if not restated(item)]
-    return [*kept, note]
+    _coverage(graphs, references, uncertainties, options, results)
+    _metadata(references, metadata_uncertainties, options, results)
+    if options.check_fuzzy_duplicates:
+        _fuzzy(references, metadata_uncertainties, options, results)
+    return results.report()

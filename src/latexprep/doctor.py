@@ -5,29 +5,43 @@ from __future__ import annotations
 import asyncio
 import shutil
 import sys
-import tempfile
-import time
 from collections.abc import Callable
-from dataclasses import replace
 from pathlib import Path
 
-from .config import PARENT_MEMORY_MB, Settings, load_settings
+from .config import Settings
+from .finding_view import is_scope_disclaimer
 from .formatting import FormattingOptions, format_project
-from .models import Finding, PreparationError, Report, has_blockers
-from .pdf import compare_pdfs, inspect_pdf
-from .pdf_artwork import _configured as configured_artwork
-from .pdf_checks import _configured as configured_pdf
-from .reporting import is_scope_disclaimer
-from .runtime import RuntimeLimits, ToolRunner, build_project
+from .job_execution import JobExecution
+from .latexmk_build import build_project
+from .models import (
+    BibliographyBackend,
+    Engine,
+    Finding,
+    Outcome,
+    PreparationError,
+    Report,
+    has_blockers,
+    outcome_from_findings,
+)
+from .pdf_artwork import DRAWING_TRACE_RULES, configured_artwork_rules
+from .pdf_checks import (
+    OBJECT_STRUCTURE_RULES,
+    PAINT_TRACE_RULES,
+    TEXT_GEOMETRY_RULES,
+    configured_pdf_check_rules,
+)
+from .pdf_comparison import compare_pdfs
+from .pdf_inspection import inspect_pdf
+from .runtime import ToolRunner
 from .scheduler import ResourceBudget
 
 _PDF_TOOLS = ("pdfinfo", "pdftotext", "pdftoppm", "pdffonts", "pdfdetach", "pdfimages")
-_BIBLIOGRAPHY_BACKENDS = ("bibtex", "biber")
+_BIBLIOGRAPHY_BACKENDS: tuple[BibliographyBackend, ...] = ("bibtex", "biber")
 _DOCUMENT = "\\documentclass{article}\n\\begin{document}\nFledge setup test.\n"
 _REFERENCE = "@article{doctor,author={Example, Alice},title={Setup test},year={2026}}\n"
 
 
-def diagnostic_engines(settings: Settings) -> tuple[str, ...]:
+def diagnostic_engines(settings: Settings) -> tuple[Engine, ...]:
     """Exercise every distinct engine selected for configured documents."""
     return tuple(
         sorted(
@@ -50,33 +64,20 @@ def _selected_tools(settings: Settings) -> tuple[set[str], set[str]]:
         # The automatic strategy runs whichever backend a paper needs, so each
         # installed backend is exercised; a missing one is only an advisory.
         optional.update(_BIBLIOGRAPHY_BACKENDS)
-    if settings.format:
+    if settings.apply_formatting:
         required.add("tex-fmt")
-    pdf_rules = set(configured_pdf(settings.pdf_checks))
-    if pdf_rules & {"pdf.document_language", "pdf.annotation_policy", "pdf.action_policy"}:
+    pdf_rules = set(configured_pdf_check_rules(settings.pdf_checks))
+    if pdf_rules & OBJECT_STRUCTURE_RULES:
         optional.add("qpdf")
-    if pdf_rules & {
-        "pdf.stroke_width",
-        "pdf.color_space_policy",
-        "pdf.assumed_text_contrast",
-        "pdf.grayscale_separation",
-    }:
+    if pdf_rules & PAINT_TRACE_RULES:
         optional.add("mutool")
-    if pdf_rules & {"pdf.rendered_text_size", "pdf.printable_text_bounds", "pdf.text_overlap"}:
+    if pdf_rules & TEXT_GEOMETRY_RULES:
         optional.add("pdftohtml")
-    raster_only = {
-        "pdf.figure_whitespace",
-        "pdf.figure_edge_ink",
-        "pdf.grayscale_preview",
-        "pdf.type3_glyph_programs",
-        "pdf.rendered_sample_contrast",
-        "figure.color_space",
-    }
-    for options in (settings.pdf_artwork, settings.figure_artwork):
-        rules = set(configured_artwork(options))
+    for options in (settings.rendered_pdf_artwork, settings.included_figure_artwork):
+        rules = set(configured_artwork_rules(options))
         if "pdf.type3_glyph_programs" in rules:
             optional.add("qpdf")
-        if rules - raster_only:
+        if rules & DRAWING_TRACE_RULES:
             optional.add("mutool")
     return required, optional
 
@@ -122,8 +123,8 @@ def _record_stage(
                 Finding(
                     "doctor.fixture_failed",
                     f"Built-in setup fixture, {name}: {item.message}",
-                    "error" if required else "warning",
-                    item.status,
+                    severity="error" if required else "warning",
+                    status=item.status,
                     suggestion="Repair the local toolchain or execution limits and rerun "
                     "fledge doctor. This result does not diagnose your manuscript."
                     + (
@@ -139,8 +140,8 @@ def _record_stage(
         Finding(
             "doctor.fixture_passed",
             f"Built-in setup fixture: {name} passed.",
-            "info",
-            "passed",
+            severity="info",
+            status="passed",
             details={"stage": name},
         )
     )
@@ -151,7 +152,7 @@ async def run_doctor(
     settings: Settings | None = None, *, progress: Callable[[str], None] | None = None
 ) -> Report:
     """Diagnose selected setup; never read or compile a user's manuscript."""
-    settings = load_settings(None, (settings or Settings()).to_dict())
+    settings = settings or Settings()
     report = Report("doctor", scope="setup diagnostics with a built-in fixture")
     report.settings = settings.to_dict()
     required, optional = _selected_tools(settings)
@@ -184,105 +185,77 @@ async def run_doctor(
                     "doctor.tool_missing",
                     f"{'Required' if name in required else 'Optional'} "
                     f"tool is unavailable: {name}.",
-                    "error" if name in required else "warning",
-                    "inconclusive",
+                    severity="error" if name in required else "warning",
+                    status="inconclusive",
                     suggestion=f"Install {name} explicitly and ensure it is on PATH, then rerun "
                     "fledge doctor.",
                     details={"tool": name, "required": name in required},
                 )
             )
-    budget = ResourceBudget(
-        settings.jobs,
-        settings.memory_mb,
-        build_jobs=settings.build_jobs,
-        render_jobs=settings.render_jobs,
-        parent_memory_mb=PARENT_MEMORY_MB,
-    )
-    runner = ToolRunner(
-        RuntimeLimits(
-            timeout_seconds=settings.timeout_seconds,
-            memory_mb=settings.build_memory_mb,
-            max_file_bytes=settings.max_bytes,
-        ),
-        budget=budget,
-        source_date_epoch=settings.source_date_epoch,
-    )
-    started = time.monotonic()
+    execution = JobExecution(settings)
     try:
-        with tempfile.TemporaryDirectory(prefix="fledge-doctor-") as temporary:
-            root = Path(temporary).resolve()
-            async with runner.job_scope(root, max_temp_bytes=settings.max_temporary_bytes):
-                async with asyncio.timeout(settings.job_timeout_seconds):
-                    await _diagnose(
-                        report, root, settings, runner, budget, required, optional, emit
-                    )
+        with execution.workspace("fledge-doctor-") as root:
+            async with execution.bounded(root):
+                await _diagnose(
+                    report,
+                    root,
+                    settings,
+                    execution.runner,
+                    execution.budget,
+                    required,
+                    optional,
+                    emit,
+                )
     except TimeoutError:
         report.findings.append(
             Finding(
                 "execution.deadline",
                 f"Setup diagnostics exceeded the "
                 f"{settings.job_timeout_seconds}-second job deadline.",
-                "error",
-                "inconclusive",
+                severity="error",
+                status="inconclusive",
                 suggestion="Adjust job_timeout_seconds in your config and rerun fledge doctor.",
             )
         )
     except asyncio.CancelledError:
-        report.outcome = "cancelled"
+        report.outcome = Outcome.CANCELLED
         raise
     except (PreparationError, OSError) as error:
         report.findings.append(
             Finding(
                 "doctor.execution_unavailable",
                 f"Setup diagnostics could not complete: {error}",
-                "error",
-                "inconclusive",
+                severity="error",
+                status="inconclusive",
                 suggestion="Resolve the local execution failure and rerun "
                 "fledge doctor. No manuscript was compiled.",
             )
         )
     finally:
-        for name, version in runner.tool_versions.items():
-            if name in report.tools and isinstance(version, dict):
+        for name, version in execution.runner.tool_versions.items():
+            if name in report.tools:
                 inventory = report.tools[name]
                 assert isinstance(inventory, dict)
-                inventory.update(version)
+                inventory.update(version.to_report())
                 inventory["version_verified"] = True
-        observed = runner.statistics()
-        report.execution.update(
-            {
-                "resources": budget.statistics(),
-                "observed": observed,
-                "elapsed_seconds": round(time.monotonic() - started, 6),
-            }
-        )
+        report.execution.update(execution.statistics())
         # job_scope takes a final sample on exit. A late limit or accounting
         # failure invalidates setup evidence even if every fixture operation passed.
-        resource_failure = observed.get("resource_exceeded")
+        resource_failure = execution.runner.statistics().resource_exceeded
         if resource_failure:
             report.findings.append(
                 Finding(
                     "execution.resources",
                     f"Setup diagnostics could not satisfy the runtime resource checks: "
                     f"{resource_failure}",
-                    "error",
-                    "inconclusive",
+                    severity="error",
+                    status="inconclusive",
                     suggestion="Resolve the stated resource or accounting failure, adjust "
                     "the relevant memory or temporary-space limit if needed, and rerun "
                     "fledge doctor.",
                 )
             )
-    report.outcome = (
-        "blocked"
-        if has_blockers(report.findings)
-        else (
-            "passed_with_advisories"
-            if any(
-                item.severity == "warning" and item.status != "passed" for item in report.findings
-            )
-            else "passed"
-        )
-    )
+    report.outcome = outcome_from_findings(report.findings, blocked=has_blockers(report.findings))
     return report.redacted_copy()
 
 
@@ -301,12 +274,7 @@ async def _diagnose(
     sandbox_work.mkdir()
     try:
         result = await runner.run(["true"], cwd=sandbox_work, workspace=sandbox_work)
-        if (
-            result.returncode
-            or result.timed_out
-            or result.output_limited
-            or result.resource_exceeded
-        ):
+        if not result.completed_normally:
             raise PreparationError(
                 "Sandbox probe did not complete "
                 f"(exit={result.returncode}, timeout={result.timed_out}, "
@@ -317,8 +285,8 @@ async def _diagnose(
             Finding(
                 "doctor.sandbox_unavailable",
                 f"Restricted execution is unavailable: {error}",
-                "error",
-                "inconclusive",
+                severity="error",
+                status="inconclusive",
                 suggestion="Run on a host where macOS sandbox-exec or Linux Bubblewrap with user "
                 "namespaces can start. Fledge never falls back to unrestricted execution.",
             )
@@ -330,8 +298,8 @@ async def _diagnose(
         Finding(
             "doctor.sandbox",
             "Restricted execution started successfully.",
-            "info",
-            "passed",
+            severity="info",
+            status="passed",
         )
     )
     for name in sorted(required | optional):
@@ -343,7 +311,7 @@ async def _diagnose(
         work = root / f"version-{name}"
         work.mkdir()
         try:
-            inventory.update(await runner.tool_version(_version_command(name), work))
+            inventory.update((await runner.tool_version(_version_command(name), work)).to_report())
             inventory["version_verified"] = True
         except PreparationError as error:
             report.findings.append(
@@ -351,8 +319,8 @@ async def _diagnose(
                     "doctor.tool_unavailable",
                     f"Installed tool {name} could not report its "
                     f"version under restricted execution: {error}",
-                    "error" if name in required else "warning",
-                    "inconclusive",
+                    severity="error" if name in required else "warning",
+                    status="inconclusive",
                     suggestion=f"Repair {name} or its sandbox-accessible resources and rerun "
                     "fledge doctor.",
                     details={"tool": name, "required": name in required},
@@ -360,13 +328,17 @@ async def _diagnose(
             )
     source = root / "source"
     _fixture(source, settings.bibliography_backend)
-    if settings.format and _ready(report, {"tex-fmt"}):
+    if settings.apply_formatting and _ready(report, {"tex-fmt"}):
         emit("Testing formatting on the built-in source")
+        # The configured line format, without project exclusions or blank-line policy.
         formatted = await format_project(
             source,
             root / "format",
             runner,
-            replace(settings, formatting_options=FormattingOptions()),
+            FormattingOptions(
+                wrap_length=settings.formatting_options.wrap_length,
+                tab_size=settings.formatting_options.tab_size,
+            ),
             budget=budget,
         )
         if not formatted.contents and not has_blockers(formatted.findings):
@@ -374,8 +346,8 @@ async def _diagnose(
                 Finding(
                     "doctor.format_evidence",
                     "Formatter produced no source output.",
-                    "error",
-                    "inconclusive",
+                    severity="error",
+                    status="inconclusive",
                 )
             )
         if _record_stage(report, "formatting", formatted.findings):
@@ -414,7 +386,7 @@ async def _diagnose(
                 Finding(
                     "doctor.build_failed",
                     "Build did not produce a successful PDF result.",
-                    "error",
+                    severity="error",
                 ),
             ]
         passed = _record_stage(report, f"{engine}: compilation", findings)
@@ -442,8 +414,8 @@ async def _diagnose(
                 Finding(
                     "doctor.pdf_evidence",
                     "Required page, text or rendered evidence is incomplete.",
-                    "error",
-                    "inconclusive",
+                    severity="error",
+                    status="inconclusive",
                 )
             )
         if _record_stage(report, f"{engine}: PDF pipeline", [*inspected, *compared]):
@@ -495,7 +467,7 @@ async def _diagnose_bibliographies(
                 Finding(
                     "doctor.build_failed",
                     "Build did not produce a successful PDF result.",
-                    "error",
+                    severity="error",
                 ),
             ]
         if _record_stage(report, stage, findings, required=False) and built.success:

@@ -37,16 +37,16 @@ suspicions and semantic advice. Missing tools or uncertain interpretation must
 produce an incomplete result, not a pass. Current settings are defined in
 {download}`Settings <../src/latexprep/config.py>`,
 {download}`ManuscriptOptions <../src/latexprep/manuscript.py>`,
-{download}`PdfOptions <../src/latexprep/pdf.py>`, and the typed options in the additional
-`*_checks.py` modules. The {download}`additional-check example <../examples/checks.toml>`
+{download}`PdfInspectionOptions <../src/latexprep/pdf_inspection.py>`, and the typed
+options in the additional `*_checks.py` modules. The {download}`additional-check example <../examples/checks.toml>`
 shows the nested tables. No template registry, package policy or publisher limit
 is maintained by the application. Online checks require both selection and
 network permission; unavailable providers are not passes.
 
 The [preparation options](preparation-options.md) and
 {download}`example <../examples/preparation.toml>` describe the new opt-in operations.
-`pdf_artwork` applies to the final document; `figure_artwork` applies separately
-to input PDFs. Regions and sample patches belong to each inspected PDF's own
+`rendered_pdf_artwork` applies to the final document; `included_figure_artwork`
+applies separately to input PDFs. Regions and sample patches belong to each inspected PDF's own
 coordinate system. Final-document coordinates are not reused for figures.
 
 Concrete remaining engineering includes image optimization/externalized-figure
@@ -200,10 +200,11 @@ violating and unavailable/ambiguous evidence. The implementation/test pairs are:
 | Bibliography transformations | {download}`bibliography_transform.py <../src/latexprep/bibliography_transform.py>` | {download}`test_bibliography_transform.py <../tests/test_bibliography_transform.py>` |
 | Artwork geometry, pixels and glyph programs | {download}`pdf_artwork.py <../src/latexprep/pdf_artwork.py>` | {download}`test_pdf_artwork.py <../tests/test_pdf_artwork.py>` |
 | Metadata edits and image metadata | {download}`metadata_privacy.py <../src/latexprep/metadata_privacy.py>` | {download}`test_metadata_privacy.py <../tests/test_metadata_privacy.py>` |
-| Author records and PDF structure | {download}`structure_checks.py <../src/latexprep/structure_checks.py>` | {download}`test_structure_checks.py <../tests/test_structure_checks.py>` |
-| Review decisions and offline outputs | {download}`reporting.py <../src/latexprep/reporting.py>` | {download}`test_reporting.py <../tests/test_reporting.py>` |
-| Independent packages and repeated baselines | {download}`core.py <../src/latexprep/core.py>`, {download}`workflow_options.py <../src/latexprep/workflow_options.py>` | {download}`test_workflow_extensions.py <../tests/test_workflow_extensions.py>` |
-| Linux command construction and bibliography backend | {download}`runtime.py <../src/latexprep/runtime.py>` | {download}`test_runtime_backends.py <../tests/test_runtime_backends.py>` |
+| Author records | {download}`author_records.py <../src/latexprep/author_records.py>` | {download}`test_structure_checks.py <../tests/test_structure_checks.py>` |
+| PDF structure | {download}`pdf_structure_checks.py <../src/latexprep/pdf_structure_checks.py>` | {download}`test_structure_checks.py <../tests/test_structure_checks.py>` |
+| Review decisions and offline outputs | {download}`review_policy.py <../src/latexprep/review_policy.py>`, {download}`html_report.py <../src/latexprep/html_report.py>`, {download}`ci_annotations.py <../src/latexprep/ci_annotations.py>`, {download}`diagnostic_bundle.py <../src/latexprep/diagnostic_bundle.py>` | {download}`test_reporting.py <../tests/test_reporting.py>` |
+| Independent packages and repeated baselines | {download}`documents.py <../src/latexprep/documents.py>`, {download}`document_run.py <../src/latexprep/document_run.py>`, {download}`workflow_options.py <../src/latexprep/workflow_options.py>` | {download}`test_workflow_extensions.py <../tests/test_workflow_extensions.py>` |
+| Linux command construction and bibliography backend | {download}`sandbox.py <../src/latexprep/sandbox.py>`, {download}`latexmk_build.py <../src/latexprep/latexmk_build.py>` | {download}`test_runtime_backends.py <../tests/test_runtime_backends.py>` |
 
 Online tests use fake transports, not live provider requests. Tool-output fixtures
 exercise Poppler/qpdf/MuPDF interpretation without claiming that each optional
@@ -225,7 +226,8 @@ pass on macOS with the sealed Biber copy; they run only with
 
 ### Build evidence
 
-{download}`build_project and _log_findings <../src/latexprep/runtime.py>` are exercised by
+{download}`build_project <../src/latexprep/latexmk_build.py>` and
+{download}`log_findings <../src/latexprep/build_log.py>` are exercised by
 {download}`BuildTests <../tests/test_runtime.py>`:
 `test_failed_tool_never_accepts_partial_pdf`,
 `test_final_rerun_request_blocks_success`,
@@ -239,7 +241,8 @@ pass on macOS with the sealed Biber copy; they run only with
 
 ### Source evidence
 
-{download}`_Inspection and plan_flatten <../src/latexprep/source.py>` are exercised by
+{download}`SourceGraph <../src/latexprep/source_graph.py>` and
+{download}`plan_flatten <../src/latexprep/source.py>` are exercised by
 {download}`SourceTests <../tests/test_source.py>`:
 `test_markers_labels_and_refs_are_heuristics_not_blockers`,
 `test_nested_paths_and_collisions_are_rewritten_not_globally_replaced`,
@@ -272,7 +275,7 @@ inlining.
 
 ### PDF evidence
 
-{download}`inspect_pdf <../src/latexprep/pdf.py>` is exercised by
+{download}`inspect_pdf <../src/latexprep/pdf_inspection.py>` is exercised by
 {download}`PdfConstraintTests <../tests/test_pdf.py>`:
 `test_page_limit_boundary_and_overflow`,
 `test_expected_dimensions_measure_every_page_with_pdf_point_tolerance`,
@@ -289,7 +292,8 @@ inlining.
 
 ### Bibliography evidence
 
-{download}`check_bibliography and normalize_dois <../src/latexprep/bibliography.py>` are
+{download}`check_bibliography_integrity <../src/latexprep/bibliography_checks.py>` and
+{download}`normalize_dois <../src/latexprep/bibliography_transform.py>` are
 exercised by {download}`BibliographyTests <../tests/test_bibliography.py>`:
 `test_duplicate_keys_and_dois_include_conflicts_without_merging`,
 `test_literal_relationships_and_builtin_months_are_checked`,
@@ -331,7 +335,7 @@ These are adapter-level checks, not proof that arbitrary TeX can be formatted.
 {download}`WorkflowTests <../tests/test_workflow.py>`:
 `test_flat_bundle_from_exact_extraction_and_serial_equivalence` and
 `test_failed_final_build_never_releases_output`.
-{download}`compare_pdfs <../src/latexprep/pdf.py>` is exercised by
+{download}`compare_pdfs <../src/latexprep/pdf_comparison.py>` is exercised by
 {download}`PdfTests <../tests/test_pdf.py>`:
 `test_rendered_change_is_detected_when_text_matches`,
 `test_extracted_text_change_is_detected_when_raster_matches`,

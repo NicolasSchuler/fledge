@@ -6,12 +6,14 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from click.testing import CliRunner
 
 from latexprep.cli import USAGE_EXIT_CODE, cli
 from latexprep.config import load_settings, resolve_config_path
-from latexprep.init_command import STARTER, WRITE_ERROR_EXIT_CODE
+from latexprep.init_command import STARTER
+from latexprep.models import Outcome
 from latexprep.presets import PRESETS, preset_text
 
 
@@ -57,19 +59,27 @@ class InitCommandTests(unittest.TestCase):
     def test_existing_file_is_kept_unless_force_is_given(self):
         self.target.write_text("jobs = 1\n")
         result = self.init(str(self.project), "--preset", "arxiv")
-        self.assertEqual(result.exit_code, WRITE_ERROR_EXIT_CODE, result.output)
+        self.assertEqual(result.exit_code, Outcome.ERROR.exit_code, result.output)
         self.assertIn("already exists; pass --force", result.output)
         self.assertEqual(self.target.read_text(), "jobs = 1\n")
         result = self.init(str(self.project), "--preset", "arxiv", "--force")
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("comment_policy", self.target.read_text())
 
+    def test_invalid_text_never_replaces_an_existing_file(self):
+        self.target.write_text("jobs = 1\n")
+        with patch("latexprep.init_command.preset_text", return_value="jobs = 0\n"):
+            result = self.init(str(self.project), "--preset", "arxiv", "--force")
+        self.assertEqual(result.exit_code, Outcome.ERROR.exit_code, result.output)
+        self.assertIn("Cannot write a valid", result.output)
+        self.assertEqual(self.target.read_text(), "jobs = 1\n")
+
     def test_symlinked_target_is_never_written_through(self):
         outside = self.root / "outside.toml"
         outside.write_text("jobs = 1\n")
         self.target.symlink_to(outside)
         result = self.init(str(self.project), "--force")
-        self.assertEqual(result.exit_code, WRITE_ERROR_EXIT_CODE, result.output)
+        self.assertEqual(result.exit_code, Outcome.ERROR.exit_code, result.output)
         self.assertEqual(outside.read_text(), "jobs = 1\n")
 
     def test_list_prints_every_preset_with_its_description(self):

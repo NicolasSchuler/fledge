@@ -6,22 +6,27 @@ from dataclasses import asdict, replace
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-from latexprep.bibliography_checks import BibliographyOptions, check_bibliography_details
+from latexprep.author_records import check_author_records
+from latexprep.bibliography_checks import (
+    BibliographyOptions,
+    check_bibliography_coverage_and_fields,
+)
 from latexprep.bibliography_transform import BibliographyTransformOptions
 from latexprep.build_checks import BuildCheckOptions, check_build_details
+from latexprep.build_dependencies import LoadedPackage
 from latexprep.check_policy import (
     _GROUP_CHECKS,
     _ROOT_CHECKS,
     DEFAULT_ADVISORY_CODES,
     MANDATORY_CODES,
-    effective_settings,
     selected_findings,
 )
 from latexprep.check_selection import CheckSelection
-from latexprep.config import Settings
+from latexprep.config import Settings, effective_settings
 from latexprep.formatting import FormattingOptions
-from latexprep.manuscript import check_manuscript
-from latexprep.manuscript_checks import ManuscriptCheckOptions, check_manuscript_details
+from latexprep.latexmk_build import BuildResult
+from latexprep.manuscript import ManuscriptOptions, check_manuscript
+from latexprep.manuscript_checks import ManuscriptCheckOptions, check_manuscript_policies
 from latexprep.metadata_privacy import (
     MetadataEdit,
     MetadataPrivacyOptions,
@@ -31,25 +36,23 @@ from latexprep.metadata_privacy import (
 )
 from latexprep.models import Finding
 from latexprep.online_checks import OnlineOptions, Response, check_online_references
-from latexprep.pdf import _configured_pdf_rules
 from latexprep.pdf_artwork import PdfArtworkOptions, inspect_artwork_inputs, inspect_pdf_artwork
 from latexprep.pdf_checks import (
     PdfCheckOptions,
-    PdfRegion,
     PdfSectionBudget,
     inspect_included_pdf_figures,
     inspect_pdf_details,
 )
-from latexprep.rules import BY_CODE, BY_NAME, RULES, code_for
-from latexprep.runtime import BuildResult
-from latexprep.source import analyze_sources
-from latexprep.source_transform import SourceTransformOptions
-from latexprep.structure_checks import (
+from latexprep.pdf_inspection import PdfInspectionOptions, configured_policy_rules
+from latexprep.pdf_structure_checks import (
     HeadingExpectation,
     StructureOptions,
-    check_author_records,
     inspect_pdf_structure,
 )
+from latexprep.pdf_support import PdfRegion
+from latexprep.rules import BY_CODE, BY_NAME, RULES, code_for
+from latexprep.source import analyze_sources
+from latexprep.source_transform import SourceTransformOptions
 from latexprep.submission_checks import (
     SubmissionOptions,
     check_pdf_identity,
@@ -71,16 +74,18 @@ def codes(findings: list[Finding]) -> set[str]:
 
 def configured_manuscript() -> Settings:
     return Settings(
-        expected_document_class="article",
-        required_class_options=("draft",),
-        forbidden_class_options=("twocolumn",),
-        forbidden_packages=("draftwatermark",),
-        require_abstract=True,
-        abstract_min_words=1,
-        abstract_max_words=100,
-        keywords_min_count=1,
-        keywords_max_count=5,
-        required_sections=("Introduction",),
+        manuscript=ManuscriptOptions(
+            expected_document_class="article",
+            required_class_options=("draft",),
+            forbidden_class_options=("twocolumn",),
+            forbidden_packages=("draftwatermark",),
+            require_abstract=True,
+            abstract_min_words=1,
+            abstract_max_words=100,
+            keywords_min_count=1,
+            keywords_max_count=5,
+            required_sections=("Introduction",),
+        ),
         manuscript_checks=ManuscriptCheckOptions(
             allowed_packages=("graphicx",),
             check_layout_manipulation=True,
@@ -179,8 +184,8 @@ class CheckPolicyTests(unittest.TestCase):
         original = replace(
             configured_manuscript(),
             pdf_checks=configured_pdf_details(),
-            pdf_artwork=configured_artwork(),
-            figure_artwork=configured_artwork(),
+            rendered_pdf_artwork=configured_artwork(),
+            included_figure_artwork=configured_artwork(),
         )
         snapshot = asdict(original)
         self.assertIs(effective_settings(original), original)
@@ -189,14 +194,17 @@ class CheckPolicyTests(unittest.TestCase):
         effective = effective_settings(narrowed)
         self.assertEqual(asdict(original), snapshot)
         self.assertEqual(asdict(narrowed), narrowed_snapshot)
-        self.assertEqual(effective.expected_document_class, "article")
-        self.assertIsNone(effective.abstract_min_words)
+        self.assertEqual(effective.manuscript.expected_document_class, "article")
+        self.assertIsNone(effective.manuscript.abstract_min_words)
         self.assertEqual(effective.pdf_checks.expected_language, "en-GB")
         self.assertIsNone(effective.pdf_checks.min_text_contrast)
         self.assertIsNone(effective.pdf_checks.contrast_background_rgb)
-        self.assertEqual(effective.pdf_artwork.figure_regions, original.pdf_artwork.figure_regions)
-        self.assertEqual(effective.pdf_artwork.figure_edge_band_pt, 2)
-        self.assertIsNone(effective.pdf_artwork.max_figure_whitespace_ratio)
+        self.assertEqual(
+            effective.rendered_pdf_artwork.figure_regions,
+            original.rendered_pdf_artwork.figure_regions,
+        )
+        self.assertEqual(effective.rendered_pdf_artwork.figure_edge_band_pt, 2)
+        self.assertIsNone(effective.rendered_pdf_artwork.max_figure_whitespace_ratio)
         self.assertIs(effective_settings(effective), effective)
 
     def test_selection_does_not_opt_in_parameters_network_or_transforms(self) -> None:
@@ -205,8 +213,8 @@ class CheckPolicyTests(unittest.TestCase):
         self.assertFalse(effective.online_checks.online)
         self.assertEqual(effective.online_checks, OnlineOptions())
         self.assertEqual(effective.pdf_checks, PdfCheckOptions())
-        self.assertEqual(effective.pdf_artwork, PdfArtworkOptions())
-        self.assertFalse(effective.format)
+        self.assertEqual(effective.rendered_pdf_artwork, PdfArtworkOptions())
+        self.assertFalse(effective.apply_formatting)
         self.assertFalse(effective.normalize_doi)
         self.assertEqual(effective.source_transforms, SourceTransformOptions())
         self.assertEqual(effective.bibliography_transform, BibliographyTransformOptions())
@@ -221,8 +229,8 @@ class CheckPolicyTests(unittest.TestCase):
 
         def inspect(settings: Settings) -> list[Finding]:
             return [
-                *check_manuscript(self.root, "main.tex", settings.manuscript_options()),
-                *check_manuscript_details(self.root, "main.tex", settings.manuscript_checks),
+                *check_manuscript(self.root, "main.tex", settings.manuscript),
+                *check_manuscript_policies(self.root, "main.tex", settings.manuscript_checks),
                 *check_author_records(self.root, "main.tex", settings.structure_checks),
             ]
 
@@ -233,9 +241,18 @@ class CheckPolicyTests(unittest.TestCase):
                 self.assertEqual(codes(inspect(effective)), {code})
         disabled = effective_settings(replace(original, checks=selection()))
         with (
-            patch("latexprep.manuscript._Inspection", side_effect=AssertionError("source scan")),
-            patch("latexprep.manuscript_checks._read", side_effect=AssertionError("source scan")),
-            patch("latexprep.structure_checks._read", side_effect=AssertionError("author scan")),
+            patch(
+                "latexprep.manuscript.SourceGraph",
+                **{"build.side_effect": AssertionError("source scan")},
+            ),
+            patch(
+                "latexprep.manuscript_checks.expand_document",
+                side_effect=AssertionError("source scan"),
+            ),
+            patch(
+                "latexprep.author_records.expand_document",
+                side_effect=AssertionError("author scan"),
+            ),
         ):
             self.assertEqual(inspect(disabled), [])
 
@@ -252,7 +269,11 @@ class CheckPolicyTests(unittest.TestCase):
         )
         expected = {f"BIB{number}" for number in range(101, 109)}
         self.assertEqual(
-            codes(check_bibliography_details(self.root, "main.tex", original.bibliography_checks)),
+            codes(
+                check_bibliography_coverage_and_fields(
+                    self.root, "main.tex", original.bibliography_checks
+                )
+            ),
             expected,
         )
         for code in expected:
@@ -260,7 +281,7 @@ class CheckPolicyTests(unittest.TestCase):
                 effective = effective_settings(replace(original, checks=selection(code)))
                 self.assertEqual(
                     codes(
-                        check_bibliography_details(
+                        check_bibliography_coverage_and_fields(
                             self.root, "main.tex", effective.bibliography_checks
                         )
                     ),
@@ -269,9 +290,15 @@ class CheckPolicyTests(unittest.TestCase):
                 self.assertTrue(effective.bibliography_checks.all_roots)
                 self.assertEqual(effective.bibliography_checks.fuzzy_duplicate_threshold, 0.8)
         disabled = effective_settings(replace(original, checks=selection()))
-        with patch("latexprep.bibliography_checks._Inspection", side_effect=AssertionError("scan")):
+        with patch(
+            "latexprep.bibliography_checks.SourceGraph",
+            **{"build.side_effect": AssertionError("scan")},
+        ):
             self.assertEqual(
-                check_bibliography_details(self.root, "main.tex", disabled.bibliography_checks), []
+                check_bibliography_coverage_and_fields(
+                    self.root, "main.tex", disabled.bibliography_checks
+                ),
+                [],
             )
 
     def test_build_policy_and_instrumentation_switches_keep_explicit_inventory(self) -> None:
@@ -290,7 +317,7 @@ class CheckPolicyTests(unittest.TestCase):
         result = BuildResult(
             True,
             findings=[Finding("build.overfull_box", "Overflow", details={"overflow_pt": 2})],
-            loaded_packages=[{"name": "article.cls", "date": "2024-01-01", "origin": "system"}],
+            loaded_packages=[LoadedPackage("article.cls", "/toolchain/article.cls", "toolchain")],
             recorder_complete=True,
         )
         self.assertEqual(
@@ -324,7 +351,7 @@ class CheckPolicyTests(unittest.TestCase):
         )
         effective = effective_settings(original)
         with patch(
-            "latexprep.metadata_privacy._inventory", side_effect=AssertionError("image scan")
+            "latexprep.metadata_privacy.inventory_files", side_effect=AssertionError("image scan")
         ):
             self.assertEqual(check_image_metadata(self.root, effective.metadata_privacy), [])
         before = self.main.read_bytes()
@@ -337,8 +364,8 @@ class CheckPolicyTests(unittest.TestCase):
                 Finding(
                     "pdf.metadata",
                     "Properties",
-                    "info",
-                    "passed",
+                    severity="info",
+                    status="passed",
                     details={"properties": {"Pages": "1", "Author": "Ada"}},
                 )
             ],
@@ -350,7 +377,7 @@ class CheckPolicyTests(unittest.TestCase):
     def test_requested_transformations_and_required_source_guards_survive_ignore_all(self) -> None:
         original = Settings(
             checks=CheckSelection(ignore=("ALL",)),
-            format=True,
+            apply_formatting=True,
             normalize_doi=True,
             layout="flat",
             formatting_options=FormattingOptions(exclude=("vendor/*",), blank_lines="preserve"),
@@ -372,7 +399,7 @@ class CheckPolicyTests(unittest.TestCase):
             ),
         )
         effective = effective_settings(original)
-        self.assertTrue(effective.format)
+        self.assertTrue(effective.apply_formatting)
         self.assertTrue(effective.normalize_doi)
         self.assertEqual(effective.layout, "flat")
         for name in (
@@ -402,7 +429,9 @@ class CheckPolicyTests(unittest.TestCase):
             ]
             self.assertEqual(codes(selected_findings(findings, effective.checks)), {code})
         disabled = effective_settings(replace(original, checks=selection()))
-        with patch("latexprep.submission_checks._inventory", side_effect=AssertionError("scan")):
+        with patch(
+            "latexprep.submission_checks.inventory_files", side_effect=AssertionError("scan")
+        ):
             self.assertEqual(
                 check_submission(self.root, "main.tex", disabled.submission_checks), []
             )
@@ -445,7 +474,9 @@ class CheckPolicyTests(unittest.TestCase):
             },
         )
         disabled = effective_settings(replace(original, checks=selection()))
-        with patch("latexprep.submission_checks._inventory", side_effect=AssertionError("scan")):
+        with patch(
+            "latexprep.submission_checks.inventory_files", side_effect=AssertionError("scan")
+        ):
             self.assertEqual(
                 check_submission(self.root, "main.tex", disabled.submission_checks), []
             )
@@ -497,8 +528,8 @@ class CheckPolicyTests(unittest.TestCase):
         }
         self.assertEqual(MANDATORY_CODES, expected)
         findings = [Finding(rule.name, rule.title) for rule in RULES]
-        diagnostic = Finding("build.failed", "Build failed", "error")
-        inventory = Finding("pdf.metadata", "Metadata", "info", "passed")
+        diagnostic = Finding("build.failed", "Build failed", severity="error")
+        inventory = Finding("pdf.metadata", "Metadata", severity="info", status="passed")
         findings += [diagnostic, inventory]
         self.assertEqual(codes(selected_findings(iter(findings), selection())), expected)
         selected = CheckSelection(select=("ALL", "MAN001"), ignore=("MAN", "PDF3"))
@@ -622,7 +653,7 @@ class CheckPolicyAdapterTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         original = Settings(
-            pdf_checks=configured_pdf_details(), match_source_pdf_metadata=("title", "author")
+            pdf_checks=configured_pdf_details(), match_source_pdf_metadata=("author",)
         )
         expected = {f"PDF{number}" for number in range(201, 217)}
         before = await inspect_pdf_details(
@@ -667,23 +698,22 @@ class CheckPolicyAdapterTests(unittest.IsolatedAsyncioTestCase):
     async def test_base_pdf_policy_constraints_are_removed_together(self) -> None:
         original = Settings(
             max_pages=10,
-            expected_page_width_pt=612,
-            expected_page_height_pt=792,
-            require_consistent_page_size=True,
-            min_image_dpi=300,
-            require_embedded_fonts=True,
-            forbid_type3_fonts=True,
-            forbid_encryption=True,
-            forbid_forms=True,
-            forbid_javascript=True,
-            forbid_attachments=True,
+            pdf=PdfInspectionOptions(
+                expected_page_width_pt=612,
+                expected_page_height_pt=792,
+                require_consistent_page_size=True,
+                min_image_dpi=300,
+                require_embedded_fonts=True,
+                forbid_type3_fonts=True,
+                forbid_encryption=True,
+                forbid_forms=True,
+                forbid_javascript=True,
+                forbid_attachments=True,
+            ),
         )
         expected = {"PDF001", *(f"PDF{number}" for number in range(101, 110))}
         self.assertEqual(
-            {
-                code_for(name)
-                for name in _configured_pdf_rules(original.pdf_options(), original.max_pages)
-            },
+            {code_for(name) for name in configured_policy_rules(original.pdf, original.max_pages)},
             expected,
         )
         for code in expected:
@@ -691,50 +721,59 @@ class CheckPolicyAdapterTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 {
                     code_for(name)
-                    for name in _configured_pdf_rules(effective.pdf_options(), effective.max_pages)
+                    for name in configured_policy_rules(effective.pdf, effective.max_pages)
                 },
                 {code},
             )
         disabled = effective_settings(replace(original, checks=selection()))
-        self.assertEqual(_configured_pdf_rules(disabled.pdf_options(), disabled.max_pages), [])
+        self.assertEqual(configured_policy_rules(disabled.pdf, disabled.max_pages), [])
 
     async def test_artwork_regions_and_rendering_stay_only_when_their_check_is_selected(
         self,
     ) -> None:
-        original = Settings(pdf_artwork=configured_artwork(), figure_artwork=configured_artwork())
+        original = Settings(
+            rendered_pdf_artwork=configured_artwork(), included_figure_artwork=configured_artwork()
+        )
         expected = {f"PDF{number}" for number in range(301, 313)}
         before = await inspect_pdf_artwork(
-            self.pdf, self.root / "artwork-all", ArtworkRunner(), options=original.pdf_artwork
+            self.pdf,
+            self.root / "artwork-all",
+            ArtworkRunner(),
+            options=original.rendered_pdf_artwork,
         )
         self.assertEqual(codes(before), expected)
         for code in expected:
             with self.subTest(code=code):
                 effective = effective_settings(replace(original, checks=selection(code)))
-                self.assertEqual(effective.figure_artwork, effective.pdf_artwork)
+                self.assertEqual(effective.included_figure_artwork, effective.rendered_pdf_artwork)
                 runner = ArtworkRunner()
                 findings = await inspect_pdf_artwork(
-                    self.pdf, self.root / code, runner, options=effective.pdf_artwork
+                    self.pdf, self.root / code, runner, options=effective.rendered_pdf_artwork
                 )
                 self.assertEqual(codes(findings), {code})
                 if code in {"PDF302", "PDF303"}:
                     self.assertEqual(
-                        effective.pdf_artwork.figure_regions, original.pdf_artwork.figure_regions
+                        effective.rendered_pdf_artwork.figure_regions,
+                        original.rendered_pdf_artwork.figure_regions,
                     )
                 else:
-                    self.assertEqual(effective.pdf_artwork.figure_regions, ())
+                    self.assertEqual(effective.rendered_pdf_artwork.figure_regions, ())
                 if code == "PDF308":
                     self.assertNotIn("pdftoppm", {call[0][0] for call in runner.calls})
         disabled = effective_settings(replace(original, checks=CheckSelection(ignore=("PDF3",))))
         runner = ArtworkRunner()
         self.assertEqual(
             await inspect_pdf_artwork(
-                self.pdf, self.root / "artwork-off", runner, options=disabled.pdf_artwork
+                self.pdf, self.root / "artwork-off", runner, options=disabled.rendered_pdf_artwork
             ),
             [],
         )
         self.assertEqual(
             await inspect_artwork_inputs(
-                (self.pdf,), self.root / "inputs-off", runner, options=disabled.figure_artwork
+                (self.pdf,),
+                self.root / "inputs-off",
+                runner,
+                options=disabled.included_figure_artwork,
             ),
             [],
         )
@@ -782,13 +821,13 @@ class CheckPolicyMapTests(unittest.TestCase):
         from latexprep import check_policy
         from latexprep.config import Settings
 
-        settings = Settings()
+        values = Settings().top_level_values()
         for code, fields in check_policy._ROOT_CHECKS.items():
             self.assertIn(code, BY_CODE)
             for name in fields:
-                self.assertTrue(hasattr(settings, name), (code, name))
+                self.assertIn(name, values, (code, name))
         for group, policies in check_policy._GROUP_CHECKS.items():
-            options = getattr(settings, group)
+            options = values[group]
             for code, fields in policies.items():
                 self.assertIn(code, BY_CODE)
                 for name in fields:
@@ -799,19 +838,22 @@ class CheckPolicyMapTests(unittest.TestCase):
         from latexprep import check_policy
         from latexprep.config import Settings
 
-        settings = Settings()
+        values = Settings().top_level_values()
         activation = check_policy.opt_in_activation()
         gated = set(_ROOT_CHECKS).union(*(set(group) for group in _GROUP_CHECKS.values()))
         self.assertEqual(set(activation), gated | {"PRV001", "PRV002"})
         self.assertEqual(activation["PRV001"], [("submission_checks", {"identity_terms": ()})])
         self.assertEqual(
-            [group for group, _ in activation["PDF313"]], ["pdf_artwork", "figure_artwork"]
+            [group for group, _ in activation["PDF313"]],
+            ["rendered_pdf_artwork", "included_figure_artwork"],
         )
         for code, rows in activation.items():
             for group, fields in rows:
-                options = settings if group is None else getattr(settings, group)
                 for name in fields:
-                    self.assertTrue(hasattr(options, name), (code, group, name))
+                    if group is None:
+                        self.assertIn(name, values, (code, name))
+                    else:
+                        self.assertTrue(hasattr(values[group], name), (code, group, name))
         # Callers receive copies, so they cannot change the policy tables.
         activation["TEX101"][0][1]["expected_document_class"] = "changed"
         self.assertIsNone(_ROOT_CHECKS["TEX101"]["expected_document_class"])

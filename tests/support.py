@@ -8,8 +8,8 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 
+from latexprep.latexmk_build import BuildResult, BuildTools
 from latexprep.models import Finding
-from latexprep.runtime import BuildResult
 
 MINIMAL_PDF = b"%PDF-controlled-test\n"
 MINIMAL_DOCUMENT = "\\documentclass{article}\n\\begin{document}Hello.\\end{document}\n"
@@ -37,11 +37,11 @@ def fake_build_result(
     findings: Iterable[Finding] = (),
     dependencies: Iterable[str] | None = None,
     submission_inputs: Iterable[str] | None = None,
-    tools: Mapping[str, object] | None = None,
+    tools: BuildTools | None = None,
     command: Iterable[str] = (),
     log: str = "",
 ) -> BuildResult:
-    """Return a ``BuildResult`` as ``latexprep.runtime.build_project`` would after a build.
+    """Return a ``BuildResult`` as ``latexprep.latexmk_build.build_project`` would after a build.
 
     Like the controlled builders in the existing tests, this writes ``work/built.pdf`` (creating
     ``work``) and reports ``main`` as both the only dependency and the only submission input,
@@ -56,8 +56,8 @@ def fake_build_result(
         success=success,
         pdf=pdf if success else None,
         findings=list(findings),
-        dependencies={main} if dependencies is None else set(dependencies),
-        tools=dict(tools or {}),
+        recorder_project_inputs={main} if dependencies is None else set(dependencies),
+        tools=tools or BuildTools(),
         command=list(command),
         log=log,
         loaded_packages=[],
@@ -67,7 +67,7 @@ def fake_build_result(
 
 
 async def fake_build(tree, main, work, engine, runner, **_options) -> BuildResult:
-    """Drop-in for ``patch("latexprep.core.build_project", side_effect=fake_build)``."""
+    """Drop-in for ``patch("latexprep.document_tasks.build_project", side_effect=fake_build)``."""
     return fake_build_result(work, main)
 
 

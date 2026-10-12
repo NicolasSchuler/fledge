@@ -4,6 +4,7 @@ recursive-include docs *.md *.py
 recursive-include docs/_static *.png *.css *.json
 recursive-include examples *.toml *.tex *.bib
 recursive-include src/latexprep/presets *.toml
+include src/latexprep/loaded_options_hook.tex
 recursive-include tests *.py
 include scripts/benchmark_parallelism.py
 prune docs/_build

@@ -1,7 +1,8 @@
-"""Explicit author-record contracts and bounded PDF structural observations.
+"""Bounded tagged-PDF structure observations and the structure option schema.
 
-These checks do not interpret arbitrary author templates, infer heading semantics,
-or establish PDF/UA conformance, meaningful reading order, or description quality.
+The options also configure the literal author-record contract that
+``author_records`` checks. These checks do not infer heading semantics or establish
+PDF/UA conformance, meaningful reading order, or description quality.
 """
 
 from __future__ import annotations
@@ -10,16 +11,23 @@ import re
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from .manuscript_checks import _placeholder, _read, _stop, _value, _where
 from .models import Finding, PreparationError
-from .pdf import _page_count
-from .pdf_checks import _Objects, _properties, _result, _session, _unavailable
-from .runtime import ToolRunner
+from .option_config import require_booleans
+from .pdf_support import (
+    DOCUMENT,
+    QpdfObjectGraph,
+    is_object_reference,
+    measurement_finding,
+    open_measurement_session,
+    page_count,
+    pdfinfo_properties,
+    qpdf_objects_argv,
+    unavailable_finding,
+)
+from .runtime import CommandRunner
 from .scheduler import ResourceBudget, cancellation_point
-from .source import in_conditional
 
 _LIMIT = 10000
-_REFERENCE = re.compile(r"[0-9]+ [0-9]+ R")
 _COMMAND = re.compile(r"[A-Za-z][A-Za-z@]{0,63}")
 _STANDARD_ROLES = frozenset(
     "/" + role
@@ -88,113 +96,14 @@ class StructureOptions:
             != len(self.heading_expectations)
         ):
             raise PreparationError("Heading expectations must be unique HeadingExpectation records")
-        for name in (
+        require_booleans(
+            self,
             "require_structure_tree",
             "check_table_structure",
             "check_link_structure",
             "require_figure_alt",
             "check_structure_references",
-        ):
-            if type(getattr(self, name)) is not bool:
-                raise PreparationError(f"{name} must be a boolean")
-
-
-def check_author_records(root: Path, main: str | None, options: StructureOptions) -> list[Finding]:
-    """Check sequential top-level literal records before begin{document}/maketitle.
-
-    The user supplies the record-opening command and required associated commands.
-    Each opener starts a new author; fields apply only until the next opener. This
-    deliberately does not interpret affiliation indices or shared author lists.
-    """
-    if not options.required_author_fields:
-        return []
-    document = _read(root, main)
-    uncertainty = list(document.graph_uncertainty)
-    records: list[dict[str, object]] = []
-    fields: dict[str, int] = {}
-    violations: list[object] = []
-    ignored_until = -1
-    configured = {options.author_command, *options.required_author_fields}
-
-    def finish() -> None:
-        if not records:
-            return
-        record = records[-1]
-        missing = [name for name in options.required_author_fields if not fields.get(name)]
-        record["present_fields"] = sorted(name for name, count in fields.items() if count)
-        record["missing_fields"] = missing
-        if missing:
-            violations.append({**record, "reason": "missing or empty associated author fields"})
-
-    for command in document.commands:
-        cancellation_point()
-        if command.start < ignored_until:
-            continue
-        if command.name in {"newcommand", "renewcommand", "providecommand", "DeclareRobustCommand"}:
-            # The declaration's literal command token is not an author record.
-            ignored_until = _stop(command)
-            continue
-        if not command.depth and (
-            command.name == "maketitle"
-            or command.name == "begin"
-            and command.arguments
-            and command.arguments[0].value.strip() == "document"
-        ):
-            break
-        if command.name in {"def", "gdef", "xdef", "edef", "csname", "catcode", "let"}:
-            uncertainty.append("dynamically redefined preamble commands")
-        if command.name not in configured:
-            continue
-        location = document.location(command.start)
-        # A \if… token only matters where it encloses a record: a \newif-defined
-        # name or a branch-taking package conditional executes nothing by itself.
-        if in_conditional(document.conditionals, command.start):
-            uncertainty.append(f"{location}: author record inside conditional control flow")
-            continue
-        if command.depth or command.options or len(command.arguments) != 1:
-            uncertainty.append(f"{location}: grouped, optional or ambiguous author-record syntax")
-            continue
-        value, reasons = _value(command)
-        uncertainty.extend(reasons)
-        nonempty = bool(value and not _placeholder(value))
-        if command.name == options.author_command:
-            finish()
-            fields = {}
-            records.append({"author_index": len(records) + 1, **location})
-            if not nonempty and not reasons:
-                violations.append({**records[-1], "reason": "empty or placeholder author value"})
-        elif not records:
-            violations.append({**location, "field": command.name, "reason": "field before author"})
-        elif nonempty and not reasons:
-            fields[command.name] = fields.get(command.name, 0) + 1
-    finish()
-    if not records:
-        violations.append({"reason": "no supported literal author records"})
-    reasons = sorted(set(uncertainty))
-    confirmed: list[object] = violations if not reasons else []
-    places = _where([item for item in confirmed if isinstance(item, dict)])
-    message = "Checked each configured sequential literal author record."
-    if confirmed:
-        message = (
-            f"{len(confirmed)} of {max(len(records), 1)} literal author records "
-            "lack a configured field" + (f": {places}" if places else "") + "."
         )
-    elif reasons:
-        message += " Inconclusive: " + reasons[0].rstrip(".") + "."
-    result = _result(
-        "manuscript.author_records",
-        message,
-        confirmed,
-        uncertain=bool(uncertainty),
-        records=records[:100],
-        observed_violations=violations[:100],
-        uncertainty=reasons,
-        author_command=options.author_command,
-        required_fields=list(options.required_author_fields),
-        scope="User-selected preamble record grammar; no template, identity or "
-        "shared-field inference.",
-    )
-    return [replace(result, path=main)]
 
 
 def _heading_findings(text: str, pages: int, options: StructureOptions) -> list[Finding]:
@@ -215,13 +124,13 @@ def _heading_findings(text: str, pages: int, options: StructureOptions) -> list[
         uncertain = outside or not any(lines) or count > 1
         candidates = [line for line in lines if line == title or line.endswith(" " + title)]
         results.append(
-            _result(
+            measurement_finding(
                 "pdf.expected_headings",
                 f"Checked configured heading text on page {expectation.page}.",
                 ["Expected numbered heading line was not extracted"]
                 if not count and not uncertain
                 else [],
-                uncertain=uncertain,
+                incomplete=uncertain,
                 page=expectation.page,
                 expected_title=expectation.title,
                 expected_number=expectation.number,
@@ -245,7 +154,7 @@ class _Element:
 
 
 class _Structure:
-    def __init__(self, objects: _Objects):
+    def __init__(self, objects: QpdfObjectGraph):
         self.objects = objects
         root_value = objects.root.get("/StructTreeRoot")
         self.root_reference = root_value if isinstance(root_value, str) else None
@@ -290,7 +199,7 @@ class _Structure:
         self.steps += 1
         if self.steps > _LIMIT or depth > 100:
             raise PreparationError("PDF structure tree exceeds bounded traversal limits")
-        reference = raw if isinstance(raw, str) and _REFERENCE.fullmatch(raw) else None
+        reference = raw if is_object_reference(raw) else None
         if reference:
             if reference in self.visited:
                 raise PreparationError("PDF structure tree has a cycle or repeated object child")
@@ -316,9 +225,7 @@ class _Structure:
             stream = value.get("/Stm")
             if parent is None or type(mcid) is not int or mcid < 0:
                 self.problems.append({"reason": "MCR is missing a valid nonnegative MCID or owner"})
-            elif stream is not None and (
-                not isinstance(stream, str) or not _REFERENCE.fullmatch(stream)
-            ):
+            elif stream is not None and not is_object_reference(stream):
                 self.uncertainty.append("non-reference marked-content stream")
             else:
                 self.content.append((parent, page, stream, mcid))
@@ -424,7 +331,7 @@ def _structure_references(tree: _Structure, required: bool) -> Finding:
             problems.append({**item, "reason": "marked-content parent-tree owner does not match"})
     for owner, page, target in tree.object_references:
         item = {**tree.location(owner), "target": target}
-        if not isinstance(target, str) or not _REFERENCE.fullmatch(target):
+        if not is_object_reference(target):
             problems.append({**item, "reason": "missing indirect object reference"})
             continue
         target_object = tree.objects.dictionary(target)
@@ -435,11 +342,11 @@ def _structure_references(tree: _Structure, required: bool) -> Finding:
             problems.append({**item, "reason": "missing object parent-tree entry"})
         elif parent is not tree.elements[owner].data:
             problems.append({**item, "reason": "object parent-tree owner does not match"})
-    return _result(
+    return measurement_finding(
         "pdf.structure_references",
         "Checked structure-tree parent links and marked-content references.",
         problems,
-        uncertain=bool(tree.uncertainty),
+        incomplete=bool(tree.uncertainty),
         uncertainty=tree.uncertainty,
         structural_sequence=sequence[:100],
         element_count=len(tree.elements),
@@ -487,11 +394,11 @@ def _table_structure(tree: _Structure) -> Finding:
         tables.append(
             {**tree.location(index), "rows": len(rows), "cells": cells, "header_cells": headers}
         )
-    result = _result(
+    result = measurement_finding(
         "pdf.table_structure",
         "Checked tagged table, row and cell relationships.",
         violations,
-        uncertain=bool(tree.uncertainty),
+        incomplete=bool(tree.uncertainty),
         tables=tables,
         uncertainty=tree.uncertainty,
         scope="Tagged Tables only; untagged visual tables, header meaning, spans and "
@@ -520,11 +427,11 @@ def _figure_alt(tree: _Structure) -> Finding:
             violations.append({**tree.location(index), "reason": "missing or empty Figure Alt"})
         elif text is None:
             uncertain = True
-    result = _result(
+    result = measurement_finding(
         "pdf.figure_alternative_text",
         "Checked nonempty Alt strings on tagged Figures.",
         violations,
-        uncertain=uncertain,
+        incomplete=uncertain,
         figure_count=figures,
         scope="Tagged Figure Alt presence only; image coverage and description quality "
         "are not established.",
@@ -539,7 +446,7 @@ def _link_structure(tree: _Structure) -> Finding:
     uncertainty = list(tree.uncertainty)
     associated: dict[str, list[tuple[int, str | None]]] = {}
     for owner, page, target in tree.object_references:
-        if not isinstance(target, str) or not _REFERENCE.fullmatch(target):
+        if not is_object_reference(target):
             continue
         index: int | None = owner
         while index is not None and tree.elements[index].role != "/Link":
@@ -572,7 +479,7 @@ def _link_structure(tree: _Structure) -> Finding:
             annotation = tree.objects.dictionary(reference)
             if annotation.get("/Subtype") != "/Link":
                 continue
-            if not isinstance(reference, str) or not _REFERENCE.fullmatch(reference):
+            if not is_object_reference(reference):
                 uncertainty.append("direct link annotation lacks an indirect identity")
                 continue
             item: dict[str, object] = {"page": number, "annotation": reference}
@@ -618,11 +525,11 @@ def _link_structure(tree: _Structure) -> Finding:
             violations.append(
                 {**tree.location(index), "reason": "Link tag has no associated annotation"}
             )
-    result = _result(
+    result = measurement_finding(
         "pdf.link_structure",
         "Checked Link tags against page Link annotations.",
         violations,
-        uncertain=bool(uncertainty),
+        incomplete=bool(uncertainty),
         annotations=annotations[:100],
         uncertainty=sorted(set(uncertainty)),
         scope="Object associations and supported target presence only; name adequacy, "
@@ -651,16 +558,16 @@ def _object_rules(options: StructureOptions) -> list[str]:
 
 def _object_findings(output: str, pages: int, options: StructureOptions) -> list[Finding]:
     rules = _object_rules(options)
-    objects = _Objects(output, pages)
+    objects = QpdfObjectGraph(output, pages)
     if objects.root.get("/StructTreeRoot") is None:
         return [
-            _result(
+            measurement_finding(
                 rule,
                 "The PDF catalog has no structure tree.",
                 ["A structure tree is explicitly required"]
                 if rule == "pdf.structure_references" and options.require_structure_tree
                 else [],
-                uncertain=not (
+                incomplete=not (
                     rule == "pdf.structure_references" and options.require_structure_tree
                 ),
             )
@@ -680,14 +587,14 @@ def _object_findings(output: str, pages: int, options: StructureOptions) -> list
         try:
             findings.append(checks[rule]())
         except PreparationError as error:
-            findings.append(_unavailable(rule, error))
+            findings.append(unavailable_finding(rule, error))
     return findings
 
 
 async def inspect_pdf_structure(
     pdf: Path,
     work: Path,
-    runner: ToolRunner,
+    runner: CommandRunner,
     options: StructureOptions,
     budget: ResourceBudget | None = None,
 ) -> list[Finding]:
@@ -697,43 +604,36 @@ async def inspect_pdf_structure(
     if not configured:
         return []
     try:
-        session = await _session(pdf, work, runner, budget)
+        session = await open_measurement_session(pdf, work, runner, budget)
         properties = await session.measure(
             "properties",
-            ["pdfinfo", "-enc", "UTF-8", "@PDF@"],
-            lambda result, _: _properties(result.stdout),
+            ["pdfinfo", "-enc", "UTF-8", DOCUMENT],
+            lambda result: pdfinfo_properties(result.stdout),
         )
-        pages = _page_count(properties)
+        pages = page_count(properties)
     except (PreparationError, OSError) as error:
-        return [_unavailable(rule, error) for rule in configured]
+        return [unavailable_finding(rule, error) for rule in configured]
     findings = []
     if options.heading_expectations:
         try:
             findings.extend(
                 await session.measure(
                     "headings",
-                    ["pdftotext", "-layout", "-enc", "UTF-8", "@PDF@", "-"],
-                    lambda result, _: _heading_findings(result.stdout, pages, options),
+                    ["pdftotext", "-layout", "-enc", "UTF-8", DOCUMENT, "-"],
+                    lambda result: _heading_findings(result.stdout, pages, options),
                 )
             )
         except (PreparationError, OSError) as error:
-            findings.append(_unavailable("pdf.expected_headings", error))
+            findings.append(unavailable_finding("pdf.expected_headings", error))
     if object_rules:
         try:
             findings.extend(
                 await session.measure(
                     "structure",
-                    [
-                        "qpdf",
-                        "--json=2",
-                        "--json-key=qpdf",
-                        "--json-key=pages",
-                        "--json-stream-data=none",
-                        "@PDF@",
-                    ],
-                    lambda result, _: _object_findings(result.stdout, pages, options),
+                    qpdf_objects_argv(),
+                    lambda result: _object_findings(result.stdout, pages, options),
                 )
             )
         except (PreparationError, OSError) as error:
-            findings.extend(_unavailable(rule, error) for rule in object_rules)
+            findings.extend(unavailable_finding(rule, error) for rule in object_rules)
     return findings

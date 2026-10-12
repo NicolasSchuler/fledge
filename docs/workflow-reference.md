@@ -74,7 +74,7 @@ and the built-in defaults. See [configuration](configuration.md) for discovery.
 | `source_transforms`, `formatting_options` | Copy-only source edits, flat filename overrides, formatter exclusions/protected regions and blank-line policy |
 | `bibliography_transform` | Explicit formatting, field removal, cited-only output, key/merge mappings, guarded field edits and ordering |
 | `metadata_privacy`, `structure_checks` | Selected literal metadata edits/image-metadata terms, per-author grammar, rendered heading expectations and supported tagged-PDF structure |
-| `pdf_artwork`, `figure_artwork` | Separate final-document and input-PDF artwork policies; regions refer to each inspected PDF's own coordinates |
+| `rendered_pdf_artwork`, `included_figure_artwork` | Separate final-document and input-PDF artwork policies; regions refer to each inspected PDF's own coordinates. The former names `pdf_artwork` and `figure_artwork` are still accepted |
 | `workflow`, `reporting` | Independent document packages, repeated baselines, comparison tolerances and exact scoped review decisions |
 
 `fledge pdf check FILE` reports settings that need a source project (source/PDF
@@ -86,11 +86,15 @@ instead of blocking.
 The default terminal report puts blocking failures first, then incomplete checks
 and warnings. Each finding shows its code, name, location, observed issue and
 next step. Passed results and scope notes are counted but listed only with
-`--show-passed` in terminal, compact and CI output; JSON and HTML list
-everything. Terminal and compact output add an `Evidence:` excerpt: the first
+`--show-passed` in terminal, compact and CI output; JSON and HTML always list
+them. Terminal and compact output add an `Evidence:` excerpt: the first
 three recorded items and a count of the rest. A terminal report with more than
 20 changes summarizes them by kind unless `--diff` is given; compact output
 always summarizes, and JSON lists every change. Colors are decoration only.
+Every format except JSON uses the same order, shows a finding repeated in
+several stages once, summarizes checks that did not run after a failed step,
+and labels the statuses `skipped` and `not_applicable` as `not checked` and
+`not applicable`. JSON keeps every copy and the raw status values.
 
 Compact output writes one plain line per finding with no table, ANSI styling or
 hard wrapping; embedded newlines are escaped. Progress goes to stderr, and

@@ -71,11 +71,11 @@ report_unused_assets = true # PKG106: files outside the selected dependency grap
 
 # PDF313: colour family ("rgb" or "cmyk") the publisher requires for figures;
 # grayscale satisfies either. Copy it from the publisher's instructions.
-[figure_artwork]
+[included_figure_artwork]
 # Each included PDF, PNG and JPEG figure.
 # required_color_space = ""
 
-[pdf_artwork]
+[rendered_pdf_artwork]
 # The whole final PDF, including text and rules.
 # required_color_space = ""
 

@@ -11,7 +11,8 @@ from pathlib import Path
 
 from latexprep.build_checks import BuildCheckOptions
 from latexprep.config import Settings
-from latexprep.core import JobRequest, run_job
+from latexprep.core import run_job
+from latexprep.job_context import JobRequest
 from latexprep.manuscript_checks import ManuscriptCheckOptions
 from latexprep.pdf_checks import PdfCheckOptions, PdfSectionBudget, inspect_pdf_details
 from latexprep.runtime import RuntimeLimits, ToolRunner
@@ -217,7 +218,7 @@ The complete fixture is included in this source package.
             strict = await inspect_pdf_details(
                 pdf,
                 base / "strict-pdf-check",
-                ToolRunner(RuntimeLimits(timeout_seconds=30, memory_mb=256)),
+                ToolRunner(RuntimeLimits(timeout_seconds=30, max_memory_mb=256)),
                 options=PdfCheckOptions(min_text_size_pt=40),
                 budget=ResourceBudget(1, 256),
             )

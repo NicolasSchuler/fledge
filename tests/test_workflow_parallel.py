@@ -12,8 +12,12 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from latexprep.config import Settings
-from latexprep.core import JobRequest, _apply_contents, run_job
-from latexprep.models import Finding, PreparationError, Report
+from latexprep.core import run_job
+from latexprep.job_context import JobRequest
+from latexprep.latexmk_build import BuildTools
+from latexprep.models import Finding, Outcome, PreparationError, Report
+from latexprep.publication import VerifiedPackage
+from latexprep.source_staging import apply_contents
 
 
 def project(root: Path) -> None:
@@ -23,7 +27,7 @@ def project(root: Path) -> None:
     )
 
 
-async def build(tree, main, work, engine, runner):
+async def build(tree, main, work, engine, runner, **_options):
     work.mkdir()
     pdf = work / "built.pdf"
     pdf.write_bytes(b"%PDF-1.4\ncontrolled orchestration fixture\n")
@@ -31,10 +35,11 @@ async def build(tree, main, work, engine, runner):
         success=True,
         pdf=pdf,
         findings=[],
-        dependencies={main},
+        recorder_project_inputs={main},
         submission_inputs={main},
-        tools={},
+        tools=BuildTools(),
         command=[],
+        generated_reads=frozenset(),
     )
 
 
@@ -47,14 +52,14 @@ class ParallelWorkflowTests(unittest.IsolatedAsyncioTestCase):
             source, output = base / "input", base / "output"
             project(source)
 
-            async def ready(_request, _settings, work, *_args):
-                prepared = work / "prepared"
+            async def ready(context, _report):
+                prepared = context.work / "prepared"
                 project(prepared)
-                archive, pdf = work / "submission.zip", work / "built.pdf"
+                archive, pdf = context.work / "submission.zip", context.work / "built.pdf"
                 archive.write_bytes(b"archive fixture")
                 pdf.write_bytes(b"PDF fixture")
-                report.outcome = "passed"
-                return prepared, archive, pdf
+                report.outcome = Outcome.PASSED
+                return VerifiedPackage(prepared, archive, pdf)
 
             def cancel_copy(src, dst, *args, **kwargs):
                 result = copytree(src, dst, *args, **kwargs)
@@ -63,8 +68,8 @@ class ParallelWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 return result
 
             with (
-                patch("latexprep.core._run_in_workspace", side_effect=ready),
-                patch("latexprep.core.shutil.copytree", side_effect=cancel_copy),
+                patch("latexprep.core.run_project", side_effect=ready),
+                patch("latexprep.publication.shutil.copytree", side_effect=cancel_copy),
             ):
                 task = asyncio.create_task(
                     run_job(JobRequest("prepare", source, Settings(), output), report=report)
@@ -85,12 +90,17 @@ class ParallelWorkflowTests(unittest.IsolatedAsyncioTestCase):
             if not release.wait(5):
                 raise AssertionError("PDF branch did not release the independent analysis")
             return [
-                Finding("bib.test_evidence", "Completed independent analysis", "info", "passed")
+                Finding(
+                    "bib.test_evidence",
+                    "Completed independent analysis",
+                    severity="info",
+                    status="passed",
+                )
             ]
 
-        async def baseline(*args):
+        async def baseline(*args, **options):
             self.assertTrue(await asyncio.to_thread(started.wait, 5))
-            return await build(*args)
+            return await build(*args, **options)
 
         async def inspect(*_args, **_kwargs):
             self.assertFalse(release.is_set())
@@ -103,9 +113,12 @@ class ParallelWorkflowTests(unittest.IsolatedAsyncioTestCase):
             project(source)
             try:
                 with (
-                    patch("latexprep.core.check_bibliography", side_effect=bibliography),
-                    patch("latexprep.core.build_project", side_effect=baseline),
-                    patch("latexprep.core.inspect_pdf", side_effect=inspect),
+                    patch(
+                        "latexprep.document_tasks.check_bibliography_integrity",
+                        side_effect=bibliography,
+                    ),
+                    patch("latexprep.document_tasks.build_project", side_effect=baseline),
+                    patch("latexprep.document_tasks.inspect_pdf", side_effect=inspect),
                 ):
                     report = await asyncio.wait_for(
                         run_job(JobRequest("check", source, Settings(jobs=3))), 8
@@ -149,9 +162,9 @@ class ParallelWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 return []
 
             with (
-                patch("latexprep.core.build_project", side_effect=build),
-                patch("latexprep.core.inspect_pdf", side_effect=inspect),
-                patch("latexprep.core.compare_pdfs", side_effect=compare),
+                patch("latexprep.document_tasks.build_project", side_effect=build),
+                patch("latexprep.document_tasks.inspect_pdf", side_effect=inspect),
+                patch("latexprep.document_tasks.compare_pdfs", side_effect=compare),
             ):
                 task = asyncio.create_task(
                     run_job(
@@ -186,17 +199,18 @@ class ParallelWorkflowTests(unittest.IsolatedAsyncioTestCase):
         failed = SimpleNamespace(
             success=False,
             pdf=None,
-            findings=[Finding("build.test", "Build diagnostic", "warning")],
-            dependencies=set(),
-            tools={},
+            findings=[Finding("build.test", "Build diagnostic", severity="warning")],
+            recorder_project_inputs=set(),
+            tools=BuildTools(),
             command=[],
+            generated_reads=frozenset(),
         )
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "input"
             project(source)
             with (
-                patch("latexprep.core.build_project", new=AsyncMock(return_value=failed)),
-                patch("latexprep.core.inspect_pdf", new=AsyncMock()) as inspect,
+                patch("latexprep.document_tasks.build_project", new=AsyncMock(return_value=failed)),
+                patch("latexprep.document_tasks.inspect_pdf", new=AsyncMock()) as inspect,
             ):
                 report = await run_job(JobRequest("check", source, Settings()))
         inspect.assert_not_called()
@@ -209,7 +223,7 @@ class ParallelWorkflowTests(unittest.IsolatedAsyncioTestCase):
     async def test_deadline_drains_tasks_preserves_evidence_and_never_publishes(self):
         stopped = asyncio.Event()
 
-        async def hang(*_args):
+        async def hang(*_args, **_options):
             try:
                 await asyncio.Event().wait()
             finally:
@@ -222,7 +236,7 @@ class ParallelWorkflowTests(unittest.IsolatedAsyncioTestCase):
             (source / "main.tex").write_text(
                 (source / "main.tex").read_text().replace("Hello.", "TODO finish.")
             )
-            with patch("latexprep.core.build_project", side_effect=hang):
+            with patch("latexprep.document_tasks.build_project", side_effect=hang):
                 report = await run_job(
                     JobRequest("prepare", source, Settings(job_timeout_seconds=1), output)
                 )
@@ -240,7 +254,7 @@ class ParallelWorkflowTests(unittest.IsolatedAsyncioTestCase):
         observed_work = []
         report = Report("prepare")
 
-        async def delayed_build(_tree, _main, work, *_args):
+        async def delayed_build(_tree, _main, work, *_args, **_options):
             observed_work.append(work.parent)
             started.set()
             try:
@@ -255,7 +269,7 @@ class ParallelWorkflowTests(unittest.IsolatedAsyncioTestCase):
             base = Path(directory)
             source, output = base / "input", base / "output"
             project(source)
-            with patch("latexprep.core.build_project", side_effect=delayed_build):
+            with patch("latexprep.document_tasks.build_project", side_effect=delayed_build):
                 task = asyncio.create_task(
                     run_job(JobRequest("prepare", source, Settings(), output), report=report)
                 )
@@ -279,9 +293,9 @@ class ParallelWorkflowTests(unittest.IsolatedAsyncioTestCase):
             source, output = base / "input", base / "output"
             project(source)
             with (
-                patch("latexprep.core.build_project", side_effect=build),
-                patch("latexprep.core.inspect_pdf", new=AsyncMock(return_value=[])),
-                patch("latexprep.core.compare_pdfs", new=AsyncMock(return_value=[])),
+                patch("latexprep.document_tasks.build_project", side_effect=build),
+                patch("latexprep.document_tasks.inspect_pdf", new=AsyncMock(return_value=[])),
+                patch("latexprep.document_tasks.compare_pdfs", new=AsyncMock(return_value=[])),
             ):
                 report = await run_job(
                     JobRequest("prepare", source, Settings(max_temporary_bytes=1), output)
@@ -298,7 +312,7 @@ class FormattingApplicationTests(unittest.TestCase):
             (root / "a.tex").write_bytes(b"original a")
             (root / "b.tex").write_bytes(b"changed b")
             with self.assertRaisesRegex(PreparationError, "Source changed"):
-                _apply_contents(
+                apply_contents(
                     root,
                     {"a.tex": b"formatted a", "b.tex": b"formatted b"},
                     originals={"a.tex": b"original a", "b.tex": b"original b"},
@@ -311,7 +325,7 @@ class FormattingApplicationTests(unittest.TestCase):
             root = Path(directory)
             (root / "a.tex").write_bytes(b"original")
             with self.assertRaises(PreparationError):
-                _apply_contents(root, {"a.tex": b"new"}, originals={})
+                apply_contents(root, {"a.tex": b"new"}, originals={})
             with self.assertRaises(PreparationError):
-                _apply_contents(root, {"a.tex": b"new", "missing.tex": b"new"})
+                apply_contents(root, {"a.tex": b"new", "missing.tex": b"new"})
             self.assertEqual((root / "a.tex").read_bytes(), b"original")

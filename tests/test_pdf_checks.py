@@ -10,12 +10,12 @@ from pathlib import Path
 from latexprep.models import PreparationError
 from latexprep.pdf_checks import (
     PdfCheckOptions,
-    PdfRegion,
     PdfSectionBudget,
     extract_pdf_evidence,
     inspect_included_pdf_figures,
     inspect_pdf_details,
 )
+from latexprep.pdf_support import PdfRegion
 from latexprep.runtime import CommandResult, RuntimeLimits, ToolRunner
 from latexprep.scheduler import ResourceBudget
 from tests.support import live_tests_enabled
@@ -172,7 +172,7 @@ class DetailRunner(ToolRunner):
         readonly_inputs: tuple[Path, ...] = (),
         memory_mb: int | None = None,
     ) -> CommandResult:
-        self._validate_readonly_inputs(readonly_inputs)
+        self._frozen.validate(readonly_inputs)
         if self.expected_budget is not None and self.expected_budget.current_lease is None:
             raise AssertionError("PDF command ran without its shared budget lease")
         self.calls.append((list(argv), workspace, readonly_inputs))
@@ -181,7 +181,7 @@ class DetailRunner(ToolRunner):
         if argv[-1] in {"-v", "--version"}:
             if argv[0] == "qpdf" and argv[-1] != "--version":
                 raise AssertionError("qpdf requires --version")
-            return CommandResult(0, argv[0] + " version fixture\n", "", False, argv)
+            return CommandResult(0, argv[0] + " version fixture\n", "", resolved_command=argv)
         self.started.set()
         if self.block is not None:
             await self.block.wait()
@@ -202,8 +202,8 @@ class DetailRunner(ToolRunner):
             0,
             output,
             "",
-            self.failure == "timeout",
-            argv,
+            resolved_command=argv,
+            timed_out=self.failure == "timeout",
             output_limited=self.failure == "output",
             resource_exceeded="Resource exceeded" if self.failure == "resource" else None,
         )
@@ -271,7 +271,7 @@ class PdfDetailTests(unittest.IsolatedAsyncioTestCase):
         options = PdfCheckOptions(printable_margins_pt=(72, 72, 72, 72))
         await self.assert_status(options, "passed")
         failure = await self.assert_status(options, "failed", xml=text_xml(left=60))
-        self.assertEqual(failure.evidence, "heuristic")
+        self.assertEqual(failure.evidence_kind, "heuristic")
         await self.assert_status(options, "inconclusive", geometry=geometry(rotation=90))
         await self.assert_status(options, "inconclusive", geometry=geometry(crop="10 10 600 780"))
         await self.assert_status(
@@ -412,7 +412,7 @@ class PdfDetailTests(unittest.IsolatedAsyncioTestCase):
                 action={"/S": "/JavaScript", "/JS": "u:Private executable payload"}
             ),
         )
-        self.assertEqual(failure.evidence, "heuristic")
+        self.assertEqual(failure.evidence_kind, "heuristic")
         self.assertNotIn("Private executable payload", repr(failure))
         await self.assert_status(
             options, "inconclusive", objects=object_json(action={"/Next": "9 0 R"})
@@ -516,7 +516,7 @@ class PdfDetailTests(unittest.IsolatedAsyncioTestCase):
         failure = await self.assert_status(
             options, "failed", trace=color_trace(text_color="1 0 0", other_color="0 0.58 0")
         )
-        self.assertEqual(failure.evidence, "heuristic")
+        self.assertEqual(failure.evidence_kind, "heuristic")
         self.assertIn("semantic color-only encoding", failure.details["scope"])
         await self.assert_status(options, "inconclusive", trace=color_trace(space="DeviceCMYK"))
 
@@ -589,7 +589,7 @@ class PdfDetailTests(unittest.IsolatedAsyncioTestCase):
     @unittest.skipUnless(live_tests_enabled(), "Opt-in live PDF tools")
     async def test_live_poppler_geometry_metadata_and_raster_measurements(self) -> None:
         self.pdf.write_bytes(simple_pdf())
-        runner = ToolRunner(RuntimeLimits(timeout_seconds=30, memory_mb=512))
+        runner = ToolRunner(RuntimeLimits(timeout_seconds=30, max_memory_mb=512))
         findings = await inspect_pdf_details(
             self.pdf,
             self.work(),

@@ -10,7 +10,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from latexprep.models import PreparationError
-from latexprep.pdf import compare_pdfs
+from latexprep.pdf_comparison import compare_pdfs
 from latexprep.pdf_previews import PdfPreviewStore
 from latexprep.runtime import CommandResult
 from latexprep.scheduler import ResourceBudget
@@ -35,14 +35,14 @@ class PreviewRunner(FakePdfRunner):
         self, argv, cwd, workspace, *, readonly_inputs=(), memory_mb=None
     ) -> CommandResult:
         if argv[0] == "pdftoppm" and "-png" in argv:
-            self._validate_readonly_inputs(readonly_inputs)
+            self._frozen.validate(readonly_inputs)
             self.commands.append(argv)
             (workspace / "page.png").write_bytes(self.png)
             if self.png_hook:
                 await self.png_hook()
             if self.png_error or self.missing == "pdftoppm":
                 raise PreparationError(f"Preview failure at {workspace}")
-            return CommandResult(0, "", "", False, argv)
+            return CommandResult(0, "", "", resolved_command=argv)
         result = await super().run(
             argv,
             cwd,

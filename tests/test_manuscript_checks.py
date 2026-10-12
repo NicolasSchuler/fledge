@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from latexprep.manuscript_checks import (
     ManuscriptCheckOptions,
-    check_manuscript_details,
+    check_manuscript_policies,
     read_literal_metadata,
 )
 from latexprep.models import Finding, PreparationError
@@ -27,7 +27,7 @@ class ManuscriptDetailTests(unittest.TestCase):
 
     def results(self, body: str, options: ManuscriptCheckOptions) -> list[Finding]:
         self.write("main.tex", "\\documentclass{article}\n" + body)
-        return check_manuscript_details(self.root, "main.tex", options)
+        return check_manuscript_policies(self.root, "main.tex", options)
 
     def result(self, body: str, options: ManuscriptCheckOptions, suffix: str) -> Finding:
         return next(
@@ -53,7 +53,7 @@ class ManuscriptDetailTests(unittest.TestCase):
         self.assertEqual(bad.status, "failed", bad.details)
         self.assertEqual(bad.code, code)
         self.assertEqual(bad.severity, "warning" if advisory else "error")
-        self.assertEqual(bad.evidence, "heuristic" if advisory else "derived")
+        self.assertEqual(bad.evidence_kind, "heuristic" if advisory else "derived")
         self.assertTrue(bad.details["matches"])
         uncertain = self.result("\\iftrue\n" + violating + "\n\\fi", options, suffix)
         self.assertEqual(uncertain.status, "inconclusive", uncertain.details)
@@ -369,7 +369,7 @@ class ManuscriptDetailTests(unittest.TestCase):
             "\\end{document}\n",
         )
         (self.root / "refs.bib").write_text("@misc{a, title={A}}\n")
-        results = check_manuscript_details(
+        results = check_manuscript_policies(
             self.root,
             "main.tex",
             ManuscriptCheckOptions(check_empty_sections=True, require_float_captions=True),
@@ -436,7 +436,7 @@ class ManuscriptDetailTests(unittest.TestCase):
         for body in (r"\input{main}", r"\input{missing}"):
             result = self.result(body, options, "float_captions")
             self.assertEqual(result.status, "inconclusive")
-        with patch("latexprep.manuscript_checks.MAX_TOTAL_SOURCE_BYTES", 16):
+        with patch("latexprep.expanded_document.MAX_TOTAL_SOURCE_BYTES", 16):
             result = self.result("Text.", options, "float_captions")
         self.assertEqual(result.status, "inconclusive")
 
@@ -515,7 +515,7 @@ class ManuscriptDetailTests(unittest.TestCase):
         options = ManuscriptCheckOptions(forbid_abstract_citations=True)
         self.write("first.tex", r"\documentclass{article}")
         self.write("second.tex", r"\documentclass{article}")
-        results = check_manuscript_details(self.root, None, options)
+        results = check_manuscript_policies(self.root, None, options)
         self.assertEqual(results[0].status, "inconclusive")
         result = self.result(
             r"\begin{abstract}Outer\begin{abstract}Inner\end{abstract}\end{abstract}",

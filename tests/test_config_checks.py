@@ -16,7 +16,8 @@ from latexprep.config import Settings, load_settings
 from latexprep.manuscript_checks import ManuscriptCheckOptions
 from latexprep.models import PreparationError
 from latexprep.online_checks import OnlineOptions
-from latexprep.pdf_checks import PdfCheckOptions, PdfRegion, PdfSectionBudget
+from latexprep.pdf_checks import PdfCheckOptions, PdfSectionBudget
+from latexprep.pdf_support import PdfRegion
 from latexprep.submission_checks import SubmissionOptions
 
 _EXAMPLE = """

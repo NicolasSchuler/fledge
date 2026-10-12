@@ -93,7 +93,7 @@ findings new users meet most often, and `fledge rule BIB101` explains any code.
 A blocked run writes no output directory. Add `--report /path/to/report.json`
 to keep its full report. In `report.json`, read `outcome` first, then each entry
 in `findings`: its `code`, `severity`, `status`, `path`, `line`, `message` and
-`suggestion`. [Reports and exit codes](reports.md) explains every outcome and
+`next_step`. [Reports and exit codes](reports.md) explains every outcome and
 why a run that passed with warnings exits with code 1.
 
 ## 4. Add a preset for your venue

@@ -8,13 +8,11 @@ from pathlib import Path
 
 import click
 
-from .config import load_settings, resolve_config_path
-from .models import PreparationError
+from .config import parse_settings_text, resolve_config_path
+from .models import Outcome, PreparationError
 from .presets import PRESETS, preset_names, preset_text
 
 CONFIG_NAME = "fledge.toml"
-# Matches the CLI's "error" outcome; usage errors use the CLI's exit code 64.
-WRITE_ERROR_EXIT_CODE = 4
 
 STARTER = """\
 # Fledge project settings. Every value is a constraint you supply for this
@@ -33,7 +31,8 @@ ignore = [] # For example ["TEX001"] to skip unfinished-text markers.
 
 
 class InitError(click.ClickException):
-    exit_code = WRITE_ERROR_EXIT_CODE
+    # The CLI's "error" outcome; usage errors use the CLI's usage exit code.
+    exit_code = Outcome.ERROR.exit_code
 
 
 def _print_presets() -> None:
@@ -100,12 +99,16 @@ def init_command(directory: Path, preset: str | None, force: bool, list_presets:
         text = f"# Written by `fledge init --preset {preset}`.\n" + preset_text(preset)
     else:
         text = STARTER
+    # Validate before writing, so --force never replaces a file with an invalid one.
+    try:
+        parse_settings_text(text, target)
+    except PreparationError as error:
+        raise InitError(f"Cannot write a valid {target}: {error}") from error
     previous = _nearest_config(directory)
     try:
         with target.open("w" if force else "x", encoding="utf-8") as stream:
             stream.write(text)
-        load_settings(target, {})
-    except (OSError, PreparationError) as error:
+    except OSError as error:
         raise InitError(f"Cannot write a valid {target}: {error}") from error
     current = _nearest_config(directory)
     origin = f" from the {preset} preset" if preset is not None else ""

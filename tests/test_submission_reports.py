@@ -13,10 +13,11 @@ from click.testing import CliRunner
 
 from latexprep.cli import cli
 from latexprep.config import Settings
-from latexprep.core import JobRequest, run_job
-from latexprep.models import Change, Finding, Report
+from latexprep.core import run_job
+from latexprep.html_report import render_html
+from latexprep.job_context import JobRequest
+from latexprep.models import Change, ChangeKind, Finding, Outcome, Report
 from latexprep.pdf_previews import PdfPreviewStore
-from latexprep.reporting import render_html
 from latexprep.workflow_options import DocumentOptions, WorkflowOptions
 from tests.test_dependency_packaging import RecordedBuild, contents
 from tests.test_pdf_previews import PNG
@@ -24,7 +25,7 @@ from tests.test_pdf_previews import PNG
 
 def captured_difference(store, stage="baseline versus prepared", document=None, *, collector=None):
     collector = collector or store.for_comparison(stage, document)
-    slot = collector.reserve_page()
+    slot = collector.store.reserve_page()
     assert slot is not None
     collector.pages.append(
         {
@@ -34,12 +35,12 @@ def captured_difference(store, stage="baseline versus prepared", document=None, 
             "left": {
                 "present": True,
                 "status": "captured",
-                "image_id": collector.add_image(slot, "left", PNG),
+                "image_id": collector.store.add_image(slot, "left", PNG),
             },
             "right": {
                 "present": True,
                 "status": "captured",
-                "image_id": collector.add_image(slot, "right", PNG),
+                "image_id": collector.store.add_image(slot, "right", PNG),
             },
         }
     )
@@ -67,10 +68,10 @@ class PreparationInventoryTests(unittest.IsolatedAsyncioTestCase):
         selected = {"main.tex", "sections/body.tex"} if trace else None
         build = RecordedBuild({"main.tex": (selected,) * 4})
         with (
-            patch("latexprep.core.build_project", side_effect=build.__call__),
-            patch("latexprep.core.inspect_pdf", new=AsyncMock(return_value=[])),
+            patch("latexprep.document_tasks.build_project", side_effect=build.__call__),
+            patch("latexprep.document_tasks.inspect_pdf", new=AsyncMock(return_value=[])),
             patch(
-                "latexprep.core.compare_pdfs",
+                "latexprep.document_tasks.compare_pdfs",
                 new=AsyncMock(side_effect=compare, return_value=[]),
             ),
         ):
@@ -141,9 +142,9 @@ class PreparationInventoryTests(unittest.IsolatedAsyncioTestCase):
         selected = {"main.tex", "sections/body.tex"}
         build = RecordedBuild({"main.tex": (selected,) * 6})
         with (
-            patch("latexprep.core.build_project", side_effect=build.__call__),
-            patch("latexprep.core.inspect_pdf", new=AsyncMock(return_value=[])),
-            patch("latexprep.core.compare_pdfs", new=AsyncMock(return_value=[])),
+            patch("latexprep.document_tasks.build_project", side_effect=build.__call__),
+            patch("latexprep.document_tasks.inspect_pdf", new=AsyncMock(return_value=[])),
+            patch("latexprep.document_tasks.compare_pdfs", new=AsyncMock(return_value=[])),
         ):
             report = await run_job(JobRequest("prepare", self.source, settings, self.root / "out"))
         self.assertEqual({row["document"] for row in report.package_contents}, {"paper", "copy"})
@@ -165,7 +166,7 @@ class PreparationInventoryTests(unittest.IsolatedAsyncioTestCase):
             scratch.append(work.parent)
             collector = kwargs["previews"]
             captured_difference(store, collector=collector)
-            return [Finding("compare.text", "Extracted text differs", "error")]
+            return [Finding("compare.text", "Extracted text differs", severity="error")]
 
         report = await self.prepare(previews=store, compare=changed)
         self.assertEqual(report.outcome, "blocked")
@@ -184,11 +185,13 @@ class PreparationInventoryTests(unittest.IsolatedAsyncioTestCase):
 class ReportOutputTests(unittest.TestCase):
     def test_default_import_capacity_retains_inventory_and_redacts_late_credentials(self):
         secret = "ghp_" + "Ab12" * 10
-        report = Report("prepare", outcome="passed", scope=f"A prior occurrence: {secret}")
+        report = Report("prepare", outcome=Outcome.PASSED, scope=f"A prior occurrence: {secret}")
         files = []
         for number in range(10_000):
             name = f"notes-{number}.txt"
-            report.changes.append(Change(name, "remove", "Not selected for the submission."))
+            report.changes.append(
+                Change(name, kind=ChangeKind.REMOVE, reason="Not selected for the submission.")
+            )
             files.append(
                 {
                     "source": name,
@@ -237,7 +240,7 @@ class ReportOutputTests(unittest.TestCase):
 
             async def job(request, _progress, report):
                 observed.append(request.pdf_previews is not None)
-                report.outcome = "blocked"
+                report.outcome = Outcome.BLOCKED
                 if request.pdf_previews is not None:
                     captured_difference(request.pdf_previews)
                     report.execution["pdf_previews"] = request.pdf_previews.summary()

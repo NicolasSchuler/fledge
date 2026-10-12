@@ -16,7 +16,7 @@ independent opt-ins. CLI options override TOML; unknown keys and invalid types f
 ```toml
 layout = "flat"
 bibliography_backend = "bibtex" # auto, bibtex, or biber
-format = true
+apply_formatting = true # the --format option
 normalize_doi = true
 
 [bibliography_transform]
@@ -182,10 +182,10 @@ page = 8
 title = "Supplementary results"
 number = "A"
 
-[pdf_artwork]
+[rendered_pdf_artwork]
 grayscale_preview = true
 
-[figure_artwork]
+[included_figure_artwork]
 classify_artwork = true
 classify_type3_glyphs = true
 ```
@@ -202,15 +202,15 @@ page/title/number lines in extracted text. Tagged PDF checks inspect supported
 table, link, alternate-text and parent-tree/MCID structures; they do not establish
 natural reading order, description quality or PDF/UA conformance.
 
-`pdf_artwork` applies to the final document. `figure_artwork` independently applies
-to each literal input PDF figure, with its own coordinate system; document page
+`rendered_pdf_artwork` applies to the final document. `included_figure_artwork`
+independently applies to each literal input PDF figure, with its own coordinate system; document page
 regions are never reused implicitly for figure files. Crop/registration marks,
 whitespace, edge contact and raster-region classifications are review candidates.
 Type 3 analysis examines supported glyph programs and separates image operations
 from vector operations. Missing tools, unsupported transforms or partial objects
 remain incomplete observations.
 
-`pdf_artwork.contrast_samples` accepts named foreground/background `PdfRegion`
+`rendered_pdf_artwork.contrast_samples` accepts named foreground/background `PdfRegion`
 tables, a `minimum_ratio` and an optional `max_channel_spread`. The regions identify
 actual rendered color patches. Nonuniform or ambiguous patches are inconclusive;
 the checker does not infer what represents text or whether color carries meaning.

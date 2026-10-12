@@ -8,13 +8,16 @@ import threading
 import time
 from collections.abc import Awaitable, Callable, Iterable, Sequence
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
-from typing import Any, TypeVar, cast
+from dataclasses import KW_ONLY, dataclass, field
+from typing import Any, Literal, TypeVar, cast, get_args
 
 from .models import PreparationError
 
 T = TypeVar("T")
 R = TypeVar("R")
+# Expensive tool classes with their own concurrency limit inside the shared budget.
+ResourceClass = Literal["build", "render"]
+RESOURCE_CLASSES: tuple[ResourceClass, ...] = get_args(ResourceClass)
 _thread_stop: contextvars.ContextVar[threading.Event | None] = contextvars.ContextVar(
     "latexprep_thread_stop", default=None
 )
@@ -72,11 +75,20 @@ async def bounded_map(
     return [results[index] for index in range(len(items))]
 
 
+class AnalysisCancelled(BaseException):
+    """A cooperatively owned worker stopped because its owner was cancelled.
+
+    Like ``asyncio.CancelledError`` this is not an ``Exception``: a checker's
+    ``except PreparationError``/``except Exception`` must never turn a
+    cancellation into an ordinary finding.
+    """
+
+
 def cancellation_point() -> None:
     """Called at bounded parser/file boundaries by a cooperatively owned worker."""
     stop = _thread_stop.get()
     if stop is not None and stop.is_set():
-        raise PreparationError("Analysis cancelled")
+        raise AnalysisCancelled("Analysis cancelled")
 
 
 async def run_in_thread(function: Callable[..., R], *args: Any, **kwargs: Any) -> R:
@@ -122,7 +134,7 @@ class Lease:
     name: str
     cpu: int
     memory_mb: int
-    kind: str | None
+    kind: ResourceClass | None
     owner: asyncio.Task[Any] | None
     queue_seconds: float
     active: bool = True
@@ -133,37 +145,42 @@ class ResourceBudget:
 
     Reservations are conservative estimates. Runtime observes aggregate RSS and
     temporary bytes separately; this class does not claim an OS-hard memory cap.
+    ``cpu_slots`` is the ``jobs`` setting: CPU units shared by every operation.
     """
 
     def __init__(
         self,
-        jobs: int,
+        cpu_slots: int,
         memory_mb: int,
         *,
         build_jobs: int = 1,
         render_jobs: int = 1,
-        parent_memory_mb: int = 0,
+        coordinator_memory_mb: int = 0,
     ) -> None:
         for name, value in (
-            ("jobs", jobs),
+            ("cpu_slots", cpu_slots),
             ("memory_mb", memory_mb),
             ("build_jobs", build_jobs),
             ("render_jobs", render_jobs),
         ):
             if type(value) is not int or value < 1:
                 raise PreparationError(f"{name} must be a positive integer")
-        if type(parent_memory_mb) is not int or not 0 <= parent_memory_mb < memory_mb:
-            raise PreparationError("Parent memory reservation must fit the job budget")
-        self.jobs, self.memory_mb = jobs, memory_mb
+        if type(coordinator_memory_mb) is not int or not 0 <= coordinator_memory_mb < memory_mb:
+            raise PreparationError("Coordinator memory reservation must fit the job budget")
+        self.cpu_slots, self.memory_mb = cpu_slots, memory_mb
         self.build_jobs, self.render_jobs = build_jobs, render_jobs
-        self.parent_memory_mb = parent_memory_mb
-        self.available_memory_mb = memory_mb - parent_memory_mb
+        self.coordinator_memory_mb = coordinator_memory_mb
+        self.available_memory_mb = memory_mb - coordinator_memory_mb
+        self._class_limits: dict[ResourceClass, int] = {
+            "build": build_jobs,
+            "render": render_jobs,
+        }
         self._condition = asyncio.Condition()
         self._queue: list[object] = []
         self._used_cpu = self._used_memory = 0
-        self._used_kinds = {"build": 0, "render": 0}
+        self._used_classes: dict[ResourceClass, int] = dict.fromkeys(RESOURCE_CLASSES, 0)
         self._peak_cpu = self._peak_memory = 0
-        self._peak_kinds = {"build": 0, "render": 0}
+        self._peak_classes: dict[ResourceClass, int] = dict.fromkeys(RESOURCE_CLASSES, 0)
         self._operations: list[dict[str, object]] = []
         self._active: contextvars.ContextVar[Lease | None] = contextvars.ContextVar(
             "latexprep_resource_lease", default=None
@@ -174,26 +191,34 @@ class ResourceBudget:
         lease = self._active.get()
         return lease if lease and lease.active and lease.owner is asyncio.current_task() else None
 
-    def validate(self, *, cpu: int, memory_mb: int, kind: str | None = None) -> None:
+    def validate(self, *, cpu: int, memory_mb: int, kind: ResourceClass | None = None) -> None:
         if type(cpu) is not int or type(memory_mb) is not int:
             raise PreparationError("Resource reservations must be integers")
-        if not (1 <= cpu <= self.jobs and 1 <= memory_mb <= self.available_memory_mb):
+        if not (1 <= cpu <= self.cpu_slots and 1 <= memory_mb <= self.available_memory_mb):
             raise PreparationError(
                 f"Operation requires {cpu} CPU units and {memory_mb} MiB; "
-                f"available capacity is {self.jobs} CPU units and {self.available_memory_mb} MiB"
+                f"available capacity is {self.cpu_slots} CPU units "
+                f"and {self.available_memory_mb} MiB"
             )
-        if kind not in {None, "build", "render"}:
+        if kind is not None and kind not in RESOURCE_CLASSES:
             raise PreparationError(f"Unknown resource class: {kind}")
 
-    def _fits(self, cpu: int, memory_mb: int, kind: str | None) -> bool:
+    def _fits(self, cpu: int, memory_mb: int, kind: ResourceClass | None) -> bool:
         return (
-            self._used_cpu + cpu <= self.jobs
+            self._used_cpu + cpu <= self.cpu_slots
             and self._used_memory + memory_mb <= self.available_memory_mb
-            and (kind is None or self._used_kinds[kind] < getattr(self, f"{kind}_jobs"))
+            and (kind is None or self._used_classes[kind] < self._class_limits[kind])
         )
 
     @asynccontextmanager
-    async def lease(self, name: str, *, cpu: int = 1, memory_mb: int = 64, kind: str | None = None):
+    async def lease(
+        self,
+        name: str,
+        *,
+        cpu: int = 1,
+        memory_mb: int = 64,
+        kind: ResourceClass | None = None,
+    ):
         self.validate(cpu=cpu, memory_mb=memory_mb, kind=kind)
         inherited = self._active.get()
         if inherited is not None and inherited.active:
@@ -210,11 +235,11 @@ class ResourceBudget:
                 self._used_cpu += cpu
                 self._used_memory += memory_mb
                 if kind:
-                    self._used_kinds[kind] += 1
+                    self._used_classes[kind] += 1
                 self._peak_cpu = max(self._peak_cpu, self._used_cpu)
                 self._peak_memory = max(self._peak_memory, self._used_memory)
-                for key in self._used_kinds:
-                    self._peak_kinds[key] = max(self._peak_kinds[key], self._used_kinds[key])
+                for key, used in self._used_classes.items():
+                    self._peak_classes[key] = max(self._peak_classes[key], used)
                 self._condition.notify_all()
             except BaseException:
                 self._queue.remove(ticket)
@@ -232,7 +257,7 @@ class ResourceBudget:
             self._used_cpu -= cpu
             self._used_memory -= memory_mb
             if kind:
-                self._used_kinds[kind] -= 1
+                self._used_classes[kind] -= 1
             self._operations.append(
                 {
                     "name": name,
@@ -261,16 +286,17 @@ class ResourceBudget:
                 raise asyncio.CancelledError
 
     def statistics(self) -> dict[str, object]:
+        # Report keys name the settings: ``jobs`` is the CPU slot count.
         return {
-            "jobs": self.jobs,
+            "jobs": self.cpu_slots,
             "memory_mb": self.memory_mb,
-            "parent_reserved_memory_mb": self.parent_memory_mb,
+            "parent_reserved_memory_mb": self.coordinator_memory_mb,
             "build_jobs": self.build_jobs,
             "render_jobs": self.render_jobs,
             "peak_reserved_cpu": self._peak_cpu,
-            "peak_reserved_memory_mb": self._peak_memory + self.parent_memory_mb,
-            "peak_builds": self._peak_kinds["build"],
-            "peak_renders": self._peak_kinds["render"],
+            "peak_reserved_memory_mb": self._peak_memory + self.coordinator_memory_mb,
+            "peak_builds": self._peak_classes["build"],
+            "peak_renders": self._peak_classes["render"],
             "active_cpu": self._used_cpu,
             "active_memory_mb": self._used_memory,
             "queued": len(self._queue),
@@ -279,16 +305,34 @@ class ResourceBudget:
         }
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Task:
+    """One scheduled operation with its prerequisites and resource reservation.
+
+    A task with ``cpu=0`` composes other leased operations and holds no reservation.
+    """
+
     name: str
     run: Callable[[], Awaitable[Any]]
-    requires: tuple[str, ...] = ()
-    after: tuple[str, ...] = ()
+    _: KW_ONLY
+    # Start only after each of these tasks succeeded; otherwise the task is blocked.
+    needs_success_of: tuple[str, ...] = ()
+    # Start only after each of these tasks finished, whatever its result.
+    waits_for: tuple[str, ...] = ()
     cpu: int = 1
     memory_mb: int = 64
-    kind: str | None = None
+    kind: ResourceClass | None = None
     is_success: Callable[[Any], bool] | None = None
+
+    def __post_init__(self) -> None:
+        # Names may be StrEnum members; results and reports carry plain strings.
+        object.__setattr__(self, "name", str(self.name))
+        object.__setattr__(self, "needs_success_of", tuple(map(str, self.needs_success_of)))
+        object.__setattr__(self, "waits_for", tuple(map(str, self.waits_for)))
+
+    @property
+    def dependencies(self) -> tuple[str, ...]:
+        return (*self.needs_success_of, *self.waits_for)
 
 
 @dataclass
@@ -306,18 +350,11 @@ class TaskResult:
 
 @dataclass
 class Scheduler:
-    jobs: int
-    memory_mb: int
+    budget: ResourceBudget
     progress: Callable[[str], None] = field(default=lambda _message: None)
     on_result: Callable[[TaskResult], None] = field(default=lambda _result: None)
-    budget: ResourceBudget | None = None
-
-    def __post_init__(self) -> None:
-        if self.budget is None:
-            self.budget = ResourceBudget(self.jobs, self.memory_mb)
 
     def _validate(self, tasks: list[Task]) -> dict[str, Task]:
-        assert self.budget is not None
         by_name = {task.name: task for task in tasks}
         if len(by_name) != len(tasks):
             raise PreparationError("Duplicate scheduler task name")
@@ -326,7 +363,7 @@ class Scheduler:
                 raise PreparationError("Resource reservations must be integers")
             if (task.cpu, task.memory_mb, task.kind) != (0, 0, None):
                 self.budget.validate(cpu=task.cpu, memory_mb=task.memory_mb, kind=task.kind)
-            for dependency in (*task.requires, *task.after):
+            for dependency in task.dependencies:
                 if dependency not in by_name:
                     raise PreparationError(f"Task {task.name} has unknown dependency {dependency}")
         visited: set[str] = set()
@@ -338,7 +375,7 @@ class Scheduler:
             if name in visited:
                 return
             active.add(name)
-            for dependency in (*by_name[name].requires, *by_name[name].after):
+            for dependency in by_name[name].dependencies:
                 visit(dependency)
             active.remove(name)
             visited.add(name)
@@ -347,10 +384,46 @@ class Scheduler:
             visit(name)
         return by_name
 
+    async def _invoke(self, task: Task) -> TaskResult:
+        self.progress(f"Starting {task.name}")
+        value = await task.run()
+        succeeded = task.is_success is None or task.is_success(value)
+        return TaskResult(
+            task.name,
+            "succeeded" if succeeded else "failed",
+            value=value,
+            error=None if succeeded else "Task did not produce a successful artifact",
+        )
+
+    async def _run_task(self, task: Task) -> TaskResult:
+        """Run one task under its reservation; an ordinary error becomes a failed result."""
+        started = time.monotonic()
+        queue_seconds = 0.0
+        try:
+            if task.cpu == 0:
+                started = time.monotonic()
+                result = await self._invoke(task)
+            else:
+                async with self.budget.lease(
+                    task.name, cpu=task.cpu, memory_mb=task.memory_mb, kind=task.kind
+                ) as lease:
+                    queue_seconds = lease.queue_seconds
+                    started = time.monotonic()
+                    result = await self._invoke(task)
+        except asyncio.CancelledError:
+            self.progress(f"Cancelled {task.name}")
+            raise
+        except Exception as error:
+            # Keep the exception type: a bare message such as an empty string
+            # or a lone path says nothing about what went wrong.
+            result = TaskResult(task.name, "failed", error=f"{type(error).__name__}: {error}")
+        result.elapsed_seconds = round(time.monotonic() - started, 6)
+        result.queue_seconds = round(queue_seconds, 6)
+        self.progress(f"{task.name}: {result.status} ({result.elapsed_seconds:.1f}s)")
+        return result
+
     async def execute(self, tasks: list[Task]) -> dict[str, TaskResult]:
         pending = self._validate(tasks)
-        assert self.budget is not None
-        budget = self.budget
         results: dict[str, TaskResult] = {}
         running: dict[asyncio.Task[TaskResult], Task] = {}
 
@@ -359,50 +432,19 @@ class Scheduler:
                 results[result.name] = result
                 self.on_result(result)
 
-        async def execute_one(task: Task) -> TaskResult:
-            start = time.monotonic()
-            queue_seconds = 0.0
-
-            async def run() -> TaskResult:
-                nonlocal start
-                start = time.monotonic()
-                self.progress(f"Starting {task.name}")
-                value = await task.run()
-                succeeded = task.is_success is None or task.is_success(value)
-                return TaskResult(
-                    task.name,
-                    "succeeded" if succeeded else "failed",
-                    value=value,
-                    error=None if succeeded else "Task did not produce a successful artifact",
-                )
-
-            try:
-                if task.cpu == 0:
-                    result = await run()
-                else:
-                    async with budget.lease(
-                        task.name, cpu=task.cpu, memory_mb=task.memory_mb, kind=task.kind
-                    ) as lease:
-                        queue_seconds = lease.queue_seconds
-                        result = await run()
-            except asyncio.CancelledError:
-                self.progress(f"Cancelled {task.name}")
-                raise
-            except Exception as error:
-                # Keep the exception type: a bare message such as an empty string
-                # or a lone path says nothing about what went wrong.
-                result = TaskResult(task.name, "failed", error=f"{type(error).__name__}: {error}")
-            result.elapsed_seconds = round(time.monotonic() - start, 6)
-            result.queue_seconds = round(queue_seconds, 6)
-            self.progress(f"{task.name}: {result.status} ({result.elapsed_seconds:.1f}s)")
-            return result
+        def ready(task: Task) -> bool:
+            return all(dependency in results for dependency in task.dependencies)
 
         try:
             while pending or running:
                 for name, task in list(pending.items()):
-                    if not all(dep in results for dep in (*task.requires, *task.after)):
+                    if not ready(task):
                         continue
-                    failed = [dep for dep in task.requires if results[dep].status != "succeeded"]
+                    failed = [
+                        dependency
+                        for dependency in task.needs_success_of
+                        if results[dependency].status != "succeeded"
+                    ]
                     del pending[name]
                     if failed:
                         record(
@@ -414,17 +456,14 @@ class Scheduler:
                             )
                         )
                     else:
-                        running[asyncio.create_task(execute_one(task))] = task
+                        running[asyncio.create_task(self._run_task(task))] = task
                 if running:
                     completed, _ = await asyncio.wait(running, return_when=asyncio.FIRST_COMPLETED)
                     for future in sorted(completed, key=lambda item: running[item].name):
                         result = future.result()
                         running.pop(future)
                         record(result)
-                elif pending and not any(
-                    all(dep in results for dep in (*task.requires, *task.after))
-                    for task in pending.values()
-                ):
+                elif pending and not any(ready(task) for task in pending.values()):
                     raise PreparationError("No schedulable task remains")
         except BaseException:
             await cancel_and_drain(running)

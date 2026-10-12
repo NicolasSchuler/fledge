@@ -8,14 +8,21 @@ comparison measurements still cover every page, independently of these limits.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any
 
+from .file_safety import MIB
 from .models import PreparationError
+from .pdf_support import MAX_RASTER_DIMENSION, MAX_RASTER_PIXELS
 
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 _PNG_END = b"\x00\x00\x00\x00IEND\xaeB`\x82"
+# Signature, IHDR and IEND chunks: no complete PNG image is shorter.
+MIN_PNG_BYTES = 57
+MAX_PREVIEW_BYTES = 12 * MIB
 
 
 class PreviewLimitError(PreparationError):
@@ -25,13 +32,17 @@ class PreviewLimitError(PreparationError):
 def png_dimensions(data: bytes) -> tuple[int, int]:
     """Validate the framing and dimensions of internally rendered PNG bytes."""
     if (
-        len(data) < 57
+        len(data) < MIN_PNG_BYTES
         or not data.startswith(PNG_SIGNATURE + b"\x00\x00\x00\rIHDR")
         or not data.endswith(_PNG_END)
     ):
         raise PreparationError("Preview renderer did not produce a complete PNG image")
     width, height = int.from_bytes(data[16:20]), int.from_bytes(data[20:24])
-    if min(width, height) < 1 or max(width, height) > 8192 or width * height > 16_000_000:
+    if (
+        min(width, height) < 1
+        or max(width, height) > MAX_RASTER_DIMENSION
+        or width * height > MAX_RASTER_PIXELS
+    ):
         raise PreparationError("Preview renderer produced oversized PNG dimensions")
     return width, height
 
@@ -45,7 +56,7 @@ class PdfPreviewStore:
     """
 
     max_page_pairs: int = 8
-    max_total_bytes: int = 12 * 1024 * 1024
+    max_total_bytes: int = MAX_PREVIEW_BYTES
     images: dict[str, bytes] = field(default_factory=dict, init=False)
     _comparisons: list[PdfPreviewCollector] = field(default_factory=list, init=False)
     _selected: int = field(default=0, init=False)
@@ -67,6 +78,28 @@ class PdfPreviewStore:
     @property
     def remaining_bytes(self) -> int:
         return self.max_total_bytes - self._image_bytes
+
+    @asynccontextmanager
+    async def exclusive(self) -> AsyncGenerator[None, None]:
+        """Select and capture pages for one comparison at a time, in coordinator order."""
+        async with self._lock:
+            yield
+
+    def reserve_page(self) -> int | None:
+        """The next preview slot, or None once the page or byte limit is reached."""
+        if self._selected >= self.max_page_pairs or self.remaining_bytes < MIN_PNG_BYTES:
+            return None
+        self._selected += 1
+        return self._selected
+
+    def add_image(self, slot: int, side: str, data: bytes) -> str:
+        png_dimensions(data)
+        if len(data) > self.remaining_bytes:
+            raise PreviewLimitError("The shared PDF preview byte limit was reached")
+        image_id = f"pdf-preview-{slot:04d}-{side}"
+        self.images[image_id] = data
+        self._image_bytes += len(data)
+        return image_id
 
     def summary(self) -> dict[str, Any]:
         comparisons = [collector.summary() for collector in self._comparisons]
@@ -95,21 +128,6 @@ class PdfPreviewCollector:
     pages: list[dict[str, Any]] = field(default_factory=list)
     error: str | None = None
     finished: bool = False
-
-    def reserve_page(self) -> int | None:
-        if self.store._selected >= self.store.max_page_pairs or self.store.remaining_bytes < 57:
-            return None
-        self.store._selected += 1
-        return self.store._selected
-
-    def add_image(self, slot: int, side: str, data: bytes) -> str:
-        png_dimensions(data)
-        if len(data) > self.store.remaining_bytes:
-            raise PreviewLimitError("The shared PDF preview byte limit was reached")
-        image_id = f"pdf-preview-{slot:04d}-{side}"
-        self.store.images[image_id] = data
-        self.store._image_bytes += len(data)
-        return image_id
 
     def unavailable(self, message: str) -> None:
         self.error = message

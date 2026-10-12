@@ -6,7 +6,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from latexprep.bibliography import check_bibliography, normalize_dois
+from latexprep.bibliography_checks import check_bibliography_integrity
+from latexprep.bibliography_transform import normalize_dois
 from latexprep.models import PreparationError
 
 
@@ -81,7 +82,7 @@ class BibliographyTests(unittest.TestCase):
             "nested/b.BIB",
         )
 
-        findings = check_bibliography(self.root)
+        findings = check_bibliography_integrity(self.root)
 
         self.assertEqual(
             {item.rule for item in findings},
@@ -109,13 +110,13 @@ class BibliographyTests(unittest.TestCase):
             "old/references-backup.bib",
         )
 
-        self.assertEqual(check_bibliography(self.root, "main.tex"), [])
+        self.assertEqual(check_bibliography_integrity(self.root, "main.tex"), [])
         proposed, _, findings = normalize_dois(self.root, "main.tex")
         self.assertEqual(set(proposed), {"references.bib"})
         self.assertEqual(findings, [])
 
         self.assertEqual(
-            {item.rule for item in check_bibliography(self.root)},
+            {item.rule for item in check_bibliography_integrity(self.root)},
             {"bibliography.duplicate_key", "bibliography.duplicate_doi"},
         )
         self.assertIn("https://doi.org/", backup.read_text())
@@ -185,7 +186,7 @@ class BibliographyTests(unittest.TestCase):
             "@misc{dynamic, crossref=venue}\n"
         )
 
-        findings = check_bibliography(self.root)
+        findings = check_bibliography_integrity(self.root)
 
         self.assertEqual(
             [item.rule for item in findings],
@@ -202,7 +203,7 @@ class BibliographyTests(unittest.TestCase):
     def test_incomplete_parse_does_not_claim_macro_or_target_is_definitely_missing(self) -> None:
         self.write("@misc{k, title=maybe, crossref={later}}\n@misc{broken, title={")
 
-        findings = check_bibliography(self.root)
+        findings = check_bibliography_integrity(self.root)
 
         uncertain = [item for item in findings if item.rule != "bibliography.syntax"]
         self.assertEqual(len(uncertain), 2)
@@ -234,7 +235,7 @@ class BibliographyTests(unittest.TestCase):
     def test_nesting_limit_reports_failure_without_python_recursion(self) -> None:
         self.write("@misc{k,title={" + "{" * 300 + "x" + "}" * 301 + "}")
 
-        findings = check_bibliography(self.root)
+        findings = check_bibliography_integrity(self.root)
 
         self.assertEqual(len(findings), 1)
         self.assertIn("nesting", findings[0].message)
@@ -242,12 +243,12 @@ class BibliographyTests(unittest.TestCase):
     def test_doi_case_is_not_collapsed_for_exact_duplicate_detection(self) -> None:
         self.write("@misc{a,doi={10.1234/UPPER}}\n@misc{b,doi={10.1234/upper}}")
 
-        self.assertEqual(check_bibliography(self.root), [])
+        self.assertEqual(check_bibliography_integrity(self.root), [])
 
     def test_root_must_be_a_directory(self) -> None:
         path = self.write("@misc{k}")
         with self.assertRaises(PreparationError):
-            check_bibliography(path)
+            check_bibliography_integrity(path)
 
 
 if __name__ == "__main__":

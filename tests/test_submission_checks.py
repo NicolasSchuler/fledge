@@ -39,7 +39,8 @@ class SubmissionTests(unittest.TestCase):
 
     def incomplete(self, rule: str, options: SubmissionOptions) -> Finding:
         with patch(
-            "latexprep.submission_checks._inventory", return_value=({}, ["Unreadable directory."])
+            "latexprep.submission_checks.inventory_files",
+            return_value=({}, ["Unreadable directory."]),
         ):
             return self.result(rule, options)
 
@@ -211,7 +212,7 @@ class SubmissionTests(unittest.TestCase):
         self.write("main.tex", r"\section*{Acknowledgements}Our institution supported this.")
         result = self.result(rule, options)
         self.assertEqual((result.code, result.status), ("PRV003", "failed"))
-        self.assertEqual(result.evidence, "heuristic")
+        self.assertEqual(result.evidence_kind, "heuristic")
         self.assertEqual(result.severity, "warning")
         self.assertEqual(self.incomplete(rule, options).status, "inconclusive")
 
@@ -226,7 +227,7 @@ class SubmissionTests(unittest.TestCase):
         results = check_submission(self.root, "main.tex", options)
         result = next(item for item in results if item.rule == rule)
         self.assertEqual((result.code, result.status), ("PRV004", "failed"))
-        self.assertEqual(result.evidence, "heuristic")
+        self.assertEqual(result.evidence_kind, "heuristic")
         serialized = json.dumps([asdict(item) for item in results])
         for value in (token, assigned):
             self.assertNotIn(value, serialized)
@@ -327,7 +328,10 @@ class SubmissionTests(unittest.TestCase):
             rule, SubmissionOptions(required_deliverables=(("missing.pdf", "pdf"),))
         )
         self.assertEqual(missing.details["matches"][0]["reason"], "missing regular file")
-        with patch("latexprep.submission_checks._read", side_effect=OSError("unreadable")):
+        with (
+            patch("latexprep.file_scan.read_regular_file", side_effect=OSError("unreadable")),
+            patch("latexprep.file_scan.read_file_prefix", side_effect=OSError("unreadable")),
+        ):
             self.assertEqual(self.result(rule, options).status, "inconclusive")
 
     def test_archive_size(self) -> None:
@@ -374,7 +378,7 @@ class SubmissionTests(unittest.TestCase):
             self.assertEqual(bad.status, "failed")
             self.assertEqual(bad.details["declared_version_comparison"], "different")
             self.assertEqual(reference.read_text(), value)
-            with patch("latexprep.submission_checks._read", side_effect=OSError("unreadable")):
+            with patch("latexprep.file_scan.read_regular_file", side_effect=OSError("unreadable")):
                 self.assertEqual(self.result(rule, options).status, "inconclusive")
 
     def test_defaults_bounds_validation_and_cancellation(self) -> None:
@@ -394,7 +398,7 @@ class SubmissionTests(unittest.TestCase):
         ):
             with self.subTest(kwargs=kwargs), self.assertRaises(PreparationError):
                 SubmissionOptions(**kwargs)
-        with patch("latexprep.submission_checks.MAX_SOURCE_BYTES", 4):
+        with patch("latexprep.file_scan.MAX_SOURCE_BYTES", 4):
             self.assertEqual(
                 self.result("submission.secrets", SubmissionOptions(scan_secrets=True)).status,
                 "inconclusive",

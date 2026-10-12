@@ -13,15 +13,19 @@ from unittest.mock import AsyncMock, patch
 from click.testing import CliRunner
 
 from latexprep.build_checks import BuildCheckOptions
-from latexprep.check_pipeline import inspect_additional_pdf_checks
+from latexprep.build_dependencies import LoadedPackage
 from latexprep.cli import cli
 from latexprep.config import Settings
-from latexprep.core import JobRequest, run_job
+from latexprep.core import run_job
+from latexprep.job_context import JobRequest, pdf_check_settings
+from latexprep.latexmk_build import BuildResult
+from latexprep.manuscript import ManuscriptOptions
 from latexprep.manuscript_checks import ManuscriptCheckOptions
-from latexprep.models import Finding, Report
+from latexprep.models import Finding, Outcome, Report
 from latexprep.online_checks import OnlineOptions
+from latexprep.pdf_check_pipeline import inspect_configured_pdf_checks
 from latexprep.pdf_checks import PdfCheckOptions
-from latexprep.runtime import BuildResult, ToolRunner
+from latexprep.runtime import ToolRunner
 from latexprep.scheduler import ResourceBudget
 from latexprep.submission_checks import SubmissionOptions
 
@@ -37,7 +41,7 @@ def source_project(root: Path, body: str = "Body.", preamble: str = "") -> None:
     )
 
 
-async def controlled_build(tree, main, work, engine, runner):
+async def controlled_build(tree, main, work, engine, runner, **_options):
     """Orchestration double only; live TeX evidence belongs to opt-in integration tests."""
     work.mkdir()
     pdf = work / "paper.pdf"
@@ -45,18 +49,18 @@ async def controlled_build(tree, main, work, engine, runner):
     return BuildResult(
         success=True,
         pdf=pdf,
-        dependencies={main},
+        recorder_project_inputs={main},
         submission_inputs={main},
         command=["controlled-build"],
         recorder_complete=True,
         loaded_packages=[
-            {
-                "name": "article.cls",
-                "path": "/toolchain/article.cls",
-                "origin": "toolchain",
-                "declared_date": "2025/01/01",
-                "declared_version": "fixture",
-            }
+            LoadedPackage(
+                "article.cls",
+                "/toolchain/article.cls",
+                "toolchain",
+                declared_date="2025/01/01",
+                declared_version="fixture",
+            )
         ],
     )
 
@@ -81,7 +85,7 @@ class WorkflowCheckTests(unittest.IsolatedAsyncioTestCase):
             submission_checks=SubmissionOptions(identity_terms=("Named Institution",)),
         )
         reports = []
-        with patch("latexprep.core.build_project", new=AsyncMock()) as build:
+        with patch("latexprep.document_tasks.build_project", new=AsyncMock()) as build:
             for jobs in (1, 4):
                 reports.append(
                     await run_job(JobRequest("inspect", self.source, replace(settings, jobs=jobs)))
@@ -139,9 +143,9 @@ class WorkflowCheckTests(unittest.IsolatedAsyncioTestCase):
         )
         settings = Settings(layout="flat", submission_checks=options)
         with (
-            patch("latexprep.core.build_project", side_effect=controlled_build),
-            patch("latexprep.core.inspect_pdf", new=AsyncMock(return_value=[])),
-            patch("latexprep.core.compare_pdfs", new=AsyncMock(return_value=[])),
+            patch("latexprep.document_tasks.build_project", side_effect=controlled_build),
+            patch("latexprep.document_tasks.inspect_pdf", new=AsyncMock(return_value=[])),
+            patch("latexprep.document_tasks.compare_pdfs", new=AsyncMock(return_value=[])),
         ):
             report = await run_job(JobRequest("prepare", self.source, settings, self.root / "out"))
         self.assertIn(report.outcome, {"passed", "passed_with_advisories"}, report.to_dict())
@@ -176,9 +180,9 @@ class WorkflowCheckTests(unittest.IsolatedAsyncioTestCase):
         ):
             with (
                 self.subTest(policy=name),
-                patch("latexprep.core.build_project", side_effect=controlled_build),
-                patch("latexprep.core.inspect_pdf", new=AsyncMock(return_value=[])),
-                patch("latexprep.core.compare_pdfs", new=AsyncMock(return_value=[])),
+                patch("latexprep.document_tasks.build_project", side_effect=controlled_build),
+                patch("latexprep.document_tasks.inspect_pdf", new=AsyncMock(return_value=[])),
+                patch("latexprep.document_tasks.compare_pdfs", new=AsyncMock(return_value=[])),
             ):
                 report = await run_job(
                     JobRequest("prepare", self.source, settings, self.root / name)
@@ -201,16 +205,16 @@ class WorkflowCheckTests(unittest.IsolatedAsyncioTestCase):
                 Finding(
                     "pdf.required_metadata",
                     "Author missing" if final else "Present",
-                    "error" if final else "info",
-                    "failed" if final else "passed",
+                    severity="error" if final else "info",
+                    status="failed" if final else "passed",
                 )
             ]
 
         with (
-            patch("latexprep.core.build_project", side_effect=controlled_build),
-            patch("latexprep.core.inspect_pdf", new=AsyncMock(return_value=[])),
-            patch("latexprep.core.compare_pdfs", new=AsyncMock(return_value=[])),
-            patch("latexprep.core.inspect_additional_pdf_checks", side_effect=configured),
+            patch("latexprep.document_tasks.build_project", side_effect=controlled_build),
+            patch("latexprep.document_tasks.inspect_pdf", new=AsyncMock(return_value=[])),
+            patch("latexprep.document_tasks.compare_pdfs", new=AsyncMock(return_value=[])),
+            patch("latexprep.document_tasks.inspect_configured_pdf_checks", side_effect=configured),
         ):
             report = await run_job(
                 JobRequest("prepare", self.source, Settings(), self.root / "out")
@@ -225,15 +229,17 @@ class WorkflowCheckTests(unittest.IsolatedAsyncioTestCase):
         (self.source / "styles").mkdir()
         (self.source / "styles/helper.sty").write_text("\\ProvidesPackage{helper}\n")
         with (
-            patch("latexprep.core.build_project", side_effect=controlled_build),
-            patch("latexprep.core.inspect_pdf", new=AsyncMock(return_value=[])),
-            patch("latexprep.core.compare_pdfs", new=AsyncMock(return_value=[])),
+            patch("latexprep.document_tasks.build_project", side_effect=controlled_build),
+            patch("latexprep.document_tasks.inspect_pdf", new=AsyncMock(return_value=[])),
+            patch("latexprep.document_tasks.compare_pdfs", new=AsyncMock(return_value=[])),
         ):
             report = await run_job(
                 JobRequest(
                     "prepare",
                     self.source,
-                    Settings(layout="flat", forbidden_packages=("helper",)),
+                    Settings(
+                        layout="flat", manuscript=ManuscriptOptions(forbidden_packages=("helper",))
+                    ),
                     self.root / "out",
                 )
             )
@@ -252,9 +258,9 @@ class WorkflowCheckTests(unittest.IsolatedAsyncioTestCase):
         reference = self.root / "reference.sty"
         reference.write_bytes(content)
         with (
-            patch("latexprep.core.build_project", side_effect=controlled_build),
-            patch("latexprep.core.inspect_pdf", new=AsyncMock(return_value=[])),
-            patch("latexprep.core.compare_pdfs", new=AsyncMock(return_value=[])),
+            patch("latexprep.document_tasks.build_project", side_effect=controlled_build),
+            patch("latexprep.document_tasks.inspect_pdf", new=AsyncMock(return_value=[])),
+            patch("latexprep.document_tasks.compare_pdfs", new=AsyncMock(return_value=[])),
         ):
             report = await run_job(
                 JobRequest(
@@ -283,14 +289,14 @@ class PdfCheckCompositionTests(unittest.IsolatedAsyncioTestCase):
             source = root / "input"
             source_project(source, preamble="\\title{A paper}\\author{Alice}\\author{Bob}")
             details = AsyncMock(return_value=[])
-            with patch("latexprep.check_pipeline.inspect_pdf_details", new=details):
-                findings = await inspect_additional_pdf_checks(
+            with patch("latexprep.pdf_check_pipeline.inspect_pdf_details", new=details):
+                findings = await inspect_configured_pdf_checks(
                     root / "paper.pdf",
                     source,
                     "main.tex",
                     root / "work",
                     ToolRunner(),
-                    Settings(match_source_pdf_metadata=("title",)),
+                    pdf_check_settings(Settings(match_source_pdf_metadata=("title",))),
                     ResourceBudget(1, 1024),
                 )
             self.assertEqual(findings, [])
@@ -310,19 +316,19 @@ class PdfCheckCompositionTests(unittest.IsolatedAsyncioTestCase):
             )
             details = AsyncMock(return_value=[])
             with (
-                patch("latexprep.check_pipeline.inspect_pdf_details", new=details),
+                patch("latexprep.pdf_check_pipeline.inspect_pdf_details", new=details),
                 patch(
-                    "latexprep.check_pipeline.extract_pdf_evidence",
+                    "latexprep.pdf_check_pipeline.extract_pdf_evidence",
                     new=AsyncMock(return_value=("Body text.", {"Author": "Example Author"})),
                 ),
             ):
-                findings = await inspect_additional_pdf_checks(
+                findings = await inspect_configured_pdf_checks(
                     root / "paper.pdf",
                     source,
                     "main.tex",
                     root / "work",
                     ToolRunner(),
-                    settings,
+                    pdf_check_settings(settings),
                     budget,
                 )
             expected = dict(details.await_args.kwargs["options"].expected_metadata)
@@ -339,21 +345,23 @@ class PdfCheckCompositionTests(unittest.IsolatedAsyncioTestCase):
             source_project(source, preamble="\\author{One}\\author{Two}")
             details = AsyncMock(return_value=[])
             with (
-                patch("latexprep.check_pipeline.inspect_pdf_details", new=details),
+                patch("latexprep.pdf_check_pipeline.inspect_pdf_details", new=details),
                 patch(
-                    "latexprep.check_pipeline.extract_pdf_evidence",
+                    "latexprep.pdf_check_pipeline.extract_pdf_evidence",
                     new=AsyncMock(side_effect=OSError("sensitive tool fragment")),
                 ),
             ):
-                findings = await inspect_additional_pdf_checks(
+                findings = await inspect_configured_pdf_checks(
                     root / "paper.pdf",
                     source,
                     "main.tex",
                     root / "work",
                     ToolRunner(),
-                    Settings(
-                        match_source_pdf_metadata=("author",),
-                        submission_checks=SubmissionOptions(identity_terms=("One",)),
+                    pdf_check_settings(
+                        Settings(
+                            match_source_pdf_metadata=("author",),
+                            submission_checks=SubmissionOptions(identity_terms=("One",)),
+                        )
                     ),
                     ResourceBudget(1, 1024),
                 )
@@ -374,26 +382,32 @@ class PdfCheckCompositionTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(paths, (source / "figure.pdf",))
                 return [
                     Finding(
-                        "pdf.included_figure_fonts", "Font is missing", "error", path=str(paths[0])
+                        "pdf.included_figure_fonts",
+                        "Font is missing",
+                        severity="error",
+                        path=str(paths[0]),
                     )
                 ]
 
             with (
                 patch(
-                    "latexprep.check_pipeline.inspect_included_pdf_figures",
+                    "latexprep.pdf_check_pipeline.inspect_included_pdf_figures",
                     side_effect=figure_check,
                 ),
                 patch(
-                    "latexprep.check_pipeline.inspect_pdf_details", new=AsyncMock(return_value=[])
+                    "latexprep.pdf_check_pipeline.inspect_pdf_details",
+                    new=AsyncMock(return_value=[]),
                 ),
             ):
-                findings = await inspect_additional_pdf_checks(
+                findings = await inspect_configured_pdf_checks(
                     root / "paper.pdf",
                     source,
                     "main.tex",
                     root / "work",
                     ToolRunner(),
-                    Settings(pdf_checks=PdfCheckOptions(require_embedded_figure_fonts=True)),
+                    pdf_check_settings(
+                        Settings(pdf_checks=PdfCheckOptions(require_embedded_figure_fonts=True))
+                    ),
                     ResourceBudget(1, 1024),
                 )
             self.assertEqual(len(findings), 1, findings)
@@ -411,7 +425,7 @@ class OnlineCliTests(unittest.TestCase):
                     self.subTest(flags=flags),
                     patch(
                         "latexprep.cli.run_job",
-                        new=AsyncMock(return_value=Report("inspect", "passed")),
+                        new=AsyncMock(return_value=Report("inspect", outcome=Outcome.PASSED)),
                     ) as job,
                 ):
                     response = CliRunner().invoke(

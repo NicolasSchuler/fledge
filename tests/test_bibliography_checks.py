@@ -8,8 +8,12 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
-from latexprep.bibliography_checks import BibliographyOptions, check_bibliography_details
+from latexprep.bibliography_checks import (
+    BibliographyOptions,
+    check_bibliography_coverage_and_fields,
+)
 from latexprep.models import Finding, PreparationError, has_blockers
+from latexprep.scheduler import AnalysisCancelled
 
 
 def listed(finding: Finding, key: str) -> list:
@@ -43,7 +47,9 @@ class BibliographyCheckTests(unittest.TestCase):
         )
 
     def check(self, **options: object) -> list[Finding]:
-        return check_bibliography_details(self.root, "main.tex", replace(self.options, **options))
+        return check_bibliography_coverage_and_fields(
+            self.root, "main.tex", replace(self.options, **options)
+        )
 
     def rows(self, suffix: str, **options: object) -> list[Finding]:
         return [item for item in self.check(**options) if item.rule == f"bibliography.{suffix}"]
@@ -437,7 +443,7 @@ class BibliographyCheckTests(unittest.TestCase):
         self.assertEqual([row.details["entry"] for row in rows], ["risk"])
         self.assertEqual(rows[0].details["tokens"], ["GPU", "iPhone"])
         self.assertEqual(rows[0].code, "BIB107")
-        self.assertEqual(rows[0].evidence, "heuristic")
+        self.assertEqual(rows[0].evidence_kind, "heuristic")
         self.write("references.bib", "@misc{protected,title={A {GPU} study}}")
         self.assertEqual(
             [row.status for row in self.rows("capitalization", check_capitalization=True)],
@@ -474,7 +480,7 @@ class BibliographyCheckTests(unittest.TestCase):
         self.assertEqual(rows[0].details["entry"], "candidate")
         self.assertEqual(rows[0].details["first_entry"], "first")
         self.assertEqual(rows[0].code, "BIB108")
-        self.assertEqual((rows[0].severity, rows[0].evidence), ("warning", "heuristic"))
+        self.assertEqual((rows[0].severity, rows[0].evidence_kind), ("warning", "heuristic"))
         self.assertEqual(path.read_text(), original)
         self.assertEqual(
             [
@@ -522,7 +528,7 @@ class BibliographyCheckTests(unittest.TestCase):
 
     def test_bibliography_only_scope_and_input_limits_report_uncertainty(self) -> None:
         self.write("references.bib", "@misc{known,url={https:///missing}}")
-        rows = check_bibliography_details(self.root)
+        rows = check_bibliography_coverage_and_fields(self.root)
         self.assertTrue(
             any(row.rule == "bibliography.url_syntax" and row.status == "failed" for row in rows)
         )
@@ -534,7 +540,7 @@ class BibliographyCheckTests(unittest.TestCase):
             )
         )
         self.manuscript("\\cite{known}")
-        with patch("latexprep.bibliography_checks._MAX_TOTAL_BYTES", 4):
+        with patch("latexprep.bibliography_checks.MAX_RESOURCES_TOTAL_BYTES", 4):
             rows = self.check(required_fields=(("*", ("title",)),))
         self.assertTrue(rows)
         self.assertTrue(all(row.status == "inconclusive" for row in rows))
@@ -584,9 +590,9 @@ class BibliographyCheckTests(unittest.TestCase):
         self.write("references.bib", "@misc{known}")
         with patch(
             "latexprep.bibliography_checks.cancellation_point",
-            side_effect=PreparationError("Analysis cancelled"),
+            side_effect=AnalysisCancelled("Analysis cancelled"),
         ):
-            with self.assertRaisesRegex(PreparationError, "Analysis cancelled"):
+            with self.assertRaisesRegex(AnalysisCancelled, "Analysis cancelled"):
                 self.check()
 
 

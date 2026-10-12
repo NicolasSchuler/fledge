@@ -12,9 +12,10 @@ from unittest.mock import patch
 from rich.console import Console
 from rich.text import Text
 
-from latexprep.models import Finding, Report
-from latexprep.presentation import print_report, render_compact, render_terminal
+from latexprep.finding_view import RenderOptions
+from latexprep.models import Finding, Outcome, Report
 from latexprep.terminal_progress import TerminalProgress
+from latexprep.terminal_report import print_report, render_compact, render_terminal
 
 
 class TerminalBuffer(StringIO):
@@ -32,7 +33,7 @@ def render(report: Report, width: int, *, color: bool = False, show_files: bool 
         no_color=not color,
         markup=True,
     )
-    print_report(report, console, show_files=show_files)
+    print_report(report, console, options=RenderOptions(show_files=show_files))
     return output.getvalue()
 
 
@@ -69,14 +70,14 @@ class TerminalPresentationTests(unittest.TestCase):
         path = "sections/" + "long-results-directory/" * 8 + "[bold]results.tex"
         report = Report(
             "prepare",
-            "blocked",
+            outcome=Outcome.BLOCKED,
             scope="selected source, build, preservation and fresh ZIP rebuild checks",
             main=path,
             findings=[
                 Finding(
-                    "source-missing-dependency",
+                    "source.missing_dependency",
                     "The dependency is missing [red]literal[/red].",
-                    "error",
+                    severity="error",
                     path=path,
                     suggestion="Review the full source path and repeat the check. ACTION END",
                 )
@@ -111,7 +112,7 @@ class TerminalPresentationTests(unittest.TestCase):
                 Finding(
                     "manuscript.forbidden_packages",
                     "Forbidden.",
-                    "error",
+                    severity="error",
                     details={"matches": [{"path": "a.tex", "line": 3}]},
                 )
             ],
@@ -132,7 +133,7 @@ class TerminalPresentationTests(unittest.TestCase):
             ("error", "31"),
         ):
             with self.subTest(outcome=outcome):
-                text = render(Report("check", outcome), 80, color=True)
+                text = render(Report("check", outcome=outcome), 80, color=True)
                 self.assertRegex(text, rf"\x1b\[[0-9;]*{ansi}m")
                 self.assertIn(outcome.replace("_", " ").capitalize(), text)
 
@@ -140,9 +141,13 @@ class TerminalPresentationTests(unittest.TestCase):
         malicious = "[bold]paper[/bold]\x1b]8;;https://example.invalid\x07\x1b[31m\x85.tex"
         report = Report(
             "check",
-            "blocked",
+            outcome=Outcome.BLOCKED,
             main=malicious,
-            findings=[Finding(malicious, malicious, "error", path=malicious, suggestion=malicious)],
+            findings=[
+                Finding(
+                    malicious, malicious, severity="error", path=malicious, suggestion=malicious
+                )
+            ],
             artifacts={malicious: malicious},
         )
         for text in (render(report, 80), render_compact(report)):
@@ -153,7 +158,9 @@ class TerminalPresentationTests(unittest.TestCase):
     def test_package_summary_full_inventory_and_measurement_boundary(self):
         for status in ("proposed", "prepared", "verified", "incomplete"):
             with self.subTest(status=status):
-                report = Report("prepare", "planned", package_contents=[package(status)])
+                report = Report(
+                    "prepare", outcome=Outcome.PLANNED, package_contents=[package(status)]
+                )
                 summary = render(report, 80)
                 self.assertIn(f"[{status}]", summary)
                 self.assertIn("1 included, 1 excluded", summary)
@@ -178,17 +185,17 @@ class TerminalPresentationTests(unittest.TestCase):
     def test_package_contents_are_redacted_with_the_report(self):
         report = Report(
             "prepare",
-            "passed",
+            outcome=Outcome.PASSED,
             settings={"password": "SyntheticInventoryCredential"},
             package_contents=[package()],
         )
         report.package_contents[0]["files"][0]["path"] = "SyntheticInventoryCredential.tex"
-        text = render_terminal(report, show_files=True)
+        text = render_terminal(report, options=RenderOptions(show_files=True))
         self.assertNotIn("SyntheticInventoryCredential", text)
         self.assertIn("REDACTED", text)
 
     def test_compact_records_keep_their_existing_scope(self):
-        report = Report("prepare", "planned", package_contents=[package("proposed")])
+        report = Report("prepare", outcome=Outcome.PLANNED, package_contents=[package("proposed")])
         self.assertEqual(len(render_compact(report).splitlines()), 1)
         self.assertNotIn("Package contents", render_compact(report))
 

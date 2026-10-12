@@ -15,7 +15,8 @@ from click.testing import CliRunner
 from latexprep.cli import cli
 from latexprep.config import Settings
 from latexprep.doctor import diagnostic_engines, run_doctor
-from latexprep.models import Finding, PreparationError
+from latexprep.models import Finding, Outcome, PreparationError
+from latexprep.resource_monitor import ResourceMonitor
 from latexprep.runtime import CommandResult, ToolRunner
 from latexprep.workflow_options import DocumentOptions, WorkflowOptions
 from tests.support import fake_build_result, write_project
@@ -37,7 +38,7 @@ class DoctorRunner(FakePdfRunner):
 
     async def run(self, argv, cwd, workspace, **options):
         if argv[-1] == "--version":
-            return CommandResult(0, f"{argv[0]} version test\n", "", False, argv)
+            return CommandResult(0, f"{argv[0]} version test\n", "", resolved_command=argv)
         return await super().run(argv, cwd, workspace, **options)
 
 
@@ -52,7 +53,7 @@ class DoctorTests(unittest.IsolatedAsyncioTestCase):
 
         self.stack = []
         for replacement in (
-            patch("latexprep.doctor.ToolRunner", side_effect=make_runner),
+            patch("latexprep.job_execution.ToolRunner", side_effect=make_runner),
             patch("latexprep.doctor.shutil.which", side_effect=lambda name: f"/test-tools/{name}"),
             patch("latexprep.doctor.build_project", side_effect=self.build),
         ):
@@ -97,15 +98,15 @@ class DoctorTests(unittest.IsolatedAsyncioTestCase):
         ):
             with self.subTest(failure=failure):
 
-                async def final_sample(runner, resource_failure=failure):
-                    runner._fail_job(resource_failure)
+                async def final_sample(monitor, scope, resource_failure=failure):
+                    monitor.fail_job(resource_failure)
 
                 # Use the real scope exit path, with only its monitor and final
                 # sample controlled. All built-in fixture operations succeed.
                 with (
                     patch.object(DoctorRunner, "job_scope", ToolRunner.job_scope),
-                    patch.object(DoctorRunner, "_monitor_job", AsyncMock()),
-                    patch.object(DoctorRunner, "_sample_job", final_sample),
+                    patch.object(ResourceMonitor, "_monitor_job", AsyncMock()),
+                    patch.object(ResourceMonitor, "_sample_job", final_sample),
                 ):
                     report = await run_doctor()
                 self.assertEqual(report.outcome, "blocked")
@@ -185,20 +186,23 @@ class DoctorTests(unittest.IsolatedAsyncioTestCase):
     async def test_enabled_formatter_exercises_builtin_source_only(self):
         from latexprep.formatting import FormattingResult
 
-        async def format_source(source, work, runner, settings, **options):
+        async def format_source(source, work, runner, options, **style):
             self.assertIn("Fledge setup test", (source / "main.tex").read_text())
-            self.assertEqual(settings.formatting_options.exclude, ())
+            self.assertEqual(options.exclude, ())
+            self.assertEqual(options.wrap_length, Settings().formatting_options.wrap_length)
             return FormattingResult(contents={"main.tex": (source / "main.tex").read_bytes()})
 
         with patch("latexprep.doctor.format_project", side_effect=format_source):
-            report = await run_doctor(Settings(format=True))
+            report = await run_doctor(Settings(apply_formatting=True))
         self.assertEqual(report.outcome, "passed", report.findings)
         self.assertTrue(report.tools["tex-fmt"]["exercised"])
 
     async def test_failed_builtin_build_is_not_a_manuscript_finding(self):
         async def failed(source, main, work, engine, runner, **options):
             return fake_build_result(
-                work, success=False, findings=[Finding("build.failed", "Tool failed.", "error")]
+                work,
+                success=False,
+                findings=[Finding("build.failed", "Tool failed.", severity="error")],
             )
 
         with patch("latexprep.doctor.build_project", side_effect=failed):
@@ -214,7 +218,7 @@ class DoctorTests(unittest.IsolatedAsyncioTestCase):
 
         async def failing(runner, argv, cwd, workspace, **options):
             if argv[0] == "pdftoppm" and argv[-1] != "-v":
-                return CommandResult(1, "", "cannot render", False, argv)
+                return CommandResult(1, "", "cannot render", resolved_command=argv)
             return await original(runner, argv, cwd, workspace, **options)
 
         with patch.object(DoctorRunner, "run", failing):
@@ -272,7 +276,7 @@ class DoctorTests(unittest.IsolatedAsyncioTestCase):
                 return fake_build_result(
                     work,
                     success=False,
-                    findings=[Finding("build.failed", "biblatex.sty not found.", "error")],
+                    findings=[Finding("build.failed", "biblatex.sty not found.", severity="error")],
                 )
             return await self.build(source, main, work, engine, runner, **options)
 
@@ -325,7 +329,7 @@ class DoctorCommandTests(unittest.TestCase):
         async def respond(settings, *, progress):
             if progress is not None:
                 progress("Testing controlled setup")
-            return Report("doctor", "passed", "setup diagnostics")
+            return Report("doctor", outcome=Outcome.PASSED, scope="setup diagnostics")
 
         for quiet in (False, True):
             with patch("latexprep.doctor_command.run_doctor", side_effect=respond):
@@ -349,7 +353,9 @@ class DoctorCommandTests(unittest.TestCase):
                     "main.tex": "private manuscript which must not be compiled",
                 },
             )
-            response = Report("doctor", "passed", "setup diagnostics with a built-in fixture")
+            response = Report(
+                "doctor", outcome=Outcome.PASSED, scope="setup diagnostics with a built-in fixture"
+            )
             with patch(
                 "latexprep.doctor_command.run_doctor", AsyncMock(return_value=response)
             ) as run:
@@ -367,7 +373,7 @@ class DoctorCommandTests(unittest.TestCase):
         with patch("latexprep.doctor_command.resolve_config_path") as discover:
             with patch(
                 "latexprep.doctor_command.run_doctor",
-                AsyncMock(return_value=Report("doctor", "blocked")),
+                AsyncMock(return_value=Report("doctor", outcome=Outcome.BLOCKED)),
             ) as run:
                 result = CliRunner().invoke(cli, ["doctor", "--quiet"])
         self.assertEqual(result.exit_code, 3, result.output)

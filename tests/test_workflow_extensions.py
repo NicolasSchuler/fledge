@@ -12,14 +12,15 @@ from unittest.mock import AsyncMock, patch
 from click.testing import CliRunner
 
 from latexprep.bibliography_transform import BibliographyTransformOptions
-from latexprep.check_pipeline import inspect_additional_pdf_checks
 from latexprep.cli import cli
 from latexprep.config import Settings, load_settings
-from latexprep.core import JobRequest, run_job
+from latexprep.core import run_job
+from latexprep.job_context import JobRequest, pdf_check_settings
 from latexprep.models import Finding
 from latexprep.online_checks import OnlineOptions
 from latexprep.pdf_artwork import PdfArtworkOptions
-from latexprep.reporting import ReportingOptions, ReviewRule
+from latexprep.pdf_check_pipeline import inspect_configured_pdf_checks
+from latexprep.review_policy import ReportingOptions, ReviewRule
 from latexprep.runtime import ToolRunner
 from latexprep.scheduler import ResourceBudget
 from latexprep.source_transform import SourceTransformOptions
@@ -53,9 +54,9 @@ class WorkflowExtensionTests(unittest.IsolatedAsyncioTestCase):
             source_transforms=SourceTransformOptions(comment_policy="private"),
         )
         with (
-            patch("latexprep.core.build_project", side_effect=build),
-            patch("latexprep.core.inspect_pdf", new=AsyncMock(return_value=[])),
-            patch("latexprep.core.compare_pdfs", new=AsyncMock(return_value=[])),
+            patch("latexprep.document_tasks.build_project", side_effect=build),
+            patch("latexprep.document_tasks.inspect_pdf", new=AsyncMock(return_value=[])),
+            patch("latexprep.document_tasks.compare_pdfs", new=AsyncMock(return_value=[])),
         ):
             result = await run_job(JobRequest("prepare", self.source, settings, self.base / "out"))
         self.assertIn(result.outcome, {"passed", "passed_with_advisories"}, result.to_dict())
@@ -101,8 +102,8 @@ class WorkflowExtensionTests(unittest.IsolatedAsyncioTestCase):
                         Finding(
                             "online.doi_resolution",
                             "Controlled online result for the inspected DOI",
-                            "info" if finding_status == "passed" else "warning",
-                            finding_status,
+                            severity="info" if finding_status == "passed" else "warning",
+                            status=finding_status,
                             details={"doi": doi},
                         )
                     ]
@@ -116,10 +117,10 @@ class WorkflowExtensionTests(unittest.IsolatedAsyncioTestCase):
                     ),
                 )
                 with (
-                    patch("latexprep.core.build_project", side_effect=build),
-                    patch("latexprep.core.inspect_pdf", new=AsyncMock(return_value=[])),
-                    patch("latexprep.core.compare_pdfs", new=AsyncMock(return_value=[])),
-                    patch("latexprep.core.check_online_references", side_effect=online),
+                    patch("latexprep.document_tasks.build_project", side_effect=build),
+                    patch("latexprep.document_tasks.inspect_pdf", new=AsyncMock(return_value=[])),
+                    patch("latexprep.document_tasks.compare_pdfs", new=AsyncMock(return_value=[])),
+                    patch("latexprep.document_tasks.check_online_references", side_effect=online),
                 ):
                     result = await run_job(JobRequest("prepare", self.source, settings, output))
                 self.assertEqual(
@@ -157,10 +158,10 @@ class WorkflowExtensionTests(unittest.IsolatedAsyncioTestCase):
             online_checks=OnlineOptions(online=True, online_doi_resolution=True),
         )
         with (
-            patch("latexprep.core.build_project", side_effect=build),
-            patch("latexprep.core.inspect_pdf", new=AsyncMock(return_value=[])),
-            patch("latexprep.core.compare_pdfs", new=AsyncMock(return_value=[])),
-            patch("latexprep.core.check_online_references", side_effect=online),
+            patch("latexprep.document_tasks.build_project", side_effect=build),
+            patch("latexprep.document_tasks.inspect_pdf", new=AsyncMock(return_value=[])),
+            patch("latexprep.document_tasks.compare_pdfs", new=AsyncMock(return_value=[])),
+            patch("latexprep.document_tasks.check_online_references", side_effect=online),
         ):
             result = await run_job(
                 JobRequest("prepare", self.source, settings, self.base / "out", dry_run=True)
@@ -175,11 +176,11 @@ class WorkflowExtensionTests(unittest.IsolatedAsyncioTestCase):
                 accepted_exceptions=(ReviewRule("PDF001", "Approved extra page"),)
             )
         )
-        failure = Finding("pdf.page_limit", "Too many pages", "error")
+        failure = Finding("pdf.page_limit", "Too many pages", severity="error")
         with (
-            patch("latexprep.core.build_project", side_effect=build),
-            patch("latexprep.core.inspect_pdf", new=AsyncMock(return_value=[failure])),
-            patch("latexprep.core.compare_pdfs", new=AsyncMock(return_value=[])),
+            patch("latexprep.document_tasks.build_project", side_effect=build),
+            patch("latexprep.document_tasks.inspect_pdf", new=AsyncMock(return_value=[failure])),
+            patch("latexprep.document_tasks.compare_pdfs", new=AsyncMock(return_value=[])),
         ):
             result = await run_job(JobRequest("prepare", self.source, settings, self.base / "out"))
         self.assertEqual(result.outcome, "accepted_exceptions", result.to_dict())
@@ -201,11 +202,11 @@ class WorkflowExtensionTests(unittest.IsolatedAsyncioTestCase):
                 )
             )
         )
-        changed = Finding("compare.rendering", "Pixels differ", "error")
+        changed = Finding("compare.rendering", "Pixels differ", severity="error")
         with (
-            patch("latexprep.core.build_project", side_effect=build),
-            patch("latexprep.core.inspect_pdf", new=AsyncMock(return_value=[])),
-            patch("latexprep.core.compare_pdfs", new=AsyncMock(return_value=[changed])),
+            patch("latexprep.document_tasks.build_project", side_effect=build),
+            patch("latexprep.document_tasks.inspect_pdf", new=AsyncMock(return_value=[])),
+            patch("latexprep.document_tasks.compare_pdfs", new=AsyncMock(return_value=[changed])),
         ):
             result = await run_job(JobRequest("prepare", self.source, settings, self.base / "out"))
         self.assertEqual(result.outcome, "blocked")
@@ -222,12 +223,16 @@ class WorkflowExtensionTests(unittest.IsolatedAsyncioTestCase):
         pdf = self.base / "paper.pdf"
         pdf.write_bytes(b"%PDF-fixture")
         with (
-            patch("latexprep.core.import_project", side_effect=AssertionError("source import")),
-            patch("latexprep.core.build_project", side_effect=AssertionError("build")),
             patch(
-                "latexprep.core.inspect_standalone_pdf",
+                "latexprep.document_run.import_project", side_effect=AssertionError("source import")
+            ),
+            patch("latexprep.document_tasks.build_project", side_effect=AssertionError("build")),
+            patch(
+                "latexprep.standalone_checks.inspect_standalone_pdf",
                 new=AsyncMock(
-                    return_value=[Finding("pdf.page_limit", "Count okay", "info", "passed")]
+                    return_value=[
+                        Finding("pdf.page_limit", "Count okay", severity="info", status="passed")
+                    ]
                 ),
             ),
         ):
@@ -241,18 +246,22 @@ class WorkflowExtensionTests(unittest.IsolatedAsyncioTestCase):
         )
         with (
             patch(
-                "latexprep.check_pipeline._figure_inputs",
+                "latexprep.pdf_check_pipeline._figure_inputs",
                 side_effect=AssertionError("unneeded figure graph"),
             ),
-            patch("latexprep.check_pipeline.inspect_pdf_artwork", new=AsyncMock(return_value=[])),
+            patch(
+                "latexprep.pdf_check_pipeline.inspect_pdf_artwork", new=AsyncMock(return_value=[])
+            ),
         ):
-            result = await inspect_additional_pdf_checks(
+            result = await inspect_configured_pdf_checks(
                 self.base / "paper.pdf",
                 self.source,
                 "main.tex",
                 self.base / "work",
                 ToolRunner(),
-                Settings(pdf_artwork=PdfArtworkOptions(grayscale_preview=True)),
+                pdf_check_settings(
+                    Settings(rendered_pdf_artwork=PdfArtworkOptions(grayscale_preview=True))
+                ),
                 ResourceBudget(2, 2048),
             )
         self.assertFalse(any(item.rule == "pdf.artwork_input_scope" for item in result))
@@ -261,7 +270,7 @@ class WorkflowExtensionTests(unittest.IsolatedAsyncioTestCase):
         pdf = self.base / "paper.pdf"
         pdf.write_bytes(b"%PDF-fixture")
 
-        async def measured(_pdf, work, *_args):
+        async def measured(_pdf, work, *_args, **_kwargs):
             work.mkdir(parents=True)
             preview = work / "gray.png"
             preview.write_bytes(b"PNG fixture")
@@ -269,14 +278,14 @@ class WorkflowExtensionTests(unittest.IsolatedAsyncioTestCase):
                 Finding(
                     "pdf.grayscale_preview",
                     "Generated",
-                    "info",
-                    "passed",
+                    severity="info",
+                    status="passed",
                     details={"artifacts": [str(preview)]},
                 )
             ]
 
-        settings = Settings(pdf_artwork=PdfArtworkOptions(grayscale_preview=True))
-        with patch("latexprep.core.inspect_standalone_pdf", side_effect=measured):
+        settings = Settings(rendered_pdf_artwork=PdfArtworkOptions(grayscale_preview=True))
+        with patch("latexprep.standalone_checks.inspect_standalone_pdf", side_effect=measured):
             result = await run_job(
                 JobRequest("pdf", pdf, settings, preview_output=self.base / "previews")
             )
@@ -294,8 +303,8 @@ class WorkflowExtensionTests(unittest.IsolatedAsyncioTestCase):
                 Finding(
                     "pdf.grayscale_preview",
                     "Generated",
-                    "info",
-                    "passed",
+                    severity="info",
+                    status="passed",
                     details={"artifacts": [str(preview)]},
                 )
             ]
@@ -306,18 +315,20 @@ class WorkflowExtensionTests(unittest.IsolatedAsyncioTestCase):
 
         for multi in (False, True):
             settings = Settings(
-                pdf_artwork=PdfArtworkOptions(grayscale_preview=True),
+                rendered_pdf_artwork=PdfArtworkOptions(grayscale_preview=True),
                 workflow=WorkflowOptions(documents=(DocumentOptions("paper", "main.tex"),))
                 if multi
                 else WorkflowOptions(),
             )
             output, previews = self.base / f"out-{multi}", self.base / f"previews-{multi}"
             with (
-                patch("latexprep.core.build_project", side_effect=build),
-                patch("latexprep.core.inspect_pdf", new=AsyncMock(return_value=[])),
-                patch("latexprep.core.compare_pdfs", new=AsyncMock(return_value=[])),
-                patch("latexprep.core.inspect_additional_pdf_checks", side_effect=measured),
-                patch("latexprep.core._copy_previews", side_effect=fail_preview),
+                patch("latexprep.document_tasks.build_project", side_effect=build),
+                patch("latexprep.document_tasks.inspect_pdf", new=AsyncMock(return_value=[])),
+                patch("latexprep.document_tasks.compare_pdfs", new=AsyncMock(return_value=[])),
+                patch(
+                    "latexprep.document_tasks.inspect_configured_pdf_checks", side_effect=measured
+                ),
+                patch("latexprep.publication._copy_previews", side_effect=fail_preview),
             ):
                 result = await run_job(
                     JobRequest("prepare", self.source, settings, output, preview_output=previews)

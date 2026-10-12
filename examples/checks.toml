@@ -87,6 +87,6 @@ online_timeout_seconds = 10
 online_jobs = 2
 # online_replication_urls = ["https://example.org/artifact"]
 
-[figure_artwork]
+[included_figure_artwork]
 # Applies to each included PDF figure (needs MuPDF mutool) and to PNG/JPEG figure headers.
 # required_color_space = "rgb" # Or "cmyk"; grayscale figures satisfy either.

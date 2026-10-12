@@ -7,7 +7,7 @@ import unittest
 import zipfile
 from pathlib import Path
 
-from latexprep.models import Change
+from latexprep.models import Change, ChangeKind
 from latexprep.package_inputs import select_package_inputs
 from latexprep.package_inventory import assemble_package_inventory
 from latexprep.project import create_archive
@@ -144,10 +144,14 @@ class PackageInventoryTests(unittest.TestCase):
             changes=[
                 Change(
                     "parts/body.tex",
-                    "remove",
-                    "Input contents were merged into the main source copy.",
+                    kind=ChangeKind.REMOVE,
+                    reason="Input contents were merged into the main source copy.",
                 ),
-                Change(".DS_Store", "exclude", "Operating-system or version-control metadata."),
+                Change(
+                    ".DS_Store",
+                    kind=ChangeKind.EXCLUDE,
+                    reason="Operating-system or version-control metadata.",
+                ),
             ],
             status="incomplete",
         )
@@ -198,7 +202,7 @@ class PackageInventoryTests(unittest.TestCase):
         _, selection = self.select({"main.tex", "body.tex"})
         package = assemble_package_inventory(
             selections=[selection],
-            changes=[Change("body.tex", "remove", "Merged into main source.")],
+            changes=[Change("body.tex", kind=ChangeKind.REMOVE, reason="Merged into main source.")],
         )
         row = next(item for item in package["files"] if item["source"] == "body.tex")
         self.assertEqual(package["status"], "proposed")
@@ -239,7 +243,9 @@ class PackageInventoryTests(unittest.TestCase):
 
     def test_missing_observations_never_claim_prepared_or_verified_and_sizes_stay_unknown(self):
         package = assemble_package_inventory(
-            changes=[Change("excluded.log", "exclude", "Rebuildable diagnostic.")],
+            changes=[
+                Change("excluded.log", kind=ChangeKind.EXCLUDE, reason="Rebuildable diagnostic.")
+            ],
             status="incomplete",
         )
         self.assertIsNone(package["files"][0]["size_bytes"])

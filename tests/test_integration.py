@@ -12,8 +12,10 @@ import zlib
 from pathlib import Path
 
 from latexprep.config import Settings
-from latexprep.core import JobRequest, run_job
-from latexprep.pdf import PdfOptions, inspect_pdf
+from latexprep.core import run_job
+from latexprep.job_context import JobRequest
+from latexprep.manuscript import ManuscriptOptions
+from latexprep.pdf_inspection import PdfInspectionOptions, inspect_pdf
 from latexprep.runtime import RuntimeLimits, ToolRunner
 from tests.support import live_tests_enabled
 
@@ -68,23 +70,27 @@ class LiveIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     source,
                     Settings(
                         layout="flat",
-                        format=True,
-                        expected_document_class="article",
-                        require_abstract=True,
-                        abstract_min_words=1,
-                        abstract_max_words=100,
-                        required_sections=("Results",),
+                        apply_formatting=True,
+                        manuscript=ManuscriptOptions(
+                            expected_document_class="article",
+                            require_abstract=True,
+                            abstract_min_words=1,
+                            abstract_max_words=100,
+                            required_sections=("Results",),
+                        ),
                         max_pages=10,
-                        expected_page_width_pt=612,
-                        expected_page_height_pt=792,
-                        require_consistent_page_size=True,
-                        min_image_dpi=1,
-                        require_embedded_fonts=True,
-                        forbid_type3_fonts=True,
-                        forbid_encryption=True,
-                        forbid_forms=True,
-                        forbid_javascript=True,
-                        forbid_attachments=True,
+                        pdf=PdfInspectionOptions(
+                            expected_page_width_pt=612,
+                            expected_page_height_pt=792,
+                            require_consistent_page_size=True,
+                            min_image_dpi=1,
+                            require_embedded_fonts=True,
+                            forbid_type3_fonts=True,
+                            forbid_encryption=True,
+                            forbid_forms=True,
+                            forbid_javascript=True,
+                            forbid_attachments=True,
+                        ),
                     ),
                     base / "prepared",
                 )
@@ -120,7 +126,7 @@ class LiveIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 base / "prepared/manuscript.pdf",
                 base / "strict-inspection",
                 ToolRunner(),
-                options=PdfOptions(min_image_dpi=300),
+                options=PdfInspectionOptions(min_image_dpi=300),
             )
             low_resolution = next(finding for finding in findings if finding.code == "PDF103")
             self.assertEqual(low_resolution.status, "failed")

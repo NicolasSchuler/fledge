@@ -28,13 +28,18 @@ MAX_DISCOVERIES = 100_000
 MAX_SECRET_CHARS = 1024 * 1024
 MAX_REPLACEMENT_WORK = 128 * 1024 * 1024
 
+_ACCESS_KEY = r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b"
+# Prefix and alphabet of each credential-shaped token; the caller adds the length.
+_TOKEN_PREFIXES = (
+    r"\b(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]",
+    r"\bsk-(?:proj-|svcacct-)?[A-Za-z0-9_-]",
+    r"\bxox[baprs]-[A-Za-z0-9-]",
+)
 # Shared with the optional source credential check. Detection remains heuristic;
 # the report boundary additionally handles short contextual credentials below.
 SECRET_PATTERNS = (
-    ("access-key-shaped token", re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b")),
-    ("credential-shaped token", re.compile(r"\b(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{20,255}")),
-    ("credential-shaped token", re.compile(r"\bsk-(?:proj-|svcacct-)?[A-Za-z0-9_-]{20,255}")),
-    ("credential-shaped token", re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{20,255}")),
+    ("access-key-shaped token", re.compile(_ACCESS_KEY)),
+    *(("credential-shaped token", re.compile(prefix + "{20,255}")) for prefix in _TOKEN_PREFIXES),
     ("private-key header", re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----")),
     (
         "secret assignment",
@@ -48,12 +53,9 @@ SECRET_PATTERNS = (
         re.compile(r"(?i)https?://[^\s/@:{}]{1,128}:(?P<secret>[^\s/@{}]{8,256})@"),
     ),
 )
-_STANDALONE = re.compile(
-    r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b|"
-    r"\b(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{20,}|"
-    r"\bsk-(?:proj-|svcacct-)?[A-Za-z0-9_-]{20,}|"
-    r"\bxox[baprs]-[A-Za-z0-9-]{20,}"
-)
+# Report redaction discovers each whole token however long it is, so no part of
+# a long credential survives; the source check above bounds its matches instead.
+_STANDALONE = re.compile("|".join([_ACCESS_KEY, *(prefix + "{20,}" for prefix in _TOKEN_PREFIXES)]))
 _PRIVATE_BLOCK = re.compile(
     r"-----BEGIN (?P<kind>(?:(?:RSA|EC|OPENSSH|DSA|ENCRYPTED) )?PRIVATE KEY)-----"
     r"(?P<body>.*?)(?:-----END (?P=kind)-----|\Z)",
@@ -92,8 +94,19 @@ _TOKEN_ENTROPY_SINGLE_CASE = 4.0
 _QUERY = re.compile(r"(?:[?&#;])(?P<key>[^\s=&;#]{1,256})=(?P<value>[^\s&#;<>\"']*)")
 
 
-class _Limit(Exception):
+class _RedactionLimitExceeded(Exception):
     """Fail closed without exposing the unprocessed report."""
+
+
+def _decoded_json_string(value: str) -> str | None:
+    """The text a double-quoted JSON string literal denotes, or None if it is not one."""
+    if not value.startswith('"'):
+        return None
+    try:
+        decoded = json.loads(value)
+    except ValueError:
+        return None
+    return decoded if isinstance(decoded, str) else None
 
 
 def _variants(text: str) -> list[str]:
@@ -104,7 +117,7 @@ def _variants(text: str) -> list[str]:
             break
         result.append(decoded)
     if unquote(result[-1]) != result[-1]:
-        raise _Limit
+        raise _RedactionLimitExceeded
     return result
 
 
@@ -153,7 +166,7 @@ class _Scan:
     def add(self, value: str) -> None:
         self.discoveries += 1
         if self.discoveries > MAX_DISCOVERIES:
-            raise _Limit
+            raise _RedactionLimitExceeded
         for item in _variants(value):
             if not item or item.startswith("[REDACTED") or item.lower() == "[redacted]":
                 continue
@@ -161,12 +174,12 @@ class _Scan:
                 self.secrets.add(item)
                 self.secret_chars += len(item)
                 if len(self.secrets) > MAX_SECRETS or self.secret_chars > MAX_SECRET_CHARS:
-                    raise _Limit
+                    raise _RedactionLimitExceeded
 
     def inspect(self, text: str, sensitive: bool = False) -> None:
         self.text_chars += len(text)
         if self.text_chars > MAX_TEXT_CHARS:
-            raise _Limit
+            raise _RedactionLimitExceeded
         if sensitive:
             self.add(text)
         for value in _variants(text):
@@ -185,14 +198,11 @@ class _Scan:
                     if candidate.startswith(('\\"', "\\'")) and candidate[-2:] == candidate[:2]:
                         candidate = candidate[2:-2]
                     elif candidate.startswith(('"', "'")) and candidate[-1:] == candidate[:1]:
-                        if candidate.startswith('"'):
-                            try:
-                                self.add(json.loads(candidate))
-                            except ValueError:
-                                pass
+                        if (decoded := _decoded_json_string(candidate)) is not None:
+                            self.add(decoded)
                         candidate = candidate[1:-1]
                     elif candidate.startswith(('"', "'")):
-                        raise _Limit
+                        raise _RedactionLimitExceeded
                     self.add(candidate)
             for match in _BEARER.finditer(value):
                 self.add(match.group("value"))
@@ -205,10 +215,10 @@ class _Scan:
                     self.add(match.group("value"))
                     self.add(unquote_plus(match.group("value")))
 
-    def copy(self, value: Any, depth: int = 0, sensitive: bool = False) -> Any:
+    def collect_secrets_and_copy(self, value: Any, depth: int = 0, sensitive: bool = False) -> Any:
         self.nodes += 1
         if self.nodes > MAX_NODES or depth > MAX_DEPTH:
-            raise _Limit
+            raise _RedactionLimitExceeded
         if isinstance(value, str):
             self.inspect(value, sensitive)
             return value
@@ -218,7 +228,7 @@ class _Scan:
             return "[REDACTED: unsupported value]"
         identity = id(value)
         if identity in self.ancestors:
-            raise _Limit
+            raise _RedactionLimitExceeded
         self.ancestors.add(identity)
         try:
             if isinstance(value, dict):
@@ -232,9 +242,9 @@ class _Scan:
                     else:
                         key = "[REDACTED: unsupported key]"
                         child_sensitive = True
-                    copied[key] = self.copy(item, depth + 1, child_sensitive)
+                    copied[key] = self.collect_secrets_and_copy(item, depth + 1, child_sensitive)
                 return copied
-            items = [self.copy(item, depth + 1, sensitive) for item in value]
+            items = [self.collect_secrets_and_copy(item, depth + 1, sensitive) for item in value]
             return tuple(items) if isinstance(value, tuple) else items
         finally:
             self.ancestors.remove(identity)
@@ -250,10 +260,10 @@ def redact_data(value: Any) -> Any:
     """
     scan = _Scan()
     try:
-        copied = scan.copy(value)
+        copied = scan.collect_secrets_and_copy(value)
         if scan.text_chars * max(1, len(scan.secrets)) > MAX_REPLACEMENT_WORK:
-            raise _Limit
-    except _Limit:
+            raise _RedactionLimitExceeded
+    except _RedactionLimitExceeded:
         return LIMIT_REDACTION
     secrets = sorted(scan.secrets, key=len, reverse=True)
     long_secrets = [secret for secret in secrets if len(secret) >= _MIN_SUBSTRING_SECRET]

@@ -3,50 +3,74 @@
 No input is written. Values, string definitions and comments are preserved unless
 the caller explicitly selects their field/entry for removal or supplies a guarded
 replacement. A merge means discard the named donor and retain the named target;
-it never guesses work identity or combines metadata.
+it never guesses work identity or combines metadata. DOI-prefix normalization is
+a separate, narrowly scoped proposal over the integrity-checked files.
 """
 
 from __future__ import annotations
 
-import difflib
 import re
-from collections import defaultdict, deque
-from dataclasses import dataclass
+from collections import defaultdict
+from collections.abc import Callable
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from .bibliography import _MAX_FILE_BYTES, _Document, _Entry, _Field, _Parser
-from .bibliography_checks import (
-    _CITATIONS,
-    _GRAPH_FAILURES,
-    _MAX_DOCUMENTS,
-    _MAX_ENTRIES,
-    _MAX_TOTAL_BYTES,
-    _MULTICITES,
-    _RELATIONS,
-    _entry_index,
-    _Graph,
-    _graph,
-    _keys,
-    _Reference,
+from .bibliography_checks import inspect_bibliography_integrity
+from .bibtex_syntax import (
+    ENTRY_TYPE,
+    IDENTIFIER,
+    LOWERCASE_NAME,
+    MAX_BIB_ENTRIES,
+    MAX_RESOURCE_FILES,
+    MAX_RESOURCES_TOTAL_BYTES,
+    BibDocument,
+    BibFileReader,
+    Declaration,
+    Entry,
+    Field,
+    parse_bibtex,
+    read_doi,
+    skip_trivia,
 )
-from .manuscript import _commands_before_end, _reachable_sources
-from .models import Change, Finding, PreparationError
+from .citation_graph import (
+    CITATION_COMMANDS,
+    KEY_LIST_FIELDS,
+    MULTICITE_COMMANDS,
+    Citation,
+    CitationGraph,
+    LocatedEntry,
+    build_citation_graph,
+    citation_keys,
+    graph_failures,
+    index_entries,
+    located_entries,
+    uncertainty_messages,
+)
+from .expanded_document import commands_before_end, reachable_sources
+from .models import Change, ChangeKind, Finding, PreparationError
+from .option_config import require_booleans
 from .scheduler import cancellation_point
-from .source import _Inspection, _items
+from .source_graph import SourceGraph
+from .tex_lexer import split_argument_items
+from .text_edits import (
+    OverlappingEdits,
+    TextEdit,
+    apply_text_edits,
+    unified_diff_text,
+    with_bom,
+)
 
-_NAME = re.compile(r"[a-z][a-z0-9_-]*")
 _KEY = re.compile(r"(?!\*$)[^\s\\{}#$^~&%\x00-\x1f\x7f\"'(),=]+")
-_ENTRY_HEADER = re.compile(r"@[A-Za-z][A-Za-z0-9_-]*")
-_FIELD_NAME = re.compile(r"[^\s\"#%'(),={}]+")
-_STRUCTURAL_FIELDS = _RELATIONS | {"ids"}
-_PREFIX = "bibliography."
-_OPERATIONS = (
-    ("format_entries", "format_entries"),
-    ("remove_fields", "remove_fields"),
-    ("cited_only", "cited_only"),
-    ("key_mapping", "key_mapping"),
-    ("field_edits", "field_edits"),
-    ("order_entries", "order_entries"),
+_ENTRY_HEADER = re.compile("@" + ENTRY_TYPE.pattern)
+# Operations in rule-catalogue order (BIB201-BIB206). A failure before any step
+# runs, such as graph selection or reading, is reported under the first requested one.
+_CATALOGUE_ORDER = (
+    "format_entries",
+    "remove_fields",
+    "cited_only",
+    "key_mapping",
+    "field_edits",
+    "order_entries",
 )
 
 
@@ -69,17 +93,15 @@ class BibliographyTransformOptions:
     order_entries: bool = False
 
     def __post_init__(self) -> None:
-        for name in ("format_entries", "cited_only", "order_entries"):
-            if type(getattr(self, name)) is not bool:
-                raise PreparationError(f"{name} must be a boolean")
+        require_booleans(self, "format_entries", "cited_only", "order_entries")
         if (
             not isinstance(self.remove_fields, tuple)
             or any(
-                not isinstance(name, str) or not _NAME.fullmatch(name)
+                not isinstance(name, str) or not LOWERCASE_NAME.fullmatch(name)
                 for name in self.remove_fields
             )
             or len(set(self.remove_fields)) != len(self.remove_fields)
-            or set(self.remove_fields) & _STRUCTURAL_FIELDS
+            or set(self.remove_fields) & KEY_LIST_FIELDS
         ):
             raise PreparationError(
                 "remove_fields must contain unique lowercase, non-relationship field names"
@@ -106,8 +128,8 @@ class BibliographyTransformOptions:
                 not isinstance(key, str)
                 or not _KEY.fullmatch(key)
                 or not isinstance(name, str)
-                or not _NAME.fullmatch(name)
-                or name in _STRUCTURAL_FIELDS
+                or not LOWERCASE_NAME.fullmatch(name)
+                or name in KEY_LIST_FIELDS
                 or name in self.remove_fields
                 or (key, name) in seen
                 or any(
@@ -131,7 +153,7 @@ _DEFAULT_OPTIONS = BibliographyTransformOptions()
 
 @dataclass(frozen=True)
 class _FieldSpan:
-    field: _Field
+    field: Field
     name_end: int
     value_start: int
     value_end: int
@@ -140,7 +162,7 @@ class _FieldSpan:
 
 @dataclass(frozen=True)
 class _EntrySpan:
-    entry: _Entry
+    entry: Entry
     key_start: int
     key_end: int
     comma: int | None
@@ -159,129 +181,92 @@ class _Blocked(Exception):
         self.path = path
 
 
-def _trivia(text: str, position: int) -> int:
-    while position < len(text):
-        if text[position].isspace():
-            position += 1
-        elif text[position] == "%":
-            newline = text.find("\n", position)
-            position = len(text) if newline < 0 else newline + 1
-        else:
-            break
-    return position
-
-
-def _layout(document: _Document, entry: _Entry) -> _EntrySpan:
+def _layout(document: BibDocument, entry: Entry) -> _EntrySpan:
     text = document.text
     match = _ENTRY_HEADER.match(text, entry.start)
-    if match is None or entry.key is None:
+    if match is None:
         raise _Blocked("An entry has no supported literal key.", path=document.path)
-    opening = _trivia(text, match.end())
-    key_start = _trivia(text, opening + 1)
+    opening = skip_trivia(text, match.end())
+    key_start = skip_trivia(text, opening + 1)
     key_end = key_start + len(entry.key)
-    after_key = _trivia(text, key_end)
+    after_key = skip_trivia(text, key_end)
     comma = after_key if text[after_key] == "," else None
     spans: list[_FieldSpan] = []
     for item in entry.fields:
-        first, last = item.atoms[0], item.atoms[-1]
-        start = first.start - (first.kind == "literal")
-        end = last.end + (last.kind == "literal")
-        delimiter = _trivia(text, end)
+        start, end = item.atoms[0].outer_start, item.atoms[-1].outer_end
+        delimiter = skip_trivia(text, end)
         field_comma = delimiter if text[delimiter] == "," else None
-        name = _FIELD_NAME.match(text, item.start)
+        name = IDENTIFIER.match(text, item.start)
         if name is None:
             raise _Blocked("A field name has unsupported syntax.", path=document.path)
         spans.append(_FieldSpan(item, name.end(), start, end, field_comma))
     if spans:
         final = spans[-1]
-        closing = _trivia(text, final.comma + 1 if final.comma is not None else final.value_end)
+        closing = skip_trivia(text, final.comma + 1 if final.comma is not None else final.value_end)
     else:
-        closing = _trivia(text, comma + 1 if comma is not None else key_end)
+        closing = skip_trivia(text, comma + 1 if comma is not None else key_end)
     return _EntrySpan(entry, key_start, key_end, comma, tuple(spans), closing)
 
 
-def _edits(text: str, changes: list[tuple[int, int, str]]) -> str:
-    pieces: list[str] = []
-    cursor = 0
-    for start, end, replacement in sorted(changes, key=lambda item: (item[0], item[1])):
-        if start < cursor or not 0 <= start <= end <= len(text):
-            raise _Blocked("Requested edits overlap; separate the conflicting transformations.")
-        pieces.extend((text[cursor:start], replacement))
-        cursor = end
-    pieces.append(text[cursor:])
-    return "".join(pieces)
+def _apply(text: str, edits: list[TextEdit]) -> str:
+    try:
+        return apply_text_edits(text, edits)
+    except OverlappingEdits as error:
+        raise _Blocked(
+            "Requested edits overlap; separate the conflicting transformations."
+        ) from error
 
 
-def _parse(path: str, text: str) -> _Document:
-    document = _Document(path, text)
-    _Parser(document).parse()
+def _require_valid(document: BibDocument) -> BibDocument:
     if not document.valid:
-        raise _Blocked(f"{path}: repair the incomplete bibliography syntax first.", path=path)
+        raise _Blocked(
+            f"{document.path}: repair the incomplete bibliography syntax first.",
+            path=document.path,
+        )
     return document
 
 
-def _read(root: Path, names: set[str]) -> tuple[dict[str, bytes], dict[str, _Document]]:
-    if len(names) > _MAX_DOCUMENTS:
+def _read(root: Path, names: set[str]) -> dict[str, BibDocument]:
+    if len(names) > MAX_RESOURCE_FILES:
         raise _Blocked("The declared bibliography resource count exceeds the supported limit.")
-    originals: dict[str, bytes] = {}
-    documents: dict[str, _Document] = {}
-    total = entries = 0
+    documents: dict[str, BibDocument] = {}
+    reader = BibFileReader(max_total_bytes=MAX_RESOURCES_TOTAL_BYTES)
+    entries = 0
     for name in sorted(names):
         cancellation_point()
-        path = root / name
         try:
             parts = Path(name).parts
             if any(
                 root.joinpath(*parts[:index]).is_symlink() for index in range(1, len(parts) + 1)
             ):
                 raise ValueError("symbolic-link resources are unsupported")
-            allowance = min(_MAX_FILE_BYTES, _MAX_TOTAL_BYTES - total)
-            with path.open("rb") as stream:
-                raw = stream.read(allowance + 1)
-            if len(raw) > allowance:
+            document = reader.read(root / name, name)
+            if document is None:
                 raise ValueError("resource exceeds the per-file or total bibliography byte limit")
-            total += len(raw)
-            text = raw.decode("utf-8")
-            if "\r" in text.replace("\r\n", ""):
+            if "\r" in document.text.replace("\r\n", ""):
                 raise ValueError("bare carriage-return newlines are unsupported")
-            document = _parse(name, text)
         except (OSError, UnicodeError, ValueError) as error:
             raise _Blocked(f"{name}: {error}.", path=name) from error
-        entries += len(document.entries)
-        if entries > _MAX_ENTRIES:
+        entries += len(_require_valid(document).records)
+        if entries > MAX_BIB_ENTRIES:
             raise _Blocked("The bibliography entry count exceeds the supported limit.")
-        originals[name] = raw
         documents[name] = document
-    return originals, documents
+    return documents
 
 
-def _references(documents: dict[str, _Document]) -> list[_Reference]:
-    return [
-        _Reference(document, entry)
-        for document in documents.values()
-        for entry in document.entries
-        if entry.key is not None
-    ]
-
-
-def _unique_entries(documents: dict[str, _Document]) -> dict[str, _Reference]:
-    result: dict[str, _Reference] = {}
-    for reference in _references(documents):
+def _unique_entries(documents: dict[str, BibDocument]) -> dict[str, LocatedEntry]:
+    result: dict[str, LocatedEntry] = {}
+    for reference in located_entries(documents.values()):
         key = reference.entry.key
-        assert key is not None
         if key in result:
             raise _Blocked(f"Citation key {key!r} is duplicated; identify entries unambiguously.")
         result[key] = reference
     return result
 
 
-def _comments(text: str, start: int, end: int, fields: tuple[_Field, ...]) -> str:
+def _comments(text: str, start: int, end: int, fields: tuple[Field, ...]) -> str:
     """Retain percent comments outside removed value atoms verbatim."""
-    protected = {
-        atom.start - (atom.kind == "literal"): atom.end + (atom.kind == "literal")
-        for item in fields
-        for atom in item.atoms
-    }
+    protected = {atom.outer_start: atom.outer_end for item in fields for atom in item.atoms}
     result: list[str] = []
     position = start
     while position < end:
@@ -297,26 +282,24 @@ def _comments(text: str, start: int, end: int, fields: tuple[_Field, ...]) -> st
     return "".join(result)
 
 
-def _remove_field(document: _Document, span: _FieldSpan) -> tuple[int, int, str]:
+def _remove_field(document: BibDocument, span: _FieldSpan) -> TextEdit:
     start = span.field.start
     end = span.comma + 1 if span.comma is not None else span.value_end
-    return start, end, _comments(document.text, start, end, (span.field,))
+    return TextEdit(start, end, _comments(document.text, start, end, (span.field,)))
 
 
-def _remove_entry(document: _Document, span: _EntrySpan) -> tuple[int, int, str]:
+def _remove_entry(document: BibDocument, span: _EntrySpan) -> TextEdit:
     start, end = span.entry.start, span.end
-    return start, end, _comments(document.text, start, end, span.entry.fields)
+    return TextEdit(start, end, _comments(document.text, start, end, span.entry.fields))
 
 
-def _replace_documents(
-    documents: dict[str, _Document], edits: dict[str, list[tuple[int, int, str]]]
-) -> int:
+def _replace_documents(documents: dict[str, BibDocument], edits: dict[str, list[TextEdit]]) -> int:
     changed = 0
     for path, changes in edits.items():
         document = documents[path]
-        text = _edits(document.text, changes)
+        text = _apply(document.text, changes)
         if text != document.text:
-            documents[path] = _parse(path, text)
+            documents[path] = _require_valid(parse_bibtex(path, text, bom=document.bom))
             changed += 1
     return changed
 
@@ -325,14 +308,12 @@ def _newline(text: str) -> str:
     return "\r\n" if "\r\n" in text else "\n"
 
 
-def _format(documents: dict[str, _Document]) -> int:
-    edits: dict[str, list[tuple[int, int, str]]] = defaultdict(list)
+def _format(documents: dict[str, BibDocument]) -> int:
+    edits: dict[str, list[TextEdit]] = defaultdict(list)
     for document in documents.values():
         cancellation_point()
         newline = _newline(document.text)
         for entry in document.entries:
-            if entry.key is None:
-                continue
             span = _layout(document, entry)
             if not span.fields:
                 continue
@@ -341,34 +322,35 @@ def _format(documents: dict[str, _Document]) -> int:
             for item in span.fields:
                 gap = document.text[previous : item.field.start]
                 if not gap or gap.isspace():
-                    edits[document.path].append((previous, item.field.start, newline + "  "))
+                    edits[document.path].append(
+                        TextEdit(previous, item.field.start, newline + "  ")
+                    )
                 assignment = document.text[item.name_end : item.value_start]
                 if re.fullmatch(r"\s*=\s*", assignment):
-                    edits[document.path].append((item.name_end, item.value_start, " = "))
+                    edits[document.path].append(TextEdit(item.name_end, item.value_start, " = "))
                 if item.comma is not None:
                     gap = document.text[item.value_end : item.comma]
                     if not gap or gap.isspace():
-                        edits[document.path].append((item.value_end, item.comma, ""))
+                        edits[document.path].append(TextEdit(item.value_end, item.comma, ""))
                     previous = item.comma + 1
                 else:
-                    edits[document.path].append((item.value_end, item.value_end, ","))
+                    edits[document.path].append(TextEdit(item.value_end, item.value_end, ","))
                     previous = item.value_end
             gap = document.text[previous : span.closing]
             if not gap or gap.isspace():
-                edits[document.path].append((previous, span.closing, newline))
+                edits[document.path].append(TextEdit(previous, span.closing, newline))
     return _replace_documents(documents, edits)
 
 
-def _remove_selected(documents: dict[str, _Document], names: tuple[str, ...]) -> int:
-    edits: dict[str, list[tuple[int, int, str]]] = defaultdict(list)
+def _remove_selected(documents: dict[str, BibDocument], names: tuple[str, ...]) -> int:
+    edits: dict[str, list[TextEdit]] = defaultdict(list)
     count = 0
     for document in documents.values():
         for entry in document.entries:
-            if entry.key is not None:
-                for item in _layout(document, entry).fields:
-                    if item.field.name in names:
-                        edits[document.path].append(_remove_field(document, item))
-                        count += 1
+            for item in _layout(document, entry).fields:
+                if item.field.name in names:
+                    edits[document.path].append(_remove_field(document, item))
+                    count += 1
     _replace_documents(documents, edits)
     return count
 
@@ -376,14 +358,13 @@ def _remove_selected(documents: dict[str, _Document], names: tuple[str, ...]) ->
 def _expression(value: str, wrapper: str = "{") -> str:
     closing = "}" if wrapper == "{" else '"'
     expression = wrapper + value + closing
-    test = _Document("replacement", "@misc{key, value=" + expression + "}")
-    _Parser(test).parse()
+    test = parse_bibtex("replacement", "@misc{key, value=" + expression + "}")
     if (
         not test.valid
-        or len(test.entries) != 1
-        or len(test.entries[0].fields) != 1
-        or len(test.entries[0].fields[0].atoms) != 1
-        or test.entries[0].fields[0].atoms[0].value != value
+        or len(test.records) != 1
+        or len(test.records[0].fields) != 1
+        or len(test.records[0].fields[0].atoms) != 1
+        or test.records[0].fields[0].atoms[0].value != value
     ):
         raise _Blocked(
             "A replacement has unbalanced braces or unsupported value syntax.", uncertain=False
@@ -391,10 +372,10 @@ def _expression(value: str, wrapper: str = "{") -> str:
     return expression
 
 
-def _fields(documents: dict[str, _Document], options: BibliographyTransformOptions) -> int:
+def _edit_fields(documents: dict[str, BibDocument], options: BibliographyTransformOptions) -> int:
     before = {path: document.text for path, document in documents.items()}
     entries = _unique_entries(documents)
-    edits: dict[str, list[tuple[int, int, str]]] = defaultdict(list)
+    edits: dict[str, list[TextEdit]] = defaultdict(list)
     additions: dict[str, dict[str, list[tuple[str, str]]]] = defaultdict(lambda: defaultdict(list))
     donors = dict(options.merge_keys)
     for key, name, expected, replacement in options.field_edits:
@@ -438,7 +419,7 @@ def _fields(documents: dict[str, _Document], options: BibliographyTransformOptio
             else:
                 wrapper = document.text[item.value_start] if atom.kind == "literal" else "{"
                 expression = _expression(replacement, wrapper)
-            edits[document.path].append((item.value_start, item.value_end, expression))
+            edits[document.path].append(TextEdit(item.value_start, item.value_end, expression))
     _replace_documents(documents, edits)
     edits = defaultdict(list)
     entries = _unique_entries(documents)
@@ -449,45 +430,84 @@ def _fields(documents: dict[str, _Document], options: BibliographyTransformOptio
             span = _layout(document, entries[key].entry)
             if span.fields and span.fields[-1].comma is None:
                 end = span.fields[-1].value_end
-                edits[path].append((end, end, ","))
+                edits[path].append(TextEdit(end, end, ","))
             elif not span.fields and span.comma is None:
-                edits[path].append((span.key_end, span.key_end, ","))
+                edits[path].append(TextEdit(span.key_end, span.key_end, ","))
             value = newline + newline.join(f"  {name} = {expression}," for name, expression in rows)
-            edits[path].append((span.closing, span.closing, value + newline))
+            edits[path].append(TextEdit(span.closing, span.closing, value + newline))
     _replace_documents(documents, edits)
     return sum(document.text != before[path] for path, document in documents.items())
 
 
-def _literal_graph(inspection: _Inspection, graph: _Graph, documents: dict[str, _Document]) -> None:
+def _require_literal_graph(
+    inspection: SourceGraph, graph: CitationGraph, documents: dict[str, BibDocument]
+) -> None:
+    """Refuse key changes and pruning unless every key use is literal and resolved."""
     reasons = [*graph.reasons, *graph.unused_reasons]
     if len(inspection.roots) != 1:
         reasons.append("Key changes and pruning require a package with exactly one document root")
-    keys, _, uncertain = _entry_index(_references(documents))
-    reasons.extend(uncertain)
-    for path in _reachable_sources(inspection):
-        for command in _commands_before_end(inspection.sources[path]):
+    index = index_entries(located_entries(documents.values()))
+    reasons.extend(uncertainty_messages(index.uncertainties))
+    for path in reachable_sources(inspection):
+        for command in commands_before_end(inspection.sources[path]):
             if command.name in {"bibentry", "entrydata", "entryset", "defbibentryset"}:
                 reasons.append(f"{path}:{command.line}: \\{command.name} key use is unsupported")
     for document in documents.values():
-        for entry in document.entries:
-            if entry.kind == "preamble" and any(
-                "\\" in atom.value for item in entry.fields for atom in item.atoms
+        for record in document.records:
+            if (
+                isinstance(record, Declaration)
+                and record.kind == "preamble"
+                and any("\\" in atom.value for item in record.fields for atom in item.atoms)
             ):
                 reasons.append(f"{document.path}: executable bibliography preamble is unsupported")
-    for key, _, _ in graph.citations:
-        if key not in keys and key not in graph.inline_keys:
-            reasons.append(f"Citation key {key!r} is unresolved")
+    for citation in graph.citations:
+        if citation.key not in index.keys and citation.key not in graph.inline_keys:
+            reasons.append(f"Citation key {citation.key!r} is unresolved")
     if reasons:
         raise _Blocked(reasons[0] + ".")
 
 
+def _key_list_edits(key: str, item: _FieldSpan, mapping: dict[str, str]) -> list[TextEdit]:
+    """Rewrite mapped keys inside one literal relationship or alias field."""
+    if len(item.field.atoms) != 1 or item.field.atoms[0].kind != "literal":
+        raise _Blocked(f"{key!r}/{item.field.name}: only literal key lists can be updated.")
+    atom = item.field.atoms[0]
+    if citation_keys(atom.value) is None:
+        raise _Blocked(f"{key!r}/{item.field.name}: the key list is not literal.")
+    return [
+        TextEdit(atom.start + match.start(), atom.start + match.end(), mapping[match[0]])
+        for match in re.finditer(r"[^,\s]+", atom.value)
+        if match[0] in mapping and mapping[match[0]] != match[0]
+    ]
+
+
+def _citation_edits(inspection: SourceGraph, mapping: dict[str, str]) -> dict[str, list[TextEdit]]:
+    """Rewrite mapped keys in the literal citation commands of the selected sources."""
+    edits: dict[str, list[TextEdit]] = {}
+    for path in sorted(reachable_sources(inspection)):
+        changes: list[TextEdit] = []
+        for command in commands_before_end(inspection.sources[path]):
+            name = command.name.lower()
+            if name not in CITATION_COMMANDS | MULTICITE_COMMANDS:
+                continue
+            arguments = command.arguments if name in MULTICITE_COMMANDS else command.arguments[:1]
+            for argument in arguments:
+                for item in split_argument_items(argument):
+                    if item.value in mapping and mapping[item.value] != item.value:
+                        changes.append(TextEdit(item.start, item.end, mapping[item.value]))
+        if changes:
+            edits[path] = changes
+    return edits
+
+
 def _mapping(
-    inspection: _Inspection,
-    graph: _Graph,
-    documents: dict[str, _Document],
+    inspection: SourceGraph,
+    graph: CitationGraph,
+    documents: dict[str, BibDocument],
     options: BibliographyTransformOptions,
-) -> tuple[dict[str, str], dict[str, bytes], int]:
-    _literal_graph(inspection, graph, documents)
+) -> tuple[dict[str, str], dict[str, str], int]:
+    """Apply reviewed key renames and merges; return the mapping and rewritten sources."""
+    _require_literal_graph(inspection, graph, documents)
     entries = _unique_entries(documents)
     renames, merges = dict(options.key_renames), dict(options.merge_keys)
     if set(renames) & set(merges) or set(merges) & set(merges.values()):
@@ -508,14 +528,13 @@ def _mapping(
     mapping = dict(renames)
     for donor, target in merges.items():
         mapping[donor] = renames.get(target, target)
-    aliases, _, _ = _entry_index(_references(documents))
-    for alias, references in aliases.items():
+    for alias, references in index_entries(located_entries(documents.values())).keys.items():
         key = references[0].entry.key
         if key in merges:
             mapping[alias] = mapping[key]
     if (set(mapping) | set(mapping.values())) & graph.inline_keys:
         raise _Blocked("The reviewed mapping overlaps an inline bibliography key.", uncertain=False)
-    edits: dict[str, list[tuple[int, int, str]]] = defaultdict(list)
+    edits: dict[str, list[TextEdit]] = defaultdict(list)
     for key, reference in entries.items():
         document = reference.document
         span = _layout(document, reference.entry)
@@ -523,80 +542,43 @@ def _mapping(
             edits[document.path].append(_remove_entry(document, span))
             continue
         if key in renames:
-            edits[document.path].append((span.key_start, span.key_end, renames[key]))
+            edits[document.path].append(TextEdit(span.key_start, span.key_end, renames[key]))
         for item in span.fields:
-            if item.field.name not in _STRUCTURAL_FIELDS:
-                continue
-            if len(item.field.atoms) != 1 or item.field.atoms[0].kind != "literal":
-                raise _Blocked(f"{key!r}/{item.field.name}: only literal key lists can be updated.")
-            atom = item.field.atoms[0]
-            if _keys(atom.value) is None:
-                raise _Blocked(f"{key!r}/{item.field.name}: the key list is not literal.")
-            for match in re.finditer(r"[^,\s]+", atom.value):
-                old = match[0]
-                if old in mapping and mapping[old] != old:
-                    edits[document.path].append(
-                        (atom.start + match.start(), atom.start + match.end(), mapping[old])
-                    )
+            if item.field.name in KEY_LIST_FIELDS:
+                edits[document.path].extend(_key_list_edits(key, item, mapping))
     _replace_documents(documents, edits)
-    _, _, reasons = _entry_index(_references(documents))
+    reasons = uncertainty_messages(index_entries(located_entries(documents.values())).uncertainties)
     if reasons:
         raise _Blocked("The reviewed mapping is ambiguous: " + reasons[0] + ".", uncertain=False)
-    sources: dict[str, bytes] = {}
+    sources: dict[str, str] = {}
     count = 0
-    for path in sorted(_reachable_sources(inspection)):
+    for path, changes in _citation_edits(inspection, mapping).items():
         source = inspection.sources[path]
-        changes: list[tuple[int, int, str]] = []
-        for command in _commands_before_end(source):
-            name = command.name.lower()
-            if name not in _CITATIONS | _MULTICITES:
-                continue
-            arguments = command.arguments if name in _MULTICITES else command.arguments[:1]
-            for argument in arguments:
-                for item in _items(argument, True):
-                    if item.value in mapping and mapping[item.value] != item.value:
-                        changes.append((item.start, item.end, mapping[item.value]))
-        if changes:
-            text = _edits(source.text, changes)
-            sources[path] = (("\ufeff" if source.bom else "") + text).encode("utf-8")
-            count += len(changes)
+        sources[path] = with_bom(_apply(source.text, changes), source.bom)
+        count += len(changes)
     return mapping, sources, count
 
 
 def _prune(
-    inspection: _Inspection,
-    graph: _Graph,
-    documents: dict[str, _Document],
+    inspection: SourceGraph,
+    graph: CitationGraph,
+    documents: dict[str, BibDocument],
     mapping: dict[str, str],
 ) -> int:
     # Mapped citations are resolved against the already mapped bibliography.
-    remapped = _Graph(
-        graph.main,
-        graph.resources,
-        [(mapping.get(key, key), path, line) for key, path, line in graph.citations],
-        graph.inline_keys,
-        graph.nocite_all,
-        graph.reasons,
-        graph.unused_reasons,
+    remapped = replace(
+        graph,
+        citations=[
+            Citation(mapping.get(citation.key, citation.key), citation.path, citation.line)
+            for citation in graph.citations
+        ],
     )
-    _literal_graph(inspection, remapped, documents)
-    references = _references(documents)
-    keys, relationships, _ = _entry_index(references)
-    queue = deque(references if graph.nocite_all else [])
-    for key, _, _ in remapped.citations:
-        queue.extend(keys.get(key, []))
-    keep: set[tuple[str, int]] = set()
-    while queue:
-        cancellation_point()
-        reference = queue.popleft()
-        if reference.identity in keep:
-            continue
-        keep.add(reference.identity)
-        for key in relationships.get(reference.identity, set()):
-            queue.extend(keys[key])
-    edits: dict[str, list[tuple[int, int, str]]] = defaultdict(list)
+    _require_literal_graph(inspection, remapped, documents)
+    index = index_entries(located_entries(documents.values()))
+    keep = index.reachable(remapped)
+    edits: dict[str, list[TextEdit]] = defaultdict(list)
     count = 0
-    for reference in references:
+    for reference in index.entries:
         if reference.identity not in keep:
             document = reference.document
             edits[document.path].append(_remove_entry(document, _layout(document, reference.entry)))
@@ -605,12 +587,12 @@ def _prune(
     return count
 
 
-def _order(documents: dict[str, _Document]) -> int:
-    edits: dict[str, list[tuple[int, int, str]]] = defaultdict(list)
+def _order(documents: dict[str, BibDocument]) -> int:
+    edits: dict[str, list[TextEdit]] = defaultdict(list)
     _unique_entries(documents)
     for document in documents.values():
-        spans = [_layout(document, entry) for entry in document.entries if entry.key is not None]
-        ordered = sorted(spans, key=lambda span: span.entry.key or "")
+        spans = [_layout(document, entry) for entry in document.entries]
+        ordered = sorted(spans, key=lambda span: span.entry.key)
         if spans == ordered:
             continue
         for first, second in zip(spans, spans[1:], strict=False):
@@ -634,7 +616,7 @@ def _order(documents: dict[str, _Document]) -> int:
                         )
         for current, replacement in zip(spans, ordered, strict=True):
             edits[document.path].append(
-                (
+                TextEdit(
                     current.entry.start,
                     current.end,
                     document.text[replacement.entry.start : replacement.end],
@@ -643,19 +625,83 @@ def _order(documents: dict[str, _Document]) -> int:
     return _replace_documents(documents, edits)
 
 
-def _finding(rule: str, message: str, error: _Blocked | None = None) -> Finding:
+@dataclass(slots=True)
+class _Proposal:
+    """The state that the selected operations transform in turn."""
+
+    inspection: SourceGraph
+    graph: CitationGraph
+    documents: dict[str, BibDocument]
+    options: BibliographyTransformOptions
+    mapping: dict[str, str] = field(default_factory=dict)
+    # Rewritten TeX sources, as stored in their files.
+    sources: dict[str, str] = field(default_factory=dict)
+
+
+def _apply_field_edits(proposal: _Proposal) -> str:
+    count = _edit_fields(proposal.documents, proposal.options)
+    return f"Reviewed metadata edits change {count} resource(s)."
+
+
+def _apply_field_removal(proposal: _Proposal) -> str:
+    count = _remove_selected(proposal.documents, proposal.options.remove_fields)
+    return f"Proposed removal of {count} explicitly selected field(s)."
+
+
+def _apply_key_mapping(proposal: _Proposal) -> str:
+    proposal.mapping, proposal.sources, count = _mapping(
+        proposal.inspection, proposal.graph, proposal.documents, proposal.options
+    )
+    return (
+        f"Reviewed key mapping updates {count} literal citation(s); "
+        f"{len(proposal.options.merge_keys)} donor entry/entries are removed."
+    )
+
+
+def _apply_pruning(proposal: _Proposal) -> str:
+    count = _prune(proposal.inspection, proposal.graph, proposal.documents, proposal.mapping)
+    return (
+        f"Proposed removal of {count} unreachable entry/entries; "
+        "nocite, relationships and all string declarations are retained."
+    )
+
+
+def _apply_ordering(proposal: _Proposal) -> str:
+    return f"Literal key ordering changes {_order(proposal.documents)} resource(s)."
+
+
+def _apply_formatting(proposal: _Proposal) -> str:
+    return f"Lossless field layout changes {_format(proposal.documents)} resource(s)."
+
+
+# Execution order of the selected operations. Field edits and removals address the
+# original keys before key mapping renames them; pruning resolves mapped citations;
+# ordering and layout come last.
+_STEPS: tuple[tuple[str, Callable[[_Proposal], str]], ...] = (
+    ("field_edits", _apply_field_edits),
+    ("remove_fields", _apply_field_removal),
+    ("key_mapping", _apply_key_mapping),
+    ("cited_only", _apply_pruning),
+    ("order_entries", _apply_ordering),
+    ("format_entries", _apply_formatting),
+)
+
+
+def _passed(operation: str, message: str) -> Finding:
+    return Finding(f"bibliography.{operation}", message, severity="info", status="passed")
+
+
+def _refused(operation: str, error: _Blocked) -> Finding:
     return Finding(
-        _PREFIX + rule,
-        message,
-        severity="error" if error else "info",
-        status=("inconclusive" if error.uncertain else "failed") if error else "passed",
-        path=error.path if error else None,
+        f"bibliography.{operation}",
+        str(error),
+        severity="error",
+        status="inconclusive" if error.uncertain else "failed",
+        path=error.path,
         suggestion=(
             "Resolve this condition and repeat the complete bibliography proposal; "
             "no requested transformation was returned."
-        )
-        if error
-        else None,
+        ),
     )
 
 
@@ -670,101 +716,88 @@ def plan_bibliography(
     citation execution, filtered bibliographies and inline-key rewrites are not
     supported. Callers apply returned bytes only to their isolated working copy.
     """
-    requested = [rule for attribute, rule in _OPERATIONS if getattr(options, attribute)]
+    requested = [operation for operation in _CATALOGUE_ORDER if getattr(options, operation)]
     if not requested:
         return {}, [], []
     findings: list[Finding] = []
     active = requested[0]
     try:
-        inspection = _Inspection(root, main)
-        graph = _graph(inspection)
-        reached = _reachable_sources(inspection)
-        scope_errors = [
-            item
-            for item in inspection.findings
-            if item.path in reached | {inspection.main}
-            and item.rule in _GRAPH_FAILURES
-            # A resolved lookup-order or conditional dependency is evidence, not a gap.
-            and item.status != "passed"
-        ]
+        inspection = SourceGraph.build(root, main)
+        graph = build_citation_graph(inspection)
+        scope_errors = graph_failures(inspection, reachable_sources(inspection))
         if inspection.main is None or not graph.resources or scope_errors:
-            reason = (
+            raise _Blocked(
                 scope_errors[0].message
                 if scope_errors
-                else (
-                    "Select a readable main source with supported literal bibliography resources."
-                )
+                else "Select a readable main source with supported literal bibliography resources."
             )
-            raise _Blocked(reason)
-        originals, documents = _read(root, graph.resources)
-        sources: dict[str, bytes] = {}
-        mapping: dict[str, str] = {}
-        if options.field_edits:
-            active = "field_edits"
-            count = _fields(documents, options)
-            findings.append(
-                _finding(active, f"Reviewed metadata edits change {count} resource(s).")
-            )
-        if options.remove_fields:
-            active = "remove_fields"
-            count = _remove_selected(documents, options.remove_fields)
-            findings.append(
-                _finding(active, f"Proposed removal of {count} explicitly selected field(s).")
-            )
-        if options.key_mapping:
-            active = "key_mapping"
-            mapping, sources, count = _mapping(inspection, graph, documents, options)
-            findings.append(
-                _finding(
-                    active,
-                    f"Reviewed key mapping updates {count} literal citation(s); "
-                    f"{len(options.merge_keys)} donor entry/entries are removed.",
-                )
-            )
-        if options.cited_only:
-            active = "cited_only"
-            count = _prune(inspection, graph, documents, mapping)
-            findings.append(
-                _finding(
-                    active,
-                    f"Proposed removal of {count} unreachable entry/entries; "
-                    "nocite, relationships and all string declarations are retained.",
-                )
-            )
-        if options.order_entries:
-            active = "order_entries"
-            count = _order(documents)
-            findings.append(_finding(active, f"Literal key ordering changes {count} resource(s)."))
-        if options.format_entries:
-            active = "format_entries"
-            count = _format(documents)
-            findings.append(_finding(active, f"Lossless field layout changes {count} resource(s)."))
-        proposed = {
-            path: document.text.encode("utf-8")
+        documents = _read(root, graph.resources)
+        before = {path: document.file_text for path, document in documents.items()}
+        proposal = _Proposal(inspection, graph, documents, options)
+        for operation, step in _STEPS:
+            if getattr(options, operation):
+                active = operation
+                findings.append(_passed(operation, step(proposal)))
+        after = {
+            path: document.file_text
             for path, document in documents.items()
-            if document.text.encode("utf-8") != originals[path]
+            if document.file_text != before[path]
         }
-        proposed.update(sources)
-        for path in sources:
+        after.update(proposal.sources)
+        for path in proposal.sources:
             source = inspection.sources[path]
-            originals[path] = (("\ufeff" if source.bom else "") + source.text).encode("utf-8")
+            before[path] = with_bom(source.text, source.bom)
         changes = [
             Change(
                 path,
-                "bibliography-transform",
-                "Apply the explicitly selected bibliography edits.",
-                diff="".join(
-                    difflib.unified_diff(
-                        originals[path].decode("utf-8").splitlines(keepends=True),
-                        proposed[path].decode("utf-8").splitlines(keepends=True),
-                        fromfile=path,
-                        tofile=path,
-                    )
-                ),
+                kind=ChangeKind.BIBLIOGRAPHY_TRANSFORM,
+                reason="Apply the explicitly selected bibliography edits.",
+                diff=unified_diff_text(path, before[path], after[path]),
             )
-            for path in sorted(proposed)
+            for path in sorted(after)
         ]
-        return proposed, changes, findings
+        return {path: text.encode("utf-8") for path, text in after.items()}, changes, findings
     except _Blocked as error:
         # Never expose a partial plan, including independent earlier operations.
-        return {}, [], [_finding(active, str(error), error)]
+        return {}, [], [_refused(active, error)]
+
+
+def normalize_dois(
+    root: Path, main: str | None = None
+) -> tuple[dict[str, bytes], list[Change], list[Finding]]:
+    """Propose literal DOI prefix removal; callers explicitly select and apply it.
+
+    ``main`` narrows the inspected and proposed files exactly as it does for
+    :func:`~latexprep.bibliography_checks.check_bibliography_integrity`, whose
+    findings are returned. Invalid files and repeated DOI fields are left
+    unchanged. Only changed files are returned, keyed by their relative POSIX
+    path, with visible unified diffs.
+    """
+    documents, findings = inspect_bibliography_integrity(root, main)
+    proposed: dict[str, bytes] = {}
+    changes: list[Change] = []
+    for document in documents:
+        cancellation_point()
+        if not document.valid:
+            continue
+        edits: list[TextEdit] = []
+        for entry in document.entries:
+            doi_fields = [bib_field for bib_field in entry.fields if bib_field.name == "doi"]
+            if len(doi_fields) != 1:
+                continue
+            span = read_doi(doi_fields[0]).prefix_span
+            if span is not None:
+                edits.append(TextEdit(*span, ""))
+        if not edits:
+            continue
+        updated = with_bom(apply_text_edits(document.text, edits), document.bom)
+        proposed[document.path] = updated.encode("utf-8")
+        changes.append(
+            Change(
+                document.path,
+                kind=ChangeKind.NORMALIZE_DOI,
+                reason=f"Remove supported prefixes from {len(edits)} literal DOI field(s).",
+                diff=unified_diff_text(document.path, document.file_text, updated),
+            )
+        )
+    return proposed, changes, findings

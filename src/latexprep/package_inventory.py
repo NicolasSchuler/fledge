@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import zipfile
 from collections.abc import Iterable, Mapping
-from pathlib import Path, PurePosixPath
-from typing import Literal
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+from typing import Any, Literal
 
+from .file_safety import is_contained_regular_file, is_plain_relative_name
 from .models import Change
-from .project import _cleanup_reason
+from .project import cleanup_reason
 from .scheduler import cancellation_point
 
 PackageStatus = Literal["proposed", "prepared", "verified", "incomplete"]
@@ -16,27 +18,35 @@ PackageStatus = Literal["proposed", "prepared", "verified", "incomplete"]
 UNUSED_REASON = "Not needed by the selected document or explicitly retained."
 
 
-def _size(root: Path | None, name: str) -> int | None:
+@dataclass(slots=True)
+class _InventoryRow:
+    """One source file's place in the package; reports receive it as a dictionary."""
+
+    source: str
+    path: str
+    status: Literal["included", "excluded"]
+    reasons: list[str] = field(default_factory=list)
+    size_bytes: int | None = None
+    compressed_bytes: int | None = None
+
+    @classmethod
+    def from_report(cls, row: Mapping[str, Any]) -> _InventoryRow:
+        return cls(
+            row["source"],
+            row["path"],
+            row["status"],
+            list(row["reasons"]),
+            row.get("size_bytes"),
+        )
+
+
+def _regular_file_size(root: Path | None, name: str) -> int | None:
     """Do not follow unsafe or unavailable source paths just to obtain a size."""
-    if root is None:
-        return None
-    relative = PurePosixPath(name)
-    if (
-        relative.is_absolute()
-        or ".." in relative.parts
-        or relative.as_posix() != name
-        or "\\" in name
-    ):
+    if root is None or not is_plain_relative_name(name):
         return None
     candidate = root / name
     try:
-        if (
-            candidate.is_symlink()
-            or not candidate.is_file()
-            or not candidate.resolve().is_relative_to(root.resolve())
-        ):
-            return None
-        return candidate.stat().st_size
+        return candidate.stat().st_size if is_contained_regular_file(root, candidate) else None
     except OSError:
         return None
 
@@ -57,7 +67,7 @@ def selection_inventory(
     cleanup policy, with all selected inputs protected.
     """
     included = literal | observed | explicit | generated
-    rows = []
+    rows: list[dict] = []
     for name in sorted(files):
         cancellation_point()
         reasons = []
@@ -70,17 +80,15 @@ def selection_inventory(
             if name in names:
                 reasons.append(reason)
         if name not in included:
-            reasons.append(_cleanup_reason(name) or UNUSED_REASON)
-        rows.append(
-            {
-                "source": name,
-                "path": name,
-                "status": "included" if name in included else "excluded",
-                "reasons": reasons,
-                "size_bytes": _size(root, name),
-                "compressed_bytes": None,
-            }
+            reasons.append(cleanup_reason(name) or UNUSED_REASON)
+        row = _InventoryRow(
+            name,
+            name,
+            "included" if name in included else "excluded",
+            reasons,
+            _regular_file_size(root, name),
         )
+        rows.append(asdict(row))
     return rows
 
 
@@ -121,42 +129,23 @@ def assemble_package_inventory(
     if status == "prepared" and final_root is None and archive is None:
         raise ValueError("A prepared inventory requires observed final files.")
 
-    rows: dict[str, dict] = {}
+    rows: dict[str, _InventoryRow] = {}
     for selection in selections:
         for item in selection:
             cancellation_point()
-            source = item["source"]
-            previous = rows.get(source)
-            rows[source] = {
-                "source": source,
-                "path": item["path"],
-                "status": item["status"],
-                "reasons": list(item["reasons"]),
-                "size_bytes": item.get("size_bytes"),
-                "compressed_bytes": None,
-            }
+            row = _InventoryRow.from_report(item)
+            previous = rows.get(row.source)
             # A later exclusion should retain why the original input was needed.
-            if previous and item["status"] == "excluded":
-                rows[source]["reasons"] = list(
-                    dict.fromkeys([*previous["reasons"], *item["reasons"]])
-                )
+            if previous and row.status == "excluded":
+                row.reasons = list(dict.fromkeys([*previous.reasons, *row.reasons]))
+            rows[row.source] = row
 
     removals: dict[str, list[str]] = {}
     for change in changes:
         if change.kind not in {"exclude", "remove"}:
             continue
         removals.setdefault(change.path, []).append(change.reason)
-        rows.setdefault(
-            change.path,
-            {
-                "source": change.path,
-                "path": change.path,
-                "status": "excluded",
-                "reasons": [],
-                "size_bytes": None,
-                "compressed_bytes": None,
-            },
-        )
+        rows.setdefault(change.path, _InventoryRow(change.path, change.path, "excluded"))
 
     mapping = dict(path_mapping or {})
     inverse_mapping = {destination: source for source, destination in mapping.items()}
@@ -182,7 +171,7 @@ def assemble_package_inventory(
         for path in final_root.rglob("*"):
             cancellation_point()
             name = path.relative_to(final_root).as_posix()
-            size = _size(final_root, name)
+            size = _regular_file_size(final_root, name)
             if size is not None:
                 actual[name] = (size, None)
 
@@ -191,45 +180,41 @@ def assemble_package_inventory(
             source = inverse_mapping.get(name, name)
             rows.setdefault(
                 source,
-                {
-                    "source": source,
-                    "path": name,
-                    "status": "included",
-                    "reasons": ["Present in the prepared package; selection reason unavailable."],
-                    "size_bytes": None,
-                    "compressed_bytes": None,
-                },
+                _InventoryRow(
+                    source,
+                    name,
+                    "included",
+                    ["Present in the prepared package; selection reason unavailable."],
+                ),
             )
 
     for source, row in rows.items():
         cancellation_point()
-        row["path"] = mapping.get(source, row["path"])
+        row.path = mapping.get(source, row.path)
         if actual is not None:
             # An excluded original file can share the basename now assigned to
             # another selected input. Its identity does not change with layout.
-            owner = inverse_mapping.get(row["path"], source)
-            measurement = actual.get(row["path"]) if owner == source else None
-            row["status"] = "included" if measurement is not None else "excluded"
+            owner = inverse_mapping.get(row.path, source)
+            measurement = actual.get(row.path) if owner == source else None
+            row.status = "included" if measurement is not None else "excluded"
             if measurement is not None:
-                row["size_bytes"], row["compressed_bytes"] = measurement
+                row.size_bytes, row.compressed_bytes = measurement
             else:
-                row["reasons"].extend(
-                    removals.get(source, ["Not present in the prepared package."])
-                )
+                row.reasons.extend(removals.get(source, ["Not present in the prepared package."]))
         elif source in removals:
-            row["reasons"].extend(
+            row.reasons.extend(
                 [f"Planned removal: {reason}" for reason in removals[source]]
-                if row["status"] == "included"
+                if row.status == "included"
                 else removals[source]
             )
-        if row["size_bytes"] is None:
-            row["size_bytes"] = _size(source_root, source)
-        row["reasons"] = list(dict.fromkeys(row["reasons"]))
+        if row.size_bytes is None:
+            row.size_bytes = _regular_file_size(source_root, source)
+        row.reasons = list(dict.fromkeys(row.reasons))
 
     return {
         "document": document,
         "status": status,
-        "files": [rows[source] for source in sorted(rows)],
+        "files": [asdict(rows[source]) for source in sorted(rows)],
         "archive_bytes": archive_bytes,
         "overhead_bytes": overhead_bytes,
     }

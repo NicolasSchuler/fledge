@@ -185,8 +185,8 @@ class MetadataPrivacyTests(unittest.TestCase):
                 Finding(
                     "pdf.metadata",
                     "Properties",
-                    "info",
-                    "passed",
+                    severity="info",
+                    status="passed",
                     details={"properties": properties},
                 )
             ]
@@ -199,7 +199,7 @@ class MetadataPrivacyTests(unittest.TestCase):
             [],
             complete + complete,
             inventory({}),
-            [Finding("pdf.metadata", "Unavailable", "error", "inconclusive")],
+            [Finding("pdf.metadata", "Unavailable", severity="error", status="inconclusive")],
         ):
             self.assertEqual(
                 check_sanitized_pdf_metadata(findings, options)[0].status, "inconclusive"

@@ -2,33 +2,45 @@
 
 from __future__ import annotations
 
-import difflib
 import fnmatch
 import re
 import shutil
+from collections.abc import Callable, Iterator
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
 
-from .models import Change, Finding, PreparationError, has_blockers
-from .runtime import ToolRunner
+from .file_safety import MIB
+from .models import Change, ChangeKind, Finding, PreparationError, has_blockers
+from .runtime import CommandResult, CommandRunner
 from .scheduler import ResourceBudget, bounded_map
 from .source_transform import protected_spans
+from .text_edits import unified_diff_text
 
-if TYPE_CHECKING:
-    from .config import Settings
-
-_MAX_SOURCE_BYTES = 8 * 1024 * 1024
+_MAX_SOURCE_BYTES = 8 * MIB
 _FORMATTER_MEMORY_MB = 128
+MIN_WRAP_LENGTH = 20
+MAX_TAB_SIZE = 16
+_WHITESPACE = re.compile(r"\s+")
 
 
 @dataclass(frozen=True)
 class FormattingOptions:
     exclude: tuple[str, ...] = ()
     blank_lines: str = "formatter"
+    # Read from the top-level wrap_length and tab_size settings.
+    wrap_length: int = 80
+    tab_size: int = 2
 
     def __post_init__(self) -> None:
+        for name in ("wrap_length", "tab_size"):
+            value = getattr(self, name)
+            if type(value) is not int or value < 1:
+                raise PreparationError(f"{name} must be a positive integer")
+        if self.wrap_length < MIN_WRAP_LENGTH or self.tab_size > MAX_TAB_SIZE:
+            raise PreparationError(
+                f"wrap_length must be >={MIN_WRAP_LENGTH} and tab_size must be <={MAX_TAB_SIZE}"
+            )
         if not isinstance(self.exclude, tuple) or any(
             not isinstance(pattern, str)
             or not pattern
@@ -44,35 +56,48 @@ class FormattingOptions:
             raise PreparationError("blank_lines must be formatter, preserve or collapse")
 
 
-def _blank_line_policy(text: str, *, collapse: bool) -> tuple[str, tuple[tuple[str, int], ...]]:
-    """Normalize repeated blank lines outside protected spans, or fingerprint runs.
+def _lines_with_blank_state(text: str) -> Iterator[tuple[str, bool]]:
+    """Each line, and whether it is blank outside every protected span."""
+    spans, _ = protected_spans(text)
+    offset = 0
+    for line in text.splitlines(keepends=True):
+        protected = any(start < offset + len(line) and end > offset for start, end in spans)
+        yield line, not line.strip() and not protected
+        offset += len(line)
+
+
+def _collapse_blank_lines(text: str) -> str:
+    """Keep one blank line of every unprotected run of blank lines."""
+    parts: list[str] = []
+    previous_blank = False
+    for line, blank in _lines_with_blank_state(text):
+        if not (blank and previous_blank):
+            parts.append(line)
+        previous_blank = blank
+    return "".join(parts)
+
+
+def _paragraph_separators(text: str) -> tuple[tuple[str, int], ...]:
+    """Fingerprint each unprotected blank-line run by the text before it.
 
     Paragraph anchors ignore whitespace so ordinary line wrapping is allowed,
     but moving a blank line across non-whitespace source text is detectable.
     """
-    spans, _ = protected_spans(text)
-    parts: list[str] = []
     signature: list[tuple[str, int]] = []
     anchor: list[str] = []
-    count = offset = 0
-    for line in text.splitlines(keepends=True):
-        protected = any(start < offset + len(line) and end > offset for start, end in spans)
-        blank = not line.strip() and not protected
+    count = 0
+    for line, blank in _lines_with_blank_state(text):
         if blank:
             count += 1
-            if not collapse or count == 1:
-                parts.append(line)
-        else:
-            if count:
-                signature.append(("".join(anchor), count))
-                anchor.clear()
-                count = 0
-            anchor.append(re.sub(r"\s+", "", line))
-            parts.append(line)
-        offset += len(line)
+            continue
+        if count:
+            signature.append(("".join(anchor), count))
+            anchor.clear()
+            count = 0
+        anchor.append(_WHITESPACE.sub("", line))
     if count:
         signature.append(("".join(anchor), count))
-    return "".join(parts), tuple(signature)
+    return tuple(signature)
 
 
 @dataclass
@@ -84,13 +109,33 @@ class FormattingResult:
     originals: dict[str, bytes] = field(default_factory=dict)
 
 
-def _format_memory_mb(source_bytes: int, runner: ToolRunner) -> int:
+def _format_memory_mb(source_bytes: int, runner: CommandRunner) -> int:
     # Reserve tool headroom plus decoded strings, split lines and diff buffers.
     # This is a conservative admission estimate, not a measured memory peak.
     output_bytes = runner.limits.max_output_bytes
-    return _FORMATTER_MEMORY_MB + (16 * (source_bytes + output_bytes) + 1024 * 1024 - 1) // (
-        1024 * 1024
+    return _FORMATTER_MEMORY_MB + (16 * (source_bytes + output_bytes) + MIB - 1) // MIB
+
+
+def _unformattable(rule: str, message: str, relative: str) -> Finding:
+    return Finding(rule, message, severity="error", status="inconclusive", path=relative)
+
+
+async def _tex_fmt(
+    runner: CommandRunner,
+    command: list[str],
+    workspace: Path,
+    options: FormattingOptions,
+    incomplete: Callable[[CommandResult], str],
+) -> str:
+    """One tex-fmt pass over the workspace copy, with the blank-line policy applied."""
+    result = await runner.run(
+        command, cwd=workspace, workspace=workspace, memory_mb=_FORMATTER_MEMORY_MB
     )
+    if not result.completed_normally:
+        raise PreparationError(incomplete(result))
+    if options.blank_lines == "collapse":
+        return _collapse_blank_lines(result.stdout)
+    return result.stdout
 
 
 async def _format_file(
@@ -99,8 +144,8 @@ async def _format_file(
     workspace: Path,
     source_bytes: int,
     executable: str,
-    runner: ToolRunner,
-    settings: Settings,
+    runner: CommandRunner,
+    options: FormattingOptions,
 ) -> FormattingResult:
     result = FormattingResult()
     with path.open("rb") as stream:
@@ -111,36 +156,27 @@ async def _format_file(
         text = original.decode("utf-8")
     except UnicodeDecodeError:
         result.findings.append(
-            Finding(
-                "source.format_encoding",
-                "Formatting currently requires UTF-8 source",
-                "error",
-                "inconclusive",
-                path=relative,
+            _unformattable(
+                "source.format_encoding", "Formatting currently requires UTF-8 source", relative
             )
         )
         return result
-    options = settings.formatting_options
     regions, incomplete = protected_spans(text)
     if incomplete:
         result.findings.append(
-            Finding(
+            _unformattable(
                 "source.format_protected",
                 "An unclosed literal or formatter-protected region "
                 "prevents a safe formatting proposal.",
-                "error",
-                "inconclusive",
-                path=relative,
+                relative,
             )
         )
         if options.blank_lines != "formatter":
             result.findings.append(
-                Finding(
+                _unformattable(
                     "source.format_blank_lines",
                     "Blank-line policy cannot be evaluated across an unclosed protected region.",
-                    "error",
-                    "inconclusive",
-                    path=relative,
+                    relative,
                 )
             )
         return result
@@ -152,87 +188,42 @@ async def _format_file(
         "--noconfig",
         "--print",
         "--wraplen",
-        str(settings.wrap_length),
+        str(options.wrap_length),
         "--tabsize",
-        str(settings.tab_size),
+        str(options.tab_size),
         f"./{path.name}",
     ]
-    formatted = await runner.run(
-        command, cwd=workspace, workspace=workspace, memory_mb=_FORMATTER_MEMORY_MB
+    updated_text = await _tex_fmt(
+        runner,
+        command,
+        workspace,
+        options,
+        lambda formatted: f"tex-fmt did not complete: {formatted.stderr[:2000]}",
     )
-    if (
-        formatted.returncode
-        or formatted.timed_out
-        or formatted.output_limited
-        or formatted.resource_exceeded
-    ):
-        raise PreparationError(f"tex-fmt did not complete: {formatted.stderr[:2000]}")
-    updated_text = formatted.stdout
-    if options.blank_lines == "collapse":
-        updated_text, _ = _blank_line_policy(updated_text, collapse=True)
     updated = updated_text.encode("utf-8")
     target.write_bytes(updated)
-    repeated = await runner.run(
-        command, cwd=workspace, workspace=workspace, memory_mb=_FORMATTER_MEMORY_MB
+    repeated_text = await _tex_fmt(
+        runner,
+        command,
+        workspace,
+        options,
+        lambda _repeated: "tex-fmt failed its second formatting pass",
     )
-    if (
-        repeated.returncode
-        or repeated.timed_out
-        or repeated.output_limited
-        or repeated.resource_exceeded
-    ):
-        raise PreparationError("tex-fmt failed its second formatting pass")
-    repeated_text = repeated.stdout
-    if options.blank_lines == "collapse":
-        repeated_text, _ = _blank_line_policy(repeated_text, collapse=True)
     if repeated_text.encode("utf-8") != updated:
         result.findings.append(
             Finding(
                 "source.format_idempotence",
                 "A second tex-fmt pass produced a different result",
-                "error",
-                "failed",
+                severity="error",
+                status="failed",
                 path=relative,
             )
         )
         return result
-    proposed_regions, proposed_incomplete = protected_spans(updated_text)
-    protected_unchanged = not proposed_incomplete and [
-        text[start:end] for start, end in regions
-    ] == [updated_text[start:end] for start, end in proposed_regions]
-    if regions or proposed_regions or proposed_incomplete:
-        result.findings.append(
-            Finding(
-                "source.format_protected",
-                "Protected literal regions, directives and licenses are unchanged."
-                if protected_unchanged
-                else "Formatter changed a protected literal region, directive "
-                "or license block; the proposal was rejected.",
-                "info" if protected_unchanged else "error",
-                "passed" if protected_unchanged else "failed",
-                path=relative,
-            )
-        )
-    if not protected_unchanged:
+    if not _accept_protected_regions(text, regions, updated_text, relative, result):
         return result
-    if options.blank_lines != "formatter":
-        blank_ok = options.blank_lines == "collapse" or (
-            _blank_line_policy(text, collapse=False)[1]
-            == _blank_line_policy(updated_text, collapse=False)[1]
-        )
-        result.findings.append(
-            Finding(
-                "source.format_blank_lines",
-                f"Blank-line policy '{options.blank_lines}' is satisfied."
-                if blank_ok
-                else "Formatter changed source paragraph separators under the preserve policy.",
-                "info" if blank_ok else "error",
-                "passed" if blank_ok else "failed",
-                path=relative,
-            )
-        )
-        if not blank_ok:
-            return result
+    if not _accept_blank_lines(text, updated_text, options, relative, result):
+        return result
     if original != updated:
         result.contents[relative] = updated
         result.originals[relative] = original
@@ -240,39 +231,86 @@ async def _format_file(
             Finding(
                 "source.formatting",
                 "File differs from the configured tex-fmt style.",
-                "warning",
-                "failed",
+                severity="warning",
+                status="failed",
                 path=relative,
             )
         )
         result.changes.append(
             Change(
                 relative,
-                "format",
-                "Apply explicitly configured tex-fmt formatting",
-                diff="".join(
-                    difflib.unified_diff(
-                        text.splitlines(keepends=True),
-                        updated_text.splitlines(keepends=True),
-                        fromfile=relative,
-                        tofile=relative,
-                    )
-                ),
+                kind=ChangeKind.FORMAT,
+                reason="Apply explicitly configured tex-fmt formatting",
+                diff=unified_diff_text(relative, text, updated_text),
             )
         )
     return result
 
 
+def _accept_protected_regions(
+    text: str,
+    regions: list[tuple[int, int]],
+    updated_text: str,
+    relative: str,
+    result: FormattingResult,
+) -> bool:
+    """Record whether protected literal regions survived formatting unchanged."""
+    proposed_regions, proposed_incomplete = protected_spans(updated_text)
+    unchanged = not proposed_incomplete and [text[start:end] for start, end in regions] == [
+        updated_text[start:end] for start, end in proposed_regions
+    ]
+    if regions or proposed_regions or proposed_incomplete:
+        result.findings.append(
+            Finding(
+                "source.format_protected",
+                "Protected literal regions, directives and licenses are unchanged."
+                if unchanged
+                else "Formatter changed a protected literal region, directive "
+                "or license block; the proposal was rejected.",
+                severity="info" if unchanged else "error",
+                status="passed" if unchanged else "failed",
+                path=relative,
+            )
+        )
+    return unchanged
+
+
+def _accept_blank_lines(
+    text: str,
+    updated_text: str,
+    options: FormattingOptions,
+    relative: str,
+    result: FormattingResult,
+) -> bool:
+    """Record whether the configured blank-line policy holds for the proposal."""
+    if options.blank_lines == "formatter":
+        return True
+    satisfied = options.blank_lines == "collapse" or (
+        _paragraph_separators(text) == _paragraph_separators(updated_text)
+    )
+    result.findings.append(
+        Finding(
+            "source.format_blank_lines",
+            f"Blank-line policy '{options.blank_lines}' is satisfied."
+            if satisfied
+            else "Formatter changed source paragraph separators under the preserve policy.",
+            severity="info" if satisfied else "error",
+            status="passed" if satisfied else "failed",
+            path=relative,
+        )
+    )
+    return satisfied
+
+
 async def format_project(
     source: Path,
     work: Path,
-    runner: ToolRunner,
-    settings: Settings,
+    runner: CommandRunner,
+    options: FormattingOptions,
     *,
     budget: ResourceBudget | None = None,
 ) -> FormattingResult:
     result = FormattingResult()
-    options = settings.formatting_options
     all_paths = sorted(
         path
         for path in source.rglob("*")
@@ -301,8 +339,8 @@ async def format_project(
                 "Formatting exclusions matched the selected source files."
                 if not unmatched
                 else "Some formatting exclusion patterns match no source file.",
-                "info" if not unmatched else "warning",
-                "passed" if not unmatched else "failed",
+                severity="info" if not unmatched else "warning",
+                status="passed" if not unmatched else "failed",
                 details={"excluded": sorted(excluded), "unmatched_patterns": unmatched},
             )
         )
@@ -313,8 +351,8 @@ async def format_project(
             Finding(
                 "source.format_exclusions",
                 "Linked source files cannot be read safely for formatting.",
-                "error",
-                "inconclusive",
+                severity="error",
+                status="inconclusive",
                 details={"linked": linked},
             )
         )
@@ -324,8 +362,8 @@ async def format_project(
             Finding(
                 "source.formatting",
                 "No source files are selected after formatting exclusions.",
-                "info",
-                "skipped",
+                severity="info",
+                status="skipped",
             )
         )
         return result
@@ -335,8 +373,8 @@ async def format_project(
             Finding(
                 "source.formatter_available",
                 "tex-fmt is not installed",
-                "error",
-                "inconclusive",
+                severity="error",
+                status="inconclusive",
                 suggestion="Install tex-fmt separately or disable formatting.",
             )
         )
@@ -345,14 +383,13 @@ async def format_project(
     version_workspace = work / "version"
     version_workspace.mkdir()
     try:
-        result.tools["tex-fmt"] = await runner.tool_version(
-            [executable, "--version"], workspace=version_workspace
-        )
+        version = await runner.tool_version([executable, "--version"], workspace=version_workspace)
     except PreparationError as error:
         result.findings.append(
-            Finding("source.format_execution", str(error), "error", "inconclusive")
+            Finding("source.format_execution", str(error), severity="error", status="inconclusive")
         )
         return result
+    result.tools["tex-fmt"] = version.to_report()
 
     async def worker(path: Path) -> FormattingResult:
         relative = path.relative_to(source).as_posix()
@@ -364,8 +401,8 @@ async def format_project(
                         Finding(
                             "source.format_size",
                             "Source exceeds the 8 MiB formatting limit",
-                            "error",
-                            "inconclusive",
+                            severity="error",
+                            status="inconclusive",
                             path=relative,
                         )
                     ]
@@ -379,7 +416,7 @@ async def format_project(
                 # File paths are leaves of the source tree, so these workspace
                 # directories cannot contain another file worker's workspace.
                 return await _format_file(
-                    path, relative, work / "files" / relative, size, executable, runner, settings
+                    path, relative, work / "files" / relative, size, executable, runner, options
                 )
         except (OSError, PreparationError) as error:
             return FormattingResult(
@@ -387,15 +424,15 @@ async def format_project(
                     Finding(
                         "source.format_execution",
                         str(error),
-                        "error",
-                        "inconclusive",
+                        severity="error",
+                        status="inconclusive",
                         path=relative,
                     )
                 ]
             )
 
     completed = (
-        await bounded_map(paths, worker, limit=budget.jobs)
+        await bounded_map(paths, worker, limit=budget.cpu_slots)
         if budget is not None
         else [await worker(path) for path in paths]
     )
@@ -412,8 +449,8 @@ async def format_project(
                 "Formatting check could not complete for all files."
                 if incomplete
                 else "All inspected source files already match the configured style.",
-                "error" if incomplete else "info",
-                "inconclusive" if incomplete else "passed",
+                severity="error" if incomplete else "info",
+                status="inconclusive" if incomplete else "passed",
             )
         )
     if incomplete:

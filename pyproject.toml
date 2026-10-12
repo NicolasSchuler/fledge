@@ -33,8 +33,9 @@ include = ["latexprep*"]
 namespaces = false
 
 [tool.setuptools.package-data]
-# Example presets read through importlib.resources; tests fail if they do not ship.
-latexprep = ["presets/*.toml"]
+# Example presets and the loaded-options TeX hook are read through importlib.resources;
+# tests fail if they do not ship.
+latexprep = ["presets/*.toml", "loaded_options_hook.tex"]
 
 [tool.pytest.ini_options]
 # The tests are unittest.TestCase classes; pytest collects exactly the same tests as
@@ -52,4 +53,31 @@ target-version = "py311"
 line-length = 100
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B"]
+select = ["E", "F", "I", "UP", "B", "C901", "PLR0912", "PLR0913", "PLR0915"]
+
+# Ceilings that keep new functions small. The per-file ignores below name the
+# files whose functions still exceed them; decompose those rather than adding more.
+[tool.ruff.lint.mccabe]
+max-complexity = 20
+
+[tool.ruff.lint.pylint]
+max-args = 8
+max-branches = 20
+max-statements = 60
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["C901", "PLR0912", "PLR0913", "PLR0915"]
+"src/latexprep/author_records.py" = ["PLR0915"]
+"src/latexprep/build_dependencies.py" = ["C901", "PLR0912", "PLR0913", "PLR0915"]
+"src/latexprep/core.py" = ["PLR0913"]
+"src/latexprep/doctor.py" = ["PLR0915"]
+"src/latexprep/metadata_privacy.py" = ["C901"]
+"src/latexprep/online_checks.py" = ["C901", "PLR0912", "PLR0915"]
+"src/latexprep/package_inventory.py" = ["C901", "PLR0912", "PLR0915"]
+"src/latexprep/pdf_artwork.py" = ["C901"]
+"src/latexprep/pdf_checks.py" = ["C901", "PLR0912"]
+"src/latexprep/pdf_structure_checks.py" = ["C901", "PLR0912", "PLR0915"]
+"src/latexprep/source_graph.py" = ["C901", "PLR0912", "PLR0915"]
+"src/latexprep/source_transform.py" = ["PLR0915"]
+"src/latexprep/terminal_report.py" = ["PLR0912"]
+"src/latexprep/tex_lexer.py" = ["PLR0915"]

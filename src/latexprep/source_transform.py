@@ -6,27 +6,37 @@ Token expansion, arbitrary catcodes and semantic equivalence are not inferred.
 
 from __future__ import annotations
 
-import difflib
 import re
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
-from .models import Change, Finding, PreparationError, Status, has_blockers
-from .source import (
+from .models import Change, ChangeKind, Finding, PreparationError, Status, has_blockers
+from .source import lint_sources
+from .source_graph import ArgumentLocation, SourceGraph
+from .tex_lexer import (
     MAX_SOURCE_BYTES,
     MAX_TOTAL_SOURCE_BYTES,
-    _commands,
-    _Inspection,
-    _items,
-    _ParseLimit,
+    Command,
+    ParseLimitExceeded,
     mask_literals,
+    merge_spans,
+    scan_commands,
     source_regions,
 )
+from .text_edits import unified_diff_text
 
+# Comments read by tools rather than people, which comment removal must keep.
 _DIRECTIVE = re.compile(
-    r"^%\s*(?:!|&|\*|</?|(?:tex|latex|bib|biber|arara|encoding|coding|spell|"
-    r"fmt|tex-fmt|fledge|latex-prep|region|endregion)\b)",
-    re.I,
+    r"""
+    ^ % \s*
+    (?:
+        ! | & | \*          # %! (as in %!TEX), %& format and %* lines
+      | </?                 # %<guard> and %</guard> docstrip guards
+      | (?: tex | latex | bib | biber | arara | encoding | coding | spell
+          | fmt | tex-fmt | fledge | latex-prep | region | endregion ) \b
+    )
+    """,
+    re.IGNORECASE | re.VERBOSE,
 )
 _LICENSE = re.compile(
     r"\b(?:copyright|license|licence|SPDX|LPPL|public domain|all rights reserved)\b", re.I
@@ -92,11 +102,11 @@ class SourceTransformPlan:
 
 def protected_spans(text: str) -> tuple[list[tuple[int, int]], bool]:
     """Literal regions, formatter-off ranges and directive/license comment blocks."""
-    regions, incomplete = source_regions(text)
-    spans = [(start, end) for start, end, kind in regions if kind == "literal"]
-    comments = [(start, end) for start, end, kind in regions if kind == "comment"]
+    regions, unclosed = source_regions(text)
+    spans = [(region.start, region.end) for region in regions if region.kind == "literal"]
+    comments = [(region.start, region.end) for region in regions if region.kind == "comment"]
     off: int | None = None
-    uncertain = bool(incomplete)
+    uncertain = bool(unclosed)
     for start, end in comments:
         marker = _FORMAT_MARKER.match(text[start:end])
         if marker:
@@ -124,17 +134,11 @@ def protected_spans(text: str) -> tuple[list[tuple[int, int]], bool]:
     for block in blocks:
         if any(_LICENSE.search(text[start:end]) for start, end in block):
             spans.append((block[0][0], block[-1][1]))
-    merged: list[tuple[int, int]] = []
-    for start, end in sorted(spans):
-        if merged and start <= merged[-1][1]:
-            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
-        else:
-            merged.append((start, end))
-    return merged, uncertain
+    return merge_spans(spans), uncertain
 
 
 def _remove_comments(text: str, policy: str) -> tuple[str, int, bool]:
-    regions, incomplete = source_regions(text)
+    regions, unclosed = source_regions(text)
     protected, uncertain = protected_spans(text)
     edits: list[tuple[int, int]] = []
     for start, end, kind in regions:
@@ -148,7 +152,7 @@ def _remove_comments(text: str, policy: str) -> tuple[str, int, bool]:
             edits.append((start + 1, end))
     for start, end in reversed(edits):
         text = text[:start] + text[end:]
-    return text, len(edits), bool(incomplete) or uncertain
+    return text, len(edits), bool(unclosed) or uncertain
 
 
 def _problem(
@@ -159,32 +163,39 @@ def _problem(
     *,
     status: Status = "inconclusive",
 ) -> None:
-    plan.findings.append(Finding(rule, message, "error", status, path=path))
+    plan.findings.append(Finding(rule, message, severity="error", status=status, path=path))
 
 
 def _command_comments(text: str) -> str:
-    regions, _ = source_regions(text)
     comments = []
-    for start, end, kind in regions:
+    for start, end, kind in source_regions(text).regions:
         if kind == "comment":
             newline = "\r\n" if text[end : end + 2] == "\r\n" else "\n"
             comments.append(text[start:end] + newline)
     return "".join(comments)
 
 
-def _merge_inputs(
-    inspection: _Inspection, texts: dict[str, str], plan: SourceTransformPlan
-) -> None:
+def _mergeable_end(command: Command, *, in_main: bool) -> bool:
+    """Whether input merging can keep this ``\\end`` command.
+
+    It may close any environment except the document, which only the main file may end.
+    """
+    if command.name != "end" or not command.arguments:
+        return False
+    return in_main or not command.ends("document", exact=True)
+
+
+def _merge_inputs(graph: SourceGraph, texts: dict[str, str], plan: SourceTransformPlan) -> None:
     rule = "source.merge_inputs"
-    if inspection.uncertainties or has_blockers(inspection.findings):
+    if graph.uncertainties or has_blockers(graph.findings):
         _problem(
             plan,
             rule,
             "Input merging requires a complete unambiguous literal dependency graph.",
-            status="failed" if has_blockers(inspection.findings) else "inconclusive",
+            status="failed" if has_blockers(graph.findings) else "inconclusive",
         )
         return
-    if any(root != inspection.main for root in inspection.roots):
+    if any(root != graph.main for root in graph.roots):
         _problem(plan, rule, "Input merging supports one document root per package.")
         return
     forbidden = {
@@ -205,29 +216,20 @@ def _merge_inputs(
 
     def expand(name: str, stack: tuple[str, ...]) -> str:
         nonlocal expanded_bytes
-        source = inspection.sources[name]
+        source = graph.sources[name]
         text = texts[name]
         if has_blockers(plan.findings):
             return text
-        # Comments may already have changed offsets, so parse this proposal.
-        commands = _commands(mask_literals(text))
+        # Comments may already have changed offsets, so parse this proposal. Comment
+        # removal deletes only bodies the lexer masks anyway, so the proposal has the
+        # inspected command sequence; pair each command with its inspected original.
+        commands = scan_commands(mask_literals(text))
         edits: list[tuple[int, int, str]] = []
-        for command in commands:
+        for index, command in enumerate(commands):
             if has_blockers(plan.findings):
                 break
-            if (
-                command.name in forbidden
-                and not (
-                    command.name == "end"
-                    and name == inspection.main
-                    and command.arguments
-                    and command.arguments[0].value == "document"
-                )
-                and not (
-                    command.name == "end"
-                    and command.arguments
-                    and command.arguments[0].value != "document"
-                )
+            if command.name in forbidden and not _mergeable_end(
+                command, in_main=name == graph.main
             ):
                 _problem(
                     plan,
@@ -243,20 +245,25 @@ def _merge_inputs(
                 _problem(plan, rule, "Only direct literal input commands can be merged.", name)
                 continue
             argument = command.arguments[0]
-            original_command = next(
-                (c for c in source.commands if c.name == "input" and c.line == command.line), None
-            )
-            if original_command is None or not original_command.arguments:
+            original_command = source.commands[index] if index < len(source.commands) else None
+            if (
+                original_command is None
+                or original_command.name != "input"
+                or original_command.line != command.line
+                or not original_command.arguments
+            ):
                 _problem(
                     plan, rule, "Input position could not be reconciled after comment edits.", name
                 )
                 continue
-            original_arg = _items(original_command.arguments[0], False)[0]
-            reference = inspection.references.get((name, original_arg.start, original_arg.end))
-            if reference is None or reference[0] in stack:
+            original_argument = original_command.arguments[0].stripped()
+            reference = graph.references.get(
+                ArgumentLocation(name, original_argument.start, original_argument.end)
+            )
+            if reference is None or reference.target in stack:
                 _problem(plan, rule, "Input target or execution order is unresolved.", name)
                 continue
-            target = reference[0]
+            target = reference.target
             if target not in texts or not texts[target].endswith(("\n", "\r")):
                 _problem(
                     plan, rule, "Merged input files must be UTF-8 and newline-terminated.", target
@@ -287,12 +294,12 @@ def _merge_inputs(
             text = text[:start] + replacement + text[end:]
         return text
 
-    if inspection.main is None:
+    if graph.main is None:
         return
-    texts[inspection.main] = expand(inspection.main, ())
+    texts[graph.main] = expand(graph.main, ())
     if any(
-        target in merged and command != "input"
-        for target, command in inspection.references.values()
+        reference.target in merged and reference.command != "input"
+        for reference in graph.references.values()
     ):
         _problem(plan, rule, "A merged input is also used by a different file-reading command.")
     if not has_blockers(plan.findings):
@@ -301,21 +308,21 @@ def _merge_inputs(
             Finding(
                 rule,
                 f"Planned recursive merging of {len(merged)} literal input files.",
-                "info",
-                "passed",
+                severity="info",
+                status="passed",
                 details={"files": sorted(merged)},
             )
         )
 
 
 def _inline_bibliography(
-    inspection: _Inspection, texts: dict[str, str], path: str, plan: SourceTransformPlan
+    graph: SourceGraph, texts: dict[str, str], path: str, plan: SourceTransformPlan
 ) -> None:
     rule = "source.inline_bibliography"
-    if inspection.uncertainties or has_blockers(inspection.findings):
+    if graph.uncertainties or has_blockers(graph.findings):
         _problem(plan, rule, "Bibliography inlining requires an unambiguous literal source graph.")
         return
-    if path not in inspection.sources or path not in texts:
+    if path not in graph.sources or path not in texts:
         _problem(
             plan,
             rule,
@@ -325,24 +332,17 @@ def _inline_bibliography(
         )
         return
     text = texts[path]
-    commands = _commands(mask_literals(text))
-    starts = [
-        c
-        for c in commands
-        if c.name == "begin" and c.arguments and c.arguments[0].value == "thebibliography"
-    ]
-    ends = [
-        c
-        for c in commands
-        if c.name == "end" and c.arguments and c.arguments[0].value == "thebibliography"
-    ]
+    commands = scan_commands(mask_literals(text))
+    starts = [command for command in commands if command.begins("thebibliography", exact=True)]
+    ends = [command for command in commands if command.ends("thebibliography", exact=True)]
     if (
         len(starts) != 1
         or len(ends) != 1
         or starts[0].start >= ends[0].start
         or any(
-            c.name in {"input", "include", "addbibresource", "entry", "refsection", "endinput"}
-            for c in commands
+            command.name
+            in {"input", "include", "addbibresource", "entry", "refsection", "endinput"}
+            for command in commands
         )
     ):
         _problem(
@@ -354,8 +354,8 @@ def _inline_bibliography(
         )
         return
     locations = []
-    for name in inspection.visited - plan.removals:
-        for command in _commands(mask_literals(texts[name])):
+    for name in graph.visited - plan.removals:
+        for command in scan_commands(mask_literals(texts[name])):
             if command.name in {"addbibresource", "printbibliography"}:
                 _problem(plan, rule, "Biblatex bibliography inlining is not supported.", name)
             if command.name == "bibliography":
@@ -386,8 +386,8 @@ def _inline_bibliography(
         Finding(
             rule,
             "Planned literal generated-bibliography inlining.",
-            "info",
-            "passed",
+            severity="info",
+            status="passed",
             path=name,
             details={"bibliography": path},
         )
@@ -405,23 +405,22 @@ def plan_source_transforms(
         and not options.inline_bibliography
     ):
         return plan
-    inspection = _Inspection(root, main)
-    if inspection.main is None:
-        plan.findings.extend(inspection.findings)
+    graph = SourceGraph.build(root, main)
+    if graph.main is None:
+        # The same source findings that source analysis reports for an unusable main.
+        plan.findings.extend([*graph.findings, *lint_sources(graph)])
         return plan
-    texts = {name: source.text for name, source in inspection.sources.items()}
+    texts = {name: source.text for name, source in graph.sources.items()}
     if options.comment_policy != "retain":
-        if inspection._unparsed - set(inspection.sources) or any(
-            finding.rule == "source-link" for finding in inspection.uncertainties
-        ):
+        if graph.unparsed or any(finding.rule == "source.link" for finding in graph.uncertainties):
             _problem(
                 plan, "source.comment_removal", "Some source files could not be parsed safely."
             )
         for name, text in list(texts.items()):
             if PurePosixPath(name).suffix.lower() not in _EDITABLE_SUFFIXES:
                 continue
-            commands = inspection.sources[name].commands
-            if any(c.name in {"catcode", "scantokens", "csname"} for c in commands):
+            commands = graph.sources[name].commands
+            if any(command.name in {"catcode", "scantokens", "csname"} for command in commands):
                 _problem(
                     plan,
                     "source.comment_removal",
@@ -444,18 +443,18 @@ def plan_source_transforms(
                         "source.comment_removal",
                         f"Planned removal of {count} comment bodies; percent signs, "
                         "line terminators, directives and license blocks are retained.",
-                        "info",
-                        "passed",
+                        severity="info",
+                        status="passed",
                         path=name,
                         details={"removed_comments": count},
                     )
                 )
     try:
         if options.merge_inputs:
-            _merge_inputs(inspection, texts, plan)
+            _merge_inputs(graph, texts, plan)
         if options.inline_bibliography:
-            _inline_bibliography(inspection, texts, options.inline_bibliography, plan)
-    except (_ParseLimit, RecursionError):
+            _inline_bibliography(graph, texts, options.inline_bibliography, plan)
+    except (ParseLimitExceeded, RecursionError):
         _problem(
             plan,
             "source.merge_inputs" if options.merge_inputs else "source.inline_bibliography",
@@ -465,17 +464,21 @@ def plan_source_transforms(
         plan.removals.clear()
         return plan
     for name in sorted(plan.removals):
-        source = inspection.sources[name]
+        source = graph.sources[name]
         plan.removal_originals[name] = (
             b"\xef\xbb\xbf" if source.bom else b""
         ) + source.text.encode("utf-8")
         plan.changes.append(
-            Change(name, "remove", "Input contents were merged into the main source copy.")
+            Change(
+                name,
+                kind=ChangeKind.REMOVE,
+                reason="Input contents were merged into the main source copy.",
+            )
         )
     for name, text in texts.items():
-        if name in plan.removals or text == inspection.sources[name].text:
+        if name in plan.removals or text == graph.sources[name].text:
             continue
-        encoded = (b"\xef\xbb\xbf" if inspection.sources[name].bom else b"") + text.encode("utf-8")
+        encoded = (b"\xef\xbb\xbf" if graph.sources[name].bom else b"") + text.encode("utf-8")
         if len(encoded) > MAX_SOURCE_BYTES:
             _problem(
                 plan,
@@ -485,23 +488,16 @@ def plan_source_transforms(
             )
             break
         plan.contents[name] = encoded
-        original = inspection.sources[name]
+        original = graph.sources[name]
         plan.originals[name] = (b"\xef\xbb\xbf" if original.bom else b"") + original.text.encode(
             "utf-8"
         )
         plan.changes.append(
             Change(
                 name,
-                "rewrite",
-                "Apply explicitly selected source transformations.",
-                diff="".join(
-                    difflib.unified_diff(
-                        inspection.sources[name].text.splitlines(keepends=True),
-                        text.splitlines(keepends=True),
-                        fromfile=name,
-                        tofile=name,
-                    )
-                ),
+                kind=ChangeKind.REWRITE,
+                reason="Apply explicitly selected source transformations.",
+                diff=unified_diff_text(name, graph.sources[name].text, text),
             )
         )
     if has_blockers(plan.findings):

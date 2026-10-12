@@ -15,41 +15,101 @@ import re
 import struct
 import xml.etree.ElementTree as ET
 import zlib
-from contextlib import nullcontext
+from collections.abc import Callable
 from dataclasses import dataclass, replace
+from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from .models import Finding, PreparationError
-from .pdf import _font_inventory, _page_count, _read_raster, _require_rendered_pages
-from .pdf_checks import (
+from .option_config import require_booleans
+from .pdf_previews import PNG_SIGNATURE
+from .pdf_support import (
+    COLOR_OPERATIONS,
+    DOCUMENT,
+    MAX_FIGURE_INPUTS,
+    MAX_MEASUREMENT_PIXELS,
+    MAX_PAIR_CHECKS,
+    MAX_SAMPLES,
     PdfRegion,
-    _contains,
-    _finite,
-    _geometry_support,
-    _gray_raster,
-    _intersection,
-    _luminance,
-    _number,
-    _Objects,
-    _properties,
-    _result,
-    _Session,
-    _session,
-    _strings,
-    _unavailable,
-    _xml,
+    PdfToolSession,
+    QpdfObjectGraph,
+    contains,
+    exceeds_measurement_raster,
+    finite_number,
+    font_inventory,
+    heuristic_finding,
+    intersection_area,
+    is_object_reference,
+    measurement_finding,
+    measurement_raster_size,
+    mupdf_trace_argv,
+    open_measurement_session,
+    page_boxes_argv,
+    page_count,
+    page_frames,
+    parse_mupdf_trace,
+    pdfinfo_properties,
+    qpdf_objects_argv,
+    read_gray_raster,
+    read_rgb_raster,
+    relative_luminance,
+    require_distinct_strings,
+    require_number,
+    require_rendered_pages,
+    unavailable_finding,
 )
-from .runtime import CommandResult, ToolRunner
+from .runtime import CommandResult, CommandRunner
 from .scheduler import ResourceBudget, cancellation_point
 
-_MAX_PIXELS = 4_000_000
-_MAX_SAMPLES = 100
 _MAX_OPERATIONS = 50_000
 _MAX_PIXEL_VISITS = 8_000_000
+_MAX_GLYPH_STREAM_BYTES = 1_000_000
 Box = tuple[float, float, float, float]
 Point = tuple[float, float]
 Matrix = tuple[float, float, float, float, float, float]
+Line = tuple[Point, Point, int]
+_IMAGE_OPERATIONS = frozenset({"fill_image", "fill_image_mask"})
+_TEXT_OPERATIONS = frozenset({"fill_text", "stroke_text"})
+# Operations with a measurable painted extent: affine images and straight paths.
+_EXTENT_OPERATIONS = frozenset({"fill_image", "fill_image_mask", "fill_path", "stroke_path"})
+_SCALABLE_FONT_TYPES = frozenset(
+    {
+        "Type 1",
+        "Type 1C",
+        "Type 1C (OT)",
+        "TrueType",
+        "TrueType (OT)",
+        "CID Type 0",
+        "CID Type 0C",
+        "CID Type 0C (OT)",
+        "CID TrueType",
+        "CID TrueType (OT)",
+    }
+)
+_TOKEN = re.compile(r"/?[^\s\x00()<>\[\]{}%/]+|[\[\]]")
+_LINE_END = re.compile(r"[\r\n]")
+_NUMBER = re.compile(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)")
+_SIMPLE_GLYPH_OPERATORS = frozenset(
+    "q Q cm w J j M d ri i g G rg RG k K cs CS sc SC m l c v y h re n W W* d0 d1 [ ]".split()
+)
+_PAINT_OPERATORS = frozenset("S s f F f* B B* b b*".split())
+_REGION_RULES = ("pdf.figure_whitespace", "pdf.figure_edge_ink")
+_PREVIEW_RULE = "pdf.grayscale_preview"
+_CONTRAST_RULE = "pdf.rendered_sample_contrast"
+_CATEGORY_RULE = "pdf.artwork_category_resolution"
+# Rules measured from the drawing operations of a MuPDF trace.
+DRAWING_TRACE_RULES = frozenset(
+    {
+        "pdf.printer_marks",
+        "pdf.drawing_bounds",
+        "pdf.clipping_candidates",
+        "pdf.artwork_composition",
+        _CATEGORY_RULE,
+        "pdf.transformed_stroke_width",
+        "pdf.raster_region_candidates",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -63,12 +123,12 @@ class PdfContrastSample:
     max_channel_spread: int = 0
 
     def __post_init__(self) -> None:
-        _strings((self.name,), "Contrast sample name")
+        require_distinct_strings((self.name,), "Contrast sample name")
         if not isinstance(self.foreground, PdfRegion) or not isinstance(self.background, PdfRegion):
             raise PreparationError("Contrast samples require foreground and background PDF regions")
         if self.foreground.page != self.background.page:
             raise PreparationError("Foreground and background samples must be on the same page")
-        _number(self.minimum_ratio, "Minimum rendered sample contrast")
+        require_number(self.minimum_ratio, "Minimum rendered sample contrast")
         if not 1 <= self.minimum_ratio <= 21:
             raise PreparationError("Minimum rendered sample contrast must be in [1, 21]")
         if type(self.max_channel_spread) is not int or not 0 <= self.max_channel_spread <= 255:
@@ -103,16 +163,15 @@ class PdfArtworkOptions:
     geometry_tolerance_pt: float = 0.5
 
     def __post_init__(self) -> None:
-        for name in (
+        require_booleans(
+            self,
             "detect_printer_marks",
             "check_clipping",
             "classify_artwork",
             "classify_type3_glyphs",
             "forbid_bitmap_type3_glyphs",
             "grayscale_preview",
-        ):
-            if type(getattr(self, name)) is not bool:
-                raise PreparationError(f"{name} must be a boolean")
+        )
         for name in ("trim_regions", "figure_regions", "drawing_regions", "raster_regions"):
             values = getattr(self, name)
             if (
@@ -131,11 +190,11 @@ class PdfArtworkOptions:
             raise PreparationError("Contrast samples require at most 300 immutable sample pairs")
         for name in ("printer_mark_max_length_pt", "figure_edge_band_pt", "min_stroke_width_pt"):
             if getattr(self, name) is not None:
-                _number(getattr(self, name), name)
+                require_number(getattr(self, name), name)
         for name in ("max_figure_whitespace_ratio", "min_raster_region_coverage"):
             value = getattr(self, name)
             if value is not None:
-                _number(value, name, zero=name == "max_figure_whitespace_ratio")
+                require_number(value, name, allow_zero=name == "max_figure_whitespace_ratio")
                 if value > 1:
                     raise PreparationError(f"{name} cannot exceed one")
         if self.detect_printer_marks and (
@@ -149,14 +208,16 @@ class PdfArtworkOptions:
         ):
             raise PreparationError("Printer-mark exemptions require immutable positive pages")
         if self.artwork_category is not None:
-            _strings((self.artwork_category,), "Artwork category")
+            require_distinct_strings((self.artwork_category,), "Artwork category")
         if not isinstance(self.category_min_dpi, tuple) or any(
             not isinstance(pair, tuple) or len(pair) != 2 for pair in self.category_min_dpi
         ):
             raise PreparationError("Category DPI requires immutable category/minimum pairs")
-        _strings(tuple(pair[0] for pair in self.category_min_dpi), "Artwork categories")
+        require_distinct_strings(
+            tuple(pair[0] for pair in self.category_min_dpi), "Artwork categories"
+        )
         for _, minimum in self.category_min_dpi:
-            _number(minimum, "Category minimum DPI")
+            require_number(minimum, "Category minimum DPI")
         if self.category_min_dpi and self.artwork_category not in dict(self.category_min_dpi):
             raise PreparationError("Select an artwork category with an explicit DPI threshold")
         if self.required_color_space not in {None, "rgb", "cmyk"}:
@@ -167,10 +228,10 @@ class PdfArtworkOptions:
             raise PreparationError("Artwork background must be an 8-bit gray value")
         if type(self.ink_difference) is not int or not 1 <= self.ink_difference <= 255:
             raise PreparationError("Artwork ink difference must be an integer from 1 to 255")
-        _number(self.geometry_tolerance_pt, "Artwork geometry tolerance", zero=True)
+        require_number(self.geometry_tolerance_pt, "Artwork geometry tolerance", allow_zero=True)
 
 
-def _configured(options: PdfArtworkOptions) -> list[str]:
+def configured_artwork_rules(options: PdfArtworkOptions) -> list[str]:
     return [
         name
         for name, enabled in (
@@ -180,23 +241,28 @@ def _configured(options: PdfArtworkOptions) -> list[str]:
             ("pdf.drawing_bounds", bool(options.drawing_regions)),
             ("pdf.clipping_candidates", options.check_clipping),
             ("pdf.artwork_composition", options.classify_artwork),
-            ("pdf.artwork_category_resolution", bool(options.category_min_dpi)),
+            (_CATEGORY_RULE, bool(options.category_min_dpi)),
             (
                 "pdf.type3_glyph_programs",
                 options.classify_type3_glyphs or options.forbid_bitmap_type3_glyphs,
             ),
             ("pdf.transformed_stroke_width", options.min_stroke_width_pt is not None),
             ("pdf.raster_region_candidates", bool(options.raster_regions)),
-            ("pdf.grayscale_preview", options.grayscale_preview),
-            ("pdf.rendered_sample_contrast", bool(options.contrast_samples)),
+            (_PREVIEW_RULE, options.grayscale_preview),
+            (_CONTRAST_RULE, bool(options.contrast_samples)),
             ("figure.color_space", options.required_color_space is not None),
         )
         if enabled
     ]
 
 
+def artwork_checks_enabled(options: PdfArtworkOptions) -> bool:
+    """Tuning values alone do not select a measurement or require a source graph."""
+    return bool(configured_artwork_rules(options))
+
+
 def _matrix(node: ET.Element) -> Matrix:
-    values = tuple(_finite(value) for value in node.get("transform", "").split())
+    values = tuple(finite_number(value) for value in node.get("transform", "").split())
     if len(values) != 6:
         raise PreparationError("Drawing operation has no complete affine transform")
     return values[0], values[1], values[2], values[3], values[4], values[5]
@@ -211,11 +277,6 @@ def _point(point: Point, matrix: Matrix) -> Point:
     return result
 
 
-def artwork_checks_enabled(options: PdfArtworkOptions) -> bool:
-    """Tuning values alone do not select a measurement or require a source graph."""
-    return bool(_configured(options))
-
-
 def _box(points: list[Point]) -> Box:
     if not points:
         raise PreparationError("Drawing path has no measured vertices")
@@ -227,12 +288,16 @@ def _box(points: list[Point]) -> Box:
     )
 
 
+def _clipped(box: Box, clip: Box) -> Box:
+    return max(box[0], clip[0]), max(box[1], clip[1]), min(box[2], clip[2]), min(box[3], clip[3])
+
+
 def _segments(node: ET.Element) -> tuple[list[tuple[Point, Point]], bool]:
     result: list[tuple[Point, Point]] = []
     start = previous = None
     for child in node:
         if child.tag in {"moveto", "lineto"}:
-            current = _finite(child.get("x")), _finite(child.get("y"))
+            current = finite_number(child.get("x")), finite_number(child.get("y"))
             if child.tag == "moveto":
                 start = current
             elif previous is None:
@@ -282,20 +347,24 @@ class _Drawing:
     uncertain: bool
 
 
-def _trace(output: str, pages: int) -> tuple[list[_Drawing], list[Box], set[int]]:
-    root = _xml(output, "document")
-    traced = root.findall("page")
-    try:
-        numbers = [int(page.attrib["number"]) for page in traced]
-    except (KeyError, ValueError) as error:
-        raise PreparationError("Trace page numbers are missing or invalid") from error
-    if numbers != list(range(1, pages + 1)):
-        raise PreparationError("Trace did not report every page exactly once")
+class _DrawingTrace(NamedTuple):
+    drawings: list[_Drawing]
+    page_boxes: list[Box]
+    uncertain_pages: set[int]
+
+
+def _drawing_trace(output: str, pages: int) -> _DrawingTrace:
+    trace = parse_mupdf_trace(
+        output,
+        pages,
+        invalid_page_message="Trace page numbers are missing or invalid",
+        incomplete_message="Trace did not report every page exactly once",
+    )
     drawings: list[_Drawing] = []
     page_boxes: list[Box] = []
     uncertain_pages: set[int] = set()
-    for number, page in zip(numbers, traced, strict=True):
-        values = tuple(_finite(value) for value in page.get("mediabox", "").split())
+    for number, page in trace.pages:
+        values = tuple(finite_number(value) for value in page.get("mediabox", "").split())
         if len(values) != 4 or values[0] >= values[2] or values[1] >= values[3]:
             raise PreparationError("Trace page bounds are incomplete")
         page_box: Box = values[0], values[1], values[2], values[3]
@@ -311,33 +380,17 @@ def _trace(output: str, pages: int) -> tuple[list[_Drawing], list[Box], set[int]
             elif node.tag.startswith("clip_"):
                 clip = _rectangle(node) if node.tag == "clip_path" else None
                 parent = clips[-1]
-                if clip is not None and parent is not None:
-                    clip = (
-                        max(clip[0], parent[0]),
-                        max(clip[1], parent[1]),
-                        min(clip[2], parent[2]),
-                        min(clip[3], parent[3]),
-                    )
-                else:
-                    clip = None
-                clips.append(clip)
+                clips.append(
+                    _clipped(clip, parent) if clip is not None and parent is not None else None
+                )
             elif node.tag == "pop_clip":
                 if len(clips) == 1:
                     raise PreparationError("Trace has an unmatched clipping restore")
                 clips.pop()
-            elif node.tag in {
-                "fill_image",
-                "fill_image_mask",
-                "fill_path",
-                "stroke_path",
-                "fill_text",
-                "stroke_text",
-                "ignore_text",
-                "fill_shade",
-            }:
+            elif node.tag in COLOR_OPERATIONS or node.tag == "ignore_text":
                 index += 1
                 box = None
-                if node.tag in {"fill_image", "fill_image_mask"}:
+                if node.tag in _IMAGE_OPERATIONS:
                     matrix = _matrix(node)
                     box = _box(
                         [_point(point, matrix) for point in ((0, 0), (1, 0), (0, 1), (1, 1))]
@@ -361,10 +414,10 @@ def _trace(output: str, pages: int) -> tuple[list[_Drawing], list[Box], set[int]
                 uncertain_pages.add(number)
         if len(clips) != 1:
             uncertain_pages.add(number)
-    return drawings, page_boxes, uncertain_pages
+    return _DrawingTrace(drawings, page_boxes, uncertain_pages)
 
 
-def _sample(drawing: _Drawing) -> dict[str, object]:
+def _drawing_sample(drawing: _Drawing) -> dict[str, object]:
     return {
         "page": drawing.page,
         "operation": drawing.index,
@@ -373,15 +426,27 @@ def _sample(drawing: _Drawing) -> dict[str, object]:
     }
 
 
+class _Composition(NamedTuple):
+    """Painted operations by kind for the whole selected PDF."""
+
+    raster: list[_Drawing]
+    vector: list[_Drawing]
+    text: list[_Drawing]
+    unsupported: bool
+    scalable_text_fonts: bool
+
+    @property
+    def classification(self) -> str:
+        if self.raster and self.vector:
+            return "mixed"
+        return "raster" if self.raster else "vector" if self.vector else "empty"
+
+
 def _composition(
-    drawings: list[_Drawing],
-    options: PdfArtworkOptions,
-    unknown: set[int],
-    *,
-    scalable_text_fonts: bool = False,
-) -> list[Finding]:
-    raster = [d for d in drawings if d.node.tag in {"fill_image", "fill_image_mask"}]
-    text = [d for d in drawings if d.node.tag in {"fill_text", "stroke_text"}]
+    drawings: list[_Drawing], unknown: set[int], scalable_text_fonts: bool
+) -> _Composition:
+    raster = [d for d in drawings if d.node.tag in _IMAGE_OPERATIONS]
+    text = [d for d in drawings if d.node.tag in _TEXT_OPERATIONS]
     vector = [d for d in drawings if d.node.tag in {"fill_path", "stroke_path"}]
     if scalable_text_fonts:
         vector.extend(text)
@@ -390,79 +455,89 @@ def _composition(
         or any(d.node.tag == "fill_shade" for d in drawings)
         or bool(text and not scalable_text_fonts)
     )
-    classification = (
-        "mixed" if raster and vector else "raster" if raster else "vector" if vector else "empty"
+    return _Composition(raster, vector, text, unsupported, scalable_text_fonts)
+
+
+def _composition_finding(composition: _Composition) -> Finding:
+    return heuristic_finding(
+        "pdf.artwork_composition",
+        "Inventoried painted raster and vector operations.",
+        [],
+        incomplete=composition.unsupported or composition.classification == "empty",
+        classification=composition.classification,
+        raster_operations=len(composition.raster),
+        vector_operations=len(composition.vector),
+        unclassified_text_operations=0
+        if composition.scalable_text_fonts
+        else len(composition.text),
+        scope="Whole selected PDF, including text and backgrounds; figure categories, "
+        "font text needs a complete scalable-font inventory. Outlined lettering "
+        "and source-to-final attribution are not inferred.",
     )
-    result = []
-    if options.classify_artwork:
-        result.append(
-            _result(
-                "pdf.artwork_composition",
-                "Inventoried painted raster and vector operations.",
-                [],
-                uncertain=unsupported or classification == "empty",
-                advisory=True,
-                classification=classification,
-                raster_operations=len(raster),
-                vector_operations=len(vector),
-                unclassified_text_operations=0 if scalable_text_fonts else len(text),
-                scope="Whole selected PDF, including text and backgrounds; figure categories, "
-                "font text needs a complete scalable-font inventory. Outlined lettering "
-                "and source-to-final attribution are not inferred.",
-            )
-        )
-    if options.category_min_dpi:
-        minimum = dict(options.category_min_dpi)[options.artwork_category or ""]
-        measurements: list[object] = []
-        violations: list[object] = []
-        incomplete = unsupported
-        for drawing in raster:
-            node = drawing.node
-            a, b, c, d, _, _ = _matrix(node)
-            width, height = _finite(node.get("width")), _finite(node.get("height"))
-            lengths = math.hypot(a, b), math.hypot(c, d)
-            determinant = a * d - b * c
-            if (
-                min(width, height, *lengths) <= 0
-                or not math.isfinite(determinant)
-                or abs(determinant) < 1e-12
-            ):
-                incomplete = True
-                continue
-            axes = 72 * width / lengths[0], 72 * height / lengths[1]
-            # Largest singular value of the points-per-pixel transform bounds
-            # the coarsest sampling direction under shear as well as rotation.
-            aa, bb, cc, dd = a / width, b / width, c / height, d / height
-            norm = aa * aa + bb * bb + cc * cc + dd * dd
-            if not math.isfinite(norm * norm) or norm <= 0:
-                incomplete = True
-                continue
-            discriminant = max(0.0, norm * norm - 4 * (aa * dd - bb * cc) ** 2)
-            coarse = 72 / math.sqrt((norm + math.sqrt(discriminant)) / 2)
-            measurement = {
-                **_sample(drawing),
-                "x_dpi": axes[0],
-                "y_dpi": axes[1],
-                "minimum_direction_dpi": coarse,
-            }
-            measurements.append(measurement)
-            if min(*axes, coarse) < minimum:
-                violations.append(measurement)
-        result.append(
-            _result(
-                "pdf.artwork_category_resolution",
-                "Compared image placement sampling with the selected category.",
-                violations,
-                uncertain=incomplete or (not raster and not vector),
-                category=options.artwork_category,
-                minimum_dpi=minimum,
-                measurements=measurements[:_MAX_SAMPLES],
-                placement_count=len(raster),
-                scope="Declared category and traced raster placements; axes and coarsest "
-                "sampling includes rotation/shear. Vector operations have no raster DPI.",
-            )
-        )
-    return result
+
+
+class _PlacementSampling(NamedTuple):
+    x_dpi: float
+    y_dpi: float
+    minimum_direction_dpi: float
+
+
+def _placement_sampling(drawing: _Drawing) -> _PlacementSampling | None:
+    """Axis and coarsest-direction sampling of one image placement, if measurable."""
+    node = drawing.node
+    a, b, c, d, _, _ = _matrix(node)
+    width, height = finite_number(node.get("width")), finite_number(node.get("height"))
+    lengths = math.hypot(a, b), math.hypot(c, d)
+    determinant = a * d - b * c
+    if (
+        min(width, height, *lengths) <= 0
+        or not math.isfinite(determinant)
+        or abs(determinant) < 1e-12
+    ):
+        return None
+    axes = 72 * width / lengths[0], 72 * height / lengths[1]
+    # Largest singular value of the points-per-pixel transform bounds
+    # the coarsest sampling direction under shear as well as rotation.
+    aa, bb, cc, dd = a / width, b / width, c / height, d / height
+    norm = aa * aa + bb * bb + cc * cc + dd * dd
+    if not math.isfinite(norm * norm) or norm <= 0:
+        return None
+    discriminant = max(0.0, norm * norm - 4 * (aa * dd - bb * cc) ** 2)
+    coarse = 72 / math.sqrt((norm + math.sqrt(discriminant)) / 2)
+    return _PlacementSampling(axes[0], axes[1], coarse)
+
+
+def _category_resolution_finding(composition: _Composition, options: PdfArtworkOptions) -> Finding:
+    minimum = dict(options.category_min_dpi)[options.artwork_category or ""]
+    measurements: list[object] = []
+    violations: list[object] = []
+    incomplete = composition.unsupported
+    for drawing in composition.raster:
+        sampling = _placement_sampling(drawing)
+        if sampling is None:
+            incomplete = True
+            continue
+        measurement = {
+            **_drawing_sample(drawing),
+            "x_dpi": sampling.x_dpi,
+            "y_dpi": sampling.y_dpi,
+            "minimum_direction_dpi": sampling.minimum_direction_dpi,
+        }
+        measurements.append(measurement)
+        if min(sampling) < minimum:
+            violations.append(measurement)
+    return measurement_finding(
+        _CATEGORY_RULE,
+        "Compared image placement sampling with the selected category.",
+        violations,
+        incomplete=incomplete or (not composition.raster and not composition.vector),
+        category=options.artwork_category,
+        minimum_dpi=minimum,
+        measurements=measurements[:MAX_SAMPLES],
+        placement_count=len(composition.raster),
+        scope="Declared category and traced raster placements; axes and coarsest "
+        "sampling includes rotation/shear. Vector operations have no raster DPI.",
+    )
 
 
 def _stroke_finding(
@@ -475,7 +550,7 @@ def _stroke_finding(
         node = drawing.node
         if node.tag not in {"stroke_path", "stroke_text"}:
             continue
-        width = _finite(node.get("linewidth"))
+        width = finite_number(node.get("linewidth"))
         a, b, c, d, _, _ = _matrix(node)
         determinant = abs(a * d - b * c)
         if width <= 0 or determinant == 0 or not math.isfinite(determinant):
@@ -501,18 +576,114 @@ def _stroke_finding(
             continue
         measured += len(widths)
         if options.min_stroke_width_pt is not None and min(widths) < options.min_stroke_width_pt:
-            violations.append({**_sample(drawing), "minimum_effective_width_pt": min(widths)})
-    return _result(
+            violations.append(
+                {**_drawing_sample(drawing), "minimum_effective_width_pt": min(widths)}
+            )
+    return heuristic_finding(
         "pdf.transformed_stroke_width",
         "Measured stroke thickness normal to transformed straight segments.",
         violations,
-        uncertain=uncertain or measured == 0,
-        advisory=True,
+        incomplete=uncertain or measured == 0,
         measured_segments=measured,
         minimum_pt=options.min_stroke_width_pt,
         scope="Straight-segment normal thickness supports arbitrary nonsingular affine transforms; "
         "curves/text need uniform transforms. Hairlines, joins, caps and raster lines are omitted.",
     )
+
+
+def _short_lines(drawings: list[_Drawing], page: int, max_length: float) -> list[Line]:
+    """Transformed straight stroke segments on a page, with their operation index."""
+    lines: list[Line] = []
+    for drawing in drawings:
+        if drawing.page != page or drawing.node.tag != "stroke_path":
+            continue
+        segments, supported = _segments(drawing.node)
+        if not supported:
+            continue
+        matrix = _matrix(drawing.node)
+        for first, second in segments:
+            first, second = _point(first, matrix), _point(second, matrix)
+            length = math.dist(first, second)
+            if 0 < length <= max_length:
+                lines.append((first, second, drawing.index))
+    return lines
+
+
+def _corner_marks(
+    region: PdfRegion, lines: list[Line], tolerance: float, max_length: float
+) -> list[object]:
+    marks: list[object] = []
+    left, top, right, bottom = region.box
+    for x, y in ((left, top), (right, top), (left, bottom), (right, bottom)):
+        horizontal = [
+            index
+            for first, second, index in lines
+            if max(abs(first[1] - y), abs(second[1] - y)) <= tolerance
+            and (
+                max(first[0], second[0]) <= left + tolerance
+                if x == left
+                else min(first[0], second[0]) >= right - tolerance
+            )
+            and min(abs(first[0] - x), abs(second[0] - x)) <= max_length
+        ]
+        vertical = [
+            index
+            for first, second, index in lines
+            if max(abs(first[0] - x), abs(second[0] - x)) <= tolerance
+            and (
+                max(first[1], second[1]) <= top + tolerance
+                if y == top
+                else min(first[1], second[1]) >= bottom - tolerance
+            )
+            and min(abs(first[1] - y), abs(second[1] - y)) <= max_length
+        ]
+        if horizontal and vertical:
+            marks.append(
+                {
+                    "page": region.page,
+                    "region": region.name,
+                    "corner_pt": (x, y),
+                    "operations": sorted(set(horizontal + vertical)),
+                    "candidate": "paired trim-aligned crop strokes",
+                }
+            )
+    return marks
+
+
+def _registration_marks(
+    region: PdfRegion, lines: list[Line], tolerance: float
+) -> list[object] | None:
+    """Crossed strokes outside the trim region; None when the pair work exceeds its bound.
+
+    Crossed short horizontal/vertical strokes outside the trim rectangle are
+    registration-target candidates. Graphic content can look identical.
+    """
+    horizontal = [line for line in lines if abs(line[0][1] - line[1][1]) <= tolerance]
+    vertical = [line for line in lines if abs(line[0][0] - line[1][0]) <= tolerance]
+    if len(horizontal) * len(vertical) > MAX_PAIR_CHECKS:
+        return None
+    marks: list[object] = []
+    for first, second, horizontal_index in horizontal:
+        for other_first, other_second, vertical_index in vertical:
+            x = (other_first[0] + other_second[0]) / 2
+            y = (first[1] + second[1]) / 2
+            if (
+                min(first[0], second[0]) + tolerance < x < max(first[0], second[0]) - tolerance
+                and min(other_first[1], other_second[1]) + tolerance
+                < y
+                < max(other_first[1], other_second[1]) - tolerance
+                and not contains(region.box, (x, y, x, y), tolerance)
+            ):
+                marks.append(
+                    {
+                        "page": region.page,
+                        "region": region.name,
+                        "center_pt": (x, y),
+                        "operations": [horizontal_index, vertical_index],
+                        "candidate": "crossed registration strokes",
+                    }
+                )
+    return marks
 
 
 def _mark_finding(
@@ -524,110 +695,33 @@ def _mark_finding(
     uncertain = any(
         region.page > pages
         or region.page in unsupported
-        or not _contains(boxes[region.page - 1], region.box, 0)
+        or not contains(boxes[region.page - 1], region.box, 0)
         for region in options.trim_regions
     )
     uncertain |= any(page > pages for page in options.printer_mark_exemptions)
     tolerance = options.geometry_tolerance_pt
+    max_length = options.printer_mark_max_length_pt or 0
     for region in options.trim_regions:
         if (
             region.page in options.printer_mark_exemptions
             or region.page in unsupported
             or region.page > pages
-            or not _contains(boxes[region.page - 1], region.box, 0)
+            or not contains(boxes[region.page - 1], region.box, 0)
         ):
             continue
         measured += 1
-        lines: list[tuple[Point, Point, int]] = []
-        for drawing in drawings:
-            if drawing.page != region.page or drawing.node.tag != "stroke_path":
-                continue
-            segments, supported = _segments(drawing.node)
-            if not supported:
-                continue
-            matrix = _matrix(drawing.node)
-            for first, second in segments:
-                first, second = _point(first, matrix), _point(second, matrix)
-                length = math.dist(first, second)
-                if 0 < length <= (options.printer_mark_max_length_pt or 0):
-                    lines.append((first, second, drawing.index))
-        left, top, right, bottom = region.box
-        for x, y in ((left, top), (right, top), (left, bottom), (right, bottom)):
-            horizontal = [
-                index
-                for first, second, index in lines
-                if max(abs(first[1] - y), abs(second[1] - y)) <= tolerance
-                and (
-                    max(first[0], second[0]) <= left + tolerance
-                    if x == left
-                    else min(first[0], second[0]) >= right - tolerance
-                )
-                and min(abs(first[0] - x), abs(second[0] - x))
-                <= (options.printer_mark_max_length_pt or 0)
-            ]
-            vertical = [
-                index
-                for first, second, index in lines
-                if max(abs(first[0] - x), abs(second[0] - x)) <= tolerance
-                and (
-                    max(first[1], second[1]) <= top + tolerance
-                    if y == top
-                    else min(first[1], second[1]) >= bottom - tolerance
-                )
-                and min(abs(first[1] - y), abs(second[1] - y))
-                <= (options.printer_mark_max_length_pt or 0)
-            ]
-            if horizontal and vertical:
-                violations.append(
-                    {
-                        "page": region.page,
-                        "region": region.name,
-                        "corner_pt": (x, y),
-                        "operations": sorted(set(horizontal + vertical)),
-                        "candidate": "paired trim-aligned crop strokes",
-                    }
-                )
-        # Crossed short horizontal/vertical strokes outside the trim rectangle
-        # are registration-target candidates. Graphic content can look identical.
-        horizontal = [
-            (first, second, index)
-            for first, second, index in lines
-            if abs(first[1] - second[1]) <= tolerance
-        ]
-        vertical = [
-            (first, second, index)
-            for first, second, index in lines
-            if abs(first[0] - second[0]) <= tolerance
-        ]
-        if len(horizontal) * len(vertical) > 250_000:
+        lines = _short_lines(drawings, region.page, max_length)
+        violations.extend(_corner_marks(region, lines, tolerance, max_length))
+        registration = _registration_marks(region, lines, tolerance)
+        if registration is None:
             uncertain = True
-            continue
-        for first, second, horizontal_index in horizontal:
-            for other_first, other_second, vertical_index in vertical:
-                x = (other_first[0] + other_second[0]) / 2
-                y = (first[1] + second[1]) / 2
-                if (
-                    min(first[0], second[0]) + tolerance < x < max(first[0], second[0]) - tolerance
-                    and min(other_first[1], other_second[1]) + tolerance
-                    < y
-                    < max(other_first[1], other_second[1]) - tolerance
-                    and not _contains(region.box, (x, y, x, y), tolerance)
-                ):
-                    violations.append(
-                        {
-                            "page": region.page,
-                            "region": region.name,
-                            "center_pt": (x, y),
-                            "operations": [horizontal_index, vertical_index],
-                            "candidate": "crossed registration strokes",
-                        }
-                    )
-    return _result(
+        else:
+            violations.extend(registration)
+    return heuristic_finding(
         "pdf.printer_marks",
         "Searched for short crop/registration strokes outside explicit trim regions.",
         violations,
-        uncertain=uncertain or measured == 0,
-        advisory=True,
+        incomplete=uncertain or measured == 0,
         measured_trim_regions=measured,
         exempt_pages=options.printer_mark_exemptions,
         scope="Geometric paired-corner and crossed-stroke candidates. Outlined, curved and "
@@ -635,154 +729,80 @@ def _mark_finding(
     )
 
 
-def _geometry_findings(
-    drawings: list[_Drawing],
-    boxes: list[Box],
-    unknown: set[int],
-    unsupported: set[int],
-    options: PdfArtworkOptions,
-) -> list[Finding]:
-    result = []
-    if options.drawing_regions:
-        violations: list[object] = []
-        measured = 0
-        uncertain = bool(unknown) or any(
-            r.page > len(boxes) or r.page in unsupported for r in options.drawing_regions
-        )
-        for drawing in drawings:
-            allowed = [r for r in options.drawing_regions if r.page == drawing.page]
-            if not allowed or drawing.node.tag not in {
-                "fill_image",
-                "fill_image_mask",
-                "fill_path",
-                "stroke_path",
-            }:
-                continue
-            if (
-                drawing.box is None
-                or drawing.page in unsupported
-                or drawing.uncertain
-                or drawing.clip is None
-            ):
-                uncertain = True
-                continue
-            measured += 1
-            visible = (
-                max(drawing.box[0], drawing.clip[0]),
-                max(drawing.box[1], drawing.clip[1]),
-                min(drawing.box[2], drawing.clip[2]),
-                min(drawing.box[3], drawing.clip[3]),
-            )
-            if visible[0] >= visible[2] or visible[1] >= visible[3]:
-                continue
-            if not any(_contains(r.box, visible, options.geometry_tolerance_pt) for r in allowed):
-                violations.append({**_sample(drawing), "visible_bounds_pt": visible})
-        result.append(
-            _result(
-                "pdf.drawing_bounds",
-                "Compared transformed image and straight filled-path bounds with allowed regions.",
-                violations,
-                uncertain=uncertain or measured == 0,
-                advisory=True,
-                measured_operations=measured,
-                scope="Affine image rectangles and polygon bounds after rectangular clipping. "
-                "Text, strokes, curves, masks and unsupported page frames remain unmeasured.",
-            )
-        )
-    if options.check_clipping:
-        violations = []
-        measured = 0
-        uncertain = bool(unknown)
-        for drawing in drawings:
-            if drawing.node.tag not in {
-                "fill_image",
-                "fill_image_mask",
-                "fill_path",
-                "stroke_path",
-            }:
-                continue
-            if drawing.box is None or drawing.clip is None or drawing.uncertain:
-                uncertain = True
-                continue
-            measured += 1
-            if not _contains(drawing.clip, drawing.box, options.geometry_tolerance_pt):
-                violations.append({**_sample(drawing), "clip_bounds_pt": drawing.clip})
-        result.append(
-            _result(
-                "pdf.clipping_candidates",
-                "Compared painted operation extents with active rectangular clips.",
-                violations,
-                uncertain=uncertain or measured == 0,
-                advisory=True,
-                measured_operations=measured,
-                scope="Extents crossing page or rectangular clip boundaries are candidates; "
-                "intentional cropping, curves, strokes and arbitrary masks need review.",
-            )
-        )
-    if options.min_stroke_width_pt is not None:
-        result.append(_stroke_finding(drawings, options, unknown))
-    if options.detect_printer_marks:
-        result.append(_mark_finding(drawings, options, unsupported | unknown, boxes))
-    if options.raster_regions:
-        for region in options.raster_regions:
-            incomplete = (
-                region.page > len(boxes)
-                or region.page in unsupported | unknown
-                or not _contains(boxes[region.page - 1], region.box, 0)
-            )
-            images = []
-            text = False
-            for drawing in drawings:
-                if drawing.page != region.page:
-                    continue
-                # Text trace has origins, not reliable glyph bounds. A page with
-                # text cannot establish absence within a selected region.
-                if drawing.node.tag in {"fill_text", "stroke_text", "ignore_text"}:
-                    text = True
-                if drawing.node.tag in {"fill_image", "fill_image_mask"}:
-                    if drawing.box is None or drawing.clip is None or drawing.uncertain:
-                        incomplete = True
-                    else:
-                        clipped = (
-                            max(drawing.box[0], drawing.clip[0]),
-                            max(drawing.box[1], drawing.clip[1]),
-                            min(drawing.box[2], drawing.clip[2]),
-                            min(drawing.box[3], drawing.clip[3]),
-                        )
-                        a, b, c, d, _, _ = _matrix(drawing.node)
-                        if not ((b == c == 0) or (a == d == 0)):
-                            incomplete = True
-                        else:
-                            images.append(clipped)
-            area = (region.right_pt - region.left_pt) * (region.bottom_pt - region.top_pt)
-            coverage = _union_area(images, region.box) / area
-            candidate = coverage >= (options.min_raster_region_coverage or 1) and not text
-            result.append(
-                _result(
-                    "pdf.raster_region_candidates",
-                    f"Measured raster coverage in {region.name}.",
-                    [{"page": region.page, "region": region.name, "raster_coverage": coverage}]
-                    if candidate and not incomplete
-                    else [],
-                    uncertain=incomplete or text,
-                    advisory=True,
-                    page=region.page,
-                    region=region.name,
-                    raster_coverage=coverage,
-                    page_has_text_operations=text,
-                    scope="Union of axis-aligned images in an explicit region; high coverage "
-                    "without page text is a scan/raster-table candidate, not a semantic diagnosis.",
-                )
-            )
-    return result
+@dataclass(frozen=True, slots=True)
+class _TracedArtwork:
+    """Traced drawings and page frames shared by the drawing-geometry measurements."""
+
+    drawings: list[_Drawing]
+    boxes: list[Box]
+    unknown: frozenset[int]
+    unsupported: frozenset[int]
+    options: PdfArtworkOptions
+
+
+def _drawing_bounds_finding(artwork: _TracedArtwork) -> Finding:
+    options = artwork.options
+    violations: list[object] = []
+    measured = 0
+    uncertain = bool(artwork.unknown) or any(
+        r.page > len(artwork.boxes) or r.page in artwork.unsupported
+        for r in options.drawing_regions
+    )
+    for drawing in artwork.drawings:
+        allowed = [r for r in options.drawing_regions if r.page == drawing.page]
+        if not allowed or drawing.node.tag not in _EXTENT_OPERATIONS:
+            continue
+        if (
+            drawing.box is None
+            or drawing.page in artwork.unsupported
+            or drawing.uncertain
+            or drawing.clip is None
+        ):
+            uncertain = True
+            continue
+        measured += 1
+        visible = _clipped(drawing.box, drawing.clip)
+        if visible[0] >= visible[2] or visible[1] >= visible[3]:
+            continue
+        if not any(contains(r.box, visible, options.geometry_tolerance_pt) for r in allowed):
+            violations.append({**_drawing_sample(drawing), "visible_bounds_pt": visible})
+    return heuristic_finding(
+        "pdf.drawing_bounds",
+        "Compared transformed image and straight filled-path bounds with allowed regions.",
+        violations,
+        incomplete=uncertain or measured == 0,
+        measured_operations=measured,
+        scope="Affine image rectangles and polygon bounds after rectangular clipping. "
+        "Text, strokes, curves, masks and unsupported page frames remain unmeasured.",
+    )
+
+
+def _clipping_finding(artwork: _TracedArtwork) -> Finding:
+    violations: list[object] = []
+    measured = 0
+    uncertain = bool(artwork.unknown)
+    for drawing in artwork.drawings:
+        if drawing.node.tag not in _EXTENT_OPERATIONS:
+            continue
+        if drawing.box is None or drawing.clip is None or drawing.uncertain:
+            uncertain = True
+            continue
+        measured += 1
+        if not contains(drawing.clip, drawing.box, artwork.options.geometry_tolerance_pt):
+            violations.append({**_drawing_sample(drawing), "clip_bounds_pt": drawing.clip})
+    return heuristic_finding(
+        "pdf.clipping_candidates",
+        "Compared painted operation extents with active rectangular clips.",
+        violations,
+        incomplete=uncertain or measured == 0,
+        measured_operations=measured,
+        scope="Extents crossing page or rectangular clip boundaries are candidates; "
+        "intentional cropping, curves, strokes and arbitrary masks need review.",
+    )
 
 
 def _union_area(boxes: list[Box], region: Box) -> float:
-    clipped = [
-        (max(b[0], region[0]), max(b[1], region[1]), min(b[2], region[2]), min(b[3], region[3]))
-        for b in boxes
-        if _intersection(b, region) > 0
-    ]
+    clipped = [_clipped(b, region) for b in boxes if intersection_area(b, region) > 0]
     if len(clipped) > 1000:
         raise PreparationError("Raster region exceeds the bounded image-union limit")
     xs = sorted({x for box in clipped for x in (box[0], box[2])})
@@ -797,6 +817,151 @@ def _union_area(boxes: list[Box], region: Box) -> float:
     return area
 
 
+def _raster_region_finding(artwork: _TracedArtwork, region: PdfRegion) -> Finding:
+    boxes = artwork.boxes
+    incomplete = (
+        region.page > len(boxes)
+        or region.page in artwork.unsupported | artwork.unknown
+        or not contains(boxes[region.page - 1], region.box, 0)
+    )
+    images = []
+    text = False
+    for drawing in artwork.drawings:
+        if drawing.page != region.page:
+            continue
+        # Text trace has origins, not reliable glyph bounds. A page with
+        # text cannot establish absence within a selected region.
+        if drawing.node.tag in {"fill_text", "stroke_text", "ignore_text"}:
+            text = True
+        if drawing.node.tag in _IMAGE_OPERATIONS:
+            if drawing.box is None or drawing.clip is None or drawing.uncertain:
+                incomplete = True
+                continue
+            clipped = _clipped(drawing.box, drawing.clip)
+            a, b, c, d, _, _ = _matrix(drawing.node)
+            if not ((b == c == 0) or (a == d == 0)):
+                incomplete = True
+            else:
+                images.append(clipped)
+    area = (region.right_pt - region.left_pt) * (region.bottom_pt - region.top_pt)
+    coverage = _union_area(images, region.box) / area
+    candidate = coverage >= (artwork.options.min_raster_region_coverage or 1) and not text
+    return heuristic_finding(
+        "pdf.raster_region_candidates",
+        f"Measured raster coverage in {region.name}.",
+        [{"page": region.page, "region": region.name, "raster_coverage": coverage}]
+        if candidate and not incomplete
+        else [],
+        incomplete=incomplete or text,
+        page=region.page,
+        region=region.name,
+        raster_coverage=coverage,
+        page_has_text_operations=text,
+        scope="Union of axis-aligned images in an explicit region; high coverage "
+        "without page text is a scan/raster-table candidate, not a semantic diagnosis.",
+    )
+
+
+def _geometry_findings(artwork: _TracedArtwork) -> list[Finding]:
+    options = artwork.options
+    result = []
+    if options.drawing_regions:
+        result.append(_drawing_bounds_finding(artwork))
+    if options.check_clipping:
+        result.append(_clipping_finding(artwork))
+    if options.min_stroke_width_pt is not None:
+        result.append(_stroke_finding(artwork.drawings, options, set(artwork.unknown)))
+    if options.detect_printer_marks:
+        result.append(
+            _mark_finding(
+                artwork.drawings, options, set(artwork.unsupported | artwork.unknown), artwork.boxes
+            )
+        )
+    result.extend(_raster_region_finding(artwork, region) for region in options.raster_regions)
+    return result
+
+
+async def _trace_output(session: PdfToolSession, pages: int) -> str | PreparationError:
+    """One MuPDF trace shared by the drawing and colour-space measurements."""
+    try:
+        return await session.measure(
+            "trace", mupdf_trace_argv(pages), lambda execution: execution.stdout
+        )
+    except (PreparationError, OSError) as error:
+        return PreparationError(str(error))
+
+
+async def _scalable_text_fonts(
+    session: PdfToolSession, drawings: list[_Drawing], options: PdfArtworkOptions
+) -> bool:
+    """Whether every font is scalable, so painted text can count as vector artwork."""
+    if not (options.classify_artwork or options.category_min_dpi) or not any(
+        drawing.node.tag in _TEXT_OPERATIONS for drawing in drawings
+    ):
+        return False
+    try:
+        font_types = await session.measure(
+            "composition-fonts",
+            ["pdffonts", DOCUMENT],
+            lambda execution: [font["type"] for font in font_inventory(execution.stdout)],
+        )
+    except (PreparationError, OSError):
+        # Text-bearing traces need this evidence and retain uncertainty.
+        return False
+    return bool(font_types) and all(kind in _SCALABLE_FONT_TYPES for kind in font_types)
+
+
+def _trace_unavailable(rules: list[str], error: Exception) -> list[Finding]:
+    return [
+        unavailable_finding(rule, error, severity="error" if rule == _CATEGORY_RULE else "warning")
+        for rule in rules
+    ]
+
+
+async def _drawing_findings(
+    session: PdfToolSession,
+    trace: str | PreparationError,
+    pages: int,
+    sizes: list[tuple[float, float]],
+    unsupported: set[int],
+    options: PdfArtworkOptions,
+    rules: list[str],
+) -> list[Finding]:
+    """Measure traced drawings; extends ``unsupported`` with misaligned trace pages.
+
+    Rendered region and contrast measurements later skip those pages as well.
+    """
+    if isinstance(trace, PreparationError):
+        return _trace_unavailable(rules, trace)
+    try:
+        async with session.lease("drawing trace"):
+            drawings, boxes, unknown = _drawing_trace(trace, pages)
+        scalable_text_fonts = await _scalable_text_fonts(session, drawings, options)
+        async with session.lease("artwork geometry"):
+            for index, (box, size) in enumerate(zip(boxes, sizes, strict=True), 1):
+                if box[:2] != (0, 0) or any(
+                    abs(actual - expected) > options.geometry_tolerance_pt
+                    for actual, expected in zip(box[2:], size, strict=True)
+                ):
+                    unsupported.add(index)
+            composition = _composition(drawings, unknown, scalable_text_fonts)
+            result = []
+            if options.classify_artwork:
+                result.append(_composition_finding(composition))
+            if options.category_min_dpi:
+                result.append(_category_resolution_finding(composition, options))
+            result.extend(
+                _geometry_findings(
+                    _TracedArtwork(
+                        drawings, boxes, frozenset(unknown), frozenset(unsupported), options
+                    )
+                )
+            )
+            return result
+    except (PreparationError, OSError) as error:
+        return _trace_unavailable(rules, error)
+
+
 def _program_tokens(data: bytes) -> list[str]:
     """Tokenize a conservative stream subset without treating string payloads as operators."""
     text = data.decode("latin1")
@@ -807,19 +972,19 @@ def _program_tokens(data: bytes) -> list[str]:
         if char.isspace() or char == "\0":
             index += 1
         elif char == "%":
-            end = re.search(r"[\r\n]", text[index:])
-            index = len(text) if end is None else index + end.end()
+            end = _LINE_END.search(text, index)
+            index = len(text) if end is None else end.end()
         elif char in "(<":
             # Text strings, dictionaries and inline image data are deliberately
             # unsupported: do not mistake embedded operator-looking bytes for paint.
             raise PreparationError("Type 3 program uses unsupported string/dictionary content")
         else:
-            match = re.match(r"/?[^\s\x00()<>\[\]{}%/]+|[\[\]]", text[index:])
+            match = _TOKEN.match(text, index)
             if match is None:
                 raise PreparationError("Type 3 program contains unsupported token syntax")
             token = match.group()
             tokens.append(token)
-            index += len(token)
+            index = match.end()
             if len(tokens) > _MAX_OPERATIONS:
                 raise PreparationError("Type 3 glyph program exceeds the token limit")
             if token == "BI":
@@ -829,24 +994,44 @@ def _program_tokens(data: bytes) -> list[str]:
     return tokens
 
 
-def _glyph_program(
-    objects: _Objects,
-    reference: object,
-    resources: object,
-    remaining: list[int],
-    seen: frozenset[str] = frozenset(),
-) -> tuple[bool, bool, bool]:
-    if (
-        not isinstance(reference, str)
-        or not re.fullmatch(r"\d+ \d+ R", reference)
-        or reference in seen
-        or len(seen) >= 20
-        or remaining[0] <= 0
-    ):
-        return False, False, True
+class _GlyphPaint(NamedTuple):
+    """What a glyph program paints, and whether part of it could not be classified."""
+
+    raster: bool = False
+    vector: bool = False
+    incomplete: bool = False
+
+    def merged(self, other: _GlyphPaint) -> _GlyphPaint:
+        return _GlyphPaint(
+            self.raster or other.raster,
+            self.vector or other.vector,
+            self.incomplete or other.incomplete,
+        )
+
+    @property
+    def classification(self) -> str:
+        if self.raster and self.vector:
+            return "mixed"
+        return "bitmap" if self.raster else "vector" if self.vector else "empty"
+
+
+_UNCLASSIFIED = _GlyphPaint(incomplete=True)
+
+
+@dataclass(slots=True)
+class _TokenAllowance:
+    """Glyph-program tokens still permitted across one Type 3 inventory."""
+
+    remaining: int = _MAX_OPERATIONS
+
+
+def _program_tokens_within(
+    objects: QpdfObjectGraph, reference: str, allowance: _TokenAllowance
+) -> list[str] | None:
+    """Tokens of an unfiltered inline program stream, or None when it is unreadable."""
     entry = objects.objects.get("obj:" + reference)
     if not isinstance(entry, dict) or not isinstance(entry.get("stream"), dict):
-        return False, False, True
+        return None
     stream = entry["stream"]
     dictionary = stream.get("dict")
     if (
@@ -854,70 +1039,89 @@ def _glyph_program(
         or dictionary.get("/Filter")
         or not isinstance(stream.get("data"), str)
     ):
-        return False, False, True
+        return None
     try:
         data = base64.b64decode(stream["data"], validate=True)
-        if len(data) > 1_000_000:
-            return False, False, True
+        if len(data) > _MAX_GLYPH_STREAM_BYTES:
+            return None
         tokens = _program_tokens(data)
-        remaining[0] -= len(tokens)
-        if remaining[0] < 0:
-            return False, False, True
     except (binascii.Error, PreparationError):
-        return False, False, True
-    raster = vector = uncertain = False
-    simple = set(
-        "q Q cm w J j M d ri i g G rg RG k K cs CS sc SC m l c v y h re n W W* d0 d1 [ ]".split()
-    )
-    paint = set("S s f F f* B B* b b*".split())
+        return None
+    allowance.remaining -= len(tokens)
+    return tokens if allowance.remaining >= 0 else None
+
+
+def _glyph_program(
+    objects: QpdfObjectGraph,
+    reference: object,
+    resources: object,
+    allowance: _TokenAllowance,
+    seen: frozenset[str] = frozenset(),
+) -> _GlyphPaint:
+    if (
+        not is_object_reference(reference)
+        or reference in seen
+        or len(seen) >= 20
+        or allowance.remaining <= 0
+    ):
+        return _UNCLASSIFIED
+    tokens = _program_tokens_within(objects, reference, allowance)
+    if tokens is None:
+        return _UNCLASSIFIED
+    paint = _GlyphPaint()
     for index, token in enumerate(tokens):
-        if token in paint:
-            vector = True
+        if token in _PAINT_OPERATORS:
+            paint = paint._replace(vector=True)
         elif token == "BI":
             # Positive inline-image evidence survives while later content is unknown.
-            raster = uncertain = True
+            paint = paint._replace(raster=True, incomplete=True)
         elif token == "Do":
-            try:
-                name = tokens[index - 1] if index else ""
-                if not name.startswith("/"):
-                    raise PreparationError("Missing XObject name")
-                xobjects = objects.dictionary(objects.dictionary(resources).get("/XObject"))
-                child_reference = xobjects.get(name)
-                child = objects.dictionary(child_reference)
-                if child.get("/Subtype") == "/Image":
-                    raster = True
-                elif child.get("/Subtype") == "/Form":
-                    child_flags = _glyph_program(
-                        objects,
-                        child_reference,
-                        child.get("/Resources", resources),
-                        remaining,
-                        seen | {reference},
-                    )
-                    raster, vector, uncertain = (
-                        a or b
-                        for a, b in zip((raster, vector, uncertain), child_flags, strict=True)
-                    )
-                else:
-                    uncertain = True
-            except PreparationError:
-                uncertain = True
+            paint = paint.merged(
+                _xobject_paint(objects, tokens, index, resources, allowance, seen | {reference})
+            )
         elif (
-            token not in simple
+            token not in _SIMPLE_GLYPH_OPERATORS
             and not token.startswith("/")
-            and not re.fullmatch(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)", token)
+            and not _NUMBER.fullmatch(token)
         ):
-            uncertain = True
-    return raster, vector, uncertain
+            paint = paint._replace(incomplete=True)
+    return paint
 
 
-def _type3_finding(objects: _Objects, options: PdfArtworkOptions) -> Finding:
+def _xobject_paint(
+    objects: QpdfObjectGraph,
+    tokens: list[str],
+    index: int,
+    resources: object,
+    allowance: _TokenAllowance,
+    seen: frozenset[str],
+) -> _GlyphPaint:
+    """What the XObject named before a ``Do`` operator paints."""
+    try:
+        name = tokens[index - 1] if index else ""
+        if not name.startswith("/"):
+            raise PreparationError("Missing XObject name")
+        xobjects = objects.dictionary(objects.dictionary(resources).get("/XObject"))
+        child_reference = xobjects.get(name)
+        child = objects.dictionary(child_reference)
+        if child.get("/Subtype") == "/Image":
+            return _GlyphPaint(raster=True)
+        if child.get("/Subtype") == "/Form":
+            return _glyph_program(
+                objects, child_reference, child.get("/Resources", resources), allowance, seen
+            )
+        return _UNCLASSIFIED
+    except PreparationError:
+        return _UNCLASSIFIED
+
+
+def _type3_finding(objects: QpdfObjectGraph, options: PdfArtworkOptions) -> Finding:
     fonts = [item for item in objects.reachable_dictionaries() if item.get("/Subtype") == "/Type3"]
     inventory: list[object] = []
     violations: list[object] = []
     uncertain = False
     count = 0
-    remaining = [_MAX_OPERATIONS]
+    allowance = _TokenAllowance()
     for index, font in enumerate(fonts, 1):
         programs = objects.dictionary(font.get("/CharProcs"))
         if not programs:
@@ -926,34 +1130,23 @@ def _type3_finding(objects: _Objects, options: PdfArtworkOptions) -> Finding:
             count += 1
             if count > _MAX_OPERATIONS:
                 raise PreparationError("Type 3 font inventory exceeds the glyph-program limit")
-            raster, vector, incomplete = _glyph_program(
-                objects, reference, font.get("/Resources", {}), remaining
-            )
-            classification = (
-                "mixed"
-                if raster and vector
-                else "bitmap"
-                if raster
-                else "vector"
-                if vector
-                else "empty"
-            )
+            paint = _glyph_program(objects, reference, font.get("/Resources", {}), allowance)
             row = {
                 "font_index": index,
                 "glyph": name,
-                "classification": classification,
-                "incomplete": incomplete,
+                "classification": paint.classification,
+                "incomplete": paint.incomplete,
             }
-            if len(inventory) < _MAX_SAMPLES:
+            if len(inventory) < MAX_SAMPLES:
                 inventory.append(row)
-            uncertain |= incomplete
-            if raster and options.forbid_bitmap_type3_glyphs:
+            uncertain |= paint.incomplete
+            if paint.raster and options.forbid_bitmap_type3_glyphs:
                 violations.append(row)
-    return _result(
+    return measurement_finding(
         "pdf.type3_glyph_programs",
         "Inspected declared Type 3 glyph programs for image and vector painting.",
         violations,
-        uncertain=uncertain,
+        incomplete=uncertain,
         font_count=len(fonts),
         glyph_count=count,
         inventory=inventory,
@@ -964,24 +1157,42 @@ def _type3_finding(objects: _Objects, options: PdfArtworkOptions) -> Finding:
     )
 
 
-async def _inspect_type3(session: _Session, pages: int, options: PdfArtworkOptions) -> Finding:
+def _decoded_type3_finding(
+    execution: CommandResult,
+    *,
+    objects: QpdfObjectGraph,
+    references: set[str],
+    options: PdfArtworkOptions,
+) -> Finding:
+    try:
+        document = json.loads(execution.stdout)
+        entries = document["qpdf"]
+        if len(entries) != 2 or entries[0]["jsonversion"] != 2 or not isinstance(entries[1], dict):
+            raise ValueError("Unsupported stream JSON")
+        for reference in references:
+            key = "obj:" + reference
+            value = entries[1][key]
+            if not isinstance(value, dict):
+                raise ValueError("Invalid stream object")
+            objects.objects[key] = value
+    except (ValueError, KeyError, TypeError, RecursionError) as error:
+        raise PreparationError("qpdf did not return every selected glyph/Form program") from error
+    return _type3_finding(objects, options)
+
+
+async def _inspect_type3(
+    session: PdfToolSession, pages: int, options: PdfArtworkOptions
+) -> Finding:
     objects = await session.measure(
         "glyph-objects",
-        [
-            "qpdf",
-            "--json=2",
-            "--json-key=qpdf",
-            "--json-key=pages",
-            "--json-stream-data=none",
-            "@PDF@",
-        ],
-        lambda execution, _: _Objects(execution.stdout, pages),
+        qpdf_objects_argv(),
+        lambda execution: QpdfObjectGraph(execution.stdout, pages),
     )
     references: set[str] = set()
     for font in objects.reachable_dictionaries():
         if font.get("/Subtype") == "/Type3":
             for value in objects.dictionary(font.get("/CharProcs")).values():
-                if isinstance(value, str) and re.fullmatch(r"\d+ \d+ R", value):
+                if is_object_reference(value):
                     references.add(value)
     if not references:
         return _type3_finding(objects, options)
@@ -996,33 +1207,10 @@ async def _inspect_type3(session: _Session, pages: int, options: PdfArtworkOptio
             and entry["stream"]["dict"].get("/Subtype") == "/Form"
         ):
             reference = key.removeprefix("obj:")
-            if re.fullmatch(r"\d+ \d+ R", reference):
+            if is_object_reference(reference):
                 references.add(reference)
     if len(references) > 1000:
         raise PreparationError("Type 3 program selection exceeds the bounded object limit")
-
-    def decoded(execution: CommandResult, _directory: Path) -> Finding:
-        try:
-            document = json.loads(execution.stdout)
-            entries = document["qpdf"]
-            if (
-                len(entries) != 2
-                or entries[0]["jsonversion"] != 2
-                or not isinstance(entries[1], dict)
-            ):
-                raise ValueError("Unsupported stream JSON")
-            for reference in references:
-                key = "obj:" + reference
-                value = entries[1][key]
-                if not isinstance(value, dict):
-                    raise ValueError("Invalid stream object")
-                objects.objects[key] = value
-        except (ValueError, KeyError, TypeError, RecursionError) as error:
-            raise PreparationError(
-                "qpdf did not return every selected glyph/Form program"
-            ) from error
-        return _type3_finding(objects, options)
-
     selectors = [
         "--json-object=" + ",".join(reference.split()[:2]) for reference in sorted(references)
     ]
@@ -1035,9 +1223,9 @@ async def _inspect_type3(session: _Session, pages: int, options: PdfArtworkOptio
             "--decode-level=all",
             "--json-stream-data=inline",
             *selectors,
-            "@PDF@",
+            DOCUMENT,
         ],
-        decoded,
+        partial(_decoded_type3_finding, objects=objects, references=references, options=options),
     )
 
 
@@ -1054,58 +1242,277 @@ def _gray_png(width: int, height: int, pixels: bytes) -> bytes:
 
     rows = b"".join(b"\0" + pixels[y * width : (y + 1) * width] for y in range(height))
     return (
-        b"\x89PNG\r\n\x1a\n"
+        PNG_SIGNATURE
         + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 0, 0, 0, 0))
         + chunk(b"IDAT", zlib.compress(rows))
         + chunk(b"IEND", b"")
     )
 
 
+def _configured_figure_regions(
+    options: PdfArtworkOptions, _sizes: list[tuple[float, float]]
+) -> tuple[PdfRegion, ...]:
+    return options.figure_regions
+
+
+def _figure_or_whole_page_regions(
+    options: PdfArtworkOptions, sizes: list[tuple[float, float]]
+) -> tuple[PdfRegion, ...]:
+    """An explicit input figure is measured page by page unless regions are configured."""
+    return options.figure_regions or tuple(
+        PdfRegion(f"Input page {index}", index, 0, 0, *size) for index, size in enumerate(sizes, 1)
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _RenderedFigures:
+    """What every rendered artwork page of one inspection shares."""
+
+    regions: tuple[PdfRegion, ...]
+    region_rules: tuple[str, ...]
+    unsupported: frozenset[int]
+    options: PdfArtworkOptions
+    preview_directory: Path
+    max_file_bytes: int
+
+
+class _GrayPage(NamedTuple):
+    page: int
+    width: int
+    height: int
+    pixels: bytes
+    width_pt: float
+    height_pt: float
+
+
+class _RegionInk(NamedTuple):
+    ink_pixels: int
+    edge_ink_pixels: int
+    outside_content_box_ratio: float
+    content_bounds_pt: Box | None
+
+
+def _region_ink(
+    raster: _GrayPage, pixels: tuple[int, int, int, int], options: PdfArtworkOptions
+) -> _RegionInk:
+    """Ink count, boundary ink and the ink bounding box within a pixel rectangle."""
+    left, top, right, bottom = pixels
+    width, height = raster.width, raster.height
+    min_x, min_y, max_x, max_y = right, bottom, left - 1, top - 1
+    band = options.figure_edge_band_pt or 0
+    band_x = math.ceil(band * width / raster.width_pt)
+    band_y = math.ceil(band * height / raster.height_pt)
+    edge_ink = 0
+    ink = 0
+    for y in range(top, bottom):
+        cancellation_point()
+        ink_x = [
+            x
+            for x in range(left, right)
+            if abs(raster.pixels[y * width + x] - options.background_gray) >= options.ink_difference
+        ]
+        if not ink_x:
+            continue
+        ink += len(ink_x)
+        min_x, max_x, min_y, max_y = (
+            min(min_x, ink_x[0]),
+            max(max_x, ink_x[-1]),
+            min(min_y, y),
+            max(max_y, y),
+        )
+        edge_ink += sum(
+            x < left + band_x or x >= right - band_x or y < top + band_y or y >= bottom - band_y
+            for x in ink_x
+        )
+    if not ink:
+        return _RegionInk(0, edge_ink, 1, None)
+    total = (right - left) * (bottom - top)
+    return _RegionInk(
+        ink,
+        edge_ink,
+        1 - ((max_x - min_x + 1) * (max_y - min_y + 1) / total),
+        (
+            min_x * raster.width_pt / width,
+            min_y * raster.height_pt / height,
+            (max_x + 1) * raster.width_pt / width,
+            (max_y + 1) * raster.height_pt / height,
+        ),
+    )
+
+
+def _region_findings(
+    figures: _RenderedFigures, raster: _GrayPage, region: PdfRegion, ink: _RegionInk
+) -> list[Finding]:
+    options = figures.options
+    details: dict[str, Any] = {
+        "page": raster.page,
+        "region": region.name,
+        "content_bounds_pt": ink.content_bounds_pt,
+        "outside_content_box_ratio": ink.outside_content_box_ratio,
+        "ink_pixels": ink.ink_pixels,
+        "background_gray": options.background_gray,
+        "raster_dpi": options.raster_dpi,
+    }
+    findings = []
+    if options.max_figure_whitespace_ratio is not None:
+        findings.append(
+            heuristic_finding(
+                "pdf.figure_whitespace",
+                f"Measured the rendered content box in {region.name}.",
+                [details]
+                if ink.outside_content_box_ratio > options.max_figure_whitespace_ratio
+                else [],
+                **details,
+                maximum_ratio=options.max_figure_whitespace_ratio,
+                scope="Area outside the ink box under the configured background; "
+                "internal white areas and intended padding are not judged.",
+            )
+        )
+    if options.figure_edge_band_pt is not None:
+        findings.append(
+            heuristic_finding(
+                "pdf.figure_edge_ink",
+                f"Measured ink near the boundary of {region.name}.",
+                [{**details, "edge_ink_pixels": ink.edge_ink_pixels}]
+                if ink.edge_ink_pixels
+                else [],
+                **details,
+                edge_band_pt=options.figure_edge_band_pt,
+                scope="Boundary ink is a cropping/border candidate, not proof of "
+                "clipping; intended borders and touching content need review.",
+            )
+        )
+    return findings
+
+
+def _grayscale_preview_finding(figures: _RenderedFigures, raster: _GrayPage) -> Finding:
+    preview = figures.preview_directory / f"page-{raster.page}.png"
+    preview.parent.mkdir(exist_ok=True)
+    # Copy validated bytes while this operation still owns its render lease.
+    encoded = _gray_png(raster.width, raster.height, raster.pixels)
+    if len(encoded) > figures.max_file_bytes:
+        raise PreparationError("Encoded artwork preview exceeds the file limit")
+    preview.write_bytes(encoded)
+    return measurement_finding(
+        _PREVIEW_RULE,
+        f"Created grayscale preview for page {raster.page}.",
+        [],
+        page=raster.page,
+        artifacts=[str(preview)],
+        raster_dpi=figures.options.raster_dpi,
+        scope="Review preview; semantic color independence is unverified.",
+    )
+
+
+def _rendered_page_findings(
+    path: Path,
+    *,
+    figures: _RenderedFigures,
+    page: int,
+    size: tuple[float, float],
+    expected: tuple[int, int],
+) -> list[Finding]:
+    width, height, pixels = read_gray_raster(path, figures.max_file_bytes)
+    if any(
+        abs(actual - target) > 1 for actual, target in zip((width, height), expected, strict=True)
+    ):
+        raise PreparationError("Artwork render dimensions disagree with page geometry")
+    raster = _GrayPage(page, width, height, pixels, *size)
+    findings: list[Finding] = []
+    if figures.options.grayscale_preview:
+        findings.append(_grayscale_preview_finding(figures, raster))
+    pixel_visits = 0
+    for region in figures.regions:
+        if region.page != page:
+            continue
+        cancellation_point()
+        if page in figures.unsupported or not contains((0, 0, *size), region.box, 0):
+            findings.extend(
+                unavailable_finding(
+                    rule,
+                    PreparationError(f"Figure region {region.name} has unsupported page geometry"),
+                    severity="warning",
+                )
+                for rule in figures.region_rules
+            )
+            continue
+        left = math.floor(region.left_pt * width / raster.width_pt)
+        top = math.floor(region.top_pt * height / raster.height_pt)
+        right = math.ceil(region.right_pt * width / raster.width_pt)
+        bottom = math.ceil(region.bottom_pt * height / raster.height_pt)
+        pixel_visits += (right - left) * (bottom - top)
+        if pixel_visits > _MAX_PIXEL_VISITS:
+            findings.extend(
+                unavailable_finding(
+                    rule,
+                    PreparationError("Figure regions exceed the bounded pixel sampling work"),
+                    severity="warning",
+                    details={"page": page, "region": region.name},
+                )
+                for rule in figures.region_rules
+            )
+            continue
+        ink = _region_ink(raster, (left, top, right, bottom), figures.options)
+        findings.extend(_region_findings(figures, raster, region, ink))
+    return findings
+
+
+async def _rendered_page(
+    session: PdfToolSession,
+    figures: _RenderedFigures,
+    page: int,
+    size: tuple[float, float],
+    rendered_rules: tuple[str, ...],
+) -> list[Finding]:
+    expected = measurement_raster_size(size, figures.options.raster_dpi)
+    try:
+        if exceeds_measurement_raster(expected):
+            raise PreparationError("Artwork preview exceeds bounded raster dimensions")
+        return await session.render_page(
+            f"artwork-render-{page}",
+            page,
+            figures.options.raster_dpi,
+            partial(
+                _rendered_page_findings, figures=figures, page=page, size=size, expected=expected
+            ),
+            raster="gray",
+        )
+    except (PreparationError, OSError) as error:
+        return [
+            unavailable_finding(rule, error, severity="warning", details={"page": page})
+            for rule in rendered_rules
+        ]
+
+
 async def _render_findings(
-    session: _Session,
+    session: PdfToolSession,
     sizes: list[tuple[float, float]],
     unsupported: set[int],
     options: PdfArtworkOptions,
-    *,
-    whole_pages: bool,
+    regions: tuple[PdfRegion, ...],
 ) -> list[Finding]:
+    configured = configured_artwork_rules(options)
+    region_rules = tuple(rule for rule in configured if rule in _REGION_RULES)
+    rendered_rules = (*region_rules, *((_PREVIEW_RULE,) if options.grayscale_preview else ()))
     result: list[Finding] = []
-    regions = options.figure_regions
-    if whole_pages and not regions:
-        regions = tuple(
-            PdfRegion(f"Input page {index}", index, 0, 0, *size)
-            for index, size in enumerate(sizes, 1)
-        )
-    selected_rules = [
-        name
-        for name in _configured(options)
-        if name
-        in {
-            "pdf.figure_whitespace",
-            "pdf.figure_edge_ink",
-            "pdf.grayscale_preview",
-        }
-    ]
-    if not regions and any(rule != "pdf.grayscale_preview" for rule in selected_rules):
+    if not regions:
         result.extend(
-            _unavailable(
+            unavailable_finding(
                 rule,
                 PreparationError("Figure measurement needs explicit regions on a manuscript PDF"),
-                advisory=True,
+                severity="warning",
             )
-            for rule in selected_rules
-            if rule != "pdf.grayscale_preview"
+            for rule in region_rules
         )
     for region in regions:
         if region.page > len(sizes):
             result.extend(
-                _unavailable(
+                unavailable_finding(
                     rule,
                     PreparationError(f"Figure region {region.name} is outside the document"),
-                    advisory=True,
+                    severity="warning",
                 )
-                for rule in selected_rules
-                if rule != "pdf.grayscale_preview"
+                for rule in region_rules
             )
     page_numbers = (
         range(1, len(sizes) + 1)
@@ -1113,225 +1520,32 @@ async def _render_findings(
         else sorted({r.page for r in regions if r.page <= len(sizes)})
     )
     try:
-        _require_rendered_pages(len(page_numbers), "Rendered artwork measurement")
+        require_rendered_pages(len(page_numbers), "Rendered artwork measurement")
     except PreparationError as error:
         # Inspection reads long documents; a render per page keeps the smaller cap.
         result.extend(
-            _unavailable(rule, error, advisory=True)
-            for rule in selected_rules
-            if regions or rule == "pdf.grayscale_preview"
+            unavailable_finding(rule, error, severity="warning")
+            for rule in rendered_rules
+            if regions or rule == _PREVIEW_RULE
         )
         return result
+    figures = _RenderedFigures(
+        regions,
+        region_rules,
+        frozenset(unsupported),
+        options,
+        session.work / "previews",
+        session.runner.limits.max_file_bytes,
+    )
     for page in page_numbers:
-        width_pt, height_pt = sizes[page - 1]
-        expected = (
-            math.ceil(width_pt * options.raster_dpi / 72),
-            math.ceil(height_pt * options.raster_dpi / 72),
-        )
-        try:
-            if math.prod(expected) > _MAX_PIXELS or max(expected) > 4000:
-                raise PreparationError("Artwork preview exceeds bounded raster dimensions")
-
-            def measure(
-                _execution: CommandResult,
-                directory: Path,
-                *,
-                expected: tuple[int, int] = expected,
-                page: int = page,
-                width_pt: float = width_pt,
-                height_pt: float = height_pt,
-            ) -> list[Finding]:
-                width, height, pixels = _gray_raster(
-                    directory / "page.pgm",
-                    min(session.runner.limits.max_file_bytes, _MAX_PIXELS + 100),
-                )
-                if any(
-                    abs(actual - target) > 1
-                    for actual, target in zip((width, height), expected, strict=True)
-                ):
-                    raise PreparationError("Artwork render dimensions disagree with page geometry")
-                findings: list[Finding] = []
-                if options.grayscale_preview:
-                    preview = session.work / "previews" / f"page-{page}.png"
-                    preview.parent.mkdir(exist_ok=True)
-                    # Copy validated bytes while this operation still owns its render lease.
-                    encoded = _gray_png(width, height, pixels)
-                    if len(encoded) > session.runner.limits.max_file_bytes:
-                        raise PreparationError("Encoded artwork preview exceeds the file limit")
-                    preview.write_bytes(encoded)
-                    findings.append(
-                        _result(
-                            "pdf.grayscale_preview",
-                            f"Created grayscale preview for page {page}.",
-                            [],
-                            page=page,
-                            artifacts=[str(preview)],
-                            raster_dpi=options.raster_dpi,
-                            scope="Review preview; semantic color independence is unverified.",
-                        )
-                    )
-                pixel_visits = 0
-                for region in (item for item in regions if item.page == page):
-                    cancellation_point()
-                    active = [rule for rule in selected_rules if rule != "pdf.grayscale_preview"]
-                    if page in unsupported or not _contains(
-                        (0, 0, width_pt, height_pt), region.box, 0
-                    ):
-                        findings.extend(
-                            _unavailable(
-                                rule,
-                                PreparationError(
-                                    f"Figure region {region.name} has unsupported page geometry"
-                                ),
-                                advisory=True,
-                            )
-                            for rule in active
-                        )
-                        continue
-                    left, top = (
-                        math.floor(region.left_pt * width / width_pt),
-                        math.floor(region.top_pt * height / height_pt),
-                    )
-                    right, bottom = (
-                        math.ceil(region.right_pt * width / width_pt),
-                        math.ceil(region.bottom_pt * height / height_pt),
-                    )
-                    pixel_visits += (right - left) * (bottom - top)
-                    if pixel_visits > _MAX_PIXEL_VISITS:
-                        findings.extend(
-                            replace(
-                                _unavailable(
-                                    rule,
-                                    PreparationError(
-                                        "Figure regions exceed the bounded pixel sampling work"
-                                    ),
-                                    advisory=True,
-                                ),
-                                details={"page": page, "region": region.name},
-                            )
-                            for rule in active
-                        )
-                        continue
-                    ink_x: list[int] = []
-                    min_x, min_y, max_x, max_y = right, bottom, left - 1, top - 1
-                    band = options.figure_edge_band_pt or 0
-                    band_x, band_y = (
-                        math.ceil(band * width / width_pt),
-                        math.ceil(band * height / height_pt),
-                    )
-                    edge_ink = 0
-                    ink = 0
-                    for y in range(top, bottom):
-                        cancellation_point()
-                        ink_x = [
-                            x
-                            for x in range(left, right)
-                            if abs(pixels[y * width + x] - options.background_gray)
-                            >= options.ink_difference
-                        ]
-                        if not ink_x:
-                            continue
-                        ink += len(ink_x)
-                        min_x, max_x, min_y, max_y = (
-                            min(min_x, ink_x[0]),
-                            max(max_x, ink_x[-1]),
-                            min(min_y, y),
-                            max(max_y, y),
-                        )
-                        edge_ink += sum(
-                            x < left + band_x
-                            or x >= right - band_x
-                            or y < top + band_y
-                            or y >= bottom - band_y
-                            for x in ink_x
-                        )
-                    total = (right - left) * (bottom - top)
-                    whitespace = (
-                        1 if not ink else 1 - ((max_x - min_x + 1) * (max_y - min_y + 1) / total)
-                    )
-                    bounds = (
-                        None
-                        if not ink
-                        else (
-                            min_x * width_pt / width,
-                            min_y * height_pt / height,
-                            (max_x + 1) * width_pt / width,
-                            (max_y + 1) * height_pt / height,
-                        )
-                    )
-                    details: dict[str, Any] = {
-                        "page": page,
-                        "region": region.name,
-                        "content_bounds_pt": bounds,
-                        "outside_content_box_ratio": whitespace,
-                        "ink_pixels": ink,
-                        "background_gray": options.background_gray,
-                        "raster_dpi": options.raster_dpi,
-                    }
-                    if options.max_figure_whitespace_ratio is not None:
-                        findings.append(
-                            _result(
-                                "pdf.figure_whitespace",
-                                f"Measured the rendered content box in {region.name}.",
-                                [details]
-                                if whitespace > options.max_figure_whitespace_ratio
-                                else [],
-                                advisory=True,
-                                **details,
-                                maximum_ratio=options.max_figure_whitespace_ratio,
-                                scope="Area outside the ink box under the configured background; "
-                                "internal white areas and intended padding are not judged.",
-                            )
-                        )
-                    if options.figure_edge_band_pt is not None:
-                        findings.append(
-                            _result(
-                                "pdf.figure_edge_ink",
-                                f"Measured ink near the boundary of {region.name}.",
-                                [{**details, "edge_ink_pixels": edge_ink}] if edge_ink else [],
-                                advisory=True,
-                                **details,
-                                edge_band_pt=options.figure_edge_band_pt,
-                                scope="Boundary ink is a cropping/border candidate, not proof of "
-                                "clipping; intended borders and touching content need review.",
-                            )
-                        )
-                return findings
-
-            result.extend(
-                await session.measure(
-                    f"artwork-render-{page}",
-                    [
-                        "pdftoppm",
-                        "-f",
-                        str(page),
-                        "-l",
-                        str(page),
-                        "-singlefile",
-                        "-gray",
-                        "-r",
-                        str(options.raster_dpi),
-                        "@PDF@",
-                        "page",
-                    ],
-                    measure,
-                    render=True,
-                    memory_mb=128,
-                    threaded_parser=True,
-                )
-            )
-        except (PreparationError, OSError) as error:
-            result.extend(
-                replace(_unavailable(rule, error, advisory=True), details={"page": page})
-                for rule in selected_rules
-            )
+        result.extend(await _rendered_page(session, figures, page, sizes[page - 1], rendered_rules))
     return result
 
 
 def _pixel_region(
     region: PdfRegion, size: tuple[float, float], raster: tuple[int, int]
 ) -> tuple[int, int, int, int]:
-    if not _contains((0, 0, *size), region.box, 0):
+    if not contains((0, 0, *size), region.box, 0):
         raise PreparationError("Contrast sample region lies outside the rendered page")
     # Include only pixels whose full area is contained within the supplied patch.
     left = math.ceil(region.left_pt * raster[0] / size[0])
@@ -1374,179 +1588,155 @@ def _contrast_interval(
     return minimum, maximum
 
 
+def _sample_unavailable(sample: PdfContrastSample, page: int, error: Exception) -> Finding:
+    return unavailable_finding(
+        _CONTRAST_RULE,
+        error,
+        severity="warning",
+        details={"sample": sample.name, "page": page},
+    )
+
+
+def _sample_contrast_finding(
+    sample: PdfContrastSample,
+    page: int,
+    pixels: bytes,
+    width: int,
+    boxes: tuple[tuple[int, int, int, int], tuple[int, int, int, int]],
+) -> Finding:
+    colors = [_pixel_colors(pixels, width, box) for box in boxes]
+    spreads = [
+        max(high - low for low, high in zip(minimum, maximum, strict=True))
+        for minimum, maximum in colors
+    ]
+    luminances = [
+        (
+            relative_luminance((minimum[0] / 255, minimum[1] / 255, minimum[2] / 255)),
+            relative_luminance((maximum[0] / 255, maximum[1] / 255, maximum[2] / 255)),
+        )
+        for minimum, maximum in colors
+    ]
+    minimum, maximum = _contrast_interval(luminances[0], luminances[1])
+    uniform = max(spreads) <= sample.max_channel_spread
+    details: dict[str, Any] = {
+        "page": page,
+        "sample": sample.name,
+        "foreground_bounds_pt": sample.foreground.box,
+        "background_bounds_pt": sample.background.box,
+        "foreground_rgb_range": colors[0],
+        "background_rgb_range": colors[1],
+        "contrast_ratio_min": minimum,
+        "contrast_ratio_max": maximum,
+        "minimum_ratio": sample.minimum_ratio,
+        "channel_spreads": spreads,
+        "allowed_channel_spread": sample.max_channel_spread,
+    }
+    return heuristic_finding(
+        _CONTRAST_RULE,
+        f"Compared rendered color patches for {sample.name}.",
+        [details] if uniform and maximum < sample.minimum_ratio else [],
+        incomplete=not uniform or minimum < sample.minimum_ratio <= maximum,
+        **details,
+        scope="Rendered/composited RGB patches interpreted as sRGB. "
+        "Channel extrema give conservative luminance/ratio bounds. "
+        "Nonuniform "
+        "patches need an explicit spread tolerance; text meaning, all text "
+        "contrast, perceptual quality and accessibility are not inferred.",
+    )
+
+
+def _rendered_contrast_findings(
+    path: Path,
+    *,
+    page: int,
+    size: tuple[float, float],
+    expected: tuple[int, int],
+    samples: tuple[PdfContrastSample, ...],
+    max_file_bytes: int,
+) -> list[Finding]:
+    if not path.is_file() or path.stat().st_size > max_file_bytes:
+        raise PreparationError("Contrast render exceeds the configured file limit or is missing")
+    dimensions, pixels = read_rgb_raster(path, max_pixels=MAX_MEASUREMENT_PIXELS)
+    if any(abs(actual - target) > 1 for actual, target in zip(dimensions, expected, strict=True)):
+        raise PreparationError("Contrast render dimensions disagree with page geometry")
+    findings: list[Finding] = []
+    pixel_visits = 0
+    for sample in samples:
+        cancellation_point()
+        try:
+            boxes = (
+                _pixel_region(sample.foreground, size, dimensions),
+                _pixel_region(sample.background, size, dimensions),
+            )
+            pixel_visits += sum((box[2] - box[0]) * (box[3] - box[1]) for box in boxes)
+            if pixel_visits > _MAX_PIXEL_VISITS:
+                raise PreparationError("Contrast patches exceed the bounded pixel sampling work")
+            findings.append(_sample_contrast_finding(sample, page, pixels, dimensions[0], boxes))
+        except PreparationError as error:
+            findings.append(_sample_unavailable(sample, page, error))
+    return findings
+
+
+async def _contrast_page(
+    session: PdfToolSession,
+    page: int,
+    size: tuple[float, float],
+    samples: tuple[PdfContrastSample, ...],
+    options: PdfArtworkOptions,
+) -> list[Finding]:
+    expected = measurement_raster_size(size, options.raster_dpi)
+    try:
+        if exceeds_measurement_raster(expected):
+            raise PreparationError("Contrast render exceeds bounded raster dimensions")
+        return await session.render_page(
+            f"contrast-render-{page}",
+            page,
+            options.raster_dpi,
+            partial(
+                _rendered_contrast_findings,
+                page=page,
+                size=size,
+                expected=expected,
+                samples=samples,
+                max_file_bytes=session.runner.limits.max_file_bytes,
+            ),
+            raster="rgb",
+        )
+    except (PreparationError, OSError) as error:
+        return [_sample_unavailable(sample, page, error) for sample in samples]
+
+
 async def _sample_contrast_findings(
-    session: _Session,
+    session: PdfToolSession,
     sizes: list[tuple[float, float]],
     unsupported: set[int],
     options: PdfArtworkOptions,
 ) -> list[Finding]:
-    rule = "pdf.rendered_sample_contrast"
-    result: list[Finding] = []
-    for sample in options.contrast_samples:
-        if sample.foreground.page > len(sizes) or sample.foreground.page in unsupported:
-            result.append(
-                replace(
-                    _unavailable(
-                        rule,
-                        PreparationError(
-                            "Contrast sample page is absent or has unsupported geometry"
-                        ),
-                        advisory=True,
-                    ),
-                    details={"sample": sample.name, "page": sample.foreground.page},
-                )
-            )
-    for page in sorted(
+    def measurable(page: int) -> bool:
+        return page <= len(sizes) and page not in unsupported
+
+    result = [
+        _sample_unavailable(
+            sample,
+            sample.foreground.page,
+            PreparationError("Contrast sample page is absent or has unsupported geometry"),
+        )
+        for sample in options.contrast_samples
+        if not measurable(sample.foreground.page)
+    ]
+    pages = sorted(
         {
             sample.foreground.page
             for sample in options.contrast_samples
-            if sample.foreground.page <= len(sizes) and sample.foreground.page not in unsupported
+            if measurable(sample.foreground.page)
         }
-    ):
-        selected = tuple(
+    )
+    for page in pages:
+        samples = tuple(
             sample for sample in options.contrast_samples if sample.foreground.page == page
         )
-        size = sizes[page - 1]
-        expected = tuple(math.ceil(value * options.raster_dpi / 72) for value in size)
-        name = f"contrast-render-{page}"
-        try:
-            if math.prod(expected) > _MAX_PIXELS or max(expected) > 4000:
-                raise PreparationError("Contrast render exceeds bounded raster dimensions")
-
-            def measure(
-                _execution: CommandResult,
-                directory: Path,
-                *,
-                size: tuple[float, float] = size,
-                expected: tuple[int, ...] = expected,
-                selected: tuple[PdfContrastSample, ...] = selected,
-                page: int = page,
-            ) -> list[Finding]:
-                path = directory / "page.ppm"
-                if not path.is_file() or path.stat().st_size > session.runner.limits.max_file_bytes:
-                    raise PreparationError(
-                        "Contrast render exceeds the configured file limit or is missing"
-                    )
-                dimensions, pixels = _read_raster(path, max_pixels=_MAX_PIXELS)
-                if any(
-                    abs(actual - target) > 1
-                    for actual, target in zip(dimensions, expected, strict=True)
-                ):
-                    raise PreparationError("Contrast render dimensions disagree with page geometry")
-                findings: list[Finding] = []
-                pixel_visits = 0
-                for sample in selected:
-                    cancellation_point()
-                    try:
-                        regions = (
-                            _pixel_region(sample.foreground, size, dimensions),
-                            _pixel_region(sample.background, size, dimensions),
-                        )
-                        pixel_visits += sum(
-                            (box[2] - box[0]) * (box[3] - box[1]) for box in regions
-                        )
-                        if pixel_visits > _MAX_PIXEL_VISITS:
-                            raise PreparationError(
-                                "Contrast patches exceed the bounded pixel sampling work"
-                            )
-                        colors = [_pixel_colors(pixels, dimensions[0], box) for box in regions]
-                        spreads = [
-                            max(high - low for low, high in zip(minimum, maximum, strict=True))
-                            for minimum, maximum in colors
-                        ]
-                        luminances = [
-                            (
-                                _luminance((minimum[0] / 255, minimum[1] / 255, minimum[2] / 255)),
-                                _luminance((maximum[0] / 255, maximum[1] / 255, maximum[2] / 255)),
-                            )
-                            for minimum, maximum in colors
-                        ]
-                        minimum, maximum = _contrast_interval(luminances[0], luminances[1])
-                        uniform = max(spreads) <= sample.max_channel_spread
-                        incomplete = not uniform or minimum < sample.minimum_ratio <= maximum
-                        details: dict[str, Any] = {
-                            "page": page,
-                            "sample": sample.name,
-                            "foreground_bounds_pt": sample.foreground.box,
-                            "background_bounds_pt": sample.background.box,
-                            "foreground_rgb_range": colors[0],
-                            "background_rgb_range": colors[1],
-                            "contrast_ratio_min": minimum,
-                            "contrast_ratio_max": maximum,
-                            "minimum_ratio": sample.minimum_ratio,
-                            "channel_spreads": spreads,
-                            "allowed_channel_spread": sample.max_channel_spread,
-                        }
-                        findings.append(
-                            _result(
-                                rule,
-                                f"Compared rendered color patches for {sample.name}.",
-                                [details] if uniform and maximum < sample.minimum_ratio else [],
-                                uncertain=incomplete,
-                                advisory=True,
-                                **details,
-                                scope="Rendered/composited RGB patches interpreted as sRGB. "
-                                "Channel extrema give conservative luminance/ratio bounds. "
-                                "Nonuniform "
-                                "patches need an explicit spread tolerance; text meaning, all text "
-                                "contrast, perceptual quality and accessibility are not inferred.",
-                            )
-                        )
-                    except PreparationError as error:
-                        findings.append(
-                            replace(
-                                _unavailable(rule, error, advisory=True),
-                                details={"sample": sample.name, "page": page},
-                            )
-                        )
-                return findings
-
-            result.extend(
-                await session.measure(
-                    name,
-                    [
-                        "pdftoppm",
-                        "-f",
-                        str(page),
-                        "-l",
-                        str(page),
-                        "-singlefile",
-                        "-r",
-                        str(options.raster_dpi),
-                        "@PDF@",
-                        "page",
-                    ],
-                    measure,
-                    render=True,
-                    memory_mb=128,
-                    threaded_parser=True,
-                )
-            )
-        except (PreparationError, OSError) as error:
-            result.extend(
-                replace(
-                    _unavailable(rule, error, advisory=True),
-                    details={"sample": sample.name, "page": page},
-                )
-                for sample in selected
-            )
-        finally:
-            # _Session removes grayscale intermediates; this adapter owns its RGB render.
-            (session.work / name / "command" / "page.ppm").unlink(missing_ok=True)
+        result.extend(await _contrast_page(session, page, sizes[page - 1], samples, options))
     return result
-
-
-_COLOR_OPERATIONS = frozenset(
-    {
-        "fill_path",
-        "stroke_path",
-        "fill_text",
-        "stroke_text",
-        "fill_image",
-        "fill_image_mask",
-        "fill_shade",
-    }
-)
 
 
 def _color_family(name: str) -> str | None:
@@ -1565,21 +1755,14 @@ def _color_family(name: str) -> str | None:
 
 def _color_space_finding(output: str, pages: int, required: str) -> Finding:
     """Compare every traced paint operation's colour family with the required one."""
-    root = _xml(output, "document")
-    traced = root.findall("page")
-    try:
-        numbers = [int(page.attrib["number"]) for page in traced]
-    except (ValueError, KeyError) as error:
-        raise PreparationError("MuPDF trace contains an invalid page number") from error
-    if numbers != list(range(1, pages + 1)):
-        raise PreparationError("MuPDF trace did not report every page exactly once")
+    trace = parse_mupdf_trace(output, pages)
     violations: list[object] = []
     spaces: dict[str, int] = {}
     unknown: set[str] = set()
-    for page, number in zip(traced, numbers, strict=True):
+    for number, page in trace.pages:
         cancellation_point()
         for node in page.iter():
-            if node.tag not in _COLOR_OPERATIONS:
+            if node.tag not in COLOR_OPERATIONS:
                 continue
             space = node.get("colorspace")
             if space is None:
@@ -1591,158 +1774,105 @@ def _color_space_finding(output: str, pages: int, required: str) -> Finding:
                 unknown.add(space)
             elif family not in {"gray", required}:
                 violations.append({"page": number, "operation": node.tag, "color_space": space})
-    return _result(
+    return measurement_finding(
         "figure.color_space",
         f"Compared traced colour spaces with the required {required.upper()} family.",
         violations,
-        uncertain=bool(unknown) or not spaces,
+        incomplete=bool(unknown) or not spaces,
         required=required,
         color_spaces=dict(sorted(spaces.items())),
-        unclassified=sorted(unknown)[:_MAX_SAMPLES],
+        unclassified=sorted(unknown)[:MAX_SAMPLES],
         scope="MuPDF trace colour-space names of painted operations; grayscale satisfies "
         "either family. Separation, DeviceN, Indexed, Lab and unnamed spaces are unclassified; "
         "ICC profile contents are not interpreted.",
     )
 
 
-async def inspect_pdf_artwork(
+async def _color_space(
+    session: PdfToolSession, trace: str | PreparationError, pages: int, required: str
+) -> Finding:
+    if isinstance(trace, PreparationError):
+        return unavailable_finding("figure.color_space", trace)
+    try:
+        async with session.lease("color trace"):
+            return _color_space_finding(trace, pages, required)
+    except (PreparationError, OSError) as error:
+        return unavailable_finding("figure.color_space", error)
+
+
+async def _inspect_artwork(
     pdf: Path,
     work: Path,
-    runner: ToolRunner,
-    *,
-    options: PdfArtworkOptions | None = None,
-    budget: ResourceBudget | None = None,
-    whole_pages: bool = False,
+    runner: CommandRunner,
+    options: PdfArtworkOptions,
+    budget: ResourceBudget | None,
+    figure_regions: Callable[[PdfArtworkOptions, list[tuple[float, float]]], tuple[PdfRegion, ...]],
 ) -> list[Finding]:
-    """Inspect one PDF; whole_pages is reserved for explicitly selected input figures."""
-    options = options or PdfArtworkOptions()
-    configured = _configured(options)
+    configured = configured_artwork_rules(options)
     if not configured:
         return []
     try:
-        session = await _session(pdf, work, runner, budget)
+        session = await open_measurement_session(pdf, work, runner, budget)
         fields = await session.measure(
             "properties",
-            ["pdfinfo", "-enc", "UTF-8", "@PDF@"],
-            lambda result, _: _properties(result.stdout),
+            ["pdfinfo", "-enc", "UTF-8", DOCUMENT],
+            lambda result: pdfinfo_properties(result.stdout),
         )
-        pages = _page_count(fields)
+        pages = page_count(fields)
         unsupported, sizes = await session.measure(
-            "geometry",
-            ["pdfinfo", "-box", "-f", "1", "-l", str(pages), "@PDF@"],
-            lambda result, _: _geometry_support(result.stdout, pages),
+            "geometry", page_boxes_argv(pages), lambda result: page_frames(result.stdout, pages)
         )
     except (PreparationError, OSError) as error:
-        return [_unavailable(rule, error) for rule in configured]
+        return [unavailable_finding(rule, error) for rule in configured]
     result: list[Finding] = []
-    trace_rules = [
-        rule
-        for rule in configured
-        if rule
-        not in {
-            "pdf.figure_whitespace",
-            "pdf.figure_edge_ink",
-            "pdf.grayscale_preview",
-            "pdf.type3_glyph_programs",
-            "pdf.rendered_sample_contrast",
-            "figure.color_space",
-        }
-    ]
+    trace_rules = [rule for rule in configured if rule in DRAWING_TRACE_RULES]
+    trace: str | PreparationError = ""  # read only when a trace measurement is configured
+    if trace_rules or options.required_color_space is not None:
+        trace = await _trace_output(session, pages)
     if trace_rules:
-        try:
-            drawings, boxes, unknown = await session.measure(
-                "trace",
-                ["mutool", "trace", "@PDF@", f"1-{pages}"],
-                lambda execution, _: _trace(execution.stdout, pages),
-            )
-            scalable_text_fonts = False
-            if (options.classify_artwork or options.category_min_dpi) and any(
-                drawing.node.tag in {"fill_text", "stroke_text"} for drawing in drawings
-            ):
-                try:
-                    font_types = await session.measure(
-                        "composition-fonts",
-                        ["pdffonts", "@PDF@"],
-                        lambda execution, _: [
-                            font["type"] for font in _font_inventory(execution.stdout)
-                        ],
-                    )
-                    scalable = {
-                        "Type 1",
-                        "Type 1C",
-                        "Type 1C (OT)",
-                        "TrueType",
-                        "TrueType (OT)",
-                        "CID Type 0",
-                        "CID Type 0C",
-                        "CID Type 0C (OT)",
-                        "CID TrueType",
-                        "CID TrueType (OT)",
-                    }
-                    scalable_text_fonts = bool(font_types) and all(
-                        kind in scalable for kind in font_types
-                    )
-                except (PreparationError, OSError):
-                    # Text-bearing traces need this evidence and retain uncertainty.
-                    pass
-            async with (
-                session.budget.lease(f"{session.work.name}: artwork geometry", memory_mb=64)
-                if session.budget is not None
-                else nullcontext()
-            ):
-                for index, (box, size) in enumerate(zip(boxes, sizes, strict=True), 1):
-                    if box[:2] != (0, 0) or any(
-                        abs(actual - expected) > options.geometry_tolerance_pt
-                        for actual, expected in zip(box[2:], size, strict=True)
-                    ):
-                        unsupported.add(index)
-                result.extend(
-                    [
-                        *_composition(
-                            drawings, options, unknown, scalable_text_fonts=scalable_text_fonts
-                        ),
-                        *_geometry_findings(drawings, boxes, unknown, unsupported, options),
-                    ]
-                )
-        except (PreparationError, OSError) as error:
-            result.extend(
-                _unavailable(rule, error, advisory=rule != "pdf.artwork_category_resolution")
-                for rule in trace_rules
-            )
+        result.extend(
+            await _drawing_findings(session, trace, pages, sizes, unsupported, options, trace_rules)
+        )
     if options.classify_type3_glyphs or options.forbid_bitmap_type3_glyphs:
         try:
             result.append(await _inspect_type3(session, pages, options))
         except (PreparationError, OSError) as error:
-            result.append(_unavailable("pdf.type3_glyph_programs", error))
+            result.append(unavailable_finding("pdf.type3_glyph_programs", error))
     if (
         options.max_figure_whitespace_ratio is not None
         or options.figure_edge_band_pt is not None
         or options.grayscale_preview
     ):
         result.extend(
-            await _render_findings(session, sizes, unsupported, options, whole_pages=whole_pages)
+            await _render_findings(
+                session, sizes, unsupported, options, figure_regions(options, sizes)
+            )
         )
     if options.contrast_samples:
         result.extend(await _sample_contrast_findings(session, sizes, unsupported, options))
     if options.required_color_space is not None:
-        required = options.required_color_space
-        try:
-            result.append(
-                await session.measure(
-                    "color-trace",
-                    ["mutool", "trace", "@PDF@", f"1-{pages}"],
-                    lambda execution, _: _color_space_finding(execution.stdout, pages, required),
-                )
-            )
-        except (PreparationError, OSError) as error:
-            result.append(_unavailable("figure.color_space", error))
+        result.append(await _color_space(session, trace, pages, options.required_color_space))
     return result
+
+
+async def inspect_pdf_artwork(
+    pdf: Path,
+    work: Path,
+    runner: CommandRunner,
+    *,
+    options: PdfArtworkOptions | None = None,
+    budget: ResourceBudget | None = None,
+) -> list[Finding]:
+    """Inspect one manuscript PDF; figure measurements need explicit regions."""
+    return await _inspect_artwork(
+        pdf, work, runner, options or PdfArtworkOptions(), budget, _configured_figure_regions
+    )
 
 
 async def inspect_artwork_inputs(
     figures: tuple[Path, ...],
     work: Path,
-    runner: ToolRunner,
+    runner: CommandRunner,
     *,
     options: PdfArtworkOptions | None = None,
     budget: ResourceBudget | None = None,
@@ -1750,16 +1880,23 @@ async def inspect_artwork_inputs(
     """Apply the selected artwork policy separately to explicit input PDF figures."""
     if (
         not isinstance(figures, tuple)
-        or len(figures) > 300
+        or len(figures) > MAX_FIGURE_INPUTS
         or any(not isinstance(figure, Path) for figure in figures)
     ):
-        raise PreparationError("Artwork input inspection requires at most 300 immutable PDF paths")
+        raise PreparationError(
+            f"Artwork input inspection requires at most {MAX_FIGURE_INPUTS} immutable PDF paths"
+        )
     if work.exists():
         raise PreparationError("Artwork inputs require a new inspection workspace")
     result = []
     for index, figure in enumerate(dict.fromkeys(figures), 1):
-        findings = await inspect_pdf_artwork(
-            figure, work / str(index), runner, options=options, budget=budget, whole_pages=True
+        findings = await _inspect_artwork(
+            figure,
+            work / str(index),
+            runner,
+            options or PdfArtworkOptions(),
+            budget,
+            _figure_or_whole_page_regions,
         )
         result.extend(replace(finding, path=str(figure)) for finding in findings)
     return result

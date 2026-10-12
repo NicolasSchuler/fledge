@@ -10,7 +10,7 @@ from rich.progress import Progress, SpinnerColumn, TaskID, TextColumn, TimeElaps
 from rich.table import Column
 from rich.text import Text
 
-from .presentation import _safe
+from .terminal_report import sanitize_terminal_text
 
 
 class TerminalProgress:
@@ -51,7 +51,7 @@ class TerminalProgress:
     def update(self, message: str) -> None:
         if self.quiet:
             return
-        message = _safe(message)
+        message = sanitize_terminal_text(message)
         if self._progress is not None and self._task is not None:
             self._progress.update(self._task, description=message, refresh=True)
         else:

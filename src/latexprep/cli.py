@@ -5,172 +5,151 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from dataclasses import replace
+from collections.abc import Generator
+from contextlib import contextmanager
+from dataclasses import dataclass, fields, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import click
 from rich.console import Console
 
 from . import __version__
-from .config import RequestError, Settings, load_settings, resolve_config_path
-from .core import JobRequest, run_job, validate_destination
+from .command_options import compose_options, reject_config_with_isolated, settings_file_options
+from .config import SETTING_NAMES, Settings, load_settings, resolve_config_path
+from .core import run_job
+from .diagnostic_bundle import export_diagnostic_bundle
 from .doctor_command import doctor_command
+from .finding_view import RenderOptions
+from .html_report import render_html
 from .init_command import init_command
-from .models import Finding, PreparationError, Report
+from .job_context import JobCommand, JobRequest
+from .models import (
+    BIBLIOGRAPHY_BACKENDS,
+    ENGINES,
+    LAYOUTS,
+    USAGE_EXIT_CODE,
+    Finding,
+    Outcome,
+    PreparationError,
+    Report,
+    RequestError,
+    cancelled_finding,
+    internal_error_finding,
+    request_error_finding,
+)
 from .pdf_previews import PdfPreviewStore
-from .presentation import REQUEST_SCOPE, print_report, print_rules, render_compact
 from .presets import preset_names
+from .publication import validate_destination
+from .report_formats import REQUEST_SCOPE, OutputFormat, write_report
 from .rules import RULES, get_rule
 from .submission_text_command import submission_text_command
 from .terminal_progress import TerminalProgress
+from .terminal_report import print_rule_explanation, print_rule_table
 
-EXIT_CODES = {
-    "passed": 0,
-    "planned": 0,
-    "passed_with_advisories": 1,
-    "accepted_exceptions": 2,
-    "blocked": 3,
-    "error": 4,
-    "cancelled": 130,
-}
-# Invalid command-line syntax (BSD sysexits EX_USAGE); distinct from every outcome.
-USAGE_EXIT_CODE = 64
+_common = compose_options(
+    click.argument("source", type=click.Path(path_type=Path), metavar="INPUT"),
+    settings_file_options,
+    click.option("--json", "json_output", is_flag=True, help="Alias for --output-format json."),
+    click.option(
+        "--output-format",
+        type=click.Choice([item.value for item in OutputFormat]),
+        help="Terminal, agent-friendly compact, JSON, offline HTML or CI annotations.",
+    ),
+    click.option(
+        "--html-report",
+        type=click.Path(path_type=Path),
+        help="Save an escaped offline HTML report to a new file outside the input.",
+    ),
+    click.option(
+        "--preview-output",
+        type=click.Path(path_type=Path),
+        help="New directory for explicitly selected grayscale page previews.",
+    ),
+    click.option(
+        "--diagnostics",
+        type=click.Path(path_type=Path),
+        help="Export an explicitly unverified diagnostic ZIP of sanitized reports and diffs.",
+    ),
+    click.option(
+        "--report",
+        type=click.Path(path_type=Path),
+        help="Also save JSON to a new file outside the input.",
+    ),
+    click.option("--quiet", is_flag=True, help="Suppress progress on stderr."),
+    click.option("--show-passed", is_flag=True, help="Also list passed findings and inventories."),
+    click.option(
+        "--show-files", is_flag=True, help="List every included and excluded submission file."
+    ),
+    # Accepted for compatibility; Fledge never prompts.
+    click.option("--non-interactive", is_flag=True, hidden=True),
+    click.option("--jobs", type=int, help="Shared CPU slots for all operations; 1 runs serially."),
+    click.option("--build-jobs", type=int, help="Maximum concurrent build operations (default 1)."),
+    click.option(
+        "--render-jobs", type=int, help="Maximum concurrent page-pair renderers (default 1)."
+    ),
+    click.option(
+        "--job-timeout-seconds", type=int, help="Overall job deadline, including queue waits."
+    ),
+    click.option("--timeout-seconds", type=int, help="Per-tool wall time limit."),
+)
 
+_online_option = click.option(
+    "--online/--offline",
+    default=None,
+    help="Allow configured DOI/URL checks to send public queries; offline by default.",
+)
 
-def _common(function):
-    options = [
-        click.argument("source", type=click.Path(path_type=Path), metavar="INPUT"),
-        click.option(
-            "--config",
-            type=click.Path(path_type=Path),
-            help="Use this TOML settings file instead of discovering project configuration.",
-        ),
-        click.option(
-            "--isolated", is_flag=True, help="Ignore discovered configuration and use defaults."
-        ),
-        click.option("--json", "json_output", is_flag=True, help="Alias for --output-format json."),
-        click.option(
-            "--output-format",
-            type=click.Choice(["terminal", "compact", "json", "html", "ci"]),
-            help="Terminal, agent-friendly compact, JSON, offline HTML or CI annotations.",
-        ),
-        click.option(
-            "--html-report",
-            type=click.Path(path_type=Path),
-            help="Save an escaped offline HTML report to a new file outside the input.",
-        ),
-        click.option(
-            "--preview-output",
-            type=click.Path(path_type=Path),
-            help="New directory for explicitly selected grayscale page previews.",
-        ),
-        click.option(
-            "--diagnostics",
-            type=click.Path(path_type=Path),
-            help="Export an explicitly unverified diagnostic ZIP of sanitized reports and diffs.",
-        ),
-        click.option(
-            "--report",
-            type=click.Path(path_type=Path),
-            help="Also save JSON to a new file outside the input.",
-        ),
-        click.option("--quiet", is_flag=True, help="Suppress progress on stderr."),
-        click.option(
-            "--show-passed", is_flag=True, help="Also list passed findings and inventories."
-        ),
-        click.option(
-            "--show-files", is_flag=True, help="List every included and excluded submission file."
-        ),
-        # Accepted for compatibility; Fledge never prompts.
-        click.option("--non-interactive", is_flag=True, hidden=True),
-        click.option(
-            "--jobs", type=int, help="Shared CPU slots for all operations; 1 runs serially."
-        ),
-        click.option(
-            "--build-jobs", type=int, help="Maximum concurrent build operations (default 1)."
-        ),
-        click.option(
-            "--render-jobs", type=int, help="Maximum concurrent page-pair renderers (default 1)."
-        ),
-        click.option(
-            "--job-timeout-seconds", type=int, help="Overall job deadline, including queue waits."
-        ),
-        click.option("--timeout-seconds", type=int, help="Per-tool wall time limit."),
-    ]
-    for option in reversed(options):
-        function = option(function)
-    return function
+_preset_option = click.option(
+    "--preset",
+    type=click.Choice(preset_names()),
+    help=(
+        "Apply an example preset beneath the settings file and command-line options; "
+        "a starting point, not a compliance certification (fledge init --list)."
+    ),
+)
 
+_main_option = click.option("--main", help="Relative path of the selected document.")
 
-def _online_option(function):
-    return click.option(
-        "--online/--offline",
-        default=None,
-        help="Allow configured DOI/URL checks to send public queries; offline by default.",
-    )(function)
-
-
-def _preset_option(function):
-    return click.option(
-        "--preset",
-        type=click.Choice(preset_names()),
+_selection_options = compose_options(
+    click.option(
+        "--select",
+        "select_checks",
+        multiple=True,
+        metavar="CODE_OR_PREFIX",
         help=(
-            "Apply an example preset beneath the settings file and command-line options; "
-            "a starting point, not a compliance certification (fledge init --list)."
+            "Run only these checks: a check code (TEX001), a code prefix (TEX, BIB1) or ALL. "
+            "Repeatable; replaces checks.select from configuration."
         ),
-    )(function)
+    ),
+    click.option(
+        "--ignore",
+        "ignore_checks",
+        multiple=True,
+        metavar="CODE_OR_PREFIX",
+        help=(
+            "Skip these checks; same syntax as --select. Repeatable; adds to checks.ignore "
+            "from configuration."
+        ),
+    ),
+)
 
-
-def _selection_options(function):
-    options = [
-        click.option(
-            "--select",
-            "select_checks",
-            multiple=True,
-            metavar="CODE_OR_PREFIX",
-            help=(
-                "Run only these checks: a check code (TEX001), a code prefix (TEX, BIB1) or ALL. "
-                "Repeatable; replaces checks.select from configuration."
-            ),
-        ),
-        click.option(
-            "--ignore",
-            "ignore_checks",
-            multiple=True,
-            metavar="CODE_OR_PREFIX",
-            help=(
-                "Skip these checks; same syntax as --select. Repeatable; adds to checks.ignore "
-                "from configuration."
-            ),
-        ),
-    ]
-    for option in reversed(options):
-        function = option(function)
-    return function
-
-
-def _build_options(function):
-    options = [
-        click.option(
-            "--engine",
-            type=click.Choice(["pdflatex", "xelatex", "lualatex"]),
-            help="TeX engine for the isolated build (default pdflatex).",
-        ),
-        click.option(
-            "--bibliography-backend",
-            type=click.Choice(["auto", "bibtex", "biber"]),
-            help="Select and validate the bibliography backend explicitly.",
-        ),
-        click.option(
-            "--reference-pdf", type=click.Path(path_type=Path), help="Required comparison PDF."
-        ),
-        click.option("--max-pages", type=int, help="Total page limit, including references."),
-    ]
-    for option in reversed(options):
-        function = option(function)
-    return function
-
+_build_options = compose_options(
+    click.option(
+        "--engine",
+        type=click.Choice(ENGINES),
+        help="TeX engine for the isolated build (default pdflatex).",
+    ),
+    click.option(
+        "--bibliography-backend",
+        type=click.Choice(BIBLIOGRAPHY_BACKENDS),
+        help="Select and validate the bibliography backend explicitly.",
+    ),
+    click.option(
+        "--reference-pdf", type=click.Path(path_type=Path), help="Required comparison PDF."
+    ),
+    click.option("--max-pages", type=int, help="Total page limit, including references."),
+)
 
 # Expert knobs listed under "Advanced options" in command help; nothing is removed.
 ADVANCED_OPTIONS = frozenset(
@@ -210,30 +189,30 @@ class _FledgeCommand(click.Command):
             formatter.write_dl(advanced)
 
 
-def _command_line_error(error: click.UsageError) -> None:
-    # Click declares exit_code as a class default; the instance value is what it reports.
-    setattr(error, "exit_code", USAGE_EXIT_CODE)  # noqa: B010
+@contextmanager
+def _usage_exit_code() -> Generator[None]:
+    """Report invalid command-line syntax with an exit code no outcome uses."""
+    try:
+        yield
+    except click.UsageError as error:
+        # Click declares exit_code as a class variable; the instance value is what it reports.
+        setattr(error, "exit_code", USAGE_EXIT_CODE)  # noqa: B010
+        raise
 
 
 class _FledgeGroup(click.Group):
-    """Report invalid command-line syntax with an exit code no outcome uses."""
+    """Parsing the group's options and invoking a command both report usage errors."""
 
     command_class = _FledgeCommand
     group_class = type
 
     def make_context(self, *args: Any, **kwargs: Any) -> click.Context:
-        try:
+        with _usage_exit_code():
             return super().make_context(*args, **kwargs)
-        except click.UsageError as error:
-            _command_line_error(error)
-            raise
 
     def invoke(self, ctx: click.Context) -> Any:
-        try:
+        with _usage_exit_code():
             return super().invoke(ctx)
-        except click.UsageError as error:
-            _command_line_error(error)
-            raise
 
 
 @click.group(
@@ -261,10 +240,10 @@ def _exit(result: int | None, **_kwargs) -> None:
 @_selection_options
 @_preset_option
 @_online_option
-@click.option("--main", help="Relative path of the selected document.")
+@_main_option
 def inspect_command(**options) -> int:
     """Run source, manuscript and bibliography checks without running TeX."""
-    return _execute("inspect", options)
+    return _execute(JobCommand.INSPECT, options)
 
 
 @cli.command("check")
@@ -272,11 +251,11 @@ def inspect_command(**options) -> int:
 @_selection_options
 @_preset_option
 @_online_option
-@click.option("--main", help="Relative path of the selected document.")
+@_main_option
 @_build_options
 def check_command(**options) -> int:
     """Run source checks, build the PDF in isolation and check the PDF."""
-    return _execute("check", options)
+    return _execute(JobCommand.CHECK, options)
 
 
 @cli.command("prepare")
@@ -284,15 +263,20 @@ def check_command(**options) -> int:
 @_selection_options
 @_preset_option
 @_online_option
-@click.option("--main", help="Relative path of the selected document.")
+@_main_option
 @_build_options
 @click.option("--output", type=click.Path(path_type=Path), help="New directory outside the input.")
 @click.option(
     "--layout",
-    type=click.Choice(["preserve", "flat"]),
+    type=click.Choice(LAYOUTS),
     help="Keep the folder structure (preserve, default) or move every file to the top level.",
 )
-@click.option("--format/--no-format", default=None, help="Apply tex-fmt to the separate copy.")
+@click.option(
+    "--format/--no-format",
+    "apply_formatting",
+    default=None,
+    help="Apply tex-fmt to the separate copy.",
+)
 @click.option(
     "--normalize-doi/--no-normalize-doi", default=None, help="Normalize literal DOI prefixes."
 )
@@ -311,7 +295,7 @@ def prepare_command(**options) -> int:
     dependency evidence and an exact archive rebuild are required. Ship extra
     files with [package] include = [...] in project configuration.
     """
-    return _execute("prepare", options)
+    return _execute(JobCommand.PREPARE, options)
 
 
 @cli.group("bib")
@@ -325,7 +309,7 @@ def bibliography() -> None:
 @click.option("--main", help="Relative path of the document whose citations should be checked.")
 def bibliography_check(**options) -> int:
     """Check syntax, citation use and configured fields; online evidence is opt-in."""
-    return _execute("bib", options)
+    return _execute(JobCommand.BIBLIOGRAPHY, options)
 
 
 @cli.command("fmt")
@@ -334,7 +318,7 @@ def bibliography_check(**options) -> int:
 @click.option("--diff", is_flag=True, help="Show proposed formatting patches in terminal output.")
 def formatting(**options) -> int:
     """Read-only tex-fmt check; show differences without editing originals."""
-    return _execute("fmt", options)
+    return _execute(JobCommand.FORMAT, options)
 
 
 @cli.group("pdf")
@@ -347,7 +331,7 @@ def pdf_group() -> None:
 @_build_options
 def pdf_check(**options) -> int:
     """Check PDF constraints; --reference-pdf adds an exact comparison."""
-    return _execute("pdf", options)
+    return _execute(JobCommand.PDF, options)
 
 
 cli.add_command(init_command)
@@ -362,7 +346,7 @@ def rules_command(json_output: bool) -> int:
     if json_output:
         click.echo(json.dumps([rule.to_dict() for rule in RULES], indent=2, ensure_ascii=False))
     else:
-        print_rules(RULES, Console(markup=False, highlight=False))
+        print_rule_table(RULES, Console(markup=False, highlight=False))
     return 0
 
 
@@ -378,23 +362,113 @@ def rule_command(code: str, json_output: bool) -> int:
     if json_output:
         click.echo(json.dumps(definition.to_dict(), indent=2, ensure_ascii=False))
     else:
-        print_rules((definition,), Console(markup=False, highlight=False), explain=True)
+        print_rule_explanation(definition, Console(markup=False, highlight=False))
     return 0
 
 
-def _destination(source: Path, destination: Path, flag: str) -> Path:
-    """Validate a new output path and name the option to change when it is unusable."""
-    try:
-        return validate_destination(source, destination)
-    except PreparationError as error:
-        message = str(error)
-        if message.startswith("Output already exists"):
-            fix = f"Choose a new {flag} path, or remove {destination} if it is no longer needed."
-        elif message.startswith("Output must be outside"):
-            fix = f"Choose a {flag} path outside the input project; originals are never written."
-        else:
-            fix = f"Create the parent directory first, or choose a {flag} path in an existing one."
-        raise RequestError(message, fix) from error
+@dataclass(kw_only=True, slots=True)
+class CommandOptions:
+    """The options of a job command; options another command lacks keep their defaults."""
+
+    command: JobCommand
+    source: Path
+    config: Path | None = None
+    isolated: bool = False
+    json_output: bool = False
+    output_format: str | None = None
+    html_report: Path | None = None
+    preview_output: Path | None = None
+    diagnostics: Path | None = None
+    report: Path | None = None
+    quiet: bool = False
+    show_passed: bool = False
+    show_files: bool = False
+    non_interactive: bool = False
+    jobs: int | None = None
+    build_jobs: int | None = None
+    render_jobs: int | None = None
+    job_timeout_seconds: int | None = None
+    timeout_seconds: int | None = None
+    select_checks: tuple[str, ...] = ()
+    ignore_checks: tuple[str, ...] = ()
+    preset: str | None = None
+    online: bool | None = None
+    main: str | None = None
+    engine: str | None = None
+    bibliography_backend: str | None = None
+    reference_pdf: Path | None = None
+    max_pages: int | None = None
+    output: Path | None = None
+    layout: str | None = None
+    apply_formatting: bool | None = None
+    normalize_doi: bool | None = None
+    cleanup: bool | None = None
+    dry_run: bool = False
+    check: bool = False
+    diff: bool = False
+
+    def setting_overrides(self) -> dict[str, object]:
+        """The settings given on the command line; an omitted option leaves its setting alone."""
+        return {
+            name: value for name in _SETTING_OPTIONS if (value := getattr(self, name)) is not None
+        }
+
+    def output_choice(self) -> OutputFormat:
+        if not self.json_output:
+            return OutputFormat(self.output_format or OutputFormat.TERMINAL)
+        if self.output_format not in {None, "json"}:
+            raise click.UsageError("--json conflicts with the chosen --output-format")
+        return OutputFormat.JSON
+
+
+# Command options that set the top-level setting of the same name.
+_SETTING_OPTIONS = tuple(item.name for item in fields(CommandOptions) if item.name in SETTING_NAMES)
+# Settings whose command-line option is not the setting name in kebab case.
+_SETTING_FLAGS = {"apply_formatting": "--format"}
+
+
+@dataclass(slots=True)
+class _ReportFiles:
+    """New report files outside the input; each is set once its option was validated."""
+
+    json: Path | None = None
+    html: Path | None = None
+    diagnostics: Path | None = None
+
+
+class _RenderedReport(NamedTuple):
+    json: str
+    html: str | None
+
+
+def _resolve_report_files(options: CommandOptions, files: _ReportFiles) -> None:
+    source = options.source
+    if options.report:
+        files.json = validate_destination(source, options.report, "--report")
+    if options.html_report:
+        files.html = validate_destination(source, options.html_report, "--html-report")
+    if options.diagnostics:
+        files.diagnostics = validate_destination(source, options.diagnostics, "--diagnostics")
+
+
+def _check_input_and_outputs(options: CommandOptions, files: _ReportFiles) -> None:
+    source = options.source
+    if not source.exists() and not source.is_symlink():
+        raise RequestError(
+            f"Input does not exist: {source}",
+            "Pass the path of an existing PDF file; check the spelling and the current directory."
+            if options.command is JobCommand.PDF
+            else "Pass the path of the paper's LaTeX source folder or ZIP file; check the "
+            "spelling and the current directory.",
+        )
+    # The job validates --output and --preview-output, naming the option at fault.
+    destinations = [
+        item
+        for item in (files.json, files.html, files.diagnostics, options.output)
+        if item is not None
+    ]
+    if len({item.resolve() for item in destinations}) != len(destinations):
+        raise PreparationError("Output, JSON, HTML and diagnostics destinations must be distinct")
 
 
 def _settings_suggestion(
@@ -403,13 +477,14 @@ def _settings_suggestion(
     """Name where each setting mentioned in a validation error was supplied."""
     mentioned = sorted(
         (match.start(), name)
-        for name in Settings.__dataclass_fields__
+        for name in SETTING_NAMES
         if (match := re.search(rf"(?<![\w.]){name}(?!\w)", message))
     )
     sources = []
     for _, name in mentioned:
         if name in overrides:
-            sources.append(f"--{name.replace('_', '-')} on the command line")
+            flag = _SETTING_FLAGS.get(name, f"--{name.replace('_', '-')}")
+            sources.append(f"{flag} on the command line")
         elif config_path is not None and preset is not None:
             sources.append(f"{name} in {config_path} or the {preset} preset")
         elif config_path is not None:
@@ -423,186 +498,142 @@ def _settings_suggestion(
     return "Correct the options named above, then rerun the command."
 
 
-def _execute(command: str, options: dict[str, Any]) -> int:
-    if options.get("isolated") and options.get("config") is not None:
-        raise click.UsageError("--isolated cannot be combined with --config")
-    output_format = options.get("output_format") or "terminal"
-    if options["json_output"]:
-        if options.get("output_format") not in {None, "json"}:
-            raise click.UsageError("--json conflicts with the chosen --output-format")
-        output_format = "json"
-    report = Report(command, scope=REQUEST_SCOPE)
-    report_destination = None
-    html_destination = diagnostic_destination = None
-    pdf_previews = None
-    source = options["source"]
+def _load_command_settings(options: CommandOptions, report: Report) -> Settings:
+    """Layer the preset, the selected settings file and the command-line options."""
+    overrides = options.setting_overrides()
+    config_path = resolve_config_path(options.source, options.config, isolated=options.isolated)
+    report.execution["config_path"] = str(config_path) if config_path is not None else None
+    report.execution["preset"] = options.preset
     try:
-        if options["report"]:
-            report_destination = _destination(source, options["report"], "--report")
-        if options.get("html_report"):
-            html_destination = _destination(source, options["html_report"], "--html-report")
-        if options.get("diagnostics"):
-            diagnostic_destination = _destination(source, options["diagnostics"], "--diagnostics")
-        if not source.exists() and not source.is_symlink():
-            raise RequestError(
-                f"Input does not exist: {source}",
-                "Pass the path of an existing PDF file; check the spelling and the current "
-                "directory."
-                if command == "pdf"
-                else "Pass the path of the paper's LaTeX source folder or ZIP file; check the "
-                "spelling and the current directory.",
-            )
-        # The job validates these again; checking here names the option at fault.
-        for name in ("output", "preview_output"):
-            if options.get(name) is not None:
-                _destination(source, options[name], "--" + name.replace("_", "-"))
-        destinations = [
-            item
-            for item in (
-                report_destination,
-                html_destination,
-                diagnostic_destination,
-                options.get("output"),
-            )
-            if item is not None
-        ]
-        if len({item.resolve() for item in destinations}) != len(destinations):
-            raise PreparationError(
-                "Output, JSON, HTML and diagnostics destinations must be distinct"
-            )
-        overrides = {
-            name: options[name]
-            for name in Settings.__dataclass_fields__
-            if options.get(name) is not None
-        }
-        config_path = resolve_config_path(
-            source, options.get("config"), isolated=options.get("isolated", False)
-        )
-        report.execution["config_path"] = str(config_path) if config_path is not None else None
-        report.execution["preset"] = options.get("preset")
+        settings = load_settings(config_path, overrides, preset=options.preset)
+    except RequestError:
+        raise
+    except PreparationError as error:
+        raise RequestError(
+            str(error), _settings_suggestion(str(error), overrides, config_path, options.preset)
+        ) from error
+    if options.select_checks or options.ignore_checks:
         try:
-            settings = load_settings(config_path, overrides, preset=options.get("preset"))
-        except RequestError:
-            raise
+            checks = settings.checks.with_command_line(options.select_checks, options.ignore_checks)
         except PreparationError as error:
             raise RequestError(
                 str(error),
-                _settings_suggestion(str(error), overrides, config_path, options.get("preset")),
+                "Correct the selector and rerun the command; fledge rule CODE explains "
+                "a single check.",
             ) from error
-        select, ignore = options.get("select_checks", ()), options.get("ignore_checks", ())
-        if select or ignore:
-            try:
-                checks = settings.checks.with_command_line(tuple(select), tuple(ignore))
-            except PreparationError as error:
-                raise RequestError(
-                    str(error),
-                    "Correct the selector and rerun the command; fledge rule CODE explains "
-                    "a single check.",
-                ) from error
-            settings = replace(settings, checks=checks)
-        if options.get("online") is not None:
-            settings = replace(
-                settings,
-                online_checks=replace(settings.online_checks, online=options["online"]),
-            )
-        pdf_previews = (
-            PdfPreviewStore() if html_destination is not None or output_format == "html" else None
+        settings = replace(settings, checks=checks)
+    if options.online is not None:
+        settings = replace(
+            settings, online_checks=replace(settings.online_checks, online=options.online)
         )
-        request = JobRequest(
-            command,
-            source,
-            settings,
-            output=options.get("output"),
-            dry_run=options.get("dry_run", False),
-            reference_pdf=options.get("reference_pdf"),
-            preview_output=options.get("preview_output"),
-            pdf_previews=pdf_previews,
-        )
-        error_console = Console(stderr=True, markup=False, highlight=False)
-        with TerminalProgress(error_console, quiet=options["quiet"]) as progress:
-            report = asyncio.run(run_job(request, progress, report))
-    except KeyboardInterrupt:
-        report.outcome = "cancelled"
-        report.findings.append(
-            Finding(
-                "execution.cancelled",
-                "Cancelled; no verified output was published",
-                "error",
-                "inconclusive",
-            )
-        )
+    return settings
+
+
+def _run(
+    options: CommandOptions,
+    settings: Settings,
+    pdf_previews: PdfPreviewStore | None,
+    report: Report,
+) -> Report:
+    request = JobRequest(
+        options.command,
+        options.source,
+        settings,
+        output=options.output,
+        dry_run=options.dry_run,
+        reference_pdf=options.reference_pdf,
+        preview_output=options.preview_output,
+        pdf_previews=pdf_previews,
+    )
+    error_console = Console(stderr=True, markup=False, highlight=False)
+    with TerminalProgress(error_console, quiet=options.quiet) as progress:
+        return asyncio.run(run_job(request, progress, report))
+
+
+def _write_reports(
+    report: Report, files: _ReportFiles, preview_images: dict | None
+) -> _RenderedReport:
+    """Save the requested report files; a write failure is recorded in the report itself."""
+    # Rendered once for the file and reused for stdout unless a later write failure
+    # changes the report.
+    html_document = None
+    # Write the HTML and diagnostics first, so a failure is reflected in the saved JSON.
+    try:
+        if files.html is not None:
+            html_document = render_html(report, preview_images=preview_images)
+            with files.html.open("x", encoding="utf-8") as stream:
+                stream.write(html_document)
+        if files.diagnostics is not None:
+            export_diagnostic_bundle(report, files.diagnostics)
     except (PreparationError, OSError, ValueError) as error:
-        report.outcome = "error"
+        report.outcome = Outcome.ERROR
+        report.findings.append(
+            Finding("report.write", str(error), severity="error", status="failed")
+        )
+        html_document = None
+    encoded = report.to_json()
+    if files.json is not None:
+        try:
+            with files.json.open("x", encoding="utf-8") as stream:
+                stream.write(encoded)
+        except OSError as error:
+            report.outcome = Outcome.ERROR
+            report.findings.append(
+                Finding(
+                    "report.write",
+                    f"Cannot write report: {error}",
+                    severity="error",
+                    status="failed",
+                )
+            )
+            encoded = report.to_json()
+            html_document = None
+    return _RenderedReport(encoded, html_document)
+
+
+def _execute(command: JobCommand, arguments: dict[str, Any]) -> int:
+    options = CommandOptions(command=command, **arguments)
+    reject_config_with_isolated(options.config, options.isolated)
+    output_format = options.output_choice()
+    report = Report(command.value, scope=REQUEST_SCOPE)
+    files = _ReportFiles()
+    pdf_previews = None
+    try:
+        _resolve_report_files(options, files)
+        _check_input_and_outputs(options, files)
+        settings = _load_command_settings(options, report)
+        if files.html is not None or output_format is OutputFormat.HTML:
+            pdf_previews = PdfPreviewStore()
+        report = _run(options, settings, pdf_previews, report)
+    except KeyboardInterrupt:
+        report.outcome = Outcome.CANCELLED
+        report.findings.append(cancelled_finding("Cancelled; no verified output was published"))
+    except (PreparationError, OSError, ValueError) as error:
+        report.outcome = Outcome.ERROR
         report.scope = REQUEST_SCOPE
         report.findings.append(
-            Finding(
-                "execution.request",
-                str(error),
-                "error",
-                "inconclusive",
-                suggestion=error.suggestion
-                if isinstance(error, RequestError)
-                else "Correct the input, option or setting named above, then rerun the command.",
+            request_error_finding(
+                error, "Correct the input, option or setting named above, then rerun the command."
             )
         )
     except Exception as error:
-        # A defect must still yield a machine-readable error report and exit code.
-        report.outcome = "error"
-        report.findings.append(
-            Finding(
-                "execution.internal",
-                f"Internal error ({type(error).__name__}): {error}",
-                "error",
-                "inconclusive",
-                suggestion="Report this defect with the command and the JSON report.",
-            )
-        )
-    from .reporting import export_diagnostic_bundle, render_ci_annotations, render_html
-
-    # Write the HTML and diagnostics first, so a failure is reflected in the saved JSON.
-    try:
-        if html_destination is not None:
-            with html_destination.open("x", encoding="utf-8") as stream:
-                stream.write(
-                    render_html(
-                        report, preview_images=pdf_previews.images if pdf_previews else None
-                    )
-                )
-        if diagnostic_destination is not None:
-            export_diagnostic_bundle(report, diagnostic_destination)
-    except (PreparationError, OSError, ValueError) as error:
-        report.outcome = "error"
-        report.findings.append(Finding("report.write", str(error), "error", "failed"))
-    encoded = json.dumps(report.to_dict(), indent=2, ensure_ascii=False) + "\n"
-    if report_destination is not None:
-        try:
-            with report_destination.open("x", encoding="utf-8") as stream:
-                stream.write(encoded)
-        except OSError as error:
-            report.outcome = "error"
-            report.findings.append(
-                Finding("report.write", f"Cannot write report: {error}", "error", "failed")
-            )
-            encoded = json.dumps(report.to_dict(), indent=2, ensure_ascii=False) + "\n"
-    if output_format == "json":
-        click.echo(encoded, nl=False)
-    elif output_format == "compact":
-        click.echo(render_compact(report, show_passed=options["show_passed"]))
-    elif output_format == "html":
-        click.echo(
-            render_html(report, preview_images=pdf_previews.images if pdf_previews else None)
-        )
-    elif output_format == "ci":
-        click.echo(render_ci_annotations(report, show_passed=options["show_passed"]))
-    else:
-        print_report(
-            report,
-            Console(markup=False, highlight=False),
-            show_diff=options.get("diff", False),
-            show_passed=options["show_passed"],
-            show_files=options.get("show_files", False),
-        )
-    return EXIT_CODES[report.outcome]
+        report.outcome = Outcome.ERROR
+        report.findings.append(internal_error_finding(error))
+    preview_images = pdf_previews.images if pdf_previews else None
+    rendered = _write_reports(report, files, preview_images)
+    write_report(
+        report,
+        output_format,
+        console=Console(markup=False, highlight=False),
+        options=RenderOptions(
+            show_passed=options.show_passed, show_diff=options.diff, show_files=options.show_files
+        ),
+        preview_images=preview_images,
+        document={OutputFormat.JSON: rendered.json, OutputFormat.HTML: rendered.html}.get(
+            output_format
+        ),
+    )
+    return report.outcome.exit_code
 
 
 def main(argv: list[str] | None = None) -> int:

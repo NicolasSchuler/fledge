@@ -19,7 +19,7 @@ from latexprep.pdf_artwork import (
     inspect_artwork_inputs,
     inspect_pdf_artwork,
 )
-from latexprep.pdf_checks import PdfRegion
+from latexprep.pdf_support import PdfRegion
 from latexprep.runtime import CommandResult, ToolRunner
 from latexprep.scheduler import ResourceBudget
 from latexprep.scheduler import cancellation_point as owned_cancellation_point
@@ -170,14 +170,14 @@ class ArtworkRunner(ToolRunner):
         readonly_inputs: tuple[Path, ...] = (),
         memory_mb: int | None = None,
     ) -> CommandResult:
-        self._validate_readonly_inputs(readonly_inputs)
+        self._frozen.validate(readonly_inputs)
         if self.expected_budget is not None and self.expected_budget.current_lease is None:
             raise AssertionError("Artwork adapter escaped the shared resource lease")
         self.calls.append((list(argv), workspace, readonly_inputs))
         if argv[0] == self.missing:
             raise PreparationError(f"Missing tool: {argv[0]}")
         if argv[-1] in {"-v", "--version"}:
-            return CommandResult(0, "Fixture tool 1\n", "", False, argv)
+            return CommandResult(0, "Fixture tool 1\n", "", resolved_command=argv)
         self.started.set()
         if self.block is not None:
             await self.block.wait()
@@ -197,8 +197,8 @@ class ArtworkRunner(ToolRunner):
             0,
             output,
             "",
-            self.failure == "timeout",
-            argv,
+            resolved_command=argv,
+            timed_out=self.failure == "timeout",
             output_limited=self.failure == "output",
             resource_exceeded="Resource exceeded" if self.failure == "resource" else None,
         )

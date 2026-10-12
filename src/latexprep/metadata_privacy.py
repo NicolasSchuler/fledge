@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import difflib
 import html
 import re
 import struct
@@ -12,20 +11,22 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
-from .models import Change, Finding, PreparationError, has_blockers
+from .file_scan import check_status, inventory_files, is_relative_project_path, read_regular_file
+from .models import Change, ChangeKind, Finding, PreparationError, has_blockers
 from .scheduler import cancellation_point
-from .source import (
+from .tex_lexer import (
     MAX_COMMANDS,
     MAX_SOURCE_BYTES,
     MAX_TOTAL_SOURCE_BYTES,
-    _commands,
-    _group,
-    _mask,
-    _ParseLimit,
+    ParseLimitExceeded,
+    blank_regions,
     conditional_spans,
     in_conditional,
+    read_group,
+    scan_commands,
+    source_regions,
 )
-from .submission_checks import _inventory, _read
+from .text_edits import unified_diff_text
 
 _PDF_FIELDS = {
     "hypersetup.pdftitle": "Title",
@@ -43,12 +44,11 @@ _MAX_ENTRIES = 4096
 _MAX_MATCHES = 200
 
 
-def _relative(value: str) -> bool:
+def _safe_manuscript_path(value: str) -> bool:
+    """A project path that is also free of colons and control or format characters."""
     return (
-        bool(value)
-        and not value.startswith("/")
-        and not any(char in value for char in "\\:")
-        and all(part not in {"", ".", ".."} for part in value.split("/"))
+        is_relative_project_path(value)
+        and ":" not in value
         and not any(unicodedata.category(char).startswith("C") for char in value)
     )
 
@@ -69,7 +69,7 @@ class MetadataEdit:
     def __post_init__(self) -> None:
         if (
             not isinstance(self.path, str)
-            or not _relative(self.path)
+            or not _safe_manuscript_path(self.path)
             or (PurePosixPath(self.path).suffix.lower() not in {".tex", ".ltx", ".latex"})
         ):
             raise PreparationError("Metadata edits require a safe relative TeX manuscript path")
@@ -137,7 +137,7 @@ def _hypersetup_values(text: str, start: int, end: int) -> list[tuple[str, int, 
         key = match[1]
         cursor += match.end()
         if cursor < end and text[cursor] == "{":
-            value = _group(text, cursor)
+            value = read_group(text, cursor)
             if value is None or value.end > end:
                 raise PreparationError("Unclosed hypersetup value")
             result.append((key, value.start, value.end))
@@ -158,12 +158,12 @@ def _hypersetup_values(text: str, start: int, end: int) -> list[tuple[str, int, 
 
 
 def _edit_spans(text: str, edits: Sequence[MetadataEdit]) -> list[tuple[int, int, str]]:
-    masked, incomplete = _mask(text)
-    if incomplete:
+    regions, unclosed = source_regions(text)
+    if unclosed:
         raise PreparationError("An unclosed literal region prevents metadata editing")
     try:
-        commands = _commands(masked)
-    except _ParseLimit:
+        commands = scan_commands(blank_regions(text, regions))
+    except ParseLimitExceeded:
         raise PreparationError("Source exceeds supported metadata parsing limits") from None
     if len(commands) >= MAX_COMMANDS:
         raise PreparationError("Source exceeds supported metadata command limits")
@@ -184,11 +184,7 @@ def _edit_spans(text: str, edits: Sequence[MetadataEdit]) -> list[tuple[int, int
     conditionals = conditional_spans(commands)
     targets: dict[str, list[tuple[int, int]]] = {edit.field: [] for edit in edits}
     for command in commands:
-        if command.name == "endinput" or (
-            command.name == "end"
-            and command.arguments
-            and command.arguments[0].value.strip() == "document"
-        ):
+        if command.name == "endinput" or command.ends("document"):
             if command.depth:
                 raise PreparationError("Grouped document termination prevents metadata editing")
             break
@@ -243,14 +239,14 @@ def plan_metadata_sanitization(
     plan = MetadataSanitizationPlan()
     if not options.edits:
         return plan
-    files, issues = _inventory(root)
+    files, issues = inventory_files(root)
     if issues:
         plan.findings.append(
             Finding(
                 "privacy.metadata_sanitization",
                 "Source inventory is incomplete; no metadata changes are proposed.",
-                "error",
-                "inconclusive",
+                severity="error",
+                status="inconclusive",
             )
         )
         return plan
@@ -261,7 +257,7 @@ def plan_metadata_sanitization(
         try:
             if name not in files:
                 raise PreparationError("Explicit metadata source file is absent")
-            original = _read(files[name], MAX_SOURCE_BYTES)
+            original = read_regular_file(files[name], MAX_SOURCE_BYTES)
             total += len(original)
             if total > MAX_TOTAL_SOURCE_BYTES:
                 raise PreparationError("Metadata sources exceed the total source-byte limit")
@@ -277,17 +273,10 @@ def plan_metadata_sanitization(
                 plan.changes.append(
                     Change(
                         name,
-                        "metadata sanitization",
-                        "Explicitly selected "
+                        kind=ChangeKind.METADATA_SANITIZATION,
+                        reason="Explicitly selected "
                         "literal metadata replacements; final PDF recheck required.",
-                        diff="".join(
-                            difflib.unified_diff(
-                                text.splitlines(keepends=True),
-                                prepared.splitlines(keepends=True),
-                                fromfile=name,
-                                tofile=name,
-                            )
-                        ),
+                        diff=unified_diff_text(name, text, prepared),
                     )
                 )
             plan.findings.append(
@@ -295,8 +284,8 @@ def plan_metadata_sanitization(
                     "privacy.metadata_sanitization",
                     "Selected literal metadata matched its old-value "
                     "preconditions; final rebuilt PDF metadata still requires verification.",
-                    "info",
-                    "passed",
+                    severity="info",
+                    status="passed",
                     path=name,
                     details={
                         "fields": [edit.field for edit in selected],
@@ -304,15 +293,19 @@ def plan_metadata_sanitization(
                     },
                 )
             )
-        except (OSError, UnicodeError, PreparationError):
+        except (OSError, UnicodeError, PreparationError) as error:
+            # Rejection messages are fixed text; file-system errors may name absolute paths.
+            reason = (
+                str(error)
+                if isinstance(error, PreparationError)
+                else "the file is unreadable or is not UTF-8 text"
+            )
             plan.findings.append(
                 Finding(
                     "privacy.metadata_sanitization",
-                    "Metadata edit cannot be proposed: the file, "
-                    "unique literal field or exact expected-before value is unavailable "
-                    "or unsupported.",
-                    "error",
-                    "inconclusive",
+                    f"Metadata edit cannot be proposed: {reason}.",
+                    severity="error",
+                    status="inconclusive",
                     path=name,
                     details={"fields": [edit.field for edit in selected]},
                 )
@@ -352,8 +345,8 @@ def check_sanitized_pdf_metadata(
                 "privacy.sanitized_pdf_metadata",
                 "Fresh final PDF property evidence is "
                 "missing or ambiguous after the selected source edits.",
-                "error",
-                "inconclusive",
+                severity="error",
+                status="inconclusive",
             )
         ]
     properties = {key.casefold(): value for key, value in inventories[0].items()}
@@ -364,8 +357,8 @@ def check_sanitized_pdf_metadata(
             Finding(
                 "privacy.sanitized_pdf_metadata",
                 "Final PDF properties have ambiguous names or lack document page-count evidence.",
-                "error",
-                "inconclusive",
+                severity="error",
+                status="inconclusive",
             )
         ]
     violations = []
@@ -396,8 +389,8 @@ def check_sanitized_pdf_metadata(
             "privacy.sanitized_pdf_metadata",
             "Checked selected metadata replacements and removed "
             "literal values in final reported PDF properties.",
-            "error" if violations else "info",
-            "failed" if violations else "passed",
+            severity="error" if violations else "info",
+            status="failed" if violations else "passed",
             details={
                 "violations": violations,
                 "scope": "Reported top-level PDF properties only; hidden objects, image pixels and "
@@ -637,6 +630,11 @@ def _png_metadata(data: bytes) -> _MetadataText:
 
 
 def _jpeg_metadata(data: bytes) -> _MetadataText:
+    """Walk a whole JPEG's pre-scan segments strictly; every structural defect is named.
+
+    ``submission_readiness_checks`` reads colour from a bounded prefix with a lenient
+    walker instead, so the two walkers deliberately stay separate.
+    """
     if not data.startswith(b"\xff\xd8"):
         raise PreparationError("JPEG signature is invalid")
     result = _MetadataText()
@@ -695,7 +693,7 @@ def check_image_metadata(root: Path, options: MetadataPrivacyOptions) -> list[Fi
     """Search supported image metadata without decoding pixels or echoing private values."""
     if not options.image_identity_terms:
         return []
-    files, inventory_issues = _inventory(root)
+    files, inventory_issues = inventory_files(root)
     issues: list[dict[str, str]] = (
         [{"reason": "Project inventory was incomplete"}] if inventory_issues else []
     )
@@ -714,7 +712,7 @@ def check_image_metadata(root: Path, options: MetadataPrivacyOptions) -> list[Fi
     for name, path in selected:
         cancellation_point()
         try:
-            data = _read(path, _MAX_IMAGE_BYTES)
+            data = read_regular_file(path, _MAX_IMAGE_BYTES)
             total += len(data)
             if total > _MAX_IMAGE_TOTAL:
                 issues.append({"reason": "Total image bytes exceeded the scan limit"})
@@ -736,22 +734,39 @@ def check_image_metadata(root: Path, options: MetadataPrivacyOptions) -> list[Fi
                 for index, term in enumerate(terms, 1):
                     if term in normalized and len(matches) < _MAX_MATCHES:
                         matches.append({"path": name, "channel": channel, "term_index": index})
-        except (PreparationError, OSError, UnicodeError, ValueError, struct.error, zlib.error):
-            issues.append(
-                {"path": name, "reason": "Unsupported, malformed or oversized image metadata"}
+        except (
+            PreparationError,
+            OSError,
+            UnicodeError,
+            ValueError,
+            struct.error,
+            zlib.error,
+        ) as error:
+            # Parser rejections are fixed text; other errors may quote file contents or paths.
+            reason = (
+                str(error)
+                if isinstance(error, PreparationError)
+                else "Unsupported, malformed or oversized image metadata"
             )
-    status = "failed" if matches else "inconclusive" if issues else "passed"
+            issues.append({"path": name, "reason": reason})
+    status = check_status(failed=bool(matches), incomplete=bool(issues))
+    match status:
+        case "failed":
+            message = "Configured identity terms were found in supported image metadata."
+        case "inconclusive":
+            message = "Image metadata inspection is incomplete."
+        case _:
+            message = (
+                "No configured identity terms were found in the supported image metadata scope."
+            )
+            if limitations:
+                message += " Some vendor-specific blocks were skipped."
     return [
         Finding(
             "privacy.image_metadata",
-            "Configured identity terms were found in supported image metadata."
-            if matches
-            else "Image metadata inspection is incomplete."
-            if issues
-            else "No configured identity terms were found in the supported image metadata scope."
-            + (" Some vendor-specific blocks were skipped." if limitations else ""),
-            "info" if status == "passed" else "error",
-            status,
+            message,
+            severity="info" if status == "passed" else "error",
+            status=status,
             details={
                 "matches": matches,
                 "issues": issues[:_MAX_MATCHES],

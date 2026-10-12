@@ -8,12 +8,14 @@ from pathlib import Path
 
 from latexprep.models import (
     REPORT_COMMANDS,
-    REPORT_OUTCOMES,
     REPORT_SCHEMA_VERSION,
     SEVERITIES,
     STATUSES,
     Change,
+    ChangeKind,
+    EvidenceKind,
     Finding,
+    Outcome,
     Report,
 )
 
@@ -25,18 +27,20 @@ class ReportSchemaTests(unittest.TestCase):
         self.schema = json.loads(SCHEMA.read_text(encoding="utf-8"))
         report = Report(
             "check",
-            "blocked",
+            outcome=Outcome.BLOCKED,
             main="main.tex",
             findings=[
                 Finding(
                     "bibliography.citation_coverage",
                     "Citation key 'knuth1948' has no entry.",
-                    "error",
+                    severity="error",
                     path="main.tex",
                     line=5,
                 )
             ],
-            changes=[Change("main.tex", "comment_removal", "Removed private comments")],
+            changes=[
+                Change("main.tex", kind=ChangeKind.REWRITE, reason="Removed private comments")
+            ],
         )
         self.report = report.to_dict()
 
@@ -60,10 +64,13 @@ class ReportSchemaTests(unittest.TestCase):
     def test_schema_enumerations_match_the_code(self) -> None:
         properties = self.schema["properties"]
         self.assertEqual(set(properties["command"]["enum"]), REPORT_COMMANDS)
-        self.assertEqual(set(properties["outcome"]["enum"]), REPORT_OUTCOMES)
+        self.assertEqual(set(properties["outcome"]["enum"]), set(Outcome))
         finding = self.schema["$defs"]["finding"]["properties"]
         self.assertEqual(set(finding["severity"]["enum"]), SEVERITIES)
         self.assertEqual(set(finding["status"]["enum"]), STATUSES)
+        self.assertEqual(set(finding["evidence_kind"]["enum"]), set(EvidenceKind))
+        change = self.schema["$defs"]["change"]["properties"]
+        self.assertEqual(set(change["kind"]["enum"]), set(ChangeKind))
 
 
 if __name__ == "__main__":

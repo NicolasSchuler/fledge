@@ -7,16 +7,16 @@ import unittest
 import zipfile
 from collections import Counter
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from latexprep.bibliography_transform import BibliographyTransformOptions
 from latexprep.check_selection import CheckSelection
 from latexprep.config import Settings
-from latexprep.core import JobRequest, run_job
+from latexprep.core import run_job
+from latexprep.job_context import JobRequest
+from latexprep.latexmk_build import BuildResult
 from latexprep.models import Finding, PreparationError, Report
 from latexprep.package_inputs import generated_bibliography_inputs
-from latexprep.runtime import BuildResult
 from latexprep.source_transform import SourceTransformOptions
 from latexprep.submission_checks import SubmissionOptions
 from latexprep.workflow_options import DocumentOptions, WorkflowOptions
@@ -37,13 +37,11 @@ class RecordedBuild:
         self,
         traces: dict[str, tuple[set[str] | None, ...]],
         *,
-        legacy_result: bool = False,
         fail_archive_main: str | None = None,
         generated_reads: frozenset[str] = frozenset(),
     ) -> None:
         self.traces = traces
         self.generated_reads = generated_reads
-        self.legacy_result = legacy_result
         self.fail_archive_main = fail_archive_main
         self.counts: Counter[str] = Counter()
         self.visits: list[tuple[str, str, dict[str, bytes]]] = []
@@ -62,15 +60,11 @@ class RecordedBuild:
             pdf=pdf if success else None,
             findings=[]
             if success
-            else [Finding("build.fixture", "Controlled archive rebuild failure", "error")],
-            dependencies=set(trace or ()),
+            else [Finding("build.fixture", "Controlled archive rebuild failure", severity="error")],
+            recorder_project_inputs=set(trace or ()),
             submission_inputs=None if trace is None else set(trace),
             generated_reads=self.generated_reads,
         )
-        if self.legacy_result:
-            return SimpleNamespace(
-                **{key: value for key, value in vars(result).items() if key != "submission_inputs"}
-            )
         return result
 
 
@@ -116,9 +110,9 @@ class DependencyPackagingTests(unittest.IsolatedAsyncioTestCase):
         original = contents(self.source)
         output = self.base / name
         with (
-            patch("latexprep.core.build_project", side_effect=build.__call__),
-            patch("latexprep.core.inspect_pdf", new=AsyncMock(return_value=[])),
-            patch("latexprep.core.compare_pdfs", new=AsyncMock(return_value=[])),
+            patch("latexprep.document_tasks.build_project", side_effect=build.__call__),
+            patch("latexprep.document_tasks.inspect_pdf", new=AsyncMock(return_value=[])),
+            patch("latexprep.document_tasks.compare_pdfs", new=AsyncMock(return_value=[])),
         ):
             report = await run_job(JobRequest("prepare", self.source, settings, output))
         self.assertEqual(contents(self.source), original)
@@ -156,7 +150,7 @@ class DependencyPackagingTests(unittest.IsolatedAsyncioTestCase):
         original = contents(self.source)
         report = Report("prepare")
         with (
-            patch("latexprep.core.build_project", new=AsyncMock()) as build,
+            patch("latexprep.document_tasks.build_project", new=AsyncMock()) as build,
             self.assertRaisesRegex(PreparationError, "Output already exists"),
         ):
             await run_job(
@@ -187,9 +181,9 @@ class DependencyPackagingTests(unittest.IsolatedAsyncioTestCase):
             mkdir(path, *args, **kwargs)
 
         with (
-            patch("latexprep.core.build_project", side_effect=build.__call__),
-            patch("latexprep.core.inspect_pdf", new=AsyncMock(return_value=[])),
-            patch("latexprep.core.compare_pdfs", new=AsyncMock(return_value=[])),
+            patch("latexprep.document_tasks.build_project", side_effect=build.__call__),
+            patch("latexprep.document_tasks.inspect_pdf", new=AsyncMock(return_value=[])),
+            patch("latexprep.document_tasks.compare_pdfs", new=AsyncMock(return_value=[])),
             patch.object(Path, "mkdir", race_mkdir),
             self.assertRaisesRegex(PreparationError, "Output appeared while the job ran"),
         ):
@@ -331,15 +325,15 @@ class DependencyPackagingTests(unittest.IsolatedAsyncioTestCase):
         self.write("main.tex", "\\documentclass{article}\n\\begin{document}Body.\\end{document}\n")
         self.write("body.tex", "Body.\n")
         main = {"main.tex"}
-        for name, traces, legacy in (
-            ("no-recorder", (None,), False),
-            ("empty-recorder", (set(),), False),
-            ("missing-main", ({"body.tex"},), False),
-            ("legacy-result", (main,), True),
-            ("transformed-no-recorder", (main, None), False),
+        # The build result always declares submission_inputs; None is absent evidence.
+        for name, traces in (
+            ("no-recorder", (None,)),
+            ("empty-recorder", (set(),)),
+            ("missing-main", ({"body.tex"},)),
+            ("transformed-no-recorder", (main, None)),
         ):
             with self.subTest(evidence=name):
-                build = RecordedBuild({"main.tex": traces}, legacy_result=legacy)
+                build = RecordedBuild({"main.tex": traces})
                 report, output = await self.prepare(
                     Settings(main="main.tex", checks=CheckSelection(ignore=("ALL",))), build, name
                 )

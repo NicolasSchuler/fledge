@@ -9,14 +9,17 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
+from latexprep.build_log import log_findings
+from latexprep.latexmk_build import build_project
 from latexprep.models import PreparationError
-from latexprep.runtime import (
-    CommandResult,
-    RuntimeLimits,
-    ToolRunner,
-    _log_findings,
-    build_project,
-)
+from latexprep.runtime import CommandResult, RuntimeLimits, ToolRunner, ToolVersion
+from latexprep.sandbox import tool_environment, with_ulimits
+
+
+async def never_reports(pid: int, workspace: Path, *, max_file_bytes: int) -> str:
+    """A standalone command watcher that never finds a resource failure."""
+    await asyncio.Future()
+    raise AssertionError("unreachable")
 
 
 class LifecycleRunner(ToolRunner):
@@ -26,6 +29,10 @@ class LifecycleRunner(ToolRunner):
     bypass option. Isolation and accounting failures have independent tests.
     """
 
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._monitor.watch_command = never_reports
+
     def _sandbox_command(
         self,
         command: list[str],
@@ -33,10 +40,6 @@ class LifecycleRunner(ToolRunner):
         readonly_inputs: tuple[Path, ...] = (),
     ) -> list[str]:
         return command
-
-    async def _resource_monitor(self, pid: int, workspace: Path) -> str:
-        await asyncio.Future()
-        raise AssertionError("unreachable")
 
 
 class FakeBuildRunner(ToolRunner):
@@ -75,7 +78,7 @@ class FakeBuildRunner(ToolRunner):
     ) -> CommandResult:
         self.commands.append(argv)
         if argv[-1] in {"-v", "--version"}:
-            return CommandResult(0, "test tool version\n", "", False, argv)
+            return CommandResult(0, "test tool version\n", "", resolved_command=argv)
         name = Path(argv[-1]).stem
         output = workspace / "output"
         (output / f"{name}.pdf").write_bytes(b"%PDF-1.7\npartial or successful")
@@ -92,7 +95,7 @@ class FakeBuildRunner(ToolRunner):
             f'  "{cwd / argv[-1]}" 1 1 {"0" * 32} ""\n'
             f'  (generated)\n  "{primary}"\n  (rewritten before read)\n'
         )
-        return CommandResult(self.returncode, "", "", False, argv)
+        return CommandResult(self.returncode, "", "", resolved_command=argv)
 
 
 class BuildTests(unittest.IsolatedAsyncioTestCase):
@@ -179,7 +182,7 @@ class BuildTests(unittest.IsolatedAsyncioTestCase):
             self.source, "-main.tex", self.root / "build", "pdflatex", runner
         )
         self.assertTrue(result.success)
-        self.assertIn("-main.tex", result.dependencies)
+        self.assertIn("-main.tex", result.recorder_project_inputs)
         self.assertEqual(result.submission_inputs, {"-main.tex"})
         command = runner.commands[-1]
         self.assertEqual(command[-1], "./-main.tex")
@@ -235,12 +238,12 @@ class BuildTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("build.external_dependency", {item.rule for item in result.findings})
 
     async def test_recorder_uses_command_roots_and_tool_metadata_is_a_snapshot(self) -> None:
-        metadata: dict[str, object] = {"version": ["build tool test"], "executable": "/tools/build"}
+        metadata = ToolVersion(("build tool test",), "/tools/build", ())
         declared = self.root / "toolchain"
         declared.mkdir()
 
         class ContextRunner(FakeBuildRunner):
-            async def tool_version(self, argv: list[str], workspace: Path) -> dict[str, object]:
+            async def tool_version(self, argv: list[str], workspace: Path) -> ToolVersion:
                 return metadata
 
             async def run(
@@ -267,10 +270,13 @@ class BuildTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(external.path, "main.tex")
         self.assertEqual(external.status, "failed")
         self.assertEqual(external.severity, "error")
-        self.assertEqual(result.tools["resource_roots"], [str(declared)])
-        metadata["version"] = ["changed later"]
+        self.assertEqual(result.tools.resource_roots, (str(declared),))
+        report = result.tools.to_report()
+        self.assertEqual(report["resource_roots"], [str(declared)])
+        report["latexmk"]["version"].append("changed later")
         self.assertEqual(
-            result.tools["latexmk"], {"version": ["build tool test"], "executable": "/tools/build"}
+            result.tools.to_report()["latexmk"],
+            {"version": ["build tool test"], "executable": "/tools/build", "version_arguments": []},
         )
 
     async def test_symlink_source_is_rejected(self) -> None:
@@ -286,7 +292,7 @@ class BuildTests(unittest.IsolatedAsyncioTestCase):
             "LaTeX Warning: Citation `missing' on page 1 undefined on input line 20.\n"
             "! Undefined control sequence.\n"
         )
-        findings = _log_findings(log, "main.tex")
+        findings = log_findings(log, "main.tex")
         overflow = next(item for item in findings if item.rule == "build.overfull_box")
         self.assertEqual(overflow.details["overflow_pt"], 4.2)
         self.assertEqual(overflow.code, "BLD006")
@@ -311,7 +317,7 @@ class BuildTests(unittest.IsolatedAsyncioTestCase):
         )
         for code, message, severity in cases:
             with self.subTest(code=code):
-                findings = _log_findings(message, "main.tex")
+                findings = log_findings(message, "main.tex")
                 self.assertEqual(len(findings), 1)
                 self.assertEqual(findings[0].code, code)
                 self.assertEqual(findings[0].message, message)
@@ -321,14 +327,14 @@ class BuildTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNone(findings[0].line)
                 self.assertEqual(findings[0].details["document"], "main.tex")
         self.assertEqual(
-            _log_findings(
+            log_findings(
                 "Citation and reference resolved.\nOutput written on main.pdf (1 page).", "main.tex"
             ),
             [],
         )
 
     def test_explicit_diagnostic_filename_identifies_included_source(self) -> None:
-        findings = _log_findings(
+        findings = log_findings(
             "./sections/method.tex:21: Undefined control sequence.",
             "article/main.tex",
         )
@@ -336,14 +342,14 @@ class BuildTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(findings[0].line, 21)
 
     def test_explicit_absolute_filename_is_mapped_only_within_build_source(self) -> None:
-        findings = _log_findings(
+        findings = log_findings(
             f"{self.source}/sections/method.tex:21: Undefined control sequence.",
             "main.tex",
             self.source,
             self.source,
         )
         self.assertEqual(findings[0].path, "sections/method.tex")
-        outside = _log_findings(
+        outside = log_findings(
             f"{self.root}/elsewhere.tex:22: Undefined control sequence.",
             "main.tex",
             self.source,
@@ -410,10 +416,10 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_resource_accounting_failure_is_closed(self) -> None:
         runner = LifecycleRunner()
 
-        async def unavailable(pid: int, workspace: Path) -> str:
+        async def unavailable(pid: int, workspace: Path, *, max_file_bytes: int) -> str:
             return "accounting unavailable"
 
-        with patch.object(runner, "_resource_monitor", unavailable):
+        with patch.object(runner._monitor, "watch_command", unavailable):
             result = await runner.run([self.perl, "-e", "sleep 30"], self.work, self.work)
         self.assertEqual(result.resource_exceeded, "accounting unavailable")
         self.assertNotEqual(result.returncode, 0)
@@ -428,7 +434,12 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                 "USER": "private-account",
             },
         ):
-            environment = ToolRunner()._environment(self.work, Path(self.perl))
+            runner = ToolRunner()
+            environment = tool_environment(
+                self.work,
+                runner.toolchain.context(Path(self.perl)),
+                source_date_epoch=runner.source_date_epoch,
+            )
         self.assertEqual(environment["TEXINPUTS"], ".:")
         # latexmk warns when USER is unset; a neutral name keeps the real one private.
         self.assertEqual(environment["USER"], "fledge")
@@ -437,22 +448,22 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(environment["TEXMFHOME"].startswith(str(self.work)))
 
     def test_file_size_limit_uses_a_shell_that_counts_kibibyte_units(self) -> None:
-        runner = ToolRunner(RuntimeLimits(max_file_bytes=4096))
-        wrapped = runner._limited_command(["/usr/bin/true"])
+        wrapped = with_ulimits(["/usr/bin/true"], max_file_bytes=4096, timeout_seconds=120)
         self.assertEqual(wrapped[3:6], ["latexprep-limits", "4", "120"])
         self.assertEqual(wrapped[-1], "/usr/bin/true")
         # Dash counts 512-byte blocks and would halve the limit, so bash wins
         # wherever it exists; macOS /bin/sh is bash and agrees either way.
         self.assertEqual(wrapped[0], "/bin/bash" if Path("/bin/bash").is_file() else "/bin/sh")
-        with patch("latexprep.runtime.os.path.isfile", return_value=False):
-            self.assertEqual(runner._limited_command(["/usr/bin/true"])[0], "/bin/sh")
+        with patch("latexprep.sandbox.os.path.isfile", return_value=False):
+            limited = with_ulimits(["/usr/bin/true"], max_file_bytes=4096, timeout_seconds=120)
+            self.assertEqual(limited[0], "/bin/sh")
 
     async def test_missing_backend_never_runs_command(self) -> None:
-        with (
-            patch("latexprep.runtime.sys.platform", "unsupported"),
-            self.assertRaises(PreparationError),
-        ):
-            await ToolRunner().run([self.perl, "-e", 'open(F, ">marker")'], self.work, self.work)
+        with patch("latexprep.sandbox.sys.platform", "unsupported"):
+            runner = ToolRunner()
+        self.assertEqual(runner.sandbox.description, "unavailable")
+        with self.assertRaises(PreparationError):
+            await runner.run([self.perl, "-e", 'open(F, ">marker")'], self.work, self.work)
         self.assertFalse((self.work / "marker").exists())
 
     async def test_real_sandbox_denies_external_file_and_network(self) -> None:

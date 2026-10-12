@@ -1,19 +1,14 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
 
-from latexprep.models import PreparationError
-from latexprep.pdf import (
-    PdfOptions,
-    _changed_pixels,
-    _is_type3,
-    _page_count,
-    _page_sizes,
-    compare_pdfs,
-    inspect_pdf,
-)
+from latexprep.models import PreparationError, Report
+from latexprep.pdf_comparison import _changed_pixels, compare_pdfs
+from latexprep.pdf_inspection import PdfInspectionOptions, inspect_pdf
+from latexprep.pdf_support import is_type3, page_count, page_sizes
 from latexprep.runtime import CommandResult, ToolRunner
 
 
@@ -45,7 +40,7 @@ class FakePdfRunner(ToolRunner):
         readonly_inputs: tuple[Path, ...] = (),
         memory_mb: int | None = None,
     ) -> CommandResult:
-        self._validate_readonly_inputs(readonly_inputs)
+        self._frozen.validate(readonly_inputs)
         self.commands.append(argv)
         if argv[0] == self.missing:
             raise PreparationError(f"Missing tool: {argv[0]}")
@@ -54,8 +49,7 @@ class FakePdfRunner(ToolRunner):
                 99 if argv[0] == "pdfdetach" else 0,
                 f"{argv[0]} version test\n",
                 "",
-                False,
-                argv,
+                resolved_command=argv,
             )
         right = any(b"right" in path.read_bytes() for path in readonly_inputs)
         pages = self.pages_right if right else 1
@@ -83,7 +77,7 @@ class FakePdfRunner(ToolRunner):
                 "page num type width height color comp bpc enc interp object ID "
                 "x-ppi y-ppi size ratio\n---\n"
             )
-        return CommandResult(0, output, "", False, argv)
+        return CommandResult(0, output, "", resolved_command=argv)
 
 
 class PdfTests(unittest.IsolatedAsyncioTestCase):
@@ -170,20 +164,20 @@ class PdfTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Rendered comparison supports at most 300 pages", unavailable.message)
 
     def test_page_count_bounds_are_explicit_per_purpose(self) -> None:
-        self.assertEqual(_page_count({"Pages": "5000"}), 5000)
-        self.assertEqual(_page_count({"Pages": "300"}, maximum=300), 300)
+        self.assertEqual(page_count({"Pages": "5000"}), 5000)
+        self.assertEqual(page_count({"Pages": "300"}, maximum=300), 300)
         for fields, maximum in (({"Pages": "5001"}, 5000), ({"Pages": "301"}, 300)):
             with self.subTest(pages=fields["Pages"]), self.assertRaises(PreparationError):
-                _page_count(fields, maximum=maximum)
+                page_count(fields, maximum=maximum)
         for fields in ({"Pages": "0"}, {"Pages": "many"}, {}):
             with self.subTest(fields=fields), self.assertRaises(PreparationError):
-                _page_count(fields)
+                page_count(fields)
 
     def test_type3_font_detection_is_shared_and_exact(self) -> None:
         for value in ("Type 3", "Type3", "type  3", "TYPE\t3"):
-            self.assertTrue(_is_type3(value), value)
+            self.assertTrue(is_type3(value), value)
         for value in ("Type 1", "Type 1C", "Type 30", "CID Type 3C", "TrueType", ""):
-            self.assertFalse(_is_type3(value), value)
+            self.assertFalse(is_type3(value), value)
 
     def test_changed_pixels_matches_a_per_pixel_reference_across_chunk_boundaries(self) -> None:
         def reference(left: bytes, right: bytes, tolerance: int) -> int:
@@ -234,17 +228,27 @@ class PdfTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(failure.severity, "error")
         self.assertEqual(failure.status, "inconclusive")
 
+    async def test_missing_pdfinfo_serializes_page_limit_as_incomplete(self) -> None:
+        findings = await inspect_pdf(
+            self.left, self.root / "inspect", FakePdfRunner(missing="pdfinfo"), max_pages=1
+        )
+        serialized = json.loads(json.dumps(Report("check", findings=findings).to_dict()))
+        page_limit = next(item for item in serialized["findings"] if item["code"] == "PDF001")
+        self.assertEqual(page_limit["status"], "inconclusive")
+        self.assertIs(page_limit["incomplete"], True)
+        self.assertIn("Missing tool: pdfinfo", page_limit["message"])
+
     def test_pathological_page_dimensions_are_rejected_before_rendering(self) -> None:
         with self.assertRaises(PreparationError):
-            _page_sizes("Page 1 size: 1e308 x 792 pts", 1)
+            page_sizes("Page 1 size: 1e308 x 792 pts", 1)
         with self.assertRaises(PreparationError):
-            _page_sizes("Page 1 size: 1000000 x 1000000 pts", 1)
+            page_sizes("Page 1 size: 1000000 x 1000000 pts", 1)
         with self.assertRaises(PreparationError):
-            _page_sizes("Page 1 size: 612 x 792 pts", 2)
+            page_sizes("Page 1 size: 612 x 792 pts", 2)
         with self.assertRaises(PreparationError):
-            _page_sizes("Page 1 size: 612 x 792 pts\nPage 1 size: 700 x 800 pts", 1)
+            page_sizes("Page 1 size: 612 x 792 pts\nPage 1 size: 700 x 800 pts", 1)
         with self.assertRaises(PreparationError):
-            _page_sizes("Page 1 size: .e x 792 pts", 1)
+            page_sizes("Page 1 size: .e x 792 pts", 1)
 
 
 class ConfigurablePdfRunner(FakePdfRunner):
@@ -278,7 +282,7 @@ class ConfigurablePdfRunner(FakePdfRunner):
             "pdftotext": "Text\n\f" * self.pages,
         }
         output = self.outputs.get(key, defaults.get(key, result.stdout))
-        return CommandResult(0, output, "", False, argv)
+        return CommandResult(0, output, "", resolved_command=argv)
 
 
 class PdfConstraintTests(unittest.IsolatedAsyncioTestCase):
@@ -305,7 +309,7 @@ class PdfConstraintTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_huge_finite_dimensions_produce_incomplete_required_measurements(self) -> None:
         findings = await self.inspect(
-            PdfOptions(expected_page_width_pt=612, expected_page_height_pt=792),
+            PdfInspectionOptions(expected_page_width_pt=612, expected_page_height_pt=792),
             runner=ConfigurablePdfRunner(outputs={"geometry": "Page 1 size: 1e308 x 792 pts\n"}),
         )
         self.assertEqual(findings["pdf.page_dimensions"].code, "PDF101")
@@ -331,7 +335,7 @@ class PdfConstraintTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(unavailable["pdf.page_limit"].severity, "error")
 
     async def test_expected_dimensions_measure_every_page_with_pdf_point_tolerance(self) -> None:
-        options = PdfOptions(
+        options = PdfInspectionOptions(
             expected_page_width_pt=612, expected_page_height_pt=792, page_size_tolerance_pt=1
         )
         exact = await self.inspect(
@@ -363,7 +367,7 @@ class PdfConstraintTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(missing["pdf.page_dimensions"].status, "inconclusive")
 
     async def test_page_consistency_uses_full_range_not_just_first_page(self) -> None:
-        options = PdfOptions(require_consistent_page_size=True, page_size_tolerance_pt=1)
+        options = PdfInspectionOptions(require_consistent_page_size=True, page_size_tolerance_pt=1)
         same = await self.inspect(options, runner=ConfigurablePdfRunner(pages=3))
         self.assertEqual(same["pdf.page_size_consistency"].status, "passed")
         changed = await self.inspect(
@@ -384,7 +388,7 @@ class PdfConstraintTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(finding.code, "PDF102")
 
     async def test_image_resolution_checks_both_axes_and_repeated_placements(self) -> None:
-        options = PdfOptions(min_image_dpi=300)
+        options = PdfInspectionOptions(min_image_dpi=300)
         header = (
             "page num type width height color comp bpc enc interp object ID "
             "x-ppi y-ppi size ratio\n---\n"
@@ -418,7 +422,7 @@ class PdfConstraintTests(unittest.IsolatedAsyncioTestCase):
     async def test_font_embedding_violation_changes_status_and_zero_fonts_are_inconclusive(
         self,
     ) -> None:
-        options = PdfOptions(require_embedded_fonts=True)
+        options = PdfInspectionOptions(require_embedded_fonts=True)
         good = await self.inspect(options)
         self.assertEqual(good["pdf.font_embedding"].status, "passed")
         header = "name type encoding emb sub uni object ID\n---\n"
@@ -442,7 +446,7 @@ class PdfConstraintTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(empty["pdf.text"].details["pages_without_text"], [1])
 
     async def test_forbidden_type3_font_policy_detects_only_type3(self) -> None:
-        options = PdfOptions(forbid_type3_fonts=True)
+        options = PdfInspectionOptions(forbid_type3_fonts=True)
         good = await self.inspect(options)
         self.assertEqual(good["pdf.type3_fonts"].status, "passed")
         fonts = (
@@ -455,7 +459,7 @@ class PdfConstraintTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(finding.code, "PDF105")
 
     async def test_encryption_policy_uses_explicit_reported_feature(self) -> None:
-        options = PdfOptions(forbid_encryption=True)
+        options = PdfInspectionOptions(forbid_encryption=True)
         good = await self.inspect(options)
         self.assertEqual(good["pdf.encryption_policy"].status, "passed")
         bad = await self.inspect(
@@ -471,7 +475,7 @@ class PdfConstraintTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(finding.code, "PDF106")
 
     async def test_forms_policy_detects_acroform_and_xfa(self) -> None:
-        options = PdfOptions(forbid_forms=True)
+        options = PdfInspectionOptions(forbid_forms=True)
         good = await self.inspect(options)
         self.assertEqual(good["pdf.forms_policy"].status, "passed")
         for form in ("AcroForm", "XFA"):
@@ -485,7 +489,7 @@ class PdfConstraintTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(finding.code, "PDF107")
 
     async def test_javascript_policy_requires_explicit_reported_value(self) -> None:
-        options = PdfOptions(forbid_javascript=True)
+        options = PdfInspectionOptions(forbid_javascript=True)
         good = await self.inspect(options)
         self.assertEqual(good["pdf.javascript_policy"].status, "passed")
         bad = await self.inspect(
@@ -504,7 +508,7 @@ class PdfConstraintTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(unknown["pdf.javascript_policy"].severity, "error")
 
     async def test_attachments_policy_counts_embedded_files(self) -> None:
-        options = PdfOptions(forbid_attachments=True)
+        options = PdfInspectionOptions(forbid_attachments=True)
         good = await self.inspect(options)
         self.assertEqual(good["pdf.attachments_policy"].status, "passed")
         bad = await self.inspect(
@@ -523,7 +527,7 @@ class PdfConstraintTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(incomplete["pdf.attachments_policy"].status, "inconclusive")
 
     async def test_each_configured_policy_is_inconclusive_when_pdfinfo_is_unavailable(self) -> None:
-        options = PdfOptions(
+        options = PdfInspectionOptions(
             expected_page_width_pt=612,
             expected_page_height_pt=792,
             require_consistent_page_size=True,
@@ -558,9 +562,9 @@ class PdfConstraintTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_empty_or_malformed_inventory_output_is_not_a_policy_pass(self) -> None:
         for tool, options, rule in (
-            ("pdffonts", PdfOptions(require_embedded_fonts=True), "pdf.font_embedding"),
-            ("pdfimages", PdfOptions(min_image_dpi=300), "pdf.image_resolution"),
-            ("pdfdetach", PdfOptions(forbid_attachments=True), "pdf.attachments_policy"),
+            ("pdffonts", PdfInspectionOptions(require_embedded_fonts=True), "pdf.font_embedding"),
+            ("pdfimages", PdfInspectionOptions(min_image_dpi=300), "pdf.image_resolution"),
+            ("pdfdetach", PdfInspectionOptions(forbid_attachments=True), "pdf.attachments_policy"),
         ):
             for output in ("", "unrecognized rows\n"):
                 with self.subTest(tool=tool, output=output):
@@ -595,7 +599,7 @@ class PdfConstraintTests(unittest.IsolatedAsyncioTestCase):
             {"forbid_forms": "yes"},
         ):
             with self.subTest(values=values), self.assertRaises(PreparationError):
-                PdfOptions(**values)
+                PdfInspectionOptions(**values)
 
 
 if __name__ == "__main__":

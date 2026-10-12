@@ -31,7 +31,7 @@ END = "% End generated catalogue.\n"
 
 # Opt-in checks activated outside the selection policy's activation tables.
 _ACTIVATED_ELSEWHERE: dict[str, tuple[str | None, tuple[str, ...]]] = {
-    "FMT001": (None, ("format",)),
+    "FMT001": (None, ("apply_formatting",)),
 }
 
 ALWAYS = "always"
@@ -57,10 +57,11 @@ def classify(rule: Rule, defaults: Settings | None = None) -> tuple[str, str]:
     entries = _activation().get(rule.code)
     if not entries:
         return DEFAULT, ""
-    defaults = defaults or Settings()
+    values = (defaults or Settings()).top_level_values()
     group, fields = entries[0]
-    holder = defaults if group is None else getattr(defaults, group)
-    disabled = all(not getattr(holder, field) for field in fields)
+    disabled = all(
+        not (values[field] if group is None else getattr(values[group], field)) for field in fields
+    )
     if not disabled:
         return DEFAULT, ""
     tables = " or ".join(dict.fromkeys(f"`{name}`" for name, _ in entries if name))

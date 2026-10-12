@@ -16,7 +16,7 @@ from click.testing import CliRunner
 from latexprep.check_selection import CheckSelection
 from latexprep.cli import USAGE_EXIT_CODE, cli
 from latexprep.config import load_settings, resolve_config_path
-from latexprep.models import PreparationError, Report
+from latexprep.models import Outcome, PreparationError, Report
 from latexprep.rules import RULES
 
 
@@ -58,7 +58,7 @@ class CheckSelectionTests(unittest.TestCase):
         for value in ("ALL", ["ALL"], (1,), None):
             with self.subTest(value=value), self.assertRaises(PreparationError):
                 CheckSelection(select=cast(tuple[str, ...], value))
-        with self.assertRaisesRegex(ValueError, "Unknown public check code"):
+        with self.assertRaisesRegex(PreparationError, "Unknown public check code"):
             selection.enabled("TEX999")
 
     def test_unknown_selector_suggests_the_closest_valid_selector(self) -> None:
@@ -90,7 +90,7 @@ class CheckSelectionTests(unittest.TestCase):
         settings = load_settings(None, {"checks": {"select": ["ALL"]}})
         self.assertFalse(settings.online_checks.online)
         self.assertFalse(settings.online_checks.online_metadata)
-        self.assertFalse(settings.format)
+        self.assertFalse(settings.apply_formatting)
         self.assertFalse(settings.normalize_doi)
         self.assertEqual(settings.submission_checks.identity_terms, ())
         self.assertIsNone(settings.max_pages)
@@ -224,7 +224,7 @@ class ConfigDiscoveryTests(unittest.TestCase):
 
         async def record_settings(request, _progress, report: Report) -> Report:
             report.settings = request.settings.to_dict()
-            report.outcome = "passed"
+            report.outcome = Outcome.PASSED
             return report
 
         with patch("latexprep.cli.run_job", new=AsyncMock(side_effect=record_settings)) as run:
@@ -242,7 +242,8 @@ class ConfigDiscoveryTests(unittest.TestCase):
         for flags, expected in ((["--config", str(explicit)], 4), (["--isolated"], 2)):
             with self.subTest(flags=flags):
                 with patch(
-                    "latexprep.cli.run_job", new=AsyncMock(return_value=Report("inspect", "passed"))
+                    "latexprep.cli.run_job",
+                    new=AsyncMock(return_value=Report("inspect", outcome=Outcome.PASSED)),
                 ) as run:
                     result = CliRunner().invoke(
                         cli, ["inspect", str(self.source), "--json", *flags]
@@ -269,7 +270,8 @@ class ConfigDiscoveryTests(unittest.TestCase):
     def test_cli_select_and_ignore_layer_over_discovered_configuration(self) -> None:
         self.write(self.source / ".fledge.toml", '[checks]\nselect = ["TEX"]\nignore = ["BIB1"]\n')
         with patch(
-            "latexprep.cli.run_job", new=AsyncMock(return_value=Report("check", "passed"))
+            "latexprep.cli.run_job",
+            new=AsyncMock(return_value=Report("check", outcome=Outcome.PASSED)),
         ) as run:
             result = CliRunner().invoke(
                 cli,
@@ -308,7 +310,7 @@ class ConfigDiscoveryTests(unittest.TestCase):
         [finding] = json.loads(result.output)["findings"]
         self.assertIn("Unknown --ignore selector 'tex001'", finding["message"])
         self.assertIn("did you mean TEX001?", finding["message"])
-        self.assertIn("fledge rule CODE", finding["suggestion"])
+        self.assertIn("fledge rule CODE", finding["next_step"])
 
     def test_cli_help_explains_configuration_controls(self) -> None:
         result = CliRunner().invoke(cli, ["inspect", "--help"])

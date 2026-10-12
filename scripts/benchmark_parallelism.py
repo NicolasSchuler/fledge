@@ -23,7 +23,8 @@ import click
 from rich.console import Console
 
 from latexprep.config import Settings
-from latexprep.core import JobRequest, run_job
+from latexprep.core import run_job
+from latexprep.job_context import JobRequest
 from latexprep.models import Report
 
 SOURCE_DATE_EPOCH = 1_700_000_000
@@ -162,7 +163,7 @@ def _settings(configuration: str, remaining: float) -> Settings:
     jobs, render_jobs = CONFIGURATIONS[configuration]
     return Settings(
         main="main.tex",
-        format=True,
+        apply_formatting=True,
         jobs=jobs,
         build_jobs=1,
         render_jobs=render_jobs,

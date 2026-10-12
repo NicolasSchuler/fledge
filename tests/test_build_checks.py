@@ -13,14 +13,11 @@ from latexprep.build_checks import (
     check_local_package_shadows,
     check_tex_distribution,
 )
+from latexprep.build_dependencies import LoadedPackage, read_loaded_package
+from latexprep.build_log import log_findings
+from latexprep.latexmk_build import BuildResult, BuildTools, build_project
 from latexprep.models import Finding, PreparationError
-from latexprep.runtime import (
-    BuildResult,
-    CommandResult,
-    _log_findings,
-    _package_record,
-    build_project,
-)
+from latexprep.runtime import CommandResult, ToolVersion
 from tests.test_runtime import FakeBuildRunner
 
 
@@ -31,13 +28,13 @@ class LookupRunner:
 
     async def tool_version(self, argv, workspace):
         assert workspace.is_dir()
-        return {"version": "Kpathsea fixture"}
+        return ToolVersion(("Kpathsea fixture",), "/tools/kpsewhich", ("--version",))
 
     async def run(self, argv, cwd, workspace):
         self.calls.append((argv, cwd, workspace))
         assert cwd == workspace
         assert not list(workspace.iterdir())
-        return CommandResult(self.status, self.output, "", False, argv)
+        return CommandResult(self.status, self.output, "", resolved_command=argv)
 
 
 class BuildCheckTests(unittest.IsolatedAsyncioTestCase):
@@ -68,12 +65,12 @@ class BuildCheckTests(unittest.IsolatedAsyncioTestCase):
             result = await build_project(source, "main.tex", root / "build", "pdflatex", runner)
             self.assertTrue(result.success, result.findings)
             self.assertTrue(result.recorder_complete)
-            records = {item["name"]: item for item in result.loaded_packages}
+            records = {item.name: item for item in result.loaded_packages}
             self.assertEqual(len(result.loaded_packages), 2)
-            self.assertEqual(records["local.sty"]["origin"], "project")
-            self.assertEqual(records["local.sty"]["path"], "local.sty")
-            self.assertEqual(records["article.cls"]["declared_date"], "2025/01/01")
-            self.assertEqual(records["article.cls"]["origin"], "toolchain")
+            self.assertEqual(records["local.sty"].origin, "project")
+            self.assertEqual(records["local.sty"].path, "local.sty")
+            self.assertEqual(records["article.cls"].declared_date, "2025/01/01")
+            self.assertEqual(records["article.cls"].origin, "toolchain")
             findings = check_build_details(
                 result,
                 BuildCheckOptions(
@@ -107,8 +104,8 @@ class BuildCheckTests(unittest.IsolatedAsyncioTestCase):
                 root = Path(directory)
                 path = root / "custom.sty"
                 path.write_text(content)
-                record = _package_record(path, root)
-                self.assertIsNone(record["declared_date"])
+                record = read_loaded_package(path, root)
+                self.assertIsNone(record.declared_date)
                 finding = check_build_details(
                     BuildResult(success=True, recorder_complete=True, loaded_packages=[record]),
                     BuildCheckOptions(minimum_package_dates=(("custom.sty", "2026-01-01"),)),
@@ -121,7 +118,7 @@ class BuildCheckTests(unittest.IsolatedAsyncioTestCase):
     def test_overfull_tolerance(self):
         result = BuildResult(
             success=True,
-            findings=_log_findings(
+            findings=log_findings(
                 "Overfull \\hbox (2.5pt too wide) in paragraph at lines 12--14\n", "main.tex"
             ),
         )
@@ -147,8 +144,8 @@ class BuildCheckTests(unittest.IsolatedAsyncioTestCase):
             success=True,
             recorder_complete=True,
             loaded_packages=[
-                {"name": "article.cls", "origin": "toolchain", "path": "/toolchain/article.cls"},
-                {"name": "graphicx.sty", "origin": "toolchain", "path": "/toolchain/graphicx.sty"},
+                LoadedPackage("article.cls", "/toolchain/article.cls", "toolchain"),
+                LoadedPackage("graphicx.sty", "/toolchain/graphicx.sty", "toolchain"),
             ],
         )
         options = BuildCheckOptions(
@@ -185,9 +182,9 @@ class BuildCheckTests(unittest.IsolatedAsyncioTestCase):
                 "% \\ProvidesPackage{decoy}[1900/01/01]\n"
                 "\\ProvidesPackage{local}[2025/05/09 v1.2 Local]\n"
             )
-            record = _package_record(path, root)
-            self.assertEqual(record["declared_date"], "2025/05/09")
-            self.assertEqual(record["declared_version"], "v1.2")
+            record = read_loaded_package(path, root)
+            self.assertEqual(record.declared_date, "2025/05/09")
+            self.assertEqual(record.declared_version, "v1.2")
             result = BuildResult(success=True, recorder_complete=True, loaded_packages=[record])
             passed = check_build_details(
                 result, BuildCheckOptions(minimum_package_dates=(("local.sty", "2025-05-09"),))
@@ -200,7 +197,7 @@ class BuildCheckTests(unittest.IsolatedAsyncioTestCase):
                 "failed",
             )
             path.write_text("\\ProvidesPackage{local}[\\release_date]\n")
-            result.loaded_packages = [_package_record(path, root)]
+            result.loaded_packages = [read_loaded_package(path, root)]
             self.assertEqual(
                 check_build_details(
                     result, BuildCheckOptions(minimum_package_dates=(("local.sty", "2025-01-01"),))
@@ -208,13 +205,13 @@ class BuildCheckTests(unittest.IsolatedAsyncioTestCase):
                 "inconclusive",
             )
             path.write_text("\\ProvidesExplPackage{local}{2026-10-06}{1.0}{Fixture}\n")
-            self.assertEqual(_package_record(path, root)["declared_date"], "2026-10-06")
+            self.assertEqual(read_loaded_package(path, root).declared_date, "2026-10-06")
 
     async def test_shadow_lookup(self):
         result = BuildResult(
             success=True,
             recorder_complete=True,
-            loaded_packages=[{"name": "article.cls", "path": "article.cls", "origin": "project"}],
+            loaded_packages=[LoadedPackage("article.cls", "article.cls", "project")],
         )
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
@@ -234,6 +231,21 @@ class BuildCheckTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(finding.severity, "warning")
                     self.assertEqual(finding.path, "article.cls")
                 self.assertEqual(runner.calls[0][0], ["kpsewhich", "--format=tex", "article.cls"])
+            # Two local files with one name cannot share a lookup or its workspace.
+            duplicated = replace(
+                result,
+                loaded_packages=[
+                    LoadedPackage("article.cls", "article.cls", "project"),
+                    LoadedPackage("article.cls", "styles/article.cls", "project"),
+                ],
+            )
+            runner = LookupRunner(0, "/toolchain/article.cls\n")
+            [ambiguous] = await check_local_package_shadows(duplicated, base / "same", runner)
+            self.assertEqual((ambiguous.code, ambiguous.status), ("BLD104", "inconclusive"))
+            self.assertEqual(
+                ambiguous.details["project_paths"], ["article.cls", "styles/article.cls"]
+            )
+            self.assertEqual(runner.calls, [])
             result.recorder_complete = False
             runner = LookupRunner(0, "/toolchain/article.cls\n")
             self.assertEqual(
@@ -264,11 +276,18 @@ class VersionRunner(FakeBuildRunner):
     async def run(self, argv, cwd, workspace, *, readonly_inputs=(), memory_mb=None):
         if argv[-1] == "--version":
             if self.banner is None:
-                return CommandResult(127, "", "pdflatex: command not found", False, argv)
-            return CommandResult(0, self.banner + "\nkpathsea version 6.4.2\n", "", False, argv)
+                return CommandResult(127, "", "pdflatex: command not found", resolved_command=argv)
+            return CommandResult(
+                0, self.banner + "\nkpathsea version 6.4.2\n", "", resolved_command=argv
+            )
         return await super().run(
             argv, cwd, workspace, readonly_inputs=readonly_inputs, memory_mb=memory_mb
         )
+
+
+def _engine_version(engine: str, banner: str) -> BuildTools:
+    version = ToolVersion((banner,), f"/tools/{engine}", ("--version",))
+    return BuildTools(versions={engine: version})
 
 
 class TexDistributionTests(unittest.IsolatedAsyncioTestCase):
@@ -295,11 +314,11 @@ class TexDistributionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((other.severity, other.status), ("warning", "failed"))
         self.assertIn("expected TeX Live 2023", other.message)
         packaged = BuildResult(
-            True, tools={"xelatex": {"version": ["XeTeX 3.14 (TeX Live 2022/Debian)"]}}
+            True, tools=_engine_version("xelatex", "XeTeX 3.14 (TeX Live 2022/Debian)")
         )
         self.assertEqual(check_tex_distribution(packaged).details["packager"], "Debian")
         miktex = BuildResult(
-            True, tools={"pdflatex": {"version": ["MiKTeX-pdfTeX 4.19 (MiKTeX 24.1)"]}}
+            True, tools=_engine_version("pdflatex", "MiKTeX-pdfTeX 4.19 (MiKTeX 24.1)")
         )
         self.assertEqual(check_tex_distribution(miktex).status, "passed")
         self.assertEqual(
@@ -317,7 +336,7 @@ class TexDistributionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((observed.severity, observed.status), ("info", "inconclusive"))
         policy = check_tex_distribution(missing, BuildCheckOptions(expected_texlive_year=2026))
         self.assertEqual((policy.severity, policy.status), ("warning", "inconclusive"))
-        unknown = BuildResult(True, tools={"pdflatex": {"version": ["pdfTeX 3.14 (custom)"]}})
+        unknown = BuildResult(True, tools=_engine_version("pdflatex", "pdfTeX 3.14 (custom)"))
         self.assertEqual(check_tex_distribution(unknown).status, "inconclusive")
         self.assertEqual(
             check_tex_distribution(unknown, BuildCheckOptions(expected_texlive_year=2026)).status,

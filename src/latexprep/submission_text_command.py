@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import asdict
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -10,21 +11,21 @@ import click
 from rich.console import Console
 from rich.text import Text
 
+from .command_options import reject_config_with_isolated, settings_file_options
 from .config import load_settings, resolve_config_path
-from .models import PreparationError
+from .models import Outcome, PreparationError
 from .project import ImportLimits, import_project
-from .submission_text import read_submission_text, safe_display
+from .submission_text import FIELD_NAMES, read_submission_text, safe_display
 
 
 @click.command("submission-text")
 @click.argument("source", type=click.Path(exists=True, path_type=Path), metavar="INPUT")
 @click.option("--main", help="Relative main TeX file inside the project.")
-@click.option("--field", type=click.Choice(["title", "abstract", "keywords"]))
+@click.option("--field", type=click.Choice(FIELD_NAMES))
 @click.option(
     "--json", "json_output", is_flag=True, help="Return all fields and readiness details."
 )
-@click.option("--config", type=click.Path(path_type=Path), help="Use this settings file.")
-@click.option("--isolated", is_flag=True, help="Ignore discovered project settings.")
+@settings_file_options
 def submission_text_command(
     source: Path,
     main: str | None,
@@ -39,8 +40,7 @@ def submission_text_command(
     """
     if json_output and field is not None:
         raise click.UsageError("--json returns all fields; do not combine it with --field")
-    if isolated and config is not None:
-        raise click.UsageError("--isolated cannot be combined with --config")
+    reject_config_with_isolated(config, isolated)
     try:
         settings = load_settings(
             resolve_config_path(source, config, isolated=isolated), {"main": main}
@@ -51,26 +51,27 @@ def submission_text_command(
             fields = read_submission_text(imported.root, settings.main)
     except (PreparationError, OSError) as error:
         click.echo(safe_display(f"Cannot export submission text: {error}"), err=True)
-        raise click.exceptions.Exit(4) from error
+        raise click.exceptions.Exit(Outcome.ERROR.exit_code) from error
     if json_output:
-        click.echo(json.dumps({"fields": fields}, ensure_ascii=False, indent=2))
+        payload = {"fields": {name: asdict(value) for name, value in fields.items()}}
+        click.echo(json.dumps(payload, ensure_ascii=False, indent=2))
     elif field is not None:
         selected = fields[field]
-        if selected["status"] == "ready":
-            click.echo(selected["draft"])
+        if selected.status == "ready":
+            click.echo(selected.draft)
             return
-        click.echo(f"{field}: {selected['status']}; no copy-ready text exported.", err=True)
-        for issue in selected["issues"]:
+        click.echo(f"{field}: {selected.status}; no copy-ready text exported.", err=True)
+        for issue in selected.issues:
             click.echo(f"  {issue}", err=True)
-        raise click.exceptions.Exit(3)
+        raise click.exceptions.Exit(Outcome.BLOCKED.exit_code)
     else:
         console = Console()
         for name, value in fields.items():
-            console.print(Text(f"{name.capitalize()} ({value['status']})", style="bold"))
-            console.print(Text(str(value["draft"])))
-            for candidate in value["candidates"]:
-                console.print(Text("Candidate: " + str(candidate)))
-            for issue in value["issues"]:
-                console.print(Text("Review: " + str(issue)))
-    if any(value["status"] == "unresolved" for value in fields.values()):
-        raise click.exceptions.Exit(3)
+            console.print(Text(f"{name.capitalize()} ({value.status})", style="bold"))
+            console.print(Text(value.draft))
+            for candidate in value.candidates:
+                console.print(Text("Candidate: " + candidate))
+            for issue in value.issues:
+                console.print(Text("Review: " + issue))
+    if any(value.status == "unresolved" for value in fields.values()):
+        raise click.exceptions.Exit(Outcome.BLOCKED.exit_code)

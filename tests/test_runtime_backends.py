@@ -9,19 +9,14 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+from latexprep.biber_toolchain import BiberToolchain, _host_macho_slice, _seal_toolchain
+from latexprep.file_safety import DirectoryIdentity, regular_file_identity
+from latexprep.latexmk_build import _sources_may_use_biber, build_project
 from latexprep.models import PreparationError
-from latexprep.runtime import (
-    CommandResult,
-    ToolRunner,
-    _BiberToolchain,
-    _distribution_roots,
-    _host_macho_slice,
-    _linux_process_groups,
-    _seal_toolchain,
-    _sources_may_use_biber,
-    _ToolContext,
-    build_project,
-)
+from latexprep.resource_monitor import _group_usage
+from latexprep.runtime import CommandResult, ToolRunner
+from latexprep.sandbox import BubblewrapSandbox, _linux_process_groups, tool_environment
+from latexprep.toolchain import ToolContext, distribution_roots
 from tests.support import live_tests_enabled
 from tests.test_runtime import FakeBuildRunner
 
@@ -45,14 +40,12 @@ class TeXLiveRuntimeTests(unittest.TestCase):
                     executable.write_bytes(b"installed engine fixture")
                     engine = executable.with_name("pdflatex")
                     engine.symlink_to(executable)
-                    roots = _distribution_roots(engine)
+                    roots = distribution_roots(engine)
                     self.assertEqual(roots, {executable, distribution})
-                    context = _ToolContext(
+                    context = ToolContext(
                         engine, frozenset({engine}), frozenset(roots), (str(engine.parent),)
                     )
-                    runner = ToolRunner()
-                    with patch.object(runner, "_tool_context", return_value=context):
-                        environment = runner._environment(workspace, engine)
+                    environment = tool_environment(workspace, context, source_date_epoch="0")
                     self.assertEqual(
                         environment["TEXMFCNF"], str(distribution / "texmf-dist/web2c")
                     )
@@ -72,13 +65,11 @@ class TeXLiveRuntimeTests(unittest.TestCase):
                 with self.subTest(directory=name):
                     distribution = base / "texlive" / name
                     executable = distribution / "bin/pdftex"
-                    self.assertEqual(_distribution_roots(executable), {executable})
-                    context = _ToolContext(
+                    self.assertEqual(distribution_roots(executable), {executable})
+                    context = ToolContext(
                         executable, frozenset({executable}), frozenset({distribution}), ()
                     )
-                    runner = ToolRunner()
-                    with patch.object(runner, "_tool_context", return_value=context):
-                        environment = runner._environment(workspace, executable)
+                    environment = tool_environment(workspace, context, source_date_epoch="0")
                     self.assertNotIn("TEXMFCNF", environment)
 
 
@@ -104,7 +95,7 @@ class HomebrewRuntimeTests(unittest.TestCase):
             binary = poppler / "bin" / "pdfinfo"
             binary.parent.mkdir()
             binary.write_bytes(b"installed tool fixture")
-            roots = _distribution_roots(binary)
+            roots = distribution_roots(binary)
             self.assertIn(nss, roots)
             self.assertIn(prefix / "opt/nss", roots)
             self.assertIn(nspr, roots)
@@ -114,7 +105,7 @@ class HomebrewRuntimeTests(unittest.TestCase):
             outside.mkdir()
             (prefix / "opt/nss").unlink()
             (prefix / "opt/nss").symlink_to(outside, target_is_directory=True)
-            roots = _distribution_roots(binary)
+            roots = distribution_roots(binary)
             self.assertNotIn(outside, roots)
             self.assertNotIn(prefix / "opt/nss", roots)
 
@@ -125,7 +116,7 @@ class LinuxSandboxTests(unittest.IsolatedAsyncioTestCase):
         self.root = Path(self.temporary.name).resolve()
         self.workspace = self.root / "workspace"
         self.workspace.mkdir()
-        self.context = _ToolContext(
+        self.context = ToolContext(
             Path("/usr/bin/perl"),
             frozenset({Path("/usr/bin/perl"), Path("/bin/sh")}),
             frozenset({Path("/usr/lib")}),
@@ -136,14 +127,20 @@ class LinuxSandboxTests(unittest.IsolatedAsyncioTestCase):
         self.temporary.cleanup()
 
     def sandbox_command(
-        self, runner: ToolRunner, inputs: tuple[Path, ...] = (), context: _ToolContext | None = None
+        self,
+        runner: ToolRunner,
+        inputs: tuple[Path, ...] = (),
+        context: ToolContext | None = None,
+        workspace: Path | None = None,
     ) -> list[str]:
+        runner.sandbox = BubblewrapSandbox()
         with (
-            patch("latexprep.runtime.sys.platform", "linux"),
-            patch("latexprep.runtime.shutil.which", return_value="/usr/bin/bwrap"),
-            patch.object(runner, "_tool_context", return_value=context or self.context),
+            patch("latexprep.sandbox.shutil.which", return_value="/usr/bin/bwrap"),
+            patch.object(runner.toolchain, "context", return_value=context or self.context),
         ):
-            return runner._sandbox_command(["/usr/bin/perl", "-v"], self.workspace, inputs)
+            return runner._sandbox_command(
+                ["/usr/bin/perl", "-v"], workspace or self.workspace, inputs
+            )
 
     def test_linux_mounts_only_leaf_writes_and_exact_frozen_inputs(self) -> None:
         runner = ToolRunner()
@@ -190,30 +187,25 @@ class LinuxSandboxTests(unittest.IsolatedAsyncioTestCase):
         runner = ToolRunner()
         private = self.root / "private-program"
         private.write_text("private")
-        private_context = _ToolContext(private, frozenset({private}), frozenset(), ())
+        private_context = ToolContext(private, frozenset({private}), frozenset(), ())
         with self.assertRaisesRegex(PreparationError, "private-home and project"):
             self.sandbox_command(runner, context=private_context)
-        broad = _ToolContext(
+        broad = ToolContext(
             self.context.executable, self.context.executables, frozenset({Path("/")}), ()
         )
         with self.assertRaisesRegex(PreparationError, "declared system paths"):
             self.sandbox_command(runner, context=broad)
-        with (
-            patch("latexprep.runtime.sys.platform", "linux"),
-            patch("latexprep.runtime.shutil.which", return_value="/usr/bin/bwrap"),
-            patch.object(runner, "_tool_context", return_value=self.context),
-            self.assertRaisesRegex(PreparationError, "overlap"),
-        ):
-            runner._sandbox_command(["/usr/bin/perl"], Path("/usr/lib/job"))
+        with self.assertRaisesRegex(PreparationError, "overlap"):
+            self.sandbox_command(runner, workspace=Path("/usr/lib/job"))
 
     async def test_missing_linux_backend_never_launches_command(self) -> None:
         runner = ToolRunner()
+        runner.sandbox = BubblewrapSandbox()
         execute = AsyncMock()
         with (
-            patch("latexprep.runtime.sys.platform", "linux"),
-            patch("latexprep.runtime.shutil.which", return_value=None),
+            patch("latexprep.sandbox.shutil.which", return_value=None),
             patch.object(runner, "_resolve_tool", return_value=Path("/usr/bin/perl")),
-            patch.object(runner, "_tool_context", return_value=self.context),
+            patch.object(runner.toolchain, "context", return_value=self.context),
             patch.object(runner, "_execute", execute),
             self.assertRaisesRegex(PreparationError, "No unrestricted fallback"),
         ):
@@ -229,7 +221,7 @@ class LinuxSandboxTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [group for pid, group, _ in rows if pid in {100, 101, 102, 103}], [100] * 4
         )
-        memory, failure = ToolRunner._group_usage(rows, 100, 1)
+        memory, failure = _group_usage(rows, 100, 1)
         self.assertEqual(memory, 1210)
         self.assertIn("exceeded 1 MiB", failure or "")
         for malformed in (b"", b"1 2 3\n", b"1 invalid 1 1\n", b"1 0 1 -2\n"):
@@ -286,14 +278,14 @@ class ToolIsolationTests(unittest.IsolatedAsyncioTestCase):
             for machine, expected in (("arm64", arm), ("x86_64", intel)):
                 with (
                     self.subTest(wide=wide, machine=machine),
-                    patch("latexprep.runtime.platform.machine", return_value=machine),
+                    patch("latexprep.biber_toolchain.platform.machine", return_value=machine),
                 ):
                     self.assertEqual(_host_macho_slice(image), expected)
 
     def test_unusable_containers_are_refused_and_thin_images_pass_through(self) -> None:
         thin = b"\xcf\xfa\xed\xfe single architecture executable"
         self.assertEqual(_host_macho_slice(thin), thin)
-        with patch("latexprep.runtime.platform.machine", return_value="arm64"):
+        with patch("latexprep.biber_toolchain.platform.machine", return_value="arm64"):
             for description, image in (
                 ("absent host slice", self.universal(((0x01000007, b"x86_64 only"),))),
                 ("truncated records", struct.pack(">II", 0xCAFEBABE, 4) + b"\x01\x00\x00\x0c"),
@@ -307,7 +299,7 @@ class ToolIsolationTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(PreparationError, "outside its container"):
                 _host_macho_slice(bytes(escaping))
         with (
-            patch("latexprep.runtime.platform.machine", return_value="riscv64"),
+            patch("latexprep.biber_toolchain.platform.machine", return_value="riscv64"),
             self.assertRaisesRegex(PreparationError, "Unsupported host architecture"),
         ):
             _host_macho_slice(self.universal(((0x0100000C, b"arm64 slice image"),)))
@@ -342,12 +334,11 @@ class ToolIsolationTests(unittest.IsolatedAsyncioTestCase):
             payload.mkdir()
             (payload / "libperl.dylib").write_bytes(b"extracted payload")
             runner = ToolRunner()
-            info = payload.stat()
-            runner._biber_toolchain = _BiberToolchain(
+            runner._biber.toolchain = BiberToolchain(
                 executable,
                 payload,
-                ToolRunner._file_identity(executable),
-                (info.st_dev, info.st_ino),
+                regular_file_identity(executable),
+                DirectoryIdentity.from_stat(payload.stat()),
             )
             profile = runner._sandbox_command(
                 ["/bin/sh", "-e", f"$biber='{executable} --noconf %O %B';"], workspace
@@ -439,9 +430,9 @@ class DeferredBiberTests(unittest.IsolatedAsyncioTestCase):
         [rules] = self.build_rules(runner)
         self.assertIn("$biber='internal latexprep_biber_deferred'", rules)
         self.assertNotIn("--noconf", rules)
-        bibliography = result.tools["bibliography"]
-        assert isinstance(bibliography, dict)
-        self.assertIn("no source mentions biblatex", bibliography["biber_preparation"])
+        bibliography = result.tools.bibliography
+        assert bibliography is not None
+        self.assertIn("no source mentions biblatex", bibliography.biber_preparation or "")
 
     async def test_fresh_bcf_from_a_deferred_build_rebuilds_with_biber_prepared(self) -> None:
         runner = UnpreparedBiberRunner({"main.bcf": _BCF})
@@ -454,10 +445,10 @@ class DeferredBiberTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("$biber='biber --noconf %O %B'", prepared)
         self.assertNotIn("latexprep_biber_deferred", prepared)
         self.assertEqual(result.pdf, work.resolve() / "output" / "main.pdf")
-        bibliography = result.tools["bibliography"]
-        assert isinstance(bibliography, dict)
-        self.assertIn("that build was discarded", bibliography["biber_preparation"])
-        self.assertIn("biber", result.tools)
+        bibliography = result.tools.bibliography
+        assert bibliography is not None
+        self.assertIn("that build was discarded", bibliography.biber_preparation or "")
+        self.assertIn("biber", result.tools.versions)
 
     async def test_biblatex_sources_or_a_ready_toolchain_prepare_biber_before_one_build(
         self,
@@ -471,9 +462,10 @@ class DeferredBiberTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(runner.biber_preparations, 1)
         [rules] = self.build_rules(runner)
         self.assertIn("$biber='biber --noconf %O %B'", rules)
-        bibliography = result.tools["bibliography"]
-        assert isinstance(bibliography, dict)
-        self.assertNotIn("biber_preparation", bibliography)
+        bibliography = result.tools.bibliography
+        assert bibliography is not None
+        self.assertIsNone(bibliography.biber_preparation)
+        self.assertNotIn("biber_preparation", bibliography.to_report())
         (self.source / "local.sty").unlink()
         runner.commands.clear()
         await build_project(self.source, "main.tex", self.root / "second", "pdflatex", runner)
@@ -608,7 +600,7 @@ class BibliographyBackendTests(unittest.IsolatedAsyncioTestCase):
         tool = next(item for item in result.findings if item.rule == "build.bibliography_tool")
         self.assertEqual(tool.code, "BLD202")
         self.assertEqual(tool.status, "passed")
-        self.assertIn("biber", result.tools)
+        self.assertIn("biber", result.tools.versions)
         self.assertIn(["biber", "--noconf", "--version"], runner.commands)
         missing, _ = await self.build("biber", {"main.bcf": _BCF}, unavailable="biber")
         self.assertFalse(missing.success)

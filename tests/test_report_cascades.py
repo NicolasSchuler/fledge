@@ -8,15 +8,18 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from latexprep.bibliography_checks import check_bibliography_details
+from latexprep.bibliography_checks import check_bibliography_coverage_and_fields
 from latexprep.build_checks import qualify_citation_findings
+from latexprep.check_policy import configured_opt_in_codes
 from latexprep.config import Settings
-from latexprep.core import JobRequest, run_job
-from latexprep.models import Finding, Report
-from latexprep.presentation import render_compact, render_terminal
-from latexprep.reporting import not_checked_areas, not_checked_summary
-from latexprep.runtime import BuildResult
+from latexprep.core import run_job
+from latexprep.coverage_hints import not_checked_areas, not_checked_summary
+from latexprep.finding_view import RenderOptions
+from latexprep.job_context import JobRequest
+from latexprep.latexmk_build import BuildResult
+from latexprep.models import Finding, Outcome, Report
 from latexprep.submission_checks import SubmissionOptions
+from latexprep.terminal_report import render_compact, render_terminal
 
 from .support import write_project
 
@@ -34,8 +37,8 @@ def blocked(task: str, document: str | None = None) -> Finding:
     return Finding(
         "execution.task",
         f"{task} was not run: Prerequisite failed: baseline build",
-        "info",
-        "skipped",
+        severity="info",
+        status="skipped",
         details=details,
     )
 
@@ -46,11 +49,13 @@ def tex_error_build(work: Path) -> BuildResult:
     return BuildResult(
         success=False,
         findings=[
-            Finding("build.tex_error", "./main.tex:4: Undefined control sequence.", "error"),
+            Finding(
+                "build.tex_error", "./main.tex:4: Undefined control sequence.", severity="error"
+            ),
             Finding(
                 "build.undefined_citation",
                 "LaTeX Warning: Citation `knuth' on page 1 undefined on input line 3.",
-                "error",
+                severity="error",
                 details={"document": "main.tex", "input_line": 3},
             ),
         ],
@@ -67,7 +72,7 @@ class BlockedTaskSummaryTests(unittest.TestCase):
             "baseline PDF inspection, baseline configured PDF checks, pdf fonts"
         )
         for show_passed in (False, True):
-            terminal = render_terminal(report, show_passed=show_passed)
+            terminal = render_terminal(report, options=RenderOptions(show_passed=show_passed))
             self.assertEqual(terminal.count(expected), 1, terminal)
             self.assertNotIn("was not run", terminal)
             self.assertNotIn("execution.task", terminal)
@@ -88,18 +93,20 @@ class BlockedTaskSummaryTests(unittest.TestCase):
         self.assertIn("two.tex: 1 check did not run because baseline build failed: pdf b", terminal)
 
     def test_a_failed_task_without_prerequisite_remains_a_finding(self):
-        failure = Finding("execution.task", "pdf fonts: OSError: gone", "error", "inconclusive")
+        failure = Finding(
+            "execution.task", "pdf fonts: OSError: gone", severity="error", status="inconclusive"
+        )
         terminal = render_terminal(Report("check", findings=[failure]))
         self.assertIn("pdf fonts: OSError: gone", terminal)
         self.assertNotIn("did not run because", terminal)
 
     def test_job_records_failed_prerequisites_for_blocked_tasks(self):
-        async def failing_build(tree, main, work, engine, runner):
+        async def failing_build(tree, main, work, engine, runner, **_options):
             return tex_error_build(work)
 
         with tempfile.TemporaryDirectory() as directory:
             source = write_project(Path(directory) / "paper", {"main.tex": CITING, "refs.bib": BIB})
-            with patch("latexprep.core.build_project", side_effect=failing_build):
+            with patch("latexprep.document_tasks.build_project", side_effect=failing_build):
                 report = asyncio.run(run_job(JobRequest("check", source, Settings())))
         tasks = [item for item in report.findings if item.rule == "execution.task"]
         self.assertTrue(tasks)
@@ -116,7 +123,7 @@ class BlockedTaskSummaryTests(unittest.TestCase):
 class DuplicateFindingTests(unittest.TestCase):
     def test_identical_recheck_at_a_later_stage_is_shown_once(self):
         marker = Finding(
-            "source-edit-marker",
+            "source.edit_marker",
             "Possible unfinished editing or placeholder text: 'TODO'.",
             path="main.tex",
             line=4,
@@ -137,7 +144,7 @@ class DuplicateFindingTests(unittest.TestCase):
         self.assertEqual(len(report.to_dict()["findings"]), 2)
 
     def test_a_changed_final_result_is_still_shown(self):
-        initial = Finding("source-edit-marker", "Marker 'TODO'.", path="main.tex", line=4)
+        initial = Finding("source.edit_marker", "Marker 'TODO'.", path="main.tex", line=4)
         changed = Finding(
             initial.rule,
             "Marker 'FIXME'.",
@@ -165,7 +172,7 @@ class DuplicateFindingTests(unittest.TestCase):
     def test_distinct_locations_stay_separate(self):
         findings = [
             Finding(
-                "source-duplicate-label",
+                "source.duplicate_label",
                 "Label 'sec:a' is defined twice.",
                 path="main.tex",
                 line=line,
@@ -184,7 +191,7 @@ class CitationAfterTexErrorTests(unittest.TestCase):
         extra = Finding(
             "build.undefined_citation",
             "LaTeX Warning: Citation `lamport' on page 1 undefined on input line 5.",
-            "error",
+            severity="error",
         )
         findings = qualify_citation_findings([*build.findings, extra], build_succeeded=False)
         citations = [item for item in findings if item.rule == "build.undefined_citation"]
@@ -201,13 +208,15 @@ class CitationAfterTexErrorTests(unittest.TestCase):
             Finding(
                 "build.undefined_reference",
                 f"LaTeX Warning: Reference `{key}' on page 1 undefined on input line {line}.",
-                "error",
+                severity="error",
                 details={"document": "main.tex", "input_line": line},
             )
             for key, line in (("sec:intro", 6), ("fig:plot", 7))
         ]
         summary = Finding(
-            "build.undefined_reference", "LaTeX Warning: There were undefined references.", "error"
+            "build.undefined_reference",
+            "LaTeX Warning: There were undefined references.",
+            severity="error",
         )
         with tempfile.TemporaryDirectory() as directory:
             build = tex_error_build(Path(directory))
@@ -236,13 +245,15 @@ class CitationAfterTexErrorTests(unittest.TestCase):
         citation = Finding(
             "build.undefined_citation",
             "LaTeX Warning: Citation `missing' on page 1 undefined on input line 3.",
-            "error",
+            severity="error",
         )
         for findings, succeeded in (([citation], False), ([citation], True)):
             self.assertEqual(
                 qualify_citation_findings(findings, build_succeeded=succeeded), [citation]
             )
-        error = Finding("build.tex_error", "./main.tex:4: Undefined control sequence.", "error")
+        error = Finding(
+            "build.tex_error", "./main.tex:4: Undefined control sequence.", severity="error"
+        )
         # A completed build's log is complete evidence even if it recorded an error.
         self.assertEqual(
             qualify_citation_findings([error, citation], build_succeeded=True), [error, citation]
@@ -275,14 +286,14 @@ class BibliographyCascadeTests(unittest.TestCase):
     def test_missing_figure_yields_one_bibliography_note(self):
         main = CITING.replace("\\begin{document}\n", "\\begin{document}\n\\includegraphics{gone}\n")
         project = write_project(self.root / "paper", {"main.tex": main, "refs.bib": BIB})
-        findings = check_bibliography_details(project, "main.tex", self.options)
+        findings = check_bibliography_coverage_and_fields(project, "main.tex", self.options)
         self.assert_one_note(findings, "Literal dependency 'gone' is missing")
 
     def test_ambiguous_main_yields_one_bibliography_note(self):
         project = write_project(
             self.root / "paper", {"a.tex": CITING, "b.tex": CITING, "refs.bib": BIB}
         )
-        findings = check_bibliography_details(project, None, self.options)
+        findings = check_bibliography_coverage_and_fields(project, None, self.options)
         self.assert_one_note(findings, "A unique readable main source could not be selected")
 
     def test_other_uncertainty_keeps_individual_summaries(self):
@@ -290,7 +301,7 @@ class BibliographyCascadeTests(unittest.TestCase):
             "\\begin{document}\n", "\\begin{document}\n\\includegraphics{gone}\n"
         )
         project = write_project(self.root / "paper", {"main.tex": main, "refs.bib": BIB})
-        findings = check_bibliography_details(project, "main.tex", self.options)
+        findings = check_bibliography_coverage_and_fields(project, "main.tex", self.options)
         self.assertFalse(any(item.rule == "bibliography.source_error" for item in findings))
         self.assertTrue(
             any(item.code == "BIB101" and item.status == "inconclusive" for item in findings)
@@ -298,7 +309,7 @@ class BibliographyCascadeTests(unittest.TestCase):
 
     def test_complete_project_is_unchanged(self):
         project = write_project(self.root / "paper", {"main.tex": CITING, "refs.bib": BIB})
-        findings = check_bibliography_details(project, "main.tex", self.options)
+        findings = check_bibliography_coverage_and_fields(project, "main.tex", self.options)
         self.assertFalse(any(item.rule == "bibliography.source_error" for item in findings))
         self.assertTrue(any(item.code == "BIB101" and item.status == "passed" for item in findings))
 
@@ -314,7 +325,7 @@ class MainSelectionTests(unittest.TestCase):
             item
             for item in report.findings
             if item.rule
-            in {"project.main_selection", "source-root-ambiguous", "source-root-missing"}
+            in {"project.main_selection", "source.root_ambiguous", "source.root_missing"}
         ]
         self.assertEqual([item.rule for item in roots], ["project.main_selection"])
         self.assertIn("a.tex, b.tex", roots[0].message)
@@ -323,7 +334,7 @@ class MainSelectionTests(unittest.TestCase):
 
 class NotCheckedFooterTests(unittest.TestCase):
     def test_default_settings_name_major_opt_in_areas(self):
-        entries = not_checked_areas(Settings())
+        entries = not_checked_areas(configured_opt_in_codes(Settings().top_level_values()))
         areas = [entry["area"] for entry in entries]
         self.assertEqual(
             areas,
@@ -348,23 +359,34 @@ class NotCheckedFooterTests(unittest.TestCase):
         settings = Settings(
             max_pages=8, submission_checks=SubmissionOptions(identity_terms=("Ada Lovelace",))
         )
-        areas = [entry["area"] for entry in not_checked_areas(settings)]
+        areas = [
+            entry["area"]
+            for entry in not_checked_areas(configured_opt_in_codes(settings.top_level_values()))
+        ]
         self.assertNotIn("page_limit", areas)
         self.assertNotIn("anonymity", areas)
         self.assertIn("image_resolution", areas)
 
     def test_deselected_check_is_listed_as_not_checked(self):
-        from latexprep.check_policy import effective_settings
         from latexprep.check_selection import CheckSelection
+        from latexprep.config import effective_settings
 
         settings = effective_settings(
             Settings(max_pages=8, checks=CheckSelection(ignore=("PDF001",)))
         )
-        self.assertIn("page_limit", [entry["area"] for entry in not_checked_areas(settings)])
+        self.assertIn(
+            "page_limit",
+            [
+                entry["area"]
+                for entry in not_checked_areas(configured_opt_in_codes(settings.top_level_values()))
+            ],
+        )
 
     def test_terminal_footer_is_one_line_and_compact_omits_it(self):
-        report = Report("check", outcome="passed")
-        report.execution["not_checked"] = not_checked_areas(Settings())
+        report = Report("check", outcome=Outcome.PASSED)
+        report.execution["not_checked"] = not_checked_areas(
+            configured_opt_in_codes(Settings().top_level_values())
+        )
         summary = not_checked_summary(report.execution["not_checked"])
         assert summary is not None
         self.assertTrue(
@@ -380,8 +402,10 @@ class NotCheckedFooterTests(unittest.TestCase):
         self.assertNotIn("Not checked", render_compact(report))
 
     def test_footer_points_at_the_loaded_settings_file_instead_of_init(self):
-        report = Report("check", outcome="passed")
-        report.execution["not_checked"] = not_checked_areas(Settings())
+        report = Report("check", outcome=Outcome.PASSED)
+        report.execution["not_checked"] = not_checked_areas(
+            configured_opt_in_codes(Settings().top_level_values())
+        )
         report.execution["config_path"] = "/work/paper/fledge.toml"
         summary = not_checked_summary(
             report.execution["not_checked"], report.execution["config_path"]
@@ -407,7 +431,7 @@ class NotCheckedFooterTests(unittest.TestCase):
         self.assertIn("Not checked (needs your settings)", render_terminal(report))
 
     def test_reports_without_the_field_have_no_footer(self):
-        self.assertNotIn("Not checked", render_terminal(Report("pdf", outcome="passed")))
+        self.assertNotIn("Not checked", render_terminal(Report("pdf", outcome=Outcome.PASSED)))
         self.assertIsNone(not_checked_summary([]))
         self.assertIsNone(not_checked_summary(None))
 

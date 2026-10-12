@@ -7,11 +7,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from latexprep.config import Settings
-from latexprep.formatting import format_project
 from latexprep.models import has_blockers
-from latexprep.runtime import CommandResult, ToolRunner
+from latexprep.runtime import CommandResult, ToolRunner, ToolVersion
 from latexprep.scheduler import ResourceBudget
+from tests.test_formatting import format_with
 
 
 class ControlledFormatter(ToolRunner):
@@ -32,10 +31,10 @@ class ControlledFormatter(ToolRunner):
         self.max_active = 0
         self.version_calls = 0
 
-    async def tool_version(self, argv, workspace) -> dict[str, object]:
+    async def tool_version(self, argv, workspace) -> ToolVersion:
         self.version_calls += 1
         assert workspace == self.work / "version"
-        return {"version": "test formatter", "executable": argv[0]}
+        return ToolVersion(("test formatter",), argv[0], ("--version",))
 
     async def run(self, argv, cwd, workspace, *, readonly_inputs=(), memory_mb=None):
         relative = workspace.relative_to(self.work / "files").as_posix()
@@ -80,7 +79,7 @@ class ControlledFormatter(ToolRunner):
 
 
 def output(text, **flags):
-    return CommandResult(0, text, "", False, [], **flags)
+    return CommandResult(0, text, "", resolved_command=[], **flags)
 
 
 def source_tree(base, paths):
@@ -112,7 +111,7 @@ class ParallelFormattingTests(unittest.IsolatedAsyncioTestCase):
             paths = ["left/main.tex", "right/main.tex"]
             source = source_tree(base, paths)
             work = base / "work"
-            budget = ResourceBudget(jobs=2, memory_mb=1024)
+            budget = ResourceBudget(cpu_slots=2, memory_mb=1024)
             runner = ControlledFormatter(
                 work,
                 {path: [output(path + "\n")] * 2 for path in paths},
@@ -128,11 +127,9 @@ class ParallelFormattingTests(unittest.IsolatedAsyncioTestCase):
 
             with (
                 patch("latexprep.formatting.shutil.which", return_value="/fake/tex-fmt"),
-                patch("latexprep.formatting.difflib.unified_diff", side_effect=checked_diff),
+                patch("latexprep.text_edits.difflib.unified_diff", side_effect=checked_diff),
             ):
-                task = asyncio.create_task(
-                    format_project(source, work, runner, Settings(), budget=budget)
-                )
+                task = asyncio.create_task(format_with(source, work, runner, budget=budget))
                 try:
                     await self.wait_for_events(*(runner.entered[path] for path in paths))
                     self.assertEqual(runner.active, 2)
@@ -172,7 +169,7 @@ class ParallelFormattingTests(unittest.IsolatedAsyncioTestCase):
                 paths = ["a.tex", "b.tex"]
                 source = source_tree(base, paths)
                 work = base / "work"
-                budget = ResourceBudget(jobs=jobs, memory_mb=1024) if jobs else None
+                budget = ResourceBudget(cpu_slots=jobs, memory_mb=1024) if jobs else None
                 runner = ControlledFormatter(
                     work,
                     {path: [output("formatted\n")] * 2 for path in paths},
@@ -180,9 +177,7 @@ class ParallelFormattingTests(unittest.IsolatedAsyncioTestCase):
                     blocked=paths,
                 )
                 with patch("latexprep.formatting.shutil.which", return_value="/fake/tex-fmt"):
-                    task = asyncio.create_task(
-                        format_project(source, work, runner, Settings(), budget=budget)
-                    )
+                    task = asyncio.create_task(format_with(source, work, runner, budget=budget))
                     try:
                         await self.wait_for_events(runner.entered["a.tex"])
                         self.assertFalse(runner.entered["b.tex"].is_set())
@@ -211,12 +206,10 @@ class ParallelFormattingTests(unittest.IsolatedAsyncioTestCase):
                 }
                 source = source_tree(base, outputs)
                 work = base / "work"
-                budget = ResourceBudget(jobs=jobs, memory_mb=1024)
+                budget = ResourceBudget(cpu_slots=jobs, memory_mb=1024)
                 runner = ControlledFormatter(work, outputs, budget=budget)
                 with patch("latexprep.formatting.shutil.which", return_value="/fake/tex-fmt"):
-                    results.append(
-                        await format_project(source, work, runner, Settings(), budget=budget)
-                    )
+                    results.append(await format_with(source, work, runner, budget=budget))
         self.assertEqual(results[0], results[1])
         self.assertEqual(list(results[0].contents), ["a/section.ltx", "z.tex"])
         self.assertEqual(
@@ -245,12 +238,10 @@ class ParallelFormattingTests(unittest.IsolatedAsyncioTestCase):
                     }
                     source = source_tree(base, outputs)
                     work = base / "work"
-                    budget = ResourceBudget(jobs=jobs, memory_mb=1024)
+                    budget = ResourceBudget(cpu_slots=jobs, memory_mb=1024)
                     runner = ControlledFormatter(work, outputs, budget=budget)
                     with patch("latexprep.formatting.shutil.which", return_value="/fake/tex-fmt"):
-                        result = await format_project(
-                            source, work, runner, Settings(), budget=budget
-                        )
+                        result = await format_with(source, work, runner, budget=budget)
                     self.assertTrue(has_blockers(result.findings))
                     self.assertEqual(result.contents, {})
                     self.assertEqual(result.originals, {})
@@ -290,7 +281,7 @@ class ParallelFormattingTests(unittest.IsolatedAsyncioTestCase):
             paths = ["a.tex", "b.tex", "c.tex"]
             source = source_tree(base, paths)
             work = base / "work"
-            budget = ResourceBudget(jobs=2, memory_mb=200)
+            budget = ResourceBudget(cpu_slots=2, memory_mb=200)
             cleanup_gate = asyncio.Event()
             runner = ControlledFormatter(
                 work,
@@ -300,9 +291,7 @@ class ParallelFormattingTests(unittest.IsolatedAsyncioTestCase):
                 cleanup_gate=cleanup_gate,
             )
             with patch("latexprep.formatting.shutil.which", return_value="/fake/tex-fmt"):
-                task = asyncio.create_task(
-                    format_project(source, work, runner, Settings(), budget=budget)
-                )
+                task = asyncio.create_task(format_with(source, work, runner, budget=budget))
                 try:
                     await self.wait_for_events(runner.entered["a.tex"])
                     self.assertNotEqual(budget.statistics()["active_memory_mb"], 0)
@@ -331,14 +320,14 @@ class ParallelFormattingTests(unittest.IsolatedAsyncioTestCase):
             paths = ["a.tex", "b.tex"]
             source = source_tree(base, paths)
             work = base / "work"
-            budget = ResourceBudget(jobs=2, memory_mb=128)
+            budget = ResourceBudget(cpu_slots=2, memory_mb=128)
             runner = ControlledFormatter(
                 work,
                 {path: [output("formatted\n")] * 2 for path in paths},
                 budget=budget,
             )
             with patch("latexprep.formatting.shutil.which", return_value="/fake/tex-fmt"):
-                result = await format_project(source, work, runner, Settings(), budget=budget)
+                result = await format_with(source, work, runner, budget=budget)
             self.assertTrue(has_blockers(result.findings))
             self.assertEqual(runner.calls, [])
             self.assertEqual(result.contents, {})
@@ -362,7 +351,7 @@ class ParallelFormattingTests(unittest.IsolatedAsyncioTestCase):
             base = Path(directory)
             source = source_tree(base, ["main.tex"])
             work = base / "work"
-            budget = ResourceBudget(jobs=2, memory_mb=1024)
+            budget = ResourceBudget(cpu_slots=2, memory_mb=1024)
             runner = ControlledFormatter(
                 work,
                 {"main.tex": [output("formatted\n")] * 2},
@@ -370,9 +359,7 @@ class ParallelFormattingTests(unittest.IsolatedAsyncioTestCase):
                 blocked=["main.tex"],
             )
             with patch("latexprep.formatting.shutil.which", return_value="/fake/tex-fmt"):
-                task = asyncio.create_task(
-                    format_project(source, work, runner, Settings(), budget=budget)
-                )
+                task = asyncio.create_task(format_with(source, work, runner, budget=budget))
                 try:
                     await self.wait_for_events(runner.entered["main.tex"])
                     (source / "main.tex").write_bytes(b"new independent edit\n")

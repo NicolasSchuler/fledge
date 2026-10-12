@@ -44,7 +44,9 @@ blocked
 incomplete
   A check that ran but could not reach a decision (status `inconclusive`), for
   example because a tool is missing or the source uses an unsupported macro. It
-  is never counted as a pass, and in a required check it blocks.
+  is never counted as a pass, and in a required check it blocks. The JSON
+  report's `incomplete` field is broader: it marks any result, including a
+  confirmed failure, whose evidence was partial, so it cannot be waived.
 
 scope note
   An `info` finding that is `skipped` or `not_applicable`. It states what was
