@@ -106,7 +106,12 @@ def submission_text_command(
     try:
         fields = _read_fields(source, main, config, isolated=isolated)
     except (PreparationError, OSError) as error:
-        click.echo(escape_single_line_text(f"Cannot export submission text: {error}"), err=True)
+        message = escape_single_line_text(f"Cannot export submission text: {error}")
+        click.echo(message, err=True)
+        if json_output:
+            # A script that parses standard output gets an object it can recognize.
+            payload = {"schema_version": SUBMISSION_TEXT_SCHEMA_VERSION, "error": message}
+            click.echo(json.dumps(payload, ensure_ascii=False, indent=2))
         raise click.exceptions.Exit(Outcome.ERROR.exit_code) from error
     if json_output:
         payload = {

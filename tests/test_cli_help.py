@@ -47,6 +47,20 @@ class HelpTests(unittest.TestCase):
             self.assertIn(option, advanced)
             self.assertNotIn(f"{option} ", common)
 
+    def test_pdf_check_offers_only_the_options_that_apply_to_a_pdf_that_is_not_built(self):
+        text = self.help_text("pdf", "check")
+        for option in ("--engine", "--bibliography-backend"):
+            self.assertNotIn(option, text)
+        self.assertNotIn("build", text.split("--reference-pdf")[1].split("--max-pages")[0])
+        self.assertIn("--reference-pdf", text)
+        # check and prepare still build the PDF, so they keep both options and their wording.
+        for command in ("check", "prepare"):
+            built = self.help_text(command)
+            self.assertIn("--engine", built)
+            self.assertIn("PDF that the build must match", built)
+        result = CliRunner().invoke(cli, ["pdf", "check", "paper.pdf", "--engine", "xelatex"])
+        self.assertEqual(result.exit_code, USAGE_EXIT_CODE, result.output)
+
     def test_formatting_check_flag_stays_accepted_as_documented_no_op(self):
         with tempfile.TemporaryDirectory() as directory:
             result = CliRunner().invoke(cli, ["fmt", directory, "--check", "--quiet", "--json"])

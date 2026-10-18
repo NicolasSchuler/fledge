@@ -111,7 +111,7 @@ class ListedNamesTests(unittest.TestCase):
     def test_many_names_are_cut_short_and_counted(self) -> None:
         names = [f"f{index}.tex" for index in range(MAX_LISTED_PATHS + 3)]
         text = listed_names(names)
-        self.assertTrue(text.endswith("and 3 more"))
+        self.assertEqual(text, "f0.tex, f1.tex, f2.tex, f3.tex, f4.tex (+3 more)")
         self.assertEqual(listed_names(names[:2]), "f0.tex, f1.tex")
 
 

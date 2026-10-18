@@ -32,14 +32,39 @@ _MAX_GROUP_PROCESSES = 32
 _PROCESS_TABLE_TIMEOUT_SECONDS = 2
 _PROCESS_LISTING_PROGRAM = "/bin/ps"
 # A workspace may hold this many times the single-file ceiling in total. The ceiling
-# bounds one runaway file; the multiple bounds many files that are each below it.
-_WORKSPACE_TOTAL_FILE_LIMITS = 4
+# bounds one runaway file; the multiple bounds many files that are each below it. A build
+# copies the sources into its workspace, so the settings keep the import total within it.
+WORKSPACE_TOTAL_FILE_LIMITS = 4
 # How often a job is sampled: tightly while it ramps up, because runaway allocation and
 # output growth almost always show in the first seconds, then at a relaxed rate because
 # every sample walks the whole job tree.
 _RAMP_UP_SECONDS = 3.0
 _RAMP_UP_SAMPLE_SECONDS = 0.1
 _STEADY_SAMPLE_SECONDS = 0.5
+
+# How a resource failure begins, so that its message can be traced to the setting that
+# governs the limit. A process count and the number of workspace entries are fixed limits.
+_FILE_SIZE_VIOLATION = "A generated file exceeded the file size limit"
+_WORKSPACE_TOTAL_VIOLATION = "Workspace exceeded the total disk limit"
+_TOOL_MEMORY_VIOLATION = "Aggregate tool memory exceeded"
+_JOB_MEMORY_VIOLATION = "Aggregate job memory including the parent exceeded"
+_JOB_STORAGE_VIOLATION = "Job temporary storage exceeded"
+_LIMIT_ADVICE = (
+    (_FILE_SIZE_VIOLATION, "Raise max_generated_file_bytes, or use smaller generated files."),
+    (
+        _WORKSPACE_TOTAL_VIOLATION,
+        "A tool workspace may hold four times max_generated_file_bytes in total, the copy of "
+        "the sources included: raise max_generated_file_bytes or lower max_import_bytes.",
+    ),
+    (_TOOL_MEMORY_VIOLATION, "Raise build_memory_mb."),
+    (_JOB_MEMORY_VIOLATION, "Raise memory_mb."),
+    (_JOB_STORAGE_VIOLATION, "Raise max_temporary_bytes."),
+)
+
+
+def limit_advice(violation: str) -> str | None:
+    """What to change when a resource failure message reports a configurable limit, if any."""
+    return next((advice for start, advice in _LIMIT_ADVICE if violation.startswith(start)), None)
 
 
 class GroupUsage(NamedTuple):
@@ -127,7 +152,7 @@ def group_usage(samples: list[ProcessSample], pid: int, memory_mb: int) -> Group
     sizes = [sample.rss_kb for sample in samples if sample.group == pid]
     resident_kb = sum(sizes)
     if resident_kb > memory_mb * 1024:
-        return GroupUsage(resident_kb, f"Aggregate tool memory exceeded {memory_mb} MiB")
+        return GroupUsage(resident_kb, f"{_TOOL_MEMORY_VIOLATION} {memory_mb} MiB")
     if len(sizes) > _MAX_GROUP_PROCESSES:
         return GroupUsage(resident_kb, f"Tool process count exceeded {_MAX_GROUP_PROCESSES}")
     return GroupUsage(resident_kb, None)
@@ -152,9 +177,9 @@ class _WorkspaceTally:
         if self.violation is not None:
             return
         if size > self._max_file_bytes:
-            self.violation = "A generated file exceeded the file size limit"
-        elif self._bytes > _WORKSPACE_TOTAL_FILE_LIMITS * self._max_file_bytes:
-            self.violation = "Workspace exceeded the total disk limit"
+            self.violation = _FILE_SIZE_VIOLATION
+        elif self._bytes > WORKSPACE_TOTAL_FILE_LIMITS * self._max_file_bytes:
+            self.violation = _WORKSPACE_TOTAL_VIOLATION
 
 
 class StorageUsage(NamedTuple):
@@ -325,7 +350,7 @@ class ResourceMonitor:
         )
         limit = statistics.memory_limit_mb
         if parent_kb + tool_kb > limit * 1024:
-            self.fail_job(f"Aggregate job memory including the parent exceeded {limit} MiB")
+            self.fail_job(f"{_JOB_MEMORY_VIOLATION} {limit} MiB")
         for pid, command in commands.items():
             usage = group_usage(samples, pid, command.memory_mb)
             statistics.peak_command_rss_mb = _peak(
@@ -362,7 +387,7 @@ class ResourceMonitor:
                     command.fail(failure)
             self.statistics.peak_temp_bytes = max(self.statistics.peak_temp_bytes, total)
             if total > scope.max_temp_bytes:
-                self.fail_job(f"Job temporary storage exceeded {scope.max_temp_bytes} bytes")
+                self.fail_job(f"{_JOB_STORAGE_VIOLATION} {scope.max_temp_bytes} bytes")
         finally:
             self.statistics.samples += 1
             self.statistics.monitor_seconds += time.monotonic() - start

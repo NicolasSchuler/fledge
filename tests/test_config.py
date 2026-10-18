@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import re
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 
@@ -144,15 +146,58 @@ class ByteLimitTests(unittest.TestCase):
     def test_an_explicit_limit_wins_and_the_other_keeps_falling_back(self) -> None:
         both = load_settings(
             None,
-            {"max_bytes": 4096, "max_import_bytes": 8192, "max_generated_file_bytes": 1024},
+            {"max_bytes": 8192, "max_import_bytes": 4096, "max_generated_file_bytes": 1024},
         )
-        self.assertEqual((both.import_byte_limit, both.generated_file_byte_limit), (8192, 1024))
+        self.assertEqual((both.import_byte_limit, both.generated_file_byte_limit), (4096, 1024))
         only_import = load_settings(None, {"max_bytes": 4096, "max_import_bytes": 8192})
         self.assertEqual(only_import.import_byte_limit, 8192)
         self.assertEqual(only_import.generated_file_byte_limit, 4096)
         only_file = load_settings(None, {"max_bytes": 4096, "max_generated_file_bytes": 1024})
         self.assertEqual(only_file.import_byte_limit, 4096)
         self.assertEqual(only_file.generated_file_byte_limit, 1024)
+
+    def test_the_import_total_must_fit_in_the_workspace_of_a_build(self) -> None:
+        """The documented 1 GiB import with 64 MiB per file could never be built."""
+        mebibyte = 1024 * 1024
+        for overrides in (
+            {"max_import_bytes": 1024 * mebibyte, "max_generated_file_bytes": 64 * mebibyte},
+            # The default import total (256 MiB) against a small per-file limit.
+            {"max_generated_file_bytes": 7000},
+            {"max_bytes": 4097, "max_generated_file_bytes": 1024},
+        ):
+            with self.subTest(overrides=overrides):
+                with self.assertRaises(SettingsError) as raised:
+                    load_settings(None, overrides)
+                self.assertEqual(
+                    raised.exception.settings, ("max_import_bytes", "max_generated_file_bytes")
+                )
+                message = str(raised.exception)
+                self.assertIn("max_import_bytes", message)
+                self.assertIn("max_generated_file_bytes", message)
+                self.assertIn("4 times max_generated_file_bytes", message)
+
+    def test_the_documented_byte_limit_example_is_a_valid_configuration(self) -> None:
+        text = (Path(__file__).resolve().parents[1] / "docs" / "configuration.md").read_text(
+            encoding="utf-8"
+        )
+        [example] = [
+            block
+            for block in re.findall(r"```toml\n(.*?)```", text, re.DOTALL)
+            if "max_generated_file_bytes" in block
+        ]
+        settings = load_settings(None, tomllib.loads(example))
+        self.assertEqual(settings.import_byte_limit, 1024**3)
+        self.assertLessEqual(settings.import_byte_limit, 4 * settings.generated_file_byte_limit)
+
+    def test_a_workspace_sized_import_total_and_the_defaults_are_valid(self) -> None:
+        mebibyte = 1024 * 1024
+        defaults = Settings()
+        self.assertLessEqual(defaults.import_byte_limit, 4 * defaults.generated_file_byte_limit)
+        limits = load_settings(
+            None, {"max_import_bytes": 256 * mebibyte, "max_generated_file_bytes": 64 * mebibyte}
+        )
+        self.assertEqual(limits.import_byte_limit, 4 * limits.generated_file_byte_limit)
+        load_settings(None, {"max_bytes": 1024 * mebibyte})
 
     def test_settings_files_and_reports_use_the_new_keys(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -178,11 +223,11 @@ class ByteLimitTests(unittest.TestCase):
     def test_each_consumer_reads_its_own_limit(self) -> None:
         settings = load_settings(
             None,
-            {"max_bytes": 4096, "max_import_bytes": 8192, "max_generated_file_bytes": 1024},
+            {"max_bytes": 8192, "max_import_bytes": 4096, "max_generated_file_bytes": 1024},
         )
         limits = RuntimeLimits.from_settings(settings)
-        self.assertEqual(ImportLimits.from_settings(settings).max_bytes, 8192)
-        self.assertEqual(limits.max_copy_bytes, 8192)
+        self.assertEqual(ImportLimits.from_settings(settings).max_bytes, 4096)
+        self.assertEqual(limits.max_copy_bytes, 4096)
         self.assertEqual(limits.max_file_bytes, 1024)
         fallback = load_settings(None, {"max_bytes": 4096})
         limits = RuntimeLimits.from_settings(fallback)
@@ -196,7 +241,13 @@ class ToolLimitTests(unittest.TestCase):
 
     def test_limits_follow_the_settings_of_the_job(self) -> None:
         settings = load_settings(
-            None, {"timeout_seconds": 33, "build_memory_mb": 512, "max_generated_file_bytes": 7000}
+            None,
+            {
+                "timeout_seconds": 33,
+                "build_memory_mb": 512,
+                "max_import_bytes": 7000,
+                "max_generated_file_bytes": 7000,
+            },
         )
         limits = RuntimeLimits.from_settings(settings)
         self.assertEqual(

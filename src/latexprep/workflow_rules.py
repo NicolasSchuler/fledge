@@ -47,13 +47,14 @@ RULES = (
         name="package.archive_limit",
         title="Archive within the extraction limit",
         description=(
-            "Fail when the prepared archive is larger than max_bytes. It then cannot be "
-            "re-extracted for the rebuild that verifies it, so it is not released."
+            "Fail when the prepared archive is larger than max_import_bytes (max_bytes unless "
+            "set). It then cannot be re-extracted for the rebuild that verifies it, so it is "
+            "not released."
         ),
         tests=(
             "tests.test_limit_findings.ArchiveLimitTests.test_an_archive_over_max_bytes_blocks_verification",
         ),
-        fix="Reduce the shipped files or raise max_bytes explicitly.",
+        fix="Reduce the shipped files or raise max_import_bytes explicitly.",
         mandatory=True,
     ),
     Rule(

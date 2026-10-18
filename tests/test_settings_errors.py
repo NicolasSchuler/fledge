@@ -430,6 +430,34 @@ class SettingsErrorMessageTests(unittest.TestCase):
             with self.subTest(table=table, body=body):
                 self.assert_error(text, (table,), message, exact=False)
 
+    def test_a_former_setting_name_is_the_name_the_error_uses(self) -> None:
+        cases = (
+            ("[pdf_artwork]\nraster_dpi = 5", "pdf_artwork", "rendered_pdf_artwork"),
+            (
+                "[figure_artwork]\nbackground_gray = 300",
+                "figure_artwork",
+                "included_figure_artwork",
+            ),
+            (
+                "[pdf_artwork]\nrequired_color_space = 'blue'",
+                "pdf_artwork",
+                "rendered_pdf_artwork",
+            ),
+            ("format = 1", "format", "apply_formatting"),
+        )
+        for text, former, current in cases:
+            with self.subTest(text=text), self.assertRaises(SettingsError) as raised:
+                parse(text)
+            self.assertIn(former, str(raised.exception))
+            self.assertNotIn(current, str(raised.exception))
+            self.assertEqual(raised.exception.settings, (former,))
+        # A file that already uses the current name keeps it, and so does a mix of names.
+        with self.assertRaisesRegex(SettingsError, "^rendered_pdf_artwork.raster_dpi must"):
+            parse("[rendered_pdf_artwork]\nraster_dpi = 5")
+        with self.assertRaises(SettingsError) as mixed:
+            parse("[pdf_artwork]\nraster_dpi = 20\n[included_figure_artwork]\nraster_dpi = 5")
+        self.assertIn("included_figure_artwork.raster_dpi", str(mixed.exception))
+
     def test_a_misspelled_key_in_a_table_suggests_the_closest_valid_one(self) -> None:
         with self.assertRaises(SettingsError) as raised:
             parse("[pdf_checks]\nraster_dp = 3")

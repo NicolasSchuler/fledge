@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+from .finding_text import more_suffix
 from .findings import Finding
 
 # Most paths named in one message; the rest are counted.
@@ -22,10 +23,8 @@ NEEDED_FOR_RESTRUCTURING = (
 
 
 def listed_names(names: Sequence[str]) -> str:
-    """Comma-separated ``names``; many of them are cut short and counted."""
-    shown = ", ".join(names[:MAX_LISTED_PATHS])
-    hidden = len(names) - MAX_LISTED_PATHS
-    return f"{shown} and {hidden} more" if hidden > 0 else shown
+    """Comma-separated ``names``; many of them are cut short and counted as ``(+N more)``."""
+    return ", ".join(names[:MAX_LISTED_PATHS]) + more_suffix(len(names) - MAX_LISTED_PATHS)
 
 
 class GraphFindings:

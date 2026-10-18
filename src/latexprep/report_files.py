@@ -29,6 +29,10 @@ class ReportFiles:
     html: Path | None = None
     diagnostics: Path | None = None
 
+    def discard(self) -> None:
+        """Forget every destination, so that no report file is written at all."""
+        self.json = self.html = self.diagnostics = None
+
 
 class RenderedReport(NamedTuple):
     """The JSON text of a report, and its HTML if that is still the final report."""

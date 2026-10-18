@@ -218,13 +218,13 @@ async def freeze_pdf_inputs(
         return work, frozen
 
 
-# Poppler reports damaged input as "Syntax Error: ..." and, when it knows the byte offset,
-# as "Syntax Error (257): ..."; MuPDF reports "error: ...". Warnings describe repairs the
-# tool made, so they do not make the evidence incomplete.
-_TOOL_ERROR_REPORT = re.compile(
-    r"\b(?:Syntax|Command Line|I/O|Permission|Internal|Fontconfig) Error\b(?: \(\d+\))?:|^error:",
-    re.IGNORECASE | re.MULTILINE,
-)
+# Poppler reports damaged input as "<Category> Error: ...", for example "Syntax Error",
+# "Config Error", "Command Line Error", "I/O Error", "Permission Error" or "Internal
+# Error", and, when it knows the byte offset, as "Syntax Error (257): ..."; MuPDF reports
+# "error: ...". Any "error:" in a tool's own words counts, wherever it stands on the line.
+# Warnings ("Syntax Warning") and "Unimplemented Feature" describe repairs or gaps the
+# tool worked around, so they do not make the evidence incomplete.
+_TOOL_ERROR_REPORT = re.compile(r"\berror(?: \(\d+\))?:", re.IGNORECASE)
 
 
 def _require_complete(result: CommandResult, tool: str) -> None:

@@ -510,6 +510,35 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(PreparationError, "it printed no version"):
             await runner.tool_version([self.perl, "-e", "exit 0;"], self.work)
 
+    async def test_a_version_probe_stopped_by_a_limit_names_the_setting_to_change(self) -> None:
+        cases = (
+            (
+                "Workspace exceeded the total disk limit",
+                ("max_generated_file_bytes", "max_import_bytes"),
+            ),
+            ("A generated file exceeded the file size limit", ("max_generated_file_bytes",)),
+            ("Job temporary storage exceeded 99 bytes", ("max_temporary_bytes",)),
+            ("Aggregate job memory including the parent exceeded 9 MiB", ("memory_mb",)),
+            ("Aggregate tool memory exceeded 9 MiB", ("build_memory_mb",)),
+        )
+        for violation, settings in cases:
+            runner = LifecycleRunner()
+
+            async def stopped(argv, *_args, _violation=violation, **_options):
+                return CommandResult(
+                    -9, "", "", resolved_command=argv, resource_exceeded=_violation
+                )
+
+            with self.subTest(violation=violation), patch.object(runner, "run", stopped):
+                with self.assertRaises(PreparationError) as raised:
+                    await runner.tool_version([self.perl, "-v"], self.work)
+            message = str(raised.exception)
+            self.assertIn("Cannot verify tool perl: it exceeded a resource limit", message)
+            self.assertIn(violation, message)
+            for setting in settings:
+                self.assertIn(setting, message)
+            self.assertNotIn("reinstall", message)
+
     async def test_tool_state_exists_during_the_command_and_is_removed_after_it(self) -> None:
         runner = LifecycleRunner()
         result = await runner.run(

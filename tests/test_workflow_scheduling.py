@@ -22,6 +22,7 @@ from latexprep.findings import Finding
 from latexprep.job_context import JobRequest
 from latexprep.job_execution import JobDeadlineExceeded
 from latexprep.publication import VerifiedPackage
+from latexprep.redaction import scrub_local_paths
 from latexprep.report import Outcome, Report
 from latexprep.staging import apply_contents
 from tests.support import controlled_backends
@@ -87,6 +88,45 @@ class ParallelWorkflowTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue((source / "main.tex").is_file())
         self.assertEqual(report.outcome, "cancelled")
         self.assertEqual(report.artifacts, {})
+
+    async def test_a_failed_rollback_leaves_a_finding_and_a_progress_line(self):
+        report = Report("prepare")
+        messages: list[str] = []
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            source, output = base / "input", base / "output"
+            project(source)
+
+            async def ready(context, _report):
+                prepared = context.work / "prepared"
+                project(prepared)
+                archive, pdf = context.work / "submission.zip", context.work / "built.pdf"
+                archive.write_bytes(b"archive fixture")
+                pdf.write_bytes(b"PDF fixture")
+                report.outcome = Outcome.PASSED
+                return VerifiedPackage(prepared, archive, pdf)
+
+            remove = shutil.rmtree
+
+            def refuse(path, *args, **kwargs):
+                # Only the rollback of the new output fails; the workspace is removed normally.
+                if Path(path) == output.resolve():
+                    raise PermissionError(13, "Permission denied", str(path))
+                remove(path, *args, **kwargs)
+
+            with (
+                patch("latexprep.core.run_project", side_effect=ready),
+                patch("latexprep.publication.shutil.copyfile", side_effect=RuntimeError("full")),
+                patch("latexprep.publication.shutil.rmtree", side_effect=refuse),
+                self.assertRaises(RuntimeError),
+            ):
+                await run_job(
+                    JobRequest("prepare", source, Settings(), output), messages.append, report
+                )
+        [rollback] = [item for item in report.findings if item.rule == "execution.rollback"]
+        self.assertIn(scrub_local_paths(str(output.resolve())), rollback.message)
+        self.assertIn("manually", rollback.next_step)
+        self.assertTrue(any("remove it manually" in message for message in messages))
 
     async def test_baseline_pdf_starts_before_independent_analysis_finishes(self):
         started, release = threading.Event(), threading.Event()
@@ -307,7 +347,30 @@ class ParallelWorkflowTests(unittest.IsolatedAsyncioTestCase):
         frames = finding.details["traceback"]
         self.assertTrue(frames)
         self.assertTrue(all("/" not in frame for frame in frames), frames)
-        self.assertEqual(report.outcome, "blocked")
+        # A defect is an error (exit code 4), not a problem with the input (blocked, 3).
+        self.assertEqual(report.outcome, Outcome.ERROR)
+        self.assertEqual(report.outcome.exit_code, 4)
+        # The other checks still ran and their results stay in the report.
+        stages = {stage["name"]: stage["status"] for stage in report.stages}
+        self.assertEqual(stages["source checks"], "succeeded")
+        self.assertEqual(stages["bibliography checks"], "failed")
+
+    async def test_an_expected_failure_in_a_check_stays_a_blocked_run(self):
+        def refuse(_root, _main=None, **_options):
+            raise PreparationError("the bibliography cannot be read")
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "input"
+            project(source)
+            with patch("latexprep.document_tasks.check_bibliography_integrity", side_effect=refuse):
+                report = await run_job(JobRequest("inspect", source, Settings()))
+        [finding] = [
+            f
+            for f in report.findings
+            if f.rule == "execution.task" and f.details.get("task") == "bibliography checks"
+        ]
+        self.assertNotIn("traceback", finding.details)
+        self.assertEqual(report.outcome, Outcome.BLOCKED)
 
     async def test_repeated_cancellation_keeps_workspace_until_children_stop(self):
         started, cleaning, release, cleaned = (asyncio.Event() for _ in range(4))

@@ -14,7 +14,7 @@ from latexprep.core import run_job
 from latexprep.findings import Finding
 from latexprep.formatting import MAX_SOURCE_BYTES
 from latexprep.job_context import JobRequest
-from latexprep.rules import MANDATORY_CODES
+from latexprep.rules import MANDATORY_CODES, get_rule
 from tests.fakes import fake_formatter
 from tests.support import controlled_backends, format_with, sectioned_project
 
@@ -92,6 +92,10 @@ class ArchiveLimitTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("max_import_bytes", finding.message)
         self.assertIn("is 300", finding.message)
+        # The catalogue names the same setting as the finding does.
+        self.assertIn("max_import_bytes", get_rule("PKG303").fix)
+        self.assertIn("max_import_bytes", get_rule("PKG303").description)
+        self.assertIn("max_import_bytes", finding.next_step)
         self.assertEqual(result.outcome, "blocked")
 
 

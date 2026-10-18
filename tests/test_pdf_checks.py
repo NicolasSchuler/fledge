@@ -250,14 +250,27 @@ class PdfDetailTests(unittest.IsolatedAsyncioTestCase):
             "I/O Error: Couldn't open file 'document.pdf'\n",
             "Fontconfig error: Cannot load default config file\n",
             "error: cannot find page tree\n",
+            "Config Error: x\n",
+            "Command Line Error: Wrong page range given\n",
+            "Permission Error: Copying of text from this document is not allowed\n",
+            "Internal Error: x\n",
+            "pdftoppm: Error: x\n",
+            "    error: cannot load page\n",
+            "mutool: error: x\n",
+            "Warning: harmless first line\nSyntax Error (257): x\n",
         ):
             with self.subTest(stderr=stderr):
                 finding = await self.assert_status(options, "inconclusive", stderr=stderr)
                 self.assertIn("damaged or incomplete", finding.message)
-        # A repaired cross-reference table is a warning, not damaged evidence.
-        await self.assert_status(
-            options, "passed", stderr="Syntax Warning: No valid XRef size in trailer\n"
-        )
+        # A repaired cross-reference table or a gap the tool worked around is not damage.
+        for stderr in (
+            "Syntax Warning: No valid XRef size in trailer\n",
+            "Syntax Warning: x\n",
+            "Unimplemented Feature: x\n",
+            "warning: ignoring zero sized extgstate\n",
+        ):
+            with self.subTest(stderr=stderr):
+                await self.assert_status(options, "passed", stderr=stderr)
 
     async def test_large_format_pages_keep_text_geometry_and_sparse_page_measurements(self) -> None:
         # About A1: valid for measurement, yet beyond the 144 DPI comparison render limits.
@@ -325,6 +338,20 @@ class PdfDetailTests(unittest.IsolatedAsyncioTestCase):
             info="Pages: 25\n",
         )
         self.assertEqual(within.message, "Main text spans 20 pages (pages 1-20); the budget is 20.")
+
+    async def test_a_one_page_section_and_a_one_page_pdf_are_not_pluralized(self) -> None:
+        single = await self.assert_status(
+            PdfCheckOptions(section_budgets=(PdfSectionBudget("Abstract", 1, 1, 1),)),
+            "passed",
+            info="Pages: 4\n",
+        )
+        self.assertEqual(single.message, "Abstract spans 1 page (page 1); the budget is 1.")
+        outside = await self.assert_status(
+            PdfCheckOptions(section_budgets=(PdfSectionBudget("Appendix", 2, 3, 1),)),
+            "inconclusive",
+            info="Pages: 1\n",
+        )
+        self.assertIn("has only 1 page;", outside.message)
 
     async def test_sparse_page_outcome_states_measured_and_minimum_coverage(self) -> None:
         options = PdfCheckOptions(min_page_ink_ratio=0.1)

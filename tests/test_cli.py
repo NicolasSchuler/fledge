@@ -6,9 +6,11 @@ import asyncio
 import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
+import zipfile
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -22,13 +24,79 @@ from latexprep.cli import (
     main,
     settings_suggestion,
 )
+from latexprep.config import Settings, load_settings
 from latexprep.core import run_job
+from latexprep.errors import RequestError
 from latexprep.findings import Finding
 from latexprep.redaction import scrub_local_paths
 from latexprep.report import Outcome, Report
 from latexprep.rule_definition import RULE_SCHEMA_VERSION
 from latexprep.rules import RULES
+from tests import SOURCE_ROOT
 from tests.support import ProjectTestCase, controlled_backends
+
+
+class BrokenPipeTests(ProjectTestCase):
+    def test_a_reader_that_stops_early_does_not_hide_the_exit_code(self):
+        """``fledge inspect INPUT | head -c5`` still ends with the verdict of the run."""
+        process = subprocess.Popen(
+            [sys.executable, "-m", "latexprep", "inspect", str(self.root / "absent"), "--quiet"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env={**os.environ, "PYTHONPATH": str(SOURCE_ROOT)},
+        )
+        # The reader leaves long before the interpreter has started and printed the report.
+        assert process.stdout is not None
+        process.stdout.close()
+        _, stderr = process.communicate(timeout=120)
+        # A missing input is a request error (4); Rich alone would have ended with status 1.
+        self.assertEqual(process.returncode, 4, stderr)
+        self.assertEqual(stderr, b"")
+
+
+class ContactAddressTests(ProjectTestCase):
+    ADDRESS = "ann@example.org"
+
+    def test_the_contact_address_is_in_no_report_format_but_stays_in_the_settings(self):
+        source = self.root / "project"
+        source.mkdir()
+        (source / "main.tex").write_text(
+            "\\documentclass{article}\\begin{document}x\\end{document}\n"
+        )
+        config = self.root / "settings.toml"
+        config.write_text(f'[online_checks]\nonline_contact_email = "{self.ADDRESS}"\n')
+        saved, page, bundle = (self.root / name for name in ("r.json", "r.html", "r.zip"))
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = main(
+                [
+                    *("inspect", str(source), "--main", "main.tex", "--config", str(config)),
+                    *("--json", "--quiet", "--json-report", str(saved)),
+                    *("--html-report", str(page), "--diagnostics", str(bundle)),
+                ]
+            )
+        self.assertEqual(code, 0, err.getvalue())
+        with zipfile.ZipFile(bundle) as archive:
+            documents = {name: archive.read(name).decode() for name in archive.namelist()}
+        documents.update(
+            {"stdout": out.getvalue(), "json": saved.read_text(), "html": page.read_text()}
+        )
+        for name, text in documents.items():
+            with self.subTest(document=name):
+                self.assertNotIn(self.ADDRESS, text)
+        for text in (out.getvalue(), saved.read_text(), documents["report.json"]):
+            online = json.loads(text)["settings"]["online_checks"]
+            self.assertEqual(online["online_contact_email"], "<set>")
+        self.assertIn("&lt;set&gt;", documents["html"])
+        # The job itself still uses the real address.
+        settings = load_settings(config, {})
+        self.assertEqual(settings.online_checks.online_contact_email, self.ADDRESS)
+        self.assertIn(self.ADDRESS, settings.online_checks.user_agent)
+
+    def test_settings_without_an_address_record_none(self):
+        recorded = Settings().to_dict()["online_checks"]
+        self.assertIsNone(recorded["online_contact_email"])
 
 
 class CommandTests(ProjectTestCase):
@@ -84,6 +152,10 @@ class CommandTests(ProjectTestCase):
         self.assertEqual(item["name"], "source.edit_marker")
         self.assertTrue(item["tests"] and item["fix"])
         self.assertEqual(self.runner.invoke(cli, ["rule", "UNKNOWN"]).exit_code, USAGE_EXIT_CODE)
+        # A former or dotted rule name explains the same check as its code.
+        by_code = self.runner.invoke(cli, ["rule", "TEX001", "--json"]).output
+        for name in ("source-edit-marker", "source.edit_marker"):
+            self.assertEqual(self.runner.invoke(cli, ["rule", name, "--json"]).output, by_code)
         self.assertEqual(self.runner.invoke(cli, ["prepare", "--help"]).exit_code, 0)
         self.assertEqual(self.runner.invoke(cli, ["inspect"]).exit_code, USAGE_EXIT_CODE)
 
@@ -473,12 +545,30 @@ class UnexpectedFailureTests(ProjectTestCase):
         self.assertIn("execution.internal", rules)
         self.assertNotIn("execution.request", rules)
 
-    def test_genuine_input_output_errors_stay_request_errors(self):
-        with patch("latexprep.cli.run_job", new=AsyncMock(side_effect=OSError("disk full"))):
+    def test_an_input_output_error_before_the_job_starts_is_a_request_error(self):
+        with patch("latexprep.cli.resolve_config_path", side_effect=OSError("unreadable")):
             code, report, _ = self.inspect_json()
         self.assertEqual(code, 4)
         self.assertEqual(report["scope"], "request validation")
         self.assertIn("execution.request", {item["rule"] for item in report["findings"]})
+
+    def test_an_input_output_error_during_the_job_is_not_blamed_on_the_request(self):
+        with patch("latexprep.cli.run_job", new=AsyncMock(side_effect=OSError("disk full"))):
+            code, report, _ = self.inspect_json()
+            _, terminal, _ = self.run_main("inspect", str(self.source), "--quiet")
+        self.assertEqual(code, 4)
+        self.assertEqual(report["outcome"], "error")
+        self.assertEqual(report["scope"], "run did not finish")
+        [finding] = [item for item in report["findings"] if item["rule"] == "execution.request"]
+        self.assertIn("disk full", finding["message"])
+        # The summary does not call it a rejected request.
+        self.assertNotIn("Request error", terminal)
+
+    def test_a_request_error_during_the_job_still_rejects_the_request(self):
+        rejection = RequestError("The main file is not a document", "Name another file.")
+        with patch("latexprep.cli.run_job", new=AsyncMock(side_effect=rejection)):
+            _, report, _ = self.inspect_json()
+        self.assertEqual(report["scope"], "request validation")
 
     def test_cancellation_is_consistent_for_interrupt_and_asyncio_cancellation(self):
         for failure in (KeyboardInterrupt(), asyncio.CancelledError()):
@@ -488,6 +578,26 @@ class UnexpectedFailureTests(ProjectTestCase):
                 self.assertEqual(code, 130)
                 self.assertEqual(report["outcome"], "cancelled")
                 self.assertEqual(report["scope"], "run did not finish")
+
+    def test_interrupt_while_writing_the_report_says_whether_output_was_published(self):
+        published = Report(
+            "prepare", outcome=Outcome.PASSED, artifacts={"sources": str(self.root / "out")}
+        )
+        unpublished = Report("check", outcome=Outcome.PASSED)
+        for report, expected, forbidden in (
+            (published, "already published", "no verified output"),
+            (unpublished, "no verified output was published", "already published"),
+        ):
+            with self.subTest(command=report.command):
+                with (
+                    patch("latexprep.cli.run_job", new=AsyncMock(return_value=report)),
+                    patch("latexprep.cli.write_redacted_report", side_effect=KeyboardInterrupt),
+                ):
+                    code, out, err = self.run_main("inspect", str(self.source), "--quiet")
+                self.assertEqual(code, 130)
+                self.assertEqual(out, "")
+                self.assertIn(expected, err)
+                self.assertNotIn(forbidden, err)
 
     def test_crash_while_writing_the_report_exits_4_with_one_plain_line(self):
         with patch(
@@ -511,6 +621,23 @@ class UnexpectedFailureTests(ProjectTestCase):
         self.assertEqual(report["outcome"], "error")
         self.assertIn("execution.internal", {item["rule"] for item in report["findings"]})
 
+    def test_clashing_report_destinations_are_rejected_and_nothing_is_written(self):
+        shared = self.root / "report.out"
+        bundle = self.root / "bundle"
+        for flags in (
+            ["--json-report", str(shared), "--html-report", str(shared)],
+            ["--json-report", str(shared), "--diagnostics", str(shared)],
+            ["--html-report", str(shared), "--diagnostics", str(shared)],
+            ["--json-report", str(bundle), "--html-report", str(bundle)],
+        ):
+            with self.subTest(flags=flags):
+                code, report, _ = self.inspect_json(*flags)
+                self.assertEqual(code, 4)
+                self.assertEqual(report["outcome"], "error")
+                self.assertIn("must be distinct", report["findings"][0]["message"])
+                self.assertFalse(shared.exists())
+                self.assertFalse(bundle.exists())
+
     def test_debug_flag_and_environment_variable_print_the_traceback_to_stderr(self):
         for environment, flags in (({"FLEDGE_DEBUG": "1"}, []), ({}, ["--debug"])):
             with self.subTest(environment=environment, flags=flags):
@@ -526,12 +653,49 @@ class UnexpectedFailureTests(ProjectTestCase):
                 self.assertIn("Traceback", err)
                 self.assertIn("renderer defect", err)
 
+    def test_debug_traceback_hides_home_paths_credentials_and_terminal_escapes(self):
+        home = Path.home().resolve()
+        message = f"cannot read {home}/papers/main.tex via https://x.example/a?token=SECRET\x1b[31m"
+        with patch("latexprep.cli.write_redacted_report", side_effect=RuntimeError(message)):
+            code, _, err = self.run_main("inspect", str(self.source), "--quiet", "--debug")
+        self.assertEqual(code, 4)
+        self.assertIn("Traceback", err)
+        self.assertIn("RuntimeError: cannot read ~/papers/main.tex via", err)
+        self.assertNotIn(str(home), err)
+        self.assertNotIn("SECRET", err)
+        self.assertNotIn("\x1b", err)
+
     def test_debug_traceback_keeps_stdout_a_clean_report(self):
         with patch("latexprep.cli.run_job", new=AsyncMock(side_effect=RuntimeError("defect"))):
             code, report, err = self.inspect_json("--debug")
         self.assertEqual(code, 4)
         self.assertEqual(report["outcome"], "error")
         self.assertIn("Traceback", err)
+
+    def test_a_defect_in_a_check_exits_4_and_debug_prints_its_traceback(self):
+        crash = RuntimeError("check defect")
+        with patch("latexprep.document_tasks.check_bibliography_integrity", side_effect=crash):
+            quiet_code, quiet_report, quiet_err = self.inspect_json()
+            code, report, err = self.inspect_json("--debug")
+        for outcome_code, outcome_report in ((quiet_code, quiet_report), (code, report)):
+            self.assertEqual(outcome_code, 4)
+            self.assertEqual(outcome_report["outcome"], "error")
+            # The per-task finding and the other checks' results stay in the report.
+            findings = outcome_report["findings"]
+            tasks = [item for item in findings if item["rule"] == "execution.task"]
+            self.assertEqual([item["details"]["task"] for item in tasks], ["bibliography checks"])
+            self.assertIn("TEX001", {item["code"] for item in findings})
+        self.assertEqual(quiet_err, "")
+        self.assertIn("Traceback (most recent call last)", err)
+        self.assertIn("RuntimeError: check defect", err)
+
+    def test_an_expected_failure_in_a_check_is_blocked_and_prints_no_traceback(self):
+        failure = OSError("the bibliography cannot be read")
+        with patch("latexprep.document_tasks.check_bibliography_integrity", side_effect=failure):
+            code, report, err = self.inspect_json("--debug")
+        self.assertEqual(code, 3)
+        self.assertEqual(report["outcome"], "blocked")
+        self.assertNotIn("Traceback", err)
 
     def test_commands_without_their_own_guard_exit_4_instead_of_status_1(self):
         (self.root / "empty").mkdir()
@@ -555,6 +719,17 @@ class UnexpectedFailureTests(ProjectTestCase):
                 self.assertEqual(code, 4)
                 self.assertIn("Internal error (RuntimeError)", err)
                 self.assertNotIn("Traceback", err)
+
+    def test_doctor_labels_an_input_output_error_by_whether_the_diagnostics_started(self):
+        for target, scope in (
+            ("latexprep.doctor_command.load_settings", "request validation"),
+            ("latexprep.doctor_command.run_doctor", "run did not finish"),
+        ):
+            with self.subTest(target=target):
+                with patch(target, side_effect=OSError("disk full")):
+                    code, out, _ = self.run_main("doctor", "--json", "--quiet")
+                self.assertEqual(code, 4)
+                self.assertEqual(json.loads(out)["scope"], scope)
 
     def test_doctor_treats_value_error_as_a_defect_and_cancellation_like_other_commands(self):
         for failure, expected_code, expected_rule in (

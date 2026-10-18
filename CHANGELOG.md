@@ -148,6 +148,29 @@ the first release of `fledge-latex` is 0.3.0.
 - A `tex-fmt` run that a time or output limit stopped now says which limit and its
   value, as a stopped build does, instead of "did not complete".
 
+- A defect inside one scheduled check now ends the run with the error outcome and exit
+  code 4, not the blocked outcome and 3 that a problem with your files gets. The other
+  checks' results stay in the report, and the failed check still has its `execution.task`
+  finding with the failing frames. An expected failure such as an unreadable file keeps
+  blocking with 3.
+- `max_import_bytes` may not exceed four times `max_generated_file_bytes` (each is
+  `max_bytes` unless set). A tool workspace holds at most that much, copy of the sources
+  included, so a larger import total could never be built; the settings error now names
+  both settings. Lowering `max_generated_file_bytes` alone therefore needs a lower
+  `max_import_bytes` or `max_bytes` too.
+- The settings that reports record show `"<set>"` for `online_contact_email` instead of
+  the address, in the JSON report, the HTML report and the diagnostics bundle. The
+  address itself is still sent to `api.crossref.org`.
+- `fledge pdf check` no longer offers `--engine` and `--bibliography-backend`, which it
+  never used because it builds nothing, and its `--reference-pdf` help describes the
+  comparison of the checked PDF.
+- `--select` and `--ignore`, `checks.select` and `checks.ignore` accept the name of a
+  check, `source.edit_marker` or the earlier `source-edit-marker`, as the code of that
+  check, and `fledge rule` explains a check by any of its names.
+- A failure that is not the request's fault (for example a full disk while publishing)
+  after the job started is labelled "run did not finish" instead of "request validation",
+  and the terminal summary no longer calls it a request error.
+
 ### Added
 
 - Findings that had no check code now have one, so `fledge rule`, `--select` and
@@ -306,8 +329,49 @@ the first release of `fledge-latex` is 0.3.0.
   comparison and the inspection accepted extracted text without its final page
   boundary. Every PDF check now applies the same preflight and page-boundary rules.
 
+- `--debug` and `FLEDGE_DEBUG=1` printed a traceback with this machine's paths, credentials
+  and terminal escape sequences unchanged. The traceback, and the exception text that the
+  debug log now includes for a defect in a check, pass through credential redaction,
+  generic home and temporary directories and terminal sanitizing. The log's path scrubbing
+  also no longer rewrites the log record that other handlers receive.
+- `fledge inspect INPUT | head` ended with exit status 1 when the reader closed the pipe
+  early, hiding the verdict of the run; the exit code is now the outcome's.
+- `--json-report X --html-report X` (or any two report destinations that name one path) was
+  rejected with exit 4 but still wrote the file; no report file is written then.
+- When publication failed and its partial output could not be removed, only a note on the
+  hidden exception said so. The progress output and the report now name the leftover
+  directory and say to remove it manually.
+- A version check stopped by a resource limit was reported as "it exceeded a resource limit"
+  without the limit; it now gives the limit and the setting to change. The documented
+  `max_import_bytes` example (1 GiB with a 64 MiB file limit) could never build and now
+  uses values that do. The `PKG303` fix text said `max_bytes` where the check reports
+  `max_import_bytes`.
+- Damaged-PDF detection missed Poppler's `Config Error`, `Permission Error` and
+  similar categories, and `error:` from MuPDF in the middle of a line; every
+  `<category> Error:` and `error:` now makes the PDF result incomplete, while
+  warnings and `Unimplemented Feature` do not.
+- A build dependency spelled with `..` (for example `root/../outside/file`) was accepted as
+  a file inside the project because the containment test was only lexical.
+- Messages read "Choose a different output path" instead of "Choose a output path",
+  "spans 1 page (page 1)" instead of "spans 1 pages (pages 1-1)", and a missing
+  dependency lists "a, b, c, d, e (+5 more)" like every other list.
+- A comment-only line between `\input` (or `\includegraphics`) and its argument no longer
+  turns the dependency into an unresolved dynamic path.
+- Pressing Ctrl-C while the final report was being written, after the output was published,
+  claimed that no verified output was published; the message now says it stays in place.
+- `fledge submission-text --json` printed nothing to standard output when it failed; it now
+  prints an object with `schema_version` and `error`, with the same exit code.
+- A settings error for a file that still uses a former table name such as `[pdf_artwork]`
+  named `rendered_pdf_artwork`, a key the file never contained; it now names the key as
+  written.
+
 ### Documentation
 
+- The configuration guide states exactly when discovery reads the system temporary
+  directory (the input is that directory, or a ZIP or PDF lies directly in it) and that a
+  `pyproject.toml` that is not valid TOML stops discovery with "Cannot read settings"
+  instead of being skipped. The reports and troubleshooting guides describe the exit code
+  and the traceback of a defect inside a check.
 - The troubleshooting guide now says that online checks ignore proxy settings, and
   that `comment_policy = "private"` keeps notes such as "Reviewer 2" (use
   `"all"` to drop every comment). The installation guide states the order in which

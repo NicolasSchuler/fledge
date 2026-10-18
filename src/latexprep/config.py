@@ -7,6 +7,7 @@ settings file < command-line overrides. Finding and reading the settings file is
 
 from __future__ import annotations
 
+import re
 import tomllib
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field, fields, is_dataclass, replace
@@ -33,7 +34,7 @@ from .limits import (
 from .manuscript import ManuscriptOptions
 from .manuscript_check_options import ManuscriptCheckOptions
 from .metadata_privacy import MetadataPrivacyOptions
-from .online_options import OnlineOptions
+from .online_options import CONTACT_EMAIL_PLACEHOLDER, OnlineOptions
 from .option_config import (
     POSITIVE_INTEGER,
     Bounds,
@@ -51,6 +52,7 @@ from .pdf_check_options import PdfCheckOptions
 from .pdf_inspection import PdfInspectionOptions
 from .pdf_structure_checks import StructureOptions
 from .presets import preset_values
+from .resource_monitor import WORKSPACE_TOTAL_FILE_LIMITS
 from .review_policy import ReportingOptions
 from .setting_choices import BibliographyBackend, Engine, Layout
 from .source_transform import SourceTransformOptions
@@ -210,6 +212,16 @@ class Settings:
                 "Choose source matching or an explicit expected PDF value for each metadata field",
                 ("match_source_pdf_metadata", "pdf_checks"),
             )
+        if self.import_byte_limit > WORKSPACE_TOTAL_FILE_LIMITS * self.generated_file_byte_limit:
+            raise SettingsError(
+                f"max_import_bytes ({self.import_byte_limit}) must not exceed "
+                f"{WORKSPACE_TOTAL_FILE_LIMITS} times max_generated_file_bytes "
+                f"({self.generated_file_byte_limit}): a tool workspace holds at most that much "
+                "in total, and the copy of the sources counts toward it. Lower "
+                "max_import_bytes or raise max_generated_file_bytes (each is max_bytes unless "
+                "set)",
+                ("max_import_bytes", "max_generated_file_bytes"),
+            )
         if self.build_memory_mb + COORDINATOR_MEMORY_MB > self.memory_mb:
             raise SettingsError(
                 f"memory_mb must allow build_memory_mb plus {COORDINATOR_MEMORY_MB} MiB "
@@ -236,8 +248,14 @@ class Settings:
         return self.max_generated_file_bytes
 
     def to_dict(self) -> dict[str, object]:
-        """The settings in their TOML layout, as reports record them."""
+        """The settings in their TOML layout, as reports record them.
+
+        A configured ``online_contact_email`` is replaced by a placeholder: it is a personal
+        address that a shared report, HTML file or diagnostics bundle must not carry.
+        """
         values = asdict(self)
+        if values["online_checks"]["online_contact_email"]:
+            values["online_checks"]["online_contact_email"] = CONTACT_EMAIL_PLACEHOLDER
         formatting = values["formatting_options"]
         line_format = {name: formatting.pop(name) for name in _FORMATTING_KEYS}
         for group, table in SHARED_TABLES.items():
@@ -366,6 +384,22 @@ def _current_names(values: Mapping[str, object]) -> dict[str, Any]:
     return result
 
 
+def _as_written(error: SettingsError, written: Mapping[str, str]) -> SettingsError:
+    """``error`` naming each renamed setting as the settings file spells it.
+
+    ``written`` maps a current setting name to the former name the file uses. Validation
+    works with current names, so without this a file with ``[pdf_artwork]`` would be
+    told about ``rendered_pdf_artwork``, a key it never wrote.
+    """
+    if not written:
+        return error
+    names = re.compile(r"(?<![\w.])(" + "|".join(map(re.escape, written)) + r")(?!\w)")
+    return SettingsError(
+        names.sub(lambda match: written[match.group()], str(error)),
+        tuple(written.get(name, name) for name in error.settings),
+    )
+
+
 def _line_format(values: dict[str, Any], table: object) -> dict[str, Any]:
     """Top-level wrap_length and tab_size, which belong to the formatting options."""
     if isinstance(table, dict) and (nested := sorted(set(_FORMATTING_KEYS) & set(table))):
@@ -462,7 +496,16 @@ def _settings_from_values(
     if unknown:
         raise _unknown_settings_error(sorted(unknown), SETTING_NAMES, path)
     selected.update(requested)
-    return _build_settings(selected, path)
+    try:
+        return _build_settings(selected, path)
+    except SettingsError as error:
+        # A setting the command line or the API supplied is named as it was given.
+        written = {
+            RENAMED_SETTINGS[name]: name
+            for name in values
+            if name in RENAMED_SETTINGS and RENAMED_SETTINGS[name] not in requested
+        }
+        raise _as_written(error, written) from error
 
 
 def load_settings(

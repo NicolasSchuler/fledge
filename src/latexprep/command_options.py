@@ -12,7 +12,8 @@ from typing import TypeVar
 import click
 
 from .defects import REPORT_DEFECT_SUGGESTION, is_expected_failure, summarize_traceback
-from .diagnostic_logging import debug_logging
+from .diagnostic_logging import debug_logging, safe_diagnostic_text
+from .errors import RequestError
 from .findings import Finding, internal_error_finding, request_error_finding
 from .report import REQUEST_SCOPE, UNFINISHED_SCOPE, Outcome, Report
 
@@ -103,9 +104,16 @@ def debug_enabled() -> bool:
 
 
 def print_debug_traceback(error: BaseException) -> None:
-    """Write the traceback of ``error`` to stderr when debugging was requested."""
+    """Write the traceback of ``error`` to stderr when debugging was requested.
+
+    The text is made safe first, as the log lines are: credentials are redacted, this
+    machine's home and temporary directories are shown generically and terminal control
+    characters are removed, because a message may quote a path, a URL or a file's content.
+    """
     if debug_enabled():
-        click.echo("".join(traceback.format_exception(error)), err=True, nl=False)
+        click.echo(
+            safe_diagnostic_text("".join(traceback.format_exception(error))), err=True, nl=False
+        )
 
 
 def record_request_error(report: Report, error: Exception, suggestion: str) -> None:
@@ -129,10 +137,19 @@ def record_internal_error(report: Report, error: Exception) -> None:
     print_debug_traceback(error)
 
 
-def record_job_failure(report: Report, error: Exception, request_suggestion: str) -> None:
-    """Record why a job stopped: a correctable request error or, otherwise, a defect."""
+def record_job_failure(
+    report: Report, error: Exception, request_suggestion: str, *, job_started: bool = False
+) -> None:
+    """Record why a job stopped: a correctable request error or, otherwise, a defect.
+
+    An expected failure before the job started, or a ``RequestError`` at any time, rejects
+    the request. Any other expected failure after ``job_started``, such as a full disk
+    while publishing, means the run did not finish; the request was not at fault.
+    """
     if is_expected_failure(error):
         record_request_error(report, error, request_suggestion)
+        if job_started and not isinstance(error, RequestError):
+            report.scope = UNFINISHED_SCOPE
     else:
         record_internal_error(report, error)
         report.scope = UNFINISHED_SCOPE

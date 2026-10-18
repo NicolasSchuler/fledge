@@ -25,6 +25,8 @@ _EMAIL = re.compile(
     r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+"
 )
 # Crossref's polite pool keys on a contact address inside the product comment.
+# What a report shows in place of a configured contact address.
+CONTACT_EMAIL_PLACEHOLDER = "<set>"
 PRODUCT = f"fledge/{__version__}"
 DEFAULT_USER_AGENT = f"{PRODUCT} (explicit reference checks)"
 # Inclusive (low, high) bounds of the integer options, also quoted in messages.
@@ -95,7 +97,9 @@ class OnlineOptions:
 
     ``online_contact_email`` is sent only in the User-Agent request header to
     api.crossref.org, for Crossref's polite pool; every other host receives the plain
-    product User-Agent. It never enters a finding, detail or report field.
+    product User-Agent. It never enters a finding, detail or report field. The report
+    records the setting as ``CONTACT_EMAIL_PLACEHOLDER`` when an address is set, so a
+    shared report, HTML file or diagnostics bundle shows that one was used but not whose.
     """
 
     FIELD_BOUNDS: ClassVar[dict[str, Bounds]] = {

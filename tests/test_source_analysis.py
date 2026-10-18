@@ -305,7 +305,8 @@ class SourceAnalysisTests(ProjectTestCase):
         self.assertIn("\\input", missing.suggestion)
         graphics = by_reference["figures/nothing"]
         self.assertIn("figures/nothing.pdf", graphics.message)
-        self.assertRegex(graphics.message, r"and \d+ more")
+        self.assertRegex(graphics.message, r"\(\+\d+ more\)\.$")
+        self.assertNotRegex(graphics.message, r"and \d+ more")
         for reference in ("/tmp/outside", "../outside"):
             with self.subTest(reference=reference):
                 self.assertEqual(by_reference[reference].rule, "source.external_path")

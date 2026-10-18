@@ -165,15 +165,24 @@ class Scheduler:
             logger.debug("task %s: cancelled", task.name)
             self.progress(f"Cancelled {task.name}")
             raise
-        except Exception as error:  # noqa: BLE001 - a task failure becomes a failed result
+        except Exception as error:
+            # A task failure becomes a failed result, so the job goes on with the other tasks.
             # Keep the exception type: a bare message such as an empty string
             # or a lone path says nothing about what went wrong.
-            logger.debug("task %s: raised %s", task.name, type(error).__name__)
+            expected = is_expected_failure(error)
+            # The full traceback of a defect is for ``--debug``; an expected failure says
+            # what is wrong in its message.
+            logger.debug(
+                "task %s: raised %s",
+                task.name,
+                type(error).__name__,
+                exc_info=None if expected else error,
+            )
             result = TaskResult(
                 task.name,
                 TaskStatus.FAILED,
                 error=f"{type(error).__name__}: {error}",
-                defect_frames=() if is_expected_failure(error) else summarize_traceback(error),
+                defect_frames=() if expected else summarize_traceback(error),
             )
         result.elapsed_seconds = round(time.monotonic() - started, 6)
         result.queue_seconds = round(queue_seconds, 6)

@@ -18,7 +18,9 @@ empty or unresolved fields print diagnostics to stderr and exit with code 3,
 without exporting text to stdout. JSON returns all fields, statuses, draft text,
 source locations, candidate texts and interpretation issues. JSON and preview
 exit with code 3 when any field is unresolved. Input/configuration failures use
-code 4. Missing optional fields do not make a preview fail.
+code 4; with `--json` they print an object with `schema_version` and `error` (the
+message) to stdout as well as the message to stderr. Missing optional fields do not
+make a preview fail.
 
 The converter retains the text inside common formatting commands, decodes
 escaped characters and common accents, preserves Unicode, converts TeX dashes

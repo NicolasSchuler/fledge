@@ -22,6 +22,7 @@ from latexprep.cli import cli
 from latexprep.command_runner import CommandResult, ToolVersion, argv_summary
 from latexprep.config_discovery import resolve_config_path
 from latexprep.diagnostic_logging import PACKAGE_LOGGER_NAME, debug_logging
+from latexprep.errors import PreparationError
 from latexprep.online_http_wire import Response
 from latexprep.pdf_tools import DOCUMENT, PdfToolSession
 from latexprep.report import Report
@@ -127,6 +128,37 @@ class DebugLoggingTests(unittest.TestCase):
         text = stream.getvalue()
         self.assertNotIn("/home/ann", text)
         self.assertIn("read ~/papers/fledge.toml and ~", text)
+
+    def test_a_logged_exception_prints_its_traceback_without_paths_or_credentials(self) -> None:
+        stream = io.StringIO()
+        with patch.dict(os.environ, {"HOME": "/home/ann"}), debug_logging(stream):
+            try:
+                raise RuntimeError("cannot read /home/ann/paper.tex?token=SECRETVALUE\x1b[31m")
+            except RuntimeError as error:
+                logging.getLogger("latexprep.scheduler").debug("task x: raised", exc_info=error)
+        text = stream.getvalue()
+        self.assertIn("Traceback (most recent call last)", text)
+        self.assertIn("RuntimeError: cannot read ~/paper.tex?token=", text)
+        self.assertNotIn("/home/ann", text)
+        self.assertNotIn("SECRETVALUE", text)
+        self.assertNotIn("\x1b", text)
+
+    def test_other_handlers_of_the_same_record_see_it_unchanged(self) -> None:
+        seen: list[str] = []
+
+        class Collecting(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                seen.append(record.getMessage())
+
+        with patch.dict(os.environ, {"HOME": "/home/ann"}), debug_logging(io.StringIO()):
+            PACKAGE_LOGGER.addHandler(Collecting())
+            try:
+                logging.getLogger("latexprep.config_discovery").debug("read %s", "/home/ann/x.toml")
+            finally:
+                PACKAGE_LOGGER.handlers = [
+                    item for item in PACKAGE_LOGGER.handlers if not isinstance(item, Collecting)
+                ]
+        self.assertEqual(seen, ["read /home/ann/x.toml"])
 
     def test_a_message_with_percent_signs_is_not_formatted_a_second_time(self) -> None:
         stream = io.StringIO()
@@ -268,6 +300,27 @@ class SchedulerLoggingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("task build: raised RuntimeError", text)
         self.assertIn("task build: failed in", text)
         self.assertIn("task compare: blocked by failed build", text)
+
+    async def test_a_defect_logs_its_traceback_but_an_expected_failure_does_not(self) -> None:
+        async def defect() -> None:
+            raise RuntimeError("defect inside the task")
+
+        async def expected() -> None:
+            raise PreparationError("the input is wrong")
+
+        with self.assertLogs("latexprep.scheduler", level="DEBUG") as logs:
+            await Scheduler(ResourceBudget(2, 1024)).execute(
+                [Task("defective", defect), Task("expected", expected)]
+            )
+        by_task = {
+            record.getMessage().split(":")[0]: record
+            for record in logs.records
+            if "raised" in record.getMessage()
+        }
+        defective = by_task["task defective"].exc_info
+        self.assertIsNotNone(defective)
+        self.assertIs(defective[0], RuntimeError)
+        self.assertIsNone(by_task["task expected"].exc_info)
 
 
 class ConfigDiscoveryLoggingTests(unittest.TestCase):

@@ -173,9 +173,10 @@ def is_link_free_regular_file(root: Path, path: Path) -> bool:
     Stricter than ``is_contained``: nothing is resolved first, so every directory
     from ``root`` down to the file is examined as written, and ``root`` itself and
     every directory between it and the file must not be a link, even one that
-    leads somewhere inside ``root``.
+    leads somewhere inside ``root``. A ``..`` segment is refused as well: the spelling
+    ``root/../elsewhere/file`` is lexically under ``root`` but names a file beside it.
     """
-    if not path.is_relative_to(root):
+    if not path.is_relative_to(root) or ".." in path.relative_to(root).parts:
         return False
     try:
         return (

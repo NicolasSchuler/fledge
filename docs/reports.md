@@ -95,6 +95,12 @@ prints one line on stderr. The JSON report then holds a finding with the rule
 `FLEDGE_DEBUG=1` to print the full traceback when you report the defect. A crash
 while printing or saving the report also exits with 4.
 
+A defect inside one check does not stop the others. The report keeps their results
+and adds an `execution.task` finding for the failed check, whose
+`details.traceback` lists the innermost frames, and the run exits with 4 rather than 3.
+A check that fails because of your input or machine, such as an unreadable file,
+blocks the run with 3 instead.
+
 **Why advisories exit with 1.** A TODO marker or an unused bibliography entry
 does not stop the release, but nobody has looked at it yet. A
 nonzero code makes scripts and CI notice instead of shipping silently. Once you

@@ -7,9 +7,11 @@ an embedding program decides what to do with the records. The command line attac
 stderr handler for the length of a command when ``--debug`` or ``FLEDGE_DEBUG=1`` asks for
 it, so standard output stays reserved for the report.
 
-Log messages are written to carry no paths, URLs or contact details; the handler's filter
-is a second line of defence that shows this machine's home and temporary directories
-generically, as reports do.
+Log messages are written to carry no paths, URLs or contact details; the handler's
+formatter is a second line of defence. It redacts credential-shaped text, shows this
+machine's home and temporary directories generically, as reports do, and makes control
+characters harmless, in the message and in the text of a logged exception. It works on its
+own copy of the text, so other handlers of the same record see the record unchanged.
 """
 
 from __future__ import annotations
@@ -20,34 +22,42 @@ from collections.abc import Generator
 from contextlib import contextmanager
 from typing import TextIO
 
-from .redaction import local_directory_labels, scrub_local_paths
+from .redaction import local_directory_labels, redact_data, scrub_local_paths
+from .text_safety import sanitize_terminal_text
 
 PACKAGE_LOGGER_NAME = __name__.partition(".")[0]
 
 
-class LocalPathFilter(logging.Filter):
-    """Replaces this machine's home and temporary directories in every record's message."""
+def safe_diagnostic_text(text: str, labels: dict[str, str] | None = None) -> str:
+    """``text`` that is safe to print: no credentials, no local directories, no escapes.
 
-    def __init__(self, labels: dict[str, str] | None = None) -> None:
-        super().__init__()
-        self._labels = local_directory_labels() if labels is None else labels
-
-    def filter(self, record: logging.LogRecord) -> bool:
-        record.msg = scrub_local_paths(record.getMessage(), self._labels)
-        record.args = ()
-        return True
+    Credentials (including URL query tokens) are redacted, this machine's home and temporary
+    directories are shown generically, and terminal control characters are removed. A text
+    too large to scan safely is withheld whole. ``labels`` replaces the directories to
+    generalize; it defaults to those of this machine.
+    """
+    return sanitize_terminal_text(scrub_local_paths(redact_data(text), labels))
 
 
 class ConciseFormatter(logging.Formatter):
     """``+1.234s runtime: message``: the time since start, the module and what it says.
 
     A record above DEBUG also names its level, so a limit that stopped a tool stands out.
+    The text of a record's exception, with its traceback, follows the line. The result is
+    made safe to print here, on a copy, so the record itself stays as the logger made it.
     """
+
+    def __init__(self, labels: dict[str, str] | None = None) -> None:
+        super().__init__()
+        self._labels = local_directory_labels() if labels is None else labels
 
     def format(self, record: logging.LogRecord) -> str:
         module = record.name.removeprefix(f"{PACKAGE_LOGGER_NAME}.")
         level = f" [{record.levelname.lower()}]" if record.levelno > logging.DEBUG else ""
-        return f"+{record.relativeCreated / 1000:.3f}s {module}{level}: {record.getMessage()}"
+        text = f"+{record.relativeCreated / 1000:.3f}s {module}{level}: {record.getMessage()}"
+        if record.exc_info and record.exc_info[0] is not None:
+            text += "\n" + self.formatException(record.exc_info)
+        return safe_diagnostic_text(text, self._labels)
 
 
 class _DebugHandler(logging.Handler):
@@ -82,7 +92,6 @@ def debug_logging(stream: TextIO | None = None) -> Generator[None]:
         yield
         return
     handler = _DebugHandler(stream)
-    handler.addFilter(LocalPathFilter())
     handler.setFormatter(ConciseFormatter())
     previous_level = package.level
     package.addHandler(handler)

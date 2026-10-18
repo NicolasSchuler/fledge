@@ -163,6 +163,10 @@ _selection_options = compose_options(
     ),
 )
 
+_max_pages_option = click.option(
+    "--max-pages", type=int, help="Total page limit, including references."
+)
+
 _build_options = compose_options(
     click.option(
         "--engine",
@@ -181,7 +185,18 @@ _build_options = compose_options(
         help="PDF that the build must match page by page, for example the version you "
         "already submitted.",
     ),
-    click.option("--max-pages", type=int, help="Total page limit, including references."),
+    _max_pages_option,
+)
+
+# `pdf check` builds nothing, so it offers neither an engine nor a bibliography tool.
+_pdf_check_options = compose_options(
+    click.option(
+        "--reference-pdf",
+        type=click.Path(path_type=Path),
+        help="PDF to compare the checked PDF with page by page, for example the version "
+        "you already submitted.",
+    ),
+    _max_pages_option,
 )
 
 # Expert knobs listed under "Advanced options" in command help; nothing is removed.
@@ -389,7 +404,7 @@ def pdf_group() -> None:
 
 @pdf_group.command("check")
 @_common
-@_build_options
+@_pdf_check_options
 def pdf_check(**options) -> int:
     """Check PDF constraints; --reference-pdf adds an exact comparison."""
     return _execute(JobCommand.PDF, options)
@@ -516,6 +531,8 @@ def _check_input_and_outputs(options: CommandOptions, files: ReportFiles) -> Non
         if item is not None
     ]
     if len({item.resolve() for item in destinations}) != len(destinations):
+        # Whichever file was written first would take the path of the others.
+        files.discard()
         raise PreparationError("Output, JSON, HTML and diagnostics destinations must be distinct")
 
 
@@ -635,6 +652,16 @@ def _deliver_report(
     return report.outcome.exit_code
 
 
+def _interrupted_report_message(report: Report) -> str:
+    """What to tell a person who stopped the command while the final report was written."""
+    if report.artifacts:
+        return (
+            "Cancelled while writing the report; the verified output was already published "
+            "and stays in place"
+        )
+    return "Cancelled; no verified output was published"
+
+
 def _execute(command: JobCommand, arguments: dict[str, Any]) -> int:
     options = CommandOptions(command=command, **arguments)
     reject_config_with_isolated(options.config, isolated=options.isolated)
@@ -642,6 +669,7 @@ def _execute(command: JobCommand, arguments: dict[str, Any]) -> int:
     report = Report(command.value, scope=UNFINISHED_SCOPE)
     files = ReportFiles()
     pdf_previews = None
+    job_started = False
     try:
         resolve_report_files(
             options.source,
@@ -654,6 +682,7 @@ def _execute(command: JobCommand, arguments: dict[str, Any]) -> int:
         settings = _load_command_settings(options, report)
         if files.html is not None or output_format is OutputFormat.HTML:
             pdf_previews = PdfPreviewStore()
+        job_started = True
         report = _run(options, settings, pdf_previews, report)
     except (KeyboardInterrupt, asyncio.CancelledError):
         record_cancellation(
@@ -664,8 +693,14 @@ def _execute(command: JobCommand, arguments: dict[str, Any]) -> int:
             report,
             error,
             "Correct the input, option or setting named above, then rerun the command.",
+            job_started=job_started,
         )
-    return _deliver_report(report, files, output_format, options, pdf_previews)
+    try:
+        return _deliver_report(report, files, output_format, options, pdf_previews)
+    except KeyboardInterrupt:
+        # The job has finished; whatever it published stays, so the message must say so.
+        click.echo(_interrupted_report_message(report), err=True)
+        return Outcome.CANCELLED.exit_code
 
 
 def main(argv: list[str] | None = None) -> int:

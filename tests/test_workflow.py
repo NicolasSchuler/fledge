@@ -17,7 +17,7 @@ from latexprep.build_result import BuildTools
 from latexprep.cli import main
 from latexprep.config import Settings
 from latexprep.core import run_job
-from latexprep.errors import PreparationError
+from latexprep.errors import PreparationError, RequestError
 from latexprep.findings import Finding
 from latexprep.job_context import JobRequest
 from latexprep.publication import (
@@ -27,6 +27,7 @@ from latexprep.publication import (
     publish_documents,
     validate_destination,
 )
+from latexprep.redaction import scrub_local_paths
 from latexprep.report import Report
 from tests.support import controlled_backends, sectioned_project
 
@@ -291,6 +292,32 @@ class OutputTransactionTests(unittest.TestCase):
             self.assertFalse(first.exists())
             self.assertTrue(second.exists())
 
+    def test_a_directory_that_stays_behind_is_announced_and_recorded_in_the_report(self):
+        messages: list[str] = []
+        report = Report("prepare")
+        with tempfile.TemporaryDirectory() as directory:
+            leftover = Path(directory) / "output"
+
+            def refuse(path, *_args, **_kwargs):
+                raise PermissionError(13, "Permission denied", str(path))
+
+            with (
+                patch("latexprep.publication.shutil.rmtree", side_effect=refuse),
+                self.assertRaises(RuntimeError),
+                OutputTransaction(messages.append, report) as transaction,
+            ):
+                transaction.create(leftover)
+                raise RuntimeError("publication failed")
+            [finding] = report.findings
+            self.assertEqual(finding.rule, "execution.rollback")
+            self.assertEqual(finding.severity, "error")
+            # The path is generalized as in every report, and the advice says what to do.
+            shown = scrub_local_paths(str(leftover))
+            self.assertIn(shown, finding.message)
+            self.assertIn(f"Remove {shown} manually", finding.next_step)
+            self.assertIn("remove it manually", messages[-1])
+            self.assertIn(str(leftover), messages[-1])
+
     def test_rollback_announces_the_removal_only_when_something_was_created(self):
         messages: list[str] = []
         with tempfile.TemporaryDirectory() as directory:
@@ -363,6 +390,16 @@ class CliTests(unittest.TestCase):
             for output in (base / "input", base / "input/new"):
                 with self.subTest(output=output), self.assertRaises(PreparationError):
                     validate_destination(base / "input", output, "--output")
+
+    def test_advice_reads_correctly_for_an_option_that_starts_with_a_vowel(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            sectioned_project(base / "input")
+            for output in (base / "input" / "new", base / "absent" / "new"):
+                with self.subTest(output=output), self.assertRaises(RequestError) as raised:
+                    validate_destination(base / "input", output, "output")
+                self.assertNotRegex(raised.exception.suggestion, r"\ba [aeiou]")
+                self.assertIn("different output path", raised.exception.suggestion)
 
 
 if __name__ == "__main__":

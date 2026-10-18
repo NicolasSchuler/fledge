@@ -75,9 +75,13 @@ suggests the closest codes.
 
 `select` defaults to `["ALL"]` and `ignore` to `[]`. A selector is `ALL`, an
 exact code such as `TEX001`, a family such as `TEX`, or a family plus numeric
-prefix such as `BIB1`; it must match at least one registered code. Selectors are
-case-sensitive, and empty strings, partial family names such as `TE` and unknown
-codes are errors. `select = []` disables every selectable check.
+prefix such as `BIB1`; it must match at least one registered code. The name of one
+check stands for its code: the dotted name that reports show (`source.edit_marker`)
+and the hyphenated name of earlier releases (`source-edit-marker`) both select
+`TEX001`, in the file and on the command line, and `fledge rule` explains a check
+by any of its names. Selectors are case-sensitive, and empty strings, partial
+family names such as `TE` and unknown codes are errors. `select = []` disables
+every selectable check.
 
 The most specific matching selector wins, regardless of list order, and `ignore`
 wins ties. For example, `select = ["ALL", "TEX001"]` with `ignore = ["TEX"]` keeps
@@ -128,12 +132,20 @@ exists is used, and the others are ignored:
 The two `latex-prep` file names are the older spellings; see
 [migrating from latex-prep](installation.md#migrating-from-latex-prep). They rank
 above `pyproject.toml`, so a leftover `latex-prep.toml` shadows a `[tool.fledge]`
-table beside it. An unrelated `pyproject.toml` is skipped. Discovery stops at a
-repository root (a directory containing `.git` or `.hg`) and never climbs into
-your home directory, the system temporary directory or the filesystem root, so
-there is no user-wide configuration and no file another user left in `/tmp` can
-configure your job. Only one file is used; files from different directories are not
-merged.
+table beside it. A `pyproject.toml` without a `[tool.fledge]` or `[tool.latex-prep]`
+table is skipped, but one that is not valid TOML stops the run with "Cannot read
+settings": Fledge cannot know that the file was not meant for it. Repair the file,
+or choose a settings file with `--config` or skip discovery with `--isolated`.
+Discovery stops at a repository root (a directory containing `.git` or `.hg`).
+
+Discovery never climbs into your home directory, the system temporary directory or
+the filesystem root, so there is no user-wide configuration, and a file another user
+left in `/tmp` cannot configure a project that lies inside it. It reads such a
+directory only when you named it yourself: when the input is that directory, or is a
+ZIP or PDF file lying directly in it (`fledge inspect /tmp/paper.zip` reads
+`/tmp/fledge.toml`). Nothing above that directory is read, and a project folder such as
+`/tmp/paper` does not read the configuration of `/tmp`. Only one file is used; files from
+different directories are not merged.
 
 Precedence, from highest to lowest: command-line options, the selected settings
 file, a `--preset`, and the built-in defaults. Negative options such as
@@ -216,17 +228,20 @@ data-heavy project can raise the import total without letting a runaway tool wri
 file of that size:
 
 ```toml
-max_bytes = 268435456           # default for both limits below: 256 MiB
-max_import_bytes = 1073741824   # projects, ZIP files and build copies up to 1 GiB
-max_generated_file_bytes = 67108864   # no tool file above 64 MiB
+max_bytes = 268435456                  # default for both limits below: 256 MiB
+max_import_bytes = 1073741824          # projects, ZIP files and build copies up to 1 GiB
+max_generated_file_bytes = 268435456   # no tool file above 256 MiB
 ```
 
-A tool workspace may hold at most four times `max_generated_file_bytes` in total,
-and that includes the copy of your sources, so keep `max_import_bytes` at or below
-that product when you lower the per-file limit. A job that exceeds a limit stops with
-a finding that names it. Reports record all three byte settings under `settings`;
-`max_import_bytes` and `max_generated_file_bytes` are `null` when you did not set
-them.
+A tool workspace may hold at most four times `max_generated_file_bytes` in total, and
+that includes the copy of your sources. Fledge therefore rejects settings in which
+`max_import_bytes` is more than four times `max_generated_file_bytes`, and the error
+names both. The example is the largest import total that 256 MiB per file allows. A limit
+you leave unset follows `max_bytes`, so lowering `max_generated_file_bytes` alone also
+needs a lower `max_import_bytes` (or a lower `max_bytes`). A job that exceeds a limit
+stops with a finding that names it. Reports record all three byte settings under
+`settings`; `max_import_bytes` and `max_generated_file_bytes` are `null` when you did not
+set them.
 
 ## Similar names, different checks
 
@@ -328,8 +343,9 @@ online_metadata = true
 - `online_contact_email` adds `mailto:` to the `User-Agent` header of requests to
   `api.crossref.org` only, which lets Crossref use its polite pool. Requests to
   every other host, such as a DOI resolver or a linked site, never carry it. No
-  finding contains it, but the JSON report records it with the other effective
-  settings.
+  finding contains it, and the settings that the JSON report, the HTML report and the
+  diagnostics bundle record show `"<set>"` instead of the address, so a shared report
+  does not reveal it.
 - A normal `prepare` checks the final archive extraction once, after
   transformations, so it inspects the references in the prepared package; if
   preparation stops earlier, an info `online.not_reached` note says the selected

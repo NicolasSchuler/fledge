@@ -43,6 +43,7 @@ from .resource_monitor import (
     ActiveCommand,
     ResourceMonitor,
     ResourceStatistics,
+    limit_advice,
     workspace_violation,
 )
 from .sandbox import SandboxBackend, select_sandbox_backend
@@ -101,22 +102,23 @@ def _log_tool_end(summary: str, result: CommandResult, seconds: float) -> None:
 
 def _unverified_version_message(tool: str, result: CommandResult) -> str:
     """Why ``tool`` gave no usable version, without its location or its raw diagnostics."""
+    advice = f"Run {tool} on its own to see why, or reinstall it, then try again."
     if result.timed_out:
         cause = "it did not report its version within the time limit"
     elif result.output_limited:
         cause = "it printed more than the output limit while reporting its version"
     elif result.resource_exceeded:
-        cause = "it exceeded a resource limit while reporting its version"
+        cause = (
+            f"it exceeded a resource limit while reporting its version ({result.resource_exceeded})"
+        )
+        advice = limit_advice(result.resource_exceeded) or advice
     elif result.returncode:
         cause = f"it exited with status {result.returncode} when asked for its version"
     elif "Error:" in result.stderr:
         cause = "it reported an error when asked for its version"
     else:
         cause = "it printed no version"
-    return (
-        f"Cannot verify tool {tool}: {cause}. Run {tool} on its own to see why, "
-        "or reinstall it, then try again."
-    )
+    return f"Cannot verify tool {tool}: {cause}. {advice}"
 
 
 def _verified_version(argv: list[str], executable: Path, result: CommandResult) -> ToolVersion:

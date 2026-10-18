@@ -60,6 +60,19 @@ def _is_terminal(stream: IO[str]) -> bool:
         return False
 
 
+class _ReportConsole(Console):
+    """The console of the final report: a reader that stops early is not an error.
+
+    Rich ends the process with exit status 1 when the reader of a pipe closes it, such as
+    ``fledge inspect INPUT | head``. That would hide the verdict of the run. Raising the
+    ``BrokenPipeError`` instead lets the command handle it, keep its own exit code and
+    stop writing to the closed stream.
+    """
+
+    def on_broken_pipe(self) -> None:
+        raise BrokenPipeError
+
+
 def stdout_console() -> Console:
     """The console for the final report on standard output.
 
@@ -67,10 +80,10 @@ def stdout_console() -> Console:
     """
     stream = sys.stdout
     if _is_terminal(stream):
-        return Console(markup=False, highlight=False)
+        return _ReportConsole(markup=False, highlight=False)
     # Rich writes, flushes and asks isatty, encoding and fileno; the wrapper offers exactly those.
     file = cast(IO[str], _TrailingBlankStripper(stream))
-    return Console(file=file, markup=False, highlight=False)
+    return _ReportConsole(file=file, markup=False, highlight=False)
 
 
 def stderr_console() -> Console:

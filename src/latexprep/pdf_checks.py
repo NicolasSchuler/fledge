@@ -17,6 +17,7 @@ from pathlib import Path
 
 from .command_runner import CommandResult, CommandRunner
 from .errors import PreparationError
+from .finding_text import plural
 from .findings import Finding
 from .measurement_findings import measurement_finding, unavailable_finding
 from .pdf_check_options import (
@@ -152,13 +153,17 @@ def _section_findings(pages: int, options: PdfCheckOptions) -> list[Finding]:
         actual = section.end_page - section.start_page + 1
         outside = section.end_page > pages
         over = not outside and actual > section.max_pages
-        span = (
-            f"{section.name} spans {actual} pages (pages {section.start_page}-{section.end_page})"
+        where = (
+            f"page {section.start_page}"
+            if actual == 1
+            else f"pages {section.start_page}-{section.end_page}"
         )
+        span = f"{section.name} spans {plural(actual, 'page')} ({where})"
         if outside:
             message = (
                 f"{section.name} is configured to end at page {section.end_page}, but the PDF "
-                f"has only {pages} pages; correct the section's page range to check its budget."
+                f"has only {plural(pages, 'page')}; correct the section's page range to check "
+                "its budget."
             )
         elif over:
             message = f"{span}, over its budget of {section.max_pages}."

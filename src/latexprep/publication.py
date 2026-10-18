@@ -20,6 +20,7 @@ from typing import NamedTuple, Self
 from .errors import PreparationError, RequestError
 from .findings import Finding
 from .path_safety import is_contained
+from .redaction import scrub_local_paths
 from .report import Outcome, Report
 
 # Workspace preview images and the published path of each.
@@ -83,12 +84,14 @@ def validate_destination(source: Path, destination: Path, option: str) -> Path:
     ):
         raise RequestError(
             "Output must be outside the original project",
-            f"Choose a {option} path outside the input project; originals are never written.",
+            f"Choose a different {option} path outside the input project; originals are "
+            "never written.",
         )
     if not resolved.parent.is_dir():
         raise RequestError(
             f"Output parent directory does not exist: {resolved.parent}",
-            f"Create the parent directory first, or choose a {option} path in an existing one.",
+            "Create the parent directory first, or choose a different "
+            f"{option} path in an existing one.",
         )
     return resolved
 
@@ -97,12 +100,18 @@ class OutputTransaction:
     """Directories one publication creates; a failure removes every one of them.
 
     Only directories created by ``create`` are removed, never previous or concurrent data.
-    ``progress`` receives a message when a failure starts the removal.
+    ``progress`` receives a message when a failure starts the removal and another for each
+    directory that cannot be removed. Such a leftover is also recorded in ``report`` as an
+    ``execution.rollback`` finding that names it, because nothing else shows it: the error
+    that caused the rollback is the one that propagates.
     """
 
-    def __init__(self, progress: Callable[[str], None] | None = None) -> None:
+    def __init__(
+        self, progress: Callable[[str], None] | None = None, report: Report | None = None
+    ) -> None:
         self._created: list[Path] = []
         self._progress = progress or (lambda _message: None)
+        self._report = report
 
     def __enter__(self) -> Self:
         return self
@@ -125,11 +134,31 @@ class OutputTransaction:
             except FileNotFoundError:
                 continue
             except OSError as error:
-                if exc_value is not None:
-                    exc_value.add_note(
-                        f"Could not remove the partial output {path} ({error}); "
-                        "remove it manually before running again."
-                    )
+                self._report_leftover(path, error, exc_value)
+
+    def _report_leftover(self, path: Path, error: OSError, cause: BaseException | None) -> None:
+        """Say that ``path`` stayed behind: in the progress, on the error and in the report."""
+        advice = (
+            f"Could not remove the partial output {path} ({error}); "
+            "remove it manually before running again."
+        )
+        self._progress(advice)
+        if cause is not None:
+            cause.add_note(advice)
+        if self._report is not None:
+            shown = scrub_local_paths(str(path))
+            reason = error.strerror or type(error).__name__
+            self._report.findings.append(
+                Finding(
+                    "execution.rollback",
+                    f"Publication failed and the partial output {shown} could not be "
+                    f"removed ({reason}).",
+                    severity="error",
+                    status="failed",
+                    suggestion=f"Remove {shown} manually before running again; it holds "
+                    "the unfinished output of this run.",
+                )
+            )
 
     def create(self, path: Path, label: str = "Output") -> Path:
         # mkdir is exclusive, so a concurrent creation cannot be overwritten by a rename.

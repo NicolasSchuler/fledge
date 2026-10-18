@@ -100,6 +100,7 @@ OPERATIONAL_RULE_NAMES = frozenset(
         "execution.internal",
         "execution.request",
         "execution.resources",
+        "execution.rollback",
         "execution.task",
         "package.document",
         "report.redaction_limit",
@@ -148,9 +149,8 @@ def code_for(name: str) -> str | None:
 
 
 def get_rule(code: str) -> Rule:
-    try:
-        return BY_CODE[code.upper()]
-    except KeyError:
-        raise ValueError(
-            f"Unknown check code {code!r}; run 'fledge rules' to list checks"
-        ) from None
+    """The check with this code (in any case), or with this rule name or former name."""
+    rule = BY_CODE.get(code.upper()) or BY_NAME.get(code)
+    if rule is None:
+        raise ValueError(f"Unknown check code {code!r}; run 'fledge rules' to list checks")
+    return rule

@@ -15,6 +15,8 @@ This module only builds and reads those findings; it does not decide when to rep
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 from .defects import REPORT_DEFECT_SUGGESTION
 from .findings import Finding
 from .scheduler import TaskResult
@@ -49,6 +51,11 @@ def failed_task_finding(result: TaskResult) -> Finding:
         suggestion=REPORT_DEFECT_SUGGESTION if result.defect_frames else None,
         details=details,
     )
+
+
+def has_task_defect(findings: Iterable[Finding]) -> bool:
+    """Whether a task failed by a defect in Fledge, which makes the whole run an error."""
+    return any(item.rule == TASK_RULE and TRACEBACK_DETAIL in item.details for item in findings)
 
 
 def blocked_prerequisites(finding: Finding) -> tuple[str, ...]:

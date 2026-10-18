@@ -54,6 +54,38 @@ class CheckSelectionTests(unittest.TestCase):
                     with self.assertRaisesRegex(PreparationError, "Unknown checks"):
                         CheckSelection(**{name: (selector,)})
 
+    def test_rule_names_and_former_names_select_the_check_by_its_code(self) -> None:
+        """TEX001 was ``source-edit-marker`` and is ``source.edit_marker`` in reports."""
+        for spelling in ("source-edit-marker", "source.edit_marker", "TEX001"):
+            for name in ("select", "ignore"):
+                with self.subTest(spelling=spelling, name=name):
+                    selection = CheckSelection(**{name: (spelling,)})
+                    self.assertEqual(getattr(selection, name), ("TEX001",))
+        ignored = CheckSelection(ignore=("source-edit-marker",))
+        self.assertFalse(ignored.enabled("TEX001"))
+        self.assertTrue(ignored.enabled("TEX002"))
+        only = CheckSelection(select=("source-edit-marker", "BIB1"))
+        self.assertTrue(only.enabled("TEX001"))
+        self.assertTrue(only.enabled("BIB101"))
+        self.assertFalse(only.enabled("TEX002"))
+        layered = CheckSelection(ignore=("PDF",)).with_command_line(
+            select=("source-edit-marker",), ignore=("source-edit-command",)
+        )
+        self.assertEqual((layered.select, layered.ignore), (("TEX001",), ("PDF", "TEX002")))
+
+    def test_every_catalogued_name_and_alias_resolves_to_its_code(self) -> None:
+        for rule in RULES:
+            for name in (rule.name, *rule.aliases):
+                with self.subTest(name=name):
+                    self.assertEqual(CheckSelection(select=(name,)).select, (rule.code,))
+
+    def test_configuration_accepts_a_former_rule_name_as_a_selector(self) -> None:
+        settings = load_settings(None, {"checks": {"ignore": ["source-edit-marker"]}})
+        self.assertEqual(settings.checks.ignore, ("TEX001",))
+        self.assertFalse(settings.checks.enabled("TEX001"))
+        with self.assertRaisesRegex(PreparationError, "Unknown checks.select selector 'source-x'"):
+            load_settings(None, {"checks": {"select": ["source-x"]}})
+
     def test_direct_api_is_immutable_and_rejects_invalid_container_types(self) -> None:
         selection = CheckSelection()
         with self.assertRaises(FrozenInstanceError):
@@ -195,6 +227,32 @@ class ConfigDiscoveryTests(unittest.TestCase):
             self.assertEqual(resolve_config_path(shared), shared / "latex-prep.toml")
         self.assertEqual(resolve_config_path(project), shared / "latex-prep.toml")
 
+    def test_a_file_input_directly_in_the_temporary_directory_reads_that_directory_only(
+        self,
+    ) -> None:
+        # The documented rule: a directory is read when the input is it or lies directly in it.
+        shared = self.root / "shared"
+        (shared / "project").mkdir(parents=True)
+        configuration = self.write(shared / "fledge.toml")
+        self.write(self.root / "fledge.toml")
+        archive = shared / "paper.zip"
+        archive.write_bytes(b"")
+        with patch("latexprep.config_discovery.tempfile.gettempdir", return_value=str(shared)):
+            self.assertEqual(resolve_config_path(archive), configuration)
+            self.assertEqual(resolve_config_path(shared), configuration)
+            self.assertIsNone(resolve_config_path(shared / "project"))
+
+    def test_an_unparsable_pyproject_stops_discovery_but_one_without_a_table_is_skipped(
+        self,
+    ) -> None:
+        pyproject = self.write(self.source / "pyproject.toml", "[project\n")
+        with self.assertRaisesRegex(PreparationError, "Cannot read settings"):
+            resolve_config_path(self.source)
+        # An explicit file or isolation never reads it.
+        self.assertIsNone(resolve_config_path(self.source, isolated=True))
+        pyproject.write_text("[project]\nname = 'other'\n", encoding="utf-8")
+        self.assertIsNone(resolve_config_path(self.source))
+
     def test_file_inputs_start_beside_the_file_and_never_inside_zip(self) -> None:
         archive = self.source / "paper.zip"
         with zipfile.ZipFile(archive, "w") as stream:
@@ -332,6 +390,23 @@ class ConfigDiscoveryTests(unittest.TestCase):
         self.assertIn("Unknown --ignore selector 'tex001'", finding["message"])
         self.assertIn("did you mean TEX001?", finding["message"])
         self.assertIn("fledge rule CODE", finding["next_step"])
+
+    def test_cli_select_and_ignore_accept_a_former_rule_name(self) -> None:
+        (self.source / "main.tex").write_text("\\documentclass{article}\nTODO fix this\n")
+        for flag, expected in (("--select", True), ("--ignore", False)):
+            with self.subTest(flag=flag):
+                result = CliRunner().invoke(
+                    cli,
+                    ["inspect", str(self.source), flag, "source-edit-marker", "--json", "--quiet"],
+                )
+                report = json.loads(result.output)
+                self.assertNotEqual(result.exit_code, USAGE_EXIT_CODE, result.output)
+                self.assertNotIn("execution.request", {item["rule"] for item in report["findings"]})
+                self.assertEqual(
+                    "TEX001" in {item["code"] for item in report["findings"]}, expected
+                )
+                selection = report["execution"]["check_selection"]
+                self.assertIn("TEX001", selection["select" if flag == "--select" else "ignore"])
 
     def test_cli_help_explains_configuration_controls(self) -> None:
         result = CliRunner().invoke(cli, ["inspect", "--help"])

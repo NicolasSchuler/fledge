@@ -94,6 +94,21 @@ class SubmissionTextTests(ProjectTestCase):
         self.assertEqual(payload["schema_version"], SUBMISSION_TEXT_SCHEMA_VERSION)
         self.assertEqual(payload["fields"]["title"]["draft"], "Selected")
 
+    def test_json_mode_prints_an_error_object_when_the_project_cannot_be_read(self) -> None:
+        (self.root / "fledge.toml").write_text("jobs = 'many'\n", encoding="utf-8")
+        runner = CliRunner()
+        failed = runner.invoke(submission_text_command, [str(self.root), "--json"])
+        self.assertEqual(failed.exit_code, 4, failed.output)
+        payload = json.loads(failed.stdout)
+        self.assertEqual(payload["schema_version"], SUBMISSION_TEXT_SCHEMA_VERSION)
+        self.assertEqual(set(payload), {"schema_version", "error"})
+        self.assertIn("Cannot export submission text", payload["error"])
+        self.assertIn("jobs", payload["error"])
+        self.assertIn("Cannot export submission text", failed.stderr)
+        # Without --json nothing goes to stdout, as before.
+        plain = runner.invoke(submission_text_command, [str(self.root)])
+        self.assertEqual((plain.exit_code, plain.stdout), (4, ""))
+
     def test_definitions_and_unclosed_environments_are_not_ready(self) -> None:
         self.write(
             r"\documentclass{article}\newcommand{\sample}{\title{Example}}"

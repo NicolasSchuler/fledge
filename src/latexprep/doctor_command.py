@@ -64,6 +64,7 @@ def doctor_command(
     """
     reject_config_with_isolated(config, isolated=isolated)
     report = Report("doctor", scope=UNFINISHED_SCOPE)
+    job_started = False
     try:
         selected = (
             resolve_config_path(project or Path.cwd(), config, isolated=isolated)
@@ -71,6 +72,7 @@ def doctor_command(
             else None
         )
         settings = load_settings(selected, {"engine": engine})
+        job_started = True
         with TerminalProgress(stderr_console(), quiet=quiet) as progress:
             report = asyncio.run(run_doctor(settings, progress=progress))
         report.execution[CONFIG_PATH_KEY] = str(selected) if selected is not None else None
@@ -87,6 +89,7 @@ def doctor_command(
             report,
             error,
             "Correct the selected settings or configuration path and rerun fledge doctor.",
+            job_started=job_started,
         )
     try:
         write_report(

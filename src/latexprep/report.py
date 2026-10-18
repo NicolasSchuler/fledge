@@ -140,8 +140,10 @@ class Report:
     @property
     def is_request_error(self) -> bool:
         """The request was rejected, so no check result describes the project."""
-        return self.outcome is Outcome.ERROR and any(
-            finding.rule == REQUEST_ERROR_RULE for finding in self.findings
+        return (
+            self.outcome is Outcome.ERROR
+            and self.scope == REQUEST_SCOPE
+            and any(finding.rule == REQUEST_ERROR_RULE for finding in self.findings)
         )
 
     def redacted_copy(self) -> Report:

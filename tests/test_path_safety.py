@@ -210,6 +210,15 @@ class ContainmentTests(unittest.TestCase):
         self.assertFalse(is_link_free_regular_file(self.root, self.root / "absent.tex"))
         self.assertFalse(is_link_free_regular_file(self.root, self.outside / "secret.tex"))
 
+    def test_link_free_regular_file_refuses_a_parent_segment_that_leaves_the_root(self) -> None:
+        escaping = self.root / ".." / self.outside.name / "secret.tex"
+        self.assertTrue((self.root / ".." / "outside" / "secret.tex").is_file())
+        self.assertFalse(is_link_free_regular_file(self.root, escaping))
+        # Even a ".." that returns inside the root is a different spelling than the file's own.
+        self.assertFalse(
+            is_link_free_regular_file(self.root, self.root / "sub" / ".." / "main.tex")
+        )
+
     def test_link_free_regular_file_refuses_a_link_that_resolves_inside(self) -> None:
         (self.root / "inside").symlink_to(self.root / "sub")
         (self.root / "alias.tex").symlink_to(self.root / "main.tex")

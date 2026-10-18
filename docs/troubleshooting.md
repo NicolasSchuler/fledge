@@ -105,7 +105,7 @@ no external tools and still works meanwhile.
 | Installer refuses an existing destination | Choose a fresh `--prefix` and a `--bin-dir` without a `fledge` launcher, or [uninstall](installation.md#upgrade-or-uninstall) first. |
 | Exit code 64 | Invalid command-line syntax; see `fledge COMMAND --help`. [Other exit codes](reports.md#exit-codes). |
 | "Request error" (exit 4) | The command cannot run as given: an unusable `--output` or report path, a missing input, a `--main` that names no document (the message lists the ones found) or an invalid setting value. The `execution.request` finding names the source of the problem and the fix; nothing was built. |
-| `execution.internal` finding (exit 4) | A defect, not a problem with your paper. Keep the command and the JSON report when reporting it. |
+| `execution.internal` finding, or an `execution.task` finding with a `traceback` detail (exit 4) | A defect, not a problem with your paper. Keep the command and the JSON report when reporting it, and rerun with `--debug` to print the traceback. The other checks' results are still in the report. |
 | Unexpected configuration | Check `execution.config_path` and `execution.preset` in the JSON report; use `--config FILE` or `--isolated`. |
 | Unknown setting or selector | The request error suggests the closest valid name, such as `max_pages` for `max_page`, or the closest codes for a selector. See [choose checks](configuration.md#choose-checks) and `fledge rules`. |
 | Output already exists | Choose a new path outside the input. |
@@ -151,7 +151,9 @@ message. The log covers:
 - when the shared source analysis was built or reused.
 
 Lines show this machine's home directory as `~` and its temporary directory as
-`<tmp>`, but read the log before sharing it. Without the option Fledge prints no log
+`<tmp>`; credential-shaped text and terminal control characters are removed, and the
+traceback that `--debug` prints for a defect gets the same treatment. Still, read the
+log before sharing it. Without the option Fledge prints no log
 lines at all. When you embed Fledge as a library, the `latexprep` logger has only a
 `NullHandler`; attach your own handler to receive the records.
 

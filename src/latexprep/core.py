@@ -53,6 +53,7 @@ from .publication import (
 from .report import Outcome, Report
 from .rules import MANDATORY_CODES
 from .standalone_checks import check_bibliography, check_formatting, check_standalone_pdf
+from .task_findings import has_task_defect
 
 
 class _Destinations(NamedTuple):
@@ -271,7 +272,7 @@ def _publish(
     preview_output = destinations.previews
     # Previews go into the bundle only without an explicit preview directory.
     bundled_previews = previews if preview_output is None else ()
-    with OutputTransaction(emit) as transaction:
+    with OutputTransaction(emit, report) as transaction:
         try:
             refused = False
             if isinstance(outputs, VerifiedPackage):
@@ -357,6 +358,11 @@ async def run_job(
             finally:
                 _record_execution(report, execution, request)
             if _block_on_resource_failure(report, execution):
+                outputs = None
+            if has_task_defect(report.findings):
+                # A defect in a check is not a problem with the input: it ends in the error
+                # outcome, whatever the other tasks found, and nothing is published.
+                report.outcome = Outcome.ERROR
                 outputs = None
             execution.check_deadline()
             previews: PreviewPlan = ()
