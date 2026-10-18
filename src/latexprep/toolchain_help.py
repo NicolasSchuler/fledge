@@ -2,28 +2,32 @@
 
 from __future__ import annotations
 
-import re
 import shutil
 import sys
 from dataclasses import replace
 
-from .models import ENGINES, Engine, Finding
+from .findings import Finding
+from .setting_choices import ENGINES, Engine
 
 INSTALLATION_GUIDE = "https://nicolasschuler.github.io/fledge/installation.html"
 _TEX_TOOLS = frozenset({"latexmk", *ENGINES})
-_UNAVAILABLE_TOOL = re.compile(r"Required tool is unavailable: (\S+)\.")
 
 
 def explain_missing_toolchain(findings: list[Finding], engine: Engine) -> list[Finding]:
     """Explain a missing TeX toolchain once, with installation steps for this system."""
     explained = []
     for finding in findings:
-        match = _UNAVAILABLE_TOOL.match(finding.message)
-        if finding.rule != "build.execution_unavailable" or not match or match[1] not in _TEX_TOOLS:
+        # The build records which tool a ToolUnavailableError named in the finding's details.
+        tool = finding.details.get("tool")
+        if (
+            finding.rule != "build.execution_unavailable"
+            or not isinstance(tool, str)
+            or tool not in _TEX_TOOLS
+        ):
             explained.append(finding)
             continue
         missing = [name for name in ("latexmk", engine) if shutil.which(name) is None]
-        missing = missing or [match[1]]
+        missing = missing or [tool]
         found = " and ".join(missing)
         install = (
             "brew install --cask basictex (a small TeX distribution) or install MacTeX, then "

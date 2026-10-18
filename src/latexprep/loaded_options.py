@@ -23,8 +23,10 @@ from .build_dependencies import (
     PackageOrigin,
     parse_declared_date,
 )
+from .errors import PreparationError
 from .file_safety import MIB
-from .models import Engine, Finding, PreparationError
+from .findings import Finding
+from .setting_choices import Engine
 
 _MAX_PACKAGES = 2048
 _MAX_FIELD_UNITS = 16_384

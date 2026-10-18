@@ -14,8 +14,8 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Literal, NamedTuple
 
+from .cancellation import cancellation_point
 from .file_safety import MIB
-from .scheduler import cancellation_point
 
 # Bounds shared by every reader of the lexical subset.
 MAX_SOURCE_BYTES = 8 * 1024 * 1024

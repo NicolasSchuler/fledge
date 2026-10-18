@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from latexprep.config import COORDINATOR_MEMORY_MB, load_settings
-from latexprep.models import PreparationError
+from latexprep.errors import PreparationError
 
 
 class ParallelConfigTests(unittest.TestCase):

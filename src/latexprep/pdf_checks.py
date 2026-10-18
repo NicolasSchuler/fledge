@@ -16,7 +16,8 @@ from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
 
-from .models import Finding, PreparationError, Severity
+from .errors import PreparationError
+from .findings import Finding, Severity
 from .option_config import require_booleans
 from .pdf_support import (
     COLOR_OPERATIONS,
@@ -61,8 +62,8 @@ from .pdf_support import (
     require_rendered_pages,
     unavailable_finding,
 )
+from .resource_budget import ResourceBudget
 from .runtime import CommandResult, CommandRunner
-from .scheduler import ResourceBudget
 
 _PROPERTIES_ARGV = ("pdfinfo", "-enc", "UTF-8", "-isodates", DOCUMENT)
 # Rules measured from one evidence source; doctor maps them to optional tools.

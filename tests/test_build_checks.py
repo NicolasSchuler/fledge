@@ -15,8 +15,9 @@ from latexprep.build_checks import (
 )
 from latexprep.build_dependencies import LoadedPackage, read_loaded_package
 from latexprep.build_log import log_findings
+from latexprep.errors import PreparationError
+from latexprep.findings import Finding
 from latexprep.latexmk_build import BuildResult, BuildTools, build_project
-from latexprep.models import Finding, PreparationError
 from latexprep.runtime import CommandResult, ToolVersion
 from tests.test_runtime import FakeBuildRunner
 

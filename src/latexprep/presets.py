@@ -12,7 +12,7 @@ from __future__ import annotations
 import tomllib
 from importlib import resources
 
-from .models import PreparationError
+from .errors import PreparationError
 
 # One-line descriptions for `fledge init --list`; each name has a <name>.toml file.
 PRESETS: dict[str, str] = {

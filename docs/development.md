@@ -283,7 +283,30 @@ scheduled tasks; {download}`documents.py <../src/latexprep/documents.py>` runs
 configured `workflow.documents`; and
 {download}`publication.py <../src/latexprep/publication.py>` writes verified
 outputs. A new scheduled check needs a task in `document_tasks.py`, named in
-`models.TaskName`.
+`TaskName` there.
+
+Small modules under the job workflow each own one concern and import nothing
+above them. {download}`errors.py <../src/latexprep/errors.py>` defines the
+expected failures: `PreparationError`, `RequestError`, and the kinds callers act
+on, `ToolUnavailableError` (the missing `tool`), `SettingsError` (the `settings`
+at fault) and `SandboxRefusedError`. Branch on these types and attributes, never
+on the wording of a message. Raise them only for problems a researcher can fix;
+a violated internal contract raises `ValueError` or `RuntimeError`, which
+`defects.is_expected_failure` reports as a defect.
+{download}`findings.py <../src/latexprep/findings.py>` defines `Finding`,
+{download}`report.py <../src/latexprep/report.py>` the `Report` with its
+`Outcome` and exit codes, and
+{download}`setting_choices.py <../src/latexprep/setting_choices.py>` the closed
+values that settings accept. For concurrency,
+{download}`cancellation.py <../src/latexprep/cancellation.py>` holds the
+cooperative-cancellation helpers (modules that parse files import it, never the
+scheduler),
+{download}`resource_budget.py <../src/latexprep/resource_budget.py>` the shared
+CPU, memory and tool-class reservations,
+{download}`scheduler.py <../src/latexprep/scheduler.py>` the dependency
+scheduling of tasks, and
+{download}`process_control.py <../src/latexprep/process_control.py>` the start
+and kill helpers for child processes.
 
 For normal preparation, online checks run once on the fresh archive extraction;
 source inspection and dry runs use the initial snapshot. Preserve the request

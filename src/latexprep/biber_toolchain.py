@@ -17,8 +17,8 @@ import stat
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+from .errors import PreparationError
 from .file_safety import DirectoryIdentity, FileIdentity, regular_file_identity
-from .models import PreparationError
 
 # Mach-O universal ("fat") container headers, always big-endian. The 32-bit form
 # uses fat_arch records and the 64-bit form fat_arch_64 records.

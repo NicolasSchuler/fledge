@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from latexprep.models import has_blockers
+from latexprep.findings import has_blockers
 from latexprep.source import (
     analyze_selected_sources,
     analyze_sources,

@@ -16,9 +16,9 @@ from .job_context import (
     names_project_file,
     pdf_check_settings,
 )
-from .models import Report
 from .online_checks import check_online_references
 from .pdf_check_pipeline import inspect_standalone_pdf
+from .report import Report
 from .source import discover_roots
 
 

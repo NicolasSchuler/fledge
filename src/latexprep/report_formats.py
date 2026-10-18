@@ -12,13 +12,8 @@ from rich.console import Console
 from .ci_annotations import render_ci_annotations
 from .finding_view import DEFAULT_RENDER_OPTIONS, RenderOptions
 from .html_report import render_html
-from .models import Report
+from .report import Report
 from .terminal_report import print_report, render_compact, render_terminal
-
-# The scope of a report whose request was rejected before or while the job ran.
-REQUEST_SCOPE = "request validation"
-# The scope of a report whose job was cancelled or hit a defect before it finished.
-UNFINISHED_SCOPE = "run did not finish"
 
 
 class OutputFormat(StrEnum):

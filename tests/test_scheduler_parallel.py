@@ -7,17 +7,12 @@ import unittest
 from pathlib import Path
 from typing import Any
 
+from latexprep.cancellation import AnalysisCancelled, bounded_map, cancellation_point, run_in_thread
+from latexprep.errors import PreparationError
+from latexprep.findings import Finding
 from latexprep.latexmk_build import BuildResult
-from latexprep.models import Finding, PreparationError
-from latexprep.scheduler import (
-    AnalysisCancelled,
-    ResourceBudget,
-    Scheduler,
-    Task,
-    bounded_map,
-    cancellation_point,
-    run_in_thread,
-)
+from latexprep.resource_budget import ResourceBudget
+from latexprep.scheduler import Scheduler, Task
 
 
 class SharedBudgetTests(unittest.IsolatedAsyncioTestCase):
@@ -421,7 +416,7 @@ class SharedBudgetTests(unittest.IsolatedAsyncioTestCase):
         execution = asyncio.create_task(
             Scheduler(budget).execute(
                 [
-                    Task("composite", composite, cpu=0, memory_mb=0),
+                    Task.composite("composite", composite),
                     Task("dependent", dependent, needs_success_of=("composite",)),
                 ]
             )

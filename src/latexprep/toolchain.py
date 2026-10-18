@@ -15,8 +15,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from .errors import ToolUnavailableError
 from .file_safety import MIB
-from .models import PreparationError
 
 # Tools declared up front, so every command of a job shares one stable grant set.
 _SANDBOXED_TOOL_NAMES = (
@@ -39,6 +39,33 @@ _SANDBOXED_TOOL_NAMES = (
 )
 # Interpreters and shells that tools such as latexmk start.
 _INTERPRETERS = (Path("/usr/bin/perl"), Path("/usr/bin/env"), Path("/bin/sh"), Path("/bin/bash"))
+# Where a researcher gets each external tool: its package, with the commands that install it.
+_POPPLER = "Poppler: brew install poppler, or sudo apt install poppler-utils"
+_TEX_LIVE = "TeX Live: brew install --cask basictex, or sudo apt install texlive latexmk"
+_INSTALL_HINTS: dict[str, str] = {
+    **dict.fromkeys(
+        ("pdfinfo", "pdftotext", "pdftoppm", "pdffonts", "pdfimages", "pdfdetach", "pdftohtml"),
+        _POPPLER,
+    ),
+    "qpdf": "qpdf: brew install qpdf, or sudo apt install qpdf",
+    "mutool": "MuPDF: brew install mupdf-tools, or sudo apt install mupdf-tools",
+    "tex-fmt": "tex-fmt: brew install tex-fmt, or a release binary from "
+    "https://github.com/WGUNDERWOOD/tex-fmt/releases",
+    **dict.fromkeys(
+        (
+            "latexmk",
+            "pdflatex",
+            "xelatex",
+            "lualatex",
+            "biber",
+            "bibtex",
+            "xdvipdfmx",
+            "kpsewhich",
+            "makeindex",
+        ),
+        _TEX_LIVE,
+    ),
+}
 # MacTeX uses a year directory; BasicTeX adds the literal "basic" suffix.
 _TEXLIVE_DIRECTORY = re.compile(r"[0-9]{4}(?:basic)?")
 _HOMEBREW_FORMULA = re.compile(r"[A-Za-z0-9][A-Za-z0-9@+_.-]*")
@@ -57,7 +84,10 @@ def _resolved_tool(found: Path, name: str) -> Path:
 def tool_path(name: str) -> Path:
     found = shutil.which(name)
     if not found:
-        raise PreparationError(f"Required tool is unavailable: {name}. Install it explicitly.")
+        hint = f" ({_INSTALL_HINTS[name]})" if name in _INSTALL_HINTS else ""
+        raise ToolUnavailableError(
+            f"Required tool is unavailable: {name}. Install it explicitly{hint}.", name
+        )
     return _resolved_tool(Path(found).absolute(), name)
 
 

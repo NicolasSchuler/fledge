@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+import re
 import types
 from dataclasses import fields, is_dataclass
 from typing import Any, Literal, TypeVar, Union, get_args, get_origin, get_type_hints
 
-from .models import PreparationError
+from .errors import PreparationError, SettingsError
 
 T = TypeVar("T")
+
+
+def _settings_error(location: str, message: str) -> SettingsError:
+    """An error about the value at ``location``, named by the top-level setting that holds it."""
+    return SettingsError(message, (re.split(r"[.\[]", location, maxsplit=1)[0],))
 
 
 def read_options(kind: type[T], value: object, location: str) -> T:
@@ -16,14 +22,14 @@ def read_options(kind: type[T], value: object, location: str) -> T:
     if isinstance(value, kind):
         return value
     if not isinstance(value, dict):
-        raise PreparationError(f"{location} must be a settings table")
+        raise _settings_error(location, f"{location} must be a settings table")
     if not is_dataclass(kind):
-        raise PreparationError(f"{location} requires a dataclass option schema")
+        raise _settings_error(location, f"{location} requires a dataclass option schema")
     known = {item.name for item in fields(kind)}
     unknown = set(value) - known
     if unknown:
-        raise PreparationError(
-            f"Unknown {location} setting(s): {', '.join(sorted(map(str, unknown)))}"
+        raise _settings_error(
+            location, f"Unknown {location} setting(s): {', '.join(sorted(map(str, unknown)))}"
         )
     hints = get_type_hints(kind)
     converted = {
@@ -32,14 +38,14 @@ def read_options(kind: type[T], value: object, location: str) -> T:
     try:
         return kind(**converted)
     except (ValueError, TypeError, PreparationError) as error:
-        raise PreparationError(f"Invalid {location} settings: {error}") from error
+        raise _settings_error(location, f"Invalid {location} settings: {error}") from error
 
 
 def require_booleans(options: object, *names: str) -> None:
     """Reject option fields that hold anything but ``True`` or ``False``, such as ``1``."""
     for name in names:
         if type(getattr(options, name)) is not bool:
-            raise PreparationError(f"{name} must be a boolean")
+            raise SettingsError(f"{name} must be a boolean", (name,))
 
 
 def _convert(annotation: Any, value: object, location: str) -> object:
@@ -56,11 +62,13 @@ def _convert(annotation: Any, value: object, location: str) -> object:
                 return _convert(variant, value, location)
             except PreparationError:
                 pass
-        raise PreparationError(f"{location} has an invalid value type")
+        raise _settings_error(location, f"{location} has an invalid value type")
     if origin is Literal:
         # Compare types too: TOML true must not match a literal 1, nor 1 a literal True.
         if not any(type(value) is type(choice) and value == choice for choice in args):
-            raise PreparationError(f"{location} must be one of {', '.join(map(str, args))}")
+            raise _settings_error(
+                location, f"{location} must be one of {', '.join(map(str, args))}"
+            )
         return value
     if isinstance(annotation, type) and is_dataclass(annotation):
         return read_options(annotation, value, location)
@@ -70,26 +78,26 @@ def _convert(annotation: Any, value: object, location: str) -> object:
             inner = get_args(args[0])
             if get_origin(args[0]) is tuple and len(inner) == 2 and inner[0] is str:
                 if any(not isinstance(key, str) for key in value):
-                    raise PreparationError(f"{location} requires string keys")
+                    raise _settings_error(location, f"{location} requires string keys")
                 value = tuple(sorted(value.items()))
         if not isinstance(value, (list, tuple)):
-            raise PreparationError(f"{location} must be an array")
+            raise _settings_error(location, f"{location} must be an array")
         if len(args) == 2 and args[-1] is Ellipsis:
             return tuple(
                 _convert(args[0], item, f"{location}[{index}]") for index, item in enumerate(value)
             )
         if len(args) != len(value):
-            raise PreparationError(f"{location} requires {len(args)} array items")
+            raise _settings_error(location, f"{location} requires {len(args)} array items")
         return tuple(
             _convert(kind, item, f"{location}[{index}]")
             for index, (kind, item) in enumerate(zip(args, value, strict=True))
         )
     if annotation is bool and type(value) is not bool:
-        raise PreparationError(f"{location} must be a boolean")
+        raise _settings_error(location, f"{location} must be a boolean")
     if annotation is int and type(value) is not int:
-        raise PreparationError(f"{location} must be an integer")
+        raise _settings_error(location, f"{location} must be an integer")
     if annotation is float and (type(value) not in {int, float}):
-        raise PreparationError(f"{location} must be a number")
+        raise _settings_error(location, f"{location} must be a number")
     if annotation is str and not isinstance(value, str):
-        raise PreparationError(f"{location} must be a string")
+        raise _settings_error(location, f"{location} must be a string")
     return value

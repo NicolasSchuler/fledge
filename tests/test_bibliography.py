@@ -17,7 +17,8 @@ from latexprep.bibliography_transform import (
     plan_bibliography,
 )
 from latexprep.bibtex_syntax import BibFileReader
-from latexprep.models import Finding, PreparationError
+from latexprep.errors import PreparationError
+from latexprep.findings import Finding
 
 
 class BibliographyTests(unittest.TestCase):

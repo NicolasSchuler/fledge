@@ -14,7 +14,8 @@ from unittest.mock import AsyncMock, patch
 
 from latexprep import __version__
 from latexprep.bibtex_syntax import BibFileReader
-from latexprep.models import PreparationError
+from latexprep.cancellation import AnalysisCancelled, cancellation_point
+from latexprep.errors import PreparationError
 from latexprep.online_checks import (
     _DNS_SCRIPT,
     NetworkFailure,
@@ -30,7 +31,7 @@ from latexprep.online_checks import (
     _target,
     check_online_references,
 )
-from latexprep.scheduler import AnalysisCancelled, ResourceBudget, cancellation_point
+from latexprep.resource_budget import ResourceBudget
 
 
 def metadata(**changes):

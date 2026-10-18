@@ -11,7 +11,9 @@ import re
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from .models import Finding, PreparationError
+from .cancellation import cancellation_point
+from .errors import PreparationError
+from .findings import Finding
 from .option_config import require_booleans
 from .pdf_support import (
     DOCUMENT,
@@ -25,8 +27,8 @@ from .pdf_support import (
     qpdf_objects_argv,
     unavailable_finding,
 )
+from .resource_budget import ResourceBudget
 from .runtime import CommandRunner
-from .scheduler import ResourceBudget, cancellation_point
 
 _LIMIT = 10000
 # Configuration bound on explicit heading expectations (not on the page they may name).

@@ -12,8 +12,8 @@ from unittest.mock import patch
 
 from latexprep import latexmk_build, project
 from latexprep.build_log import log_findings
+from latexprep.errors import PreparationError, SandboxRefusedError
 from latexprep.latexmk_build import build_project
-from latexprep.models import PreparationError
 from latexprep.runtime import CommandResult, RuntimeLimits, ToolRunner, ToolVersion
 from latexprep.sandbox import sandbox_refusal, tool_environment, with_ulimits
 
@@ -532,7 +532,9 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_bubblewrap_refusal_is_not_reported_as_a_tool_failure(self) -> None:
         runner = LifecycleRunner()
         script = 'print STDERR "bwrap: No permissions to create new namespace\\n"; exit 1;'
-        with self.assertRaisesRegex(PreparationError, "Restricted execution was refused: bwrap:"):
+        with self.assertRaisesRegex(
+            SandboxRefusedError, "Restricted execution was refused: bwrap:"
+        ):
             await runner.tool_version([self.perl, "-e", script], self.work)
 
     async def test_unverifiable_tool_is_named_without_its_path_or_diagnostics(self) -> None:

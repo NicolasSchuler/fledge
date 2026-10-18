@@ -29,7 +29,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, NamedTuple, TypeVar
+from typing import Any, NamedTuple
 from urllib.parse import parse_qsl, quote, urlencode, urljoin, urlsplit, urlunsplit
 
 from . import __version__
@@ -42,11 +42,19 @@ from .bibtex_syntax import (
     mebibytes,
     read_doi,
 )
+from .cancellation import (
+    bounded_map,
+    cancellation_point,
+    complete_despite_cancellation,
+    run_in_thread,
+)
 from .citation_graph import require_directory, resource_declarations
+from .errors import PreparationError
 from .expanded_document import reachable_sources
-from .models import EvidenceKind, Finding, PreparationError, Severity, Status
+from .findings import EvidenceKind, Finding, Severity, Status
 from .option_config import require_booleans
-from .scheduler import ResourceBudget, bounded_map, cancellation_point, run_in_thread
+from .process_control import kill_unfinished, start_process
+from .resource_budget import ResourceBudget
 from .source_graph import SourceGraph
 from .tex_lexer import ParseLimitExceeded, scan_source_commands
 
@@ -116,7 +124,6 @@ _HEAD_RETRY_STATUSES = frozenset({403, 404, 405, 501})
 _MAX_ADDRESS_ATTEMPTS = 4
 _CONNECT_TIMEOUT_SHARE = 0.5
 _DNS_UNRESOLVED_EXIT = 3
-_T = TypeVar("_T")
 
 
 class FetchOutcome(StrEnum):
@@ -390,48 +397,27 @@ print(json.dumps(addresses))
 """
 
 
-async def _drain(work: Awaitable[_T]) -> _T:
-    """Await ``work`` to completion even when the caller is cancelled meanwhile.
-
-    Cleanup such as reaping the resolver child must finish before cancellation
-    propagates; a cancellation received while waiting is re-raised afterwards.
-    """
-    task = asyncio.ensure_future(work)
-    cancelled = False
-    while not task.done():
-        try:
-            await asyncio.shield(task)
-        except asyncio.CancelledError:
-            cancelled = True
-    result = task.result()
-    if cancelled:
-        raise asyncio.CancelledError
-    return result
-
-
 async def _resolve(host: str, port: int) -> tuple[str, ...]:
     try:
         return (_public_ip(str(ipaddress.ip_address(host))),)
     except ValueError:
         pass
-    launch = asyncio.create_task(
-        asyncio.create_subprocess_exec(
+    process = None
+    try:
+        process = await start_process(
             sys.executable,
             "-I",
             "-c",
             _DNS_SCRIPT,
             host,
             str(port),
+            stop=kill_unfinished,
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
             env={"LANG": "C"},
             close_fds=True,
         )
-    )
-    process = None
-    try:
-        process = await asyncio.shield(launch)
         assert process.stdout is not None
         data = bytearray()
         while chunk := await process.stdout.read(8193 - len(data)):
@@ -456,20 +442,9 @@ async def _resolve(host: str, port: int) -> tuple[str, ...]:
             FetchOutcome.UNAVAILABLE, "Public DNS resolution did not complete"
         ) from error
     finally:
-
-        async def close() -> None:
-            child = process
-            if child is None:
-                try:
-                    child = await launch
-                except OSError:
-                    return
-            if child.returncode is None:
-                with contextlib.suppress(ProcessLookupError):
-                    child.kill()
-            await child.wait()
-
-        await _drain(close())
+        if process is not None:
+            kill_unfinished(process)
+            await complete_despite_cancellation(process.wait())
 
 
 @dataclass(frozen=True)

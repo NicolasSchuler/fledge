@@ -19,8 +19,10 @@ from .command_options import (
 from .config import load_settings, resolve_config_path
 from .doctor import run_doctor
 from .finding_view import RenderOptions
-from .models import ENGINES, Engine, Report, cancelled_finding
-from .report_formats import UNFINISHED_SCOPE, OutputFormat, write_report
+from .findings import cancelled_finding
+from .report import UNFINISHED_SCOPE, Report
+from .report_formats import OutputFormat, write_report
+from .setting_choices import ENGINES, Engine
 from .terminal_progress import TerminalProgress
 
 

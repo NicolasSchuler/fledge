@@ -6,15 +6,12 @@ import json
 import unittest
 from pathlib import Path
 
-from latexprep.models import (
+from latexprep.findings import SEVERITIES, STATUSES, EvidenceKind, Finding
+from latexprep.report import (
     REPORT_COMMANDS,
     REPORT_SCHEMA_VERSION,
-    SEVERITIES,
-    STATUSES,
     Change,
     ChangeKind,
-    EvidenceKind,
-    Finding,
     Outcome,
     Report,
 )

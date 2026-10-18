@@ -14,8 +14,8 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any
 
+from .errors import PreparationError
 from .file_safety import MIB
-from .models import PreparationError
 from .pdf_support import MAX_RASTER_DIMENSION, MAX_RASTER_PIXELS
 
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"

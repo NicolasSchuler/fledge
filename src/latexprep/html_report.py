@@ -10,6 +10,7 @@ from base64 import b64encode
 from collections.abc import Mapping
 from urllib.parse import quote
 
+from .errors import PreparationError
 from .finding_view import (
     RedactedReport,
     finding_views,
@@ -17,8 +18,9 @@ from .finding_view import (
     redact_report,
     size_label,
 )
-from .models import Finding, PreparationError, Report
+from .findings import Finding
 from .pdf_previews import MAX_PREVIEW_BYTES, png_dimensions
+from .report import Report
 from .review_policy import is_literal_relative_path
 
 _STYLE = (

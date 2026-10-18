@@ -12,8 +12,8 @@ from typing import TypeVar
 import click
 
 from .defects import REPORT_DEFECT_SUGGESTION, is_expected_failure, summarize_traceback
-from .models import Finding, Outcome, Report, internal_error_finding, request_error_finding
-from .report_formats import REQUEST_SCOPE, UNFINISHED_SCOPE
+from .findings import Finding, internal_error_finding, request_error_finding
+from .report import REQUEST_SCOPE, UNFINISHED_SCOPE, Outcome, Report
 
 F = TypeVar("F", bound=Callable[..., object])
 

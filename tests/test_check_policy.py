@@ -23,6 +23,7 @@ from latexprep.check_policy import (
 )
 from latexprep.check_selection import CheckSelection
 from latexprep.config import Settings, effective_settings
+from latexprep.findings import Finding
 from latexprep.formatting import FormattingOptions
 from latexprep.latexmk_build import BuildResult
 from latexprep.manuscript import ManuscriptOptions, check_manuscript
@@ -34,7 +35,6 @@ from latexprep.metadata_privacy import (
     check_sanitized_pdf_metadata,
     plan_metadata_sanitization,
 )
-from latexprep.models import Finding
 from latexprep.online_checks import OnlineOptions, Response, check_online_references
 from latexprep.pdf_artwork import PdfArtworkOptions, inspect_artwork_inputs, inspect_pdf_artwork
 from latexprep.pdf_checks import (

@@ -25,7 +25,10 @@ from .build_dependencies import (
     read_recorder_trace,
 )
 from .build_log import log_findings, log_tail, read_bounded
+from .cancellation import run_in_thread
+from .errors import PreparationError, ToolUnavailableError
 from .file_safety import MIB, byte_count_text
+from .findings import Finding
 from .loaded_options import (
     LoadedOptionsEvidence,
     LoadedOptionsProbe,
@@ -33,17 +36,9 @@ from .loaded_options import (
     loaded_options_unavailable,
     stage_loaded_options,
 )
-from .models import (
-    BIBLIOGRAPHY_BACKENDS,
-    ENGINES,
-    BibliographyBackend,
-    Engine,
-    Finding,
-    PreparationError,
-)
 from .project import MAX_FOLDER_DEPTH, ImportLimits, import_project
 from .runtime import CommandResult, RuntimeLimits, ToolRunner, ToolVersion
-from .scheduler import run_in_thread
+from .setting_choices import BIBLIOGRAPHY_BACKENDS, ENGINES, BibliographyBackend, Engine
 
 # Only these policy-level log errors may be deselected. Tool failures, incomplete
 # output/recorder evidence, TeX errors and unresolved reruns remain build failures.
@@ -316,7 +311,11 @@ async def _build_once(request: BuildRequest, runner: ToolRunner, biber: _BiberPl
     except PreparationError as error:
         result.findings.append(
             Finding(
-                "build.execution_unavailable", str(error), severity="error", status="inconclusive"
+                "build.execution_unavailable",
+                str(error),
+                severity="error",
+                status="inconclusive",
+                details={"tool": error.tool} if isinstance(error, ToolUnavailableError) else {},
             )
         )
         if request.inventory_loaded_options:

@@ -6,10 +6,11 @@ import shutil
 from dataclasses import replace
 from pathlib import Path, PurePosixPath
 
+from .cancellation import cancellation_point
 from .file_safety import is_contained_regular_file, is_plain_relative_name
-from .models import Change, ChangeKind, Finding
+from .findings import Finding
 from .package_inventory import selection_inventory
-from .scheduler import cancellation_point
+from .report import Change, ChangeKind
 from .source import analyze_selected_sources
 
 # Generated bibliography files that the TeX run reads: the .bbl, which services

@@ -15,16 +15,16 @@ from latexprep.bibliography_transform import BibliographyTransformOptions
 from latexprep.cli import cli
 from latexprep.config import Settings, load_settings
 from latexprep.core import run_job
+from latexprep.findings import Finding
 from latexprep.job_context import JobRequest, pdf_check_settings
 from latexprep.job_execution import JobDeadlineExceeded
-from latexprep.models import Finding
 from latexprep.online_checks import OnlineOptions
 from latexprep.pdf_artwork import PdfArtworkOptions
 from latexprep.pdf_check_pipeline import inspect_configured_pdf_checks
 from latexprep.redaction import scrub_local_paths
+from latexprep.resource_budget import ResourceBudget
 from latexprep.review_policy import BASELINE_VERSUS_PREPARED_STAGE, ReportingOptions, ReviewRule
 from latexprep.runtime import ToolRunner
-from latexprep.scheduler import ResourceBudget
 from latexprep.source_transform import SourceTransformOptions
 from latexprep.workflow_options import DocumentOptions, WorkflowOptions
 from tests.test_multi_document import build, project
@@ -393,7 +393,7 @@ key = "paper"
 field = "doi"
 replacement = "10.1234/example"
 """)
-            from latexprep.models import PreparationError
+            from latexprep.errors import PreparationError
 
             with self.assertRaises(PreparationError):
                 load_settings(config, {})

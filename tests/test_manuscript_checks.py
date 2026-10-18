@@ -6,12 +6,13 @@ from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 from unittest.mock import patch
 
+from latexprep.errors import PreparationError
+from latexprep.findings import Finding
 from latexprep.manuscript_checks import (
     ManuscriptCheckOptions,
     check_manuscript_policies,
     read_literal_metadata,
 )
-from latexprep.models import Finding, PreparationError
 
 
 class ManuscriptDetailTests(unittest.TestCase):

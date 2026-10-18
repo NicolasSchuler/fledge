@@ -13,10 +13,11 @@ from unittest.mock import AsyncMock, patch
 from latexprep.config import load_settings
 from latexprep.core import run_job
 from latexprep.document_tasks import _submission_readiness
+from latexprep.errors import PreparationError
 from latexprep.finding_view import is_scope_disclaimer
+from latexprep.findings import Finding
 from latexprep.job_context import JobRequest
 from latexprep.manuscript_checks import ManuscriptCheckOptions, check_manuscript_policies
-from latexprep.models import Finding, PreparationError
 from latexprep.submission_checks import SubmissionOptions
 from latexprep.submission_readiness_checks import check_submission_readiness
 

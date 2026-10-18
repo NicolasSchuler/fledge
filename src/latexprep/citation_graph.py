@@ -16,9 +16,10 @@ from pathlib import Path
 from typing import NamedTuple
 
 from .bibtex_syntax import BibDocument, Entry, field_literal
+from .cancellation import cancellation_point
+from .errors import PreparationError
 from .expanded_document import commands_before_end, reachable_sources
-from .models import Finding, PreparationError
-from .scheduler import cancellation_point
+from .findings import Finding
 from .source_graph import ArgumentLocation, ParsedSource, SourceGraph
 from .tex_lexer import Command, conditional_spans, in_conditional, split_argument_items
 

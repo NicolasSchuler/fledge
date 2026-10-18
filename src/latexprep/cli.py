@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
 from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import dataclass, fields, replace
@@ -31,27 +30,19 @@ from .core import run_job
 from .defects import is_expected_failure
 from .diagnostic_bundle import export_diagnostic_bundle
 from .doctor_command import doctor_command
+from .errors import PreparationError, RequestError, SettingsError
 from .finding_view import RenderOptions
+from .findings import Finding, cancelled_finding
 from .html_report import render_html
 from .init_command import init_command
 from .job_context import JobCommand, JobRequest
-from .models import (
-    BIBLIOGRAPHY_BACKENDS,
-    ENGINES,
-    LAYOUTS,
-    USAGE_EXIT_CODE,
-    Finding,
-    Outcome,
-    PreparationError,
-    Report,
-    RequestError,
-    cancelled_finding,
-)
 from .pdf_previews import PdfPreviewStore
 from .presets import preset_names
 from .publication import validate_destination
-from .report_formats import UNFINISHED_SCOPE, OutputFormat, write_report
+from .report import UNFINISHED_SCOPE, USAGE_EXIT_CODE, Outcome, Report
+from .report_formats import OutputFormat, write_report
 from .rules import RULES, get_rule
+from .setting_choices import BIBLIOGRAPHY_BACKENDS, ENGINES, LAYOUTS
 from .submission_text_command import submission_text_command
 from .terminal_progress import TerminalProgress
 from .terminal_report import print_rule_explanation, print_rule_table
@@ -509,16 +500,14 @@ def _check_input_and_outputs(options: CommandOptions, files: _ReportFiles) -> No
 
 
 def _settings_suggestion(
-    message: str, overrides: dict[str, object], config_path: Path | None, preset: str | None
+    names: tuple[str, ...],
+    overrides: dict[str, object],
+    config_path: Path | None,
+    preset: str | None,
 ) -> str:
-    """Name where each setting mentioned in a validation error was supplied."""
-    mentioned = sorted(
-        (match.start(), name)
-        for name in SETTING_NAMES
-        if (match := re.search(rf"(?<![\w.]){name}(?!\w)", message))
-    )
+    """Name where each setting at fault in a validation error was supplied."""
     sources = []
-    for _, name in mentioned:
+    for name in names:
         if name in overrides:
             flag = _SETTING_FLAGS.get(name, f"--{name.replace('_', '-')}")
             sources.append(f"{flag} on the command line")
@@ -546,8 +535,9 @@ def _load_command_settings(options: CommandOptions, report: Report) -> Settings:
     except RequestError:
         raise
     except PreparationError as error:
+        names = error.settings if isinstance(error, SettingsError) else ()
         raise RequestError(
-            str(error), _settings_suggestion(str(error), overrides, config_path, options.preset)
+            str(error), _settings_suggestion(names, overrides, config_path, options.preset)
         ) from error
     if options.select_checks or options.ignore_checks:
         try:

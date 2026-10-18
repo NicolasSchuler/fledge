@@ -15,8 +15,10 @@ from click.testing import CliRunner
 from latexprep.cli import cli
 from latexprep.config import Settings
 from latexprep.doctor import diagnostic_engines, run_doctor
+from latexprep.errors import PreparationError
+from latexprep.findings import Finding
 from latexprep.job_execution import JobDeadlineExceeded
-from latexprep.models import Finding, Outcome, PreparationError
+from latexprep.report import Outcome
 from latexprep.resource_monitor import ResourceMonitor
 from latexprep.runtime import CommandResult, ToolRunner
 from latexprep.workflow_options import DocumentOptions, WorkflowOptions
@@ -387,7 +389,7 @@ class DoctorTests(unittest.IsolatedAsyncioTestCase):
 
 class DoctorCommandTests(unittest.TestCase):
     def test_json_stdout_is_clean_and_quiet_suppresses_only_stderr_progress(self):
-        from latexprep.models import Report
+        from latexprep.report import Report
 
         async def respond(settings, *, progress):
             if progress is not None:
@@ -406,7 +408,7 @@ class DoctorCommandTests(unittest.TestCase):
                 self.assertIn("Testing controlled setup", result.stderr)
 
     def test_project_config_is_selected_without_reading_or_building_manuscript(self):
-        from latexprep.models import Report
+        from latexprep.report import Report
 
         with tempfile.TemporaryDirectory() as temporary:
             root = write_project(
@@ -431,7 +433,7 @@ class DoctorCommandTests(unittest.TestCase):
             )
 
     def test_no_project_uses_defaults_and_quiet_retains_exit_code(self):
-        from latexprep.models import Report
+        from latexprep.report import Report
 
         with patch("latexprep.doctor_command.resolve_config_path") as discover:
             with patch(

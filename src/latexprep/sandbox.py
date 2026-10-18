@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Protocol
 
 from .biber_toolchain import BiberToolchain
-from .models import PreparationError
+from .errors import PreparationError, SandboxRefusedError
 from .resource_monitor import ProcessSample
 from .toolchain import ToolContext, texlive_root
 
@@ -164,12 +164,12 @@ class SeatbeltSandbox:
     ) -> list[str]:
         backend = shutil.which("sandbox-exec", path=_SYSTEM_PROGRAM_PATH)
         if backend is None:
-            raise PreparationError("Restricted execution requires macOS sandbox-exec")
+            raise SandboxRefusedError("Restricted execution requires macOS sandbox-exec")
         executables, roots = context.executables, context.resource_roots
         if any(path.resolve().is_relative_to(workspace) for path in executables):
-            raise PreparationError("Executing a project-supplied program is not permitted")
+            raise SandboxRefusedError("Executing a project-supplied program is not permitted")
         if any(workspace.is_relative_to(root) for root in roots if root.is_dir()):
-            raise PreparationError("A job workspace cannot be inside a declared toolchain tree")
+            raise SandboxRefusedError("A job workspace cannot be inside a declared toolchain tree")
         isolated = () if biber is None else (biber.executable, biber.payload)
         profile = _seatbelt_profile(workspace, context, readonly_inputs, isolated)
         return [backend, "-p", profile, *command]
@@ -272,17 +272,17 @@ class BubblewrapSandbox:
     ) -> list[str]:
         backend = shutil.which("bwrap", path=_SYSTEM_PROGRAM_PATH)
         if backend is None:
-            raise PreparationError(
+            raise SandboxRefusedError(
                 "Restricted Linux execution requires Bubblewrap and permitted user namespaces; "
                 "install or enable them explicitly. No unrestricted fallback is available."
             )
         if not _linux_tool_path(Path(backend).resolve()):
-            raise PreparationError("The Linux sandbox backend must use a system executable")
+            raise SandboxRefusedError("The Linux sandbox backend must use a system executable")
         if any(
             not _linux_tool_path(path) or not _linux_tool_path(path.resolve())
             for path in context.executables
         ):
-            raise PreparationError(
+            raise SandboxRefusedError(
                 "Linux tool executables must be installed under the supported system prefixes; "
                 "private-home and project executables cannot become toolchain grants."
             )
@@ -292,11 +292,15 @@ class BubblewrapSandbox:
             if (not _linux_tool_path(path) and path not in system_paths) or (
                 not _linux_tool_path(path.resolve()) and path.resolve() not in system_paths
             ):
-                raise PreparationError("Linux toolchain resources must use declared system paths")
+                raise SandboxRefusedError(
+                    "Linux toolchain resources must use declared system paths"
+                )
             if workspace.is_relative_to(path.resolve()) or path.resolve().is_relative_to(workspace):
-                raise PreparationError("A job workspace cannot overlap a declared toolchain tree")
+                raise SandboxRefusedError(
+                    "A job workspace cannot overlap a declared toolchain tree"
+                )
         if any(path.is_relative_to(workspace) for path in readonly_inputs):
-            raise PreparationError("Read-only inputs must be outside the writable workspace")
+            raise SandboxRefusedError("Read-only inputs must be outside the writable workspace")
         # Every namespace below is mandatory. Do not use *-try, share-net, or
         # automatic retries: missing kernel/backend support is a closed failure.
         wrapped = [
@@ -388,7 +392,7 @@ class UnavailableSandbox:
         readonly_inputs: tuple[Path, ...],
         biber: BiberToolchain | None,
     ) -> list[str]:
-        raise PreparationError(
+        raise SandboxRefusedError(
             "Restricted execution is unavailable on this platform; supported backends "
             "require macOS sandbox-exec or Linux Bubblewrap with user namespaces."
         )

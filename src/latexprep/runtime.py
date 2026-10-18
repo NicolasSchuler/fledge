@@ -20,15 +20,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, Self
 
 from .biber_toolchain import BiberPreparation, create_biber_toolchain
+from .cancellation import complete_despite_cancellation
+from .errors import PreparationError, SandboxRefusedError
 from .file_safety import MIB, DirectoryIdentity, FileIdentity, regular_file_identity
-from .models import PreparationError
+from .process_control import kill_process_group, start_process
 from .resource_monitor import (
     ActiveCommand,
     ResourceMonitor,
     ResourceStatistics,
-    complete_despite_cancellation,
-    kill_process_group,
-    start_process,
     workspace_violation,
 )
 from .sandbox import (
@@ -41,7 +40,7 @@ from .sandbox import (
 from .toolchain import Toolchain, tool_path
 
 if TYPE_CHECKING:
-    from .scheduler import ResourceBudget
+    from .resource_budget import ResourceBudget
 
 _READ_CHUNK_BYTES = 64 * 1024
 _UNLEASED_MEMORY_MB = 256
@@ -489,7 +488,7 @@ class ToolRunner:
     ) -> CommandResult:
         _require_arguments(argv, "A tool command")
         if memory_mb is not None and (type(memory_mb) is not int or memory_mb < 1):
-            raise PreparationError("A command memory cap must be a positive integer")
+            raise ValueError("A command memory cap must be a positive integer")
         async with self._admission("tool " + argv[0], memory_mb):
             return await self._run_command(argv, cwd, workspace, readonly_inputs, memory_mb)
 
@@ -504,25 +503,23 @@ class ToolRunner:
         workspace = workspace.resolve(strict=True)
         cwd = cwd.resolve(strict=True)
         if not workspace.is_dir() or not cwd.is_dir() or not cwd.is_relative_to(workspace):
-            raise PreparationError("Tool working directory must be inside its own workspace")
+            raise ValueError("Tool working directory must be inside its own workspace")
         scope = self._monitor.scope
         if scope is not None and not workspace.is_relative_to(scope.root):
-            raise PreparationError("Tool workspaces must be inside the monitored job directory")
+            raise ValueError("Tool workspaces must be inside the monitored job directory")
         if self._frozen.overlap(workspace):
-            raise PreparationError("A tool's writable workspace cannot contain frozen inputs")
+            raise ValueError("A tool's writable workspace cannot contain frozen inputs")
         if any(
             path.is_relative_to(workspace) or workspace.is_relative_to(path)
             for path in self._workspace_claims
         ):
-            raise PreparationError(
-                "Concurrent tools need separate non-overlapping writable workspaces"
-            )
+            raise RuntimeError("Concurrent tools need separate non-overlapping writable workspaces")
         if self._monitor.failure:
             raise PreparationError(self._monitor.failure)
         inputs = self._frozen.validate(readonly_inputs)
         executable = self._resolve_tool(argv[0])
         if executable.resolve().is_relative_to(workspace):
-            raise PreparationError("Executing a project-supplied program is not permitted")
+            raise SandboxRefusedError("Executing a project-supplied program is not permitted")
         command = [str(executable), *argv[1:]]
         context = self.toolchain.context(executable)
         sandboxed = self._sandbox_command(command, workspace, inputs)
@@ -537,7 +534,7 @@ class ToolRunner:
             min(self.limits.max_memory_mb, lease.memory_mb) if lease else self.limits.max_memory_mb
         )
         if memory_mb is not None and memory_mb > maximum:
-            raise PreparationError("A command memory cap cannot exceed its lease or runtime limit")
+            raise ValueError("A command memory cap cannot exceed its lease or runtime limit")
         command_memory_mb = maximum if memory_mb is None else memory_mb
         invocation = _Invocation(
             resolved_command=command,
@@ -606,7 +603,7 @@ class ToolRunner:
         stdout = output.stdout.decode("utf-8", errors="replace")
         stderr = output.stderr.decode("utf-8", errors="replace")
         if sandbox_refusal(stderr):
-            raise PreparationError(f"Restricted execution was refused: {stderr.strip()[:1000]}")
+            raise SandboxRefusedError(f"Restricted execution was refused: {stderr.strip()[:1000]}")
         return CommandResult(
             process.returncode or 0,
             stdout,

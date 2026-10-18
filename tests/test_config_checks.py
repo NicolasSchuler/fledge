@@ -13,8 +13,8 @@ from unittest.mock import patch
 from latexprep.bibliography_checks import BibliographyOptions
 from latexprep.build_checks import BuildCheckOptions
 from latexprep.config import Settings, load_settings
+from latexprep.errors import PreparationError
 from latexprep.manuscript_checks import ManuscriptCheckOptions
-from latexprep.models import PreparationError
 from latexprep.online_checks import OnlineOptions
 from latexprep.pdf_checks import PdfCheckOptions, PdfSectionBudget
 from latexprep.pdf_support import PdfRegion

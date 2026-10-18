@@ -13,10 +13,12 @@ from latexprep.bibliography_transform import BibliographyTransformOptions
 from latexprep.check_selection import CheckSelection
 from latexprep.config import Settings
 from latexprep.core import run_job
+from latexprep.errors import PreparationError
+from latexprep.findings import Finding
 from latexprep.job_context import JobRequest
 from latexprep.latexmk_build import BuildResult
-from latexprep.models import Finding, PreparationError, Report
 from latexprep.package_inputs import generated_bibliography_inputs
+from latexprep.report import Report
 from latexprep.source_transform import SourceTransformOptions
 from latexprep.submission_checks import SubmissionOptions
 from latexprep.workflow_options import DocumentOptions, WorkflowOptions

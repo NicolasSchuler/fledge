@@ -17,6 +17,8 @@ from functools import partial
 from pathlib import Path, PurePosixPath
 
 from .bbl_checks import check_bbl
+from .cancellation import cancellation_point
+from .errors import PreparationError
 from .expanded_document import (
     ExpandedDocument,
     Location,
@@ -36,9 +38,8 @@ from .file_scan import (
     redact_secrets,
     tex_comments,
 )
+from .findings import EvidenceKind, Finding
 from .literal_text import PACKAGE_COMMANDS, first_argument_names, plain_text
-from .models import EvidenceKind, Finding, PreparationError
-from .scheduler import cancellation_point
 from .source_graph import SourceGraph
 from .submission_checks import SubmissionOptions
 from .tex_lexer import in_conditional, in_half_open_span

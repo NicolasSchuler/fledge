@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from latexprep.build_dependencies import collect_submission_dependencies, read_recorder_trace
-from latexprep.models import PreparationError
+from latexprep.errors import PreparationError
 
 
 def rule(

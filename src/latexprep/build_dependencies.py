@@ -20,8 +20,9 @@ from enum import Enum, auto
 from pathlib import Path
 from typing import Literal, NamedTuple
 
+from .errors import PreparationError
 from .file_safety import is_contained_regular_file
-from .models import Engine, PreparationError
+from .setting_choices import Engine
 from .tex_lexer import ParseLimitExceeded, mask_literals, scan_commands, scan_source_commands
 
 _MAX_ROWS = 50_000

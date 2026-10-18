@@ -13,18 +13,19 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from latexprep.models import PreparationError
+from latexprep.defects import is_expected_failure
+from latexprep.errors import PreparationError
+from latexprep.process_control import kill_process_group
+from latexprep.resource_budget import ResourceBudget
 from latexprep.resource_monitor import (
     JobScope,
     ProcessSample,
     ResourceMonitor,
     ResourceStatistics,
     _sample_interval,
-    kill_process_group,
 )
 from latexprep.runtime import CommandResult, ToolRunner
 from latexprep.sandbox import SeatbeltSandbox, tool_environment
-from latexprep.scheduler import ResourceBudget
 from latexprep.toolchain import ToolContext
 from tests.support import live_tests_enabled
 from tests.test_runtime import never_reports
@@ -345,7 +346,7 @@ class ProcessListingTests(unittest.IsolatedAsyncioTestCase):
         listing.communicate = AsyncMock(return_value=(b"1 1 10\n", b""))
         listing.wait = AsyncMock(return_value=0)
         start = AsyncMock(return_value=listing)
-        with patch("latexprep.resource_monitor.asyncio.create_subprocess_exec", start):
+        with patch("latexprep.process_control.asyncio.create_subprocess_exec", start):
             samples = await self.monitor()._sample_processes()
         self.assertEqual(samples, [ProcessSample(1, 1, 10)])
         options = start.call_args.kwargs
@@ -354,7 +355,7 @@ class ProcessListingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_missing_process_listing_names_the_package_to_install(self) -> None:
         missing = AsyncMock(side_effect=FileNotFoundError(2, "No such file", "/bin/ps"))
-        with patch("latexprep.resource_monitor.asyncio.create_subprocess_exec", missing):
+        with patch("latexprep.process_control.asyncio.create_subprocess_exec", missing):
             with self.assertRaises(PreparationError) as raised:
                 await self.monitor()._sample_processes()
         self.assertIn("/bin/ps", str(raised.exception))
@@ -492,10 +493,10 @@ class SharedMonitorTests(unittest.IsolatedAsyncioTestCase):
         runner = UnrestrictedLifecycleRunner(budget=ResourceBudget(1, 1024))
         assert runner.budget is not None
         async with runner.budget.lease("page", memory_mb=128):
-            with self.assertRaisesRegex(PreparationError, "cannot exceed"):
+            with self.assertRaisesRegex(ValueError, "cannot exceed"):
                 await runner.run([self.perl, "-e", "exit 0"], self.root, self.root, memory_mb=129)
         for cap in (0, -1, True):
-            with self.assertRaisesRegex(PreparationError, "positive integer"):
+            with self.assertRaisesRegex(ValueError, "positive integer"):
                 await runner.run([self.perl, "-e", "exit 0"], self.root, self.root, memory_mb=cap)
         self.assertEqual(runner.statistics().commands, 0)
 
@@ -583,8 +584,27 @@ class SharedMonitorTests(unittest.IsolatedAsyncioTestCase):
         source = self.root / "source.pdf"
         source.write_bytes(b"%PDF-input")
         runner.freeze_input(source, self.root / "artifacts")
-        with self.assertRaisesRegex(PreparationError, "cannot contain frozen inputs"):
+        with self.assertRaisesRegex(ValueError, "cannot contain frozen inputs"):
             await runner.run([self.perl, "-e", "exit 0"], self.root, self.root)
+
+    async def test_contract_violations_are_defects_not_expected_failures(self) -> None:
+        runner = UnrestrictedLifecycleRunner()
+        other = self.root / "other"
+        other.mkdir()
+        command = [self.perl, "-e", "exit 0"]
+        runner._workspace_claims.add(self.root)
+        violations = (
+            (ValueError, "inside its own workspace", self.root, other, None),
+            (ValueError, "positive integer", self.root, self.root, 0),
+            (RuntimeError, "non-overlapping writable workspaces", self.root, self.root, None),
+        )
+        for error_type, message, cwd, workspace, memory_mb in violations:
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(error_type, message) as raised:
+                    await runner.run(command, cwd, workspace, memory_mb=memory_mb)
+                # Reported as a defect, not as an unavailable tool or a researcher's problem.
+                self.assertFalse(isinstance(raised.exception, PreparationError))
+                self.assertFalse(is_expected_failure(raised.exception))
 
     async def test_scope_exit_reaps_unawaited_active_commands(self) -> None:
         runner = SampledRunner(ResourceBudget(1, 1024))
@@ -612,7 +632,7 @@ class SharedMonitorTests(unittest.IsolatedAsyncioTestCase):
             await release.wait()
             return child
 
-        with patch("latexprep.resource_monitor.asyncio.create_subprocess_exec", delayed_launch):
+        with patch("latexprep.process_control.asyncio.create_subprocess_exec", delayed_launch):
             task = asyncio.create_task(
                 runner.run([self.perl, "-e", "sleep 30"], self.root, self.root)
             )

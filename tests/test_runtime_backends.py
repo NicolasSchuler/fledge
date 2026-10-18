@@ -10,12 +10,17 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from latexprep.biber_toolchain import BiberToolchain, _host_macho_slice, _seal_toolchain
+from latexprep.errors import PreparationError, SandboxRefusedError, ToolUnavailableError
 from latexprep.file_safety import DirectoryIdentity, regular_file_identity
 from latexprep.latexmk_build import _sources_may_use_biber, build_project
-from latexprep.models import PreparationError
 from latexprep.resource_monitor import _group_usage
 from latexprep.runtime import CommandResult, ToolRunner
-from latexprep.sandbox import BubblewrapSandbox, _linux_process_groups, tool_environment
+from latexprep.sandbox import (
+    BubblewrapSandbox,
+    UnavailableSandbox,
+    _linux_process_groups,
+    tool_environment,
+)
 from latexprep.toolchain import ToolContext, distribution_roots
 from tests.support import live_tests_enabled
 from tests.test_runtime import FakeBuildRunner
@@ -201,15 +206,27 @@ class LinuxSandboxTests(unittest.IsolatedAsyncioTestCase):
         private = self.root / "private-program"
         private.write_text("private")
         private_context = ToolContext(private, frozenset({private}), frozenset(), ())
-        with self.assertRaisesRegex(PreparationError, "private-home and project"):
+        with self.assertRaisesRegex(SandboxRefusedError, "private-home and project"):
             self.sandbox_command(runner, context=private_context)
         broad = ToolContext(
             self.context.executable, self.context.executables, frozenset({Path("/")}), ()
         )
-        with self.assertRaisesRegex(PreparationError, "declared system paths"):
+        with self.assertRaisesRegex(SandboxRefusedError, "declared system paths"):
             self.sandbox_command(runner, context=broad)
-        with self.assertRaisesRegex(PreparationError, "overlap"):
+        with self.assertRaisesRegex(SandboxRefusedError, "overlap"):
             self.sandbox_command(runner, workspace=Path("/usr/lib/job"))
+
+    def test_a_platform_without_a_backend_refuses_every_command(self) -> None:
+        with self.assertRaisesRegex(SandboxRefusedError, "unavailable on this platform") as error:
+            UnavailableSandbox().wrap(
+                ["/usr/bin/perl", "-v"],
+                self.workspace,
+                context=self.context,
+                readonly_inputs=(),
+                biber=None,
+            )
+        # A refusal is an expected failure that no caller may answer by running unrestricted.
+        self.assertIsInstance(error.exception, PreparationError)
 
     async def test_missing_linux_backend_never_launches_command(self) -> None:
         runner = ToolRunner()
@@ -220,7 +237,7 @@ class LinuxSandboxTests(unittest.IsolatedAsyncioTestCase):
             patch.object(runner, "_resolve_tool", return_value=Path("/usr/bin/perl")),
             patch.object(runner.toolchain, "context", return_value=self.context),
             patch.object(runner, "_execute", execute),
-            self.assertRaisesRegex(PreparationError, "No unrestricted fallback"),
+            self.assertRaisesRegex(SandboxRefusedError, "No unrestricted fallback"),
         ):
             await runner.run(["perl", "-e", 'print "must not run"'], self.workspace, self.workspace)
         execute.assert_not_awaited()
@@ -390,7 +407,9 @@ class ControlBuildRunner(FakeBuildRunner):
         memory_mb: int | None = None,
     ) -> CommandResult:
         if argv[0] == self.unavailable:
-            raise PreparationError(f"Required tool is unavailable: {self.unavailable}")
+            raise ToolUnavailableError(
+                f"Required tool is unavailable: {self.unavailable}", self.unavailable
+            )
         result = await super().run(argv, cwd, workspace)
         if argv[-1].endswith(".tex"):
             for name, text in self.controls.items():

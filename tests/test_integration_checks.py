@@ -15,8 +15,8 @@ from latexprep.core import run_job
 from latexprep.job_context import JobRequest
 from latexprep.manuscript_checks import ManuscriptCheckOptions
 from latexprep.pdf_checks import PdfCheckOptions, PdfSectionBudget, inspect_pdf_details
+from latexprep.resource_budget import ResourceBudget
 from latexprep.runtime import RuntimeLimits, ToolRunner
-from latexprep.scheduler import ResourceBudget
 from latexprep.submission_checks import SubmissionOptions
 from tests.support import live_tests_enabled
 

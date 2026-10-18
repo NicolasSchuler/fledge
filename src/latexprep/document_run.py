@@ -18,9 +18,11 @@ from .build_checks import (
     check_tex_distribution,
     qualify_citation_findings,
 )
+from .cancellation import bounded_map
 from .config import Settings
 from .defects import REPORT_DEFECT_SUGGESTION
 from .document_tasks import (
+    TaskName,
     baseline_build_task,
     baseline_pdf_tasks,
     build_document,
@@ -29,6 +31,7 @@ from .document_tasks import (
     prepared_submission_options,
     source_analysis_tasks,
 )
+from .findings import Finding, has_blockers
 from .formatting import format_project
 from .job_context import (
     JobCommand,
@@ -41,13 +44,13 @@ from .job_context import (
 )
 from .latexmk_build import BuildResult
 from .metadata_privacy import check_sanitized_pdf_metadata
-from .models import Change, Finding, Outcome, Report, StageRecord, TaskName, has_blockers
 from .package_inputs import generated_bibliography_inputs, select_package_inputs
 from .package_inventory import PackageStatus, assemble_package_inventory
 from .project import ImportLimits, create_archive, import_project
 from .publication import VerifiedPackage
+from .report import Change, Outcome, Report, StageRecord
 from .review_policy import BASELINE_VERSUS_PREPARED_STAGE
-from .scheduler import Scheduler, Task, TaskResult, bounded_map
+from .scheduler import Scheduler, Task, TaskResult, TaskStatus
 from .source import discover_roots
 from .source_staging import (
     apply_contents,
@@ -216,7 +219,7 @@ class DocumentRun:
     def analysis_snapshot(self) -> Path:
         """The selected preparation inputs once their selection succeeded, else the import."""
         selection = self.completed.get(TaskName.SELECT_PREPARATION_INPUTS)
-        if selection is not None and selection.status == "succeeded":
+        if selection is not None and selection.succeeded:
             return selection.value.root
         return self.imported
 
@@ -276,12 +279,10 @@ class DocumentRun:
         if self.command is not JobCommand.PREPARE:
             return [baseline, *checks]
         main = self.main
-        selection = Task(
+        selection = Task.composite(
             TaskName.SELECT_PREPARATION_INPUTS,
             lambda: self._select_preparation_inputs(main),
             needs_success_of=(TaskName.BASELINE_BUILD,),
-            cpu=0,
-            memory_mb=0,
             is_success=lambda selected: not has_blockers(selected.findings),
         )
         # Wait for selection, but still analyze the full snapshot if it fails.
@@ -321,14 +322,14 @@ class DocumentRun:
         report.stages.append(
             {
                 "name": _BASELINE_STAGE if result.name == TaskName.BASELINE_BUILD else result.name,
-                "status": result.status,
+                "status": result.status.value,
                 "elapsed_seconds": result.elapsed_seconds,
                 "queue_seconds": result.queue_seconds,
             }
         )
         if result.name == TaskName.SELECT_PREPARATION_INPUTS and result.value is not None:
             self._collect_input_selection(result.value)
-        elif result.status == "blocked":
+        elif result.status is TaskStatus.BLOCKED:
             # The failed prerequisite already reports its own blocking finding.
             report.findings.append(
                 Finding(
@@ -339,7 +340,7 @@ class DocumentRun:
                     details={"task": result.name, "blocked_by": list(result.blocked_by)},
                 )
             )
-        elif result.status != "succeeded":
+        elif not result.succeeded:
             defect = bool(result.defect_frames)
             report.findings.append(
                 Finding(
@@ -776,9 +777,7 @@ class DocumentRun:
         record_findings(
             report,
             check_sanitized_pdf_metadata(
-                final_inspection.value
-                if final_inspection and final_inspection.status == "succeeded"
-                else [],
+                final_inspection.value if final_inspection and final_inspection.succeeded else [],
                 settings.metadata_privacy,
             ),
             "final metadata sanitization",

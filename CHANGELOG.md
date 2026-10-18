@@ -65,6 +65,9 @@ the first release of `fledge-latex` is 0.3.0.
   again with GET before reporting the link.
 - A host name that does not resolve is now reported as unresolved, and a host with
   several addresses is tried address by address.
+- A missing external tool now names the package that provides it (Poppler, qpdf,
+  MuPDF, `tex-fmt` or TeX Live) with the commands that install it. A
+  `build.execution_unavailable` finding records the missing tool as `details.tool`.
 
 ### Added
 

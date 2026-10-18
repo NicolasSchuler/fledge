@@ -8,7 +8,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
-from .models import Finding, Severity
+from .findings import Finding, Severity
 
 
 @dataclass(frozen=True, slots=True)

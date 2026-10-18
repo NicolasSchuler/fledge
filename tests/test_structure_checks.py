@@ -7,7 +7,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from latexprep.author_records import check_author_records
-from latexprep.models import PreparationError
+from latexprep.errors import PreparationError
 from latexprep.option_config import read_options
 from latexprep.pdf_structure_checks import (
     HeadingExpectation,
@@ -15,7 +15,7 @@ from latexprep.pdf_structure_checks import (
     inspect_pdf_structure,
 )
 from latexprep.pdf_support import MAX_INSPECTION_PAGES
-from latexprep.scheduler import ResourceBudget
+from latexprep.resource_budget import ResourceBudget
 from tests.test_pdf_checks import DetailRunner
 
 

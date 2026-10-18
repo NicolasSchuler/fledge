@@ -14,8 +14,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
-from .models import Finding, Severity, Status
-from .scheduler import cancellation_point
+from .cancellation import cancellation_point
+from .findings import Finding, Severity, Status
 from .text_edits import with_bom
 
 MAX_BIB_FILE_BYTES = 16 * 1024 * 1024

@@ -15,7 +15,8 @@ from functools import partial
 from pathlib import Path
 from typing import NamedTuple
 
-from .models import EvidenceKind, Finding, PreparationError
+from .errors import PreparationError
+from .findings import EvidenceKind, Finding
 from .pdf_support import (
     DOCUMENT,
     TOOL_FAILURE_SUGGESTION,
@@ -32,8 +33,8 @@ from .pdf_support import (
     pdfinfo_fields,
     unavailable_finding,
 )
+from .resource_budget import ResourceBudget
 from .runtime import CommandResult, CommandRunner
-from .scheduler import ResourceBudget
 
 _POINT_UNIT = "PDF points (1/72 inch)"
 # Placement kinds in the pdfimages -list type column: stencil is a one-bit /ImageMask image.

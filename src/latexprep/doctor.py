@@ -9,20 +9,12 @@ from collections.abc import Callable
 from pathlib import Path
 
 from .config import Settings
+from .errors import PreparationError
 from .finding_view import is_scope_disclaimer
+from .findings import Finding, has_blockers
 from .formatting import FormattingOptions, format_project
 from .job_execution import JobDeadlineExceeded, JobExecution
 from .latexmk_build import build_project
-from .models import (
-    BibliographyBackend,
-    Engine,
-    Finding,
-    Outcome,
-    PreparationError,
-    Report,
-    has_blockers,
-    outcome_from_findings,
-)
 from .pdf_artwork import DRAWING_TRACE_RULES, configured_artwork_rules
 from .pdf_checks import (
     OBJECT_STRUCTURE_RULES,
@@ -33,8 +25,10 @@ from .pdf_checks import (
 from .pdf_comparison import compare_pdfs
 from .pdf_inspection import inspect_pdf
 from .pdf_structure_checks import StructureOptions
+from .report import Outcome, Report, outcome_from_findings
+from .resource_budget import ResourceBudget
 from .runtime import ToolRunner
-from .scheduler import ResourceBudget
+from .setting_choices import BibliographyBackend, Engine
 
 _PDF_TOOLS = ("pdfinfo", "pdftotext", "pdftoppm", "pdffonts", "pdfdetach", "pdfimages")
 _BIBLIOGRAPHY_BACKENDS: tuple[BibliographyBackend, ...] = ("bibtex", "biber")

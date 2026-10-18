@@ -7,7 +7,8 @@ import re
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 
-from .models import ENGINES, Engine, PreparationError
+from .errors import PreparationError
+from .setting_choices import ENGINES, Engine
 
 
 @dataclass(frozen=True)

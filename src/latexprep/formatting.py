@@ -10,10 +10,13 @@ from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .cancellation import bounded_map
+from .errors import PreparationError, SettingsError
 from .file_safety import MIB
-from .models import Change, ChangeKind, Finding, PreparationError, has_blockers
+from .findings import Finding, has_blockers
+from .report import Change, ChangeKind
+from .resource_budget import ResourceBudget
 from .runtime import CommandResult, CommandRunner
-from .scheduler import ResourceBudget, bounded_map
 from .source_transform import protected_spans
 from .text_edits import unified_diff_text
 
@@ -40,10 +43,11 @@ class FormattingOptions:
         for name in ("wrap_length", "tab_size"):
             value = getattr(self, name)
             if type(value) is not int or value < 1:
-                raise PreparationError(f"{name} must be a positive integer")
+                raise SettingsError(f"{name} must be a positive integer", (name,))
         if self.wrap_length < MIN_WRAP_LENGTH or self.tab_size > MAX_TAB_SIZE:
-            raise PreparationError(
-                f"wrap_length must be >={MIN_WRAP_LENGTH} and tab_size must be <={MAX_TAB_SIZE}"
+            raise SettingsError(
+                f"wrap_length must be >={MIN_WRAP_LENGTH} and tab_size must be <={MAX_TAB_SIZE}",
+                ("wrap_length", "tab_size"),
             )
         if not isinstance(self.exclude, tuple) or any(
             not isinstance(pattern, str)

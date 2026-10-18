@@ -10,7 +10,9 @@ from dataclasses import FrozenInstanceError
 from pathlib import Path
 from unittest.mock import patch
 
+from latexprep.errors import PreparationError
 from latexprep.finding_view import evidence_excerpt
+from latexprep.findings import Finding, has_blockers
 from latexprep.metadata_privacy import (
     MetadataEdit,
     MetadataPrivacyOptions,
@@ -18,8 +20,8 @@ from latexprep.metadata_privacy import (
     check_sanitized_pdf_metadata,
     plan_metadata_sanitization,
 )
-from latexprep.models import Finding, PreparationError, Report, has_blockers
 from latexprep.option_config import read_options
+from latexprep.report import Report
 
 
 class MetadataPrivacyTests(unittest.TestCase):

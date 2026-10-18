@@ -10,6 +10,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
+from .cancellation import cancellation_point
+from .errors import PreparationError
 from .file_scan import (
     check_status,
     inventory_files,
@@ -18,8 +20,8 @@ from .file_scan import (
     read_regular_file,
     redact_secrets,
 )
-from .models import Change, ChangeKind, Finding, PreparationError, has_blockers
-from .scheduler import cancellation_point
+from .findings import Finding, has_blockers
+from .report import Change, ChangeKind
 from .tex_lexer import (
     MAX_SOURCE_BYTES,
     MAX_TOTAL_SOURCE_BYTES,

@@ -12,7 +12,8 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import NamedTuple, NewType
 
-from .models import Finding, Report
+from .findings import Finding
+from .report import Report
 from .review_policy import review_marker
 from .rules import BY_NAME
 

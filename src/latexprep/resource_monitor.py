@@ -10,21 +10,20 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
-import signal
 import time
-from collections.abc import AsyncGenerator, Awaitable, Callable
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, NamedTuple, Protocol, TypeVar
+from typing import NamedTuple, Protocol
 
-from .models import PreparationError
+from .cancellation import complete_despite_cancellation
+from .errors import PreparationError
+from .process_control import kill_process_group, kill_unfinished, start_process
 
 _MAX_WORKSPACE_ENTRIES = 20_000
 _MAX_GROUP_PROCESSES = 32
 _PROCESS_TABLE_TIMEOUT_SECONDS = 2
 _PROCESS_LISTING_PROGRAM = "/bin/ps"
-
-_Result = TypeVar("_Result")
 
 
 class ProcessSample(NamedTuple):
@@ -98,58 +97,6 @@ class JobScope:
     max_temp_bytes: int
     max_file_bytes: int
     monitor: asyncio.Task[None] = field(init=False)
-
-
-def kill_process_group(pid: int) -> None:
-    # macOS reports EPERM instead of ESRCH for a group whose leader is already a
-    # zombie being reaped; either way no signalable member of our group remains.
-    with contextlib.suppress(ProcessLookupError, PermissionError):
-        os.killpg(pid, signal.SIGKILL)
-
-
-def _kill_unfinished(process: asyncio.subprocess.Process) -> None:
-    if process.returncode is None:
-        with contextlib.suppress(ProcessLookupError):
-            process.kill()
-
-
-async def complete_despite_cancellation(work: Awaitable[_Result]) -> _Result:
-    """Complete owned cleanup despite repeated cancellation of its caller."""
-    task = asyncio.ensure_future(work)
-    cancelled = False
-    while not task.done():
-        try:
-            await asyncio.shield(task)
-        except asyncio.CancelledError:
-            cancelled = True
-    result = task.result()
-    if cancelled:
-        raise asyncio.CancelledError
-    return result
-
-
-async def start_process(
-    *argv: str, stop: Callable[[asyncio.subprocess.Process], None], **options: Any
-) -> asyncio.subprocess.Process:
-    """Start a subprocess; a launch cancelled midway is stopped and reaped first."""
-    launch = asyncio.create_task(asyncio.create_subprocess_exec(*argv, **options))
-    try:
-        return await asyncio.shield(launch)
-    except asyncio.CancelledError:
-        await complete_despite_cancellation(_stop_launched(launch, stop))
-        raise
-
-
-async def _stop_launched(
-    launch: asyncio.Task[asyncio.subprocess.Process],
-    stop: Callable[[asyncio.subprocess.Process], None],
-) -> None:
-    try:
-        process = await launch
-    except (OSError, ValueError):
-        return
-    stop(process)
-    await process.communicate()
 
 
 def _sample_interval(start: float) -> float:
@@ -275,7 +222,7 @@ class ResourceMonitor:
                 _PROCESS_LISTING_PROGRAM,
                 "-axo",
                 self._processes.process_columns,
-                stop=_kill_unfinished,
+                stop=kill_unfinished,
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
@@ -295,7 +242,7 @@ class ResourceMonitor:
             async with asyncio.timeout(_PROCESS_TABLE_TIMEOUT_SECONDS):
                 output, _ = await probe.communicate()
         finally:
-            _kill_unfinished(probe)
+            kill_unfinished(probe)
             await complete_despite_cancellation(probe.wait())
         if probe.returncode:
             raise PreparationError("Process memory accounting is unavailable")

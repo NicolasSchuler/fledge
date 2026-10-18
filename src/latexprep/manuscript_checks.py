@@ -14,6 +14,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, NamedTuple, TypedDict, get_args
 
+from .cancellation import cancellation_point
+from .errors import PreparationError
 from .expanded_document import (
     MACRO_DEFINITION_COMMANDS,
     EnvironmentRegion,
@@ -26,6 +28,7 @@ from .expanded_document import (
     expand_document,
 )
 from .file_scan import check_status, format_locations, more_suffix, plural
+from .findings import EvidenceKind, Finding, Severity
 from .literal_text import (
     HEADING_DEPTHS,
     KNOWN_TEXT_COMMANDS,
@@ -41,9 +44,7 @@ from .literal_text import (
     plain_argument_text,
     plain_text,
 )
-from .models import EvidenceKind, Finding, PreparationError, Severity
 from .option_config import require_booleans
-from .scheduler import cancellation_point
 from .tex_lexer import (
     Command,
     conditional_spans,

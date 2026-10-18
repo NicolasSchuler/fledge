@@ -8,10 +8,10 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
+from .cancellation import cancellation_point
 from .file_safety import is_contained_regular_file, is_plain_relative_name
-from .models import Change
 from .project import cleanup_reason
-from .scheduler import cancellation_point
+from .report import Change
 
 PackageStatus = Literal["proposed", "prepared", "verified", "incomplete"]
 

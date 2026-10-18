@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import shutil
 import tempfile
 import threading
@@ -15,11 +16,13 @@ from latexprep.check_selection import CheckSelection
 from latexprep.config import Settings
 from latexprep.core import run_job
 from latexprep.defects import REPORT_DEFECT_SUGGESTION
+from latexprep.errors import PreparationError
+from latexprep.findings import Finding
 from latexprep.job_context import JobRequest
 from latexprep.job_execution import JobDeadlineExceeded
 from latexprep.latexmk_build import BuildTools
-from latexprep.models import Finding, Outcome, PreparationError, Report
 from latexprep.publication import VerifiedPackage
+from latexprep.report import Outcome, Report
 from latexprep.source_staging import apply_contents
 
 
@@ -222,6 +225,12 @@ class ParallelWorkflowTests(unittest.IsolatedAsyncioTestCase):
         stages = {stage["name"]: stage["status"] for stage in report.stages}
         self.assertEqual(stages["baseline PDF inspection"], "blocked")
         self.assertEqual(stages["bibliography checks"], "succeeded")
+        # Task statuses are recorded and serialized as plain strings, not enum members.
+        self.assertTrue(all(type(stage["status"]) is str for stage in report.stages))
+        serialized = {
+            stage["name"]: stage["status"] for stage in json.loads(report.to_json())["stages"]
+        }
+        self.assertEqual(serialized["baseline PDF inspection"], "blocked")
 
     async def test_deadline_drains_tasks_preserves_evidence_and_never_publishes(self):
         stopped = asyncio.Event()

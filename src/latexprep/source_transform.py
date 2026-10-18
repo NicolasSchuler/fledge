@@ -10,8 +10,10 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
+from .errors import PreparationError
 from .file_safety import MIB
-from .models import Change, ChangeKind, Finding, PreparationError, Status, has_blockers
+from .findings import Finding, Status, has_blockers
+from .report import Change, ChangeKind
 from .source import lint_sources
 from .source_graph import ArgumentLocation, SourceGraph
 from .tex_lexer import (

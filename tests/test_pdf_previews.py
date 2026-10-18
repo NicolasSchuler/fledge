@@ -9,11 +9,11 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 
-from latexprep.models import PreparationError
+from latexprep.errors import PreparationError
 from latexprep.pdf_comparison import compare_pdfs
 from latexprep.pdf_previews import PdfPreviewStore
+from latexprep.resource_budget import ResourceBudget
 from latexprep.runtime import CommandResult
-from latexprep.scheduler import ResourceBudget
 from latexprep.workflow_options import ComparisonOptions
 from tests.test_pdf import FakePdfRunner
 

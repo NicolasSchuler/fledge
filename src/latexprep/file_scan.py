@@ -15,10 +15,10 @@ from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO, NamedTuple, cast
 
+from .cancellation import cancellation_point
 from .file_safety import byte_count_text
-from .models import Finding, Status
+from .findings import Finding, Status
 from .redaction import SECRET_PATTERNS
-from .scheduler import cancellation_point
 from .tex_lexer import MAX_SOURCE_BYTES, MAX_TOTAL_SOURCE_BYTES, source_regions
 
 MAX_SCAN_ENTRIES = 10_000

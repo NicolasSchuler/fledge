@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
-import re
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
 from typing import Any, NamedTuple
 
+from .cancellation import bounded_map, run_in_thread
+from .errors import PreparationError, ToolUnavailableError
+from .findings import Finding, has_blockers
 from .manuscript_checks import read_literal_metadata
-from .models import Finding, PreparationError, has_blockers
 from .pdf_artwork import (
     PdfArtworkOptions,
     artwork_checks_enabled,
@@ -29,12 +30,10 @@ from .pdf_inspection import PdfInspectionOptions, inspect_pdf
 from .pdf_previews import PdfPreviewCollector
 from .pdf_structure_checks import StructureOptions, inspect_pdf_structure
 from .pdf_support import MAX_FIGURE_INPUTS
+from .resource_budget import ResourceBudget
 from .runtime import CommandRunner
-from .scheduler import ResourceBudget, bounded_map, run_in_thread
 from .source_graph import SourceGraph
 from .submission_checks import SubmissionOptions, check_pdf_identity
-
-_TOOL_MISSING = re.compile(r"Required tool is unavailable: ([\w.+-]+)\. Install it explicitly\.")
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -95,8 +94,8 @@ def _figure_inputs(root: Path, main: str) -> _FigureInputs:
 def _extraction_failure_reason(error: Exception) -> str:
     """A cause that is safe to report: tool errors can quote the document, so only a missing
     tool is named and every other failure keeps its raw message out of the report."""
-    if (missing := _TOOL_MISSING.fullmatch(str(error))) is not None:
-        return f"{missing[1]} is not installed"
+    if isinstance(error, ToolUnavailableError):
+        return f"{error.tool} is not installed"
     return (
         "a PDF tool did not complete normally; the raw tool message is withheld "
         "because it can quote the document"

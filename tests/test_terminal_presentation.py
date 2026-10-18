@@ -13,7 +13,8 @@ from rich.console import Console
 from rich.text import Text
 
 from latexprep.finding_view import RenderOptions
-from latexprep.models import Finding, Outcome, Report
+from latexprep.findings import Finding
+from latexprep.report import Outcome, Report
 from latexprep.terminal_progress import TerminalProgress
 from latexprep.terminal_report import (
     print_report,

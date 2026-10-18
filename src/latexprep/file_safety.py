@@ -7,7 +7,7 @@ import stat
 from pathlib import Path, PurePosixPath
 from typing import NamedTuple
 
-from .models import PreparationError
+from .errors import PreparationError
 
 MIB = 1024 * 1024
 

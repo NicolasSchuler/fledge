@@ -16,8 +16,9 @@ from click.testing import CliRunner
 from latexprep.check_selection import CheckSelection
 from latexprep.cli import USAGE_EXIT_CODE, cli
 from latexprep.config import load_settings, resolve_config_path
-from latexprep.models import Outcome, PreparationError, Report
+from latexprep.errors import PreparationError
 from latexprep.redaction import scrub_local_paths
+from latexprep.report import Outcome, Report
 from latexprep.rules import RULES
 
 

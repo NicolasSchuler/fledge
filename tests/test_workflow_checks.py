@@ -17,16 +17,17 @@ from latexprep.build_dependencies import LoadedPackage
 from latexprep.cli import cli
 from latexprep.config import Settings
 from latexprep.core import run_job
+from latexprep.findings import Finding
 from latexprep.job_context import JobRequest, pdf_check_settings
 from latexprep.latexmk_build import BuildResult
 from latexprep.manuscript import ManuscriptOptions
 from latexprep.manuscript_checks import ManuscriptCheckOptions
-from latexprep.models import Finding, Outcome, Report
 from latexprep.online_checks import OnlineOptions
 from latexprep.pdf_check_pipeline import inspect_configured_pdf_checks
 from latexprep.pdf_checks import PdfCheckOptions
+from latexprep.report import Outcome, Report
+from latexprep.resource_budget import ResourceBudget
 from latexprep.runtime import ToolRunner
-from latexprep.scheduler import ResourceBudget
 from latexprep.submission_checks import SubmissionOptions
 
 

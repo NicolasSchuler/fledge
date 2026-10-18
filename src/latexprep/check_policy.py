@@ -12,7 +12,7 @@ from dataclasses import replace
 from typing import Any
 
 from .check_selection import CheckSelection
-from .models import Finding
+from .findings import Finding
 
 # These establish the safety of reading, transforming, building or publishing a
 # prepared copy. Bibliography syntax, key, macro and relationship checks are kept

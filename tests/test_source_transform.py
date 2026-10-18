@@ -5,7 +5,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from latexprep.models import PreparationError, has_blockers
+from latexprep.errors import PreparationError
+from latexprep.findings import has_blockers
 from latexprep.source_transform import SourceTransformOptions, plan_source_transforms
 from latexprep.tex_lexer import ParseLimitExceeded
 

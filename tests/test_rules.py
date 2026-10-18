@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import unittest
 
-from latexprep.models import Finding, Report
+from latexprep.findings import Finding
+from latexprep.report import Report
 from latexprep.rules import BY_CODE, BY_NAME, RULES, get_rule
 
 

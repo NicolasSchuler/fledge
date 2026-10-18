@@ -14,8 +14,10 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
+from .errors import PreparationError
+from .findings import EvidenceKind, Finding
 from .literal_text import REFERENCE_COMMANDS
-from .models import Change, ChangeKind, EvidenceKind, Finding, PreparationError
+from .report import Change, ChangeKind
 from .source_graph import (
     DEFAULT_SUFFIXES_BY_FILE_COMMAND,
     FILE_COMMANDS,

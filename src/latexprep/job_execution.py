@@ -15,8 +15,8 @@ from dataclasses import asdict
 from pathlib import Path
 
 from .config import COORDINATOR_MEMORY_MB, Settings
+from .resource_budget import ResourceBudget
 from .runtime import RuntimeLimits, ToolRunner
-from .scheduler import ResourceBudget
 
 
 class JobDeadlineExceeded(TimeoutError):

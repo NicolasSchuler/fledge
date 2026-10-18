@@ -11,9 +11,11 @@ from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path, PurePosixPath
 
+from .errors import PreparationError
 from .finding_view import redact_report
+from .findings import Finding
 from .html_report import render_redacted_html
-from .models import Finding, Outcome, PreparationError, Report
+from .report import Outcome, Report
 from .review_policy import is_literal_relative_path
 
 _TEXT_SUFFIXES = frozenset(

@@ -15,7 +15,7 @@ from pathlib import Path
 from latexprep.config import Settings
 from latexprep.core import run_job
 from latexprep.job_context import JobRequest
-from latexprep.models import Report
+from latexprep.report import Report
 from tests.support import live_tests_enabled, write_project
 
 EPOCH = 1_700_000_000

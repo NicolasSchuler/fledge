@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
+from enum import StrEnum
 from pathlib import Path
 
 from .author_records import check_author_records
@@ -17,22 +18,51 @@ from .bibliography_checks import (
     check_bibliography_integrity,
 )
 from .build_checks import check_local_package_shadows
+from .cancellation import run_in_thread
 from .config import Settings
+from .findings import Finding
 from .job_context import JobCommand, JobContext, pdf_check_settings
 from .latexmk_build import SELECTABLE_BUILD_ERRORS, BuildResult, build_project
 from .manuscript import check_manuscript
 from .manuscript_checks import check_manuscript_policies
 from .metadata_privacy import check_image_metadata
-from .models import Finding, TaskName
 from .online_checks import check_online_references
 from .pdf_check_pipeline import inspect_configured_pdf_checks
 from .pdf_comparison import compare_pdfs
 from .pdf_inspection import inspect_pdf
-from .scheduler import Task, run_in_thread
+from .scheduler import Task
 from .source import analyze_sources
 from .submission_checks import SubmissionOptions, check_submission
 from .submission_readiness_checks import check_submission_readiness
 from .workflow_options import ComparisonOptions
+
+
+class TaskName(StrEnum):
+    """Scheduled job tasks; each value is also the stage name in reports."""
+
+    SOURCE_CHECKS = "source checks"
+    BIBLIOGRAPHY_CHECKS = "bibliography checks"
+    BIBLIOGRAPHY_COVERAGE = "bibliography coverage and fields"
+    MANUSCRIPT_DETAILS = "manuscript details"
+    IMAGE_METADATA_PRIVACY = "image metadata privacy"
+    AUTHOR_FIELDS = "per-author fields"
+    SOURCE_SUBMISSION_CHECKS = "source privacy and bundle checks"
+    ONLINE_REFERENCES = "online reference checks"
+    MANUSCRIPT_CHECKS = "manuscript checks"
+    SUBMISSION_READINESS = "submission readiness"
+    BASELINE_BUILD = "baseline build"
+    BASELINE_CONFIGURED_PDF_CHECKS = "baseline configured PDF checks"
+    BASELINE_PACKAGE_SHADOWS = "baseline local package shadows"
+    BASELINE_PDF_INSPECTION = "baseline PDF inspection"
+    REFERENCE_VERSUS_BASELINE = "supplied PDF versus baseline"
+    SELECT_PREPARATION_INPUTS = "select preparation inputs"
+    FINAL_SOURCE_CHECKS = "final source checks"
+    FINAL_ONLINE_REFERENCES = "final online reference checks"
+    PREPARED_VERSUS_ARCHIVE = "prepared versus archive rebuild"
+    FINAL_PDF_INSPECTION = "final PDF inspection"
+    FINAL_CONFIGURED_PDF_CHECKS = "final configured PDF checks"
+    FINAL_SUBMISSION_CHECKS = "final submission checks"
+    REFERENCE_VERSUS_ARCHIVE = "supplied PDF versus archive rebuild"
 
 
 async def build_document(context: JobContext, tree: Path, main: str, directory: str) -> BuildResult:
@@ -177,13 +207,11 @@ def source_analysis_tasks(
     # without spending a second request allowance on the original snapshot.
     if request.command is not JobCommand.PREPARE or request.dry_run:
         tasks.append(
-            Task(
+            Task.composite(
                 TaskName.ONLINE_REFERENCES,
                 lambda: check_online_references(
                     snapshot(), main, options=settings.online_checks, budget=context.budget
                 ),
-                cpu=0,
-                memory_mb=0,
             )
         )
     if main is None:
@@ -225,7 +253,7 @@ def baseline_pdf_tasks(
     settings, work, runner, budget = context.settings, context.work, context.runner, context.budget
 
     def after_baseline(name: TaskName, run: Callable[[], Awaitable[object]]) -> Task:
-        return Task(name, run, needs_success_of=(TaskName.BASELINE_BUILD,), cpu=0, memory_mb=0)
+        return Task.composite(name, run, needs_success_of=(TaskName.BASELINE_BUILD,))
 
     tasks = [
         after_baseline(
@@ -296,15 +324,13 @@ def final_verification_tasks(
             TaskName.FINAL_SOURCE_CHECKS,
             lambda: run_in_thread(_source_policies, root, main, settings),
         ),
-        Task(
+        Task.composite(
             TaskName.FINAL_ONLINE_REFERENCES,
             lambda: check_online_references(
                 root, main, options=settings.online_checks, budget=budget
             ),
-            cpu=0,
-            memory_mb=0,
         ),
-        Task(
+        Task.composite(
             TaskName.PREPARED_VERSUS_ARCHIVE,
             lambda: compare_documents(
                 context,
@@ -313,10 +339,8 @@ def final_verification_tasks(
                 "compare-archive",
                 TaskName.PREPARED_VERSUS_ARCHIVE.value,
             ),
-            cpu=0,
-            memory_mb=0,
         ),
-        Task(
+        Task.composite(
             TaskName.FINAL_PDF_INSPECTION,
             lambda: inspect_pdf(
                 final_pdf,
@@ -326,10 +350,8 @@ def final_verification_tasks(
                 options=settings.pdf,
                 budget=budget,
             ),
-            cpu=0,
-            memory_mb=0,
         ),
-        Task(
+        Task.composite(
             TaskName.FINAL_CONFIGURED_PDF_CHECKS,
             lambda: inspect_configured_pdf_checks(
                 final_pdf,
@@ -340,8 +362,6 @@ def final_verification_tasks(
                 pdf_check_settings(settings),
                 budget,
             ),
-            cpu=0,
-            memory_mb=0,
         ),
         Task(
             TaskName.FINAL_SUBMISSION_CHECKS,
@@ -350,7 +370,7 @@ def final_verification_tasks(
     ]
     if reference is not None:
         tasks.append(
-            Task(
+            Task.composite(
                 TaskName.REFERENCE_VERSUS_ARCHIVE,
                 lambda: compare_documents(
                     context,
@@ -363,8 +383,6 @@ def final_verification_tasks(
                 waits_for=(TaskName.PREPARED_VERSUS_ARCHIVE,)
                 if context.request.pdf_previews is not None
                 else (),
-                cpu=0,
-                memory_mb=0,
             )
         )
     return tasks

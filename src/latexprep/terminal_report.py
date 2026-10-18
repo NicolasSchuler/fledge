@@ -31,7 +31,8 @@ from .finding_view import (
     redact_report,
     size_label,
 )
-from .models import Finding, Outcome, Report
+from .findings import Finding
+from .report import Outcome, Report
 from .rule_definition import Rule
 
 # Larger change sets are summarized by kind; every entry remains in the JSON report.

@@ -7,7 +7,8 @@ from dataclasses import asdict, fields
 from pathlib import Path
 from unittest.mock import patch
 
-from latexprep.models import Finding, PreparationError
+from latexprep.errors import PreparationError
+from latexprep.findings import Finding
 from latexprep.option_config import read_options
 from latexprep.submission_checks import (
     SubmissionOptions,

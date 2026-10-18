@@ -15,9 +15,10 @@ from latexprep.config import Settings
 from latexprep.core import run_job
 from latexprep.coverage_hints import not_checked_areas, not_checked_summary
 from latexprep.finding_view import RenderOptions
+from latexprep.findings import Finding
 from latexprep.job_context import JobRequest
 from latexprep.latexmk_build import BuildResult
-from latexprep.models import Finding, Outcome, Report
+from latexprep.report import Outcome, Report
 from latexprep.submission_checks import SubmissionOptions
 from latexprep.terminal_report import render_compact, render_terminal
 

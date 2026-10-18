@@ -14,10 +14,11 @@ from click.testing import CliRunner
 from latexprep.cli import cli
 from latexprep.config import Settings
 from latexprep.core import run_job
+from latexprep.findings import Finding
 from latexprep.html_report import render_html
 from latexprep.job_context import JobRequest
-from latexprep.models import Change, ChangeKind, Finding, Outcome, Report
 from latexprep.pdf_previews import PdfPreviewStore
+from latexprep.report import Change, ChangeKind, Outcome, Report
 from latexprep.workflow_options import DocumentOptions, WorkflowOptions
 from tests.test_dependency_packaging import RecordedBuild, contents
 from tests.test_pdf_previews import PNG

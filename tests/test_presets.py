@@ -14,7 +14,7 @@ from click.testing import CliRunner
 
 from latexprep.cli import cli
 from latexprep.config import load_settings
-from latexprep.models import PreparationError
+from latexprep.errors import PreparationError
 from latexprep.presets import PRESETS, preset_names, preset_text, preset_values
 
 ROOT = Path(__file__).resolve().parents[1]

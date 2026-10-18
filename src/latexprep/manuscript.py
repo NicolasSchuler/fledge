@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, TypedDict
 
+from .cancellation import cancellation_point
+from .errors import SettingsError
 from .expanded_document import (
     CONTENT_INPUT_COMMANDS,
     commands_before_end,
@@ -20,6 +22,7 @@ from .expanded_document import (
     unresolved_non_content_file,
 )
 from .file_scan import check_status, format_locations, more_suffix, plural
+from .findings import EvidenceKind, Finding, Status
 from .literal_text import (
     HEADING_DEPTHS,
     KEY_ARGUMENT_COMMANDS,
@@ -33,9 +36,7 @@ from .literal_text import (
     plain_text,
     scan_literal_text,
 )
-from .models import EvidenceKind, Finding, PreparationError, Status
 from .option_config import require_booleans
-from .scheduler import cancellation_point
 from .source_graph import ParsedSource, SourceGraph
 from .tex_lexer import CONTROL_SEQUENCE, Command, conditional_spans, in_conditional
 
@@ -59,7 +60,10 @@ class ManuscriptOptions:
             not isinstance(self.expected_document_class, str)
             or literal_list(self.expected_document_class) != [self.expected_document_class]
         ):
-            raise PreparationError("expected_document_class must be a single nonempty class name")
+            raise SettingsError(
+                "expected_document_class must be a single nonempty class name",
+                ("expected_document_class",),
+            )
         for name in (
             "required_class_options",
             "forbidden_class_options",
@@ -71,18 +75,19 @@ class ManuscriptOptions:
                 not isinstance(value, str) or not value.strip() or value != value.strip()
                 for value in values
             ):
-                raise PreparationError(
-                    f"{name} must contain nonempty strings without surrounding spaces"
+                raise SettingsError(
+                    f"{name} must contain nonempty strings without surrounding spaces", (name,)
                 )
             repeated = sorted({value for value in values if values.count(value) > 1})
             if repeated:
-                raise PreparationError(f"{name} lists {', '.join(map(repr, repeated))} twice")
+                raise SettingsError(f"{name} lists {', '.join(map(repr, repeated))} twice", (name,))
         for name in ("required_class_options", "forbidden_class_options", "forbidden_packages"):
             for value in getattr(self, name):
                 if literal_list(value) != [value]:
-                    raise PreparationError(
+                    raise SettingsError(
                         f"{name} entry {value!r} must be a single literal name "
-                        "without commas or TeX commands"
+                        "without commas or TeX commands",
+                        (name,),
                     )
         for lower_name, upper_name in (
             ("abstract_min_words", "abstract_max_words"),
@@ -91,14 +96,19 @@ class ManuscriptOptions:
             lower, upper = getattr(self, lower_name), getattr(self, upper_name)
             for limit_name, value in ((lower_name, lower), (upper_name, upper)):
                 if value is not None and (type(value) is not int or value < 0):
-                    raise PreparationError(f"{limit_name} must be a nonnegative integer")
+                    raise SettingsError(
+                        f"{limit_name} must be a nonnegative integer", (limit_name,)
+                    )
             if lower is not None and upper is not None and lower > upper:
-                raise PreparationError(f"{lower_name} must not exceed {upper_name}")
+                raise SettingsError(
+                    f"{lower_name} must not exceed {upper_name}", (lower_name, upper_name)
+                )
         both = sorted(set(self.required_class_options) & set(self.forbidden_class_options))
         if both:
-            raise PreparationError(
+            raise SettingsError(
                 f"Class option {', '.join(map(repr, both))} is in both required_class_options "
-                "and forbidden_class_options"
+                "and forbidden_class_options",
+                ("required_class_options", "forbidden_class_options"),
             )
 
 

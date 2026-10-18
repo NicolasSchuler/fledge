@@ -4,8 +4,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from latexprep.config import load_settings
-from latexprep.models import PreparationError
+from latexprep.config import SETTING_NAMES, load_settings
+from latexprep.errors import PreparationError, SettingsError
 
 
 class ConfigTests(unittest.TestCase):
@@ -119,6 +119,69 @@ class ConfigTests(unittest.TestCase):
         ):
             with self.subTest(overrides=overrides), self.assertRaises(PreparationError):
                 load_settings(None, overrides)
+
+
+class SettingsErrorTests(unittest.TestCase):
+    """An invalid value names the top-level settings at fault, in the order its message does."""
+
+    def test_invalid_values_name_the_settings_at_fault(self):
+        cases = (
+            ({"jobs": 0}, ("jobs",)),
+            ({"max_pages": 0}, ("max_pages",)),
+            ({"engine": "word"}, ("engine",)),
+            ({"apply_formatting": 1}, ("apply_formatting",)),
+            ({"source_date_epoch": -1}, ("source_date_epoch",)),
+            ({"build_jobs": 100}, ("build_jobs", "render_jobs")),
+            ({"memory_mb": 300, "build_memory_mb": 1024}, ("memory_mb", "build_memory_mb")),
+            ({"wrap_length": 5}, ("wrap_length", "tab_size")),
+            ({"tab_size": 0}, ("tab_size",)),
+            ({"required_sections": "intro"}, ("required_sections",)),
+            ({"required_class_options": ["a", "a"]}, ("required_class_options",)),
+            (
+                {"abstract_min_words": 5, "abstract_max_words": 2},
+                ("abstract_min_words", "abstract_max_words"),
+            ),
+            ({"format": True, "apply_formatting": True}, ("apply_formatting",)),
+            (
+                {"formatting_options": {"wrap_length": 90}},
+                ("wrap_length", "formatting_options"),
+            ),
+            (
+                {
+                    "layout": "preserve",
+                    "source_transforms": {"filename_overrides": [["a.tex", "b.tex"]]},
+                },
+                ("source_transforms", "layout"),
+            ),
+        )
+        for values, names in cases:
+            with self.subTest(values=values):
+                with self.assertRaises(SettingsError) as raised:
+                    load_settings(None, values)
+                self.assertEqual(raised.exception.settings, names)
+                self.assertLessEqual(set(raised.exception.settings), SETTING_NAMES)
+
+    def test_a_problem_inside_a_table_names_the_table(self):
+        cases = (
+            {"online_checks": {"online_timeout_seconds": 0}},
+            {"online_checks": {"unknown_option": 1}},
+            {"online_checks": 3},
+            {"formatting_options": {"blank_lines": "everything"}},
+        )
+        for values in cases:
+            with self.subTest(values=values):
+                with self.assertRaises(SettingsError) as raised:
+                    load_settings(None, values)
+                [table] = values
+                self.assertEqual(raised.exception.settings, (table,))
+
+    def test_failures_that_no_setting_explains_carry_no_names(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.toml"
+            path.write_text("jobs = [")
+            with self.assertRaises(PreparationError) as raised:
+                load_settings(path, {})
+        self.assertNotIsInstance(raised.exception, SettingsError)
 
 
 if __name__ == "__main__":

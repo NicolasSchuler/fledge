@@ -6,8 +6,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from latexprep.config import Settings
+from latexprep.findings import has_blockers
 from latexprep.formatting import FormattingOptions, FormattingResult, format_project
-from latexprep.models import has_blockers
 from latexprep.runtime import CommandResult, CommandRunner, ToolRunner, ToolVersion
 
 

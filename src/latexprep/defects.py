@@ -12,7 +12,7 @@ from __future__ import annotations
 import traceback
 from pathlib import Path
 
-from .models import PreparationError
+from .errors import PreparationError
 
 # The innermost frames name the failing code; older ones only show how it was reached.
 _TRACEBACK_FRAME_LIMIT = 8

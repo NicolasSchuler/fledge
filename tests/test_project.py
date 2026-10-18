@@ -13,7 +13,7 @@ import zlib
 from pathlib import Path
 from unittest.mock import patch
 
-from latexprep.models import PreparationError
+from latexprep.errors import PreparationError
 from latexprep.project import (
     MAX_FOLDER_DEPTH,
     ImportLimits,

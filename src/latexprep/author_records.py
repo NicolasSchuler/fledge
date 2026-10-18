@@ -9,12 +9,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from .cancellation import cancellation_point
 from .expanded_document import command_end, expand_document
 from .file_scan import check_status, location_label, more_suffix
+from .findings import EvidenceKind, Finding
 from .literal_text import is_placeholder_text, plain_argument_text
-from .models import EvidenceKind, Finding
 from .pdf_structure_checks import StructureOptions
-from .scheduler import cancellation_point
 from .tex_lexer import in_conditional
 
 _RULE = "manuscript.author_records"

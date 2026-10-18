@@ -14,8 +14,10 @@ from pathlib import Path
 from types import TracebackType
 from typing import Self
 
+from .errors import PreparationError, RequestError
 from .file_safety import is_contained_regular_file
-from .models import Finding, Outcome, PreparationError, Report, RequestError
+from .findings import Finding
+from .report import Outcome, Report
 
 # Workspace preview images and the published path of each.
 PreviewPlan = tuple[tuple[Path, Path], ...]

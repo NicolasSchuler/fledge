@@ -11,6 +11,7 @@ from importlib import resources
 from pathlib import Path
 
 from latexprep.build_checks import BuildCheckOptions, check_build_details
+from latexprep.errors import PreparationError
 from latexprep.latexmk_build import BuildResult, build_project
 from latexprep.loaded_options import (
     _native_string,
@@ -18,7 +19,6 @@ from latexprep.loaded_options import (
     collect_loaded_options,
     stage_loaded_options,
 )
-from latexprep.models import PreparationError
 from latexprep.pdf_comparison import compare_pdfs
 from latexprep.runtime import ToolRunner
 from tests.support import live_tests_enabled

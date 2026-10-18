@@ -11,7 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from latexprep import project
-from latexprep.scheduler import run_in_thread
+from latexprep.cancellation import run_in_thread
 
 
 class ArchiveCancellationTests(unittest.IsolatedAsyncioTestCase):

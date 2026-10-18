@@ -13,8 +13,9 @@ from rich.text import Text
 
 from .command_options import debug_option, reject_config_with_isolated, settings_file_options
 from .config import load_settings, resolve_config_path
-from .models import Outcome, PreparationError
+from .errors import PreparationError
 from .project import ImportLimits, import_project
+from .report import Outcome
 from .submission_text import FIELD_NAMES, read_submission_text, safe_display
 
 

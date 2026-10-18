@@ -13,8 +13,8 @@ from click.testing import CliRunner
 from latexprep.cli import USAGE_EXIT_CODE, cli
 from latexprep.config import load_settings, resolve_config_path
 from latexprep.init_command import STARTER
-from latexprep.models import Outcome
 from latexprep.presets import PRESETS, preset_text
+from latexprep.report import Outcome
 
 
 class InitCommandTests(unittest.TestCase):

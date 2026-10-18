@@ -7,7 +7,7 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 
-from latexprep.models import PreparationError
+from latexprep.errors import PreparationError
 from latexprep.pdf_checks import (
     PdfCheckOptions,
     PdfSectionBudget,
@@ -22,8 +22,8 @@ from latexprep.pdf_support import (
     MIN_MEASUREMENT_DPI,
     PdfRegion,
 )
+from latexprep.resource_budget import ResourceBudget
 from latexprep.runtime import CommandResult, RuntimeLimits, ToolRunner
-from latexprep.scheduler import ResourceBudget
 from tests.support import live_tests_enabled
 
 

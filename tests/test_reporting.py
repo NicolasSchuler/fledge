@@ -14,12 +14,14 @@ from unittest.mock import patch
 
 from latexprep.ci_annotations import render_ci_annotations
 from latexprep.diagnostic_bundle import export_diagnostic_bundle
+from latexprep.errors import PreparationError
 from latexprep.file_scan import read_regular_file
 from latexprep.finding_view import RenderOptions, evidence_excerpt, is_scope_disclaimer
+from latexprep.findings import Finding
 from latexprep.html_report import render_html
-from latexprep.models import Change, ChangeKind, Finding, Outcome, PreparationError, Report
 from latexprep.option_config import read_options
 from latexprep.pdf_support import heuristic_finding, measurement_finding
+from latexprep.report import Change, ChangeKind, Outcome, Report
 from latexprep.review_policy import (
     ReportingOptions,
     ReviewRule,

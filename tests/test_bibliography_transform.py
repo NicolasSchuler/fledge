@@ -11,7 +11,9 @@ from unittest.mock import patch
 from latexprep.bibliography_transform import BibliographyTransformOptions, plan_bibliography
 from latexprep.bibliography_transform_rules import RULES
 from latexprep.bibtex_syntax import BibDocument, parse_bibtex
-from latexprep.models import Change, Finding, PreparationError, has_blockers
+from latexprep.errors import PreparationError
+from latexprep.findings import Finding, has_blockers
+from latexprep.report import Change
 
 
 class BibliographyTransformTests(unittest.TestCase):

@@ -15,11 +15,12 @@ from unittest.mock import AsyncMock, patch
 
 from click.testing import CliRunner
 
-from latexprep.cli import USAGE_EXIT_CODE, cli, main
+from latexprep.cli import USAGE_EXIT_CODE, _settings_suggestion, cli, main
 from latexprep.finding_view import RenderOptions
+from latexprep.findings import Finding
 from latexprep.latexmk_build import BuildResult
-from latexprep.models import Change, ChangeKind, Finding, Outcome, Report
 from latexprep.redaction import scrub_local_paths
+from latexprep.report import Change, ChangeKind, Outcome, Report
 from latexprep.rules import RULES
 from latexprep.terminal_report import render_compact, render_terminal
 
@@ -251,6 +252,36 @@ class RequestErrorTests(unittest.TestCase):
         finding = self.request_error("inspect", str(self.source))
         self.assertIn(f"jobs in {scrub_local_paths(str(config))}", finding["next_step"])
 
+    def test_a_table_value_names_the_table_in_the_settings_file(self):
+        config = self.source / ".fledge.toml"
+        config.write_text("[online_checks]\nonline_timeout_seconds = 0\n")
+        finding = self.request_error("inspect", str(self.source))
+        self.assertIn("online_timeout_seconds", finding["message"])
+        self.assertIn(f"online_checks in {scrub_local_paths(str(config))}", finding["next_step"])
+
+    def test_every_setting_at_fault_is_named_in_the_order_of_the_message(self):
+        config = self.source / ".fledge.toml"
+        config.write_text("build_jobs = 100\n")
+        finding = self.request_error("inspect", str(self.source))
+        shown = scrub_local_paths(str(config))
+        self.assertIn(
+            f"Change build_jobs in {shown}; render_jobs in {shown}, then rerun",
+            finding["next_step"],
+        )
+
+    def test_a_setting_name_in_a_file_path_is_not_taken_for_a_setting_at_fault(self):
+        project = self.root / "jobs"
+        project.mkdir()
+        (project / "main.tex").write_text((self.source / "main.tex").read_text())
+        config = project / ".fledge.toml"
+        config.write_text("jobs = [")
+        finding = self.request_error("inspect", str(project))
+        self.assertIn("Cannot read settings", finding["message"])
+        self.assertEqual(
+            finding["next_step"],
+            f"Correct the settings in {scrub_local_paths(str(config))}, then rerun the command.",
+        )
+
     def test_unknown_setting_names_the_file_and_the_closest_valid_key(self):
         config = self.source / ".fledge.toml"
         config.write_text("max_page = 3\n")
@@ -274,6 +305,37 @@ class RequestErrorTests(unittest.TestCase):
         self.assertNotIn("source analysis", result.stdout)
 
 
+class SettingsSuggestionTests(unittest.TestCase):
+    def test_each_named_setting_says_where_it_was_supplied(self):
+        names = ("jobs", "apply_formatting", "engine", "layout")
+        overrides = {"jobs": 0, "apply_formatting": True}
+        config = Path("/project/fledge.toml")
+        self.assertEqual(
+            _settings_suggestion(names, overrides, config, "journal"),
+            "Change --jobs on the command line; --format on the command line; "
+            "engine in /project/fledge.toml or the journal preset; "
+            "layout in /project/fledge.toml or the journal preset, then rerun the command.",
+        )
+        self.assertEqual(
+            _settings_suggestion(("engine",), {}, config, None),
+            "Change engine in /project/fledge.toml, then rerun the command.",
+        )
+        self.assertEqual(
+            _settings_suggestion(("engine",), {}, None, "journal"),
+            "Change engine in the journal preset, then rerun the command.",
+        )
+
+    def test_no_named_setting_gives_the_general_advice(self):
+        self.assertEqual(
+            _settings_suggestion((), {}, Path("/project/fledge.toml"), None),
+            "Correct the settings in /project/fledge.toml, then rerun the command.",
+        )
+        self.assertEqual(
+            _settings_suggestion((), {}, None, None),
+            "Correct the options named above, then rerun the command.",
+        )
+
+
 class MissingToolchainTests(unittest.TestCase):
     def test_missing_tex_is_reported_once_with_installation_steps(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -290,6 +352,7 @@ class MissingToolchainTests(unittest.TestCase):
                         "Required tool is unavailable: latexmk. Install it explicitly.",
                         severity="error",
                         status="inconclusive",
+                        details={"tool": "latexmk"},
                     )
                 ],
             )

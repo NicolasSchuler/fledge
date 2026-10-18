@@ -10,8 +10,9 @@ import click
 
 from .command_options import debug_option
 from .config import parse_settings_text, resolve_config_path
-from .models import Outcome, PreparationError
+from .errors import PreparationError
 from .presets import PRESETS, preset_names, preset_text
+from .report import Outcome
 
 CONFIG_NAME = "fledge.toml"
 

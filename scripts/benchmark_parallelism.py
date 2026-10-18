@@ -25,7 +25,7 @@ from rich.console import Console
 from latexprep.config import Settings
 from latexprep.core import run_job
 from latexprep.job_context import JobRequest
-from latexprep.models import Report
+from latexprep.report import Report
 
 SOURCE_DATE_EPOCH = 1_700_000_000
 CONFIGURATIONS = {"serial": (1, 1), "parallel": (4, 2)}

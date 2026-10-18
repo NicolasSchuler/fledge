@@ -7,10 +7,10 @@ import unittest
 import zipfile
 from pathlib import Path
 
-from latexprep.models import Change, ChangeKind
 from latexprep.package_inputs import select_package_inputs
 from latexprep.package_inventory import assemble_package_inventory
 from latexprep.project import create_archive
+from latexprep.report import Change, ChangeKind
 
 
 class PackageInventoryTests(unittest.TestCase):

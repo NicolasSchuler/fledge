@@ -11,12 +11,13 @@ from unittest.mock import AsyncMock, patch
 from latexprep.check_selection import CheckSelection
 from latexprep.config import Settings
 from latexprep.core import run_job
+from latexprep.findings import Finding
 from latexprep.job_context import JobRequest
 from latexprep.latexmk_build import build_project
 from latexprep.manuscript import ManuscriptOptions
-from latexprep.models import Finding, Report
 from latexprep.online_checks import OnlineOptions
 from latexprep.pdf_artwork import PdfArtworkOptions
+from latexprep.report import Report
 from latexprep.submission_checks import SubmissionOptions
 from latexprep.terminal_report import render_compact, render_terminal
 from tests.test_multi_document import build as fixture_build

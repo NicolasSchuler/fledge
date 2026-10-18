@@ -18,11 +18,12 @@ from latexprep.config import Settings
 from latexprep.core import run_job
 from latexprep.diagnostic_bundle import export_diagnostic_bundle
 from latexprep.finding_view import RenderOptions
+from latexprep.findings import Finding
 from latexprep.html_report import render_html
 from latexprep.job_context import JobRequest
-from latexprep.models import Change, ChangeKind, Finding, Outcome, Report
 from latexprep.online_checks import OnlineOptions
 from latexprep.pdf_artwork import PdfArtworkOptions
+from latexprep.report import Change, ChangeKind, Outcome, Report
 from latexprep.terminal_report import render_compact, render_terminal
 from tests.test_workflow_checks import controlled_build, source_project
 
@@ -106,7 +107,7 @@ class ReportSafetyTests(unittest.TestCase):
 
     def test_redaction_limits_do_not_fall_back_to_raw_report_details(self):
         _, report = self.report()
-        with patch("latexprep.models.redact_data", return_value="redaction budget reached"):
+        with patch("latexprep.report.redact_data", return_value="redaction budget reached"):
             result = report.to_dict()
         self.assertEqual(result["outcome"], "error")
         self.assertEqual(result["settings"], {})
@@ -130,7 +131,7 @@ class ReportSafetyTests(unittest.TestCase):
         self.assertEqual(result["settings"]["password"], "[REDACTED]")
         self.assertEqual(result["findings"][0]["message"], "[REDACTED]")
         # If a credential collides with schema keys, return a safe error report.
-        with patch("latexprep.models.redact_data", return_value={"[REDACTED]": []}):
+        with patch("latexprep.report.redact_data", return_value={"[REDACTED]": []}):
             fallback = report.to_dict()
         self.assertEqual(fallback["outcome"], "error")
 
@@ -156,14 +157,14 @@ class WithheldReportTests(unittest.TestCase):
         return Report("check", outcome=Outcome.PASSED, scope="fixture")
 
     def test_oversized_report_records_the_redaction_limit(self):
-        with patch("latexprep.models.redact_data", return_value="redaction budget reached"):
+        with patch("latexprep.report.redact_data", return_value="redaction budget reached"):
             result = self.report().to_dict()
         [finding] = result["findings"]
         self.assertEqual(finding["details"], {"cause": "redaction_limit"})
         self.assertIn("within redaction limits", finding["message"])
 
     def test_structural_failure_records_only_the_error_type(self):
-        with patch("latexprep.models.redact_data", return_value={"[REDACTED]": []}):
+        with patch("latexprep.report.redact_data", return_value={"[REDACTED]": []}):
             result = self.report().to_dict()
         [finding] = result["findings"]
         self.assertEqual(finding["details"], {"cause": "KeyError"})
@@ -171,7 +172,7 @@ class WithheldReportTests(unittest.TestCase):
         self.assertNotIn("within redaction limits", finding["message"])
 
     def test_withheld_report_keeps_the_command_so_it_matches_the_schema(self):
-        with patch("latexprep.models.redact_data", return_value="redaction budget reached"):
+        with patch("latexprep.report.redact_data", return_value="redaction budget reached"):
             self.assertEqual(self.report().to_dict()["command"], "check")
 
 

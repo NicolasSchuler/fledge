@@ -12,7 +12,8 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
-from latexprep.models import PreparationError
+from latexprep.cancellation import cancellation_point as owned_cancellation_point
+from latexprep.errors import PreparationError
 from latexprep.pdf_artwork import (
     PdfArtworkOptions,
     PdfContrastSample,
@@ -20,9 +21,8 @@ from latexprep.pdf_artwork import (
     inspect_pdf_artwork,
 )
 from latexprep.pdf_support import PdfRegion
+from latexprep.resource_budget import ResourceBudget
 from latexprep.runtime import CommandResult, ToolRunner
-from latexprep.scheduler import ResourceBudget
-from latexprep.scheduler import cancellation_point as owned_cancellation_point
 
 
 def region(name: str = "Figure", *, left: float = 0, right: float = 100) -> PdfRegion:

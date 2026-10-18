@@ -14,20 +14,11 @@ from .bibliography_transform import BibliographyTransformOptions
 from .build_checks import BuildCheckOptions
 from .check_policy import unselected_policy_updates
 from .check_selection import CheckSelection
+from .errors import PreparationError, RequestError, SettingsError
 from .formatting import FormattingOptions
 from .manuscript import ManuscriptOptions
 from .manuscript_checks import ManuscriptCheckOptions
 from .metadata_privacy import MetadataPrivacyOptions
-from .models import (
-    BIBLIOGRAPHY_BACKENDS,
-    ENGINES,
-    LAYOUTS,
-    BibliographyBackend,
-    Engine,
-    Layout,
-    PreparationError,
-    RequestError,
-)
 from .online_checks import OnlineOptions
 from .option_config import read_options, require_booleans
 from .pdf_artwork import PdfArtworkOptions
@@ -36,6 +27,14 @@ from .pdf_inspection import PdfInspectionOptions
 from .pdf_structure_checks import StructureOptions
 from .presets import preset_values
 from .review_policy import ReportingOptions
+from .setting_choices import (
+    BIBLIOGRAPHY_BACKENDS,
+    ENGINES,
+    LAYOUTS,
+    BibliographyBackend,
+    Engine,
+    Layout,
+)
 from .source_transform import SourceTransformOptions
 from .submission_checks import SubmissionOptions
 from .workflow_options import PackageOptions, WorkflowOptions
@@ -159,7 +158,7 @@ class Settings:
     def __post_init__(self) -> None:
         for name, kind in _OPTION_TYPES.items():
             if not isinstance(getattr(self, name), kind):
-                raise PreparationError(f"{name} must be a settings table")
+                raise SettingsError(f"{name} must be a settings table", (name,))
         metadata = self.match_source_pdf_metadata
         if (
             not isinstance(metadata, tuple)
@@ -168,53 +167,67 @@ class Settings:
             )
             or len(set(metadata)) != len(metadata)
         ):
-            raise PreparationError("match_source_pdf_metadata must list unique title/author fields")
+            raise SettingsError(
+                "match_source_pdf_metadata must list unique title/author fields",
+                ("match_source_pdf_metadata",),
+            )
         if self.main is not None and (not isinstance(self.main, str) or not self.main.strip()):
-            raise PreparationError("main must be a nonempty relative filename")
+            raise SettingsError("main must be a nonempty relative filename", ("main",))
         for name, allowed in _CHOICES.items():
             value = getattr(self, name)
             if not isinstance(value, str) or value not in allowed:
-                raise PreparationError(f"{name} must be one of {', '.join(sorted(allowed))}")
+                raise SettingsError(f"{name} must be one of {', '.join(sorted(allowed))}", (name,))
         require_booleans(self, *_SWITCHES)
         for name in _POSITIVE_INTEGERS:
             value = getattr(self, name)
             if type(value) is not int or value < 1:
-                raise PreparationError(f"{name} must be a positive integer")
+                raise SettingsError(f"{name} must be a positive integer", (name,))
         epoch = self.source_date_epoch
         if epoch is not None and (
             type(epoch) is not int or not 0 <= epoch <= MAX_SOURCE_DATE_EPOCH
         ):
-            raise PreparationError(
-                "source_date_epoch must be a nonnegative supported Unix timestamp"
+            raise SettingsError(
+                "source_date_epoch must be a nonnegative supported Unix timestamp",
+                ("source_date_epoch",),
             )
         if self.max_pages is not None and (type(self.max_pages) is not int or self.max_pages < 1):
-            raise PreparationError("max_pages must be a positive integer")
+            raise SettingsError("max_pages must be a positive integer", ("max_pages",))
         self._validate_combinations()
 
     def _validate_combinations(self) -> None:
         if self.workflow.documents and self.main is not None:
-            raise PreparationError("Choose workflow.documents or one main, not both")
+            raise SettingsError(
+                "Choose workflow.documents or one main, not both", ("workflow", "main")
+            )
         if self.source_transforms.filename_overrides and self.layout != "flat":
-            raise PreparationError("filename_overrides requires layout='flat'")
+            raise SettingsError(
+                "filename_overrides requires layout='flat'", ("source_transforms", "layout")
+            )
         if {name.title() for name in self.match_source_pdf_metadata} & {
             name for name, _ in self.pdf_checks.expected_metadata
         }:
-            raise PreparationError(
-                "Choose source matching or an explicit expected PDF value for each metadata field"
+            raise SettingsError(
+                "Choose source matching or an explicit expected PDF value for each metadata field",
+                ("match_source_pdf_metadata", "pdf_checks"),
             )
         if self.jobs > MAX_CONCURRENCY:
-            raise PreparationError(f"jobs must be at most {MAX_CONCURRENCY}")
+            raise SettingsError(f"jobs must be at most {MAX_CONCURRENCY}", ("jobs",))
         if self.build_jobs > MAX_CONCURRENCY or self.render_jobs > MAX_CONCURRENCY:
-            raise PreparationError(f"build_jobs and render_jobs must be at most {MAX_CONCURRENCY}")
+            raise SettingsError(
+                f"build_jobs and render_jobs must be at most {MAX_CONCURRENCY}",
+                ("build_jobs", "render_jobs"),
+            )
         if self.memory_mb < MIN_MEMORY_MB or self.build_memory_mb < MIN_BUILD_MEMORY_MB:
-            raise PreparationError(
+            raise SettingsError(
                 f"memory_mb must be >={MIN_MEMORY_MB} and "
-                f"build_memory_mb must be >={MIN_BUILD_MEMORY_MB}"
+                f"build_memory_mb must be >={MIN_BUILD_MEMORY_MB}",
+                ("memory_mb", "build_memory_mb"),
             )
         if self.build_memory_mb + COORDINATOR_MEMORY_MB > self.memory_mb:
-            raise PreparationError(
+            raise SettingsError(
                 f"memory_mb must allow build_memory_mb plus {COORDINATOR_MEMORY_MB} MiB "
-                "for the coordinator"
+                "for the coordinator",
+                ("memory_mb", "build_memory_mb"),
             )
 
     def to_dict(self) -> dict[str, object]:
@@ -418,7 +431,7 @@ def _current_names(values: Mapping[str, object]) -> dict[str, Any]:
         current = RENAMED_SETTINGS.get(name, name)
         if current in result:
             former = next(old for old, new in RENAMED_SETTINGS.items() if new == current)
-            raise PreparationError(f"Set {current} only; {former} is its former name")
+            raise SettingsError(f"Set {current} only; {former} is its former name", (current,))
         result[current] = value
     return result
 
@@ -426,8 +439,9 @@ def _current_names(values: Mapping[str, object]) -> dict[str, Any]:
 def _line_format(values: dict[str, Any], table: object) -> dict[str, Any]:
     """Top-level wrap_length and tab_size, which belong to the formatting options."""
     if isinstance(table, dict) and (nested := sorted(set(_FORMATTING_KEYS) & set(table))):
-        raise PreparationError(
-            f"Set {', '.join(nested)} at the top level, not in formatting_options"
+        raise SettingsError(
+            f"Set {', '.join(nested)} at the top level, not in formatting_options",
+            (*nested, "formatting_options"),
         )
     return {name: values.pop(name) for name in _FORMATTING_KEYS if name in values}
 
@@ -453,7 +467,7 @@ def _build_settings(values: dict[str, Any], path: Path | None) -> Settings:
         if name in grouped["manuscript"]:
             value = grouped["manuscript"][name]
             if not isinstance(value, (tuple, list)):
-                raise PreparationError(f"{name} must be an array of unique nonempty strings")
+                raise SettingsError(f"{name} must be an array of unique nonempty strings", (name,))
             grouped["manuscript"][name] = tuple(value)
     if isinstance(metadata := values.get("match_source_pdf_metadata"), list):
         values["match_source_pdf_metadata"] = tuple(metadata)

@@ -8,8 +8,8 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 
+from latexprep.findings import Finding
 from latexprep.latexmk_build import BuildResult, BuildTools
-from latexprep.models import Finding
 
 MINIMAL_PDF = b"%PDF-controlled-test\n"
 MINIMAL_DOCUMENT = "\\documentclass{article}\n\\begin{document}Hello.\\end{document}\n"

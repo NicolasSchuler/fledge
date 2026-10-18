@@ -14,8 +14,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
-from .models import Finding
-from .scheduler import cancellation_point
+from .cancellation import cancellation_point
+from .findings import Finding
 from .source_graph import (
     COMMA_LIST_FILE_COMMANDS,
     FILE_COMMANDS,

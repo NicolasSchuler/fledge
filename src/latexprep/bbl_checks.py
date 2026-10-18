@@ -10,13 +10,13 @@ from __future__ import annotations
 import re
 from pathlib import Path, PurePosixPath
 
+from .cancellation import cancellation_point
 from .citation_graph import build_citation_graph, resource_declarations
 from .expanded_document import commands_before_end
 from .file_scan import MAX_SCAN_MATCHES, list_locations, more_suffix, read_regular_file
+from .findings import EvidenceKind, Finding
 from .literal_text import PACKAGE_COMMANDS, first_argument_names
-from .models import EvidenceKind, Finding
 from .rules import code_for
-from .scheduler import cancellation_point
 from .source_graph import SourceGraph
 from .submission_checks import SubmissionOptions
 from .tex_lexer import MAX_SOURCE_BYTES

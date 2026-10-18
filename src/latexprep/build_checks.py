@@ -9,11 +9,14 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 from .build_dependencies import PACKAGE_FILENAME, LoadedPackage, parse_declared_date
+from .cancellation import bounded_map, cancellation_point
+from .errors import PreparationError
+from .findings import EvidenceKind, Finding, Status
 from .latexmk_build import BuildResult
 from .loaded_options import loaded_options_unavailable
-from .models import ENGINES, EvidenceKind, Finding, PreparationError, Status
+from .resource_budget import ResourceBudget
 from .runtime import CommandRunner
-from .scheduler import ResourceBudget, bounded_map, cancellation_point
+from .setting_choices import ENGINES
 
 
 @dataclass(frozen=True)

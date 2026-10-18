@@ -10,7 +10,9 @@ from functools import partial
 from pathlib import Path
 from typing import Any, NamedTuple, TypeVar, cast
 
-from .models import Finding, PreparationError
+from .cancellation import cancellation_point, run_in_thread
+from .errors import PreparationError
+from .findings import Finding
 from .pdf_previews import (
     MIN_PNG_BYTES,
     PdfPreviewCollector,
@@ -35,8 +37,8 @@ from .pdf_support import (
     require_rendered_pages,
     unavailable_finding,
 )
+from .resource_budget import ResourceBudget
 from .runtime import CommandResult, CommandRunner
-from .scheduler import ResourceBudget, cancellation_point, run_in_thread
 from .workflow_options import ComparisonOptions
 
 _T = TypeVar("_T")

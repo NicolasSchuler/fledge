@@ -15,12 +15,14 @@ from pathlib import Path
 from typing import NamedTuple
 
 from .bibliography_transform import normalize_dois, plan_bibliography
+from .cancellation import cancellation_point
 from .config import Settings
+from .errors import PreparationError
 from .file_safety import is_contained_regular_file
+from .findings import Finding, has_blockers
 from .metadata_privacy import plan_metadata_sanitization
-from .models import Change, Finding, PreparationError, has_blockers
 from .project import plan_cleanup
-from .scheduler import cancellation_point
+from .report import Change
 from .source import plan_flatten
 from .source_transform import plan_source_transforms
 from .workflow_options import DocumentOptions

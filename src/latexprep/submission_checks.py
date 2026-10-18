@@ -17,6 +17,8 @@ from functools import lru_cache
 from pathlib import Path
 from urllib.parse import unquote
 
+from .cancellation import cancellation_point
+from .errors import PreparationError
 from .file_scan import (
     MAX_SCAN_ENTRIES,
     MAX_SCAN_MATCHES,
@@ -30,9 +32,8 @@ from .file_scan import (
     redact_secrets,
     tex_comments,
 )
-from .models import EvidenceKind, Finding, PreparationError
+from .findings import EvidenceKind, Finding
 from .redaction import SECRET_PATTERNS
-from .scheduler import cancellation_point
 from .source import analyze_sources
 from .tex_lexer import (
     MAX_SOURCE_BYTES,

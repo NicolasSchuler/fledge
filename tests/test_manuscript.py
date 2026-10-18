@@ -4,8 +4,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from latexprep.errors import PreparationError
+from latexprep.findings import Finding
 from latexprep.manuscript import ManuscriptOptions, check_manuscript
-from latexprep.models import Finding, PreparationError
 
 
 class ManuscriptTests(unittest.TestCase):

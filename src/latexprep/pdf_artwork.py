@@ -21,7 +21,9 @@ from functools import partial
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from .models import Finding, PreparationError
+from .cancellation import cancellation_point
+from .errors import PreparationError
+from .findings import Finding
 from .option_config import require_booleans
 from .pdf_previews import PNG_SIGNATURE
 from .pdf_support import (
@@ -61,8 +63,8 @@ from .pdf_support import (
     require_rendered_pages,
     unavailable_finding,
 )
+from .resource_budget import ResourceBudget
 from .runtime import CommandResult, CommandRunner
-from .scheduler import ResourceBudget, cancellation_point
 
 _MAX_OPERATIONS = 50_000
 _MAX_PIXEL_VISITS = 8_000_000

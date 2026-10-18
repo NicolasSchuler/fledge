@@ -12,6 +12,8 @@ from .config import Settings, effective_settings
 from .coverage_hints import not_checked_areas
 from .document_run import run_project
 from .documents import run_documents
+from .errors import PreparationError, RequestError
+from .findings import Finding
 from .job_context import (
     DOCUMENT_COMMANDS,
     JobCommand,
@@ -21,7 +23,6 @@ from .job_context import (
     select_and_review,
 )
 from .job_execution import JobDeadlineExceeded, JobExecution
-from .models import Finding, Outcome, PreparationError, Report, RequestError
 from .publication import (
     DocumentResult,
     OutputTransaction,
@@ -34,6 +35,7 @@ from .publication import (
     publish_previews,
     validate_destination,
 )
+from .report import Outcome, Report
 
 
 class _Destinations(NamedTuple):

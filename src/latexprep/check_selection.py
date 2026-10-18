@@ -5,7 +5,7 @@ from __future__ import annotations
 import difflib
 from dataclasses import dataclass
 
-from .models import PreparationError
+from .errors import PreparationError
 from .rules import BY_CODE
 
 

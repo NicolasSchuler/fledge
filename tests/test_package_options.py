@@ -11,8 +11,8 @@ from unittest.mock import AsyncMock, patch
 from latexprep.check_selection import CheckSelection
 from latexprep.config import Settings, load_settings
 from latexprep.core import run_job
+from latexprep.errors import PreparationError
 from latexprep.job_context import JobRequest
-from latexprep.models import PreparationError
 from latexprep.workflow_options import PackageOptions
 from tests.support import MINIMAL_DOCUMENT, fake_build, write_project
 

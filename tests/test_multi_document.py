@@ -12,9 +12,10 @@ from unittest.mock import AsyncMock, patch
 from latexprep.config import Settings, load_settings
 from latexprep.core import run_job
 from latexprep.defects import REPORT_DEFECT_SUGGESTION
+from latexprep.errors import PreparationError, RequestError
+from latexprep.findings import Finding
 from latexprep.job_context import JobRequest, main_selection_error
 from latexprep.latexmk_build import BuildTools
-from latexprep.models import Finding, PreparationError, RequestError
 from latexprep.pdf_comparison import compare_pdfs
 from latexprep.source_staging import stage_document
 from latexprep.workflow_options import ComparisonOptions, DocumentOptions, WorkflowOptions

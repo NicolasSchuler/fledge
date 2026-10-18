@@ -10,16 +10,17 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from latexprep.config import Settings
+from latexprep.errors import PreparationError, ToolUnavailableError
+from latexprep.findings import has_blockers
 from latexprep.job_context import pdf_check_settings
-from latexprep.models import PreparationError, has_blockers
 from latexprep.pdf_artwork import PdfArtworkOptions
 from latexprep.pdf_check_pipeline import inspect_standalone_pdf
 from latexprep.pdf_checks import PdfCheckOptions
 from latexprep.pdf_comparison import _pair_memory_mb, compare_pdfs
 from latexprep.pdf_inspection import PdfInspectionOptions, inspect_pdf
 from latexprep.pdf_support import read_rgb_raster
+from latexprep.resource_budget import ResourceBudget
 from latexprep.runtime import CommandResult, ToolRunner
-from latexprep.scheduler import ResourceBudget
 from latexprep.submission_checks import SubmissionOptions
 from tests.test_pdf import FakePdfRunner
 
@@ -88,11 +89,11 @@ class RecordingPdfRunner(FakePdfRunner):
 
 
 class FailingTextRunner(FakePdfRunner):
-    """Fails text extraction with a controlled tool message."""
+    """Fails text extraction with a controlled tool error."""
 
-    def __init__(self, message: str) -> None:
+    def __init__(self, error: PreparationError) -> None:
         super().__init__()
-        self.message = message
+        self.error = error
 
     async def run(
         self,
@@ -104,7 +105,7 @@ class FailingTextRunner(FakePdfRunner):
         memory_mb: int | None = None,
     ) -> CommandResult:
         if argv[0] == "pdftotext" and argv[-1] != "-v":
-            raise PreparationError(self.message)
+            raise self.error
         return await super().run(
             argv, cwd, workspace, readonly_inputs=readonly_inputs, memory_mb=memory_mb
         )
@@ -535,18 +536,23 @@ class ParallelPdfTests(unittest.IsolatedAsyncioTestCase):
         empty = AsyncMock(return_value=[])
         cases = (
             (
-                "Required tool is unavailable: pdftotext. Install it explicitly.",
+                ToolUnavailableError("Required tool is unavailable: pdftotext.", "pdftotext"),
                 "pdftotext is not installed",
             ),
             (
-                "pdftotext failed (1): Syntax Error: private manuscript sentence",
+                PreparationError("pdftotext failed (1): Syntax Error: private manuscript sentence"),
+                "the raw tool message is withheld",
+            ),
+            # Only the structured error names a missing tool; wording alone never does.
+            (
+                PreparationError("Required tool is unavailable: pdftotext. Install it explicitly."),
                 "the raw tool message is withheld",
             ),
         )
-        for index, (message, expected) in enumerate(cases):
-            runner = FailingTextRunner(message)
+        for index, (error, expected) in enumerate(cases):
+            runner = FailingTextRunner(error)
             with (
-                self.subTest(message=message),
+                self.subTest(message=str(error)),
                 patch("latexprep.pdf_check_pipeline.inspect_pdf", new=empty),
                 patch("latexprep.pdf_check_pipeline.inspect_pdf_details", new=empty),
                 patch("latexprep.pdf_check_pipeline.inspect_pdf_artwork", new=empty),

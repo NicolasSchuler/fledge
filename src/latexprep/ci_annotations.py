@@ -11,7 +11,7 @@ from .finding_view import (
     not_run_summaries,
     redact_report,
 )
-from .models import Report
+from .report import Report
 from .review_policy import is_literal_relative_path
 
 

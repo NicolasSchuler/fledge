@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from latexprep.models import PreparationError, Report
+from latexprep.errors import PreparationError
 from latexprep.pdf_comparison import _changed_pixels, compare_pdfs
 from latexprep.pdf_inspection import PdfInspectionOptions, inspect_pdf
 from latexprep.pdf_support import (
@@ -16,8 +16,9 @@ from latexprep.pdf_support import (
     parse_page_sizes,
     require_comparison_raster_fit,
 )
+from latexprep.report import Report
+from latexprep.resource_budget import ResourceBudget
 from latexprep.runtime import CommandResult, RuntimeLimits, ToolRunner
-from latexprep.scheduler import ResourceBudget
 from tests.support import live_tests_enabled
 
 

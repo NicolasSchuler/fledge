@@ -16,15 +16,17 @@ from unittest.mock import AsyncMock, patch
 from latexprep.cli import main
 from latexprep.config import Settings
 from latexprep.core import run_job
+from latexprep.errors import PreparationError
+from latexprep.findings import Finding
 from latexprep.job_context import JobRequest
 from latexprep.latexmk_build import BuildTools
-from latexprep.models import Finding, PreparationError, Report
 from latexprep.publication import (
     DocumentResult,
     OutputTransaction,
     publish_documents,
     validate_destination,
 )
+from latexprep.report import Report
 
 
 def project(root: Path) -> None:
