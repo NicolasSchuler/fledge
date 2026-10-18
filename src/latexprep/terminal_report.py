@@ -7,6 +7,7 @@ untrusted text passes through :func:`sanitize_terminal_text`.
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections import Counter
 from collections.abc import Sequence
 from io import StringIO
@@ -19,6 +20,7 @@ from rich.text import Text
 
 from .coverage_hints import not_checked_summary
 from .finding_view import (
+    ALWAYS_LISTED_RULES,
     DEFAULT_RENDER_OPTIONS,
     RedactedReport,
     RenderOptions,
@@ -45,13 +47,23 @@ OUTCOME_STYLES: dict[Outcome, str] = {
 }
 
 
+def _visible_format_character(char: str) -> str:
+    """Show an invisible format character, such as a bidi override, as a visible escape."""
+    code = ord(char)
+    return f"\\u{code:04x}" if code <= 0xFFFF else f"\\U{code:08x}"
+
+
 def sanitize_terminal_text(value: str) -> str:
-    """Remove escape sequences and control characters, keeping newlines and tabs."""
+    """Remove escape sequences and control characters, keeping newlines and tabs.
+
+    Invisible format characters (Unicode category Cf, for example right-to-left
+    overrides that can reorder a displayed path) are shown as ``\\uXXXX`` escapes.
+    """
     # File names and diagnostics are untrusted text, never terminal escape commands.
     value = re.sub(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)", "", value)
     value = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", value)
     return "".join(
-        char
+        _visible_format_character(char) if unicodedata.category(char) == "Cf" else char
         for char in value
         if char in "\n\t" or (ord(char) >= 32 and not 127 <= ord(char) <= 159)
     )
@@ -241,7 +253,7 @@ def print_report(
             _detail(console, "Next", view.next_step)
         if view.review:
             _detail(console, "Review", view.review, style="yellow")
-    if not views:
+    if all(view.finding.rule in ALWAYS_LISTED_RULES for view in views):
         console.print(Text("No issues found within this command's stated scope."))
     not_run = not_run_summaries(public)
     if not_run:

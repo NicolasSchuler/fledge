@@ -8,21 +8,19 @@ from pathlib import Path
 import click
 from rich.console import Console
 
-from .command_options import reject_config_with_isolated, settings_file_options
+from .command_options import (
+    debug_option,
+    discard_closed_stdout,
+    record_cancellation,
+    record_job_failure,
+    reject_config_with_isolated,
+    settings_file_options,
+)
 from .config import load_settings, resolve_config_path
 from .doctor import run_doctor
 from .finding_view import RenderOptions
-from .models import (
-    ENGINES,
-    Engine,
-    Outcome,
-    PreparationError,
-    Report,
-    cancelled_finding,
-    internal_error_finding,
-    request_error_finding,
-)
-from .report_formats import REQUEST_SCOPE, OutputFormat, write_report
+from .models import ENGINES, Engine, Report, cancelled_finding
+from .report_formats import UNFINISHED_SCOPE, OutputFormat, write_report
 from .terminal_progress import TerminalProgress
 
 
@@ -35,6 +33,7 @@ from .terminal_progress import TerminalProgress
 )
 @click.option("--engine", type=click.Choice(ENGINES))
 @settings_file_options
+@debug_option
 @click.option("--json", "json_output", is_flag=True, help="Print the structured setup report.")
 @click.option("--quiet", is_flag=True, help="Hide progress; retain the final report.")
 def doctor_command(
@@ -53,7 +52,7 @@ def doctor_command(
     fixture, not project packages, custom classes, or venue compliance.
     """
     reject_config_with_isolated(config, isolated)
-    report = Report("doctor", scope=REQUEST_SCOPE)
+    report = Report("doctor", scope=UNFINISHED_SCOPE)
     try:
         selected = (
             resolve_config_path(project or Path.cwd(), config, isolated=isolated)
@@ -65,28 +64,27 @@ def doctor_command(
             report = asyncio.run(run_doctor(settings, progress=progress))
         report.execution["config_path"] = str(selected) if selected is not None else None
         report.execution["project"] = str(project) if project is not None else None
-    except (PreparationError, OSError, ValueError) as error:
-        report.outcome = Outcome.ERROR
-        report.findings.append(
-            request_error_finding(
-                error,
-                "Correct the selected settings or configuration path and rerun fledge doctor.",
-            )
-        )
     except (KeyboardInterrupt, asyncio.CancelledError):
-        report.outcome = Outcome.CANCELLED
-        report.findings.append(
+        record_cancellation(
+            report,
             cancelled_finding(
                 "Setup diagnostics were cancelled.", "Rerun fledge doctor when ready."
-            )
+            ),
         )
     except Exception as error:
-        report.outcome = Outcome.ERROR
-        report.findings.append(internal_error_finding(error))
-    write_report(
-        report,
-        OutputFormat.JSON if json_output else OutputFormat.TERMINAL,
-        console=Console(),
-        options=RenderOptions(show_passed=True),
-    )
+        record_job_failure(
+            report,
+            error,
+            "Correct the selected settings or configuration path and rerun fledge doctor.",
+        )
+    try:
+        write_report(
+            report,
+            OutputFormat.JSON if json_output else OutputFormat.TERMINAL,
+            console=Console(),
+            options=RenderOptions(show_passed=True),
+        )
+    except BrokenPipeError:
+        # The reader of stdout stopped early; the verdict is still the exit code.
+        discard_closed_stdout()
     return report.outcome.exit_code

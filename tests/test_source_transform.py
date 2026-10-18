@@ -3,9 +3,11 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from latexprep.models import PreparationError, has_blockers
 from latexprep.source_transform import SourceTransformOptions, plan_source_transforms
+from latexprep.tex_lexer import ParseLimitExceeded
 
 
 class SourceTransformTests(unittest.TestCase):
@@ -21,6 +23,24 @@ class SourceTransformTests(unittest.TestCase):
 
     def plan(self, **options):
         return plan_source_transforms(self.root, "main.tex", SourceTransformOptions(**options))
+
+    def test_exceeding_the_lexical_bounds_blocks_every_transformation(self) -> None:
+        self.write("main.tex", "\\documentclass{article}\n\\input{body}\n")
+        self.write("body.tex", "Body.\n")
+        exceeded = ParseLimitExceeded("command_count", 0)
+        with patch("latexprep.source_transform.scan_source_commands", side_effect=exceeded):
+            plan = self.plan(merge_inputs=True)
+        self.assertTrue(has_blockers(plan.findings))
+        self.assertEqual((plan.contents, plan.removals, plan.changes), ({}, set(), []))
+        self.assertIn("bounded literal parsing limits", plan.findings[-1].message)
+
+    def test_a_comment_line_between_input_and_its_file_is_merged(self) -> None:
+        self.write("main.tex", "\\documentclass{article}\n\\input\n% the body\n{body}\n")
+        self.write("body.tex", "Body.\n")
+        plan = self.plan(merge_inputs=True)
+        self.assertFalse(has_blockers(plan.findings), plan.findings)
+        self.assertEqual(plan.removals, {"body.tex"})
+        self.assertIn(b"Body.", plan.contents["main.tex"])
 
     def test_comment_removal(self) -> None:
         original = (

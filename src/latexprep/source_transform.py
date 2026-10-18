@@ -10,6 +10,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
+from .file_safety import MIB
 from .models import Change, ChangeKind, Finding, PreparationError, Status, has_blockers
 from .source import lint_sources
 from .source_graph import ArgumentLocation, SourceGraph
@@ -20,7 +21,7 @@ from .tex_lexer import (
     ParseLimitExceeded,
     mask_literals,
     merge_spans,
-    scan_commands,
+    scan_source_commands,
     source_regions,
 )
 from .text_edits import unified_diff_text
@@ -223,7 +224,7 @@ def _merge_inputs(graph: SourceGraph, texts: dict[str, str], plan: SourceTransfo
         # Comments may already have changed offsets, so parse this proposal. Comment
         # removal deletes only bodies the lexer masks anyway, so the proposal has the
         # inspected command sequence; pair each command with its inspected original.
-        commands = scan_commands(mask_literals(text))
+        commands = scan_source_commands(text)
         edits: list[tuple[int, int, str]] = []
         for index, command in enumerate(commands):
             if has_blockers(plan.findings):
@@ -286,7 +287,13 @@ def _merge_inputs(graph: SourceGraph, texts: dict[str, str], plan: SourceTransfo
             replacement = leading_comments + expand(target, (*stack, name)) + trailing_comments
             expanded_bytes += len(replacement.encode("utf-8"))
             if expanded_bytes > MAX_TOTAL_SOURCE_BYTES:
-                _problem(plan, rule, "Merged sources exceed the 32 MiB expansion limit.", name)
+                _problem(
+                    plan,
+                    rule,
+                    "Merged sources exceed the "
+                    f"{MAX_TOTAL_SOURCE_BYTES // MIB} MiB expansion limit.",
+                    name,
+                )
                 return text
             edits.append((start, end, replacement))
             merged.add(target)
@@ -332,7 +339,7 @@ def _inline_bibliography(
         )
         return
     text = texts[path]
-    commands = scan_commands(mask_literals(text))
+    commands = scan_source_commands(text)
     starts = [command for command in commands if command.begins("thebibliography", exact=True)]
     ends = [command for command in commands if command.ends("thebibliography", exact=True)]
     if (
@@ -355,7 +362,7 @@ def _inline_bibliography(
         return
     locations = []
     for name in graph.visited - plan.removals:
-        for command in scan_commands(mask_literals(texts[name])):
+        for command in scan_source_commands(texts[name]):
             if command.name in {"addbibresource", "printbibliography"}:
                 _problem(plan, rule, "Biblatex bibliography inlining is not supported.", name)
             if command.name == "bibliography":
@@ -483,7 +490,7 @@ def plan_source_transforms(
             _problem(
                 plan,
                 "source.merge_inputs",
-                "Transformed source exceeds the 8 MiB per-file limit.",
+                f"Transformed source exceeds the {MAX_SOURCE_BYTES // MIB} MiB per-file limit.",
                 name,
             )
             break

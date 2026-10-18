@@ -20,7 +20,7 @@ from .job_context import (
     is_blocked,
     select_and_review,
 )
-from .job_execution import JobExecution
+from .job_execution import JobDeadlineExceeded, JobExecution
 from .models import Finding, Outcome, PreparationError, Report, RequestError
 from .publication import (
     DocumentResult,
@@ -60,6 +60,15 @@ def _effective_settings(request: JobRequest, report: Report) -> Settings:
             configured_opt_in_codes(effective.top_level_values())
         )
     return effective
+
+
+def _runs_documents(request: JobRequest, settings: Settings) -> bool:
+    """Whether the configured ``workflow.documents`` apply to this command.
+
+    The single-purpose commands (``bib``, ``fmt``, ``pdf``) work on the input as
+    a whole and ignore the document list.
+    """
+    return bool(settings.workflow.documents) and request.command in DOCUMENT_COMMANDS
 
 
 def _grayscale_previews(settings: Settings) -> bool:
@@ -104,6 +113,12 @@ def _validate_request(request: JobRequest, settings: Settings) -> _Destinations:
             "prepare requires --output (or --dry-run)",
             "Add --output with a new directory outside the input, or --dry-run to preview "
             "the planned changes without writing a bundle.",
+        )
+    if _runs_documents(request, settings) and request.reference_pdf is not None:
+        raise RequestError(
+            "--reference-pdf cannot be used while workflow.documents is configured",
+            "Set reference_pdf on each document under workflow.documents instead, or remove "
+            "the workflow.documents setting to compare one document with a reference PDF.",
         )
     if request.reference_pdf and not request.reference_pdf.is_file():
         raise RequestError(
@@ -227,6 +242,7 @@ async def run_job(
     report.scope = "source analysis"
     destinations = _validate_request(request, settings)
     execution = JobExecution(settings)
+    reviewed = False
     try:
         with execution.workspace("fledge-") as work:
             context = JobContext(request, settings, work, execution.runner, execution.budget, emit)
@@ -234,7 +250,7 @@ async def run_job(
             documents: list[DocumentResult] | None = None
             try:
                 async with execution.bounded(work):
-                    if settings.workflow.documents:
+                    if _runs_documents(request, settings):
                         documents = await run_documents(context, report)
                     else:
                         package = await run_project(context, report)
@@ -256,6 +272,7 @@ async def run_job(
             # The same redacted report is used by API callers and saved output. A
             # sanitization limit must be resolved before publishing a verified bundle.
             select_and_review(report, settings)
+            reviewed = True
             public = report.redacted_copy()
             if public.outcome == Outcome.ERROR:
                 report = public
@@ -273,7 +290,11 @@ async def run_job(
                 documents=documents,
                 previews=previews,
             )
-    except TimeoutError:
+    except JobDeadlineExceeded:
+        if not reviewed:
+            # Findings collected before the deadline still follow the check selection and
+            # the configured review decisions.
+            select_and_review(report, settings)
         report.findings.append(
             Finding(
                 "execution.deadline",

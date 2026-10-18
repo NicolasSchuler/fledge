@@ -19,6 +19,7 @@ from .build_checks import (
     qualify_citation_findings,
 )
 from .config import Settings
+from .defects import REPORT_DEFECT_SUGGESTION
 from .document_tasks import (
     baseline_build_task,
     baseline_pdf_tasks,
@@ -45,6 +46,7 @@ from .package_inputs import generated_bibliography_inputs, select_package_inputs
 from .package_inventory import PackageStatus, assemble_package_inventory
 from .project import ImportLimits, create_archive, import_project
 from .publication import VerifiedPackage
+from .review_policy import BASELINE_VERSUS_PREPARED_STAGE
 from .scheduler import Scheduler, Task, TaskResult, bounded_map
 from .source import discover_roots
 from .source_staging import (
@@ -56,6 +58,10 @@ from .source_staging import (
 from .standalone_checks import check_bibliography, check_formatting, check_standalone_pdf
 from .submission_checks import check_submission, check_submission_archive
 from .toolchain_help import explain_missing_toolchain
+
+# The baseline build is recorded under this stage name whether it was scheduled and
+# finished or crashed, so reports and review decisions see one name for it.
+_BASELINE_STAGE = "baseline"
 
 
 def _retained_files(settings: Settings) -> set[str]:
@@ -157,6 +163,14 @@ class _RepeatedBaseline(NamedTuple):
     number: int
     build: BuildResult
     comparison: list[Finding]
+    elapsed_seconds: float
+    queue_seconds: float
+
+
+class _TimedBuild(NamedTuple):
+    result: BuildResult
+    elapsed_seconds: float
+    queue_seconds: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -297,13 +311,16 @@ class DocumentRun:
         report = self.report
         self.completed[result.name] = result
         if result.name == TaskName.BASELINE_BUILD and result.value is not None:
-            stage = self._record_build(result.value, "baseline")
-            stage["elapsed_seconds"] = result.elapsed_seconds
-            stage["queue_seconds"] = result.queue_seconds
+            self._record_build(
+                result.value,
+                _BASELINE_STAGE,
+                elapsed_seconds=result.elapsed_seconds,
+                queue_seconds=result.queue_seconds,
+            )
             return
         report.stages.append(
             {
-                "name": result.name,
+                "name": _BASELINE_STAGE if result.name == TaskName.BASELINE_BUILD else result.name,
                 "status": result.status,
                 "elapsed_seconds": result.elapsed_seconds,
                 "queue_seconds": result.queue_seconds,
@@ -323,12 +340,17 @@ class DocumentRun:
                 )
             )
         elif result.status != "succeeded":
+            defect = bool(result.defect_frames)
             report.findings.append(
                 Finding(
                     "execution.task",
                     f"{result.name}: {result.error}",
                     severity="error",
                     status="inconclusive",
+                    suggestion=REPORT_DEFECT_SUGGESTION if defect else None,
+                    details={"task": result.name, "traceback": list(result.defect_frames)}
+                    if defect
+                    else {},
                 )
             )
         else:
@@ -395,8 +417,10 @@ class DocumentRun:
             )
         ]
 
-    def _record_build(self, result: BuildResult, stage: str) -> StageRecord:
-        """Record a build's findings, tools and stage; return the stage record."""
+    def _record_build(
+        self, result: BuildResult, stage: str, *, elapsed_seconds: float, queue_seconds: float
+    ) -> StageRecord:
+        """Record a build's findings, tools, timing and stage; return the stage record."""
         report, settings = self.report, self.settings
         findings = explain_missing_toolchain(
             qualify_citation_findings(result.findings, build_succeeded=result.success),
@@ -405,7 +429,7 @@ class DocumentRun:
         toolchain_missing = any("missing_tools" in finding.details for finding in findings)
         record_findings(report, findings, stage)
         record_findings(report, check_build_details(result, settings.build_checks), stage)
-        if stage == "baseline" and not toolchain_missing:
+        if stage == _BASELINE_STAGE and not toolchain_missing:
             # One observation per document: later builds use the same toolchain. Without
             # TeX the missing-toolchain finding already explains the absent version.
             record_findings(report, [check_tex_distribution(result, settings.build_checks)], stage)
@@ -415,6 +439,8 @@ class DocumentRun:
             "name": stage,
             "status": "succeeded" if built else "failed",
             "command": result.command,
+            "elapsed_seconds": round(elapsed_seconds, 6),
+            "queue_seconds": round(queue_seconds, 6),
         }
         report.stages.append(record)
         # A missing toolchain is already reported once; a failed-build finding would repeat it.
@@ -436,12 +462,14 @@ class DocumentRun:
         assert first_pdf is not None
 
         async def attempt(number: int) -> _RepeatedBaseline:
-            async with context.budget.lease(
-                f"repeat baseline {number}", memory_mb=settings.build_memory_mb, kind="build"
-            ):
-                repeated = await build_document(context, self.imported, main, f"baseline-{number}")
+            timed = await self._leased_build(
+                f"repeat baseline {number}", self.imported, main, f"baseline-{number}"
+            )
+            repeated = timed.result
             if not repeated.success or repeated.pdf is None:
-                return _RepeatedBaseline(number, repeated, [])
+                return _RepeatedBaseline(
+                    number, repeated, [], timed.elapsed_seconds, timed.queue_seconds
+                )
             compared = await compare_documents(
                 context,
                 first_pdf,
@@ -449,7 +477,9 @@ class DocumentRun:
                 f"compare-baseline-{number}",
                 f"baseline repeat {number}",
             )
-            return _RepeatedBaseline(number, repeated, compared)
+            return _RepeatedBaseline(
+                number, repeated, compared, timed.elapsed_seconds, timed.queue_seconds
+            )
 
         # Independent repeats overlap up to the configured build concurrency.
         attempts = await bounded_map(
@@ -458,9 +488,16 @@ class DocumentRun:
             limit=1 if context.request.pdf_previews is not None else settings.build_jobs,
         )
         stable = True
-        for number, repeated, compared in attempts:
-            self._record_build(repeated, f"baseline repeat {number}")
-            record_findings(report, compared, f"baseline repeat {number}")
+        for attempted in attempts:
+            repeated, compared = attempted.build, attempted.comparison
+            stage = f"baseline repeat {attempted.number}"
+            self._record_build(
+                repeated,
+                stage,
+                elapsed_seconds=attempted.elapsed_seconds,
+                queue_seconds=attempted.queue_seconds,
+            )
+            record_findings(report, compared, stage)
             if not repeated.success or repeated.pdf is None or has_blockers(compared):
                 stable = False
         report.findings.append(
@@ -478,21 +515,32 @@ class DocumentRun:
             )
         )
 
+    async def _leased_build(
+        self, lease_name: str, tree: Path, main: str, directory: str
+    ) -> _TimedBuild:
+        """Build under a build lease; report the build's own time and the wait for the lease."""
+        async with self.context.budget.lease(
+            lease_name, memory_mb=self.settings.build_memory_mb, kind="build"
+        ) as lease:
+            started = time.monotonic()
+            result = await build_document(self.context, tree, main, directory)
+            elapsed = time.monotonic() - started
+        return _TimedBuild(result, elapsed, lease.queue_seconds)
+
     async def build_stage(self, tree: Path, main: str, directory: str, stage: str) -> BuildResult:
         """Build one staged tree under a build lease and record it like the baseline."""
         context, settings, report = self.context, self.settings, self.report
         context.emit(f"Rebuilding {stage} sources")
-        async with context.budget.lease(
-            f"{stage} build", memory_mb=settings.build_memory_mb, kind="build"
-        ) as lease:
-            started = time.monotonic()
-            result = await build_document(context, tree, main, directory)
-            elapsed = time.monotonic() - started
-        record = self._record_build(result, stage)
-        # Like the scheduled baseline build, so every build's time appears in the report.
-        record["elapsed_seconds"] = round(elapsed, 6)
-        record["queue_seconds"] = round(lease.queue_seconds, 6)
-        context.emit(f"{stage} build: {record['status']} ({elapsed:.1f}s)")
+        timed = await self._leased_build(f"{stage} build", tree, main, directory)
+        result = timed.result
+        # Every build records its time, like the scheduled baseline build.
+        record = self._record_build(
+            result,
+            stage,
+            elapsed_seconds=timed.elapsed_seconds,
+            queue_seconds=timed.queue_seconds,
+        )
+        context.emit(f"{stage} build: {record['status']} ({timed.elapsed_seconds:.1f}s)")
         if result.success and result.submission_inputs is None:
             record_findings(
                 report,
@@ -635,10 +683,10 @@ class DocumentRun:
                 self.baseline_pdf(),
                 pdf,
                 "compare-prepared",
-                "baseline versus prepared",
+                BASELINE_VERSUS_PREPARED_STAGE,
                 options=settings.workflow.comparison,
             ),
-            "baseline versus prepared",
+            BASELINE_VERSUS_PREPARED_STAGE,
         )
         if is_blocked(report, settings):
             return None

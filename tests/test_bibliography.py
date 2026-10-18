@@ -5,10 +5,19 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from latexprep.bibliography_checks import check_bibliography_integrity
-from latexprep.bibliography_transform import normalize_dois
-from latexprep.models import PreparationError
+from latexprep.bibliography_checks import (
+    check_bibliography_coverage_and_fields,
+    check_bibliography_integrity,
+)
+from latexprep.bibliography_transform import (
+    BibliographyTransformOptions,
+    normalize_dois,
+    plan_bibliography,
+)
+from latexprep.bibtex_syntax import BibFileReader
+from latexprep.models import Finding, PreparationError
 
 
 class BibliographyTests(unittest.TestCase):
@@ -249,6 +258,101 @@ class BibliographyTests(unittest.TestCase):
         path = self.write("@misc{k}")
         with self.assertRaises(PreparationError):
             check_bibliography_integrity(path)
+
+    def test_every_bibliography_entry_point_words_a_missing_directory_alike(self) -> None:
+        path = self.write("@misc{k}")
+        calls = (
+            lambda: check_bibliography_integrity(path),
+            lambda: check_bibliography_coverage_and_fields(path),
+            lambda: plan_bibliography(
+                path, None, BibliographyTransformOptions(format_entries=True)
+            ),
+        )
+        for call in calls:
+            with self.assertRaises(PreparationError) as raised:
+                call()
+            message = str(raised.exception)
+            self.assertTrue(message.startswith("Bibliography input must be a directory, but "))
+            self.assertIn("Pass the project folder", message)
+
+    def test_unreadable_encoding_names_the_byte_offset_without_codec_jargon(self) -> None:
+        self.write(b"@misc{k,title={\xff}}", "legacy.bib")
+
+        (finding,) = check_bibliography_integrity(self.root)
+
+        self.assertEqual(
+            finding.message,
+            "Bibliography legacy.bib is not valid UTF-8 (first invalid byte at offset 15), "
+            "so it was not inspected.",
+        )
+        self.assertNotIn("codec", finding.message)
+        self.assertIn("UTF-8", finding.suggestion or "")
+
+    def test_oversize_bibliography_states_the_limit_in_mebibytes(self) -> None:
+        self.write("@misc{k}", "big.bib")
+        with patch("latexprep.bibliography_checks.MAX_BIB_FILE_BYTES", 4 * 1024 * 1024):
+            with patch.object(BibFileReader, "read", return_value=None):
+                (finding,) = check_bibliography_integrity(self.root)
+        self.assertIn("exceeds the 4 MiB parser limit", finding.message)
+        self.assertNotIn("4194304", finding.message)
+
+    def macro_findings(self, body: str) -> list[Finding]:
+        self.write(
+            "\\documentclass{article}\n\\begin{document}\\cite{k}\n" + body + "\n\\end{document}\n",
+            "main.tex",
+        )
+        return [
+            item
+            for item in check_bibliography_integrity(self.root, "main.tex")
+            if item.rule == "bibliography.undefined_macro"
+        ]
+
+    def test_macros_of_the_standard_styles_are_known_but_typos_still_fail(self) -> None:
+        self.write("@article{k, journal = jacm, title = {T}}\n@article{j, journal = jaccm}")
+
+        findings = self.macro_findings("\\bibliographystyle{plain}\\bibliography{references}")
+
+        self.assertEqual([item.message.split("'")[1] for item in findings], ["jaccm"])
+        self.assertEqual((findings[0].severity, findings[0].status), ("error", "failed"))
+
+    def test_macros_of_a_style_that_is_not_available_are_inconclusive(self) -> None:
+        self.write("@article{k, journal = csur}")
+
+        findings = self.macro_findings(
+            "\\bibliographystyle{ACM-Reference-Format}\\bibliography{references}"
+        )
+
+        (finding,) = findings
+        self.assertEqual((finding.severity, finding.status), ("warning", "inconclusive"))
+        self.assertIn("'ACM-Reference-Format' may define it", finding.message)
+        self.assertIn("unless the style defines it", finding.suggestion or "")
+
+    def test_macros_of_a_shipped_style_are_read_from_its_file(self) -> None:
+        self.write("@article{k, journal = myjournal}\n@article{j, journal = hidden}")
+        self.write(
+            '% MACRO {hidden} {"commented out"}\nMACRO {MyJournal}\n  {"My Journal"}\n',
+            "mystyle.bst",
+        )
+
+        findings = self.macro_findings("\\bibliographystyle{mystyle}\\bibliography{references}")
+
+        # The whole style is read, so what it does not define is still a certain error.
+        self.assertEqual([item.message.split("'")[1] for item in findings], ["hidden"])
+        self.assertEqual((findings[0].severity, findings[0].status), ("error", "failed"))
+
+    def test_macros_stay_errors_without_a_bibtex_style_and_uncertain_without_a_document(
+        self,
+    ) -> None:
+        self.write("@article{k, journal = jacm}")
+
+        biblatex = self.macro_findings("\\usepackage{biblatex}\\addbibresource{references.bib}")
+        self.assertEqual([(i.severity, i.status) for i in biblatex], [("error", "failed")])
+
+        bibliography_only = check_bibliography_integrity(self.root)
+        self.assertEqual(
+            [(i.severity, i.status) for i in bibliography_only], [("warning", "inconclusive")]
+        )
+        self.assertIn("style used with this file", bibliography_only[0].message)
 
 
 if __name__ == "__main__":

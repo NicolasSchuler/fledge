@@ -11,6 +11,7 @@ used on every operating system are kept and reported as warnings.
 from __future__ import annotations
 
 import contextlib
+import errno
 import os
 import re
 import shutil
@@ -25,13 +26,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO, BinaryIO, NamedTuple
 
-from .file_safety import MIB
+from .file_safety import MIB, byte_count_text
 from .models import Change, ChangeKind, Finding, PreparationError
 from .scheduler import cancellation_point
 
 _CHUNK_SIZE = 64 * 1024
 _MAX_ZIP_DIRECTORY_BYTES = 16 * MIB
 _IMPORT_TIMEOUT_SECONDS = 60.0
+# Deepest folder nesting walked when the caller sets no depth limit. Each level
+# holds one open descriptor and one stack frame; macOS allows 256 descriptors.
+MAX_FOLDER_DEPTH = 128
 _METADATA_DIRS = {".git", ".hg", ".svn", "__MACOSX"}
 _RESERVED_NAMES = {"con", "prn", "aux", "nul", "conin$", "conout$"} | {
     f"{prefix}{number}" for prefix in ("com", "lpt") for number in "123456789¹²³"
@@ -124,23 +128,38 @@ class _Budget:
     def check_time(self) -> None:
         cancellation_point()
         if time.monotonic() - self.started > _IMPORT_TIMEOUT_SECONDS:
-            raise PreparationError("Project import exceeded the 60-second processing limit.")
+            raise PreparationError(
+                f"Project import exceeded the {_IMPORT_TIMEOUT_SECONDS:g}-second processing "
+                "limit. Remove large or numerous files that are not needed and run again."
+            )
 
     def add_entry(self, path: str) -> None:
         self.check_time()
         self.entries += 1
         if self.entries > self.limits.max_files:
-            raise PreparationError(f"Project exceeds the {self.limits.max_files} entry limit.")
+            raise _entry_limit_error(self.limits.max_files)
         if len(path.split("/")) > self.limits.max_depth:
-            raise PreparationError(f"Project path exceeds the nesting limit: {path!r}.")
+            raise PreparationError(
+                f"Project path exceeds the nesting limit of {self.limits.max_depth} folder "
+                f"levels: {path!r}. Move the files closer to the project root."
+            )
 
     def add_bytes(self, count: int, path: str) -> None:
         self.check_time()
         self.total_bytes += count
         if self.total_bytes > self.limits.max_bytes:
             raise PreparationError(
-                f"Project exceeds the {self.limits.max_bytes}-byte size limit at {path!r}."
+                f"Project exceeds the {byte_count_text(self.limits.max_bytes)} size limit at "
+                f"{path!r}. Remove large files that are not needed, such as build output or "
+                "data sets, and run again."
             )
+
+
+def _entry_limit_error(max_files: int) -> PreparationError:
+    return PreparationError(
+        f"Project exceeds the {max_files} entry limit (files and folders together). "
+        "Remove files or folders that are not needed and run again."
+    )
 
 
 def _collision_key(path: str) -> str:
@@ -273,10 +292,19 @@ def _folder_entries(
                 path = _normalize_path(f"{prefix}{item.name}")
                 if budget is not None:
                     budget.add_entry(path)
+                elif path.count("/") >= MAX_FOLDER_DEPTH:
+                    raise PreparationError(
+                        f"Folder nesting exceeds {MAX_FOLDER_DEPTH} levels at {path!r}. "
+                        "Move the files closer to the project root and run again."
+                    )
                 metadata = item.stat(follow_symlinks=False)
                 is_dir = stat.S_ISDIR(metadata.st_mode)
                 if not is_dir and not stat.S_ISREG(metadata.st_mode):
-                    raise PreparationError(f"Links and special files are forbidden: {path!r}.")
+                    raise PreparationError(
+                        f"Links and special files are forbidden, but {path!r} is one. "
+                        "Replace it with a real copy of the file or folder, or remove it, "
+                        "and run again."
+                    )
                 registry.add(path, is_dir)
                 entries.append(_Entry(path, is_dir, metadata.st_size if not is_dir else 0))
                 if is_dir and not (exclude_metadata and _metadata_prefix(path, True)):
@@ -366,9 +394,13 @@ def _check_zip_directory(stream: BinaryIO, budget: _Budget) -> None:
         raise PreparationError("Multi-disk ZIP archives are unsupported or inconsistent.")
     count = directory.total_entries
     if count > budget.limits.max_files:
-        raise PreparationError(f"Project exceeds the {budget.limits.max_files} entry limit.")
+        raise _entry_limit_error(budget.limits.max_files)
     if directory.directory_size > _MAX_ZIP_DIRECTORY_BYTES:
-        raise PreparationError("ZIP central-directory metadata exceeds the 16 MiB limit.")
+        raise PreparationError(
+            "ZIP central-directory metadata exceeds the "
+            f"{byte_count_text(_MAX_ZIP_DIRECTORY_BYTES)} limit. "
+            "Create a smaller archive containing only the project files."
+        )
     if directory.directory_offset + directory.directory_size != directory_end:
         raise PreparationError(
             "ZIP directory offsets are invalid; embedded archives are unsupported."
@@ -386,7 +418,7 @@ def _check_zip_directory(stream: BinaryIO, budget: _Budget) -> None:
             raise PreparationError("ZIP central directory is truncated.")
         actual_count += 1
         if actual_count > budget.limits.max_files:
-            raise PreparationError(f"Project exceeds the {budget.limits.max_files} entry limit.")
+            raise _entry_limit_error(budget.limits.max_files)
         stream.seek(entry_size - 46, os.SEEK_CUR)
         remaining -= entry_size
     if actual_count != count:
@@ -403,7 +435,10 @@ def _zip_entries(archive: zipfile.ZipFile, budget: _Budget) -> list[_Entry]:
         budget.add_entry(path)
         mode = stat.S_IFMT(info.external_attr >> 16)
         if mode not in {0, stat.S_IFREG, stat.S_IFDIR}:
-            raise PreparationError(f"ZIP links and special files are forbidden: {path!r}.")
+            raise PreparationError(
+                f"ZIP links and special files are forbidden, but {path!r} is one. "
+                "Create the archive again with the real files instead of links."
+            )
         is_dir = info.is_dir() or mode == stat.S_IFDIR or bool(info.external_attr & 0x10)
         if is_dir and (mode == stat.S_IFREG or info.file_size):
             raise PreparationError(f"Conflicting ZIP directory metadata: {path!r}.")
@@ -414,7 +449,10 @@ def _zip_entries(archive: zipfile.ZipFile, budget: _Budget) -> list[_Entry]:
         registry.add(path, is_dir)
         declared_bytes += info.file_size
         if declared_bytes > budget.limits.max_bytes:
-            raise PreparationError(f"ZIP exceeds the {budget.limits.max_bytes}-byte size limit.")
+            raise PreparationError(
+                f"ZIP exceeds the {byte_count_text(budget.limits.max_bytes)} size limit. "
+                "Remove large files that are not needed from the archive and run again."
+            )
         if info.file_size > max(info.compress_size, 1) * budget.limits.max_ratio:
             raise PreparationError(f"ZIP compression ratio exceeds the limit for {path!r}.")
         entries.append(_Entry(path, is_dir, info.file_size, info))
@@ -456,6 +494,41 @@ def _select_entries(
             )
         )
     return kept, wrapper, changes
+
+
+def _plain_reason(error: Exception) -> str:
+    """Why a file operation or ZIP read failed, in words rather than Python error text."""
+    if isinstance(error, FileNotFoundError):
+        return (
+            f"{error.filename or 'a file or folder'} was not found. Check the path and that "
+            "nothing was moved or deleted while Fledge was reading the project."
+        )
+    if isinstance(error, PermissionError):
+        return (
+            f"{error.filename or 'a file or folder'} cannot be read or written (permission "
+            "denied). Check its permissions and run again."
+        )
+    if isinstance(error, OSError) and error.errno == errno.ELOOP:
+        return (
+            f"{error.filename or 'a file'} was replaced by a link while Fledge was reading "
+            "the project. Replace the link with a real file and run again."
+        )
+    if isinstance(error, OSError):
+        where = f" ({error.filename})" if error.filename else ""
+        return f"the file system reported: {error.strerror or error}{where}."
+    if isinstance(error, (zipfile.BadZipFile, zlib.error, EOFError)):
+        return "the ZIP file is damaged or incomplete. Export or download it again and retry."
+    if isinstance(error, zipfile.LargeZipFile):
+        return "the archive is too large for the ZIP format. Remove files that are not needed."
+    if isinstance(error, UnicodeError):
+        return (
+            "a file name in the ZIP file is not valid text. Create the archive again with "
+            "UTF-8 file names."
+        )
+    return (
+        "the ZIP file uses a feature Fledge does not support, such as a password or a "
+        "multi-part archive. Create it again as a plain ZIP file."
+    )
 
 
 def _source_path(source: Path) -> tuple[Path, bool]:
@@ -554,7 +627,7 @@ def import_project(
         zlib.error,
         EOFError,
     ) as error:
-        raise PreparationError(f"Could not import project: {error}") from error
+        raise PreparationError(f"Could not import project: {_plain_reason(error)}") from error
 
 
 def _import_folder(
@@ -639,7 +712,9 @@ def create_archive(root: Path, archive: Path) -> None:
         finally:
             os.close(directory_fd)
     except (OSError, zipfile.BadZipFile, zipfile.LargeZipFile) as error:
-        raise PreparationError(f"Could not create submission archive: {error}") from error
+        raise PreparationError(
+            f"Could not create submission archive: {_plain_reason(error)}"
+        ) from error
 
 
 def _write_archive(stream: BinaryIO, directory_fd: int, entries: list[_Entry]) -> None:
@@ -713,4 +788,4 @@ def plan_cleanup(root: Path, observed_dependencies: set[str]) -> list[Change]:
                 changes.append(Change(path=entry.path, kind=ChangeKind.EXCLUDE, reason=reason))
         return changes
     except OSError as error:
-        raise PreparationError(f"Could not plan project cleanup: {error}") from error
+        raise PreparationError(f"Could not plan project cleanup: {_plain_reason(error)}") from error

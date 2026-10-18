@@ -17,6 +17,8 @@ from .terminal_report import print_report, render_compact, render_terminal
 
 # The scope of a report whose request was rejected before or while the job ran.
 REQUEST_SCOPE = "request validation"
+# The scope of a report whose job was cancelled or hit a defect before it finished.
+UNFINISHED_SCOPE = "run did not finish"
 
 
 class OutputFormat(StrEnum):

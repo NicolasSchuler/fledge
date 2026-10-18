@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Literal, NamedTuple, get_args
@@ -80,6 +80,9 @@ _ROMAN_WRAPPERS = frozenset({"textrm", "textsf", "textnormal"})
 _LIGATURES = (("---", "—"), ("--", "–"), ("``", "“"), ("''", "”"))
 # TeX primitives that assign a name written directly after them, without braces.
 _PRIMITIVE_ASSIGNMENTS = frozenset({"def", "gdef", "edef", "xdef", "let", "futurelet"})
+# Line breaks take an optional bracketed length or priority; other spacing does not,
+# so a bracket after them is ordinary text.
+_LINE_BREAK_COMMANDS = frozenset({"\\", "linebreak"})
 _MAX_GROUP_DEPTH = 32
 
 
@@ -319,7 +322,7 @@ class _Converter:
 
     def _space(self, word: _ControlWord) -> int:
         cursor = word.cursor
-        if cursor < len(self.value) and self.value[cursor] == "[":
+        if word.name in _LINE_BREAK_COMMANDS and self.value[cursor : cursor + 1] == "[":
             option = self._group(cursor, "[", "]")
             if option is not None:
                 cursor = option.end + 1
@@ -335,20 +338,29 @@ class _Converter:
         return word.cursor
 
 
-# The command groups are disjoint, so each name has exactly one handler.
-_COMMAND_HANDLERS: dict[str, Callable[[_Converter, _ControlWord], int]] = {
-    **dict.fromkeys(TEXT_WRAPPERS | {"text", "href"}, _Converter._wrapper),
-    **dict.fromkeys(_VERBATIM_URL_COMMANDS, _Converter._url),
-    **dict.fromkeys(_ACCENTS, _Converter._accent),
-    **dict.fromkeys(_SYMBOLS, _Converter._symbol),
-    **dict.fromkeys("%&#_{}$", _Converter._escaped_character),
-    **dict.fromkeys(
-        ("par", "newline", "linebreak", "\\", " ", ",", ";", "sep", "and"), _Converter._space
-    ),
-    **dict.fromkeys(
-        ("em", "itshape", "bfseries", "normalfont", "protect"), _Converter._font_switch
-    ),
-}
+_Handler = Callable[[_Converter, _ControlWord], int]
+
+
+def _handler_table(*groups: tuple[Iterable[str], _Handler]) -> dict[str, _Handler]:
+    """Map every command name to its handler; a name in two groups is a programming error."""
+    table: dict[str, _Handler] = {}
+    for names, handler in groups:
+        for name in names:
+            if name in table:
+                raise RuntimeError(f"Command \\{name} is assigned to more than one text handler")
+            table[name] = handler
+    return table
+
+
+_COMMAND_HANDLERS = _handler_table(
+    (TEXT_WRAPPERS | {"text", "href"}, _Converter._wrapper),
+    (_VERBATIM_URL_COMMANDS, _Converter._url),
+    (_ACCENTS, _Converter._accent),
+    (_SYMBOLS, _Converter._symbol),
+    ("%&#_{}$", _Converter._escaped_character),
+    (("par", "newline", "linebreak", "\\", " ", ",", ";", "sep", "and"), _Converter._space),
+    (("em", "itshape", "bfseries", "normalfont", "protect"), _Converter._font_switch),
+)
 
 
 def convert_text(

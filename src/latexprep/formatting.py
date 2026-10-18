@@ -22,6 +22,10 @@ _FORMATTER_MEMORY_MB = 128
 MIN_WRAP_LENGTH = 20
 MAX_TAB_SIZE = 16
 _WHITESPACE = re.compile(r"\s+")
+# Longest piece of tex-fmt's own message quoted in a finding.
+_MAX_FORMATTER_MESSAGE_CHARS = 200
+# An absolute POSIX path, which would reveal the local directory layout.
+_ABSOLUTE_PATH = re.compile(r"(?<![\w.~-])/(?:[\w.@+~-]+/)*[\w.@+~-]*")
 
 
 @dataclass(frozen=True)
@@ -120,6 +124,21 @@ def _unformattable(rule: str, message: str, relative: str) -> Finding:
     return Finding(rule, message, severity="error", status="inconclusive", path=relative)
 
 
+def _formatter_failure(result: CommandResult) -> str:
+    """Why tex-fmt did not complete: its exit status and the first line of its message.
+
+    The message is shortened and local paths in it are replaced, so findings do not
+    carry the workspace layout or long source excerpts.
+    """
+    if result.returncode and result.within_limits:
+        first_line = next((line.strip() for line in result.stderr.splitlines() if line.strip()), "")
+        message = _ABSOLUTE_PATH.sub("<path>", first_line)[:_MAX_FORMATTER_MESSAGE_CHARS]
+        return f"tex-fmt failed with exit status {result.returncode}" + (
+            f": {message}" if message else ""
+        )
+    return result.failure_reason("tex-fmt") or "tex-fmt did not complete"
+
+
 async def _tex_fmt(
     runner: CommandRunner,
     command: list[str],
@@ -198,7 +217,7 @@ async def _format_file(
         command,
         workspace,
         options,
-        lambda formatted: f"tex-fmt did not complete: {formatted.stderr[:2000]}",
+        _formatter_failure,
     )
     updated = updated_text.encode("utf-8")
     target.write_bytes(updated)
@@ -400,7 +419,7 @@ async def format_project(
                     findings=[
                         Finding(
                             "source.format_size",
-                            "Source exceeds the 8 MiB formatting limit",
+                            f"Source exceeds the {_MAX_SOURCE_BYTES // MIB} MiB formatting limit",
                             severity="error",
                             status="inconclusive",
                             path=relative,
@@ -419,11 +438,18 @@ async def format_project(
                     path, relative, work / "files" / relative, size, executable, runner, options
                 )
         except (OSError, PreparationError) as error:
+            # An OS error names the temporary workspace; report only its cause.
+            cause = (
+                f"The file could not be read or written while formatting "
+                f"({(error.strerror or type(error).__name__).lower()})"
+                if isinstance(error, OSError)
+                else str(error)
+            )
             return FormattingResult(
                 findings=[
                     Finding(
                         "source.format_execution",
-                        str(error),
+                        cause,
                         severity="error",
                         status="inconclusive",
                         path=relative,

@@ -64,6 +64,27 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(results["build"].status, "failed")
         self.assertEqual(results["build"].error, "OSError: ")
 
+    async def test_a_defect_keeps_path_free_frames_but_expected_errors_do_not(self):
+        async def defect():
+            return {}["missing"]
+
+        async def bad_input():
+            raise PreparationError("The input cannot be read")
+
+        async def unreadable():
+            raise OSError("disk unavailable")
+
+        results = await Scheduler(ResourceBudget(3, 192)).execute(
+            [Task("defect", defect), Task("input", bad_input), Task("disk", unreadable)]
+        )
+        self.assertEqual(results["defect"].error, "KeyError: 'missing'")
+        frames = results["defect"].defect_frames
+        self.assertTrue(frames)
+        self.assertIn("test_scheduler.py", frames[-1])
+        self.assertTrue(all("/" not in frame and "\\" not in frame for frame in frames), frames)
+        self.assertEqual(results["input"].defect_frames, ())
+        self.assertEqual(results["disk"].defect_frames, ())
+
     async def test_invalid_graphs_and_unsatisfiable_resources_rejected(self):
         async def nothing():
             return None

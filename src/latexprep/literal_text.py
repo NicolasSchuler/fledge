@@ -193,6 +193,19 @@ MATH_ENVIRONMENTS = ("equation", "equation*", "align", "align*", "displaymath", 
 # Regular-expression alternation of the math environment names.
 MATH_ENVIRONMENT_PATTERN = "|".join(map(re.escape, MATH_ENVIRONMENTS))
 
+# Display and inline math to drop. In the inline form an escaped character is consumed
+# as a pair and the loop is possessive, so a stray ``$`` with no partner fails in
+# linear time instead of retrying every way to split the escapes.
+_MATH_PATTERNS = tuple(
+    re.compile(pattern, re.S)
+    for pattern in (
+        r"\$\$.*?\$\$",
+        r"(?<!\\)\$(?:\\.|[^$\\])*+\$",
+        r"\\\(.*?\\\)",
+        r"\\\[.*?\\\]",
+    )
+)
+
 _PLACEHOLDER_VALUES = frozenset(
     {
         "placeholder",
@@ -227,19 +240,17 @@ def scan_literal_text(value: str) -> LiteralText:
     value = re.sub(
         rf"\\begin\{{({MATH_ENVIRONMENT_PATTERN})\}}.*?\\end\{{\1\}}", " ", value, flags=re.S
     )
-    for pattern in (
-        r"\$\$.*?\$\$",
-        r"(?<!\\)\$(?:\\.|[^$])*?(?<!\\)\$",
-        r"\\\(.*?\\\)",
-        r"\\\[.*?\\\]",
-    ):
-        value = re.sub(pattern, " ", value, flags=re.S)
+    for pattern in _MATH_PATTERNS:
+        value = pattern.sub(" ", value)
     if re.search(r"(?<!\\)\$|\\[()[\]]", value):
         uncertain.add("unbalanced math delimiters")
     try:
         commands = scan_commands(value)
-    except ParseLimitExceeded:
-        return LiteralText("", ["unclosed or oversized argument"], 1)
+    except ParseLimitExceeded as error:
+        # The text is read only up to the lexer's bounds; nothing after them is counted.
+        if error.reason in {"unclosed_group", "oversized_group"}:
+            return LiteralText("", ["unclosed or oversized argument"], 1)
+        return LiteralText("", ["more commands or argument text than the literal scan supports"], 1)
     edits: list[tuple[int, int, str]] = []
     covered_until = -1
     for command in commands:

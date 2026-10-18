@@ -17,6 +17,7 @@ from latexprep.check_selection import CheckSelection
 from latexprep.cli import USAGE_EXIT_CODE, cli
 from latexprep.config import load_settings, resolve_config_path
 from latexprep.models import Outcome, PreparationError, Report
+from latexprep.redaction import scrub_local_paths
 from latexprep.rules import RULES
 
 
@@ -234,7 +235,10 @@ class ConfigDiscoveryTests(unittest.TestCase):
         settings = run.await_args.args[0].settings
         self.assertEqual(settings.jobs, 1)
         self.assertEqual(settings.checks.select, ("BIB1",))
-        self.assertEqual(json.loads(result.output)["execution"]["config_path"], str(path))
+        # Reports show the home and temporary directories generically.
+        self.assertEqual(
+            json.loads(result.output)["execution"]["config_path"], scrub_local_paths(str(path))
+        )
 
     def test_cli_explicit_and_isolated_override_discovery(self) -> None:
         self.write(self.source / "latex-prep.toml", "jobs = 3\n")

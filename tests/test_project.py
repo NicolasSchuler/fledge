@@ -5,6 +5,7 @@ import os
 import stat
 import struct
 import tempfile
+import time
 import unittest
 import warnings
 import zipfile
@@ -13,7 +14,13 @@ from pathlib import Path
 from unittest.mock import patch
 
 from latexprep.models import PreparationError
-from latexprep.project import ImportLimits, create_archive, import_project, plan_cleanup
+from latexprep.project import (
+    MAX_FOLDER_DEPTH,
+    ImportLimits,
+    create_archive,
+    import_project,
+    plan_cleanup,
+)
 
 
 class ProjectTests(unittest.TestCase):
@@ -614,6 +621,102 @@ class ProjectTests(unittest.TestCase):
         self.write_file("main.aux")
         self.assertEqual(plan_cleanup(self.source, {"MAIN.AUX"}), [])
         self.assertEqual(plan_cleanup(self.source, {"sections/../main.aux"}), [])
+
+    def test_link_rejection_names_the_path_and_the_remedy(self) -> None:
+        self.write_file("figures/real.png")
+        (self.source / "figures" / "link.png").symlink_to(self.source / "figures" / "real.png")
+        with self.assertRaises(PreparationError) as raised:
+            import_project(self.source, self.base / "import")
+        message = str(raised.exception)
+        self.assertIn("figures/link.png", message)
+        self.assertRegex(message, "Replace it with a real copy")
+        info = zipfile.ZipInfo("figures/link.png")
+        info.create_system = 3
+        info.external_attr = (stat.S_IFLNK | 0o600) << 16
+        archive = self.make_zip([(info, b"target")])
+        with self.assertRaises(PreparationError) as raised:
+            import_project(archive, self.base / "import-zip")
+        self.assertIn("figures/link.png", str(raised.exception))
+        self.assertIn("Create the archive again", str(raised.exception))
+
+    def test_file_that_becomes_a_link_during_the_copy_is_refused_not_followed(self) -> None:
+        secret = self.base / "secret.txt"
+        secret.write_text("outside the project")
+        victim = self.write_file("data.tex", b"inside")
+        from latexprep import project
+
+        scan = project._folder_entries
+
+        def scan_then_swap(*args, **kwargs):
+            entries = scan(*args, **kwargs)
+            victim.unlink()
+            victim.symlink_to(secret)
+            return entries
+
+        with patch.object(project, "_folder_entries", scan_then_swap):
+            with self.assertRaisesRegex(PreparationError, "replaced by a link"):
+                import_project(self.source, self.base / "import")
+        self.assertFalse((self.base / "import").exists())
+
+    def test_import_failures_are_explained_without_python_error_text(self) -> None:
+        cases = (
+            (
+                FileNotFoundError(2, "No such file or directory", "main.tex"),
+                "main.tex was not found",
+            ),
+            (PermissionError(13, "Permission denied", "main.tex"), "permission denied"),
+            (OSError(28, "No space left on device"), "the file system reported: No space left"),
+        )
+        for error, expected in cases:
+            with self.subTest(error=error):
+                with patch("latexprep.project._source_path", side_effect=error):
+                    with self.assertRaises(PreparationError) as raised:
+                        import_project(self.source, self.base / "import")
+                message = str(raised.exception)
+                self.assertIn(expected, message)
+                self.assertNotIn("[Errno", message)
+        archive = self.make_zip([("main.tex", b"source")])
+        with (
+            patch("latexprep.project.zipfile.ZipFile", side_effect=zipfile.BadZipFile("Bad magic")),
+            self.assertRaises(PreparationError) as raised,
+        ):
+            import_project(archive, self.base / "import-zip")
+        self.assertIn("ZIP file is damaged or incomplete", str(raised.exception))
+        self.assertNotIn("Bad magic", str(raised.exception))
+
+    def test_time_and_metadata_limits_in_messages_come_from_their_constants(self) -> None:
+        self.write_file("main.tex")
+        with (
+            patch("latexprep.project._IMPORT_TIMEOUT_SECONDS", 0.5),
+            patch("latexprep.project.time.monotonic", return_value=time.monotonic() + 1000),
+            self.assertRaisesRegex(PreparationError, "0.5-second"),
+        ):
+            import_project(self.source, self.base / "import")
+        archive = self.make_zip([("main.tex", b"source")])
+        data = bytearray(archive.read_bytes())
+        footer = data.rfind(b"PK\x05\x06")
+        struct.pack_into("<I", data, footer + 12, 3 * 1024 * 1024)
+        archive.write_bytes(data)
+        with (
+            patch("latexprep.project._MAX_ZIP_DIRECTORY_BYTES", 2 * 1024 * 1024),
+            self.assertRaisesRegex(PreparationError, r"exceeds the 2 MiB limit"),
+        ):
+            import_project(archive, self.base / "import-zip")
+
+    def test_unbudgeted_walks_stop_at_the_folder_depth_cap(self) -> None:
+        deep = self.base / "deep"
+        nested = deep.joinpath(*["d"] * (MAX_FOLDER_DEPTH + 1))
+        nested.mkdir(parents=True)
+        (nested / "file.tex").write_text("x")
+        with self.assertRaisesRegex(PreparationError, "nesting exceeds"):
+            create_archive(deep, self.base / "deep.zip")
+        self.assertFalse((self.base / "deep.zip").exists())
+        with self.assertRaisesRegex(PreparationError, "nesting exceeds"):
+            plan_cleanup(deep, set())
+        shallow = self.base / "shallow"
+        shallow.joinpath(*["d"] * (MAX_FOLDER_DEPTH - 1)).mkdir(parents=True)
+        create_archive(shallow, self.base / "shallow.zip")
+        self.assertTrue((self.base / "shallow.zip").exists())
 
     def test_limits_reject_invalid_values(self) -> None:
         for value in (0, -1, True, 1.5):

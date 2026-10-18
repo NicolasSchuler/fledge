@@ -33,6 +33,11 @@ MAX_RASTER_DIMENSION = 8192
 # Configured measurement renders use their own, lower resolution and limits.
 MAX_MEASUREMENT_PIXELS = 4_000_000
 MAX_MEASUREMENT_DIMENSION = 4000
+MIN_MEASUREMENT_DPI = 18
+MAX_MEASUREMENT_DPI = 144
+# PDF 1.7 Annex C: readers need not support pages beyond 14,400 units on a side. Larger
+# reported sizes are treated as damaged geometry, which also keeps raster arithmetic finite.
+MAX_PAGE_DIMENSION_PT = 14_400
 MEASUREMENT_RENDER_MEMORY_MB = 128
 MAX_SAMPLES = 100
 MAX_PARSED_NODES = 50_000
@@ -124,10 +129,19 @@ async def freeze_pdf_inputs(
         return work, frozen
 
 
+# Poppler reports damaged input as "Syntax Error: ..." and, when it knows the byte offset,
+# as "Syntax Error (257): ..."; MuPDF reports "error: ...". Warnings describe repairs the
+# tool made, so they do not make the evidence incomplete.
+_TOOL_ERROR_REPORT = re.compile(
+    r"\b(?:Syntax|Command Line|I/O|Permission|Internal|Fontconfig) Error\b(?: \(\d+\))?:|^error:",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
 def _require_complete(result: CommandResult, tool: str) -> None:
     if (reason := result.failure_reason(tool)) is not None:
         raise PreparationError(reason)
-    if re.search(r"(?:Syntax|Internal|Fontconfig) Error:|Error:", result.stderr, re.IGNORECASE):
+    if _TOOL_ERROR_REPORT.search(result.stderr):
         raise PreparationError(
             f"{tool} reported damaged or incomplete input: {result.stderr[:1000]}"
         )
@@ -443,7 +457,8 @@ def require_rendered_pages(pages: int, subject: str = "Rendered comparison") -> 
         )
 
 
-def page_sizes(output: str, pages: int) -> list[tuple[float, float]]:
+def parse_page_sizes(output: str, pages: int) -> list[tuple[float, float]]:
+    """Every page size in points from ``pdfinfo -box`` output; geometry only, no render limits."""
     sizes: dict[int, tuple[float, float]] = {}
     for match in re.finditer(
         r"^Page\s+(?:(\d+)\s+)?size:\s*([\d.eE+-]+)\s+x\s+([\d.eE+-]+)\s+pts",
@@ -462,12 +477,24 @@ def page_sizes(output: str, pages: int) -> list[tuple[float, float]]:
     for width, height in sizes.values():
         if not math.isfinite(width) or not math.isfinite(height) or min(width, height) <= 0:
             raise PreparationError("PDF contains invalid page dimensions")
-        if max(width, height) > MAX_RASTER_DIMENSION * 72 / COMPARISON_DPI:
-            raise PreparationError("PDF page exceeds safe raster dimensions at 144 DPI")
+        if max(width, height) > MAX_PAGE_DIMENSION_PT:
+            raise PreparationError(
+                f"PDF page dimensions exceed {MAX_PAGE_DIMENSION_PT} points on one side; "
+                "the file may be damaged"
+            )
+    return [sizes[page] for page in range(1, pages + 1)]
+
+
+def require_comparison_raster_fit(sizes: Sequence[tuple[float, float]]) -> None:
+    """Reject pages that cannot be rendered at the comparison resolution within raster limits."""
+    for page, (width, height) in enumerate(sizes, 1):
         pixels = (math.ceil(width * COMPARISON_DPI / 72), math.ceil(height * COMPARISON_DPI / 72))
         if max(pixels) > MAX_RASTER_DIMENSION or math.prod(pixels) > MAX_RASTER_PIXELS:
-            raise PreparationError("PDF page exceeds safe raster dimensions at 144 DPI")
-    return [sizes[page] for page in range(1, pages + 1)]
+            raise PreparationError(
+                f"Page {page} ({width:g} x {height:g} points) is too large to compare as images "
+                f"at {COMPARISON_DPI} DPI (limits: {MAX_RASTER_PIXELS:,} pixels, "
+                f"{MAX_RASTER_DIMENSION:,} per side); compare a smaller export of the document"
+            )
 
 
 def normalized_text_pages(text: str, pages: int) -> list[str]:
@@ -508,7 +535,7 @@ def page_frames(output: str, pages: int) -> PageFrames:
         media, crop = entry.get("MediaBox"), entry.get("CropBox")
         if rotations.get(page) != 0 or media is None or crop != media or media[:2] != (0.0, 0.0):
             unsupported.add(page)
-    return PageFrames(unsupported, page_sizes(output, pages))
+    return PageFrames(unsupported, parse_page_sizes(output, pages))
 
 
 def measurement_raster_size(size: tuple[float, float], dpi: int) -> tuple[int, int]:
@@ -700,16 +727,17 @@ class QpdfObjectGraph:
                 raise ValueError("unsupported JSON shape")
             self.objects = entries[1]
             self.pages = document["pages"]
-            if (
-                not isinstance(self.pages, list)
-                or len(self.pages) != pages
-                or len(self.objects) > MAX_PARSED_NODES
-            ):
-                raise ValueError("incomplete page/object data")
+            if not isinstance(self.pages, list) or len(self.pages) != pages:
+                raise ValueError("incomplete page data")
         except (ValueError, KeyError, TypeError, RecursionError) as error:
             raise PreparationError(
                 "qpdf did not return complete supported JSON v2 object data"
             ) from error
+        if len(self.objects) > MAX_PARSED_NODES:
+            raise PreparationError(
+                f"The PDF has {len(self.objects):,} objects; object-level checks support at most "
+                f"{MAX_PARSED_NODES:,}. Check a smaller PDF or turn these checks off for it."
+            )
         self.root = self.dictionary(self.dictionary(self.lookup("trailer")).get("/Root"))
         if self.root.get("/Type") != "/Catalog":
             raise PreparationError("qpdf object data lacks a valid catalog")

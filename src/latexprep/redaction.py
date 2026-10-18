@@ -1,8 +1,9 @@
 """Bounded credential redaction for complete, JSON/asdict-shaped report trees.
 
 Discovery precedes replacement so a credential found in settings also disappears
-from earlier logs, metadata, suggestions and diffs. This module performs no I/O
+from earlier logs, metadata, suggestions and diffs. This module performs no file I/O
 and does not import report models. Unsupported values are never stringified.
+Local directory names are generalized separately by :func:`scrub_local_paths`.
 """
 
 from __future__ import annotations
@@ -10,12 +11,16 @@ from __future__ import annotations
 import json
 import math
 import re
+import tempfile
 from collections import Counter
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, unquote_plus
 
 REDACTED = "[REDACTED]"
+HOME_LABEL = "~"
+TEMPORARY_LABEL = "<tmp>"
 LIMIT_REDACTION = "[REDACTED: report exceeds redaction limits]"
 MAX_TEXT_CHARS = 16 * 1024 * 1024
 # Leave room for the default 10,000 imported entries, each represented by a
@@ -305,3 +310,62 @@ def redact_data(value: Any) -> Any:
         return item
 
     return clean(copied)
+
+
+def local_directory_labels() -> dict[str, str]:
+    """The home and temporary directories of this machine, each with its generic label.
+
+    Both the spelled and the symlink-resolved form are listed, because tools report either.
+    ``/tmp`` counts as a temporary directory although macOS keeps the real one elsewhere.
+    """
+    labels: dict[str, str] = {}
+    for label, directory in (
+        (HOME_LABEL, Path.home),
+        (TEMPORARY_LABEL, tempfile.gettempdir),
+        (TEMPORARY_LABEL, lambda: "/tmp"),
+    ):
+        try:
+            spelled = Path(directory())
+            candidates = {str(spelled), str(spelled.resolve())}
+        except (OSError, RuntimeError):
+            continue
+        for candidate in candidates:
+            candidate = candidate.rstrip("/")
+            # The filesystem root says nothing about a person.
+            if len(candidate) > 1:
+                labels.setdefault(candidate, label)
+    return labels
+
+
+def scrub_local_paths(value: Any, labels: dict[str, str] | None = None) -> Any:
+    """Return a copy of ``value`` with machine-specific directories shown generically.
+
+    The home directory becomes ``~`` and the temporary directory ``<tmp>``, so a shared
+    report does not reveal a user name or an institution's directory layout. Paths
+    relative to a project are unchanged, and so is any text that merely starts like a
+    directory name (``/home/ann`` does not match ``/home/anna``). Only strings are
+    rewritten; dictionary keys keep their names.
+    """
+    generic = local_directory_labels() if labels is None else labels
+    if not generic:
+        return value
+    pattern = re.compile(
+        r"(?<![\w.~-])(?:"
+        + "|".join(re.escape(directory) for directory in sorted(generic, key=len, reverse=True))
+        + r")(?![\w-]|\.\w)"
+    )
+
+    def scrub_text(text: str) -> str:
+        return pattern.sub(lambda match: generic[match.group()], text)
+
+    def scrub(item: Any) -> Any:
+        if isinstance(item, str):
+            return scrub_text(item)
+        if isinstance(item, dict):
+            return {key: scrub(part) for key, part in item.items()}
+        if isinstance(item, (list, tuple)):
+            values = [scrub(part) for part in item]
+            return tuple(values) if isinstance(item, tuple) else values
+        return item
+
+    return scrub(value)

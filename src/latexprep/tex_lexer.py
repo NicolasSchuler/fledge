@@ -14,6 +14,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Literal, NamedTuple
 
+from .file_safety import MIB
 from .scheduler import cancellation_point
 
 # Bounds shared by every reader of the lexical subset.
@@ -21,10 +22,16 @@ MAX_SOURCE_BYTES = 8 * 1024 * 1024
 MAX_TOTAL_SOURCE_BYTES = 32 * 1024 * 1024
 MAX_COMMANDS = 100_000
 MAX_ARGUMENT_CHARS = 64 * 1024
+# Groups read after one command: its brace arguments and bracket options together.
+_MAX_GROUPS_PER_COMMAND = 6
+# Arguments may together span this many times the scanned text, because commands nest.
+_ARGUMENT_BUDGET_FACTOR = 4
 
 # A control word, with ``@`` as a letter as in package code, or a control symbol
 # on the same line.
 CONTROL_SEQUENCE = re.compile(r"\\([A-Za-z@]+|[^\r\n])")
+# The file name after a bare ``\input name``, which has no braces.
+_BARE_INPUT_NAME = re.compile(r"[^\s\\{}\[\]]+")
 # Environments whose body is read verbatim up to the matching \end.
 VERBATIM_ENVIRONMENTS = frozenset(
     {
@@ -40,6 +47,9 @@ VERBATIM_ENVIRONMENTS = frozenset(
 )
 # Commands whose argument is read verbatim, either braced or between a repeated delimiter.
 _VERBATIM_COMMANDS = frozenset({"verb", "lstinline", "mintinline", "url", "nolinkurl", "path"})
+# The url package's \path takes a braced or ``|``-delimited argument. TikZ shares the name
+# for \path[options] (a) -- (b), whose arguments are ordinary markup, not literal text.
+_URL_PATH_OPENERS = "{|"
 # Tokens after these commands name a macro being defined, not a conditional being run.
 DEFINITION_COMMANDS = frozenset(
     {"newif", "def", "gdef", "edef", "xdef", "let", "futurelet", "global", "long", "protected"}
@@ -70,8 +80,34 @@ _ARGUMENT_CONDITIONALS = frozenset(
 )
 
 
+ParseLimit = Literal[
+    "unclosed_group",
+    "oversized_group",
+    "argument_budget",
+    "command_count",
+    "expanded_size",
+]
+
+_PARSE_LIMIT_DESCRIPTIONS: dict[ParseLimit, str] = {
+    "unclosed_group": "a brace group is never closed",
+    "oversized_group": f"a brace group is longer than {MAX_ARGUMENT_CHARS // 1024} KiB",
+    "argument_budget": "the command arguments together exceed the supported total size",
+    "command_count": f"the text has more than {MAX_COMMANDS:,} commands",
+    "expanded_size": f"the expanded text is larger than {MAX_TOTAL_SOURCE_BYTES // MIB} MiB",
+}
+
+
 class ParseLimitExceeded(Exception):
-    """The lexical subset cannot establish bounded, complete argument spans."""
+    """The lexical subset cannot establish bounded, complete argument spans.
+
+    ``reason`` names the limit and ``offset`` is the character offset in the scanned
+    text where it was reached, so a caller can report the line.
+    """
+
+    def __init__(self, reason: ParseLimit, offset: int = 0) -> None:
+        super().__init__(f"{_PARSE_LIMIT_DESCRIPTIONS[reason]} (at character {offset})")
+        self.reason = reason
+        self.offset = offset
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,16 +201,24 @@ def skip_trivia(text: str, pos: int) -> int:
             return pos
 
 
-def read_group(text: str, pos: int, opening: str = "{", closing: str = "}") -> Argument | None:
+def read_group(
+    text: str,
+    pos: int,
+    opening: str = "{",
+    closing: str = "}",
+    *,
+    limit: int = MAX_ARGUMENT_CHARS,
+) -> Argument | None:
     """Read a balanced group starting at ``pos``; ``None`` if absent, unclosed or oversized.
 
-    A bracket group ignores brackets nested inside braces, as in ``[{a]}]``.
+    A group longer than ``limit`` characters counts as oversized. A bracket group
+    ignores brackets nested inside braces, as in ``[{a]}]``.
     """
     if pos >= len(text) or text[pos] != opening:
         return None
     depth, cursor = 1, pos + 1
     brace_depth = 0
-    while cursor < len(text) and cursor - pos <= MAX_ARGUMENT_CHARS:
+    while cursor < len(text) and cursor - pos <= limit:
         char = text[cursor]
         if char == "\\":
             cursor += 2
@@ -195,6 +239,12 @@ def read_group(text: str, pos: int, opening: str = "{", closing: str = "}") -> A
                 return Argument(pos + 1, cursor, text[pos + 1 : cursor])
         cursor += 1
     return None
+
+
+def _is_url_path_form(text: str, pos: int) -> bool:
+    """Whether the argument after ``\\path`` at ``pos`` is the url package's literal form."""
+    opener = skip_trivia(text, pos)
+    return opener < len(text) and text[opener] in _URL_PATH_OPENERS
 
 
 def source_regions(text: str) -> RegionScan:
@@ -234,7 +284,7 @@ def source_regions(text: str) -> RegionScan:
                 regions.append(Region(pos, end, "literal"))
                 pos = end
                 continue
-        if name in _VERBATIM_COMMANDS:
+        if name in _VERBATIM_COMMANDS and (name != "path" or _is_url_path_form(text, end)):
             cursor = end
             if cursor < len(text) and text[cursor] == "*":
                 cursor += 1
@@ -281,11 +331,43 @@ def mask_literals(text: str) -> str:
     return blank_regions(text, source_regions(text).regions)
 
 
-def scan_commands(masked: str) -> list[Command]:
+def _has_blank_line(text: str, start: int, end: int, comments: Sequence[int]) -> bool:
+    """Whether ``text[start:end]``, a gap of whitespace, contains a blank line.
+
+    A blank line ends a paragraph. A line that only held a comment does not: the
+    comment swallows its line break, so TeX reads straight through it.
+    """
+    line_start = text.find("\n", start, end) + 1
+    if line_start == 0:
+        return False
+    while (line_end := text.find("\n", line_start, end)) >= 0:
+        index = bisect.bisect_left(comments, line_start)
+        if index == len(comments) or comments[index] >= line_end:
+            return True
+        line_start = line_end + 1
+    return False
+
+
+def _unreadable_group_reason(text: str, pos: int) -> ParseLimit:
+    """Why the brace group at ``pos`` cannot be read: longer than the bound, or never closed."""
+    return "oversized_group" if read_group(text, pos, limit=len(text)) else "unclosed_group"
+
+
+def comment_starts(regions: Iterable[Region]) -> list[int]:
+    """The sorted offsets at which the comments among ``regions`` begin."""
+    return [region.start for region in regions if region.kind == "comment"]
+
+
+def scan_commands(masked: str, comments: Sequence[int] = ()) -> list[Command]:
     """Return the commands of literal-masked text with their following groups.
 
+    ``comments`` are the sorted offsets of the comments blanked to produce
+    ``masked``. Without them a line that held only a comment is taken for a blank
+    line, which ends argument scanning.
+
     Raises ``ParseLimitExceeded`` when an unbalanced brace leaves later argument
-    spans unreadable or the arguments exceed their bounded total size.
+    spans unreadable, the arguments exceed their bounded total size, or the text
+    holds more than ``MAX_COMMANDS`` commands.
     """
     result: list[Command] = []
     depth = pos = 0
@@ -310,11 +392,11 @@ def scan_commands(masked: str) -> list[Command]:
                 arguments: list[Argument] = []
                 options: list[Argument] = []
                 name = token.group(1)
-                for _ in range(6):
+                for _ in range(_MAX_GROUPS_PER_COMMAND):
                     skipped = skip_space(masked, cursor)
                     # A paragraph break ends argument scanning: the next group starts
                     # new text instead of completing this command.
-                    if masked.count("\n", cursor, skipped) > 1:
+                    if _has_blank_line(masked, cursor, skipped, comments):
                         break
                     cursor = skipped
                     option = read_group(masked, cursor, "[", "]")
@@ -330,23 +412,34 @@ def scan_commands(masked: str) -> list[Command]:
                         # unreadable, but an unmatched bracket is ordinary text such
                         # as "[0, 1)" and only ends this command's arguments.
                         if cursor < len(masked) and masked[cursor] == "{":
-                            raise ParseLimitExceeded
+                            raise ParseLimitExceeded(
+                                _unreadable_group_reason(masked, cursor), cursor
+                            )
                         break
                 argument_chars += sum(len(group.value) for group in (*arguments, *options))
-                if argument_chars > min(MAX_SOURCE_BYTES, len(masked) * 4):
-                    raise ParseLimitExceeded
+                if argument_chars > min(MAX_SOURCE_BYTES, len(masked) * _ARGUMENT_BUDGET_FACTOR):
+                    raise ParseLimitExceeded("argument_budget", pos)
                 if not arguments and name == "input":
                     start = skip_space(masked, token.end())
-                    match = re.match(r"[^\s\\{}\[\]]+", masked[start:])
+                    match = _BARE_INPUT_NAME.match(masked, start)
                     if match:
-                        arguments.append(Argument(start, start + match.end(), match.group()))
+                        arguments.append(Argument(start, match.end(), match.group()))
                 result.append(Command(name, pos, line, depth, tuple(arguments), tuple(options)))
                 if len(result) > MAX_COMMANDS:
-                    return result
+                    raise ParseLimitExceeded("command_count", pos)
                 pos = token.end()
                 continue
         pos += 1
     return result
+
+
+def scan_source_commands(text: str) -> list[Command]:
+    """Return the commands of source text, masking its comments and literal regions first.
+
+    Raises ``ParseLimitExceeded`` as :func:`scan_commands` does.
+    """
+    regions = source_regions(text).regions
+    return scan_commands(blank_regions(text, regions), comment_starts(regions))
 
 
 def split_argument_items(argument: Argument, *, comma_separated: bool = True) -> list[Argument]:

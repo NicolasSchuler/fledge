@@ -157,9 +157,12 @@ Fledge was previously named `latex-prep`. Existing setups keep working:
 - The `fledge-latex` distribution also installs a `latex-prep` command. The
   macOS installer exposes only `fledge`.
 - Configuration files named `.latex-prep.toml` and `latex-prep.toml`, and the
-  `[tool.latex-prep]` table in `pyproject.toml`, are still read, after the
-  `fledge` names in the same directory. A `pyproject.toml` with both
-  `[tool.fledge]` and `[tool.latex-prep]` is an error.
+  `[tool.latex-prep]` table in `pyproject.toml`, are still read. In one directory
+  the order is `.fledge.toml`, `fledge.toml`, `.latex-prep.toml`, `latex-prep.toml`
+  and then `pyproject.toml`, so a leftover `latex-prep.toml` shadows a
+  `[tool.fledge]` table beside it (see
+  [discovery and precedence](configuration.md#discovery-and-precedence)). A
+  `pyproject.toml` with both `[tool.fledge]` and `[tool.latex-prep]` is an error.
 - Formatter-off markers with the `latex-prep` prefix are still accepted.
 - Installations under the former name are left untouched by the installer.
 - For development, `LATEX_PREP_RUN_INTEGRATION=1` and

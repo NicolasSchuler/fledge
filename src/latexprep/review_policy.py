@@ -104,6 +104,9 @@ REVIEWABLE_CODES = frozenset(
     }
 )
 _COMPARISON_CODES = frozenset({"CMP001", "CMP002", "CMP003"})
+# The stage that compares the baseline PDF with the prepared one. Only differences found
+# there can be accepted as intended; the workflow tags those findings with this label.
+BASELINE_VERSUS_PREPARED_STAGE = "baseline versus prepared"
 _REVIEW_DIAGNOSTICS = {"report.review_unmatched", "report.review_ineligible"}
 
 
@@ -244,7 +247,7 @@ def _eligible(finding: Finding, action: str) -> bool:
     if finding.incomplete or (action == "suppressed" and finding.severity == "error"):
         return False
     if finding.code in _COMPARISON_CODES:
-        return action == "accepted_exception" and (finding.stage == "baseline versus prepared")
+        return action == "accepted_exception" and (finding.stage == BASELINE_VERSUS_PREPARED_STAGE)
     return True
 
 

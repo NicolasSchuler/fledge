@@ -116,18 +116,23 @@ format version the receiving service expects (`BIB110`,
 
 Discovery starts at the input directory, or at the parent directory of a ZIP or
 PDF input; configuration inside a ZIP is never loaded. The nearest directory
-with a configuration file wins. Within one directory the order is:
+with a configuration file wins. Within one directory the first of these that
+exists is used, and the others are ignored:
 
 1. `.fledge.toml`
 2. `fledge.toml`
-3. `pyproject.toml` containing `[tool.fledge]`
+3. `.latex-prep.toml`
+4. `latex-prep.toml`
+5. `pyproject.toml` containing `[tool.fledge]` (or the older `[tool.latex-prep]`)
 
-Older `latex-prep` names are read after these; see
-[migrating from latex-prep](installation.md#migrating-from-latex-prep). An
-unrelated `pyproject.toml` is skipped. Discovery stops at a repository root (a
-directory containing `.git` or `.hg`) and never climbs into your home directory
-or the filesystem root, so there is no user-wide configuration. Only one file is
-used; files from different directories are not merged.
+The two `latex-prep` file names are the older spellings; see
+[migrating from latex-prep](installation.md#migrating-from-latex-prep). They rank
+above `pyproject.toml`, so a leftover `latex-prep.toml` shadows a `[tool.fledge]`
+table beside it. An unrelated `pyproject.toml` is skipped. Discovery stops at a
+repository root (a directory containing `.git` or `.hg`) and never climbs into
+your home directory or the filesystem root, so there is no user-wide
+configuration. Only one file is used; files from different directories are not
+merged.
 
 Precedence, from highest to lowest: command-line options, the selected settings
 file, a `--preset`, and the built-in defaults. Negative options such as
@@ -261,9 +266,11 @@ online_metadata = true
 - `online_max_requests` (default 40, at most 1000) is one budget shared by all
   selected online checks of a document. Entries beyond it report `request_limit`
   and are never treated as verified.
-- `online_contact_email` adds `mailto:` to the request's `User-Agent` header, which
-  lets Crossref use its polite pool. No finding contains it, but the JSON report
-  records it with the other effective settings.
+- `online_contact_email` adds `mailto:` to the `User-Agent` header of requests to
+  `api.crossref.org` only, which lets Crossref use its polite pool. Requests to
+  every other host, such as a DOI resolver or a linked site, never carry it. No
+  finding contains it, but the JSON report records it with the other effective
+  settings.
 - A normal `prepare` checks the final archive extraction once, after
   transformations, so it inspects the references in the prepared package; if
   preparation stops earlier, an info `online.not_reached` note says the selected

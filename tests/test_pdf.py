@@ -4,12 +4,21 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from latexprep.models import PreparationError, Report
 from latexprep.pdf_comparison import _changed_pixels, compare_pdfs
 from latexprep.pdf_inspection import PdfInspectionOptions, inspect_pdf
-from latexprep.pdf_support import is_type3, page_count, page_sizes
-from latexprep.runtime import CommandResult, ToolRunner
+from latexprep.pdf_support import (
+    COMPARISON_DPI,
+    is_type3,
+    page_count,
+    parse_page_sizes,
+    require_comparison_raster_fit,
+)
+from latexprep.runtime import CommandResult, RuntimeLimits, ToolRunner
+from latexprep.scheduler import ResourceBudget
+from tests.support import live_tests_enabled
 
 
 class FakePdfRunner(ToolRunner):
@@ -137,6 +146,16 @@ class PdfTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rendered.details["pixel_tolerance"], 0)
         self.assertFalse(rendered.details["semantic_equivalence_proven"])
 
+    async def test_rendering_message_states_the_comparison_resolution_in_use(self) -> None:
+        with patch("latexprep.pdf_comparison.COMPARISON_DPI", 96):
+            findings = await compare_pdfs(
+                self.left, self.right, self.root / "compare", FakePdfRunner()
+            )
+        rendered = next(item for item in findings if item.rule == "compare.rendering")
+        self.assertEqual(rendered.details["dpi"], 96)
+        self.assertIn("96 DPI", rendered.message)
+        self.assertNotIn("144", rendered.message)
+
     async def test_pdf_inspection_reports_scope_gaps(self) -> None:
         findings = await inspect_pdf(self.left, self.root / "inspect", FakePdfRunner())
         by_rule = {item.rule: item for item in findings}
@@ -240,15 +259,39 @@ class PdfTests(unittest.IsolatedAsyncioTestCase):
 
     def test_pathological_page_dimensions_are_rejected_before_rendering(self) -> None:
         with self.assertRaises(PreparationError):
-            page_sizes("Page 1 size: 1e308 x 792 pts", 1)
+            parse_page_sizes("Page 1 size: 1e308 x 792 pts", 1)
         with self.assertRaises(PreparationError):
-            page_sizes("Page 1 size: 1000000 x 1000000 pts", 1)
+            parse_page_sizes("Page 1 size: 1000000 x 1000000 pts", 1)
         with self.assertRaises(PreparationError):
-            page_sizes("Page 1 size: 612 x 792 pts", 2)
+            parse_page_sizes("Page 1 size: 612 x 792 pts", 2)
         with self.assertRaises(PreparationError):
-            page_sizes("Page 1 size: 612 x 792 pts\nPage 1 size: 700 x 800 pts", 1)
+            parse_page_sizes("Page 1 size: 612 x 792 pts\nPage 1 size: 700 x 800 pts", 1)
         with self.assertRaises(PreparationError):
-            page_sizes("Page 1 size: .e x 792 pts", 1)
+            parse_page_sizes("Page 1 size: .e x 792 pts", 1)
+
+
+def stencil_mask_pdf() -> bytes:
+    """One page painting an 8 x 8 one-bit image mask, which pdfimages lists as a stencil."""
+    content = b"q 100 0 0 100 10 10 cm /M Do Q\n"
+    objects = (
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] "
+        b"/Resources << /XObject << /M 4 0 R >> >> /Contents 5 0 R >>",
+        b"<< /Type /XObject /Subtype /Image /Width 8 /Height 8 /ImageMask true "
+        b"/BitsPerComponent 1 /Length 8 >>\nstream\n" + bytes([0b10101010] * 8) + b"\nendstream",
+        b"<< /Length " + str(len(content)).encode() + b" >>\nstream\n" + content + b"endstream",
+    )
+    output = bytearray(b"%PDF-1.4\n")
+    offsets = []
+    for number, value in enumerate(objects, 1):
+        offsets.append(len(output))
+        output.extend(f"{number} 0 obj\n".encode() + value + b"\nendobj\n")
+    start = len(output)
+    output.extend(b"xref\n0 6\n0000000000 65535 f \n")
+    output.extend(b"".join(f"{offset:010} 00000 n \n".encode() for offset in offsets))
+    output.extend(f"trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n{start}\n%%EOF\n".encode())
+    return bytes(output)
 
 
 class ConfigurablePdfRunner(FakePdfRunner):
@@ -315,7 +358,29 @@ class PdfConstraintTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(findings["pdf.page_dimensions"].code, "PDF101")
         self.assertEqual(findings["pdf.page_dimensions"].status, "inconclusive")
         self.assertEqual(findings["pdf.page_dimensions"].severity, "error")
-        self.assertIn("safe raster dimensions", findings["pdf.page_dimensions"].message)
+        self.assertIn("exceed", findings["pdf.page_dimensions"].message)
+        self.assertNotIn("raster", findings["pdf.page_dimensions"].message)
+
+    async def test_large_format_pages_are_inventoried_without_comparison_render_limits(
+        self,
+    ) -> None:
+        # About A1: valid geometry that the 144 DPI comparison renderer cannot raster.
+        a1 = "Page 1 size: 1684 x 2384 pts\n"
+        findings = await self.inspect(
+            PdfInspectionOptions(
+                expected_page_width_pt=1684,
+                expected_page_height_pt=2384,
+                require_consistent_page_size=True,
+            ),
+            runner=ConfigurablePdfRunner(outputs={"geometry": a1}),
+        )
+        self.assertNotIn("pdf.geometry_unavailable", findings)
+        self.assertEqual(findings["pdf.page_geometry"].status, "passed")
+        self.assertEqual(findings["pdf.page_dimensions"].status, "passed")
+        self.assertEqual(findings["pdf.page_size_consistency"].status, "passed")
+        # The comparison path still refuses pages it cannot render, and says why.
+        with self.assertRaisesRegex(PreparationError, f"{COMPARISON_DPI} DPI"):
+            require_comparison_raster_fit(parse_page_sizes(a1, 1))
 
     async def test_page_limit_boundary_and_overflow(self) -> None:
         at_limit = await self.inspect(max_pages=2, runner=ConfigurablePdfRunner(pages=2))
@@ -418,6 +483,44 @@ class PdfConstraintTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(vector_only["pdf.image_resolution"].status, "passed")
         self.assertEqual(vector_only["pdf.image_resolution"].details["inspected_placements"], 0)
+
+    async def test_stencil_masks_are_measured_like_other_raster_placements(self) -> None:
+        header = (
+            "page num type width height color comp bpc enc interp object ID "
+            "x-ppi y-ppi size ratio\n---\n"
+        )
+        # A row copied from pdfimages -list for a 1-bit /ImageMask image.
+        stencil = "1 0 stencil 8 8 - 1 1 image no 4 0 6 6 8B 100%\n"
+        for options in (PdfInspectionOptions(), PdfInspectionOptions(min_image_dpi=300)):
+            findings = await self.inspect(
+                options, runner=ConfigurablePdfRunner(outputs={"pdfimages": header + stencil})
+            )
+            with self.subTest(options=options):
+                self.assertNotIn("pdf.images_unavailable", findings)
+                self.assertEqual(findings["pdf.images"].details["images"][0]["type"], "stencil")
+        low = (
+            await self.inspect(
+                PdfInspectionOptions(min_image_dpi=300),
+                runner=ConfigurablePdfRunner(outputs={"pdfimages": header + stencil}),
+            )
+        )["pdf.image_resolution"]
+        self.assertEqual(low.status, "failed")
+        self.assertEqual(low.details["below_minimum"][0]["type"], "stencil")
+
+    @unittest.skipUnless(live_tests_enabled(), "Opt-in live PDF tools")
+    async def test_live_pdfimages_inventory_accepts_a_real_stencil_mask(self) -> None:
+        self.pdf.write_bytes(stencil_mask_pdf())
+        findings = await inspect_pdf(
+            self.pdf,
+            self.root / "live-stencil",
+            ToolRunner(RuntimeLimits(timeout_seconds=30, max_memory_mb=512)),
+            options=PdfInspectionOptions(min_image_dpi=1),
+            budget=ResourceBudget(2, 512),
+        )
+        rules = {item.rule: item for item in findings}
+        self.assertNotIn("pdf.images_unavailable", rules)
+        self.assertEqual(rules["pdf.images"].details["images"][0]["type"], "stencil")
+        self.assertEqual(rules["pdf.image_resolution"].status, "passed")
 
     async def test_font_embedding_violation_changes_status_and_zero_fonts_are_inconclusive(
         self,

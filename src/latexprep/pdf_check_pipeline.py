@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field, replace
 from functools import partial
@@ -32,6 +33,8 @@ from .runtime import CommandRunner
 from .scheduler import ResourceBudget, bounded_map, run_in_thread
 from .source_graph import SourceGraph
 from .submission_checks import SubmissionOptions, check_pdf_identity
+
+_TOOL_MISSING = re.compile(r"Required tool is unavailable: ([\w.+-]+)\. Install it explicitly\.")
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -89,20 +92,52 @@ def _figure_inputs(root: Path, main: str) -> _FigureInputs:
     return _FigureInputs(figures, complete)
 
 
+def _extraction_failure_reason(error: Exception) -> str:
+    """A cause that is safe to report: tool errors can quote the document, so only a missing
+    tool is named and every other failure keeps its raw message out of the report."""
+    if (missing := _TOOL_MISSING.fullmatch(str(error))) is not None:
+        return f"{missing[1]} is not installed"
+    return (
+        "a PDF tool did not complete normally; the raw tool message is withheld "
+        "because it can quote the document"
+    )
+
+
+def _with_extraction_failure(finding: Finding, reason: str) -> Finding:
+    """Tell an incomplete scan why its evidence is missing, unlike a text-free PDF."""
+    if not finding.incomplete:
+        return finding
+    return replace(
+        finding,
+        message=f"{finding.message} Extraction failed: {reason}.",
+        suggestion=finding.suggestion
+        or "Make sure Poppler's pdftotext and pdfinfo are installed and can read this PDF, "
+        "then repeat the check.",
+        details={**finding.details, "extraction_failure": reason},
+    )
+
+
 async def _inspect_pdf_privacy(context: _PdfCheckContext) -> list[Finding]:
     budget = context.budget
     privacy_options = context.settings.privacy
     if not (privacy_options.identity_terms or privacy_options.scan_secrets):
         return []
+    failure = None
     try:
         text, metadata = await extract_pdf_evidence(
             context.pdf, context.work / "privacy", context.runner, budget=budget
         )
-    except (PreparationError, OSError):
+    except (PreparationError, OSError) as error:
         # Tool errors can contain document fragments. The checker explains missing evidence
         # without copying raw tool output into an identity/credential report.
         text, metadata = "", {}
-    return await _read(budget, "PDF privacy", check_pdf_identity, text, metadata, privacy_options)
+        failure = _extraction_failure_reason(error)
+    findings = await _read(
+        budget, "PDF privacy", check_pdf_identity, text, metadata, privacy_options
+    )
+    if failure is None:
+        return findings
+    return [_with_extraction_failure(finding, failure) for finding in findings]
 
 
 async def _inspect_pdf_artwork(context: _PdfCheckContext) -> list[Finding]:

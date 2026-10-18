@@ -12,6 +12,15 @@ from .models import PreparationError
 MIB = 1024 * 1024
 
 
+def byte_count_text(count: int) -> str:
+    """A byte count for messages: ``256 MiB``, ``1.5 MiB``, ``4 KiB`` or ``300 bytes``."""
+    if count >= MIB:
+        return f"{count // MIB} MiB" if count % MIB == 0 else f"{count / MIB:.1f} MiB"
+    if count >= 1024 and count % 1024 == 0:
+        return f"{count // 1024} KiB"
+    return f"{count} bytes"
+
+
 class FileIdentity(NamedTuple):
     """Detects that a regular file was replaced or modified between two checks."""
 

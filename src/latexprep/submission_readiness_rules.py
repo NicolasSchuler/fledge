@@ -121,7 +121,9 @@ RULES = (
         description=(
             "Default advisory over TeX comments in shipped .tex/.ltx/.latex files: reviewer or "
             "rebuttal correspondence, distribution restrictions such as 'do not submit' or "
-            "'confidential', 'note to self' and 'NS:'-style author-initial notes. Only "
+            "'confidential', 'note to self' and 'NS:'-style notes whose capital letters are the "
+            "initials of a literal \\author name (other acronyms such as 'MLP:' are ignored, "
+            "and so are initials when no literal author name is available). Only "
             "locations and marker categories are reported. This narrow scan is separate from "
             "the opt-in PRV005 comment policy and does not establish anonymity."
         ),

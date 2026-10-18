@@ -10,20 +10,25 @@ from __future__ import annotations
 import posixpath
 import re
 import unicodedata
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Literal, NamedTuple, Self
 
+from .file_safety import MIB
 from .models import EvidenceKind, Finding, PreparationError
 from .scheduler import cancellation_point
 from .tex_lexer import (
+    MAX_ARGUMENT_CHARS,
     MAX_COMMANDS,
     MAX_SOURCE_BYTES,
     MAX_TOTAL_SOURCE_BYTES,
     Argument,
     Command,
+    ParseLimit,
     ParseLimitExceeded,
     blank_regions,
+    comment_starts,
     conditional_spans,
     in_conditional,
     read_group,
@@ -34,6 +39,31 @@ from .tex_lexer import (
 )
 
 MAX_INPUT_DEPTH = 128
+# Most paths named in one message; the rest are counted.
+_MAX_LISTED_PATHS = 5
+# Appended to advice for constructs the scan cannot follow, to say when they matter.
+_NEEDED_FOR_RESTRUCTURING = (
+    'Flat layout (layout = "flat") and source transformations need this; '
+    'layout = "preserve" does not.'
+)
+_COPY_INTO_PROJECT = (
+    "Copy the file into the project and refer to it by a path relative to the project folder."
+)
+# What to tell the user for each way an argument can defeat the lexer's bounds.
+_ARGUMENT_LIMIT_ADVICE: dict[ParseLimit, tuple[str, str]] = {
+    "unclosed_group": (
+        "A brace group opened on this line is never closed.",
+        "Add the missing closing brace, or remove the extra opening brace.",
+    ),
+    "oversized_group": (
+        f"A brace group on this line is longer than {MAX_ARGUMENT_CHARS // 1024} KiB.",
+        "Move the long text out of the command argument, for example into its own file.",
+    ),
+    "argument_budget": (
+        "The command arguments in this file together exceed the supported total size.",
+        "Split the file, or shorten long or deeply nested command arguments.",
+    ),
+}
 
 _SOURCE_SUFFIXES = {
     ".tex",
@@ -227,6 +257,13 @@ _TRAVERSED_COMMANDS = frozenset(
 )
 
 
+def _listed(names: Sequence[str]) -> str:
+    """Comma-separated ``names``; many of them are cut short and counted."""
+    shown = ", ".join(names[:_MAX_LISTED_PATHS])
+    hidden = len(names) - _MAX_LISTED_PATHS
+    return f"{shown} and {hidden} more" if hidden > 0 else shown
+
+
 def path_comparison_key(value: str) -> str:
     """Key under which paths collide on case-insensitive or normalizing file systems."""
     return unicodedata.normalize("NFC", value).casefold()
@@ -267,6 +304,8 @@ class ParsedSource:
     masked: str
     commands: list[Command]
     bom: bool = False
+    # Offsets of the comments blanked in ``masked``, in order.
+    comment_starts: tuple[int, ...] = ()
 
 
 class ArgumentLocation(NamedTuple):
@@ -410,6 +449,31 @@ class SourceGraph:
             self.uncertainties.append(finding)
             self.findings.append(finding)
 
+    def _unreadable(self, name: str, error: OSError) -> None:
+        """Record that a source could not be read, naming the cause but not the local path."""
+        cause = (error.strerror or type(error).__name__).lower()
+        self._uncertain(
+            "source.encoding",
+            f"Source could not be read ({cause}); its contents were not changed.",
+            name,
+            suggestion="Make the file readable, then prepare it again.",
+        )
+
+    def _parse_limit_reached(self, name: str, text: str, error: ParseLimitExceeded) -> None:
+        """Record which bound of the lexical subset a source exceeded, and where."""
+        line = text.count("\n", 0, error.offset) + 1
+        if error.reason == "command_count":
+            self._uncertain(
+                "source.command_limit",
+                f"This file has more than {MAX_COMMANDS:,} TeX commands, more than can be checked.",
+                name,
+                line,
+                "Split the file or reduce the selected source set.",
+            )
+            return
+        message, suggestion = _ARGUMENT_LIMIT_ADVICE[error.reason]
+        self._uncertain("source.argument_limit", message, name, line, suggestion)
+
     def _names_project_file(self, command: Command) -> bool:
         """Whether a class/package reference can name a file inside the project.
 
@@ -445,48 +509,57 @@ class SourceGraph:
                 suggestion="Supply the actual project file inside the project.",
             )
             return None
-        size = path.stat().st_size
+        try:
+            size = path.stat().st_size
+        except OSError as error:
+            self._unreadable(name, error)
+            return None
         if size > MAX_SOURCE_BYTES or self._source_bytes + size > MAX_TOTAL_SOURCE_BYTES:
             self._uncertain(
                 "source.size_limit",
-                "Source parsing exceeded the 8 MiB per-file or 32 MiB total limit.",
+                f"Source parsing exceeded the {MAX_SOURCE_BYTES // MIB} MiB per-file "
+                f"or {MAX_TOTAL_SOURCE_BYTES // MIB} MiB total limit.",
                 name,
                 suggestion="Reduce the selected source set or inspect this file separately.",
             )
             return None
         try:
             raw = path.read_bytes()
-            self._source_bytes += len(raw)
+        except OSError as error:
+            self._unreadable(name, error)
+            return None
+        self._source_bytes += len(raw)
+        try:
             text = raw.decode("utf-8-sig")
-        except (OSError, UnicodeDecodeError):
+        except UnicodeDecodeError:
             self._uncertain(
                 "source.encoding",
-                "Source could not be read as UTF-8; its encoding was not changed.",
+                "Source is not valid UTF-8; its encoding was not changed.",
                 name,
                 suggestion="Convert an explicit copy to UTF-8 before preparing it.",
             )
             return None
         regions, unclosed = source_regions(text)
         masked = blank_regions(text, regions)
+        comments = comment_starts(regions)
         try:
-            commands = scan_commands(masked)
-        except ParseLimitExceeded:
-            self._uncertain(
-                "source.argument_limit",
-                "An argument is unclosed, exceeds 64 KiB, or exceeds the nested-argument budget.",
-                name,
-                suggestion="Simplify the source construct or use preserve layout.",
-            )
+            commands = scan_commands(masked, comments)
+        except ParseLimitExceeded as error:
+            self._parse_limit_reached(name, text, error)
             return None
         self._parsed_commands += len(commands)
         if self._parsed_commands > MAX_COMMANDS:
             self._uncertain(
                 "source.command_limit",
-                "The project exceeds the bounded lexical command limit.",
+                f"The project's sources together have more than {MAX_COMMANDS:,} TeX commands, "
+                "more than can be checked.",
                 name,
+                suggestion="Reduce the selected source set or inspect this file separately.",
             )
             return None
-        source = ParsedSource(text, masked, commands, raw.startswith(b"\xef\xbb\xbf"))
+        source = ParsedSource(
+            text, masked, commands, raw.startswith(b"\xef\xbb\xbf"), tuple(comments)
+        )
         spans = conditional_spans(commands)
         for command in commands:
             if command.name != "graphicspath" and command.name not in FILE_COMMANDS:
@@ -502,8 +575,8 @@ class SourceGraph:
                 "the static scan does not establish which branch executes.",
                 name,
                 command.line,
-                suggestion="Make the dependency unconditional, "
-                "or rely on the build trace for preserve layout.",
+                suggestion="Make the dependency unconditional so it can be followed. "
+                'With layout = "preserve" the files the build read are shipped anyway.',
             )
         self.sources[name] = source
         for offset in unclosed:
@@ -521,20 +594,27 @@ class SourceGraph:
     def _select_main(self, main: str | None) -> str | None:
         if main is not None:
             candidate = posixpath.normpath(main)
-            if (
+            escapes = (
                 main.startswith(("/", "\\"))
                 or re.match(r"^[A-Za-z]:", main)
                 or candidate == ".."
                 or candidate.startswith("../")
                 or "\\" in main
-                or candidate not in self.files
-            ):
+            )
+            if escapes or candidate not in self.files:
+                roots = f" Document roots found: {_listed(self.roots)}." if self.roots else ""
                 self.findings.append(
                     Finding(
                         "source.main_invalid",
-                        "Selected main file must be an existing relative path inside the project.",
+                        f"Main file {main!r} must be a path relative to the project folder, "
+                        "not absolute or outside it."
+                        if escapes
+                        else f"Main file {main!r} was not found in the project.{roots}",
                         severity="error",
                         path=main,
+                        suggestion="Give the main file relative to the project folder, "
+                        "for example --main paper/main.tex.",
+                        details={"candidates": list(self.roots)},
                     )
                 )
                 return None
@@ -546,12 +626,12 @@ class SourceGraph:
         self.findings.append(
             Finding(
                 "source.root_ambiguous" if self.roots else "source.root_missing",
-                "Multiple document roots were found."
+                f"Multiple document roots were found: {_listed(self.roots)}."
                 if self.roots
                 else "No literal document root could be selected.",
                 severity="error",
                 status="inconclusive",
-                suggestion="Select the main file explicitly with --main.",
+                suggestion="Select the main file explicitly with --main (or the main setting).",
                 details={"candidates": self.roots},
             )
         )
@@ -577,7 +657,8 @@ class SourceGraph:
                     "The declared package, class, or file identity contains a directory path.",
                     name,
                     command.line,
-                    "Use preserve layout to retain this identity.",
+                    "Flat layout would move this file and change the declared identity; "
+                    'use layout = "preserve" to keep it.',
                 )
         if command.name in _UNSUPPORTED_COMMANDS or (
             command.name in _FONT_COMMANDS and command.name not in _SUPPORTED_FONT_COMMANDS
@@ -588,7 +669,8 @@ class SourceGraph:
                 "outside the supported literal subset.",
                 name,
                 command.line,
-                "Use preserve layout or replace this command with a supported literal dependency.",
+                "Replace this command with a literal file reference the scan can follow. "
+                + _NEEDED_FOR_RESTRUCTURING,
                 {"command": command.name},
             )
         elif (
@@ -608,7 +690,8 @@ class SourceGraph:
                         "whose lookup semantics are unknown.",
                         name,
                         command.line,
-                        "Use preserve layout or provide a supported explicit file reference.",
+                        "Name the file with a supported command such as \\input or "
+                        "\\includegraphics. " + _NEEDED_FOR_RESTRUCTURING,
                         {"command": command.name, "argument": argument.value},
                     )
                     break
@@ -631,7 +714,8 @@ class SourceGraph:
                         "with unsupported lookup semantics.",
                         name,
                         command.line,
-                        "Use preserve layout or simplify this option.",
+                        "Simplify the option so it no longer looks like a file path. "
+                        + _NEEDED_FOR_RESTRUCTURING,
                     )
             if command.depth and command.name != "graphicspath":
                 self._uncertain(
@@ -640,7 +724,8 @@ class SourceGraph:
                     "its execution context is not established.",
                     name,
                     command.line,
-                    "Use a direct literal reference or preserve layout.",
+                    "Use a direct literal reference outside groups and macro arguments. "
+                    + _NEEDED_FOR_RESTRUCTURING,
                 )
             file_index = 1 if command.name in SECOND_ARGUMENT_FILE_COMMANDS else 0
             if len(command.arguments) <= file_index:
@@ -671,9 +756,17 @@ class SourceGraph:
         name: str,
         command: Command,
         details: dict[str, object] | None = None,
+        *,
+        suggestion: str | None = None,
     ) -> None:
         finding = Finding(
-            rule, message, severity="error", path=name, line=command.line, details=details or {}
+            rule,
+            message,
+            severity="error",
+            path=name,
+            line=command.line,
+            suggestion=suggestion,
+            details=details or {},
         )
         if finding not in self.findings:
             self.findings.append(finding)
@@ -688,6 +781,7 @@ class SourceGraph:
                 name,
                 command,
                 {"reference": value},
+                suggestion=_COPY_INTO_PROJECT,
             )
             return None
         path = posixpath.normpath(posixpath.join(self.cwd if base is None else base, value))
@@ -698,6 +792,7 @@ class SourceGraph:
                 name,
                 command,
                 {"reference": value},
+                suggestion=_COPY_INTO_PROJECT,
             )
             return None
         return path
@@ -730,7 +825,7 @@ class SourceGraph:
                 f"\\{command.name} has a dynamic or unsupported filename expression.",
                 name,
                 command.line,
-                "Use preserve layout or make the filename literal.",
+                "Make the filename literal. " + _NEEDED_FOR_RESTRUCTURING,
                 {"command": command.name},
             )
             return None
@@ -809,16 +904,28 @@ class SourceGraph:
                 if path_comparison_key(candidate) == path_comparison_key(path)
             }
         )
-        self._error(
-            "source.case_mismatch" if mismatches else "source.missing_dependency",
-            f"Dependency {value!r} differs in case or Unicode normalization "
-            f"from: {', '.join(mismatches)}."
-            if mismatches
-            else f"Literal dependency {value!r} is missing from the project.",
-            name,
-            command,
-            {"reference": value, "candidates": mismatches or candidates},
-        )
+        if mismatches:
+            self._error(
+                "source.case_mismatch",
+                f"Dependency {value!r} differs in case or Unicode normalization "
+                f"from: {', '.join(mismatches)}.",
+                name,
+                command,
+                {"reference": value, "candidates": mismatches, "command": command.name},
+                suggestion=f"Change the reference to match {mismatches[0]!r} exactly, "
+                "or rename the file.",
+            )
+        else:
+            tried = list(dict.fromkeys(candidates))
+            self._error(
+                "source.missing_dependency",
+                f"Literal dependency {value!r} is missing from the project; "
+                f"looked for {_listed(tried)}.",
+                name,
+                command,
+                {"reference": value, "candidates": candidates, "command": command.name},
+                suggestion=f"Add the file to the project or correct the name in \\{command.name}.",
+            )
         return None
 
     def _search_paths(
@@ -874,10 +981,13 @@ class SourceGraph:
         if previous and previous.target != target:
             self._error(
                 "source.context_ambiguity",
-                "The same reference selects different files under different path contexts.",
+                "The same reference selects different files under different path contexts: "
+                f"{previous.target} and {target}.",
                 name,
                 command,
                 {"candidates": [previous.target, target]},
+                suggestion="Give the file a name that resolves to the same file from every "
+                "directory that reads it.",
             )
         else:
             self.references[location] = FileReference(target, command.name)

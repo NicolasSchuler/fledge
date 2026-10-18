@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import ast
 import importlib.util
+import re
 import unittest
 from pathlib import Path
 
@@ -19,6 +21,25 @@ def _generator():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _defined_tests() -> tuple[set[str], dict[str, set[str]]]:
+    """Every test function name in ``tests/`` and the test methods of each class."""
+    names: set[str] = set()
+    methods: dict[str, set[str]] = {}
+    for path in sorted((ROOT / "tests").glob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.ClassDef):
+                methods.setdefault(node.name, set()).update(
+                    item.name
+                    for item in node.body
+                    if isinstance(item, ast.FunctionDef | ast.AsyncFunctionDef)
+                )
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and node.name.startswith(
+                "test"
+            ):
+                names.add(node.name)
+    return names, methods
 
 
 class DocumentationTests(unittest.TestCase):
@@ -73,6 +94,25 @@ class DocumentationTests(unittest.TestCase):
                 for word in words:
                     if word.startswith("-"):
                         self.assertIn(word, options, f"{invocation}: unknown option {word}")
+
+    def test_test_names_quoted_in_the_published_docs_exist(self) -> None:
+        """The backlog and development notes name tests as evidence; a rename must update them."""
+        names, methods = _defined_tests()
+        quoted = re.compile(r"(?<![\w/.<])(?:([A-Z]\w+)\.)?(test_[a-z0-9_]+)(?!\w)")
+        checked = 0
+        for path in sorted((ROOT / "docs").glob("*.md")):
+            text = path.read_text(encoding="utf-8")
+            for match in quoted.finditer(text):
+                if text.startswith(".py", match.end()):
+                    continue  # a test file name such as test_source.py, not a test
+                owner, name = match.groups()
+                checked += 1
+                with self.subTest(document=path.name, test=match.group(0)):
+                    known = names if owner is None else methods.get(owner, set())
+                    self.assertTrue(
+                        name in known, f"{path.name} quotes {match.group(0)}, which does not exist"
+                    )
+        self.assertGreater(checked, 40, "the docs no longer quote tests; is the pattern stale?")
 
     def test_shipped_example_settings_load(self) -> None:
         for path in sorted((ROOT / "examples").glob("*.toml")):

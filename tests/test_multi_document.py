@@ -11,9 +11,10 @@ from unittest.mock import AsyncMock, patch
 
 from latexprep.config import Settings, load_settings
 from latexprep.core import run_job
-from latexprep.job_context import JobRequest
+from latexprep.defects import REPORT_DEFECT_SUGGESTION
+from latexprep.job_context import JobRequest, main_selection_error
 from latexprep.latexmk_build import BuildTools
-from latexprep.models import Finding, PreparationError
+from latexprep.models import Finding, PreparationError, RequestError
 from latexprep.pdf_comparison import compare_pdfs
 from latexprep.source_staging import stage_document
 from latexprep.workflow_options import ComparisonOptions, DocumentOptions, WorkflowOptions
@@ -108,6 +109,65 @@ class MultiDocumentTests(unittest.IsolatedAsyncioTestCase):
             any(item.code == "PKG301" and item.status == "failed" for item in report.findings)
         )
 
+    async def test_single_purpose_commands_ignore_configured_documents(self):
+        pdf = self.base / "paper.pdf"
+        pdf.write_bytes(b"%PDF-fixture")
+        formatted = SimpleNamespace(findings=[], tools={}, changes=[])
+        with (
+            patch(
+                "latexprep.standalone_checks.inspect_standalone_pdf",
+                new=AsyncMock(return_value=[]),
+            ),
+            patch(
+                "latexprep.standalone_checks.format_project", new=AsyncMock(return_value=formatted)
+            ),
+        ):
+            for command, source in (("bib", self.source), ("fmt", self.source), ("pdf", pdf)):
+                with self.subTest(command=command):
+                    report = await run_job(JobRequest(command, source, self.settings))
+                    self.assertEqual(report.command, command)
+                    self.assertNotIn(report.outcome, {"error", "blocked"})
+                    self.assertFalse(
+                        any(
+                            item.rule == "package.independent_documents" for item in report.findings
+                        )
+                    )
+
+    async def test_reference_pdf_with_documents_is_rejected_before_the_workspace_exists(self):
+        reference = self.base / "reference.pdf"
+        reference.write_bytes(b"%PDF-fixture")
+        request = JobRequest("check", self.source, self.settings, reference_pdf=reference)
+        with (
+            patch("latexprep.core.JobExecution") as execution,
+            self.assertRaises(RequestError) as raised,
+        ):
+            await run_job(request)
+        execution.assert_not_called()
+        self.assertIn("workflow.documents", raised.exception.suggestion)
+        self.assertIn("reference_pdf", raised.exception.suggestion)
+
+    async def test_failed_document_names_its_own_settings_not_the_command_line(self):
+        failure = main_selection_error("main.tex", ["a.tex"])
+        self.assertIn("--main", failure.suggestion)
+        with patch("latexprep.documents.run_project", side_effect=failure):
+            report = await run_job(JobRequest("check", self.source, self.settings))
+        failed = [item for item in report.findings if item.rule == "package.document"]
+        self.assertEqual({item.document for item in failed}, {"paper", "supplement"})
+        for item in failed:
+            self.assertIn("workflow.documents", item.suggestion)
+            self.assertNotIn("--main", item.suggestion)
+        self.assertEqual(report.outcome, "blocked")
+
+    async def test_a_defect_in_one_document_is_reported_as_a_defect(self):
+        with patch("latexprep.documents.run_project", side_effect=ValueError("unexpected value")):
+            report = await run_job(JobRequest("check", self.source, self.settings))
+        [item, *_] = [item for item in report.findings if item.rule == "package.document"]
+        self.assertIn("ValueError: unexpected value", item.message)
+        self.assertEqual(item.suggestion, REPORT_DEFECT_SUGGESTION)
+        self.assertTrue(item.details["traceback"])
+        self.assertTrue(all("/" not in frame for frame in item.details["traceback"]))
+        self.assertEqual(report.outcome, "blocked")
+
     async def test_explicit_selection_must_include_root_and_match_all_patterns(self):
         for patterns in (("*.bib",), ("main.tex", "absent.*")):
             with self.subTest(patterns=patterns), self.assertRaises(PreparationError):
@@ -188,6 +248,31 @@ class BaselineStabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(
             any(item.code == "CMP101" and item.status == "passed" for item in report.findings)
         )
+
+    async def test_every_build_stage_records_its_time(self):
+        with (
+            patch("latexprep.document_tasks.build_project", side_effect=build),
+            patch("latexprep.document_tasks.inspect_pdf", new=AsyncMock(return_value=[])),
+            patch("latexprep.document_tasks.compare_pdfs", new=AsyncMock(return_value=[])),
+        ):
+            report = await run_job(
+                JobRequest("prepare", self.source, self.settings, self.base / "out")
+            )
+        stages = {stage["name"]: stage for stage in report.stages}
+        for name in ("baseline", "baseline repeat 2", "transformed", "archive"):
+            with self.subTest(stage=name):
+                self.assertGreaterEqual(stages[name]["elapsed_seconds"], 0)
+                self.assertGreaterEqual(stages[name]["queue_seconds"], 0)
+
+    async def test_a_crashed_baseline_build_keeps_the_baseline_stage_name(self):
+        async def crash(*_args, **_options):
+            raise RuntimeError("tool crashed")
+
+        with patch("latexprep.document_tasks.build_project", side_effect=crash):
+            report = await run_job(JobRequest("check", self.source, self.settings))
+        stages = {stage["name"]: stage["status"] for stage in report.stages}
+        self.assertEqual(stages["baseline"], "failed")
+        self.assertNotIn("baseline build", stages)
 
     async def test_pixel_tolerance_boundary_preserves_text_check(self):
         left, right = self.base / "a.pdf", self.base / "b.pdf"

@@ -73,7 +73,7 @@ The job runner supplies each module with the selected roots, effective settings,
 | Reporting | Collect findings, path mappings, diffs and verification results for terminal, compact, JSON, HTML and CI output; a later web adapter reuses the same results |
 | Tool adapters and process runner | Translate structured operations into bounded local tool invocations; capture diagnostics; enforce restricted file access and no network |
 
-Build orchestration may use `latexmk` with the selected TeX engine and BibTeX/Biber. `tex-fmt` and bibliography tools sit behind adapters; the PDF library remains undecided. Internal path rewriting owns dependency-aware flattening. Third-party cleanup tools operate only within the selected change plan.
+Build orchestration may use `latexmk` with the selected TeX engine and BibTeX/Biber. `tex-fmt` and bibliography tools sit behind adapters. PDF inspection and rendering use the Poppler command-line tools (`pdfinfo`, `pdftotext`, `pdftoppm`, `pdffonts` and related), with optional qpdf and MuPDF (`mutool`) adapters for object-level and drawing evidence. Internal path rewriting owns dependency-aware flattening. Third-party cleanup tools operate only within the selected change plan.
 
 ## Preparation lifecycle
 

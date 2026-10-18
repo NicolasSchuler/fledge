@@ -19,8 +19,9 @@ RULES = (
             "tests.test_structure_checks.AuthorRecordTests.test_failed_author_records_report_counts_and_locations",
         ),
         fix=(
-            "Supply the missing fields for the indicated author using the selected record "
-            "grammar, or review unsupported template structures manually."
+            "Add each missing field command named in the message after that author's opening "
+            "command and before the next author's, or review unsupported template structures "
+            "manually."
         ),
     ),
     Rule(

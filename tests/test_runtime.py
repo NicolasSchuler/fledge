@@ -4,16 +4,18 @@ import asyncio
 import os
 import shutil
 import tempfile
+import threading
 import unittest
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
+from latexprep import latexmk_build, project
 from latexprep.build_log import log_findings
 from latexprep.latexmk_build import build_project
 from latexprep.models import PreparationError
 from latexprep.runtime import CommandResult, RuntimeLimits, ToolRunner, ToolVersion
-from latexprep.sandbox import tool_environment, with_ulimits
+from latexprep.sandbox import sandbox_refusal, tool_environment, with_ulimits
 
 
 async def never_reports(pid: int, workspace: Path, *, max_file_bytes: int) -> str:
@@ -141,6 +143,47 @@ class BuildTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(passed.success)
         self.assertFalse(any("log_tail" in item.details for item in passed.findings))
+
+    async def test_a_limit_that_stopped_the_build_is_reported_once_with_its_value(self) -> None:
+        class StoppedBuildRunner(FakeBuildRunner):
+            """latexmk was killed by a limit and so left a signal status behind."""
+
+            def __init__(self, **stopped) -> None:
+                super().__init__()
+                self.limits = RuntimeLimits(timeout_seconds=7, max_output_bytes=3 * 1024 * 1024)
+                self.stopped = stopped
+
+            async def run(self, argv, cwd, workspace, **kwargs):
+                result = await super().run(argv, cwd, workspace, **kwargs)
+                if argv[-1] in {"-v", "--version"}:
+                    return result
+                return CommandResult(-9, "", "", resolved_command=argv, **self.stopped)
+
+        cases = (
+            ({"timed_out": True}, "build.timeout", ("7 s",), "timeout_seconds"),
+            ({"output_limited": True}, "build.output_limit", ("3 MiB",), "not configurable"),
+            (
+                {"resource_exceeded": "Aggregate tool memory exceeded 1024 MiB"},
+                "build.resource_limit",
+                ("1024 MiB",),
+                "build_memory_mb",
+            ),
+        )
+        for index, (stopped, rule, mentioned, setting) in enumerate(cases):
+            with self.subTest(rule=rule):
+                result = await build_project(
+                    self.source,
+                    "main.tex",
+                    self.root / f"stopped-{index}",
+                    "pdflatex",
+                    StoppedBuildRunner(**stopped),
+                )
+                self.assertFalse(result.success)
+                errors = [item for item in result.findings if item.severity == "error"]
+                self.assertEqual([item.rule for item in errors], [rule])
+                for text in mentioned:
+                    self.assertIn(text, errors[0].message)
+                self.assertIn(setting, errors[0].suggestion or "")
 
     async def test_missing_pdf_reports_the_log_tail_without_a_tool_failure(self) -> None:
         class EmptyOutputRunner(FakeBuildRunner):
@@ -286,6 +329,66 @@ class BuildTests(unittest.IsolatedAsyncioTestCase):
                 self.source, "main.tex", self.root / "build", "pdflatex", FakeBuildRunner()
             )
 
+    async def test_rejected_link_is_named_with_a_remedy(self) -> None:
+        (self.source / "external.tex").symlink_to(self.root / "unrelated")
+        with self.assertRaises(PreparationError) as raised:
+            await build_project(
+                self.source, "main.tex", self.root / "build", "pdflatex", FakeBuildRunner()
+            )
+        self.assertIn("'external.tex'", str(raised.exception))
+        self.assertIn("Replace it with a real copy", str(raised.exception))
+
+    async def test_link_that_appears_while_copying_is_refused_not_followed(self) -> None:
+        secret = self.root / "secret.txt"
+        secret.write_text("outside the project")
+        victim = self.source / "data.tex"
+        victim.write_text("inside the project")
+        scan = project._folder_entries
+
+        def scan_then_swap(*args, **kwargs):
+            entries = scan(*args, **kwargs)
+            victim.unlink()
+            victim.symlink_to(secret)
+            return entries
+
+        with patch.object(project, "_folder_entries", scan_then_swap):
+            with self.assertRaisesRegex(PreparationError, "replaced by a link"):
+                await build_project(
+                    self.source, "main.tex", self.root / "build", "pdflatex", FakeBuildRunner()
+                )
+        copied = [path for path in (self.root / "build").rglob("*") if path.is_file()]
+        self.assertFalse([path for path in copied if path.read_text() == "outside the project"])
+
+    async def test_oversized_build_input_names_the_limit_and_its_value(self) -> None:
+        (self.source / "extra.tex").write_text("more")
+        with patch.object(latexmk_build, "_MAX_IMPORTED_ENTRIES", 1):
+            with self.assertRaisesRegex(PreparationError, "exceeds the 1 entry limit"):
+                await build_project(
+                    self.source, "main.tex", self.root / "entries", "pdflatex", FakeBuildRunner()
+                )
+        (self.source / "extra.tex").write_bytes(b"x" * 2048)
+        small = FakeBuildRunner()
+        small.limits = RuntimeLimits(max_file_bytes=1024)
+        with self.assertRaisesRegex(
+            PreparationError, "exceeds the 1 KiB size limit at 'extra.tex'"
+        ):
+            await build_project(self.source, "main.tex", self.root / "bytes", "pdflatex", small)
+
+    async def test_copying_the_project_does_not_block_the_event_loop(self) -> None:
+        threads: list[int] = []
+        prepare = latexmk_build._prepare_tree
+
+        def recorded(*args, **kwargs):
+            threads.append(threading.get_ident())
+            return prepare(*args, **kwargs)
+
+        with patch.object(latexmk_build, "_prepare_tree", recorded):
+            await build_project(
+                self.source, "main.tex", self.root / "build", "pdflatex", FakeBuildRunner()
+            )
+        self.assertEqual(len(threads), 1)
+        self.assertNotEqual(threads[0], threading.get_ident())
+
     def test_diagnostics_do_not_invent_source_locations(self) -> None:
         log = (
             "Overfull \\hbox (4.2pt too wide) in paragraph at lines 12--14\n"
@@ -413,6 +516,38 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.15)
         self.assertEqual(heartbeat.stat().st_size, size)
 
+    def test_both_backends_report_refused_isolation_by_their_own_markers(self) -> None:
+        for stderr in (
+            "sandbox-exec: sandbox_apply: Operation not permitted",
+            "bwrap: No permissions to create new namespace, likely because the kernel does "
+            "not allow non-privileged user namespaces.\n",
+            "\nbwrap: setting up uid map: Permission denied",
+        ):
+            with self.subTest(stderr=stderr):
+                self.assertTrue(sandbox_refusal(stderr))
+        for stderr in ("", "! LaTeX Error: File `x.sty' not found.", "see bwrap: in the manual"):
+            with self.subTest(stderr=stderr):
+                self.assertFalse(sandbox_refusal(stderr))
+
+    async def test_bubblewrap_refusal_is_not_reported_as_a_tool_failure(self) -> None:
+        runner = LifecycleRunner()
+        script = 'print STDERR "bwrap: No permissions to create new namespace\\n"; exit 1;'
+        with self.assertRaisesRegex(PreparationError, "Restricted execution was refused: bwrap:"):
+            await runner.tool_version([self.perl, "-e", script], self.work)
+
+    async def test_unverifiable_tool_is_named_without_its_path_or_diagnostics(self) -> None:
+        runner = LifecycleRunner()
+        script = 'print STDERR "Error: leaked detail\\n"; exit 3;'
+        with self.assertRaises(PreparationError) as raised:
+            await runner.tool_version([self.perl, "-e", script], self.work)
+        message = str(raised.exception)
+        self.assertTrue(message.startswith("Cannot verify tool perl: "), message)
+        self.assertIn("exited with status 3", message)
+        self.assertNotIn(self.perl, message)
+        self.assertNotIn("leaked detail", message)
+        with self.assertRaisesRegex(PreparationError, "it printed no version"):
+            await runner.tool_version([self.perl, "-e", "exit 0;"], self.work)
+
     async def test_resource_accounting_failure_is_closed(self) -> None:
         runner = LifecycleRunner()
 
@@ -423,6 +558,18 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             result = await runner.run([self.perl, "-e", "sleep 30"], self.work, self.work)
         self.assertEqual(result.resource_exceeded, "accounting unavailable")
         self.assertNotEqual(result.returncode, 0)
+
+    async def test_unexpected_accounting_error_names_its_type(self) -> None:
+        runner = LifecycleRunner()
+
+        async def broken(pid: int, workspace: Path, *, max_file_bytes: int) -> str:
+            raise ValueError("bad row")
+
+        with patch.object(runner._monitor, "watch_command", broken):
+            result = await runner.run([self.perl, "-e", "sleep 30"], self.work, self.work)
+        self.assertEqual(
+            result.resource_exceeded, "Resource accounting failed: ValueError: bad row"
+        )
 
     async def test_environment_discards_injection_and_private_variables(self) -> None:
         with patch.dict(
@@ -446,6 +593,46 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         for key in ("HOME", "CODEX_HOME", "PERL5OPT", "OPENAI_API_KEY"):
             self.assertNotIn(key, environment)
         self.assertTrue(environment["TEXMFHOME"].startswith(str(self.work)))
+
+    async def test_environment_keeps_long_log_lines_unwrapped(self) -> None:
+        runner = ToolRunner()
+        environment = tool_environment(
+            self.work,
+            runner.toolchain.context(Path(self.perl)),
+            source_date_epoch=runner.source_date_epoch,
+        )
+        self.assertEqual(environment["max_print_line"], "1000")
+        self.assertEqual(environment["error_line"], "254")
+        self.assertEqual(environment["half_error_line"], "238")
+
+    async def test_long_citation_keys_reach_the_findings_whole(self) -> None:
+        pdflatex = shutil.which("pdflatex")
+        if pdflatex is None:
+            self.skipTest("pdflatex is unavailable")
+        key = "averyveryverylongcitationkeyforsomethingdeep2020"
+        (self.work / "main.tex").write_text(
+            "\\documentclass{article}\n\\begin{document}\\cite{" + key + "}\\end{document}\n"
+        )
+        runner = ToolRunner()
+        environment = tool_environment(
+            self.work,
+            runner.toolchain.context(Path(pdflatex).resolve()),
+            source_date_epoch=runner.source_date_epoch,
+        )
+        process = await asyncio.create_subprocess_exec(
+            pdflatex,
+            "-interaction=nonstopmode",
+            "main.tex",
+            cwd=self.work,
+            env=environment,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await process.wait()
+        findings = log_findings((self.work / "main.log").read_text(), "main.tex")
+        citations = [item for item in findings if item.rule == "build.undefined_citation"]
+        self.assertTrue(any(key in item.message for item in citations), citations)
 
     def test_file_size_limit_uses_a_shell_that_counts_kibibyte_units(self) -> None:
         wrapped = with_ulimits(["/usr/bin/true"], max_file_bytes=4096, timeout_seconds=120)

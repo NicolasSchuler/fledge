@@ -33,43 +33,9 @@ jobs:
       # Fail before building when the project metadata, the module and the
       # release tag disagree about the version, or the distribution is misnamed.
       - name: Verify the release tag matches the package version
-        id: version
         env:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
-        run: |
-          python - <<'PY'
-          import os
-          import re
-          import sys
-          import tomllib
-          from pathlib import Path
-
-          project = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["project"]
-          init = Path("src/latexprep/__init__.py").read_text(encoding="utf-8")
-          found = re.search(r'^__version__ = "([^"]+)"', init, re.MULTILINE)
-          problems = []
-          if project["name"] != "fledge-latex":
-              problems.append(f"pyproject.toml names the distribution {project['name']!r}, not 'fledge-latex'")
-          version = project["version"]
-          if found is None or found.group(1) != version:
-              module = found.group(1) if found else "missing"
-              problems.append(
-                  f"pyproject.toml version {version} differs from latexprep.__version__ ({module}); "
-                  "`fledge --version` would report the wrong version"
-              )
-          tag = os.environ.get("RELEASE_TAG", "")
-          if tag and tag != f"v{version}":
-              problems.append(f"release tag {tag!r} does not match pyproject.toml version {version} (expected 'v{version}')")
-          if not tag:
-              print("No release tag (manual run): checked the package metadata only.")
-          for problem in problems:
-              print(f"::error::{problem}")
-          if problems:
-              sys.exit(1)
-          print(f"Version {version} is consistent.")
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
-              output.write(f"version={version}\n")
-          PY
+        run: python scripts/release_checks.py version --tag "$RELEASE_TAG"
       - name: Install build tools
         run: python -m pip install --disable-pip-version-check 'build>=1.2,<2' 'twine>=6,<7'
       - name: Build source distribution and wheel
@@ -80,51 +46,7 @@ jobs:
       # from another directory, so a file missing from the wheel cannot be hidden
       # by the source tree.
       - name: Smoke-test the built wheel in a fresh environment
-        env:
-          EXPECTED_VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          shopt -s nullglob
-          wheels=(dist/*.whl)
-          if [ "${#wheels[@]}" -ne 1 ]; then
-            echo "::error::Expected exactly one wheel in dist/, found ${#wheels[@]}"
-            exit 1
-          fi
-          venv="$RUNNER_TEMP/wheel-smoke"
-          python -m venv "$venv"
-          "$venv/bin/python" -m pip install --disable-pip-version-check "${wheels[0]}"
-          presets="$GITHUB_WORKSPACE/src/latexprep/presets"
-          cd "$RUNNER_TEMP"
-          for command in fledge latex-prep; do
-            printed=$("$venv/bin/$command" --version)
-            if [ "$printed" != "fledge, version $EXPECTED_VERSION" ]; then
-              echo "::error::$command --version printed '$printed', expected version $EXPECTED_VERSION"
-              exit 1
-            fi
-          done
-          "$venv/bin/fledge" --help > /dev/null
-          "$venv/bin/python" -I - "$EXPECTED_VERSION" "$presets" <<'PY'
-          import sys
-          from importlib import metadata, resources
-          from pathlib import Path
-
-          import latexprep
-
-          expected_version, source_presets = sys.argv[1], Path(sys.argv[2])
-          distribution = metadata.distribution("fledge-latex")
-          if distribution.version != expected_version:
-              sys.exit(f"Installed version {distribution.version} is not {expected_version}")
-          if "site-packages" not in Path(latexprep.__file__).parts:
-              sys.exit(f"latexprep was imported from {latexprep.__file__}, not the installed wheel")
-          source = sorted(path.name for path in source_presets.glob("*.toml"))
-          shipped = sorted(
-              entry.name
-              for entry in (resources.files("latexprep") / "presets").iterdir()
-              if entry.name.endswith(".toml")
-          )
-          if not source or shipped != source:
-              sys.exit(f"latexprep/presets/*.toml in the wheel {shipped} differ from the source {source}")
-          print(f"fledge-latex {distribution.version} ships presets: {', '.join(shipped)}")
-          PY
+        run: python scripts/release_checks.py wheel dist
       - name: Upload distributions
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:

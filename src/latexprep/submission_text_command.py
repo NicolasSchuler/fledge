@@ -11,7 +11,7 @@ import click
 from rich.console import Console
 from rich.text import Text
 
-from .command_options import reject_config_with_isolated, settings_file_options
+from .command_options import debug_option, reject_config_with_isolated, settings_file_options
 from .config import load_settings, resolve_config_path
 from .models import Outcome, PreparationError
 from .project import ImportLimits, import_project
@@ -26,6 +26,7 @@ from .submission_text import FIELD_NAMES, read_submission_text, safe_display
     "--json", "json_output", is_flag=True, help="Return all fields and readiness details."
 )
 @settings_file_options
+@debug_option
 def submission_text_command(
     source: Path,
     main: str | None,

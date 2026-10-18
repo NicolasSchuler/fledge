@@ -304,7 +304,16 @@ def _load_toml(path: Path) -> dict[str, object]:
     try:
         with path.open("rb") as stream:
             return tomllib.load(stream)
-    except (OSError, tomllib.TOMLDecodeError) as error:
+    except FileNotFoundError as error:
+        raise RequestError(
+            f"Settings file {path} does not exist",
+            "Check the spelling of the --config path, or run fledge init to write a starter "
+            "fledge.toml.",
+        ) from error
+    except OSError as error:
+        # strerror is the plain reason ("Permission denied"); str(error) adds an errno code.
+        raise PreparationError(f"Cannot read settings {path}: {error.strerror or error}") from error
+    except tomllib.TOMLDecodeError as error:
         raise PreparationError(f"Cannot read settings {path}: {error}") from error
 
 

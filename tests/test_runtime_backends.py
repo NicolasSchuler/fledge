@@ -109,6 +109,19 @@ class HomebrewRuntimeTests(unittest.TestCase):
             self.assertNotIn(outside, roots)
             self.assertNotIn(prefix / "opt/nss", roots)
 
+    def test_receipt_that_is_not_a_json_object_grants_only_its_own_package(self) -> None:
+        for content in ("[]", '"text"', "7", "null", "not json"):
+            with self.subTest(content=content), tempfile.TemporaryDirectory() as directory:
+                prefix = Path(directory).resolve()
+                poppler = prefix / "Cellar" / "poppler" / "26.10.0"
+                binary = poppler / "bin" / "pdfinfo"
+                binary.parent.mkdir(parents=True)
+                binary.write_bytes(b"installed tool fixture")
+                (poppler / "INSTALL_RECEIPT.json").write_text(content)
+                roots = distribution_roots(binary)
+                self.assertIn(poppler, roots)
+                self.assertNotIn(prefix / "Cellar", roots)
+
 
 class LinuxSandboxTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:

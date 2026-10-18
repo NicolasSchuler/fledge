@@ -5,17 +5,34 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fledge-latex"
-version = "0.2.0"
+# The version is defined once, as latexprep.__version__; setuptools reads it without importing.
+dynamic = ["version"]
 description = "Fledge prepares verified LaTeX submission bundles without changing the original project"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
+authors = [{ name = "Nicolas Schuler" }]
+keywords = ["latex", "submission", "arxiv", "reproducibility", "pdf", "bibliography", "linter"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Science/Research",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Text Processing :: Markup :: LaTeX",
+]
 requires-python = ">=3.11"
 dependencies = ["click>=8.1,<9", "rich>=13.7,<15"]
 
 [project.urls]
 Repository = "https://github.com/NicolasSchuler/fledge"
 Documentation = "https://nicolasschuler.github.io/fledge/"
+Issues = "https://github.com/NicolasSchuler/fledge/issues"
+Changelog = "https://github.com/NicolasSchuler/fledge/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 docs = ["sphinx>=8,<10", "myst-parser>=4,<6"]
@@ -26,6 +43,9 @@ dev = ["ruff>=0.9,<1", "ty>=0.0.1,<0.1", "pytest>=9,<10", "pytest-xdist>=3.6,<4"
 [project.scripts]
 fledge = "latexprep.cli:main"
 latex-prep = "latexprep.cli:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "latexprep.__version__" }
 
 [tool.setuptools.packages.find]
 where = ["src"]

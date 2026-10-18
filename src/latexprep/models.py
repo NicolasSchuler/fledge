@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from dataclasses import KW_ONLY, asdict, dataclass, field
 from enum import StrEnum
 from typing import Literal, NotRequired, TypedDict, get_args
 
-from .redaction import redact_data
+from .redaction import redact_data, scrub_local_paths
 from .rules import BY_NAME, code_for
 
 Severity = Literal["error", "warning", "info"]
@@ -25,7 +26,7 @@ LAYOUTS: tuple[Layout, ...] = get_args(Layout)
 # new fields may appear within a version. docs/_static/report.schema.json describes it.
 REPORT_SCHEMA_VERSION = 2
 REPORT_COMMANDS: frozenset[str] = frozenset(
-    {"inspect", "check", "prepare", "bib", "fmt", "pdf", "report", "doctor"}
+    {"inspect", "check", "prepare", "bib", "fmt", "pdf", "doctor"}
 )
 # The finding rule that marks a request rejected before or while the job ran.
 REQUEST_ERROR_RULE = "execution.request"
@@ -221,7 +222,13 @@ class Report:
         """Sanitize every output field together, including settings and tool inventories."""
         values = redact_data(asdict(self))
         if not isinstance(values, dict):
-            return _withheld_report()
+            return _withheld_report(self.command, _REDACTION_LIMIT_CAUSE)
+        # Artifact paths name the files a job published, which callers and scripts open,
+        # so they keep their location; every other local path is generalized.
+        artifacts = values.get("artifacts")
+        values = scrub_local_paths(values)
+        if "artifacts" in values:
+            values["artifacts"] = artifacts
         try:
             # These finite, application-defined enums and registered rule IDs are
             # control data, not manuscript content (a password could be "passed").
@@ -244,15 +251,16 @@ class Report:
             values["findings"] = [Finding(**item) for item in values["findings"]]
             values["changes"] = [Change(**item) for item in values["changes"]]
             result = Report(**values)
-        except (KeyError, TypeError, ValueError):
+        except (KeyError, TypeError, ValueError) as error:
             # A short credential can also occur in a schema key. Never reconstruct
-            # from raw content or throw a diagnostic containing that content.
-            return _withheld_report()
+            # from raw content or throw a diagnostic containing that content; the
+            # error type alone tells such a collision or defect from an oversized report.
+            return _withheld_report(self.command, type(error).__name__)
         if any(
             not isinstance(stage, dict) or not isinstance(stage.get("name"), str)
             for stage in result.stages
         ):
-            return _withheld_report()
+            return _withheld_report(self.command, "invalid_stage_record")
         return result
 
     def sorted_findings(self) -> list[Finding]:
@@ -298,19 +306,42 @@ class Report:
         return json.dumps(self.to_dict(), indent=2, ensure_ascii=False) + "\n"
 
 
-def _withheld_report() -> Report:
+# Why a report was withheld: its size or nesting exceeded the redaction limits.
+_REDACTION_LIMIT_CAUSE = "redaction_limit"
+
+
+def _withheld_report(command: str, cause: str) -> Report:
+    """A report without content, for output that cannot be sanitized safely.
+
+    ``cause`` is ``redaction_limit`` or the name of the error that stopped sanitizing,
+    so an oversized report and a defect are distinguishable; it never quotes content.
+    """
+    if cause == _REDACTION_LIMIT_CAUSE:
+        message = (
+            "Report cannot be safely represented within redaction limits; "
+            "raw details were withheld."
+        )
+        suggestion = "Reduce the selected checks or input size and repeat the job."
+    else:
+        message = (
+            f"Report could not be safely sanitized (cause: {cause}); raw details were withheld."
+        )
+        suggestion = (
+            "Repeat the job; if this persists, report the cause shown together with the command "
+            "you ran. A very short credential-like value in your settings can also trigger it."
+        )
     return Report(
-        "report",
+        command if command in REPORT_COMMANDS else "inspect",
         outcome=Outcome.ERROR,
         scope="report sanitization",
         findings=[
             Finding(
                 "report.redaction_limit",
-                "Report cannot be safely represented within redaction limits; "
-                "raw details were withheld.",
+                message,
                 severity="error",
                 status="inconclusive",
-                suggestion="Reduce the selected checks or input size and repeat the job.",
+                suggestion=suggestion,
+                details={"cause": cause},
             )
         ],
     )
@@ -327,14 +358,23 @@ def request_error_finding(error: Exception, suggestion: str) -> Finding:
     )
 
 
-def internal_error_finding(error: Exception) -> Finding:
-    """A defect must still yield a machine-readable error report and exit code."""
+def internal_error_finding(
+    error: Exception,
+    *,
+    suggestion: str = "Report this defect with the command and the JSON report.",
+    frames: Sequence[str] = (),
+) -> Finding:
+    """A defect must still yield a machine-readable error report and exit code.
+
+    ``frames`` summarize where it was raised; see ``defects.summarize_traceback``.
+    """
     return Finding(
         "execution.internal",
         f"Internal error ({type(error).__name__}): {error}",
         severity="error",
         status="inconclusive",
-        suggestion="Report this defect with the command and the JSON report.",
+        suggestion=suggestion,
+        details={"error_type": type(error).__name__, "frames": list(frames)},
     )
 
 

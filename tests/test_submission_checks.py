@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
-from dataclasses import asdict
+from dataclasses import asdict, fields
 from pathlib import Path
 from unittest.mock import patch
 
@@ -144,11 +144,18 @@ class SubmissionTests(unittest.TestCase):
         result = self.result(rule, options)
         self.assertEqual(result.message, "9 matches: a.tex:1, a.tex:3, b.txt:2 (+5 more)")
         many = self.result("submission.filename_length", SubmissionOptions(filename_max_length=4))
-        self.assertEqual(many.message, "8 matches: a.tex, b.txt, c0.tex (+5 more)")
+        self.assertEqual(
+            many.message,
+            "File names longer than 4 characters (8): a.tex (5 characters), b.txt (5 characters), "
+            "c0.tex (6 characters) (+5 more)",
+        )
         self.assertEqual(len(many.details["matches"]), 8)
         self.write("x" * 240 + ".dat", "")
         long = self.result("submission.filename_length", SubmissionOptions(filename_max_length=200))
-        self.assertEqual(long.message, "1 match: " + "x" * 119 + "…")
+        self.assertEqual(
+            long.message,
+            "File names longer than 200 characters (1): " + "x" * 119 + "… (244 characters)",
+        )
         self.assertEqual(long.details["matches"], [{"path": "x" * 240 + ".dat"}])
 
     def test_file_policy_and_deliverable_messages_name_the_offending_files(self) -> None:
@@ -156,19 +163,118 @@ class SubmissionTests(unittest.TestCase):
         one = self.result(
             "submission.file_extensions", SubmissionOptions(allowed_extensions=(".tex",))
         )
-        self.assertEqual(one.message, "1 match: only-one.dat")
+        self.assertEqual(
+            one.message, "Files with extensions that are not allowed (1): only-one.dat (.dat)"
+        )
         # Deliverable reasons stay visible without opening the JSON details.
         missing = self.result(
             "submission.deliverables",
             SubmissionOptions(required_deliverables=(("missing.pdf", "pdf"),)),
         )
-        self.assertEqual(missing.message, "1 match: missing.pdf (missing regular file)")
+        self.assertEqual(
+            missing.message, "Required deliverables not satisfied (1): missing.pdf is missing"
+        )
         with patch("latexprep.submission_checks.MAX_SCAN_MATCHES", 2):
             self.write("a.tex", "Identity\n" * 5)
             capped = self.result(
                 "submission.identity_terms", SubmissionOptions(identity_terms=("Identity",))
             )
         self.assertEqual(capped.message, "2+ matches: a.tex:1, a.tex:2")
+
+    def test_file_policy_messages_give_the_limit_the_characters_and_the_extension(self) -> None:
+        self.write("bad name.tex", "")
+        self.write("notes", "")
+        characters = self.result(
+            "submission.filename_characters",
+            SubmissionOptions(filename_allowed_characters="abcdefghijklmnopqrstuvwxyz."),
+        )
+        self.assertEqual(
+            characters.message,
+            "File names with characters outside the allowed set (1): "
+            "bad name.tex (not allowed: ' ')",
+        )
+        extensions = self.result(
+            "submission.file_extensions", SubmissionOptions(allowed_extensions=(".tex",))
+        )
+        self.assertEqual(
+            extensions.message,
+            "Files with extensions that are not allowed (1): notes (no extension)",
+        )
+        self.assertEqual(extensions.details["matches"], [{"path": "notes"}])
+
+    def test_deliverable_messages_say_what_is_missing_or_wrong_in_plain_words(self) -> None:
+        self.write("title.pdf", "Not a PDF")
+        self.write("data.zip", b"PK\x05\x06" + bytes(18))
+        self.write("empty.txt", "")
+        result = self.result(
+            "submission.deliverables",
+            SubmissionOptions(
+                required_deliverables=(
+                    ("title.pdf", "pdf"),
+                    ("data.zip", "zip"),
+                    ("empty.txt", "text"),
+                    ("cover.pdf", "pdf"),
+                )
+            ),
+        )
+        self.assertEqual(
+            result.message,
+            "Required deliverables not satisfied (3): title.pdf does not start like a PDF file, "
+            "empty.txt is empty or is not UTF-8 text, cover.pdf is missing",
+        )
+        self.assertNotIn("match", result.message)
+
+    def test_archive_size_message_states_the_size_and_the_limit(self) -> None:
+        archive = self.write("project.zip", b"0" * 12345)
+        result = check_submission_archive(archive, SubmissionOptions(max_archive_bytes=10000))[0]
+        self.assertEqual(
+            result.message,
+            "The compressed archive is 12,345 bytes, over the configured limit of 10,000 bytes",
+        )
+
+    def test_unused_asset_message_names_the_files(self) -> None:
+        self.write("figures/unused.png", b"image")
+        result = self.result(
+            "submission.unused_assets", SubmissionOptions(report_unused_assets=True)
+        )
+        self.assertEqual(
+            result.message,
+            "Asset files not referenced by the selected document (1): figures/unused.png",
+        )
+
+    def test_every_option_either_enables_the_bundle_scan_or_is_handled_elsewhere(self) -> None:
+        enabling = {
+            "identity_terms": ("Jane",),
+            "scan_identity_hints": True,
+            "scan_secrets": True,
+            "scan_private_comments": True,
+            "check_shell_escape": True,
+            "filename_max_length": 1,
+            "filename_allowed_characters": "a",
+            "allowed_extensions": (".tex",),
+            "required_deliverables": (("main.tex", "file"),),
+            "report_unused_assets": True,
+            "template_references": (("main.tex", "reference.tex"),),
+        }
+        elsewhere = {
+            "identity_term_matching": "substring",
+            "max_archive_bytes": 1,
+            "check_bbl_coverage": True,
+            "require_bbl": True,
+            "biblatex_bbl_format_version": "3.3",
+        }
+        # A new option has to be classified here, so it cannot silently run no check.
+        self.assertEqual(
+            {option.name for option in fields(SubmissionOptions)}, {*enabling, *elsewhere}
+        )
+        for name, value in enabling.items():
+            with self.subTest(option=name):
+                options = SubmissionOptions(**{name: value})  # type: ignore[arg-type]
+                self.assertTrue(check_submission(self.root, "main.tex", options))
+        for name, value in elsewhere.items():
+            with self.subTest(option=name):
+                options = SubmissionOptions(**{name: value})  # type: ignore[arg-type]
+                self.assertEqual(check_submission(self.root, "main.tex", options), [])
 
     def test_inconclusive_message_names_the_first_issue_and_pdf_message_names_channels(
         self,

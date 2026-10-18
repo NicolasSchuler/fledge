@@ -74,7 +74,9 @@ def stage_loaded_options(project: Path, main: str, work: Path) -> LoadedOptionsP
     """Add a line-neutral hook only to the existing disposable project copy."""
     main_path = project / main
     if main_path.stat().st_size > _MAX_MAIN_BYTES:
-        raise PreparationError("Loaded-option instrumentation supports main files up to 8 MiB")
+        raise PreparationError(
+            f"Loaded-option instrumentation supports main files up to {_MAX_MAIN_BYTES // MIB} MiB"
+        )
     original = main_path.read_bytes()
     token = secrets.token_hex(16)
     hook = work / f"latexprep-loaded-options-{token}.tex"
@@ -282,5 +284,13 @@ def collect_loaded_options(
                 "Unexpanded control sequences remain in normalized kernel options"
             )
         return LoadedOptionsEvidence(replace(kernel, packages=joined))
-    except (OSError, UnicodeError, PreparationError) as error:
+    except OSError as error:
+        # The cause names no path: the hook's files live in a private temporary directory.
+        cause = (error.strerror or type(error).__name__).lower()
+        return LoadedOptionsEvidence(
+            uncertainty=f"The option hook or the file it writes could not be read ({cause})"
+        )
+    except UnicodeError:
+        return LoadedOptionsEvidence(uncertainty="The option evidence is not plain ASCII text")
+    except PreparationError as error:
         return LoadedOptionsEvidence(uncertainty=str(error))

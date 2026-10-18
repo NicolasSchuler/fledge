@@ -267,7 +267,11 @@ class PdfArtworkTests(unittest.IsolatedAsyncioTestCase):
         result = await self.check(options, runner)
         self.assertEqual(result[0].status, "inconclusive")
         self.assertEqual(result[0].details["unclassified_text_operations"], 1)
-        await self.status(options, "inconclusive", trace=trace(text), missing="pdffonts")
+        self.assertIsNone(result[0].details["font_inventory_error"])
+        self.assertNotIn("pdffonts", result[0].message)
+        failed = await self.status(options, "inconclusive", trace=trace(text), missing="pdffonts")
+        self.assertIn("pdffonts could not list the fonts (Missing tool: pdffonts)", failed.message)
+        self.assertEqual(failed.details["font_inventory_error"], "Missing tool: pdffonts")
 
     async def test_type3_decoding_excludes_image_pixels(self) -> None:
         runner = ArtworkRunner(objects=type3_objects(b"/Picture Do", nested=True))
@@ -294,9 +298,16 @@ class PdfArtworkTests(unittest.IsolatedAsyncioTestCase):
         options = PdfArtworkOptions(figure_regions=(region(),), max_figure_whitespace_ratio=0.5)
         good = await self.status(options, "passed")
         self.assertAlmostEqual(good.details["outside_content_box_ratio"], 0.36)
+        self.assertEqual(
+            good.message,
+            "Figure on page 1 leaves 36.0% of its area empty around the content, within the "
+            "50.0% limit.",
+        )
         bad = await self.status(options, "failed", raster=raster(box=(40, 40, 60, 60)))
         self.assertAlmostEqual(bad.details["outside_content_box_ratio"], 0.96)
         self.assertEqual(bad.details["content_bounds_pt"], (40, 40, 60, 60))
+        self.assertIn("leaves 96.0% of its area empty", bad.message)
+        self.assertIn("above the 50.0% limit", bad.message)
         await self.status(
             replace(options, background_gray=0), "passed", raster=raster(background=0)
         )
@@ -309,6 +320,9 @@ class PdfArtworkTests(unittest.IsolatedAsyncioTestCase):
         finding = await self.status(options, "failed", raster=raster(box=(0, 20, 30, 60)))
         self.assertEqual(finding.severity, "warning")
         self.assertEqual(finding.details["violations"][0]["edge_ink_pixels"], 40)
+        self.assertIn(
+            "Ink touches the outer 1 pt border of Figure on page 1 (40 pixels)", finding.message
+        )
         runner = ArtworkRunner()
         runner.geometry = runner.geometry.replace("CropBox: 0 0 100 100", "CropBox: 10 10 90 90")
         result = await self.check(options, runner)
@@ -359,13 +373,20 @@ class PdfArtworkTests(unittest.IsolatedAsyncioTestCase):
         options = PdfArtworkOptions(
             artwork_category="line drawing", category_min_dpi=(("line drawing", 200),)
         )
-        await self.status(options, "passed", trace=trace(image(matrix="0 100 -100 0 100 0")))
+        good = await self.status(options, "passed", trace=trace(image(matrix="0 100 -100 0 100 0")))
+        self.assertIn("All 1 image placements are at or above the 200 dpi minimum", good.message)
         bad = await self.status(
             options, "failed", trace=trace(image(height=100) + image(height=100))
         )
         self.assertEqual(bad.details["violation_count"], 2)
         self.assertEqual(bad.details["violations"][0]["x_dpi"], 216)
         self.assertEqual(bad.details["violations"][0]["y_dpi"], 72)
+        self.assertEqual(bad.details["violations"][0]["effective_dpi"], 72)
+        self.assertEqual(
+            bad.message,
+            "Image placements below the 200 dpi minimum for 'line drawing': 2 of 2; "
+            "the lowest is 72 dpi on page 1.",
+        )
         sheared = replace(options, category_min_dpi=(("line drawing", 60),))
         finding = await self.status(
             sheared, "failed", trace=trace(image(matrix="100 0 100 100 0 0", width=100, height=100))
@@ -420,6 +441,10 @@ class PdfArtworkTests(unittest.IsolatedAsyncioTestCase):
             options, "failed", trace=trace(stroke(matrix="2 0 0 .5 0 0", width=0.5))
         )
         self.assertEqual(bad.details["violations"][0]["minimum_effective_width_pt"], 0.25)
+        self.assertEqual(
+            bad.message,
+            "Strokes thinner than 0.4 pt after placement: 1; the thinnest is 0.25 pt on page 1.",
+        )
         await self.status(options, "passed", trace=trace(stroke(matrix="0 2 -2 0 0 0", width=0.2)))
         await self.status(options, "inconclusive", trace=trace(stroke(width=0)))
         curve = (
@@ -434,9 +459,12 @@ class PdfArtworkTests(unittest.IsolatedAsyncioTestCase):
         )
         candidate = await self.status(options, "failed", trace=trace(image()))
         self.assertEqual(candidate.details["raster_coverage"], 1)
+        self.assertIn("Table 1 on page 1 is 100.0% covered by raster images", candidate.message)
+        self.assertIn("scan or a raster table", candidate.message)
         duplicate = image(matrix="60 0 0 100 0 0") * 2
         valid = await self.status(options, "passed", trace=trace(duplicate))
         self.assertAlmostEqual(valid.details["raster_coverage"], 0.6)
+        self.assertEqual(valid.message, "Raster images cover 60.0% of Table 1 on page 1.")
         text = '<fill_text transform="1 0 0 1 0 0"><span><g x="10" y="10"/></span></fill_text>'
         await self.status(options, "inconclusive", trace=trace(image() + text))
         await self.status(options, "inconclusive", trace=trace(image(matrix="80 20 0 80 0 0")))
@@ -516,8 +544,17 @@ class PdfArtworkTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result[0].status, "passed")
         self.assertEqual(result[0].details["contrast_ratio_min"], 21)
         self.assertEqual(result[0].details["contrast_ratio_max"], 21)
+        self.assertEqual(
+            result[0].message,
+            "Sample 'Label/background' on page 1 has a contrast ratio of at least 21.00:1 "
+            "(required 4.5:1).",
+        )
         self.assertFalse(any(argv[0] == "mutool" for argv, _, _ in runner.calls))
-        await self.status(options, "failed", rgb=rgb_raster(foreground=(180, 180, 180)))
+        light = await self.status(options, "failed", rgb=rgb_raster(foreground=(180, 180, 180)))
+        self.assertIn(
+            "Sample 'Label/background' on page 1 has a contrast ratio of at most", light.message
+        )
+        self.assertIn("below the required 4.5:1", light.message)
         dark_background = await self.status(
             options, "failed", rgb=rgb_raster(background=(20, 20, 20))
         )
@@ -536,7 +573,12 @@ class PdfArtworkTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         options = PdfArtworkOptions(contrast_samples=(contrast_sample(),))
         varied = rgb_raster(alternate=(1, 1, 1))
-        await self.status(options, "inconclusive", rgb=varied)
+        uneven = await self.status(options, "inconclusive", rgb=varied)
+        self.assertIn(
+            "has uneven colours (channel values vary by up to 1; the allowed spread is 0)",
+            uneven.message,
+        )
+        self.assertIn("max_channel_spread", uneven.message)
         tolerated = PdfArtworkOptions(contrast_samples=(contrast_sample(tolerance=1),))
         await self.status(tolerated, "passed", rgb=varied)
         crossing = PdfArtworkOptions(contrast_samples=(contrast_sample(tolerance=30),))
@@ -548,6 +590,7 @@ class PdfArtworkTests(unittest.IsolatedAsyncioTestCase):
         self.assertLess(uncertain.details["contrast_ratio_min"], 4.5)
         self.assertGreater(uncertain.details["contrast_ratio_max"], 4.5)
         self.assertEqual(uncertain.details["violation_count"], 0)
+        self.assertIn("cannot be confirmed or ruled out", uncertain.message)
 
     async def test_rendered_sample_contrast_rejects_incomplete_render_and_unsupported_regions(
         self,

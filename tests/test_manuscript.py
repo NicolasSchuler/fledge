@@ -325,6 +325,111 @@ class ManuscriptTests(unittest.TestCase):
             self.assertEqual(result.status, "inconclusive")
             self.assertTrue(result.details["uncertainty"])
 
+    def test_missing_figures_and_bibliographies_do_not_hide_a_definite_result(self) -> None:
+        options = ManuscriptOptions(expected_document_class="article")
+        for command in (
+            r"\includegraphics{missing.png}",
+            r"\includegraphics{a.png}\includegraphics{b.pdf}",
+            r"\bibliography{refs}",
+            r"\addbibresource{refs.bib}",
+            r"\bibliographystyle{styles/custom}",
+        ):
+            with self.subTest(command=command):
+                result = self.finding(
+                    r"\documentclass{report}" + command, options, "manuscript.document_class"
+                )
+                self.assertEqual((result.status, result.severity), ("failed", "error"))
+                self.assertEqual(result.details["uncertainty"], [])
+
+    def test_missing_source_files_still_make_every_constraint_inconclusive(self) -> None:
+        options = ManuscriptOptions(expected_document_class="article")
+        for command in (
+            r"\input{missing}",
+            r"\input{missing}\includegraphics{missing}",
+            r"\includegraphics{a.png}\input{chapter}",
+            r"\usepackage{local/missing}",
+        ):
+            with self.subTest(command=command):
+                result = self.finding(
+                    r"\documentclass{article}" + command, options, "manuscript.document_class"
+                )
+                self.assertEqual(result.status, "inconclusive")
+                self.assertTrue(result.details["uncertainty"])
+                self.assertNotIn("..", result.message)
+                self.assertIn("is missing from the project", result.message)
+                self.assertTrue(result.message.endswith("."), result.message)
+
+    def test_messages_state_values_limits_and_counts_in_plain_words(self) -> None:
+        self.write(
+            "main.tex",
+            r"\documentclass[draft]{report}\usepackage{todonotes,graphicx,geometry}"
+            r"\begin{abstract}one two\end{abstract}",
+        )
+        options = ManuscriptOptions(
+            expected_document_class="article",
+            required_class_options=("twocolumn", "10pt"),
+            forbidden_class_options=("draft",),
+            forbidden_packages=("todonotes", "geometry", "hyperref", "amsmath"),
+            require_abstract=True,
+            abstract_min_words=3,
+            keywords_max_count=2,
+        )
+        messages = {
+            item.rule: item.message for item in check_manuscript(self.root, "main.tex", options)
+        }
+        self.assertEqual(
+            messages["manuscript.document_class"],
+            "Declared document class: report; expected: article.",
+        )
+        self.assertEqual(
+            messages["manuscript.class_options"],
+            "Missing required class options: 10pt, twocolumn; "
+            "forbidden class options present: draft.",
+        )
+        self.assertEqual(
+            messages["manuscript.forbidden_packages"],
+            "Forbidden packages declared: todonotes, geometry (main.tex:1).",
+        )
+        self.assertEqual(
+            messages["manuscript.abstract_required"],
+            "Found 1 supported literal abstract declaration; one nonempty abstract is required.",
+        )
+        self.assertEqual(
+            messages["manuscript.abstract_words"],
+            "Abstract source word count: 2; allowed: at least 3 words.",
+        )
+        self.assertEqual(
+            messages["manuscript.keyword_count"],
+            "Literal keyword count: 0; allowed: at most 2 keywords.",
+        )
+        for message in messages.values():
+            self.assertNotIn("[", message)
+            self.assertNotIn("None", message)
+        clean = self.finding(
+            r"\documentclass{article}\usepackage{graphicx}",
+            ManuscriptOptions(forbidden_packages=("todonotes", "geometry")),
+            "manuscript.forbidden_packages",
+        )
+        self.assertEqual(
+            clean.message,
+            "No forbidden package is declared directly (forbidden: todonotes, geometry).",
+        )
+
+    def test_word_and_keyword_ranges_are_spelled_out(self) -> None:
+        for minimum, maximum, words in (
+            (None, 5, "at most 5 words"),
+            (1, None, "at least 1 word"),
+            (3, 5, "3 to 5 words"),
+            (4, 4, "exactly 4 words"),
+        ):
+            with self.subTest(minimum=minimum, maximum=maximum):
+                result = self.finding(
+                    r"\documentclass{article}\begin{abstract}one two\end{abstract}",
+                    ManuscriptOptions(abstract_min_words=minimum, abstract_max_words=maximum),
+                    "manuscript.abstract_words",
+                )
+                self.assertTrue(result.message.endswith(f"allowed: {words}."), result.message)
+
     def test_default_options_do_not_emit_compliance_passes_or_read_input(self) -> None:
         self.assertEqual(
             check_manuscript(self.root / "absent", "main.tex", ManuscriptOptions()), []
@@ -482,15 +587,40 @@ class ManuscriptTests(unittest.TestCase):
         self.assertEqual(result.details["abstracts"][0]["word_count_range"], [3, 3])
 
     def test_invalid_count_ranges_and_conflicting_class_options_are_rejected(self) -> None:
-        for values in (
-            {"abstract_min_words": -1},
-            {"keywords_min_count": 3, "keywords_max_count": 2},
-            {"required_class_options": ("draft",), "forbidden_class_options": ("draft",)},
-            {"require_abstract": "yes"},
-            {"required_sections": ("",)},
+        for values, named in (
+            ({"abstract_min_words": -1}, "abstract_min_words must be a nonnegative integer"),
+            (
+                {"keywords_min_count": 3, "keywords_max_count": 2},
+                "keywords_min_count must not exceed keywords_max_count",
+            ),
+            (
+                {"required_class_options": ("draft",), "forbidden_class_options": ("draft",)},
+                "Class option 'draft' is in both required_class_options and "
+                "forbidden_class_options",
+            ),
+            ({"require_abstract": "yes"}, "require_abstract must be a boolean"),
+            (
+                {"required_sections": ("",)},
+                "required_sections must contain nonempty strings without surrounding spaces",
+            ),
+            (
+                {"forbidden_packages": ("amsmath", "todonotes", "amsmath")},
+                "forbidden_packages lists 'amsmath' twice",
+            ),
+            (
+                {"forbidden_class_options": ("a,b",)},
+                "forbidden_class_options entry 'a,b' must be a single literal name",
+            ),
+            (
+                {"expected_document_class": "a,b"},
+                "expected_document_class must be a single nonempty class name",
+            ),
+            ({"abstract_max_words": True}, "abstract_max_words must be a nonnegative integer"),
         ):
-            with self.subTest(values=values), self.assertRaises(PreparationError):
-                ManuscriptOptions(**values)
+            with self.subTest(values=values):
+                with self.assertRaises(PreparationError) as raised:
+                    ManuscriptOptions(**values)
+                self.assertIn(named, str(raised.exception))
 
 
 if __name__ == "__main__":

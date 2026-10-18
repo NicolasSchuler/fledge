@@ -167,6 +167,47 @@ class FormattingTests(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(result.changes, [])
                         self.assertEqual((source / "main.tex").read_bytes(), original)
 
+    async def test_formatter_failures_quote_a_short_pathless_message(self):
+        stderr = (
+            "error: cannot read /private/var/folders/ab/work/files/main.tex: boom\n"
+            "second line\n" + "x" * 5000
+        )
+        for stderr_text, expected in (
+            (stderr, "tex-fmt failed with exit status 2: error: cannot read <path>: boom"),
+            ("", "tex-fmt failed with exit status 2"),
+        ):
+            with self.subTest(stderr=stderr_text[:20]), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory)
+                (base / "source").mkdir()
+                (base / "source" / "main.tex").write_text("text\n")
+                failed = CommandResult(2, "", stderr_text, resolved_command=[])
+                with patch("latexprep.formatting.shutil.which", return_value="/fake/tex-fmt"):
+                    result = await format_with(
+                        base / "source", base / "work", FakeFormatter([failed]), Settings()
+                    )
+                (finding,) = [f for f in result.findings if f.rule == "source.format_execution"]
+                self.assertEqual(finding.message, expected)
+                self.assertNotIn("second line", finding.message)
+                self.assertNotIn(str(base), finding.message)
+
+    async def test_operating_system_errors_are_reported_by_cause_without_the_workspace(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            (base / "source").mkdir()
+            (base / "source" / "main.tex").write_text("text\n")
+            denied = PermissionError(13, "Permission denied", str(base / "work/files/main.tex"))
+            with (
+                patch("latexprep.formatting.shutil.which", return_value="/fake/tex-fmt"),
+                patch("latexprep.formatting._format_file", side_effect=denied),
+            ):
+                result = await format_with(
+                    base / "source", base / "work", FakeFormatter([]), Settings()
+                )
+            (finding,) = [f for f in result.findings if f.rule == "source.format_execution"]
+            self.assertEqual(finding.path, "main.tex")
+            self.assertIn("permission denied", finding.message)
+            self.assertNotIn(str(base), finding.message)
+
     async def test_only_idempotent_output_is_proposed(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)

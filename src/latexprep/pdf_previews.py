@@ -20,7 +20,8 @@ from .pdf_support import MAX_RASTER_DIMENSION, MAX_RASTER_PIXELS
 
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 _PNG_END = b"\x00\x00\x00\x00IEND\xaeB`\x82"
-# Signature, IHDR and IEND chunks: no complete PNG image is shorter.
+# Signature (8) + IHDR chunk (25) + a minimal empty IDAT chunk (12) + IEND chunk (12): no
+# complete PNG image is shorter.
 MIN_PNG_BYTES = 57
 MAX_PREVIEW_BYTES = 12 * MIB
 

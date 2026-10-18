@@ -13,8 +13,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, TypedDict
 
-from .expanded_document import CONTENT_INPUT_COMMANDS, commands_before_end, reachable_sources
-from .file_scan import check_status
+from .expanded_document import (
+    CONTENT_INPUT_COMMANDS,
+    commands_before_end,
+    reachable_sources,
+    unresolved_non_content_file,
+)
+from .file_scan import check_status, format_locations, more_suffix, plural
 from .literal_text import (
     HEADING_DEPTHS,
     KEY_ARGUMENT_COMMANDS,
@@ -54,46 +59,47 @@ class ManuscriptOptions:
             not isinstance(self.expected_document_class, str)
             or literal_list(self.expected_document_class) != [self.expected_document_class]
         ):
-            raise PreparationError("Expected document class must be a nonempty string")
-        for names in (
-            self.required_class_options,
-            self.forbidden_class_options,
-            self.forbidden_packages,
-            self.required_sections,
-        ):
-            if (
-                not isinstance(names, tuple)
-                or any(
-                    not isinstance(name, str) or not name.strip() or name != name.strip()
-                    for name in names
-                )
-                or len(set(names)) != len(names)
-            ):
-                raise PreparationError(
-                    "Manuscript name lists must be tuples of unique nonempty strings"
-                )
+            raise PreparationError("expected_document_class must be a single nonempty class name")
         for name in (
-            *self.required_class_options,
-            *self.forbidden_class_options,
-            *self.forbidden_packages,
+            "required_class_options",
+            "forbidden_class_options",
+            "forbidden_packages",
+            "required_sections",
         ):
-            if literal_list(name) != [name]:
-                raise PreparationError(
-                    "Class options and package names must be single literal names"
-                )
-        for lower, upper in (
-            (self.abstract_min_words, self.abstract_max_words),
-            (self.keywords_min_count, self.keywords_max_count),
-        ):
-            if any(
-                value is not None and (type(value) is not int or value < 0)
-                for value in (lower, upper)
+            values = getattr(self, name)
+            if not isinstance(values, tuple) or any(
+                not isinstance(value, str) or not value.strip() or value != value.strip()
+                for value in values
             ):
-                raise PreparationError("Manuscript count limits must be nonnegative integers")
+                raise PreparationError(
+                    f"{name} must contain nonempty strings without surrounding spaces"
+                )
+            repeated = sorted({value for value in values if values.count(value) > 1})
+            if repeated:
+                raise PreparationError(f"{name} lists {', '.join(map(repr, repeated))} twice")
+        for name in ("required_class_options", "forbidden_class_options", "forbidden_packages"):
+            for value in getattr(self, name):
+                if literal_list(value) != [value]:
+                    raise PreparationError(
+                        f"{name} entry {value!r} must be a single literal name "
+                        "without commas or TeX commands"
+                    )
+        for lower_name, upper_name in (
+            ("abstract_min_words", "abstract_max_words"),
+            ("keywords_min_count", "keywords_max_count"),
+        ):
+            lower, upper = getattr(self, lower_name), getattr(self, upper_name)
+            for limit_name, value in ((lower_name, lower), (upper_name, upper)):
+                if value is not None and (type(value) is not int or value < 0):
+                    raise PreparationError(f"{limit_name} must be a nonnegative integer")
             if lower is not None and upper is not None and lower > upper:
-                raise PreparationError("Manuscript minimum count must not exceed its maximum")
-        if set(self.required_class_options) & set(self.forbidden_class_options):
-            raise PreparationError("A class option cannot be both required and forbidden")
+                raise PreparationError(f"{lower_name} must not exceed {upper_name}")
+        both = sorted(set(self.required_class_options) & set(self.forbidden_class_options))
+        if both:
+            raise PreparationError(
+                f"Class option {', '.join(map(repr, both))} is in both required_class_options "
+                "and forbidden_class_options"
+            )
 
 
 _COUNT_METHOD = (
@@ -270,7 +276,10 @@ def _graph_reasons(graph: SourceGraph, selected: set[str], content: set[str]) ->
     reasons.extend(
         f"{item.path}: {item.message}"
         for item in graph.findings
-        if item.path in scope and item.rule in _INCOMPLETE_SOURCE_RULES and item.status != "passed"
+        if item.path in scope
+        and item.rule in _INCOMPLETE_SOURCE_RULES
+        and item.status != "passed"
+        and not unresolved_non_content_file(item)
     )
     return reasons
 
@@ -422,6 +431,31 @@ def _keyword_count(block: _Block) -> _KeywordCount:
     }
 
 
+# Offending names spelled out in a message; the details list every one.
+_MAX_NAMED = 3
+
+
+def _named(names: Iterable[str]) -> str:
+    """The first few distinct names, ``a, b, c (+2 more)``, or ``none``."""
+    unique = list(dict.fromkeys(names))
+    if not unique:
+        return "none"
+    return ", ".join(unique[:_MAX_NAMED]) + more_suffix(len(unique) - _MAX_NAMED)
+
+
+def _limits(minimum: int | None, maximum: int | None, noun: str) -> str:
+    """The configured range in words: ``at most 250 words``, ``3 to 5 keywords``."""
+    if minimum is None and maximum is None:
+        return "no limit"
+    if minimum is None:
+        return f"at most {plural(maximum or 0, noun)}"
+    if maximum is None:
+        return f"at least {plural(minimum, noun)}"
+    if minimum == maximum:
+        return f"exactly {plural(minimum, noun)}"
+    return f"{minimum} to {plural(maximum, noun)}"
+
+
 @dataclass(frozen=True)
 class _Evidence:
     """Everything the configured constraints are decided from."""
@@ -482,7 +516,7 @@ def _constraint_finding(
     """
     if status == "inconclusive":
         reason = uncertainty[0] if uncertainty else "no unique supported literal interpretation"
-        message += f" Inconclusive: {reason}."
+        message += f" Inconclusive: {reason.rstrip('.')}."
     path: object = evidence.main
     line: object = None
     if len(located) == 1:
@@ -540,7 +574,8 @@ def _document_class_finding(evidence: _Evidence, expected: str) -> Finding:
         status = "passed" if actual == [expected] else "failed"
     return _constraint_finding(
         "manuscript.document_class",
-        f"Direct document class: {actual or 'unavailable'}; expected: {expected}.",
+        f"Declared document class: {', '.join(actual) if actual else 'unavailable'}; "
+        f"expected: {expected}.",
         status,
         {"expected": expected, "declarations": classes, "uncertainty": evidence.graph_reasons},
         evidence,
@@ -562,8 +597,8 @@ def _class_options_finding(evidence: _Evidence, options: ManuscriptOptions) -> F
         status = "failed" if missing or forbidden else "passed"
     return _constraint_finding(
         "manuscript.class_options",
-        f"Missing required class options: {missing or 'none'}; "
-        f"forbidden options present: {forbidden or 'none'}.",
+        f"Missing required class options: {_named(missing)}; "
+        f"forbidden class options present: {_named(forbidden)}.",
         status,
         {
             "required": list(options.required_class_options),
@@ -590,10 +625,12 @@ def _forbidden_packages_finding(evidence: _Evidence, forbidden: tuple[str, ...])
         and not item["uncertainty"]
     ]
     uncertain = bool(evidence.graph_reasons or any(item["uncertainty"] for item in packages))
+    found = [name for item in matches for name in item["names"] or [] if name in forbidden]
     return _constraint_finding(
         "manuscript.forbidden_packages",
-        f"Forbidden package declarations: {len(matches)}; "
-        f"configured forbidden names: {', '.join(forbidden)}.",
+        f"Forbidden packages declared: {_named(found)} ({format_locations(matches)})."
+        if matches
+        else f"No forbidden package is declared directly (forbidden: {_named(forbidden)}).",
         check_status(failed=bool(matches), incomplete=uncertain),
         {
             "forbidden": list(forbidden),
@@ -625,7 +662,7 @@ def _abstract_required_finding(evidence: _Evidence) -> Finding:
         status = "failed"
     return _constraint_finding(
         "manuscript.abstract_required",
-        f"Found {len(abstracts)} supported literal abstract declarations; "
+        f"Found {plural(len(abstracts), 'supported literal abstract declaration')}; "
         "one nonempty abstract is required.",
         status,
         {"abstracts": abstracts, "uncertainty": evidence.graph_reasons},
@@ -667,7 +704,7 @@ def _abstract_words_finding(
         reported = f"{bounds[0]} to {bounds[1]}"
     return _constraint_finding(
         "manuscript.abstract_words",
-        f"Abstract source word count: {reported}; configured minimum/maximum: {minimum}/{maximum}.",
+        f"Abstract source word count: {reported}; allowed: {_limits(minimum, maximum, 'word')}.",
         status,
         {
             "minimum": minimum,
@@ -700,7 +737,7 @@ def _keyword_count_finding(
         status = "passed"
     return _constraint_finding(
         "manuscript.keyword_count",
-        f"Literal keyword count: {count}; configured minimum/maximum: {minimum}/{maximum}.",
+        f"Literal keyword count: {count}; allowed: {_limits(minimum, maximum, 'keyword')}.",
         status,
         {
             "minimum": minimum,

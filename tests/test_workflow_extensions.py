@@ -16,11 +16,13 @@ from latexprep.cli import cli
 from latexprep.config import Settings, load_settings
 from latexprep.core import run_job
 from latexprep.job_context import JobRequest, pdf_check_settings
+from latexprep.job_execution import JobDeadlineExceeded
 from latexprep.models import Finding
 from latexprep.online_checks import OnlineOptions
 from latexprep.pdf_artwork import PdfArtworkOptions
 from latexprep.pdf_check_pipeline import inspect_configured_pdf_checks
-from latexprep.review_policy import ReportingOptions, ReviewRule
+from latexprep.redaction import scrub_local_paths
+from latexprep.review_policy import BASELINE_VERSUS_PREPARED_STAGE, ReportingOptions, ReviewRule
 from latexprep.runtime import ToolRunner
 from latexprep.scheduler import ResourceBudget
 from latexprep.source_transform import SourceTransformOptions
@@ -192,12 +194,37 @@ class WorkflowExtensionTests(unittest.IsolatedAsyncioTestCase):
         saved = json.loads((self.base / "out/report.json").read_text())
         self.assertEqual(saved["outcome"], "accepted_exceptions")
 
+    async def test_baseline_difference_is_accepted_at_the_stage_the_workflow_records(self):
+        settings = Settings(
+            reporting=ReportingOptions(
+                accepted_exceptions=(
+                    ReviewRule(
+                        "CMP003", "Intended new appearance", stage=BASELINE_VERSUS_PREPARED_STAGE
+                    ),
+                )
+            )
+        )
+        changed = Finding("compare.rendering", "Pixels differ", severity="error")
+
+        async def compare(_left, _right, work, *_args, **_options):
+            return [changed] if work.name == "compare-prepared" else []
+
+        with (
+            patch("latexprep.document_tasks.build_project", side_effect=build),
+            patch("latexprep.document_tasks.inspect_pdf", new=AsyncMock(return_value=[])),
+            patch("latexprep.document_tasks.compare_pdfs", side_effect=compare),
+        ):
+            result = await run_job(JobRequest("prepare", self.source, settings, self.base / "out"))
+        stages = {item.details.get("stage") for item in result.findings if item.code == "CMP003"}
+        self.assertEqual(stages, {BASELINE_VERSUS_PREPARED_STAGE})
+        self.assertEqual(result.outcome, "accepted_exceptions", result.to_dict())
+
     async def test_archive_mismatch_cannot_be_waived(self):
         settings = Settings(
             reporting=ReportingOptions(
                 accepted_exceptions=(
                     ReviewRule(
-                        "CMP003", "Intended new appearance", stage="baseline versus prepared"
+                        "CMP003", "Intended new appearance", stage=BASELINE_VERSUS_PREPARED_STAGE
                     ),
                 )
             )
@@ -292,7 +319,9 @@ class WorkflowExtensionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.outcome, "passed")
         preview = Path(result.artifacts["preview.1"])
         self.assertEqual(preview.read_bytes(), b"PNG fixture")
-        self.assertEqual(result.findings[0].details["artifacts"], [str(preview)])
+        # Findings are part of the shareable report, so the preview's location is shown
+        # generically (<tmp>/...); only report.artifacts keeps the real path.
+        self.assertEqual(result.findings[0].details["artifacts"], [scrub_local_paths(str(preview))])
 
     async def test_preview_export_timeout_rolls_back_single_and_multiple_packages(self):
         async def measured(_pdf, _root, _main, work, *_args):
@@ -311,7 +340,7 @@ class WorkflowExtensionTests(unittest.IsolatedAsyncioTestCase):
 
         def fail_preview(previews, _deadline):
             if previews:
-                raise TimeoutError
+                raise JobDeadlineExceeded
 
         for multi in (False, True):
             settings = Settings(

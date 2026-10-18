@@ -4,22 +4,29 @@ from __future__ import annotations
 
 import html
 import re
-import struct
 import unicodedata
 import zlib
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
-from .file_scan import check_status, inventory_files, is_relative_project_path, read_regular_file
+from .file_scan import (
+    check_status,
+    inventory_files,
+    is_relative_project_path,
+    plural,
+    read_regular_file,
+    redact_secrets,
+)
 from .models import Change, ChangeKind, Finding, PreparationError, has_blockers
 from .scheduler import cancellation_point
 from .tex_lexer import (
-    MAX_COMMANDS,
     MAX_SOURCE_BYTES,
     MAX_TOTAL_SOURCE_BYTES,
+    Command,
     ParseLimitExceeded,
     blank_regions,
+    comment_starts,
     conditional_spans,
     in_conditional,
     read_group,
@@ -42,6 +49,13 @@ _MAX_METADATA_TOTAL = 4 * 1024 * 1024
 _MAX_IMAGE_COUNT = 2000
 _MAX_ENTRIES = 4096
 _MAX_MATCHES = 200
+# Problems named in a message; the finding's details list every one.
+_MAX_LISTED_PROBLEMS = 3
+_SCANNED_IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg"})
+# Figure formats the scan does not read, named in the result so a pass is not over-read.
+_UNSCANNED_FIGURE_FORMATS = "PDF, EPS, SVG, TIFF, GIF and WebP"
+# Commands that can change a declaration while TeX runs, so its source text is not final.
+_DYNAMIC_COMMANDS = frozenset({"catcode", "csname", "scantokens", "ExplSyntaxOn", "directlua"})
 
 
 def _safe_manuscript_path(value: str) -> bool:
@@ -122,8 +136,23 @@ class MetadataSanitizationPlan:
     findings: list[Finding] = field(default_factory=list)
 
 
+# A hyperref setting is ``key``, ``key=value`` or ``key={value}``. A key without a value is a
+# yes/no option such as ``colorlinks`` or ``hidelinks``.
+_HYPERSETUP_KEY = re.compile(r"([A-Za-z]+)\s*(=\s*)?")
+
+
+def _field_label(field_name: str) -> str:
+    """How a selected field is named to the researcher: its command or hyperref key."""
+    if field_name.startswith("hypersetup."):
+        return f"hyperref key {field_name.removeprefix('hypersetup.')}"
+    return f"\\{field_name}"
+
+
 def _hypersetup_values(text: str, start: int, end: int) -> list[tuple[str, int, int]]:
-    """Locate plain keys with braced or unbraced literal values, retaining source offsets."""
+    """Locate plain keys with braced or unbraced literal values, retaining source offsets.
+
+    Keys without a value are accepted and skipped; they hold no text to edit.
+    """
     result = []
     cursor = start
     while cursor < end:
@@ -131,21 +160,36 @@ def _hypersetup_values(text: str, start: int, end: int) -> list[tuple[str, int, 
             cursor += 1
         if cursor == end:
             break
-        match = re.match(r"([A-Za-z]+)\s*=\s*", text[cursor:end])
+        match = _HYPERSETUP_KEY.match(text, cursor, end)
         if match is None:
-            raise PreparationError("Unsupported hypersetup key/value syntax")
+            line = text.count("\n", 0, cursor) + 1
+            raise PreparationError(
+                f"\\hypersetup on line {line} has a setting that is not written as "
+                "key, key=value or key={value}"
+            )
         key = match[1]
-        cursor += match.end()
+        cursor = match.end()
+        if match[2] is None:
+            while cursor < end and text[cursor].isspace():
+                cursor += 1
+            if cursor < end and text[cursor] != ",":
+                raise PreparationError(
+                    f"hyperref key {key} is followed by text that is neither '=' nor ','"
+                )
+            continue
         if cursor < end and text[cursor] == "{":
             value = read_group(text, cursor)
             if value is None or value.end > end:
-                raise PreparationError("Unclosed hypersetup value")
+                raise PreparationError(f"The braced value of hyperref key {key} is not closed")
             result.append((key, value.start, value.end))
             cursor = value.end + 1
             while cursor < end and text[cursor].isspace():
                 cursor += 1
             if cursor < end and text[cursor] != ",":
-                raise PreparationError("Ambiguous hypersetup value suffix")
+                raise PreparationError(
+                    f"The braced value of hyperref key {key} is followed by text before the "
+                    "next comma"
+                )
         else:
             stop = text.find(",", cursor, end)
             stop = end if stop < 0 else stop
@@ -157,28 +201,36 @@ def _hypersetup_values(text: str, start: int, end: int) -> list[tuple[str, int, 
     return result
 
 
+def _selected_command_problem(command: Command, text: str) -> str | None:
+    """Why a selected declaration cannot be edited safely, or None when it is a plain one."""
+    name = f"\\{command.name}"
+    if command.depth:
+        return f"{name} is inside braces or an environment, so its scope is not certain"
+    if command.options:
+        return f"{name} has an optional argument, which this edit does not support"
+    if len(command.arguments) != 1:
+        return f"{name} does not have exactly one braced argument"
+    if text.startswith("\\" + command.name + "*", command.start):
+        return f"{name} is used in its starred form, which this edit does not support"
+    return None
+
+
 def _edit_spans(text: str, edits: Sequence[MetadataEdit]) -> list[tuple[int, int, str]]:
     regions, unclosed = source_regions(text)
     if unclosed:
         raise PreparationError("An unclosed literal region prevents metadata editing")
     try:
-        commands = scan_commands(blank_regions(text, regions))
+        commands = scan_commands(blank_regions(text, regions), comment_starts(regions))
     except ParseLimitExceeded:
         raise PreparationError("Source exceeds supported metadata parsing limits") from None
-    if len(commands) >= MAX_COMMANDS:
-        raise PreparationError("Source exceeds supported metadata command limits")
-    if any(
-        command.name
-        in {
-            "catcode",
-            "csname",
-            "scantokens",
-            "ExplSyntaxOn",
-            "directlua",
-        }
-        for command in commands
-    ):
-        raise PreparationError("Dynamic source syntax prevents a literal metadata proposal")
+    dynamic = next(
+        (command.name for command in commands if command.name in _DYNAMIC_COMMANDS), None
+    )
+    if dynamic is not None:
+        raise PreparationError(
+            f"\\{dynamic} can change metadata while TeX runs, so the declared values are "
+            "not certain"
+        )
     # Only a conditional that encloses a selected declaration makes its old value
     # unestablished; an unrelated \if…\fi elsewhere in the file does not.
     conditionals = conditional_spans(commands)
@@ -195,17 +247,12 @@ def _edit_spans(text: str, edits: Sequence[MetadataEdit]) -> list[tuple[int, int
             continue
         if in_conditional(conditionals, command.start):
             raise PreparationError(
-                "Selected metadata is enclosed by conditional source control flow"
+                f"\\{command.name} is inside conditional TeX (\\if ... \\fi), so which value "
+                "applies is not certain"
             )
-        if (
-            command.depth
-            or len(command.arguments) != 1
-            or command.options
-            or text.startswith("\\" + command.name + "*", command.start)
-        ):
-            raise PreparationError(
-                "Selected metadata is grouped, generated or has unsupported syntax"
-            )
+        problem = _selected_command_problem(command, text)
+        if problem is not None:
+            raise PreparationError(problem)
         argument = command.arguments[0]
         if command.name == "hypersetup":
             for key, start, end in _hypersetup_values(text, argument.start, argument.end):
@@ -217,13 +264,16 @@ def _edit_spans(text: str, edits: Sequence[MetadataEdit]) -> list[tuple[int, int
     replacements = []
     for edit in edits:
         spans = targets[edit.field]
+        label = _field_label(edit.field)
         if len(spans) != 1:
-            raise PreparationError("Selected metadata field is missing or not a unique declaration")
+            found = "was not found" if not spans else f"was declared {len(spans)} times"
+            raise PreparationError(f"{label} {found}; exactly one declaration is required")
         start, end = spans[0]
         actual = text[start:end]
         if not _literal(actual) or actual != edit.expected_before:
             raise PreparationError(
-                "Selected metadata does not match its expected literal old value"
+                f"{label} does not hold the expected old value; the source changed or "
+                "expected_before is wrong"
             )
         replacement = edit.replacement
         if edit.field.startswith("hypersetup.") and text[start - 1 : start] != "{":
@@ -307,6 +357,8 @@ def plan_metadata_sanitization(
                     severity="error",
                     status="inconclusive",
                     path=name,
+                    suggestion="Compare the edit's path, field and expected_before with the "
+                    "source file, correct the edit or the source, and run again.",
                     details={"fields": [edit.field for edit in selected]},
                 )
             )
@@ -361,34 +413,34 @@ def check_sanitized_pdf_metadata(
                 status="inconclusive",
             )
         ]
-    violations = []
+    names = {key.casefold(): key for key in inventories[0]}
+    violations: list[dict[str, object]] = []
+
+    def violation(index: int, name: str, problem: str) -> None:
+        # The reason names the edit and property, never a value, and is what a terminal
+        # report shows for each violation.
+        violations.append(
+            {
+                "edit_index": index,
+                "property": name,
+                "reason": f"Edit {index}: PDF property {name} {problem}",
+            }
+        )
+
     for index, edit in enumerate(options.edits, 1):
         if edit.field in _PDF_FIELDS:
             key = _PDF_FIELDS[edit.field].casefold()
             if " ".join(properties.get(key, "").split()) != " ".join(edit.replacement.split()):
-                violations.append(
-                    {
-                        "edit_index": index,
-                        "property": _PDF_FIELDS[edit.field],
-                        "reason": "Final value differs from the selected replacement",
-                    }
-                )
+                violation(index, _PDF_FIELDS[edit.field], "does not show the selected replacement")
         old = _normalized(edit.expected_before)
         if old and old not in _normalized(edit.replacement):
             for key, value in properties.items():
                 if old in _normalized(value):
-                    violations.append(
-                        {
-                            "edit_index": index,
-                            "property": key,
-                            "reason": "Removed literal value remains in final metadata",
-                        }
-                    )
+                    violation(index, names[key], "still contains the value that the edit removes")
     return [
         Finding(
             "privacy.sanitized_pdf_metadata",
-            "Checked selected metadata replacements and removed "
-            "literal values in final reported PDF properties.",
+            _recheck_message(violations),
             severity="error" if violations else "info",
             status="failed" if violations else "passed",
             details={
@@ -400,12 +452,62 @@ def check_sanitized_pdf_metadata(
     ]
 
 
+def _recheck_message(violations: Sequence[dict[str, object]]) -> str:
+    """Outcome of the final-PDF recheck, naming the first few problems."""
+    if not violations:
+        return (
+            "Checked selected metadata replacements and removed "
+            "literal values in final reported PDF properties."
+        )
+    shown = "; ".join(str(item["reason"]) for item in violations[:_MAX_LISTED_PROBLEMS])
+    more = len(violations) - _MAX_LISTED_PROBLEMS
+    return (
+        f"Final PDF metadata does not match the selected edits: {shown}"
+        + (f"; and {more} more" if more > 0 else "")
+        + ". Correct the metadata in the source, rebuild the PDF and run the check again."
+    )
+
+
 def _inflate(data: bytes) -> bytes:
     decoder = zlib.decompressobj()
     result = decoder.decompress(data, _MAX_METADATA_BYTES + 1)
     if len(result) > _MAX_METADATA_BYTES or not decoder.eof or decoder.unused_data:
         raise PreparationError("Compressed metadata is incomplete or exceeds its decoded limit")
     return result
+
+
+def _decoded_text(raw: bytes) -> str:
+    """Text of a metadata field whose encoding is not declared: UTF-8 if valid, else Latin-1.
+
+    Cameras and editors store non-ASCII names in either encoding. Latin-1 gives every byte a
+    character, so an accented name cannot make the whole image unreadable to the scan.
+    """
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw.decode("latin-1")
+
+
+def _user_comment(value: bytes, byte_order: str, result: _MetadataText) -> None:
+    """Record an EXIF UserComment, whose first eight bytes name its character set."""
+    if not value.strip(b"\0 "):
+        return
+    charset, text = value[:8], value[8:]
+    if charset == b"ASCII\0\0\0":
+        result.append(("EXIF UserComment", _decoded_text(text.rstrip(b"\0"))))
+    elif charset == b"UNICODE\0":
+        encoding = (
+            "utf-16"
+            if text[:2] in {b"\xff\xfe", b"\xfe\xff"}
+            else ("utf-16-le" if byte_order == "<" else "utf-16-be")
+        )
+        result.append(("EXIF UserComment", text.decode(encoding, errors="replace").rstrip("\0")))
+    elif charset == b"\0" * 8:
+        # An undefined character set is application-defined text, usually ASCII or UTF-8.
+        result.append(("EXIF UserComment", _decoded_text(text.rstrip(b"\0"))))
+    else:
+        # JIS and unregistered character sets cannot be decoded reliably.
+        result.limit("EXIF UserComment in a JIS or unrecognized character set")
 
 
 @dataclass
@@ -480,27 +582,18 @@ def _exif(data: bytes, result: _MetadataText) -> None:
                 # an ordinary camera image's metadata determinable.
                 result.limit("EXIF MakerNote (vendor binary)")
             elif kind == 2:
-                result.append((f"EXIF tag {tag:#06x}", value.rstrip(b"\0").decode("ascii")))
+                result.append((f"EXIF tag {tag:#06x}", _decoded_text(value.rstrip(b"\0"))))
             elif tag == 0x9286 and kind == 7:
-                if value.startswith(b"ASCII\0\0\0"):
-                    decoded = value[8:].rstrip(b"\0").decode("ascii")
-                elif value.startswith(b"UNICODE\0"):
-                    raw = value[8:]
-                    encoding = (
-                        "utf-16"
-                        if raw[:2] in {b"\xff\xfe", b"\xfe\xff"}
-                        else ("utf-16-le" if order == "<" else "utf-16-be")
-                    )
-                    decoded = raw.decode(encoding).rstrip("\0")
-                else:
-                    raise PreparationError("Unsupported EXIF UserComment encoding")
-                result.append(("EXIF UserComment", decoded))
+                _user_comment(value, order, result)
             elif 0x9C9B <= tag <= 0x9C9F and kind == 1:
                 result.append(
-                    (f"EXIF Windows tag {tag:#06x}", value.decode("utf-16-le").rstrip("\0"))
+                    (
+                        f"EXIF Windows tag {tag:#06x}",
+                        value.decode("utf-16-le", errors="replace").rstrip("\0"),
+                    )
                 )
             elif tag == 700 and kind in {1, 7}:
-                result.append(("EXIF XMP", value.rstrip(b"\0").decode("utf-8")))
+                result.append(("EXIF XMP", _decoded_text(value.rstrip(b"\0"))))
         pending.append(integer(offset + 2 + 12 * integer(offset, 2), 4))
 
 
@@ -668,12 +761,12 @@ def _jpeg_metadata(data: bytes) -> _MetadataText:
             raise PreparationError("JPEG metadata segment is truncated")
         contents = data[cursor + 2 : cursor + length]
         if kind == 0xFE:
-            result.append(("JPEG comment", contents.decode("utf-8")))
+            result.append(("JPEG comment", _decoded_text(contents)))
         elif kind == 0xE1:
             if contents.startswith(b"Exif\0\0"):
                 _exif(contents[6:], result)
             elif contents.startswith(b"http://ns.adobe.com/xap/1.0/\0"):
-                result.append(("JPEG XMP", contents.split(b"\0", 1)[1].decode("utf-8")))
+                result.append(("JPEG XMP", _decoded_text(contents.split(b"\0", 1)[1])))
             elif contents.startswith(b"http://ns.adobe.com/xmp/extension/\0"):
                 # The extension header carries a GUID and binary chunk offsets
                 # ahead of the XMP text; it is decoded for term matching only and
@@ -689,6 +782,69 @@ def _jpeg_metadata(data: bytes) -> _MetadataText:
     raise PreparationError("JPEG pre-scan metadata termination was not found")
 
 
+def _unreadable_reason(error: Exception) -> str:
+    """Why an image's metadata could not be read, without quoting file contents or paths.
+
+    Parser rejections are fixed text; other errors may quote file contents or paths, so they
+    are described by kind only.
+    """
+    if isinstance(error, PreparationError):
+        return str(error)
+    if isinstance(error, UnicodeError):
+        return "a metadata text field uses an unsupported character encoding"
+    if isinstance(error, zlib.error):
+        return "compressed metadata is damaged"
+    if isinstance(error, OSError):
+        return "the file is unreadable, not a regular file or larger than the scan limit"
+    return "a metadata block is malformed"
+
+
+def _first_problem(issues: Sequence[dict[str, str]]) -> str:
+    """The first scan problem with its image path, and how many others there are."""
+    first = issues[0]
+    where = f"{redact_secrets(first['path'])}: " if "path" in first else ""
+    others = len(issues) - 1
+    return f"{where}{first['reason']}" + (f" (and {others} more)" if others else "")
+
+
+def _image_scan_message(
+    status: str,
+    *,
+    matches: Sequence[dict[str, object]],
+    issues: Sequence[dict[str, str]],
+    scanned: int,
+    selected: int,
+    has_limitations: bool,
+) -> str:
+    """The outcome of the image scan; a pass states what was and was not covered."""
+    match status:
+        case "failed":
+            message = (
+                "Configured identity terms were found in the metadata of "
+                f"{plural(len({item['path'] for item in matches}), 'image')}."
+            )
+            if issues:
+                message += f" Other images could not be fully checked: {_first_problem(issues)}."
+            return message
+        case "inconclusive":
+            return (
+                f"Image metadata could not be fully checked: {_first_problem(issues)}. "
+                f"{scanned} of {plural(selected, 'PNG/JPEG image')} were scanned."
+            )
+    covered = (
+        f"the metadata of {plural(scanned, 'PNG/JPEG image')}"
+        if scanned
+        else "any PNG or JPEG image (none was found)"
+    )
+    message = (
+        f"No configured identity terms were found in {covered}. "
+        f"{_UNSCANNED_FIGURE_FORMATS} figures and image pixels were not scanned."
+    )
+    if has_limitations:
+        message += " Some vendor-specific blocks were skipped."
+    return message
+
+
 def check_image_metadata(root: Path, options: MetadataPrivacyOptions) -> list[Finding]:
     """Search supported image metadata without decoding pixels or echoing private values."""
     if not options.image_identity_terms:
@@ -700,13 +856,14 @@ def check_image_metadata(root: Path, options: MetadataPrivacyOptions) -> list[Fi
     selected = [
         (name, path)
         for name, path in files.items()
-        if path.suffix.lower() in {".png", ".jpg", ".jpeg"}
+        if path.suffix.lower() in _SCANNED_IMAGE_SUFFIXES
     ]
     if len(selected) > _MAX_IMAGE_COUNT:
         issues.append({"reason": "Image count exceeded the scan limit"})
         selected = selected[:_MAX_IMAGE_COUNT]
     terms = [_normalized(term) for term in options.image_identity_terms]
-    matches = []
+    matches: list[dict[str, object]] = []
+    match_output_limited = False
     limitations: list[dict[str, str]] = []
     scanned = total = metadata_total = 0
     for name, path in selected:
@@ -732,41 +889,34 @@ def check_image_metadata(root: Path, options: MetadataPrivacyOptions) -> list[Fi
                 # Decode text only; never evaluate entities or fetch XML resources.
                 normalized = _normalized(html.unescape(value))
                 for index, term in enumerate(terms, 1):
-                    if term in normalized and len(matches) < _MAX_MATCHES:
+                    if term not in normalized:
+                        continue
+                    if len(matches) < _MAX_MATCHES:
                         matches.append({"path": name, "channel": channel, "term_index": index})
-        except (
-            PreparationError,
-            OSError,
-            UnicodeError,
-            ValueError,
-            struct.error,
-            zlib.error,
-        ) as error:
-            # Parser rejections are fixed text; other errors may quote file contents or paths.
-            reason = (
-                str(error)
-                if isinstance(error, PreparationError)
-                else "Unsupported, malformed or oversized image metadata"
-            )
-            issues.append({"path": name, "reason": reason})
+                    else:
+                        match_output_limited = True
+        except (PreparationError, OSError, ValueError, zlib.error) as error:
+            issues.append({"path": name, "reason": _unreadable_reason(error)})
     status = check_status(failed=bool(matches), incomplete=bool(issues))
-    match status:
-        case "failed":
-            message = "Configured identity terms were found in supported image metadata."
-        case "inconclusive":
-            message = "Image metadata inspection is incomplete."
-        case _:
-            message = (
-                "No configured identity terms were found in the supported image metadata scope."
-            )
-            if limitations:
-                message += " Some vendor-specific blocks were skipped."
     return [
         Finding(
             "privacy.image_metadata",
-            message,
+            _image_scan_message(
+                status,
+                matches=matches,
+                issues=issues,
+                scanned=scanned,
+                selected=len(selected),
+                has_limitations=bool(limitations),
+            ),
             severity="info" if status == "passed" else "error",
             status=status,
+            suggestion=(
+                "Re-save or re-export each listed image with standard metadata, or remove it "
+                "from the project, then run the check again."
+                if status == "inconclusive"
+                else None
+            ),
             details={
                 "matches": matches,
                 "issues": issues[:_MAX_MATCHES],
@@ -774,7 +924,7 @@ def check_image_metadata(root: Path, options: MetadataPrivacyOptions) -> list[Fi
                 "incomplete": bool(issues),
                 "images_selected": len(selected),
                 "images_scanned": scanned,
-                "match_output_limited": len(matches) >= _MAX_MATCHES,
+                "match_output_limited": match_output_limited,
                 "scope": "PNG tEXt/zTXt/iTXt/EXIF and pre-scan JPEG EXIF/XMP/"
                 "extended XMP/IPTC IIM application records/comments; "
                 "literal text with character-reference decoding; "

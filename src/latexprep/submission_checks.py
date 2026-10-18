@@ -12,7 +12,7 @@ import re
 import stat
 import unicodedata
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import KW_ONLY, dataclass, field, replace
+from dataclasses import KW_ONLY, dataclass, field, fields, replace
 from functools import lru_cache
 from pathlib import Path
 from urllib.parse import unquote
@@ -43,6 +43,10 @@ from .tex_lexer import (
 )
 
 IDENTITY_TERM_MATCHING = ("word", "substring")
+# Matches named in a message; the details list every match up to MAX_SCAN_MATCHES.
+_MAX_LISTED = 3
+# Longer file names are shortened in messages; the details keep them whole.
+_MAX_LABEL_CHARS = 120
 _TEXT_EXTENSIONS = {
     ".tex",
     ".ltx",
@@ -190,6 +194,30 @@ class SubmissionOptions:
 
 
 _DEFAULT_OPTIONS = SubmissionOptions()
+# Options that do not make check_submission inspect the bundle: a matching mode that
+# only refines identity terms, the compressed archive (check_submission_archive) and
+# the shipped bibliography (check_bbl in the readiness checks).
+_OPTIONS_OUTSIDE_BUNDLE_SCAN = frozenset(
+    {
+        "identity_term_matching",
+        "max_archive_bytes",
+        "check_bbl_coverage",
+        "require_bbl",
+        "biblatex_bbl_format_version",
+    }
+)
+
+
+def _inspects_bundle(options: SubmissionOptions) -> bool:
+    """Whether any option other than those handled elsewhere differs from its default.
+
+    A newly added option therefore enables the bundle scan unless it is listed above.
+    """
+    return any(
+        getattr(options, option.name) != option.default
+        for option in fields(options)
+        if option.name not in _OPTIONS_OUTSIDE_BUNDLE_SCAN
+    )
 
 
 def _fold(value: str) -> str:
@@ -214,6 +242,27 @@ def _private_note(comment: str) -> str | None:
     return "private note" if _NOTE.search(comment) else None
 
 
+def _short(value: str) -> str:
+    """Shorten an over-long file name; it is the finding itself and the details keep it whole."""
+    return value if len(value) <= _MAX_LABEL_CHARS else value[: _MAX_LABEL_CHARS - 1] + "…"
+
+
+def _listed(items: Sequence[str]) -> str:
+    """The first few distinct items; the suffix counts hidden items, repeats included."""
+    shown = list(dict.fromkeys(items))[:_MAX_LISTED]
+    return ", ".join(shown) + more_suffix(sum(item not in shown for item in items))
+
+
+def _match_count(matches: Sequence[Mapping[str, object]]) -> str:
+    # Scans stop collecting at the limit, so a full list means "at least" this many.
+    return f"{len(matches)}{'+' if len(matches) == MAX_SCAN_MATCHES else ''}"
+
+
+# Renders the matches of one rule for its message; rules without one use ``_message``'s
+# generic "N matches: location" wording, which never repeats matched text.
+_Describe = Callable[[Sequence[Mapping[str, object]]], str]
+
+
 def _match_label(match: Mapping[str, object]) -> str:
     # Matches hold only locations and generated reasons, never matched text or terms.
     path, line, reason = match.get("path"), match.get("line"), match.get("reason")
@@ -221,25 +270,25 @@ def _match_label(match: Mapping[str, object]) -> str:
     label = label if isinstance(label, str) else ""
     if label and type(line) is int:
         label += f":{line}"
-    if len(label) > 120:  # Over-long file names are the finding itself; details keep them whole.
-        label = label[:119] + "…"
+    label = _short(label)
     if isinstance(reason, str):
         label = f"{label} ({reason})" if label else reason
     return label or "unspecified location"
 
 
-def _message(matches: Sequence[Mapping[str, object]], issues: list[str]) -> str:
+def _message(
+    matches: Sequence[Mapping[str, object]], issues: list[str], describe: _Describe | None = None
+) -> str:
     if not matches:
         if not issues:
             return "No matches in the stated scope."
         return f"The configured scan is incomplete: {issues[0]}{more_suffix(len(issues) - 1)}"
-    labels = [_match_label(match) for match in matches]
-    shown = list(dict.fromkeys(labels))[:3]
-    # Scans stop collecting at the limit, so a full list means "at least" this many.
-    count = f"{len(matches)}{'+' if len(matches) == MAX_SCAN_MATCHES else ''}"
-    message = f"{count} match{'es' if len(matches) != 1 else ''}: {', '.join(shown)}"
-    # Repeated labels each count: the suffix counts hidden matches, not hidden places.
-    message += more_suffix(sum(label not in shown for label in labels))
+    if describe is not None:
+        message = describe(matches)
+    else:
+        count = _match_count(matches)
+        labels = [_match_label(match) for match in matches]
+        message = f"{count} match{'es' if len(matches) != 1 else ''}: {_listed(labels)}"
     if issues:
         message += f"; the scan was also incomplete: {issues[0]}"
     return message
@@ -253,13 +302,14 @@ def _scan_finding(
     *,
     advisory: bool = False,
     details: dict[str, object] | None = None,
+    describe: _Describe | None = None,
 ) -> Finding:
     status = check_status(failed=bool(matches), incomplete=bool(issues))
     # Scans stop collecting at the reporting limit, so further matches may be unlisted.
     limited = len(matches) >= MAX_SCAN_MATCHES
     return Finding(
         rule,
-        _message(matches, issues),
+        _message(matches, issues, describe),
         severity="info" if status == "passed" else "warning" if advisory else "error",
         status=status,
         evidence_kind=EvidenceKind.HEURISTIC if advisory else EvidenceKind.DIRECT,
@@ -488,39 +538,88 @@ class _ContentScan:
         ]
 
 
+def _long_file_names(limit: int) -> _Describe:
+    def describe(matches: Sequence[Mapping[str, object]]) -> str:
+        names = [
+            f"{_short(str(match['path']))} ({len(Path(str(match['path'])).name)} characters)"
+            for match in matches
+        ]
+        return (
+            f"File names longer than {limit} characters ({_match_count(matches)}): {_listed(names)}"
+        )
+
+    return describe
+
+
+def _disallowed_characters(allowed: set[str]) -> _Describe:
+    def describe(matches: Sequence[Mapping[str, object]]) -> str:
+        names = []
+        for match in matches:
+            path = str(match["path"])
+            unexpected = sorted(set(Path(path).name) - allowed)
+            shown = ", ".join(map(repr, unexpected[:_MAX_LISTED]))
+            names.append(
+                f"{_short(path)} (not allowed: {shown}{more_suffix(len(unexpected) - _MAX_LISTED)})"
+            )
+        return (
+            f"File names with characters outside the allowed set ({_match_count(matches)}): "
+            f"{_listed(names)}"
+        )
+
+    return describe
+
+
+def _other_extensions(matches: Sequence[Mapping[str, object]]) -> str:
+    names = []
+    for match in matches:
+        path = str(match["path"])
+        names.append(f"{_short(path)} ({Path(path).suffix.lower() or 'no extension'})")
+    return f"Files with extensions that are not allowed ({_match_count(matches)}): {_listed(names)}"
+
+
 def _filename_findings(
     files: Mapping[str, Path], issues: list[str], options: SubmissionOptions
 ) -> list[Finding]:
-    allowed_extensions = {extension.lower() for extension in options.allowed_extensions}
-    checks: tuple[tuple[str, bool, Callable[[str], bool]], ...] = (
-        (
-            "submission.filename_length",
-            options.filename_max_length is not None,
-            lambda name: len(Path(name).name) > (options.filename_max_length or 0),
-        ),
-        (
-            "submission.filename_characters",
-            options.filename_allowed_characters is not None,
-            lambda name: bool(
-                set(Path(name).name) - set(options.filename_allowed_characters or "")
-            ),
-        ),
-        (
-            "submission.file_extensions",
-            bool(options.allowed_extensions),
-            lambda name: Path(name).suffix.lower() not in allowed_extensions,
-        ),
-    )
-    return [
-        _scan_finding(
-            rule,
-            [{"path": name} for name in files if violates(name)],
-            issues,
-            "All supplied regular-file basenames.",
+    scope = "All supplied regular-file basenames."
+    findings = []
+    if options.filename_max_length is not None:
+        limit = options.filename_max_length
+        findings.append(
+            _scan_finding(
+                "submission.filename_length",
+                [{"path": name} for name in files if len(Path(name).name) > limit],
+                issues,
+                scope,
+                describe=_long_file_names(limit),
+            )
         )
-        for rule, active, violates in checks
-        if active
-    ]
+    if options.filename_allowed_characters is not None:
+        allowed = set(options.filename_allowed_characters)
+        findings.append(
+            _scan_finding(
+                "submission.filename_characters",
+                [{"path": name} for name in files if set(Path(name).name) - allowed],
+                issues,
+                scope,
+                describe=_disallowed_characters(allowed),
+            )
+        )
+    if options.allowed_extensions:
+        allowed_extensions = {extension.lower() for extension in options.allowed_extensions}
+        findings.append(
+            _scan_finding(
+                "submission.file_extensions",
+                [
+                    {"path": name}
+                    for name in files
+                    if Path(name).suffix.lower() not in allowed_extensions
+                ],
+                issues,
+                scope,
+                describe=_other_extensions,
+            )
+        )
+    return findings
 
 
 def check_submission(
@@ -529,22 +628,7 @@ def check_submission(
     options: SubmissionOptions = _DEFAULT_OPTIONS,
 ) -> list[Finding]:
     """Inspect local files without modifying or excluding any bundle contents."""
-    enabled = any(
-        (
-            options.identity_terms,
-            options.scan_identity_hints,
-            options.scan_secrets,
-            options.scan_private_comments,
-            options.check_shell_escape,
-            options.filename_max_length,
-            options.filename_allowed_characters,
-            options.allowed_extensions,
-            options.required_deliverables,
-            options.report_unused_assets,
-            options.template_references,
-        )
-    )
-    if not enabled:
+    if not _inspects_bundle(options):
         return []
     files, inventory_issues = inventory_files(root)
     findings = _filename_findings(files, inventory_issues, options)
@@ -560,6 +644,27 @@ def check_submission(
     if options.report_unused_assets:
         findings.append(_unused(root, main, files, inventory_issues))
     return redact_findings(findings, content.secret_values)
+
+
+# What is wrong with a present deliverable whose content does not match its declared kind.
+_DELIVERABLE_PROBLEMS = {
+    "pdf": "does not start like a PDF file",
+    "zip": "does not start like a ZIP archive",
+    "text": "is empty or is not UTF-8 text",
+}
+
+
+def _unmet_deliverables(matches: Sequence[Mapping[str, object]]) -> str:
+    problems = []
+    for match in matches:
+        path = _short(str(match["path"]))
+        if match.get("reason") == "missing regular file":
+            problems.append(f"{path} is missing")
+        else:
+            problems.append(
+                f"{path} {_DELIVERABLE_PROBLEMS.get(str(match.get('kind')), 'does not match')}"
+            )
+    return f"Required deliverables not satisfied ({_match_count(matches)}): {_listed(problems)}"
 
 
 def _deliverables(files: dict[str, Path], issues: list[str], options: SubmissionOptions) -> Finding:
@@ -598,6 +703,7 @@ def _deliverables(files: dict[str, Path], issues: list[str], options: Submission
         incomplete,
         "Explicit project-relative paths; PDF/ZIP signatures and bounded UTF-8 text only, "
         "not format validation or verification of separately transmitted deliverables.",
+        describe=_unmet_deliverables,
     )
 
 
@@ -651,6 +757,14 @@ def _templates(
     return results
 
 
+def _unused_assets(matches: Sequence[Mapping[str, object]]) -> str:
+    names = [_short(str(match["path"])) for match in matches]
+    return (
+        f"Asset files not referenced by the selected document ({_match_count(matches)}): "
+        f"{_listed(names)}"
+    )
+
+
 def _unused(root: Path, main: str | None, files: dict[str, Path], issues: list[str]) -> Finding:
     incomplete = list(issues)
     candidates = []
@@ -682,6 +796,7 @@ def _unused(root: Path, main: str | None, files: dict[str, Path], issues: list[s
         "and toolchain inputs may need these files. "
         "No candidate is safe to delete based on this scan.",
         advisory=True,
+        describe=_unused_assets,
     )
     return replace(result, status="inconclusive") if incomplete else result
 
@@ -706,6 +821,7 @@ def check_submission_archive(
             matches.append({"reason": "compressed archive exceeds configured byte limit"})
     except OSError:
         issues.append("The final archive is missing or is not an accessible regular file.")
+    limit = options.max_archive_bytes
     return [
         _scan_finding(
             "submission.archive_size",
@@ -713,6 +829,10 @@ def check_submission_archive(
             issues,
             "Actual compressed archive bytes.",
             details=details,
+            describe=lambda _: (
+                f"The compressed archive is {details['compressed_bytes']:,} bytes, "
+                f"over the configured limit of {limit:,} bytes"
+            ),
         )
     ]
 

@@ -11,6 +11,7 @@ from contextlib import asynccontextmanager
 from dataclasses import KW_ONLY, dataclass, field
 from typing import Any, Literal, TypeVar, cast, get_args
 
+from .defects import is_expected_failure, summarize_traceback
 from .models import PreparationError
 
 T = TypeVar("T")
@@ -346,6 +347,9 @@ class TaskResult:
     # Names of failed prerequisites for a ``blocked`` result, so reports can
     # group the tasks that one root failure prevented without parsing ``error``.
     blocked_by: tuple[str, ...] = ()
+    # Path-free traceback frames of a task that failed by a defect rather than by an
+    # expected ``PreparationError`` or ``OSError``; empty for every other result.
+    defect_frames: tuple[str, ...] = ()
 
 
 @dataclass
@@ -416,7 +420,12 @@ class Scheduler:
         except Exception as error:
             # Keep the exception type: a bare message such as an empty string
             # or a lone path says nothing about what went wrong.
-            result = TaskResult(task.name, "failed", error=f"{type(error).__name__}: {error}")
+            result = TaskResult(
+                task.name,
+                "failed",
+                error=f"{type(error).__name__}: {error}",
+                defect_frames=() if is_expected_failure(error) else summarize_traceback(error),
+            )
         result.elapsed_seconds = round(time.monotonic() - started, 6)
         result.queue_seconds = round(queue_seconds, 6)
         self.progress(f"{task.name}: {result.status} ({result.elapsed_seconds:.1f}s)")

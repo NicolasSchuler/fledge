@@ -15,7 +15,12 @@ from rich.text import Text
 from latexprep.finding_view import RenderOptions
 from latexprep.models import Finding, Outcome, Report
 from latexprep.terminal_progress import TerminalProgress
-from latexprep.terminal_report import print_report, render_compact, render_terminal
+from latexprep.terminal_report import (
+    print_report,
+    render_compact,
+    render_terminal,
+    sanitize_terminal_text,
+)
 
 
 class TerminalBuffer(StringIO):
@@ -198,6 +203,58 @@ class TerminalPresentationTests(unittest.TestCase):
         report = Report("prepare", outcome=Outcome.PLANNED, package_contents=[package("proposed")])
         self.assertEqual(len(render_compact(report).splitlines()), 1)
         self.assertNotIn("Package contents", render_compact(report))
+
+
+class InvisibleCharacterTests(unittest.TestCase):
+    def test_format_characters_such_as_bidi_overrides_are_shown_not_applied(self):
+        text = "gpj.\u202etxet\u2066x\u200d\U000e0001"
+        self.assertEqual(sanitize_terminal_text(text), "gpj.\\u202etxet\\u2066x\\u200d\\U000e0001")
+
+    def test_escape_sequences_and_controls_are_still_removed_and_text_is_kept(self):
+        self.assertEqual(
+            sanitize_terminal_text("a\x1b[31mb\x1b]0;title\x07c\x00d\u0085e\nf\tg"),
+            "abcde\nf\tg",
+        )
+
+    def test_a_reordering_override_in_a_file_name_is_visible_in_every_terminal_report(self):
+        report = Report(
+            "inspect",
+            outcome=Outcome.PASSED_WITH_ADVISORIES,
+            findings=[Finding("source.edit_marker", "TODO", path="figure\u202egpj.tex", line=1)],
+        )
+        for text in (render_terminal(report), render_compact(report)):
+            self.assertNotIn("\u202e", text)
+            self.assertIn("\\u202e", text)
+
+
+class OnlineDisclosureTests(unittest.TestCase):
+    def report(self) -> Report:
+        return Report(
+            "inspect",
+            outcome=Outcome.PASSED,
+            findings=[
+                Finding(
+                    "online.sharing",
+                    "Explicit online checks share DOI identifiers and URL destinations.",
+                    severity="info",
+                    status="passed",
+                ),
+                Finding("pdf.metadata", "Metadata inventory", severity="info", status="passed"),
+            ],
+        )
+
+    def test_the_privacy_disclosure_is_listed_without_show_passed(self):
+        for text in (render_terminal(self.report()), render_compact(self.report())):
+            self.assertIn("online.sharing", text)
+            self.assertIn("share DOI identifiers", text)
+            self.assertNotIn("Metadata inventory", text)
+
+    def test_other_passed_results_stay_hidden_and_the_no_issues_line_remains(self):
+        text = render_terminal(self.report())
+        self.assertIn("No issues found within this command's stated scope.", text)
+        shown = render_terminal(self.report(), options=RenderOptions(show_passed=True))
+        self.assertIn("Metadata inventory", shown)
+        self.assertNotIn("No issues found", shown)
 
 
 class TerminalProgressTests(unittest.TestCase):

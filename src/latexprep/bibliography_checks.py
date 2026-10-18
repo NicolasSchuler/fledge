@@ -35,7 +35,9 @@ from .bibtex_syntax import (
     Declaration,
     Entry,
     Field,
+    describe_read_failure,
     field_literal,
+    mebibytes,
     read_doi,
 )
 from .citation_graph import (
@@ -43,21 +45,35 @@ from .citation_graph import (
     CitationGraph,
     EntryIndex,
     LocatedEntry,
+    StyleReference,
     Uncertainty,
     bounded_uncertainties,
     build_citation_graph,
     index_entries,
     located_entries,
-    selected_resources,
+    require_directory,
+    selected_bibliography,
     uncertainty_messages,
 )
-from .file_scan import more_suffix
+from .file_scan import more_suffix, read_regular_file
 from .models import EvidenceKind, Finding, PreparationError, Severity, Status
 from .option_config import require_booleans
 from .scheduler import cancellation_point
 from .source_graph import SourceGraph
 
 _MONTHS = frozenset("jan feb mar apr may jun jul aug sep oct nov dec".split())
+# BibTeX styles define their own string macros. The standard styles (and the natbib and
+# other styles derived from them) define these journal macros besides the months;
+# other styles, such as ACM-Reference-Format, define more or fewer.
+_BASE_STYLE_MACROS = frozenset(
+    "acmcs acta cacm ibmjrd ibmsj ieeese ieeetc ieeetcad ipl jacm jcss scp sicomp tocs "
+    "tods tog toms toois toplas tcs".split()
+)
+_BASE_STYLES = frozenset(
+    "plain unsrt alpha abbrv ieeetr acm siam apalike plainnat unsrtnat abbrvnat".split()
+)
+_MAX_STYLE_BYTES = 2 * 1024 * 1024
+_STYLE_MACRO = re.compile(r"^[ \t]*MACRO[ \t]*\{[ \t]*([^\s{}]+)[ \t]*\}", re.MULTILINE)
 _MAX_ROOTS = 32
 _MAX_FUZZY_ENTRIES = 2_000
 _MAX_FUZZY_PAIRS = 20_000
@@ -75,7 +91,15 @@ _DISCOVERY_FAILURES = frozenset(
     }
 )
 _SELECTION_UNAVAILABLE = "No complete bibliography resource selection is available"
-_OVER_BUDGET = "resource exceeds the per-file or total bibliography byte budget"
+
+
+def _over_budget() -> str:
+    return (
+        "exceeds the bibliography byte budget "
+        f"({mebibytes(MAX_BIB_FILE_BYTES)} per file, "
+        f"{mebibytes(MAX_RESOURCES_TOTAL_BYTES)} in total)"
+    )
+
 
 # --- File integrity ---------------------------------------------------------------
 
@@ -84,8 +108,7 @@ def _load_bibliographies(
     root: Path, only: set[str] | None
 ) -> tuple[list[BibDocument], list[Finding]]:
     """Parse every .bib file below ``root``, or only the named ones."""
-    if not root.is_dir():
-        raise PreparationError(f"Bibliography input is not a directory: {root}")
+    require_directory(root, "Bibliography input")
     paths = (
         sorted(
             (path for path in root.rglob("*") if path.suffix.lower() == ".bib"),
@@ -116,19 +139,19 @@ def _load_bibliographies(
         try:
             document = reader.read(path, relative)
             if document is None:
-                raise ValueError(
-                    f"Bibliography exceeds the {MAX_BIB_FILE_BYTES}-byte parser limit."
-                )
+                raise ValueError(f"exceeds the {mebibytes(MAX_BIB_FILE_BYTES)} parser limit")
         except (OSError, UnicodeError, ValueError) as error:
             findings.append(
                 Finding(
                     "bibliography.input",
-                    f"Bibliography could not be inspected: {error}",
+                    f"Bibliography {relative} {describe_read_failure(error)}, "
+                    "so it was not inspected.",
                     severity="error",
                     status="inconclusive",
                     path=relative,
                     suggestion=(
-                        "Use a readable UTF-8 bibliography within the documented parser limit."
+                        "Make the file readable, save it as UTF-8 and keep it within "
+                        f"{mebibytes(MAX_BIB_FILE_BYTES)}."
                     ),
                 )
             )
@@ -170,21 +193,84 @@ def _conflicts(first: Entry, second: Entry) -> list[str]:
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _StyleMacros:
+    """The string macros the BibTeX style in use is known to define.
+
+    ``unread`` names the styles whose definitions are not available here, so any
+    macro they might define stays uncertain. ``unknown`` means no document names
+    a style at all, as in a bibliography-only directory.
+    """
+
+    macros: frozenset[str] = frozenset()
+    unread: tuple[str, ...] = ()
+    unknown: bool = False
+
+    @property
+    def uncertain(self) -> bool:
+        return self.unknown or bool(self.unread)
+
+    def explanation(self) -> str:
+        """Why an undefined macro may still be fine, naming the style when it is known."""
+        if self.unread:
+            styles = ", ".join(repr(name) for name in self.unread)
+            return f"the bibliography style {styles} may define it"
+        return "a bibliography style used with this file may define it"
+
+
+def _style_macros(root: Path, styles: list[StyleReference] | None) -> _StyleMacros:
+    """Macros of the styles ``styles`` name: project .bst files are read, standard ones known."""
+    if styles is None:
+        return _StyleMacros(unknown=True)
+    macros: set[str] = set()
+    unread: list[str] = []
+    for style in styles:
+        cancellation_point()
+        base = style.name.removesuffix(".bst").casefold()
+        if style.local_file is not None:
+            try:
+                text = read_regular_file(root / style.local_file, _MAX_STYLE_BYTES).decode(
+                    "utf-8", errors="replace"
+                )
+            except OSError:
+                unread.append(style.name)
+                continue
+            # BST comments run from % to the end of the line.
+            macros.update(
+                name.casefold() for name in _STYLE_MACRO.findall(re.sub(r"%[^\n]*", "", text))
+            )
+        elif base in _BASE_STYLES:
+            macros |= _BASE_STYLE_MACROS
+        else:
+            unread.append(style.name)
+    return _StyleMacros(frozenset(macros), tuple(unread))
+
+
 class _IntegrityCheck:
     """Cross-file consistency of keys, string macros, relationships and DOIs."""
 
-    def __init__(self, documents: list[BibDocument], *, complete: bool) -> None:
-        self.macro_names = _MONTHS | {
-            bib_field.name
-            for document in documents
-            for record in document.records
-            if isinstance(record, Declaration) and record.kind == "string"
-            for bib_field in record.fields
-        }
+    def __init__(
+        self, documents: list[BibDocument], *, complete: bool, style: _StyleMacros | None = None
+    ) -> None:
+        style = style or _StyleMacros()
+        self.style = style
+        self.macro_names = (
+            _MONTHS
+            | style.macros
+            | {
+                bib_field.name
+                for document in documents
+                for record in document.records
+                if isinstance(record, Declaration) and record.kind == "string"
+                for bib_field in record.fields
+            }
+        )
         self.keys = _defined_keys(documents)
-        # A missing definition is only certain when every inspected file parsed.
-        self.severity: Severity = "error" if complete else "warning"
-        self.status: Status = "failed" if complete else "inconclusive"
+        # A missing definition is only certain when every inspected file parsed and the
+        # bibliography style, which may define macros of its own, is known in full.
+        certain = complete and not style.uncertain
+        self.severity: Severity = "error" if certain else "warning"
+        self.status: Status = "failed" if certain else "inconclusive"
         self.seen_keys: dict[str, tuple[BibDocument, Entry]] = {}
         self.seen_dois: dict[str, tuple[BibDocument, Entry]] = {}
 
@@ -233,12 +319,29 @@ class _IntegrityCheck:
     def _undefined_macros(self, document: BibDocument, bib_field: Field) -> Iterator[Finding]:
         for atom in bib_field.atoms:
             if atom.kind == "macro" and atom.value.lower() not in self.macro_names:
+                if self.style.uncertain:
+                    message = (
+                        f"String macro {atom.value!r} has no definition in the inspected "
+                        f"files; {self.style.explanation()}."
+                    )
+                    suggestion = (
+                        "Define it with @string in a .bib file, or replace it with the literal "
+                        "text, unless the style defines it."
+                    )
+                else:
+                    message = (
+                        f"String macro {atom.value!r} has no definition in the inspected files."
+                    )
+                    suggestion = (
+                        "Define it with @string in a .bib file or replace it with the literal text."
+                    )
                 yield document.finding(
                     "bibliography.undefined_macro",
-                    f"String macro {atom.value!r} has no definition in the inspected files.",
+                    message,
                     atom.start,
                     severity=self.severity,
                     status=self.status,
+                    suggestion=suggestion,
                 )
 
     def _relationship(self, document: BibDocument, bib_field: Field) -> Iterator[Finding]:
@@ -302,11 +405,13 @@ class _IntegrityCheck:
 
 
 def _integrity_findings(
-    documents: list[BibDocument], input_findings: list[Finding]
+    documents: list[BibDocument], input_findings: list[Finding], style: _StyleMacros
 ) -> list[Finding]:
     findings = list(input_findings)
     check = _IntegrityCheck(
-        documents, complete=all(document.valid for document in documents) and not findings
+        documents,
+        complete=all(document.valid for document in documents) and not findings,
+        style=style,
     )
     for document in documents:
         cancellation_point()
@@ -321,8 +426,10 @@ def inspect_bibliography_integrity(
     root: Path, main: str | None = None
 ) -> tuple[list[BibDocument], list[Finding]]:
     """The parsed documents of :func:`check_bibliography_integrity` with its findings."""
-    documents, findings = _load_bibliographies(root, selected_resources(root, main))
-    return documents, _integrity_findings(documents, findings)
+    selection = selected_bibliography(root, main)
+    documents, findings = _load_bibliographies(root, selection.resources)
+    style = _style_macros(root, selection.styles)
+    return documents, _integrity_findings(documents, findings, style)
 
 
 def check_bibliography_integrity(root: Path, main: str | None = None) -> list[Finding]:
@@ -332,6 +439,11 @@ def check_bibliography_integrity(root: Path, main: str | None = None) -> list[Fi
     bibliography resources, only those resources are inspected, so duplicate keys
     and DOIs are reported within that declared set. Without such a selection every
     .bib file below ``root`` is inspected, including unreferenced spare copies.
+
+    BibTeX styles define string macros of their own. A macro is therefore a certain
+    error only when the style is known in full: a standard style, a .bst file in the
+    project, or no BibTeX style at all (biblatex). Otherwise it is reported as
+    inconclusive and names the style that may define it.
 
     No findings means no problem was found by these checks, not that metadata,
     macro expansion order, style requirements, or rendered citations are valid.
@@ -575,14 +687,14 @@ def _load_resources(root: Path, names: set[str]) -> tuple[list[BibDocument], lis
         path = root / name
         try:
             if path.is_symlink() or not path.is_file():
-                raise ValueError("resource is missing or is a symbolic link")
+                raise ValueError("is missing or is a symbolic link")
             if path.stat().st_size > reader.allowance:
-                raise ValueError(_OVER_BUDGET)
+                raise ValueError(_over_budget())
             document = reader.read(path, name)
             if document is None:
-                raise ValueError(_OVER_BUDGET)
+                raise ValueError(_over_budget())
         except (OSError, UnicodeError, ValueError) as error:
-            uncertainties.append(Uncertainty(f"{name}: {error}"))
+            uncertainties.append(Uncertainty(f"{name} {describe_read_failure(error)}"))
             continue
         if not document.valid:
             uncertainties.append(Uncertainty(f"{name}: bibliography syntax is incomplete"))
@@ -1076,6 +1188,7 @@ def check_bibliography_coverage_and_fields(
         raise PreparationError("Bibliography checks require BibliographyOptions")
     if not options.any_enabled:
         return []
+    require_directory(root, "Bibliography input")
     inspection = SourceGraph.build(root, main)
     graphs = [build_citation_graph(inspection)]
     uncertainties: list[Uncertainty] = []

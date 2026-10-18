@@ -405,6 +405,26 @@ class BibFileReader:
         return parse_bibtex(name, text[1:] if bom else text, bom=bom)
 
 
+def mebibytes(count: int) -> str:
+    """A byte limit as whole MiB, for messages built from the limit constants."""
+    return f"{count // (1024 * 1024)} MiB"
+
+
+def describe_read_failure(error: Exception) -> str:
+    """Why :meth:`BibFileReader.read` failed, as a phrase that follows the file name.
+
+    Codec details and absolute paths stay out: a researcher needs the cause and, for
+    an encoding problem, where in the file it starts.
+    """
+    if isinstance(error, UnicodeDecodeError):
+        return f"is not valid UTF-8 (first invalid byte at offset {error.start})"
+    if isinstance(error, UnicodeError):
+        return "is not valid UTF-8"
+    if isinstance(error, OSError):
+        return f"could not be read ({error.strerror or type(error).__name__})"
+    return str(error)
+
+
 def field_literal(
     bib_field: Field,
     *,

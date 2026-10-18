@@ -95,7 +95,7 @@ Fledge's own workflows; a tool such as Dependabot can keep them current.
 - **TeX and Poppler.** BasicTeX is a small TeX Live distribution, and `tlmgr` adds
   `latexmk`, Biber and BibLaTeX. A package your paper needs but the runner lacks
   is reported as a build failure; add it to the `tlmgr install` line.
-  Pin the version of Fledge, for example `fledge-latex==0.2.0`, if you want the
+  Pin the version of Fledge, for example `fledge-latex==0.3.0`, if you want the
   same checks on every run.
 - **`--output-format ci`** prints each finding as a GitHub annotation, and
   `--quiet` leaves out the progress messages. Fledge also reads a `fledge.toml` in
@@ -122,7 +122,7 @@ on 0, 1 and 2 and fails on everything else:
 | 1 | Passed with advisories: warnings need review | Passes; the warnings stay visible as annotations |
 | 2 | Passed only because of exceptions you accepted in `fledge.toml` | Passes |
 | 3 | Blocked: a required check failed or lacked evidence | Fails |
-| 4, 64, 130 | Error, invalid command line, or interrupted | Fails |
+| 4, 64, 130 | Error (including an internal failure), invalid command line, or interrupted | Fails |
 
 To fail the job on advisories as well, change `-le 2` to `-le 0`. The
 [reports page](reports.md#exit-codes) explains every code.

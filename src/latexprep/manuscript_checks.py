@@ -25,7 +25,7 @@ from .expanded_document import (
     environment_regions,
     expand_document,
 )
-from .file_scan import check_status, format_locations
+from .file_scan import check_status, format_locations, more_suffix, plural
 from .literal_text import (
     HEADING_DEPTHS,
     KNOWN_TEXT_COMMANDS,
@@ -527,6 +527,16 @@ class _CheckOutcome(NamedTuple):
     uncertainty: Iterable[str]
 
 
+# Offending names spelled out in a message; the details list every one.
+_MAX_NAMED = 3
+
+
+def _listing(label: str, names: Iterable[str]) -> str:
+    """``Missing: a, b, c (+2 more)``: the first few distinct names under a label."""
+    unique = list(dict.fromkeys(names))
+    return f"{label}: {', '.join(unique[:_MAX_NAMED])}{more_suffix(len(unique) - _MAX_NAMED)}"
+
+
 def _unknown_reasons(unknown: Sequence[tuple[int, str]], start: int, end: int) -> list[str]:
     """Describe unexpanded body constructs inside one checked region only."""
     labels = sorted({label for offset, label in unknown if start <= offset < end})
@@ -594,14 +604,16 @@ def _policy_finding(
     weight: _Weight = _POLICY,
     details: Mapping[str, object] | None = None,
     other_gaps: bool = False,
+    listing: str = "",
 ) -> Finding:
     """Report confirmed violations as failures even when other constructs are unclear.
 
     Callers only record a violation for a construct they could interpret, so a
     violation is never in doubt. Remaining interpretation gaps stay in the details
     and decide the outcome only when nothing was confirmed. ``failure`` summarizes
-    the violations; it defaults to the title. Any remaining gap, or ``other_gaps``
-    reported in ``details`` beyond the outcome's own, marks the evidence incomplete.
+    the violations; it defaults to the title. ``listing`` names the offending items
+    after the locations. Any remaining gap, or ``other_gaps`` reported in ``details``
+    beyond the outcome's own, marks the evidence incomplete.
     """
     violations = outcome.violations
     reasons = sorted(set(outcome.uncertainty))
@@ -612,6 +624,8 @@ def _policy_finding(
         case "failed":
             where = format_locations(violations)
             message = (failure or title.rstrip(".")) + (": " + where if where else "") + "."
+            if listing:
+                message += " " + listing + "."
             if reasons:
                 message += " Other constructs remain inconclusive: " + reasons[0].rstrip(".") + "."
         case "inconclusive":
@@ -833,6 +847,7 @@ def _package_checks(document: ExpandedDocument, options: ManuscriptCheckOptions)
     allowed = options.allowed_packages
     if allowed is not None:
         matches = []
+        not_allowed: list[str] = []
         for declaration in declarations:
             names = declaration["names"]
             if names is None or declaration["uncertainty"]:
@@ -840,13 +855,15 @@ def _package_checks(document: ExpandedDocument, options: ManuscriptCheckOptions)
             disallowed = [name for name in names if name not in allowed]
             if disallowed:
                 matches.append({**declaration, "disallowed": disallowed})
+                not_allowed.extend(disallowed)
         findings.append(
             _policy_finding(
                 "manuscript.package_allowlist",
                 "Checked the configured direct-package allowlist.",
                 _CheckOutcome(matches, reasons),
-                failure=f"{len(matches)} of {len(declarations)} direct package declarations "
-                "are not allowed",
+                failure=f"{len(matches)} of "
+                f"{plural(len(declarations), 'direct package declaration')} not allowed",
+                listing=_listing("Not allowed", not_allowed),
                 details={"allowed": list(allowed), "declarations": declarations, "scope": scope},
             )
         )
@@ -937,6 +954,7 @@ def _abstract_checks(reading: _Reading, options: ManuscriptCheckOptions) -> list
         reasons.extend(region.uncertainty)
     citations = []
     abbreviations = []
+    abbreviation_names: list[str] = []
     for region in regions:
         cancellation_point()
         if region.uncertainty:
@@ -950,10 +968,13 @@ def _abstract_checks(reading: _Reading, options: ManuscriptCheckOptions) -> list
                 literal[start:end] = [" "] * (end - start)
         value, unknown = plain_text("".join(literal))
         reasons.extend(unknown)
-        abbreviations.extend(
-            document.located(region.command.start, abbreviation=token, definition_candidate=defined)
-            for token, defined in _abbreviation_candidates(value, options)
-        )
+        for token, defined in _abbreviation_candidates(value, options):
+            abbreviations.append(
+                document.located(
+                    region.command.start, abbreviation=token, definition_candidate=defined
+                )
+            )
+            abbreviation_names.append(token)
     results = []
     if options.forbid_abstract_citations:
         results.append(
@@ -961,7 +982,7 @@ def _abstract_checks(reading: _Reading, options: ManuscriptCheckOptions) -> list
                 "manuscript.abstract_citations",
                 "Checked the abstract citation policy.",
                 _CheckOutcome(citations, reasons),
-                failure=f"{len(citations)} citation commands appear in the abstract",
+                failure=f"{plural(len(citations), 'citation command')} in the abstract",
             )
         )
     if options.abstract_abbreviation_policy:
@@ -970,7 +991,9 @@ def _abstract_checks(reading: _Reading, options: ManuscriptCheckOptions) -> list
                 "manuscript.abstract_abbreviations",
                 "Checked uppercase abbreviation candidates in abstracts.",
                 _CheckOutcome(abbreviations, reasons),
-                failure=f"{len(abbreviations)} abstract abbreviation candidates need review",
+                failure=f"{plural(len(abbreviations), 'abstract abbreviation candidate')} "
+                "to review",
+                listing=_listing("Abbreviations", abbreviation_names),
                 weight=_ADVISORY,
                 details={
                     "policy": options.abstract_abbreviation_policy,
@@ -992,7 +1015,8 @@ def _heading_depth_finding(headings: list[_Heading], reasons: list[str], maximum
         "manuscript.heading_depth",
         "Checked the configured literal heading depth.",
         _CheckOutcome(deep, reasons),
-        failure=f"{len(deep)} of {len(headings)} literal headings exceed depth {maximum}",
+        failure=f"{len(deep)} of {plural(len(headings), 'literal heading')} deeper than depth "
+        f"{maximum}",
         details={"maximum_depth": maximum, "headings": headings, "depths": dict(HEADING_DEPTHS)},
     )
 
@@ -1012,7 +1036,8 @@ def _empty_sections_finding(document: ExpandedDocument, headings: list[_Heading]
         "manuscript.empty_sections",
         "Checked apparently empty section subtrees.",
         _CheckOutcome(empty, unknown),
-        failure=f"{len(empty)} of {len(headings)} section subtrees have no observable content",
+        failure=f"{len(empty)} of {plural(len(headings), 'section subtree')} with no "
+        "observable content",
         weight=_ADVISORY,
     )
 
@@ -1033,7 +1058,7 @@ def _hardcoded_references_finding(reading: _Reading) -> Finding:
         "manuscript.hardcoded_references",
         "Checked hard-coded reference candidates.",
         _CheckOutcome(matches, reading.uncertainty),
-        failure=f"{len(matches)} hard-coded reference candidates",
+        failure=plural(len(matches), "hard-coded reference candidate"),
         weight=_ADVISORY,
     )
 
@@ -1087,7 +1112,9 @@ def _required_declarations_finding(
         "manuscript.required_declarations",
         "Checked required nonempty declarations.",
         _CheckOutcome(missing, unknown),
-        failure=f"{len(missing)} of {len(required)} required declarations are missing or empty",
+        failure=f"{len(missing)} of {plural(len(required), 'required declaration')} missing or "
+        "empty",
+        listing=_listing("Missing", (str(item["declaration"]) for item in missing)),
         details={
             "declarations": declarations,
             "required": list(required),
@@ -1142,7 +1169,9 @@ def _required_metadata_finding(document: ExpandedDocument, required: tuple[str, 
         "manuscript.required_metadata",
         "Checked configured literal metadata presence.",
         _CheckOutcome(missing, reasons),
-        failure=f"{len(missing)} of {len(required)} required metadata fields are missing or empty",
+        failure=f"{len(missing)} of {plural(len(required), 'required metadata field')} missing "
+        "or empty",
+        listing=_listing("Missing", (str(item["field"]) for item in missing)),
         details={
             "metadata": metadata,
             "required": list(required),
@@ -1193,7 +1222,7 @@ def _orcid_finding(reading: _Reading) -> Finding:
         "manuscript.orcid",
         "Checked literal ORCID syntax and checksums.",
         _CheckOutcome(invalid, reasons),
-        failure=f"{len(invalid)} of {len(identifiers)} literal ORCID identifiers are invalid",
+        failure=f"{len(invalid)} of {plural(len(identifiers), 'literal ORCID identifier')} invalid",
         details={
             "identifiers": identifiers,
             "identity": "Checksum validity does not establish ownership or identity.",
@@ -1275,7 +1304,7 @@ def _line_number_checks(
                 "manuscript.line_numbers",
                 "No literal line-number activation was found.",
                 _CheckOutcome(activations, reasons),
-                failure=f"Line numbering is active at {len(activations)} location(s)",
+                failure=f"Line numbering is active at {plural(len(activations), 'location')}",
                 details=details,
             )
         ]
@@ -1306,39 +1335,40 @@ class _FloatRule(NamedTuple):
 
     rule: str
     title: str
-    # {count} and {total} name the violations and the inspected floats.
+    # {count} is the number of violations; {floats}, {labels} and {figures} are counts
+    # with their nouns: the inspected floats, the violating labels and the violating figures.
     failure: str
 
 
 _FLOAT_CAPTIONS = _FloatRule(
     "manuscript.float_captions",
     "Checked literal figure/table captions.",
-    "{count} of {total} floats lack a caption",
+    "{count} of {floats} without a caption",
 )
 _FLOAT_LABELS = _FloatRule(
     "manuscript.float_labels",
     "Checked literal figure/table labels.",
-    "{count} of {total} floats lack a label",
+    "{count} of {floats} without a label",
 )
 _FLOAT_LABEL_ORDER = _FloatRule(
     "manuscript.float_label_order",
     "Checked float label/caption source order.",
-    "{count} float labels do not follow their caption",
+    "{labels} placed before the caption",
 )
 _FLOAT_REFERENCES = _FloatRule(
     "manuscript.float_references",
     "Checked external literal float references.",
-    "{count} of {total} floats have no external reference",
+    "{count} of {floats} without an external reference",
 )
 _FLOAT_REFERENCE_ORDER = _FloatRule(
     "manuscript.float_reference_order",
     "Checked first-reference source order.",
-    "{count} of {total} floats are first referenced out of source order",
+    "{count} of {floats} first referenced out of source order",
 )
 _FIGURE_DESCRIPTIONS = _FloatRule(
     "manuscript.figure_descriptions",
     "Checked literal figure descriptions.",
-    "{count} figures lack a usable Description",
+    "{figures} without a usable Description",
 )
 _FLOAT_RULES = (
     _FLOAT_CAPTIONS,
@@ -1576,7 +1606,12 @@ def _float_checks(reading: _Reading, options: ManuscriptCheckOptions) -> list[Fi
             rule.rule,
             rule.title,
             _CheckOutcome(violations[rule], [*reasons, *scan.uncertainty[rule]]),
-            failure=rule.failure.format(count=len(violations[rule]), total=len(floats)),
+            failure=rule.failure.format(
+                count=len(violations[rule]),
+                floats=plural(len(floats), "float"),
+                labels=plural(len(violations[rule]), "float label"),
+                figures=plural(len(violations[rule]), "figure"),
+            ),
             details=details,
         )
         for rule in enabled

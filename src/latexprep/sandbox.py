@@ -62,6 +62,7 @@ _LINUX_TOOL_PREFIXES = (Path("/usr"), Path("/bin"), Path("/lib"), Path("/lib64")
 # Only trusted system directories may supply the sandbox program itself.
 _SYSTEM_PROGRAM_PATH = "/usr/bin:/bin"
 _REFUSAL_MARKERS = ("sandbox_apply:", "sandbox initialization failed", "sandbox_compile:")
+_BUBBLEWRAP_PREFIX = "bwrap:"
 
 
 class SandboxBackend(Protocol):
@@ -394,8 +395,14 @@ class UnavailableSandbox:
 
 
 def sandbox_refusal(stderr: str) -> bool:
-    """Whether a backend reported that it could not apply its isolation."""
-    return any(marker in stderr for marker in _REFUSAL_MARKERS)
+    """Whether a backend reported that it could not apply its isolation.
+
+    Seatbelt names its failures inside a longer line; Bubblewrap prefixes every
+    message it prints itself (such as a refused user namespace) with ``bwrap:``.
+    """
+    return stderr.lstrip().startswith(_BUBBLEWRAP_PREFIX) or any(
+        marker in stderr for marker in _REFUSAL_MARKERS
+    )
 
 
 def with_ulimits(command: list[str], *, max_file_bytes: int, timeout_seconds: int) -> list[str]:
@@ -459,6 +466,11 @@ def tool_environment(
         "MKTEXTFM": "0",
         "MKTEXFMT": "0",
         "MKTEXMF": "0",
+        # TeX wraps log lines at 79 columns by default, which splits long citation
+        # and label names mid-word and hides them from the log parser.
+        "max_print_line": "1000",
+        "error_line": "254",
+        "half_error_line": "238",
         "OMP_NUM_THREADS": "1",
         "OPENBLAS_NUM_THREADS": "1",
         "VECLIB_MAXIMUM_THREADS": "1",

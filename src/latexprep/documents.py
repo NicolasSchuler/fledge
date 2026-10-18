@@ -6,6 +6,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from .config import Settings
+from .defects import REPORT_DEFECT_SUGGESTION, is_expected_failure, summarize_traceback
 from .document_run import run_project
 from .job_context import (
     DOCUMENT_COMMANDS,
@@ -46,6 +47,43 @@ def _document_reporting(reporting: ReportingOptions, name: str) -> ReportingOpti
     )
 
 
+def _failed_document_finding(error: Exception, document: DocumentOptions) -> Finding:
+    """Say why one selected document could not be checked or packaged.
+
+    Expected failures point at the document's own settings (the command-line
+    advice of the underlying error does not apply to ``workflow.documents``). A
+    defect is reported as one, with its traceback frames, instead of passing for
+    an input problem.
+    """
+    if not is_expected_failure(error):
+        return Finding(
+            "package.document",
+            f"Document {document.name} stopped unexpectedly: {type(error).__name__}: {error}",
+            severity="error",
+            status="inconclusive",
+            suggestion=REPORT_DEFECT_SUGGESTION,
+            details={"traceback": list(summarize_traceback(error))},
+        )
+    if isinstance(error, PreparationError):
+        suggestion = (
+            f"Check the settings of document '{document.name}' under workflow.documents "
+            "(main, source_directory, include, reference_pdf) and the files they select, "
+            "then run the command again."
+        )
+    else:
+        suggestion = (
+            "Check that the input files are readable and the temporary directory has free "
+            "space, then run the command again."
+        )
+    return Finding(
+        "package.document",
+        str(error),
+        severity="error",
+        status="inconclusive",
+        suggestion=suggestion,
+    )
+
+
 async def _run_document(
     context: JobContext, shared_root: Path, document: DocumentOptions
 ) -> DocumentResult:
@@ -80,10 +118,8 @@ async def _run_document(
             lambda message: context.emit(f"{document.name}: {message}"),
         )
         package = await run_project(child_context, child)
-    except (PreparationError, OSError, ValueError) as error:
-        child.findings.append(
-            Finding("package.document", str(error), severity="error", status="inconclusive")
-        )
+    except Exception as error:
+        child.findings.append(_failed_document_finding(error, document))
         child.outcome = Outcome.BLOCKED
         package = None
     select_and_review(child, settings)
@@ -117,9 +153,8 @@ async def run_documents(context: JobContext, report: Report) -> list[DocumentRes
     """Check, and for preparation verify, every configured document from one shared import."""
     request, settings = context.request, context.settings
     if request.command not in DOCUMENT_COMMANDS:
+        # ``run_job`` routes only these commands here; the others ignore workflow.documents.
         raise PreparationError("workflow.documents is supported by inspect, check and prepare")
-    if request.reference_pdf is not None:
-        raise PreparationError("Configure reference_pdf separately for each document")
     imported = await context.thread_operation(
         "import shared document snapshot",
         import_project,

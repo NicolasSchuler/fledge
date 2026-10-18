@@ -15,6 +15,7 @@ from click.testing import CliRunner
 from latexprep.cli import cli
 from latexprep.config import Settings
 from latexprep.doctor import diagnostic_engines, run_doctor
+from latexprep.job_execution import JobDeadlineExceeded
 from latexprep.models import Finding, Outcome, PreparationError
 from latexprep.resource_monitor import ResourceMonitor
 from latexprep.runtime import CommandResult, ToolRunner
@@ -160,12 +161,29 @@ class DoctorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report.findings[0].status, "inconclusive")
 
     async def test_timeout_preserves_installed_evidence_without_claiming_pass(self):
-        with patch.object(DoctorRunner, "run", side_effect=TimeoutError):
+        with patch.object(DoctorRunner, "run", side_effect=JobDeadlineExceeded):
             report = await run_doctor()
         self.assertEqual(report.outcome, "blocked")
         self.assertTrue(report.tools["pdflatex"]["installed"])
         self.assertTrue(any(item.rule == "execution.deadline" for item in report.findings))
         self.assertEqual(self.builds, [])
+
+    async def test_stray_timeout_is_not_reported_as_the_job_deadline(self):
+        with patch.object(DoctorRunner, "run", side_effect=TimeoutError("timed out")):
+            report = await run_doctor()
+        rules = {item.rule for item in report.findings}
+        self.assertNotIn("execution.deadline", rules)
+        self.assertIn("doctor.execution_unavailable", rules)
+        self.assertEqual(report.outcome, "blocked")
+
+    async def test_failed_sandbox_probe_names_the_command_failure_in_plain_words(self):
+        failed = CommandResult(1, "", "bwrap: no user namespaces", resolved_command=["true"])
+        with patch.object(DoctorRunner, "run", return_value=failed):
+            report = await run_doctor()
+        message = report.findings[0].message
+        self.assertEqual(report.findings[0].rule, "doctor.sandbox_unavailable")
+        self.assertIn("the sandbox probe failed (1): bwrap: no user namespaces", message)
+        self.assertNotIn("output_limit", message)
 
     async def test_job_deadline_cancels_active_build_and_releases_its_budget(self):
         cancelled = asyncio.Event()
@@ -301,6 +319,51 @@ class DoctorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report.outcome, "passed_with_advisories", report.to_dict())
         self.assertFalse(report.tools["qpdf"]["required"])
         self.assertFalse(report.tools["qpdf"]["exercised"])
+
+    async def test_configured_pdf_structure_checks_list_qpdf_as_an_advisory_tool(self):
+        from latexprep.pdf_structure_checks import StructureOptions
+
+        for field in (
+            "check_table_structure",
+            "check_link_structure",
+            "require_figure_alt",
+            "check_structure_references",
+            "require_structure_tree",
+        ):
+            with self.subTest(setting=field):
+                report = await run_doctor(
+                    Settings(structure_checks=StructureOptions(**{field: True}))
+                )
+                self.assertTrue(report.tools["qpdf"]["installed"])
+                self.assertFalse(report.tools["qpdf"]["required"])
+        report = await run_doctor(Settings())
+        self.assertNotIn("qpdf", report.tools)
+
+    async def test_missing_qpdf_is_an_advisory_for_structure_checks(self):
+        from latexprep.pdf_structure_checks import StructureOptions
+
+        with patch(
+            "latexprep.doctor.shutil.which",
+            side_effect=lambda name: None if name == "qpdf" else f"/test-tools/{name}",
+        ):
+            report = await run_doctor(
+                Settings(structure_checks=StructureOptions(require_figure_alt=True))
+            )
+        self.assertEqual(report.outcome, "passed_with_advisories", report.to_dict())
+        self.assertFalse(report.tools["qpdf"]["installed"])
+
+    async def test_required_color_space_alone_lists_mutool(self):
+        from latexprep.pdf_artwork import PdfArtworkOptions
+
+        for field in ("rendered_pdf_artwork", "included_figure_artwork"):
+            with self.subTest(setting=field):
+                report = await run_doctor(
+                    Settings(**{field: PdfArtworkOptions(required_color_space="rgb")})
+                )
+                self.assertTrue(report.tools["mutool"]["installed"])
+                self.assertFalse(report.tools["mutool"]["required"])
+        report = await run_doctor(Settings())
+        self.assertNotIn("mutool", report.tools)
 
     async def test_cancellation_propagates_to_the_active_work(self):
         started = asyncio.Event()

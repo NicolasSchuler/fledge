@@ -40,6 +40,82 @@ jobs:
       - name: Check types
         run: ty check src/latexprep
 
+  # Shell scripts are linted here because the installer is the one shell program shipped.
+  shellcheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      # shellcheck is preinstalled on GitHub-hosted Ubuntu runners.
+      - name: Lint install.sh
+        run: |
+          shellcheck --version
+          shellcheck install.sh
+
+  # The same strict build as the Deploy documentation workflow, without publishing,
+  # so a broken link or reference fails the pull request and not the merge.
+  docs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install documentation dependencies
+        run: python -m pip install '.[docs]'
+      - name: Build documentation with warnings as errors
+        run: >-
+          python -m sphinx -n -W --keep-going -b html
+          -d "$RUNNER_TEMP/sphinx-doctrees" docs "$RUNNER_TEMP/docs-html"
+
+  # Build what would be published and use it the way a user would: install the wheel
+  # into a fresh environment and run it from another directory, then run the
+  # documentation and packaging tests from the extracted source archive, which must carry
+  # every file they read (scripts, skills, examples, docs and the changelog).
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Check the package metadata and version
+        run: python scripts/release_checks.py version
+      - name: Build source distribution and wheel
+        run: |
+          python -m pip install --disable-pip-version-check 'build>=1.2,<2' 'twine>=6,<7'
+          python -m build --outdir dist
+          python -m twine check --strict dist/*
+      - name: Install the wheel in a fresh environment and run fledge --version
+        run: python scripts/release_checks.py wheel dist
+      - name: Run the documentation and packaging tests from the source distribution
+        run: |
+          extract="$(mktemp -d)"
+          tar -xzf dist/*.tar.gz -C "$extract"
+          cd "$extract"/*/
+          python -m venv "$RUNNER_TEMP/sdist-tests"
+          "$RUNNER_TEMP/sdist-tests/bin/python" -m pip install --disable-pip-version-check \
+            . 'pytest>=9,<10'
+          "$RUNNER_TEMP/sdist-tests/bin/python" -m pytest tests/test_docs.py tests/test_packaging.py \
+            -q -p no:cacheprovider
+
   unit:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
@@ -47,7 +123,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        python-version: ["3.11", "3.13"]
+        python-version: ["3.11", "3.12", "3.13"]
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -112,14 +188,16 @@ jobs:
       # with each other for CPU on the hosted runner.
       - name: Run live integration and sandbox tests
         env:
-          LATEX_PREP_RUN_INTEGRATION: "1"
-          LATEXPREP_RUN_SANDBOX_TESTS: "1"
+          FLEDGE_RUN_INTEGRATION: "1"
         run: >-
           python -m pytest
           tests/test_integration.py
           tests/test_integration_checks.py
           tests/test_integration_remaining.py
           tests/test_integration_backends.py
+          tests/test_loaded_options.py
+          tests/test_pdf.py
+          tests/test_pdf_checks.py
           tests/test_runtime_parallel.py
           -v -ra -p no:cacheprovider
 
@@ -218,11 +296,12 @@ jobs:
       # Serial on purpose, as in live-macos. The live tests in
       # test_runtime_parallel.py run only on macOS, so that file is left out.
       # test_integration_realistic.py is added here because it covers
-      # ordinary-paper constructs and Biber.
+      # ordinary-paper constructs and Biber, and test_runtime_backends.py because
+      # it holds the live Bubblewrap isolation test. A packaging test fails when a
+      # test file with live tests is missing from the live jobs.
       - name: Run live integration tests
         env:
-          LATEX_PREP_RUN_INTEGRATION: "1"
-          LATEXPREP_RUN_SANDBOX_TESTS: "1"
+          FLEDGE_RUN_INTEGRATION: "1"
         run: >-
           python -m pytest
           tests/test_integration.py
@@ -230,4 +309,8 @@ jobs:
           tests/test_integration_remaining.py
           tests/test_integration_backends.py
           tests/test_integration_realistic.py
+          tests/test_loaded_options.py
+          tests/test_pdf.py
+          tests/test_pdf_checks.py
+          tests/test_runtime_backends.py
           -v -ra -p no:cacheprovider

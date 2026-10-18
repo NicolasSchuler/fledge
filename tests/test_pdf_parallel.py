@@ -20,6 +20,7 @@ from latexprep.pdf_inspection import PdfInspectionOptions, inspect_pdf
 from latexprep.pdf_support import read_rgb_raster
 from latexprep.runtime import CommandResult, ToolRunner
 from latexprep.scheduler import ResourceBudget
+from latexprep.submission_checks import SubmissionOptions
 from tests.test_pdf import FakePdfRunner
 
 
@@ -84,6 +85,49 @@ class RecordingPdfRunner(FakePdfRunner):
             self.active -= 1
             if rendering:
                 self.active_renders -= 1
+
+
+class FailingTextRunner(FakePdfRunner):
+    """Fails text extraction with a controlled tool message."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__()
+        self.message = message
+
+    async def run(
+        self,
+        argv: list[str],
+        cwd: Path,
+        workspace: Path,
+        *,
+        readonly_inputs: tuple[Path, ...] = (),
+        memory_mb: int | None = None,
+    ) -> CommandResult:
+        if argv[0] == "pdftotext" and argv[-1] != "-v":
+            raise PreparationError(self.message)
+        return await super().run(
+            argv, cwd, workspace, readonly_inputs=readonly_inputs, memory_mb=memory_mb
+        )
+
+
+class ImageOnlyRunner(FakePdfRunner):
+    """Extraction succeeds but finds no text on the page."""
+
+    async def run(
+        self,
+        argv: list[str],
+        cwd: Path,
+        workspace: Path,
+        *,
+        readonly_inputs: tuple[Path, ...] = (),
+        memory_mb: int | None = None,
+    ) -> CommandResult:
+        result = await super().run(
+            argv, cwd, workspace, readonly_inputs=readonly_inputs, memory_mb=memory_mb
+        )
+        if argv[0] == "pdftotext" and argv[-1] != "-v":
+            return replace(result, stdout="\f")
+        return result
 
 
 class ParallelPdfTests(unittest.IsolatedAsyncioTestCase):
@@ -483,6 +527,60 @@ class ParallelPdfTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((item.severity, item.status), ("info", "skipped"))
             self.assertIn("requires a source project; not run for a standalone PDF", item.message)
         self.assertFalse(has_blockers(findings))
+
+    async def test_pdf_privacy_scan_names_a_safe_cause_for_missing_extraction(self) -> None:
+        settings = pdf_check_settings(
+            Settings(submission_checks=SubmissionOptions(identity_terms=("Ada Lovelace",)))
+        )
+        empty = AsyncMock(return_value=[])
+        cases = (
+            (
+                "Required tool is unavailable: pdftotext. Install it explicitly.",
+                "pdftotext is not installed",
+            ),
+            (
+                "pdftotext failed (1): Syntax Error: private manuscript sentence",
+                "the raw tool message is withheld",
+            ),
+        )
+        for index, (message, expected) in enumerate(cases):
+            runner = FailingTextRunner(message)
+            with (
+                self.subTest(message=message),
+                patch("latexprep.pdf_check_pipeline.inspect_pdf", new=empty),
+                patch("latexprep.pdf_check_pipeline.inspect_pdf_details", new=empty),
+                patch("latexprep.pdf_check_pipeline.inspect_pdf_artwork", new=empty),
+                patch("latexprep.pdf_check_pipeline.inspect_pdf_structure", new=empty),
+            ):
+                findings = await inspect_standalone_pdf(
+                    self.left,
+                    self.root / f"privacy-{index}",
+                    runner,
+                    settings,
+                    ResourceBudget(2, 1024),
+                )
+            [finding] = [item for item in findings if item.rule == "submission.pdf_identity_terms"]
+            self.assertEqual(finding.status, "inconclusive")
+            self.assertIn(expected, finding.message)
+            self.assertIn(expected, finding.details["extraction_failure"])
+            self.assertNotIn("private manuscript sentence", str(finding))
+        # An image-only PDF has nothing to extract but no tool failed: no cause is claimed.
+        with (
+            patch("latexprep.pdf_check_pipeline.inspect_pdf", new=empty),
+            patch("latexprep.pdf_check_pipeline.inspect_pdf_details", new=empty),
+            patch("latexprep.pdf_check_pipeline.inspect_pdf_artwork", new=empty),
+            patch("latexprep.pdf_check_pipeline.inspect_pdf_structure", new=empty),
+        ):
+            findings = await inspect_standalone_pdf(
+                self.left,
+                self.root / "privacy-empty",
+                ImageOnlyRunner(),
+                settings,
+                ResourceBudget(2, 1024),
+            )
+        [finding] = [item for item in findings if item.rule == "submission.pdf_identity_terms"]
+        self.assertNotIn("extraction_failure", finding.details)
+        self.assertIn("unavailable or empty", finding.message)
 
     def test_raster_pixels_cannot_exceed_geometry_reservation(self) -> None:
         raster = self.root / "oversized.ppm"

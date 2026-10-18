@@ -27,10 +27,11 @@ from .pdf_support import (
     normalized_text_pages,
     page_boxes_argv,
     page_count,
-    page_sizes,
+    parse_page_sizes,
     pdf_input,
     pdfinfo_fields,
     read_rgb_raster,
+    require_comparison_raster_fit,
     require_rendered_pages,
     unavailable_finding,
 )
@@ -111,6 +112,13 @@ def _side_evidence(
         return None
 
 
+def _comparable_page_sizes(output: str, pages: int) -> list[tuple[float, float]]:
+    """Page sizes in points, refusing pages too large to render at the comparison resolution."""
+    sizes = parse_page_sizes(output, pages)
+    require_comparison_raster_fit(sizes)
+    return sizes
+
+
 async def _prepare_side(session: PdfToolSession, name: str) -> _ComparisonSide:
     document = pdf_input(name)
     info = await session.run(f"{name}/properties", ["pdfinfo", document])
@@ -124,7 +132,9 @@ async def _prepare_side(session: PdfToolSession, name: str) -> _ComparisonSide:
         session.budget,
     )
     errors: list[str] = []
-    dimensions = _side_evidence(geometry, page_sizes, pages, f"{name} page geometry", errors)
+    dimensions = _side_evidence(
+        geometry, _comparable_page_sizes, pages, f"{name} page geometry", errors
+    )
     text_pages = _side_evidence(
         text, normalized_text_pages, pages, f"{name} text extraction", errors
     )
@@ -326,9 +336,11 @@ def _rendering_finding(
     if changed_pages:
         message = f"Rendered output differs on {len(changed_pages)} pages."
     elif tolerant:
-        message = "Rendered pages match within the explicit pixel tolerances at 144 DPI."
+        message = (
+            f"Rendered pages match within the explicit pixel tolerances at {COMPARISON_DPI} DPI."
+        )
     else:
-        message = "Rendered pages match exactly at 144 DPI."
+        message = f"Rendered pages match exactly at {COMPARISON_DPI} DPI."
     return Finding(
         "compare.rendering",
         message,

@@ -524,6 +524,100 @@ class InstallerTests(unittest.TestCase):
         self.assertIn("installing the local Python package", result.stderr)
         self.assertTrue(self.prefix.exists())
         self.assertFalse(self.launcher.exists())
+        self.assertTrue((self.prefix / ".fledge-installer").is_file())
+        self.assertEqual(self.cleanup_command(result.stderr), self.uninstall_command())
+
+    def uninstall_command(self, prefix=None, bin_dir=None):
+        return [
+            "bash",
+            os.path.realpath(self.script),  # the installer reports its physical directory
+            "--uninstall",
+            "--prefix",
+            str(prefix or self.prefix),
+            "--bin-dir",
+            str(bin_dir or self.launcher.parent),
+        ]
+
+    def cleanup_command(self, stderr):
+        """The command printed after 'run the installer again:' by a failed install."""
+        lines = stderr.splitlines()
+        announcement = next(i for i, line in enumerate(lines) if "then run the installer" in line)
+        return shlex.split(lines[announcement + 1])
+
+    def test_failed_install_prints_a_command_that_cleans_up_so_a_retry_succeeds(self):
+        self.complete_tools()
+        self.env["MOCK_PIP_FAIL"] = "1"
+        failed = self.run_installer("--yes")
+        self.assertEqual(failed.returncode, 19)
+        retry = self.run_installer("--yes")
+        self.assertEqual(retry.returncode, 1)
+        self.assertIn("created by this installer", retry.stderr)
+        self.assertIn("--uninstall", retry.stderr)
+        # The printed command, run as printed except for accepting its plan, removes
+        # the partial installation although no launcher was ever written.
+        command = [*self.cleanup_command(failed.stderr), "--yes"]
+        self.assertEqual(command[:2], ["bash", os.path.realpath(self.script)])
+        cleaned = subprocess.run(
+            ["/bin/bash", "-c", HARNESS, "installer-test", *command[1:]],
+            cwd=self.root,
+            env=self.env,
+            text=True,
+            capture_output=True,
+            timeout=30,
+        )
+        self.assertEqual(cleaned.returncode, 0, cleaned.stderr)
+        self.assertIn("No launcher at", cleaned.stdout)
+        self.assertFalse(self.prefix.exists())
+        del self.env["MOCK_PIP_FAIL"]
+        again = self.run_installer("--yes")
+        self.assertEqual(again.returncode, 0, again.stderr)
+        self.assertTrue(self.launcher.is_file())
+
+    def test_cleanup_command_quotes_paths_with_spaces(self):
+        self.complete_tools()
+        self.env["MOCK_PIP_FAIL"] = "1"
+        result = self.run_installer("--yes", "--prefix", "private dir", "--bin-dir", "bin dir")
+        self.assertEqual(result.returncode, 19)
+        physical_root = Path(os.path.realpath(self.root))  # relative paths resolve from $PWD
+        self.assertEqual(
+            self.cleanup_command(result.stderr),
+            self.uninstall_command(physical_root / "private dir", physical_root / "bin dir"),
+        )
+
+    def test_failure_before_the_installation_directory_exists_prints_no_cleanup_command(self):
+        self.add_tools("brew")
+        self.env["MOCK_FAIL"] = "brew"
+        result = self.run_installer("--yes")
+        self.assertEqual(result.returncode, 17)
+        self.assertNotIn("--uninstall", result.stderr)
+        self.assertNotIn("partial installation", result.stderr)
+
+    def test_uninstall_removes_a_marked_directory_without_touching_a_foreign_launcher(self):
+        self.prefix.mkdir(parents=True)
+        (self.prefix / ".fledge-installer").write_text("marker")
+        (self.prefix / "venv").mkdir()
+        self.launcher.parent.mkdir(parents=True)
+        self.launcher.write_text("#!/bin/bash\nexec /usr/bin/true\n")
+        dry = self.run_installer("--uninstall", "--dry-run")
+        self.assertEqual(dry.returncode, 0, dry.stderr)
+        self.assertIn(f"Leave {self.launcher} alone", dry.stdout)
+        self.assertTrue((self.prefix / "venv").is_dir())
+        result = self.run_installer("--uninstall", "--yes")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(self.prefix.exists())
+        self.assertEqual(self.launcher.read_text(), "#!/bin/bash\nexec /usr/bin/true\n")
+
+    def test_marker_must_be_a_regular_file_in_a_real_directory(self):
+        elsewhere = self.root / "elsewhere"
+        elsewhere.mkdir()
+        (elsewhere / ".fledge-installer").write_text("marker")
+        self.prefix.parent.mkdir(parents=True)
+        self.prefix.mkdir()
+        (self.prefix / ".fledge-installer").symlink_to(elsewhere / ".fledge-installer")
+        result = self.run_installer("--uninstall", "--yes")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Nothing was removed", result.stderr)
+        self.assertTrue(self.prefix.is_dir())
 
     def install(self, *args):
         self.complete_tools()
@@ -554,12 +648,15 @@ class InstallerTests(unittest.TestCase):
         self.install("--prefix", "private dir", "--bin-dir", "bin dir")
         launcher, prefix = self.root / "bin dir/fledge", self.root / "private dir"
         wrong = self.run_installer("--uninstall", "--yes", "--prefix", "private dir")
-        self.assertEqual(wrong.returncode, 1)
-        self.assertTrue(prefix.is_dir() and launcher.is_file())
+        self.assertEqual(wrong.returncode, 0, wrong.stderr)
+        self.assertIn("rerun with its --bin-dir", wrong.stdout)
+        self.assertFalse(prefix.exists())
+        self.assertTrue(launcher.is_file(), "the launcher in another directory is not touched")
         result = self.run_installer(
             "--uninstall", "--yes", "--prefix", "private dir", "--bin-dir", "bin dir"
         )
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("already absent", result.stdout)
         self.assertFalse(prefix.exists() or launcher.exists())
         self.assertTrue(launcher.parent.is_dir())
 
@@ -590,17 +687,20 @@ class InstallerTests(unittest.TestCase):
             self.assertEqual(result.returncode, 1)
             self.assertEqual(marker.read_text(), "keep")
 
-    def test_uninstall_refuses_symbolic_links_to_the_installation(self):
+    def test_uninstall_never_removes_a_launcher_that_is_a_symbolic_link(self):
         self.install()
         real_launcher = self.root / "real launcher"
-        real_prefix = self.root / "real prefix"
         self.launcher.rename(real_launcher)
         self.launcher.symlink_to(real_launcher)
         result = self.run_installer("--uninstall", "--yes")
-        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("alone: it does not run this installation", result.stdout)
+        self.assertFalse(self.prefix.exists())
         self.assertTrue(self.launcher.is_symlink() and real_launcher.is_file())
-        self.launcher.unlink()
-        real_launcher.rename(self.launcher)
+
+    def test_uninstall_refuses_a_symbolic_link_to_the_installation_directory(self):
+        self.install()
+        real_prefix = self.root / "real prefix"
         self.prefix.rename(real_prefix)
         self.prefix.symlink_to(real_prefix)
         result = self.run_installer("--uninstall", "--yes")

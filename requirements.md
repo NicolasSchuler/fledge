@@ -1,7 +1,17 @@
 # Fledge requirements
 
-Status: Draft for product and implementation planning  
+Status: Historical design record. Written on 6 October 2026 as the original product
+requirements and not updated with the code.  
 Date: 6 October 2026
+
+> **Read this as the original plan, not as documentation of Fledge.** For what the
+> tool does today, read the [documentation](https://nicolasschuler.github.io/fledge/),
+> starting with `docs/workflow-reference.md` and `docs/checks.md`. Decisions the
+> body below still lists as open have been settled: the package is published as
+> `fledge-latex` under the MIT license, settings are TOML files (`fledge.toml`; the
+> `--config submission.yaml` example below is illustrative only), there is no
+> `report` command, and PDF inspection uses Poppler with optional qpdf and MuPDF
+> adapters.
 
 Implementation coverage and remaining checks are tracked in the
 [check backlog](docs/check-backlog.md); the [README](README.md) describes shipped behavior.

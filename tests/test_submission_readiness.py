@@ -320,6 +320,30 @@ class FigureTests(ReadinessCase):
         self.document("\\usepackage{graphicx}\n", "\\includegraphics{photo.pdf}")
         self.assertEqual(self.findings("source.eps_figures"), [])
 
+    def test_vector_figures_are_not_applicable_to_the_raster_color_space_policy(self) -> None:
+        self.write("plot.eps", "%!PS\n")
+        self.write("chart.pdf", b"%PDF-1.5\n")
+        self.write("photo.png", png(2))
+        self.document(
+            "\\usepackage{graphicx}\n",
+            "\\includegraphics{plot.eps}\\includegraphics{chart.pdf}",
+        )
+        only_vector = self.one("figure.color_space", required_color_space="rgb")
+        self.assertEqual((only_vector.severity, only_vector.status), ("info", "passed"))
+        self.assertEqual(
+            only_vector.details["not_applicable_vector_figures"], ["chart.pdf", "plot.eps"]
+        )
+        self.assertNotIn("raster figure(s)", only_vector.message)
+        self.document(
+            "\\usepackage{graphicx}\n",
+            "\\includegraphics{plot.eps}\\includegraphics{photo.png}",
+        )
+        mixed = self.one("figure.color_space", required_color_space="cmyk")
+        self.assertEqual((mixed.severity, mixed.status), ("error", "failed"))
+        self.assertEqual(
+            mixed.message, "Raster figures that are not CMYK or grayscale (1): photo.png."
+        )
+
     def test_raster_color_space_policy_parses_png_and_jpeg_headers(self) -> None:
         self.write("rgb.png", png(2))
         self.write("gray.jpg", jpeg(1))
@@ -343,14 +367,16 @@ class FigureTests(ReadinessCase):
         self.assertEqual(
             self.one("figure.color_space", required_color_space="cmyk").status, "passed"
         )
-        # A truncated header or an unparsed format is never a pass.
+        # A truncated header or an unparsed raster format is never a pass.
         self.write("broken.jpg", jpeg(3)[:12])
-        self.write("plot.eps", "%!PS\n")
-        for name in ("broken.jpg", "plot.eps"):
+        self.write("scan.tif", b"II*\x00")
+        for name in ("broken.jpg", "scan.tif"):
             with self.subTest(name=name):
                 self.document("\\usepackage{graphicx}\n", f"\\includegraphics{{{name}}}")
                 result = self.one("figure.color_space", required_color_space="rgb")
                 self.assertEqual((result.severity, result.status), ("error", "inconclusive"))
+        self.assertIn("scan.tif", result.message)
+        self.assertIn("cannot be read here", result.message)
         with self.assertRaises(PreparationError):
             check_submission_readiness(self.root, "main.tex", required_color_space="srgb")
 
@@ -358,12 +384,13 @@ class FigureTests(ReadinessCase):
 class PrivateMarkerTests(ReadinessCase):
     def test_private_markers_report_locations_and_categories_only(self) -> None:
         self.document(
+            "\\author{Nina Schmidt}",
             body="% NS: rephrase before the deadline\n"
             "% Do not submit: Secret Project Falcon\n"
             "% Added because Reviewer #2 asked\n"
             "% note to self: check with Bob\n"
             "\\begin{verbatim}\n% do not distribute\n\\end{verbatim}\n"
-            "Ordinary text."
+            "Ordinary text.",
         )
         self.write("style.sty", "% Do not distribute modified copies of this file.\n")
         finding = self.one("submission.private_comment_markers")
@@ -398,6 +425,32 @@ class PrivateMarkerTests(ReadinessCase):
         self.write("legacy.tex", b"% caf\xe9 is Latin-1\n")
         incomplete = self.one("submission.private_comment_markers")
         self.assertEqual((incomplete.severity, incomplete.status), ("info", "inconclusive"))
+
+    def test_acronyms_are_not_author_initials(self) -> None:
+        notes = "% MLP: first layer\n% KL: divergence term\n% RNN: recurrent cell\n"
+        self.document("\\author{Nina Schmidt}", body=notes + "% NS: ask Bob\n")
+        finding = self.one("submission.private_comment_markers")
+        self.assertEqual(
+            [(item["line"], item["reason"]) for item in finding.details["matches"]],
+            [(6, "author-initials note")],
+        )
+
+    def test_initials_need_a_literal_author_name_to_match(self) -> None:
+        self.document(body="% NS: rephrase\n% MLP: first layer\n")
+        self.assertEqual(self.one("submission.private_comment_markers").status, "passed")
+        self.document("\\author{\\authorname}", body="% NS: rephrase\n")
+        self.assertEqual(self.one("submission.private_comment_markers").status, "passed")
+        for author, note, flagged in (
+            ("\\author{Ada Lovelace \\and Grace Hopper}", "GH", True),
+            ("\\author[1]{Ada Byron King}", "AK", True),
+            ("\\author{Lovelace, Ada}", "AL", True),
+            ("\\author{\\'Eva Nagy}", "EN", True),
+            ("\\author{Ada Lovelace}", "GH", False),
+        ):
+            with self.subTest(author=author, note=note):
+                self.document(author, body=f"% {note}: check this\n")
+                status = self.one("submission.private_comment_markers").status
+                self.assertEqual(status, "failed" if flagged else "passed")
 
 
 class LineNumberTests(ReadinessCase):

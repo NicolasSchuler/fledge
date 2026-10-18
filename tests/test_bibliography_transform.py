@@ -409,6 +409,30 @@ class BibliographyTransformTests(unittest.TestCase):
         result = self.plan(remove_fields=("note",), format_entries=True)
         self.assertEqual(set(result[0]), {"references.bib"})
 
+    def test_refusal_names_the_first_blocking_reasons_not_only_one(self) -> None:
+        self.write("references.bib", "@misc{known}\n")
+        self.manuscript("\\cite{known,a,b,c,d}")
+
+        _, _, rows = self.plan(cited_only=True)
+
+        (row,) = rows
+        for key in ("'a'", "'b'", "'c'"):
+            self.assertIn(f"Citation key {key} is unresolved", row.message)
+        self.assertNotIn("'d'", row.message)
+        self.assertTrue(row.message.endswith("; and 1 more."))
+        self.assertNotIn("..", row.message)
+
+    def test_unreadable_encoding_refusal_names_the_file_and_byte_offset(self) -> None:
+        self.write("references.bib", b"@misc{k,title={\xff}}")
+
+        _, _, rows = self.plan(format_entries=True)
+
+        (row,) = rows
+        self.assertEqual(
+            row.message, "references.bib is not valid UTF-8 (first invalid byte at offset 15)."
+        )
+        self.assertEqual(row.path, "references.bib")
+
     def test_resource_limits_and_links_refuse_proposals(self) -> None:
         self.write("references.bib", "@misc{k,title={A}}")
         with patch("latexprep.bibliography_transform.MAX_RESOURCES_TOTAL_BYTES", 5):

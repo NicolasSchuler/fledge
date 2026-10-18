@@ -12,6 +12,8 @@ pass. No source is modified.
 from __future__ import annotations
 
 import re
+import unicodedata
+from functools import partial
 from pathlib import Path, PurePosixPath
 
 from .bbl_checks import check_bbl
@@ -34,7 +36,7 @@ from .file_scan import (
     redact_secrets,
     tex_comments,
 )
-from .literal_text import PACKAGE_COMMANDS, first_argument_names
+from .literal_text import PACKAGE_COMMANDS, first_argument_names, plain_text
 from .models import EvidenceKind, Finding, PreparationError
 from .scheduler import cancellation_point
 from .source_graph import SourceGraph
@@ -45,6 +47,10 @@ FIGURE_COLOR_SPACES = ("rgb", "cmyk")
 _MAX_LISTED = 3
 _MAX_IMAGE_HEADER_BYTES = 4 * 1024 * 1024
 _MANUSCRIPT_SUFFIXES = {".tex", ".ltx", ".latex"}
+# Vector figures have no raster colour space to read from a header. PDF figures are
+# measured on the built document; EPS and PostScript are not measured at all.
+_VECTOR_FIGURE_SUFFIXES = {".pdf", ".eps", ".ps"}
+_RASTER_FIGURE_SUFFIXES = {".png", ".jpg", ".jpeg"}
 _DEFAULT_OPTIONS = SubmissionOptions()
 
 # Each package documents that it must be loaded after hyperref. Keep this list
@@ -59,10 +65,6 @@ _AFTER_HYPERREF = {
 
 # Narrow, explicit private-note markers. Only the category and location are
 # reported; comment text is never copied into the report.
-_INITIALS_EXCLUDED = frozenset(
-    "XXX TBD DOI URL PDF CCS ACM MSC NB PS ID TOC API SQL CPU GPU RAM CSS XML CSV TEX BIB "
-    "FIG TAB SEC EQ REF CMD EOF".split()
-)
 _PRIVATE_MARKERS: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
         "review correspondence",
@@ -95,13 +97,44 @@ _PRIVATE_MARKERS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ),
 )
 _INITIALS_NOTE = re.compile(r"^[\s%]*\[?([A-Z]{2,3})\]?\s*:\s+\S")
+# A name written out in an \author argument is split into at most this many words when
+# deriving initials, and a run of two or three words yields one set of initials.
+_MAX_NAME_WORDS = 12
+_NAME_WORD = re.compile(r"[^\W\d_]+(?:['\u2019-][^\W\d_]+)*")
+_AUTHOR_SEPARATOR = re.compile(r"\\and\b")
 
 
-def _private_marker(comment: str) -> str | None:
-    """The private-note category of one comment, or ``None`` for ordinary comments."""
+def _author_initials(document: ExpandedDocument) -> frozenset[str]:
+    """Initials, in capitals, that the literal ``\\author`` names can be abbreviated to.
+
+    A run of two or three consecutive words, in either order, and the first and last word
+    of each name give one set of initials. Names that are not literal text give none.
+    """
+    initials: set[str] = set()
+    for command in document.commands:
+        if command.name != "author" or not command.arguments:
+            continue
+        for name in _AUTHOR_SEPARATOR.split(command.arguments[0].value):
+            words = _NAME_WORD.findall(plain_text(name)[0])[:_MAX_NAME_WORDS]
+            letters = [unicodedata.normalize("NFKD", word)[0].upper() for word in words]
+            if len(letters) >= 2:
+                initials.add(letters[0] + letters[-1])
+            for size in (2, 3):
+                for start in range(len(letters) - size + 1):
+                    run = letters[start : start + size]
+                    initials.update(("".join(run), "".join(reversed(run))))
+    return frozenset(initials)
+
+
+def _private_marker(comment: str, author_initials: frozenset[str] = frozenset()) -> str | None:
+    """The private-note category of one comment, or ``None`` for ordinary comments.
+
+    Capital letters before a colon only count as an author's note when they are the
+    initials of a literal ``\\author`` name; acronyms such as ``MLP:`` are ordinary.
+    """
     reason = next((label for label, pattern in _PRIVATE_MARKERS if pattern.search(comment)), None)
     initials = _INITIALS_NOTE.match(comment)
-    if reason is None and initials and initials.group(1) not in _INITIALS_EXCLUDED:
+    if reason is None and initials and initials.group(1) in author_initials:
         reason = "author-initials note"
     return reason
 
@@ -194,7 +227,7 @@ def _eps_finding(figures: list[str], main: str) -> list[Finding]:
     return [
         Finding(
             "source.eps_figures",
-            f"{len(eps)} EPS/PS figure(s) are included: {shown}. pdfLaTeX and LuaLaTeX convert "
+            f"EPS/PS figures are included ({len(eps)}): {shown}. pdfLaTeX and LuaLaTeX convert "
             "them only through epstopdf with shell escape, which Fledge's isolated build "
             "disables; arXiv converts EPS itself, other services may not.",
             severity="info",
@@ -252,16 +285,22 @@ def _color_finding(
 ) -> Finding:
     violations: list[dict[str, object]] = []
     measured: list[dict[str, object]] = []
+    vector: list[str] = []
     uncertainty: list[str] = []
     if graph.uncertainties:
         uncertainty.append("the literal figure graph has unresolved or uncertain inputs")
     for name in figures:
         cancellation_point()
         suffix = PurePosixPath(name).suffix.lower()
-        if suffix == ".pdf":
-            continue  # Measured by the included_figure_artwork input trace after a build.
-        if suffix not in {".png", ".jpg", ".jpeg"}:
-            uncertainty.append(f"{name}: {suffix or 'extensionless'} figure colour is not parsed")
+        if suffix in _VECTOR_FIGURE_SUFFIXES:
+            # PDF figures are measured by the included_figure_artwork input trace after a build.
+            vector.append(name)
+            continue
+        if suffix not in _RASTER_FIGURE_SUFFIXES:
+            uncertainty.append(
+                f"{name}: the colour space of {suffix or 'an extensionless'} figure file "
+                "cannot be read here; check it manually or use a PNG or JPEG file"
+            )
             continue
         try:
             data = read_file_prefix(root / name, _MAX_IMAGE_HEADER_BYTES)
@@ -287,15 +326,17 @@ def _color_finding(
         "measured": measured[:MAX_SCAN_MATCHES],
         "violations": violations[:MAX_SCAN_MATCHES],
         "uncertainty": uncertainty[:MAX_SCAN_MATCHES],
+        "not_applicable_vector_figures": vector[:MAX_SCAN_MATCHES],
         "scope": "PNG IHDR colour type and JPEG frame component count (Adobe APP14 recorded) "
         "of literal raster figures; grayscale satisfies either policy. PDF figures are "
-        "measured separately by the included_figure_artwork input trace; embedded ICC "
-        "profiles are not interpreted.",
+        "measured separately by the included_figure_artwork input trace and EPS or PS "
+        "figures are vector formats that are not measured; embedded ICC profiles are not "
+        "interpreted.",
     }
     if violations:
         return Finding(
             "figure.color_space",
-            f"{len(violations)} raster figure(s) are not {required.upper()} or grayscale: "
+            f"Raster figures that are not {required.upper()} or grayscale ({len(violations)}): "
             f"{list_locations(violations, _MAX_LISTED)}.",
             severity="error",
             status="failed",
@@ -306,7 +347,7 @@ def _color_finding(
     if uncertainty:
         return Finding(
             "figure.color_space",
-            f"Raster figure colour spaces are incomplete: {uncertainty[0]}.",
+            f"Raster figure colour spaces could not all be checked: {uncertainty[0]}.",
             severity="error",
             status="inconclusive",
             path=main,
@@ -314,7 +355,9 @@ def _color_finding(
         )
     return Finding(
         "figure.color_space",
-        f"{len(measured)} raster figure(s) are {required.upper()} or grayscale.",
+        f"Raster figures that are {required.upper()} or grayscale: {len(measured)}."
+        if measured
+        else "No raster figures to check; PDF, EPS and PS figures are not read for colour here.",
         severity="info",
         status="passed",
         path=main,
@@ -322,7 +365,7 @@ def _color_finding(
     )
 
 
-def _private_markers(root: Path) -> list[Finding]:
+def _private_markers(root: Path, author_initials: frozenset[str]) -> list[Finding]:
     files, issues = inventory_files(root)
     matches: list[dict[str, object]] = []
     budget = ByteBudget()
@@ -336,7 +379,9 @@ def _private_markers(root: Path) -> list[Finding]:
             issues.append(f"Unreadable, non-UTF-8 or over-budget source: {redact_secrets(name)}")
             continue
         markers = marked_comments(
-            tex_comments(text), _private_marker, MAX_SCAN_MATCHES - len(matches)
+            tex_comments(text),
+            partial(_private_marker, author_initials=author_initials),
+            MAX_SCAN_MATCHES - len(matches),
         )
         matches.extend({"path": name, "line": line, "reason": reason} for line, reason in markers)
         if len(matches) >= MAX_SCAN_MATCHES:
@@ -356,8 +401,8 @@ def _private_markers(root: Path) -> list[Finding]:
         return [
             Finding(
                 "submission.private_comment_markers",
-                f"{len(matches)}{'+' if len(matches) >= MAX_SCAN_MATCHES else ''} comment(s) "
-                f"carry private-note markers: {listed}"
+                "Comments with private-note markers "
+                f"({len(matches)}{'+' if len(matches) >= MAX_SCAN_MATCHES else ''}): {listed}"
                 f"{more_suffix(len(matches) - _MAX_LISTED)}.",
                 severity="warning",
                 status="failed",
@@ -401,13 +446,15 @@ def check_submission_readiness(
     """
     if required_color_space is not None and required_color_space not in FIGURE_COLOR_SPACES:
         raise PreparationError("required_color_space must be 'rgb' or 'cmyk'")
-    findings = _private_markers(root)
     graph = SourceGraph.build(root, main)
-    if graph.main is None:
+    document = expand_document(root, graph.main, graph) if graph.main is not None else None
+    # Without literal author names, initials cannot be told from acronyms and are not reported.
+    findings = _private_markers(root, _author_initials(document) if document else frozenset())
+    if graph.main is None or document is None:
         return findings
     selected = reachable_sources(graph)
     findings.extend(check_bbl(root, graph, selected, options))
-    findings.extend(_hyperref_order(expand_document(root, graph.main, graph)))
+    findings.extend(_hyperref_order(document))
     figures = _figures(graph, selected)
     findings.extend(_eps_finding(figures, graph.main))
     if required_color_space is not None:

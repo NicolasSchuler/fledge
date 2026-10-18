@@ -25,7 +25,7 @@
     },
     "command": {
       "description": "The command that produced the report.",
-      "enum": ["inspect", "check", "prepare", "bib", "fmt", "pdf", "report", "doctor"]
+      "enum": ["inspect", "check", "prepare", "bib", "fmt", "pdf", "doctor"]
     },
     "outcome": {
       "description": "Read this first; the exit code is derived from it.",

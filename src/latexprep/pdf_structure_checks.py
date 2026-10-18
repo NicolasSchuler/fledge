@@ -15,6 +15,7 @@ from .models import Finding, PreparationError
 from .option_config import require_booleans
 from .pdf_support import (
     DOCUMENT,
+    MAX_INSPECTION_PAGES,
     QpdfObjectGraph,
     is_object_reference,
     measurement_finding,
@@ -28,6 +29,8 @@ from .runtime import CommandRunner
 from .scheduler import ResourceBudget, cancellation_point
 
 _LIMIT = 10000
+# Configuration bound on explicit heading expectations (not on the page they may name).
+_MAX_HEADING_EXPECTATIONS = 300
 _COMMAND = re.compile(r"[A-Za-z][A-Za-z@]{0,63}")
 _STANDARD_ROLES = frozenset(
     "/" + role
@@ -47,8 +50,10 @@ class HeadingExpectation:
     number: str
 
     def __post_init__(self) -> None:
-        if type(self.page) is not int or not 1 <= self.page <= 300:
-            raise PreparationError("Heading page must be an integer from 1 to 300")
+        if type(self.page) is not int or not 1 <= self.page <= MAX_INSPECTION_PAGES:
+            raise PreparationError(
+                f"Heading page must be an integer from 1 to {MAX_INSPECTION_PAGES}"
+            )
         for name, value, limit in (("title", self.title, 256), ("number", self.number, 64)):
             if (
                 not isinstance(value, str)
@@ -90,7 +95,7 @@ class StructureOptions:
             raise PreparationError("Required author fields must be unique associated command names")
         if (
             not isinstance(self.heading_expectations, tuple)
-            or len(self.heading_expectations) > 300
+            or len(self.heading_expectations) > _MAX_HEADING_EXPECTATIONS
             or any(not isinstance(value, HeadingExpectation) for value in self.heading_expectations)
             or len({(value.page, value.title) for value in self.heading_expectations})
             != len(self.heading_expectations)
@@ -174,7 +179,7 @@ class _Structure:
         self.content: list[tuple[int, str | None, str | None, int]] = []
         self.object_references: list[tuple[int, str | None, object]] = []
         self.problems: list[object] = []
-        self.uncertainty: list[str] = []
+        self.uncertainty: set[str] = set()
         self.visited: set[str] = set()
         self.steps = 0
         self._visit(self.root.get("/K", []), None, None, 0)
@@ -191,7 +196,7 @@ class _Structure:
         if not isinstance(role, str) or not role.startswith("/"):
             raise PreparationError("PDF structure element has no supported role name")
         if role not in _STANDARD_ROLES:
-            self.uncertainty.append("unmapped or unsupported PDF structure role")
+            self.uncertainty.add("unmapped or unsupported PDF structure role")
         return role
 
     def _visit(self, raw: object, parent: int | None, page: str | None, depth: int) -> None:
@@ -226,7 +231,7 @@ class _Structure:
             if parent is None or type(mcid) is not int or mcid < 0:
                 self.problems.append({"reason": "MCR is missing a valid nonnegative MCID or owner"})
             elif stream is not None and not is_object_reference(stream):
-                self.uncertainty.append("non-reference marked-content stream")
+                self.uncertainty.add("non-reference marked-content stream")
             else:
                 self.content.append((parent, page, stream, mcid))
             return
@@ -238,12 +243,10 @@ class _Structure:
             return
         role = self._role(value.get("/S"))
         if "/NS" in value:
-            self.uncertainty.append("PDF namespace-specific structure roles are not interpreted")
+            self.uncertainty.add("PDF namespace-specific structure roles are not interpreted")
         expected_parent = self.root_reference if parent is None else self.elements[parent].reference
         if expected_parent is None:
-            self.uncertainty.append(
-                "direct structure dictionaries lack verifiable parent identities"
-            )
+            self.uncertainty.add("direct structure dictionaries lack verifiable parent identities")
         elif value.get("/P") != expected_parent:
             self.problems.append(
                 {"object": reference, "reason": "missing or incorrect structure parent"}
@@ -347,7 +350,7 @@ def _structure_references(tree: _Structure, required: bool) -> Finding:
         "Checked structure-tree parent links and marked-content references.",
         problems,
         incomplete=bool(tree.uncertainty),
-        uncertainty=tree.uncertainty,
+        uncertainty=sorted(tree.uncertainty),
         structural_sequence=sequence[:100],
         element_count=len(tree.elements),
         marked_content_count=len(tree.content),
@@ -400,7 +403,7 @@ def _table_structure(tree: _Structure) -> Finding:
         violations,
         incomplete=bool(tree.uncertainty),
         tables=tables,
-        uncertainty=tree.uncertainty,
+        uncertainty=sorted(tree.uncertainty),
         scope="Tagged Tables only; untagged visual tables, header meaning, spans and "
         "associations are not inferred.",
     )
@@ -443,7 +446,7 @@ def _figure_alt(tree: _Structure) -> Finding:
 
 def _link_structure(tree: _Structure) -> Finding:
     violations: list[object] = []
-    uncertainty = list(tree.uncertainty)
+    uncertainty = set(tree.uncertainty)
     associated: dict[str, list[tuple[int, str | None]]] = {}
     for owner, page, target in tree.object_references:
         if not is_object_reference(target):
@@ -466,7 +469,7 @@ def _link_structure(tree: _Structure) -> Finding:
             ):
                 violations.append({**item, "reason": "local link destination lacks a valid page"})
         else:
-            uncertainty.append("named or unsupported link destination is not resolved")
+            uncertainty.add("named or unsupported link destination is not resolved")
 
     annotations: list[object] = []
     encountered: set[str] = set()
@@ -480,7 +483,7 @@ def _link_structure(tree: _Structure) -> Finding:
             if annotation.get("/Subtype") != "/Link":
                 continue
             if not is_object_reference(reference):
-                uncertainty.append("direct link annotation lacks an indirect identity")
+                uncertainty.add("direct link annotation lacks an indirect identity")
                 continue
             item: dict[str, object] = {"page": number, "annotation": reference}
             annotations.append(item)
@@ -505,11 +508,11 @@ def _link_structure(tree: _Structure) -> Finding:
                 if action.get("/S") == "/URI":
                     target = _unicode_string(tree.objects.resolve(action.get("/URI")))
                     if target is None:
-                        uncertainty.append("link URI is not a supported Unicode string")
+                        uncertainty.add("link URI is not a supported Unicode string")
                     elif not target.strip():
                         violations.append({**item, "reason": "link URI is empty"})
                 elif action.get("/S") != "/GoTo":
-                    uncertainty.append("link action is outside supported URI/GoTo inspection")
+                    uncertainty.add("link action is outside supported URI/GoTo inspection")
                 elif "/D" not in action:
                     violations.append({**item, "reason": "GoTo link action has no destination"})
                 else:
@@ -531,7 +534,7 @@ def _link_structure(tree: _Structure) -> Finding:
         violations,
         incomplete=bool(uncertainty),
         annotations=annotations[:100],
-        uncertainty=sorted(set(uncertainty)),
+        uncertainty=sorted(uncertainty),
         scope="Object associations and supported target presence only; name adequacy, "
         "navigation and target availability are unverified.",
     )

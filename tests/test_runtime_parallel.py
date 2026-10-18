@@ -11,13 +11,14 @@ import unittest
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from latexprep.models import PreparationError
 from latexprep.resource_monitor import (
     JobScope,
     ProcessSample,
     ResourceMonitor,
+    ResourceStatistics,
     _sample_interval,
     kill_process_group,
 )
@@ -305,7 +306,7 @@ class VersionAndInputTests(unittest.IsolatedAsyncioTestCase):
 
     @unittest.skipUnless(
         live_tests_enabled("LATEXPREP_RUN_SANDBOX_TESTS") and sys.platform == "darwin",
-        "opt-in live Seatbelt test (LATEXPREP_RUN_SANDBOX_TESTS=1)",
+        "opt-in live Seatbelt test (FLEDGE_RUN_INTEGRATION=1)",
     )
     async def test_live_sandbox_denies_sibling_writes_and_undeclared_reads(self) -> None:
         runner = ToolRunner()
@@ -333,6 +334,49 @@ class VersionAndInputTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, "READ DENIED BLOCKED READONLY", result.stderr)
         self.assertFalse((sibling / "marker").exists())
+
+
+class ProcessListingTests(unittest.IsolatedAsyncioTestCase):
+    def monitor(self) -> ResourceMonitor:
+        return ResourceMonitor(SeatbeltSandbox(), ResourceStatistics(1024, None))
+
+    async def test_process_listing_runs_detached_and_without_input(self) -> None:
+        listing = MagicMock(returncode=0)
+        listing.communicate = AsyncMock(return_value=(b"1 1 10\n", b""))
+        listing.wait = AsyncMock(return_value=0)
+        start = AsyncMock(return_value=listing)
+        with patch("latexprep.resource_monitor.asyncio.create_subprocess_exec", start):
+            samples = await self.monitor()._sample_processes()
+        self.assertEqual(samples, [ProcessSample(1, 1, 10)])
+        options = start.call_args.kwargs
+        self.assertEqual(options["stdin"], asyncio.subprocess.DEVNULL)
+        self.assertTrue(options["start_new_session"])
+
+    async def test_missing_process_listing_names_the_package_to_install(self) -> None:
+        missing = AsyncMock(side_effect=FileNotFoundError(2, "No such file", "/bin/ps"))
+        with patch("latexprep.resource_monitor.asyncio.create_subprocess_exec", missing):
+            with self.assertRaises(PreparationError) as raised:
+                await self.monitor()._sample_processes()
+        self.assertIn("/bin/ps", str(raised.exception))
+        self.assertIn("procps", str(raised.exception))
+
+    async def test_unexpected_monitor_failure_names_the_exception_type(self) -> None:
+        runner = SampledRunner(ResourceBudget(1, 1024))
+
+        async def broken(scope: JobScope) -> None:
+            if asyncio.current_task() is scope.monitor:
+                raise KeyError("scope")
+
+        runner._monitor._sample_job = broken
+        with tempfile.TemporaryDirectory() as directory:
+            async with runner.job_scope(Path(directory), max_temp_bytes=1_000_000):
+                async with asyncio.timeout(3):
+                    while runner.statistics().resource_exceeded is None:
+                        await asyncio.sleep(0.005)
+        self.assertEqual(
+            runner.statistics().resource_exceeded,
+            "Job resource accounting failed: KeyError: 'scope'",
+        )
 
 
 class SharedMonitorTests(unittest.IsolatedAsyncioTestCase):
@@ -368,7 +412,7 @@ class SharedMonitorTests(unittest.IsolatedAsyncioTestCase):
 
     @unittest.skipUnless(
         live_tests_enabled("LATEXPREP_RUN_SANDBOX_TESTS") and sys.platform == "darwin",
-        "opt-in live job-monitor test (LATEXPREP_RUN_SANDBOX_TESTS=1)",
+        "opt-in live job-monitor test (FLEDGE_RUN_INTEGRATION=1)",
     )
     async def test_live_job_monitor_samples_parent_and_real_tool_group(self) -> None:
         runner = ToolRunner(budget=ResourceBudget(1, 1024, coordinator_memory_mb=64))

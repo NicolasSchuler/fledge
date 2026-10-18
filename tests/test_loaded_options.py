@@ -12,7 +12,12 @@ from pathlib import Path
 
 from latexprep.build_checks import BuildCheckOptions, check_build_details
 from latexprep.latexmk_build import BuildResult, build_project
-from latexprep.loaded_options import _native_string, _parse_options, stage_loaded_options
+from latexprep.loaded_options import (
+    _native_string,
+    _parse_options,
+    collect_loaded_options,
+    stage_loaded_options,
+)
 from latexprep.models import PreparationError
 from latexprep.pdf_comparison import compare_pdfs
 from latexprep.runtime import ToolRunner
@@ -274,9 +279,46 @@ class LoadedOptionsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(probe.hook.parent, work)
 
 
+class LoadedOptionsDiagnosticsTests(unittest.TestCase):
+    def collect(self, directory: str, sidecar: bytes | None):
+        work = Path(directory).resolve() / "staging"
+        project = work / "project"
+        project.mkdir(parents=True)
+        (project / "main.tex").write_bytes(b"\\documentclass{article}\n")
+        probe = stage_loaded_options(project, "main.tex", work)
+        if sidecar is not None:
+            probe.sidecar.parent.mkdir(parents=True)
+            probe.sidecar.write_bytes(sidecar)
+        evidence = collect_loaded_options(
+            probe,
+            [],
+            {probe.hook},
+            engine="pdflatex",
+            recorder_complete=True,
+            build_complete=True,
+            max_bytes=1_000_000,
+        )
+        return probe, evidence
+
+    def test_a_missing_option_file_is_explained_without_local_paths_or_the_token(self):
+        with tempfile.TemporaryDirectory() as directory:
+            probe, evidence = self.collect(directory, None)
+            self.assertFalse(evidence.complete)
+            self.assertIn("could not be read (no such file or directory)", evidence.uncertainty)
+            for private in (directory, str(Path(directory).resolve()), probe.token, ".lpo"):
+                self.assertNotIn(private, evidence.uncertainty)
+            self.assertNotIn(probe.token, evidence.finding("main.tex").message)
+
+    def test_option_evidence_that_is_not_ascii_is_reported_as_such(self):
+        with tempfile.TemporaryDirectory() as directory:
+            _, evidence = self.collect(directory, b"START|\xff\xfe")
+            self.assertFalse(evidence.complete)
+            self.assertEqual(evidence.uncertainty, "The option evidence is not plain ASCII text")
+
+
 @unittest.skipUnless(
     live_tests_enabled(),
-    "Enable LATEX_PREP_RUN_INTEGRATION for real restricted TeX option instrumentation",
+    "Enable FLEDGE_RUN_INTEGRATION for real restricted TeX option instrumentation",
 )
 class LiveLoadedOptionsTests(unittest.IsolatedAsyncioTestCase):
     async def test_live_forwarded_options_preserve_rendered_pdf_and_source(self):

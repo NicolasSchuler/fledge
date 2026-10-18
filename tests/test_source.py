@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,7 +13,7 @@ from latexprep.source import (
     discover_roots,
     plan_flatten,
 )
-from latexprep.tex_lexer import mask_literals
+from latexprep.tex_lexer import MAX_ARGUMENT_CHARS, mask_literals
 
 
 class SourceTests(unittest.TestCase):
@@ -708,6 +709,157 @@ class SourceTests(unittest.TestCase):
                 plan = plan_flatten(self.root, "main.tex")
                 self.assertTrue(has_blockers(plan.findings))
                 self.assertIn("source.argument_limit", {item.rule for item in plan.findings})
+
+    def finding(self, findings, rule: str):
+        return next(item for item in findings if item.rule == rule)
+
+    def test_tikz_path_commands_are_not_taken_for_literal_text(self) -> None:
+        self.write(
+            "main.tex",
+            "\\documentclass{article}\n\\begin{document}\n\\begin{tikzpicture}\n"
+            "\\path[draw] (0,0)\n  -- (1,1);\n\\end{tikzpicture}\n\\input{body}\n"
+            "\\end{document}\n",
+        )
+        self.write("body.tex", "Body.\n")
+        analysis = analyze_sources(self.root, "main.tex")
+        self.assertNotIn("source.literal_unclosed", {item.rule for item in analysis.findings})
+        self.assertTrue(analysis.complete, analysis.findings)
+        self.assert_usable(plan_flatten(self.root, "main.tex"))
+
+    def test_comment_between_a_command_and_its_argument_does_not_hide_the_argument(self) -> None:
+        self.write("main.tex", "\\documentclass{article}\n\\input\n% see the next file\n{body}\n")
+        self.write("body.tex", "Body.\n")
+        selected = analyze_selected_sources(self.root, "main.tex")
+        self.assertTrue(selected.complete, selected.findings)
+        self.assertEqual(selected.dependencies, {"main.tex", "body.tex"})
+        self.assert_usable(plan_flatten(self.root, "main.tex"))
+
+    def test_read_failures_and_encoding_failures_are_told_apart_without_local_paths(self) -> None:
+        self.write("main.tex", "\\documentclass{article}\n\\input{body}\n")
+        self.write("body.tex", b"caf\xe9")
+        encoding = self.finding(
+            analyze_selected_sources(self.root, "main.tex").findings, "source.encoding"
+        )
+        self.assertIn("not valid UTF-8", encoding.message)
+        self.write("body.tex", "Readable once permissions are fixed.\n")
+        (self.root / "body.tex").chmod(0)
+        self.addCleanup((self.root / "body.tex").chmod, 0o600)
+        if os.access(self.root / "body.tex", os.R_OK):
+            self.skipTest("file permissions are not enforced for this user")
+        unreadable = self.finding(
+            analyze_selected_sources(self.root, "main.tex").findings, "source.encoding"
+        )
+        self.assertIn("could not be read (permission denied)", unreadable.message)
+        self.assertNotIn("UTF-8", unreadable.message)
+        self.assertNotIn(str(self.root), unreadable.message)
+
+    def test_lexical_bounds_report_their_cause_and_line(self) -> None:
+        self.write("main.tex", "\\documentclass{article}\n\\input{body}\n")
+        cases = (
+            ("Text.\n\\emph{open\n", "source.argument_limit", "never closed", 2),
+            (
+                "A\n\\emph{" + "x" * (MAX_ARGUMENT_CHARS + 1) + "}\n",
+                "source.argument_limit",
+                f"longer than {MAX_ARGUMENT_CHARS // 1024} KiB",
+                2,
+            ),
+        )
+        for body, rule, cause, line in cases:
+            with self.subTest(cause=cause):
+                self.write("body.tex", body)
+                item = self.finding(analyze_selected_sources(self.root, "main.tex").findings, rule)
+                self.assertIn(cause, item.message)
+                self.assertEqual((item.path, item.line), ("body.tex", line))
+                self.assertTrue(item.suggestion)
+        self.write("body.tex", "One \\a \\b \\c \\d \\e \\f.\n")
+        with (
+            patch("latexprep.tex_lexer.MAX_COMMANDS", 5),
+            patch("latexprep.source_graph.MAX_COMMANDS", 5),
+        ):
+            item = self.finding(
+                analyze_selected_sources(self.root, "main.tex").findings, "source.command_limit"
+            )
+        self.assertIn("more than 5 TeX commands", item.message)
+        self.assertEqual((item.path, item.line), ("body.tex", 1))
+
+    def test_root_discovery_skips_files_beyond_the_lexical_bounds(self) -> None:
+        self.write("big.tex", "\\documentclass{article}\n" + "\\relax\n" * 10)
+        self.write("small.tex", "\\documentclass{article}\n")
+        with patch("latexprep.tex_lexer.MAX_COMMANDS", 5):
+            self.assertEqual(discover_roots(self.root), ["small.tex"])
+        self.assertEqual(discover_roots(self.root), ["big.tex", "small.tex"])
+
+    def test_dependency_errors_name_what_was_tried_and_the_next_step(self) -> None:
+        self.write("Body.TEX", "x")
+        self.write(
+            "main.tex",
+            "\\documentclass{article}\n\\input{missing}\n\\input{/tmp/outside}\n"
+            "\\input{../outside}\n\\input{body.TEX}\n\\includegraphics{figures/nothing}\n",
+        )
+        findings = analyze_sources(self.root, "main.tex").findings
+        by_reference = {
+            item.details["reference"]: item
+            for item in findings
+            if item.rule.startswith("source.") and "reference" in item.details
+        }
+        missing = by_reference["missing"]
+        self.assertEqual(missing.rule, "source.missing_dependency")
+        self.assertIn("looked for missing.tex, missing", missing.message)
+        self.assertIn("\\input", missing.suggestion)
+        graphics = by_reference["figures/nothing"]
+        self.assertIn("figures/nothing.pdf", graphics.message)
+        self.assertRegex(graphics.message, r"and \d+ more")
+        for reference in ("/tmp/outside", "../outside"):
+            with self.subTest(reference=reference):
+                self.assertEqual(by_reference[reference].rule, "source.external_path")
+                self.assertIn("Copy the file into the project", by_reference[reference].suggestion)
+        mismatch = by_reference["body.TEX"]
+        self.assertEqual(mismatch.rule, "source.case_mismatch")
+        self.assertIn("Body.TEX", mismatch.suggestion)
+
+    def test_main_file_and_root_selection_errors_list_what_exists(self) -> None:
+        self.write("a.tex", "\\documentclass{article}")
+        self.write("b.tex", "\\documentclass{article}")
+        ambiguous = self.finding(analyze_sources(self.root).findings, "source.root_ambiguous")
+        self.assertIn("a.tex, b.tex", ambiguous.message)
+        self.assertIn("--main", ambiguous.suggestion)
+        absent = self.finding(analyze_sources(self.root, "c.tex").findings, "source.main_invalid")
+        self.assertIn("'c.tex' was not found", absent.message)
+        self.assertIn("a.tex, b.tex", absent.message)
+        self.assertIn("--main", absent.suggestion)
+        escaping = self.finding(
+            analyze_sources(self.root, "../a.tex").findings, "source.main_invalid"
+        )
+        self.assertIn("relative to the project folder", escaping.message)
+
+    def test_advice_names_the_layout_setting_only_where_it_applies(self) -> None:
+        self.write(
+            "main.tex",
+            "\\documentclass{article}\n\\input{\\chosen}\n\\IfFileExists{x.tex}{}{}\n"
+            "\\customreader{data/table.csv}\n\\ProvidesPackage{dir/name}\n",
+        )
+        self.write("data/table.csv", "data")
+        analysis = analyze_sources(self.root, "main.tex")
+        plan = plan_flatten(self.root, "main.tex")
+        advice = [
+            item.suggestion for item in (*analysis.findings, *plan.findings) if item.suggestion
+        ]
+        self.assertTrue(advice)
+        self.assertFalse([text for text in advice if "preserve layout" in text.lower()], advice)
+        for item in analysis.findings:
+            if item.suggestion and "layout" in item.suggestion:
+                self.assertIn('layout = "', item.suggestion)
+        unsupported = [item for item in plan.findings if item.rule == "flatten.unsupported_source"]
+        self.assertTrue(unsupported)
+        self.assertTrue(all('layout = "preserve"' in item.suggestion for item in unsupported))
+
+    def test_flat_layout_with_other_roots_explains_the_limit_in_plain_words(self) -> None:
+        self.write("main.tex", "\\documentclass{article}\n")
+        self.write("other.tex", "\\documentclass{article}\n")
+        roots = self.finding(plan_flatten(self.root, "main.tex").findings, "flatten.multiple_roots")
+        self.assertEqual(roots.details["other_roots"], ["other.tex"])
+        self.assertNotIn("initial", roots.message.lower())
+        self.assertIn("Flat layout supports one document root per package", roots.message)
 
     def test_long_unicode_collisions_keep_counter_and_byte_limit(self) -> None:
         self.write("main.tex", "\\documentclass{article}")

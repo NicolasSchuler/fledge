@@ -5,7 +5,13 @@ import unittest
 from unittest.mock import patch
 from urllib.parse import quote
 
-from latexprep.redaction import LIMIT_REDACTION, REDACTED, redact_data
+from latexprep.redaction import (
+    LIMIT_REDACTION,
+    REDACTED,
+    local_directory_labels,
+    redact_data,
+    scrub_local_paths,
+)
 
 
 class RedactionTests(unittest.TestCase):
@@ -298,6 +304,53 @@ class RedactionTests(unittest.TestCase):
     def test_repeated_redaction_preserves_the_redacted_copy(self) -> None:
         result = redact_data({"password": "SecretValue87654", "log": "SecretValue87654"})
         self.assertEqual(redact_data(result), result)
+
+
+class LocalPathScrubbingTests(unittest.TestCase):
+    LABELS = {"/home/ann": "~", "/var/tmp/x": "<tmp>"}
+
+    def test_home_and_temporary_directories_become_generic_everywhere_in_a_tree(self) -> None:
+        value = {
+            "a": "Cannot read /home/ann/paper/fledge.toml: denied",
+            "b": ["/var/tmp/x/build/main.log", ("see (/home/ann/papers)",)],
+            "c": {"nested": "file:///home/ann/x.pdf"},
+            "d": 3,
+        }
+        self.assertEqual(
+            scrub_local_paths(value, self.LABELS),
+            {
+                "a": "Cannot read ~/paper/fledge.toml: denied",
+                "b": ["<tmp>/build/main.log", ("see (~/papers)",)],
+                "c": {"nested": "file://~/x.pdf"},
+                "d": 3,
+            },
+        )
+
+    def test_project_relative_paths_and_look_alike_directories_are_unchanged(self) -> None:
+        value = [
+            "sections/intro.tex",
+            "/home/anna/paper.tex",
+            "/home/ann.old/paper.tex",
+            "/srv/home/ann/paper.tex",
+            "x/home/ann",
+            "Ann's home is /home/ann.",
+        ]
+        self.assertEqual(scrub_local_paths(value, self.LABELS), [*value[:-1], "Ann's home is ~."])
+
+    def test_dictionary_keys_keep_their_names(self) -> None:
+        self.assertEqual(
+            scrub_local_paths({"/home/ann": "/home/ann"}, self.LABELS), {"/home/ann": "~"}
+        )
+
+    def test_the_longer_directory_wins_when_one_contains_the_other(self) -> None:
+        labels = {"/home/ann": "~", "/home/ann/tmp": "<tmp>"}
+        self.assertEqual(scrub_local_paths("/home/ann/tmp/a /home/ann/b", labels), "<tmp>/a ~/b")
+
+    def test_machine_directories_come_from_the_home_and_temporary_directories(self) -> None:
+        labels = local_directory_labels()
+        self.assertIn("~", labels.values())
+        self.assertIn("<tmp>", labels.values())
+        self.assertNotIn("/", labels)
 
 
 if __name__ == "__main__":

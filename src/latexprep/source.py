@@ -31,8 +31,7 @@ from .source_graph import (
 from .tex_lexer import (
     MAX_SOURCE_BYTES,
     ParseLimitExceeded,
-    mask_literals,
-    scan_commands,
+    scan_source_commands,
     split_argument_items,
 )
 from .text_edits import unified_diff_text
@@ -97,7 +96,7 @@ def discover_roots(root: Path) -> list[str]:
         except (UnicodeDecodeError, OSError):
             continue
         try:
-            if is_document_root(scan_commands(mask_literals(text))):
+            if is_document_root(scan_source_commands(text)):
                 roots.append(name)
         except ParseLimitExceeded:
             continue
@@ -324,7 +323,7 @@ def _mapping(
                         "cannot be sanitized without changing its naming contract.",
                         severity="error",
                         path=name,
-                        suggestion="Use preserve layout or rename the original project explicitly.",
+                        suggestion='Set layout = "preserve", or rename the original file.',
                     )
                 )
             candidates.append((0, name, basename))
@@ -348,7 +347,7 @@ def _mapping(
                     severity="error",
                     path=name,
                     details={"other": used[path_comparison_key(candidate)], "filename": candidate},
-                    suggestion="Use preserve layout or separate these files into packages.",
+                    suggestion='Set layout = "preserve", or separate these files into packages.',
                 )
             )
             continue
@@ -408,7 +407,7 @@ def plan_flatten(
                 path=item.path,
                 line=item.line,
                 suggestion=item.suggestion
-                or "Use preserve layout until this source construct is resolved.",
+                or 'Resolve this source construct, or set layout = "preserve".',
                 details={"source_rule": item.rule, **item.details},
             )
         )
@@ -419,7 +418,8 @@ def plan_flatten(
         findings.append(
             Finding(
                 "flatten.multiple_roots",
-                "The initial flat planner supports one document root per selected package.",
+                "Flat layout supports one document root per package, "
+                "but the package contains other document roots.",
                 severity="error",
                 status="inconclusive",
                 details={"other_roots": other_roots},
@@ -439,7 +439,8 @@ def plan_flatten(
                     severity="error",
                     status="inconclusive",
                     path=name,
-                    suggestion="Declare a literal input, exclude the file, or preserve layout.",
+                    suggestion="Declare a literal input for the file, exclude it from the package, "
+                    'or set layout = "preserve".',
                 )
             )
     plan.mapping = _mapping(graph.files, graph.main, findings, filename_overrides)
@@ -459,7 +460,7 @@ def plan_flatten(
                     path=reference.path,
                     line=reference.command.line,
                     details={"reference": reference.reference, "files": shadows},
-                    suggestion="Use preserve layout or resolve the intended dependency explicitly.",
+                    suggestion='Set layout = "preserve", or name the intended file explicitly.',
                 )
             )
     for name, output in plan.mapping.items():

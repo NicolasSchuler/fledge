@@ -22,6 +22,7 @@ from .models import PreparationError
 _MAX_WORKSPACE_ENTRIES = 20_000
 _MAX_GROUP_PROCESSES = 32
 _PROCESS_TABLE_TIMEOUT_SECONDS = 2
+_PROCESS_LISTING_PROGRAM = "/bin/ps"
 
 _Result = TypeVar("_Result")
 
@@ -269,15 +270,25 @@ class ResourceMonitor:
                 return failure
 
     async def _sample_processes(self) -> list[ProcessSample]:
-        probe = await start_process(
-            "/bin/ps",
-            "-axo",
-            self._processes.process_columns,
-            stop=_kill_unfinished,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
-            env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"},
-        )
+        try:
+            probe = await start_process(
+                _PROCESS_LISTING_PROGRAM,
+                "-axo",
+                self._processes.process_columns,
+                stop=_kill_unfinished,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+                env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"},
+                start_new_session=True,
+            )
+        except FileNotFoundError as error:
+            raise PreparationError(
+                "Fledge limits the memory of the programs it runs and needs "
+                f"{_PROCESS_LISTING_PROGRAM} for that, but it was not found. Install the "
+                "procps package (for example `sudo apt install procps` on Debian or Ubuntu), "
+                "then run Fledge again."
+            ) from error
         try:
             # asyncio.wait_for in Python 3.11 can drop an external cancellation that
             # arrives as the probe finishes (bpo-42130); asyncio.timeout does not.
@@ -375,7 +386,7 @@ class ResourceMonitor:
                 await asyncio.sleep(interval)
         except Exception as error:
             # Fail closed: commands must not outlive their resource accounting.
-            self.fail_job(f"Job resource accounting failed: {error}")
+            self.fail_job(f"Job resource accounting failed: {type(error).__name__}: {error}")
 
     @contextlib.asynccontextmanager
     async def job_scope(

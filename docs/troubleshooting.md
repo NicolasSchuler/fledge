@@ -74,9 +74,16 @@ that pdfLaTeX embeds, such as Latin Modern via `\usepackage{lmodern}`.
 
 `TEX001` finds `TODO`, `FIXME`, `XXX` and `??` in the active text; `PRV007` finds
 private notes, such as reviewer correspondence or "do not submit", in comments.
-Both are advisories. Finish or remove the text. Remove private comments from the
-prepared copy with `source_transforms.comment_policy = "private"`, which the
-`arxiv` preset sets. A deliberate marker can be accepted with a
+Both are advisories. Finish or remove the text.
+
+`source_transforms.comment_policy = "private"`, which the `arxiv` preset sets,
+removes only comments that contain `TODO`, `FIXME`, `XXX`, `private`, `internal`,
+`confidential` or `note to self`. It keeps a comment such as "Reviewer 2 wants
+this shortened" or "do not submit", so the notes `PRV007` reports can remain in
+the prepared copy. To drop every comment from the prepared copy, set
+`comment_policy = "all"`; comment blocks that carry a license notice or a
+formatter directive are kept either way. Otherwise, delete or rewrite the
+reported comments in your sources. A deliberate marker can be accepted with a
 [suppression](preparation-options.md#preservation-and-explicit-exceptions).
 
 ### `build.execution_unavailable`, `pdf.inspection_unavailable`, `BLD202`: tool unavailable
@@ -111,6 +118,7 @@ no external tools and still works meanwhile.
 | Flattening or source edit blocked | Review the unsupported path or syntax finding; use `--layout preserve` if flattening is unnecessary. |
 | PDF comparison fails | Review the differences and the [preservation rules](preparation-options.md#preservation-and-explicit-exceptions). |
 | Online check skipped | The note is listed only with `--show-passed`. Enable the individual check and pass `--online`; selecting `NET` alone is not enough. |
+| Online checks cannot connect | Online checks connect directly and ignore proxy settings such as `HTTPS_PROXY`, so a network that allows only proxied access blocks them. Run them from a network with direct access, or leave them off. |
 
 ## Getting help
 

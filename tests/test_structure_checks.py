@@ -14,6 +14,7 @@ from latexprep.pdf_structure_checks import (
     StructureOptions,
     inspect_pdf_structure,
 )
+from latexprep.pdf_support import MAX_INSPECTION_PAGES
 from latexprep.scheduler import ResourceBudget
 from tests.test_pdf_checks import DetailRunner
 
@@ -140,8 +141,45 @@ class AuthorRecordTests(unittest.TestCase):
         self.assertEqual(result.status, "failed")
         self.assertEqual(
             result.message,
-            "2 of 2 literal author records lack a configured field: main.tex:2, main.tex:3.",
+            "Incomplete author records (2 of 2): main.tex:2 (missing \\email), "
+            "main.tex:3 (missing \\affiliation, \\email).",
         )
+
+    def test_a_record_with_two_problems_is_counted_once(self) -> None:
+        options = StructureOptions(required_author_fields=("email",))
+        result = self.check("\\author{}", options)[0]
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(
+            result.message,
+            "Incomplete author records (1 of 1): main.tex:2 (empty or placeholder name; "
+            "missing \\email).",
+        )
+        self.assertEqual(result.details["violation_count"], 1)
+        self.assertEqual(len(result.details["violations"]), 1)
+        self.assertEqual(result.details["violations"][0]["author_index"], 1)
+
+    def test_missing_author_records_and_fields_before_the_first_author_are_named(self) -> None:
+        none = self.check("\\title{No authors}")[0]
+        self.assertEqual(none.status, "failed")
+        self.assertNotIn("1 of 1", none.message)
+        self.assertIn("No literal \\author author record was found in the preamble", none.message)
+        self.assertIn("structure_checks.author_command", none.message)
+        first = self.check(
+            "\\affiliation{Lab}\\author{Ada}",
+            StructureOptions(required_author_fields=("affiliation",)),
+        )[0]
+        self.assertEqual(
+            first.message,
+            "Incomplete author records (1 of 1): main.tex:2 (missing \\affiliation); "
+            "Fields placed before the first \\author: \\affiliation at main.tex:2.",
+        )
+
+    def test_long_failure_lists_name_the_first_records_and_count_the_rest(self) -> None:
+        authors = "".join(f"\\author{{Author {number}}}\n" for number in range(1, 6))
+        result = self.check(authors, StructureOptions(required_author_fields=("email",)))[0]
+        self.assertEqual(result.details["violation_count"], 5)
+        self.assertTrue(result.message.startswith("Incomplete author records (5 of 5): main.tex:2"))
+        self.assertTrue(result.message.endswith("(+2 more)."), result.message)
 
     def test_option_schema_is_explicit_and_frozen(self) -> None:
         parsed = read_options(
@@ -311,6 +349,48 @@ class PdfStructureTests(unittest.IsolatedAsyncioTestCase):
                 object_value(document, 9)["/Pg"] = "90 0 R"
             with self.subTest(mutation=mutation):
                 self.assertEqual((await self.check(options, document))[0].status, "failed")
+
+    async def test_repeated_unsupported_roles_are_reported_once(self) -> None:
+        document = structured_pdf_objects()
+        # Several elements with one unmapped role must not repeat the recorded uncertainty.
+        object_value(document, 5)["/K"] = ["6 0 R", "9 0 R", "12 0 R", "13 0 R", "14 0 R"]
+        objects = document["qpdf"][1]
+        for number in (13, 14):
+            objects[f"obj:{number} 0 R"] = {
+                "value": {"/Type": "/StructElem", "/S": "/Picture", "/P": "5 0 R"}
+            }
+        for options in (
+            StructureOptions(check_table_structure=True),
+            StructureOptions(require_structure_tree=True, check_structure_references=True),
+            StructureOptions(check_link_structure=True),
+        ):
+            with self.subTest(options=options):
+                finding = (await self.check(options, document))[0]
+                self.assertEqual(finding.status, "inconclusive")
+                self.assertEqual(
+                    finding.details["uncertainty"],
+                    ["unmapped or unsupported PDF structure role"],
+                )
+
+    async def test_link_violations_carry_a_readable_reason(self) -> None:
+        document = structured_pdf_objects()
+        object_value(document, 10).pop("/A")
+        finding = (await self.check(StructureOptions(check_link_structure=True), document))[0]
+        self.assertEqual(finding.status, "failed")
+        reasons = [item["reason"] for item in finding.details["violations"]]
+        self.assertIn("link annotation has no destination or action", reasons)
+
+    async def test_heading_expectations_can_name_pages_up_to_the_inspection_limit(self) -> None:
+        pages = 301
+        options = StructureOptions(
+            heading_expectations=(HeadingExpectation(pages, "Appendix", "A"),)
+        )
+        runner = DetailRunner(info=f"Pages: {pages}\n", text="\f" * (pages - 1) + "A Appendix\f")
+        result = await inspect_pdf_structure(self.pdf, self.root / "late-heading", runner, options)
+        self.assertEqual(result[0].status, "passed")
+        HeadingExpectation(MAX_INSPECTION_PAGES, "Appendix", "A")
+        with self.assertRaisesRegex(PreparationError, str(MAX_INSPECTION_PAGES)):
+            HeadingExpectation(MAX_INSPECTION_PAGES + 1, "Appendix", "A")
 
     async def test_missing_or_malformed_structure_and_tools_are_not_passes(self) -> None:
         options = StructureOptions(require_structure_tree=True, require_figure_alt=True)

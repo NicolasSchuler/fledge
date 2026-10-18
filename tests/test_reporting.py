@@ -486,6 +486,22 @@ class RenderTests(unittest.TestCase):
             "Helvetica, Times, Symbol (+1 more)",
         )
         self.assertEqual(excerpt(candidates=["a.tex", "b.tex"]), "a.tex, b.tex")
+        self.assertEqual(
+            excerpt(candidates=[{"doi": "10.1/a", "title": "A"}, {"doi": "10.1/b", "title": "B"}]),
+            "10.1/a, 10.1/b",
+        )
+        self.assertEqual(
+            excerpt(issues=["Unreadable source: a.tex", "Unreadable source: b.tex"]),
+            "Unreadable source: a.tex, Unreadable source: b.tex",
+        )
+        self.assertEqual(excerpt(matches=[], issues=[{"path": "a.png", "reason": "x"}]), "a.png")
+        self.assertEqual(excerpt(matches=["a.tex"], issues=["unreadable"]), "a.tex")
+        self.assertEqual(
+            excerpt(violations=[{"page": 4, "reason": "Duplicate marked-content reference"}]),
+            "Duplicate marked-content reference (page 4)",
+        )
+        clipped = excerpt(violations=[{"page": 4, "reason": "x" * 500}])
+        self.assertEqual((len(clipped), clipped[-10:]), (120, "… (page 4)"))
         self.assertEqual(excerpt(missing=["twocolumn"]), "twocolumn")
         self.assertEqual(excerpt(entries=[{"name": "key1"}, {"key": "key2"}]), "key1, key2")
         self.assertEqual(excerpt(below_minimum=[{"page": 1, "number": 2, "x_dpi": 72}]), "page 1")

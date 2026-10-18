@@ -380,7 +380,9 @@ class CheckConfigTests(unittest.TestCase):
                 load_settings(None, {"match_source_pdf_metadata": value})
 
     def test_settings_file_errors_and_missing_nested_fields_are_actionable(self) -> None:
-        with self.assertRaisesRegex(PreparationError, "Cannot read settings"):
+        with self.assertRaisesRegex(
+            PreparationError, "Settings file .*missing.toml does not exist"
+        ):
             load_settings(self.root / "missing.toml", {})
         for source in (
             "[pdf_checks\nrequire_tagged = true\n",

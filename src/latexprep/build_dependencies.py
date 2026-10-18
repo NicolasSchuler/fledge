@@ -22,7 +22,7 @@ from typing import Literal, NamedTuple
 
 from .file_safety import is_contained_regular_file
 from .models import Engine, PreparationError
-from .tex_lexer import ParseLimitExceeded, mask_literals, scan_commands
+from .tex_lexer import ParseLimitExceeded, mask_literals, scan_commands, scan_source_commands
 
 _MAX_ROWS = 50_000
 _MAX_RULES = 256
@@ -507,7 +507,7 @@ def _require_biber_control(text: str) -> None:
 
 
 def _declares_bibtex_data(text: str) -> bool:
-    commands = scan_commands(mask_literals(text))
+    commands = scan_source_commands(text)
     resources = [command for command in commands if command.name == "bibdata"]
     if any(not command.arguments or not command.arguments[0].value for command in resources):
         raise PreparationError("AUX bibliography data declaration is incomplete")

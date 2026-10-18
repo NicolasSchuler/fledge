@@ -2,21 +2,27 @@
 
 from __future__ import annotations
 
+import io
 import json
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from click.testing import CliRunner
 
+from latexprep.ci_annotations import render_ci_annotations
 from latexprep.cli import cli
 from latexprep.config import Settings
 from latexprep.core import run_job
+from latexprep.diagnostic_bundle import export_diagnostic_bundle
 from latexprep.finding_view import RenderOptions
+from latexprep.html_report import render_html
 from latexprep.job_context import JobRequest
 from latexprep.models import Change, ChangeKind, Finding, Outcome, Report
 from latexprep.online_checks import OnlineOptions
+from latexprep.pdf_artwork import PdfArtworkOptions
 from latexprep.terminal_report import render_compact, render_terminal
 from tests.test_workflow_checks import controlled_build, source_project
 
@@ -143,6 +149,103 @@ class ReportSafetyTests(unittest.TestCase):
         self.assertIn("report.redaction_limit", render_compact(report))
 
 
+class WithheldReportTests(unittest.TestCase):
+    """A withheld report says whether it was too large or sanitizing failed, never why in detail."""
+
+    def report(self) -> Report:
+        return Report("check", outcome=Outcome.PASSED, scope="fixture")
+
+    def test_oversized_report_records_the_redaction_limit(self):
+        with patch("latexprep.models.redact_data", return_value="redaction budget reached"):
+            result = self.report().to_dict()
+        [finding] = result["findings"]
+        self.assertEqual(finding["details"], {"cause": "redaction_limit"})
+        self.assertIn("within redaction limits", finding["message"])
+
+    def test_structural_failure_records_only_the_error_type(self):
+        with patch("latexprep.models.redact_data", return_value={"[REDACTED]": []}):
+            result = self.report().to_dict()
+        [finding] = result["findings"]
+        self.assertEqual(finding["details"], {"cause": "KeyError"})
+        self.assertIn("cause: KeyError", finding["message"])
+        self.assertNotIn("within redaction limits", finding["message"])
+
+    def test_withheld_report_keeps_the_command_so_it_matches_the_schema(self):
+        with patch("latexprep.models.redact_data", return_value="redaction budget reached"):
+            self.assertEqual(self.report().to_dict()["command"], "check")
+
+
+class LocalPathTests(unittest.TestCase):
+    """Shared reports do not reveal the user name or the directory layout of a machine."""
+
+    def setUp(self):
+        self.home = str(Path.home().resolve())
+        self.temporary = str(Path(tempfile.gettempdir()).resolve())
+        self.report = Report(
+            "check",
+            outcome=Outcome.PASSED_WITH_ADVISORIES,
+            scope="fixture",
+            settings={"reference_pdf": f"{self.home}/paper/reference.pdf"},
+            tools={"latexmk": {"executable": f"{self.home}/.local/bin/latexmk"}},
+            findings=[
+                Finding(
+                    "source.edit_marker",
+                    f"Cannot read {self.home}/paper/extra.tex and {self.temporary}/scratch/a.log",
+                    path="main.tex",
+                    suggestion=f"Copy {self.home}/paper/fledge.toml",
+                )
+            ],
+            artifacts={"report": f"{self.home}/out/report.json"},
+            execution={"config_path": f"{self.home}/paper/fledge.toml"},
+        )
+
+    def test_json_shows_home_and_temporary_directories_generically(self):
+        result = self.report.to_dict()
+        self.assertEqual(result["execution"]["config_path"], "~/paper/fledge.toml")
+        self.assertEqual(result["settings"]["reference_pdf"], "~/paper/reference.pdf")
+        self.assertEqual(result["tools"]["latexmk"]["executable"], "~/.local/bin/latexmk")
+        [finding] = result["findings"]
+        self.assertEqual(
+            finding["message"], "Cannot read ~/paper/extra.tex and <tmp>/scratch/a.log"
+        )
+        self.assertEqual(finding["next_step"], "Copy ~/paper/fledge.toml")
+        self.assertEqual(finding["path"], "main.tex")
+
+    def test_published_artifact_paths_keep_their_location(self):
+        self.assertEqual(
+            self.report.to_dict()["artifacts"], {"report": f"{self.home}/out/report.json"}
+        )
+        self.assertEqual(
+            self.report.redacted_copy().artifacts, {"report": f"{self.home}/out/report.json"}
+        )
+
+    def test_every_other_output_format_is_scrubbed(self):
+        outputs = {
+            "terminal": render_terminal(self.report, options=RenderOptions(show_passed=True)),
+            "compact": render_compact(self.report),
+            "html": render_html(self.report),
+            "ci": render_ci_annotations(self.report),
+        }
+        for name, text in outputs.items():
+            with self.subTest(format=name):
+                self.assertNotIn(f"{self.home}/paper", text)
+                self.assertNotIn(f"{self.home}/.local", text)
+                self.assertNotIn(self.temporary, text)
+                self.assertIn("~/paper", text)
+
+    def test_diagnostic_bundle_is_scrubbed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "bundle.zip"
+            export_diagnostic_bundle(self.report, destination)
+            with zipfile.ZipFile(io.BytesIO(destination.read_bytes())) as archive:
+                for name in ("report.json", "report.html"):
+                    with self.subTest(entry=name):
+                        text = archive.read(name).decode("utf-8")
+                        self.assertNotIn(f"{self.home}/paper", text)
+                        self.assertNotIn(f"{self.home}/.local", text)
+                        self.assertIn("~/paper/fledge.toml", text)
+
+
 class ReportPublicationSafetyTests(unittest.IsolatedAsyncioTestCase):
     async def test_artifact_path_redaction_failure_blocks_before_creating_output(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -161,6 +264,50 @@ class ReportPublicationSafetyTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(report.artifacts, {})
             self.assertTrue((source / "main.tex").exists())
             self.assertIn("report.redaction_limit", {item.rule for item in report.findings})
+
+    async def test_redaction_refusal_leaves_no_references_to_unpublished_previews(self):
+        async def measured(_pdf, _root, _main, work, *_args):
+            work.mkdir(parents=True)
+            preview = work / "gray.png"
+            preview.write_bytes(b"PNG fixture")
+            return [
+                Finding(
+                    "pdf.grayscale_preview",
+                    "Generated",
+                    severity="info",
+                    status="passed",
+                    details={"artifacts": [str(preview)]},
+                )
+            ]
+
+        settings = Settings(rendered_pdf_artwork=PdfArtworkOptions(grayscale_preview=True))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            source = root / "input"
+            source_project(source)
+            output = root / "out?token=findings&"
+            with (
+                patch("latexprep.document_tasks.build_project", side_effect=controlled_build),
+                patch("latexprep.document_tasks.inspect_pdf", new=AsyncMock(return_value=[])),
+                patch("latexprep.document_tasks.compare_pdfs", new=AsyncMock(return_value=[])),
+                patch(
+                    "latexprep.document_tasks.inspect_configured_pdf_checks", side_effect=measured
+                ),
+            ):
+                report = await run_job(
+                    JobRequest(
+                        "prepare", source, settings, output, preview_output=root / "previews"
+                    )
+                )
+            self.assertFalse(output.exists())
+            self.assertFalse((root / "previews").exists())
+        self.assertEqual(report.outcome, "error")
+        self.assertEqual(report.artifacts, {})
+        previews = [item for item in report.findings if item.rule == "pdf.grayscale_preview"]
+        self.assertTrue(previews)
+        for item in previews:
+            self.assertEqual(item.details["artifacts"], [])
+            self.assertEqual(item.details["previews_exported"], 0)
 
     async def test_api_and_published_report_redact_configured_urls(self):
         with tempfile.TemporaryDirectory() as directory:

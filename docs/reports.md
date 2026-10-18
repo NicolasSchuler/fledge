@@ -88,6 +88,13 @@ table. Both include original source paths, final paths and selection reasons.
 The *Bundle written?* column applies to `prepare --output`; `inspect` and
 `check` never write a bundle.
 
+An unexpected failure inside Fledge never ends with 0, 1 or 2: it exits with 4 and
+prints one line on stderr. The JSON report then holds a finding with the rule
+`execution.internal` that records the `error_type` and the innermost `frames`
+(`file.py:line in function`, without directories). Pass `--debug` or set
+`FLEDGE_DEBUG=1` to print the full traceback when you report the defect. A crash
+while printing or saving the report also exits with 4.
+
 **Why advisories exit with 1.** A TODO marker or an unused bibliography entry
 does not stop the release, but nobody has looked at it yet. A
 nonzero code makes scripts and CI notice instead of shipping silently. Once you
@@ -186,9 +193,15 @@ findings, settings and tool details removed:
 | `settings` | The effective settings after preset, file and command line, under their current names (`apply_formatting`, `rendered_pdf_artwork` and `included_figure_artwork` replace `format`, `pdf_artwork` and `figure_artwork`) |
 | `tools` | Versions and paths of the tools used |
 | `stages` | Each build and verification step with its status and elapsed seconds |
-| `artifacts` | Paths of the published output; empty when blocked |
+| `artifacts` | Paths of the published output, as written; empty when blocked |
 | `package_contents` | Per-document inventory, verification status, selection reasons and measured file/ZIP sizes |
 | `execution` | Configuration file, preset, check selection, opt-in checks that did not run (`not_checked`), resource use and timing |
+
+Every other path in a report, such as the settings file, a reference PDF or a tool
+location, shows your home directory as `~` and the system temporary directory as
+`<tmp>`, so a report can be shared without revealing a user name. Paths inside the
+project stay relative, and `artifacts` keeps the real location of the files Fledge
+wrote.
 
 A finding's `code` is `null` for operational results such as `build.failed`;
 its `rule` always holds a descriptive name. `evidence_kind` says how directly

@@ -1,0 +1,13 @@
+version: 2
+updates:
+  # Every workflow pins its actions to a commit SHA with the release in a trailing
+  # comment. Dependabot keeps both current and opens one grouped pull request a week.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: ci

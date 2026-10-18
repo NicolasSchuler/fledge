@@ -1,3 +1,3 @@
 """Fledge: LaTeX submission preparation with an interface-independent core."""
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"

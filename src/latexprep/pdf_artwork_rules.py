@@ -149,8 +149,10 @@ RULES = (
         description="Opt-in required_color_space ('rgb' or 'cmyk'): classify MuPDF trace "
         "colour-space names in each included PDF figure (included_figure_artwork) or the whole "
         "PDF (rendered_pdf_artwork), and PNG/JPEG figure headers in the selected source graph. "
-        "Grayscale satisfies either family; unclassified spaces, EPS figures and missing tools are "
-        "inconclusive.",
+        "Grayscale satisfies either family; unclassified spaces and missing tools are "
+        "inconclusive. In the source-graph header check, PDF, EPS and PS figures are not "
+        "applicable, not inconclusive: PDF figures are measured by the trace, and EPS and PS "
+        "figures are vector formats that are not measured.",
         tests=(
             "tests.test_pdf_artwork.PdfArtworkTests.test_traced_figure_color_families_against_required_space",
             "tests.test_pdf_artwork.PdfArtworkTests.test_missing_trace_tool_is_inconclusive",

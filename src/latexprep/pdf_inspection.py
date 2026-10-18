@@ -28,7 +28,7 @@ from .pdf_support import (
     open_inspection_session,
     page_boxes_argv,
     page_count,
-    page_sizes,
+    parse_page_sizes,
     pdfinfo_fields,
     unavailable_finding,
 )
@@ -36,6 +36,8 @@ from .runtime import CommandResult, CommandRunner
 from .scheduler import ResourceBudget
 
 _POINT_UNIT = "PDF points (1/72 inch)"
+# Placement kinds in the pdfimages -list type column: stencil is a one-bit /ImageMask image.
+_IMAGE_TYPES = frozenset({"image", "stencil", "mask", "smask"})
 _POLICY_SUGGESTIONS = {
     "pdf.page_limit": "Review the total page budget, including references and appendices.",
     "pdf.page_dimensions": "Check the configured paper size and PDF page boxes.",
@@ -185,7 +187,7 @@ def _document_findings(pages: int, fields: dict[str, str], max_pages: int | None
 
 def _geometry_findings(output: str, context: _InspectionContext) -> list[Finding]:
     options = context.options
-    sizes = page_sizes(output, context.pages)
+    sizes = parse_page_sizes(output, context.pages)
     findings = [
         Finding(
             "pdf.page_geometry",
@@ -434,7 +436,7 @@ def _image_inventory(output: str, pages: int) -> list[dict[str, object]]:
             page not in range(1, pages + 1)
             or number < 0
             or min(width, height) < 1
-            or values[2] not in {"image", "mask", "smask"}
+            or values[2] not in _IMAGE_TYPES
             or not all(math.isfinite(dpi) and dpi >= 0 for dpi in (x_dpi, y_dpi))
         ):
             raise PreparationError("pdfimages returned invalid image measurements")

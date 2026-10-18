@@ -15,9 +15,20 @@ import click
 from rich.console import Console
 
 from . import __version__
-from .command_options import compose_options, reject_config_with_isolated, settings_file_options
+from .command_options import (
+    compose_options,
+    debug_option,
+    discard_closed_stdout,
+    print_debug_traceback,
+    record_cancellation,
+    record_internal_error,
+    record_job_failure,
+    reject_config_with_isolated,
+    settings_file_options,
+)
 from .config import SETTING_NAMES, Settings, load_settings, resolve_config_path
 from .core import run_job
+from .defects import is_expected_failure
 from .diagnostic_bundle import export_diagnostic_bundle
 from .doctor_command import doctor_command
 from .finding_view import RenderOptions
@@ -35,13 +46,11 @@ from .models import (
     Report,
     RequestError,
     cancelled_finding,
-    internal_error_finding,
-    request_error_finding,
 )
 from .pdf_previews import PdfPreviewStore
 from .presets import preset_names
 from .publication import validate_destination
-from .report_formats import REQUEST_SCOPE, OutputFormat, write_report
+from .report_formats import UNFINISHED_SCOPE, OutputFormat, write_report
 from .rules import RULES, get_rule
 from .submission_text_command import submission_text_command
 from .terminal_progress import TerminalProgress
@@ -50,6 +59,7 @@ from .terminal_report import print_rule_explanation, print_rule_table
 _common = compose_options(
     click.argument("source", type=click.Path(path_type=Path), metavar="INPUT"),
     settings_file_options,
+    debug_option,
     click.option("--json", "json_output", is_flag=True, help="Alias for --output-format json."),
     click.option(
         "--output-format",
@@ -200,6 +210,22 @@ def _usage_exit_code() -> Generator[None]:
         raise
 
 
+class _InternalFailure(click.ClickException):
+    """A defect outside every command's own guard: one plain line and the error exit code."""
+
+    exit_code = Outcome.ERROR.exit_code
+
+
+def _internal_failure(error: Exception, during: str = "") -> _InternalFailure:
+    """The plain message for a defect; ``--debug`` or FLEDGE_DEBUG=1 also prints its traceback."""
+    print_debug_traceback(error)
+    return _InternalFailure(
+        f"Internal error ({type(error).__name__}){during}. This is a defect in Fledge, not in "
+        "your input. Rerun with --debug (or set FLEDGE_DEBUG=1) to print the traceback, and "
+        "report it with the command you ran."
+    )
+
+
 class _FledgeGroup(click.Group):
     """Parsing the group's options and invoking a command both report usage errors."""
 
@@ -212,13 +238,22 @@ class _FledgeGroup(click.Group):
 
     def invoke(self, ctx: click.Context) -> Any:
         with _usage_exit_code():
-            return super().invoke(ctx)
+            try:
+                return super().invoke(ctx)
+            except (click.ClickException, click.exceptions.Exit, click.Abort, BrokenPipeError):
+                raise
+            except Exception as error:
+                # init, rules and the other commands have no guard of their own. Without
+                # this, Python would end them with a traceback and exit status 1, the
+                # code for "passed with advisories".
+                raise _internal_failure(error) from error
 
 
 @click.group(
     name="fledge", cls=_FledgeGroup, context_settings={"help_option_names": ["-h", "--help"]}
 )
 @click.version_option(__version__, prog_name="fledge")
+@debug_option
 def cli() -> None:
     """Fledge checks and prepares a separate LaTeX submission copy.
 
@@ -341,6 +376,7 @@ cli.add_command(submission_text_command)
 
 @cli.command("rules")
 @click.option("--json", "json_output", is_flag=True, help="Print every check as JSON.")
+@debug_option
 def rules_command(json_output: bool) -> int:
     """List every check with its stable code and title."""
     if json_output:
@@ -353,6 +389,7 @@ def rules_command(json_output: bool) -> int:
 @cli.command("rule")
 @click.argument("code")
 @click.option("--json", "json_output", is_flag=True, help="Print the explanation as JSON.")
+@debug_option
 def rule_command(code: str, json_output: bool) -> int:
     """Explain the check with code CODE: its scope, limits, suggested fix and tests."""
     try:
@@ -550,6 +587,25 @@ def _run(
         return asyncio.run(run_job(request, progress, report))
 
 
+def _record_write_failure(report: Report, option: str, destination: Path, error: Exception) -> None:
+    """Record that a requested report file could not be saved, in the report itself."""
+    if not is_expected_failure(error):
+        record_internal_error(report, error)
+        return
+    reason = error.strerror if isinstance(error, OSError) and error.strerror else str(error)
+    report.outcome = Outcome.ERROR
+    report.findings.append(
+        Finding(
+            "report.write",
+            f"Cannot write {option} {destination}: {reason}",
+            severity="error",
+            status="failed",
+            suggestion=f"Choose a {option} path in a folder that exists and is writable, with "
+            "no file at that path yet, then rerun the command.",
+        )
+    )
+
+
 def _write_reports(
     report: Report, files: _ReportFiles, preview_images: dict | None
 ) -> _RenderedReport:
@@ -558,44 +614,73 @@ def _write_reports(
     # changes the report.
     html_document = None
     # Write the HTML and diagnostics first, so a failure is reflected in the saved JSON.
-    try:
-        if files.html is not None:
+    if files.html is not None:
+        try:
             html_document = render_html(report, preview_images=preview_images)
             with files.html.open("x", encoding="utf-8") as stream:
                 stream.write(html_document)
-        if files.diagnostics is not None:
+        except Exception as error:
+            _record_write_failure(report, "--html-report", files.html, error)
+            html_document = None
+    if files.diagnostics is not None:
+        try:
             export_diagnostic_bundle(report, files.diagnostics)
-    except (PreparationError, OSError, ValueError) as error:
-        report.outcome = Outcome.ERROR
-        report.findings.append(
-            Finding("report.write", str(error), severity="error", status="failed")
-        )
-        html_document = None
+        except Exception as error:
+            _record_write_failure(report, "--diagnostics", files.diagnostics, error)
+            html_document = None
     encoded = report.to_json()
     if files.json is not None:
         try:
             with files.json.open("x", encoding="utf-8") as stream:
                 stream.write(encoded)
-        except OSError as error:
-            report.outcome = Outcome.ERROR
-            report.findings.append(
-                Finding(
-                    "report.write",
-                    f"Cannot write report: {error}",
-                    severity="error",
-                    status="failed",
-                )
-            )
+        except Exception as error:
+            _record_write_failure(report, "--report", files.json, error)
             encoded = report.to_json()
             html_document = None
     return _RenderedReport(encoded, html_document)
+
+
+def _deliver_report(
+    report: Report,
+    files: _ReportFiles,
+    output_format: OutputFormat,
+    options: CommandOptions,
+    pdf_previews: PdfPreviewStore | None,
+) -> int:
+    """Save the requested report files, print the final report and return the exit code."""
+    preview_images = pdf_previews.images if pdf_previews else None
+    try:
+        rendered = _write_reports(report, files, preview_images)
+        write_report(
+            report,
+            output_format,
+            console=Console(markup=False, highlight=False),
+            options=RenderOptions(
+                show_passed=options.show_passed,
+                show_diff=options.diff,
+                show_files=options.show_files,
+            ),
+            preview_images=preview_images,
+            document={OutputFormat.JSON: rendered.json, OutputFormat.HTML: rendered.html}.get(
+                output_format
+            ),
+        )
+    except BrokenPipeError:
+        # The reader of stdout stopped early, for example `| head`; the verdict is known.
+        discard_closed_stdout()
+    except Exception as error:
+        # A defect while rendering must still end in the error exit code, never in a pass.
+        failure = _internal_failure(error, " while writing the report")
+        failure.show()
+        return failure.exit_code
+    return report.outcome.exit_code
 
 
 def _execute(command: JobCommand, arguments: dict[str, Any]) -> int:
     options = CommandOptions(command=command, **arguments)
     reject_config_with_isolated(options.config, options.isolated)
     output_format = options.output_choice()
-    report = Report(command.value, scope=REQUEST_SCOPE)
+    report = Report(command.value, scope=UNFINISHED_SCOPE)
     files = _ReportFiles()
     pdf_previews = None
     try:
@@ -605,39 +690,25 @@ def _execute(command: JobCommand, arguments: dict[str, Any]) -> int:
         if files.html is not None or output_format is OutputFormat.HTML:
             pdf_previews = PdfPreviewStore()
         report = _run(options, settings, pdf_previews, report)
-    except KeyboardInterrupt:
-        report.outcome = Outcome.CANCELLED
-        report.findings.append(cancelled_finding("Cancelled; no verified output was published"))
-    except (PreparationError, OSError, ValueError) as error:
-        report.outcome = Outcome.ERROR
-        report.scope = REQUEST_SCOPE
-        report.findings.append(
-            request_error_finding(
-                error, "Correct the input, option or setting named above, then rerun the command."
-            )
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        record_cancellation(
+            report, cancelled_finding("Cancelled; no verified output was published")
         )
     except Exception as error:
-        report.outcome = Outcome.ERROR
-        report.findings.append(internal_error_finding(error))
-    preview_images = pdf_previews.images if pdf_previews else None
-    rendered = _write_reports(report, files, preview_images)
-    write_report(
-        report,
-        output_format,
-        console=Console(markup=False, highlight=False),
-        options=RenderOptions(
-            show_passed=options.show_passed, show_diff=options.diff, show_files=options.show_files
-        ),
-        preview_images=preview_images,
-        document={OutputFormat.JSON: rendered.json, OutputFormat.HTML: rendered.html}.get(
-            output_format
-        ),
-    )
-    return report.outcome.exit_code
+        record_job_failure(
+            report,
+            error,
+            "Correct the input, option or setting named above, then rerun the command.",
+        )
+    return _deliver_report(report, files, output_format, options, pdf_previews)
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Return an exit code for console scripts, embedding, and existing callers."""
+    """Return an exit code for console scripts, embedding, and existing callers.
+
+    Whatever goes wrong, the code is never one that means success: a defect is exit
+    code 4, the same as any other error.
+    """
     try:
         return cli.main(args=argv, prog_name="fledge", standalone_mode=False) or 0
     except click.ClickException as error:
@@ -646,3 +717,11 @@ def main(argv: list[str] | None = None) -> int:
     except (click.Abort, KeyboardInterrupt):
         click.echo("Cancelled; no verified output was published", err=True)
         return 130
+    except BrokenPipeError:
+        # Output the reader no longer wants; the command itself had finished.
+        discard_closed_stdout()
+        return 0
+    except Exception as error:
+        failure = _internal_failure(error)
+        failure.show()
+        return failure.exit_code

@@ -107,16 +107,29 @@ been validated live.
 ## Continuous integration
 
 The [Tests workflow](https://github.com/NicolasSchuler/fledge/actions/workflows/tests.yml)
-runs on pushes to `main`, pull requests, manual dispatch and weekly. It lints with
-Ruff and `ty`, then runs the unit tests with pytest on macOS and Ubuntu with Python 3.11 and
-3.13. Manual and weekly runs add two live jobs that run the opt-in integration
-tests without tool doubles:
+runs on pushes to `main`, pull requests, manual dispatch and weekly. Every run:
+
+- lints with Ruff (`check` and `format --check`) and checks types with `ty`;
+- lints `install.sh` with ShellCheck;
+- builds the documentation with `-n -W`, as the Deploy documentation workflow does,
+  so a broken link fails the pull request instead of the merge;
+- builds the source archive and wheel, installs the wheel into a fresh
+  environment, runs `fledge --version` from another directory, and runs
+  `tests/test_docs.py` and `tests/test_packaging.py` from the extracted source
+  archive, so a file missing from either distribution fails the pull request;
+- runs the unit tests with pytest on macOS and Ubuntu with Python 3.11, 3.12 and 3.13.
+
+Manual and weekly runs add two live jobs that run the opt-in integration tests
+(`FLEDGE_RUN_INTEGRATION=1`) without tool doubles. Each lists its test files by
+hand, and `tests/test_packaging.py` fails when a test file with live tests
+is missing from both lists:
 
 - `live-macos` installs BasicTeX, Poppler, `tex-fmt` and Biber and also runs the
   macOS sandbox tests.
 - `live-linux` installs TeX Live, Biber, Poppler and Bubblewrap from apt plus a
   pinned `tex-fmt` release, and runs the integration tests under Bubblewrap. It
-  leaves out `test_runtime_parallel.py`, whose live tests run only on macOS.
+  leaves out `test_runtime_parallel.py`, whose live tests run only on macOS, and
+  adds `test_runtime_backends.py` for the live Bubblewrap isolation test.
   **This job is unvalidated until a maintainer has run it from the Actions tab
   and it passes**; until then the documentation must keep saying that Linux has
   not run live. On Ubuntu 24.04 it sets
@@ -124,7 +137,8 @@ tests without tool doubles:
   CI setting that users must decide on for their own hosts (see
   [installation](installation.md#linux)).
 
-Every third-party action in every workflow is pinned to a commit SHA. The
+Every third-party action in every workflow is pinned to a commit SHA, and
+Dependabot (`.github/dependabot.yml`) proposes a grouped update each week. The
 [Release workflow](https://github.com/NicolasSchuler/fledge/actions/workflows/release.yml)
 publishes to PyPI; see [release to PyPI](#release-to-pypi).
 
@@ -168,9 +182,12 @@ reaches `main`.
 
 ### Each release
 
-1. Set the same new version in `pyproject.toml` and in `__version__` in
-   `src/latexprep/__init__.py`. The workflow refuses to build if they differ or
-   if the release tag is not `v` followed by that version.
+1. Set the new version in `__version__` in `src/latexprep/__init__.py`, the only
+   place it is defined: `pyproject.toml` reads it through
+   `[tool.setuptools.dynamic]`, and `fledge --version` reports it. Give the
+   version's heading in `CHANGELOG.md` its release date. The workflow
+   (`python scripts/release_checks.py version`) refuses to build if the version
+   is defined anywhere else or if the release tag is not `v` followed by that version.
 2. Merge to `main` and wait for the Tests workflow to pass. Run the live jobs
    from the Actions tab when the release depends on them.
 3. Optional dry run: on the Release workflow page choose **Run workflow** on
@@ -178,7 +195,7 @@ reaches `main`.
    environment, checks `fledge --version` and the packaged presets, and uploads
    the files as the `python-distributions` artifact, but never publishes.
 4. Create a GitHub release: choose or create the tag `vX.Y.Z` (for the current
-   version, `v0.2.0`) on `main` and publish the release. Publishing starts the
+   version, `v0.3.0`) on `main` and publish the release. Publishing starts the
    workflow, which verifies the tag, builds, smoke-tests and then uploads to PyPI
    from the `pypi` environment. Approve the deployment if you added a reviewer.
 5. Check the result in a clean environment: `pipx install fledge-latex==X.Y.Z`,
@@ -202,26 +219,29 @@ python -m build
 
 This creates a wheel and source archive in `dist/`; it does not publish them.
 The wheel installs the CLI. The source archive also carries the documentation,
-examples, tests, agent skill, architecture, requirements, and benchmark script, so it can be
+examples, tests, agent skill, architecture, requirements, changelog and the scripts, so it can be
 used to build these docs and run the documented source checks. It also includes
 the opt-in macOS installer; installer tests use controlled commands, not native
 Homebrew or MacTeX installation.
 
 ## Design and planning references
 
-These source documents remain available without claiming that every planned
-capability is implemented:
+The requirements and the parallel execution design are historical design
+records: they explain why Fledge is built as it is, were written on 6 to
+12 October 2026, and are not updated with the code.
 
 - {download}`Architecture <../architecture.md>`: component responsibilities,
   stage boundaries, isolation, and parallel execution design, including future
   interface work.
-- {download}`Requirements <../requirements.md>`: the broader planned release and
-  acceptance criteria; use [what prepare does](workflow.md) and the
-  [workflow reference](workflow-reference.md) for current scope.
+- {download}`Requirements <../requirements.md>`: the original product requirements
+  and acceptance criteria (historical design record); use
+  [what prepare does](workflow.md) and the [workflow reference](workflow-reference.md)
+  for current scope.
 - [Check backlog](check-backlog.md): implemented subsets, partial behavior,
   outstanding implementation, and missing validation.
 - [Parallel execution design](parallelization-plan.md): rationale and acceptance
-  criteria, with current implementation status separated from historical seams.
+  criteria of the scheduler work, with the starting seams it replaced (historical
+  design record).
 - [Bounded benchmark](parallelization-benchmark.md): recorded local synthetic
   measurements and their limits.
 

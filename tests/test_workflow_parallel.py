@@ -11,9 +11,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+from latexprep.check_selection import CheckSelection
 from latexprep.config import Settings
 from latexprep.core import run_job
+from latexprep.defects import REPORT_DEFECT_SUGGESTION
 from latexprep.job_context import JobRequest
+from latexprep.job_execution import JobDeadlineExceeded
 from latexprep.latexmk_build import BuildTools
 from latexprep.models import Finding, Outcome, PreparationError, Report
 from latexprep.publication import VerifiedPackage
@@ -248,6 +251,60 @@ class ParallelWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stages["source checks"], "cancelled")
         self.assertEqual(report.execution["resources"]["active_cpu"], 0)
         self.assertEqual(report.execution["resources"]["queued"], 0)
+
+    async def test_deadline_report_still_follows_check_selection(self):
+        async def hang(*_args, **_options):
+            await asyncio.Event().wait()
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "input"
+            project(source)
+            (source / "main.tex").write_text(
+                "\\documentclass{article}\n\\begin{document}\nTODO finish.\n\\end{document}\n"
+            )
+            settings = Settings(
+                jobs=3, job_timeout_seconds=1, checks=CheckSelection(ignore=("TEX001",))
+            )
+            with patch("latexprep.document_tasks.build_project", side_effect=hang):
+                report = await run_job(JobRequest("check", source, settings))
+        self.assertTrue(any(f.rule == "execution.deadline" for f in report.findings))
+        stages = {stage["name"]: stage["status"] for stage in report.stages}
+        self.assertEqual(stages["source checks"], "succeeded")
+        self.assertNotIn("source.edit_marker", {f.rule for f in report.findings})
+
+    async def test_a_socket_timeout_is_not_reported_as_the_job_deadline(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "input"
+            project(source)
+            with (
+                patch(
+                    "latexprep.document_run.import_project", side_effect=TimeoutError("timed out")
+                ),
+                self.assertRaises(TimeoutError) as raised,
+            ):
+                await run_job(JobRequest("check", source, Settings()))
+        self.assertNotIsInstance(raised.exception, JobDeadlineExceeded)
+
+    async def test_a_crashed_check_is_reported_as_a_defect_without_paths(self):
+        def crash(_root, _main=None):
+            raise KeyError("unexpected")
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "input"
+            project(source)
+            with patch("latexprep.document_tasks.check_bibliography_integrity", side_effect=crash):
+                report = await run_job(JobRequest("inspect", source, Settings()))
+        [finding] = [
+            f
+            for f in report.findings
+            if f.rule == "execution.task" and f.details.get("task") == "bibliography checks"
+        ]
+        self.assertIn("KeyError", finding.message)
+        self.assertEqual(finding.suggestion, REPORT_DEFECT_SUGGESTION)
+        frames = finding.details["traceback"]
+        self.assertTrue(frames)
+        self.assertTrue(all("/" not in frame for frame in frames), frames)
+        self.assertEqual(report.outcome, "blocked")
 
     async def test_repeated_cancellation_keeps_workspace_until_children_stop(self):
         started, cleaning, release, cleaned = (asyncio.Event() for _ in range(4))

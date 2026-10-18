@@ -22,10 +22,14 @@ from .pdf_support import (
     COLOR_OPERATIONS,
     DOCUMENT,
     MAX_FIGURE_INPUTS,
+    MAX_MEASUREMENT_DIMENSION,
+    MAX_MEASUREMENT_DPI,
+    MAX_MEASUREMENT_PIXELS,
     MAX_PAIR_CHECKS,
     MAX_PARSED_NODES,
     MAX_SAMPLES,
     METADATA_FIELDS,
+    MIN_MEASUREMENT_DPI,
     PageFrames,
     PdfRegion,
     PdfToolSession,
@@ -45,8 +49,8 @@ from .pdf_support import (
     page_boxes_argv,
     page_count,
     page_frames,
-    page_sizes,
     parse_mupdf_trace,
+    parse_page_sizes,
     parse_tool_xml,
     pdfinfo_properties,
     qpdf_objects_argv,
@@ -194,8 +198,13 @@ class PdfCheckOptions:
             type(page) is not int or page < 1 for page in self.sparse_page_exemptions
         ):
             raise PreparationError("Sparse-page exemptions must be a tuple of positive pages")
-        if type(self.raster_dpi) is not int or not 18 <= self.raster_dpi <= 144:
-            raise PreparationError("Raster DPI must be an integer from 18 to 144")
+        if (
+            type(self.raster_dpi) is not int
+            or not MIN_MEASUREMENT_DPI <= self.raster_dpi <= MAX_MEASUREMENT_DPI
+        ):
+            raise PreparationError(
+                f"Raster DPI must be an integer from {MIN_MEASUREMENT_DPI} to {MAX_MEASUREMENT_DPI}"
+            )
         if type(self.background_gray) is not int or not 0 <= self.background_gray <= 255:
             raise PreparationError("Background gray must be an integer from 0 to 255")
         if type(self.ink_difference) is not int or not 1 <= self.ink_difference <= 255:
@@ -342,17 +351,44 @@ def _section_findings(pages: int, options: PdfCheckOptions) -> list[Finding]:
     result = []
     for section in options.section_budgets:
         actual = section.end_page - section.start_page + 1
+        outside = section.end_page > pages
+        over = not outside and actual > section.max_pages
+        span = (
+            f"{section.name} spans {actual} pages (pages {section.start_page}-{section.end_page})"
+        )
+        if outside:
+            message = (
+                f"{section.name} is configured to end at page {section.end_page}, but the PDF "
+                f"has only {pages} pages; correct the section's page range to check its budget."
+            )
+        elif over:
+            message = f"{span}, over its budget of {section.max_pages}."
+        else:
+            message = f"{span}; the budget is {section.max_pages}."
+        reason = f"{section.name}: {actual} pages against a budget of {section.max_pages}"
+        violations: list[object] = (
+            [
+                {
+                    "section": section.name,
+                    "pages": actual,
+                    "maximum": section.max_pages,
+                    "reason": reason,
+                }
+            ]
+            if over
+            else []
+        )
         result.append(
             measurement_finding(
                 "pdf.section_page_budget",
-                f"Checked the supplied page range for {section.name}.",
-                [actual] if actual > section.max_pages and section.end_page <= pages else [],
-                incomplete=section.end_page > pages,
+                message,
+                violations,
+                incomplete=outside,
                 section=section.name,
                 start_page=section.start_page,
                 end_page=section.end_page,
                 observed_total_pages=pages,
-                section_pages=actual if section.end_page <= pages else None,
+                section_pages=None if outside else actual,
                 maximum=section.max_pages,
                 scope="Inclusive user-supplied boundaries; semantic section locations "
                 "are not inferred.",
@@ -575,7 +611,7 @@ def _overlap_finding(layout: _TextLayout, minimum_ratio: float) -> Finding:
         incomplete=uncertain or measured == 0,
         total_violations=overlap_count,
         minimum_area_ratio=minimum_ratio,
-        comparisons=comparisons,
+        comparisons=min(comparisons, MAX_PAIR_CHECKS),
         scope=_LAYOUT_SCOPE
         + " Overlaps are candidates, including legitimate mathematical overlays.",
     )
@@ -650,6 +686,47 @@ def _ink_coverage(
     return width, height, ink / len(pixels)
 
 
+def _percent(ratio: float) -> str:
+    return f"{ratio * 100:.3g}%"
+
+
+def _page_ranges(pages: list[int]) -> str:
+    """Ascending page numbers as ``1-3, 5``."""
+    ranges: list[list[int]] = []
+    for page in sorted(pages):
+        if ranges and page == ranges[-1][1] + 1:
+            ranges[-1][1] = page
+        else:
+            ranges.append([page, page])
+    return ", ".join(str(first) if first == last else f"{first}-{last}" for first, last in ranges)
+
+
+def _merge_page_unavailability(findings: list[Finding]) -> list[Finding]:
+    """One finding for each distinct reason pages could not be measured, naming those pages."""
+
+    def unavailable_page(finding: Finding) -> int | None:
+        page = finding.details.get("page")
+        return page if finding.status == "inconclusive" and type(page) is int else None
+
+    pages_by_message: dict[str, list[int]] = {}
+    for finding in findings:
+        if (page := unavailable_page(finding)) is not None:
+            pages_by_message.setdefault(finding.message, []).append(page)
+    result = []
+    for finding in findings:
+        if unavailable_page(finding) is None:
+            result.append(finding)
+        elif (pages := pages_by_message.pop(finding.message, None)) is not None:
+            if len(pages) == 1:
+                label, details = f"page {pages[0]}", finding.details
+            else:
+                label = f"pages {_page_ranges(pages)}"
+                details = {k: v for k, v in finding.details.items() if k != "page"}
+                details["pages"] = pages
+            result.append(replace(finding, message=f"{finding.message} ({label})", details=details))
+    return result
+
+
 async def _sparse_page_finding(
     session: PdfToolSession,
     page: int,
@@ -661,7 +738,12 @@ async def _sparse_page_finding(
     if exceeds_measurement_raster(expected):
         return unavailable_finding(
             "pdf.sparse_pages",
-            PreparationError("Page exceeds the bounded raster dimensions at configured DPI"),
+            PreparationError(
+                f"A {size[0]:g} x {size[1]:g} point page would need a "
+                f"{expected[0]:,} x {expected[1]:,} pixel render at {options.raster_dpi} DPI, "
+                f"above the limit of {MAX_MEASUREMENT_PIXELS:,} pixels "
+                f"({MAX_MEASUREMENT_DIMENSION:,} per side); lower raster_dpi to measure it"
+            ),
             severity="warning",
             details={"page": page},
         )
@@ -682,23 +764,40 @@ async def _sparse_page_finding(
         return unavailable_finding(
             "pdf.sparse_pages", error, severity="warning", details={"page": page}
         )
+    minimum = options.min_page_ink_ratio
+    violations: list[object] = []
+    ink = f"Page {page} has {_percent(ratio)} inked pixels"
+    if minimum is None:
+        message = f"{ink}."
+    elif ratio < minimum:
+        message = f"{ink}, below the configured minimum of {_percent(minimum)}."
+        violations.append(
+            {
+                "page": page,
+                "ink_ratio": ratio,
+                "minimum": minimum,
+                "reason": f"{_percent(ratio)} inked pixels against a minimum of "
+                f"{_percent(minimum)}",
+            }
+        )
+    else:
+        message = f"{ink}; the minimum is {_percent(minimum)}."
     return heuristic_finding(
         "pdf.sparse_pages",
-        f"Measured rendered ink coverage on page {page}.",
-        [ratio]
-        if options.min_page_ink_ratio is not None and ratio < options.min_page_ink_ratio
-        else [],
+        message,
+        violations,
         page=page,
         last_page=page == pages,
         ink_ratio=ratio,
-        minimum=options.min_page_ink_ratio,
+        minimum=minimum,
         raster_pixels=[width, height],
         background_gray=options.background_gray,
         ink_difference=options.ink_difference,
         raster_dpi=options.raster_dpi,
         scope="Rendered pixel coverage; intentional blank/image-only pages "
         "are not inferred. "
-        "Pages above four million pixels are inconclusive before rendering.",
+        f"Pages above {MAX_MEASUREMENT_PIXELS:,} pixels ({MAX_MEASUREMENT_DIMENSION:,} per side) "
+        "are inconclusive before rendering.",
     )
 
 
@@ -710,7 +809,7 @@ async def _sparse_findings(
         sizes = await session.measure(
             "raster-sizes",
             page_boxes_argv(pages),
-            lambda execution: page_sizes(execution.stdout, pages),
+            lambda execution: parse_page_sizes(execution.stdout, pages),
         )
     except (PreparationError, OSError) as error:
         return [unavailable_finding("pdf.sparse_pages", error, severity="warning")]
@@ -728,28 +827,32 @@ async def _sparse_findings(
             result.append(
                 await _sparse_page_finding(session, page, pages, sizes[page - 1], options)
             )
-    return result
+    return _merge_page_unavailability(result)
 
 
 def _language_finding(objects: QpdfObjectGraph, options: PdfCheckOptions) -> Finding:
     raw = objects.resolve(objects.root.get("/Lang"))
     language = raw[2:].strip() if isinstance(raw, str) and raw.startswith("u:") else None
+    expected = options.expected_language
     violations: list[object] = []
     if raw is None or language == "":
-        violations.append("Missing nonempty catalog language")
+        violations.append(
+            "The PDF catalog declares no language"
+            + (f"; the configured language is {expected!r}." if expected else ".")
+        )
     elif (
-        language is not None
-        and options.expected_language is not None
-        and language.casefold() != options.expected_language.casefold()
+        language is not None and expected is not None and language.casefold() != expected.casefold()
     ):
-        violations.append("Catalog language differs from configured language")
+        violations.append(
+            f"Catalog language {language!r} differs from the configured language {expected!r}."
+        )
     return measurement_finding(
         "pdf.document_language",
         "Checked the catalog language declaration.",
         violations,
         incomplete=raw is not None and language is None,
         declared_language=language,
-        expected=options.expected_language,
+        expected=expected,
         scope="Declaration presence/exact language-tag agreement, not the language of the prose.",
     )
 

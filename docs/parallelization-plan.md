@@ -1,4 +1,18 @@
+---
+orphan: true
+---
+
 # Deeper parallel execution plan
+
+```{note}
+**Historical design record.** Written between 7 and 12 October 2026, while the work
+was under way. The scheduling, bounded page and file workers and declared
+independent documents it describes are implemented, and the tables of starting
+seams describe the code *before* that work. It is kept for its rationale and
+acceptance criteria and is not updated with the code. For shipped behavior, read
+the [workflow reference](workflow-reference.md) and the
+[bounded benchmark](parallelization-benchmark.md).
+```
 
 Extend the existing local scheduler first to overlap independent PDF work, then
 to compare pages and format files within one shared resource budget. Keep the

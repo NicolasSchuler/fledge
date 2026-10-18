@@ -121,7 +121,10 @@ def _homebrew_runtime_roots(package: Path, cellar: Path) -> set[Path]:
 
 def _receipt_dependencies(receipt: Path, cellar: Path) -> Iterator[Path]:
     """Installed directories of the runtime dependencies one receipt declares."""
-    dependencies = json.loads(receipt.read_text()).get("runtime_dependencies", [])
+    declared = json.loads(receipt.read_text())
+    if not isinstance(declared, dict):
+        return
+    dependencies = declared.get("runtime_dependencies", [])
     if not isinstance(dependencies, list) or len(dependencies) > _MAX_HOMEBREW_PACKAGES:
         return
     for dependency in dependencies:

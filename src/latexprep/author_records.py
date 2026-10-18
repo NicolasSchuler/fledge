@@ -10,7 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from .expanded_document import command_end, expand_document
-from .file_scan import check_status, format_locations, location_label
+from .file_scan import check_status, location_label, more_suffix
 from .literal_text import is_placeholder_text, plain_argument_text
 from .models import EvidenceKind, Finding
 from .pdf_structure_checks import StructureOptions
@@ -19,8 +19,67 @@ from .tex_lexer import in_conditional
 
 _RULE = "manuscript.author_records"
 _MAX_REPORTED_RECORDS = 100
+# Records and fields named in the message; the details list up to _MAX_REPORTED_RECORDS.
+_MAX_NAMED_PROBLEMS = 3
 _DECLARATION_COMMANDS = {"newcommand", "renewcommand", "providecommand", "DeclareRobustCommand"}
 _DYNAMIC_COMMANDS = {"def", "gdef", "xdef", "edef", "csname", "catcode", "let"}
+
+
+def _problem(item: dict[str, object]) -> str:
+    """Name where one confirmed violation is and what is wrong there."""
+    where = location_label(item)
+    if "author_index" not in item:
+        return f"\\{item['field']} at {where}"
+    problems = []
+    if item["empty_value"]:
+        problems.append("empty or placeholder name")
+    missing = item["missing_fields"]
+    if isinstance(missing, list) and missing:
+        problems.append("missing " + ", ".join(f"\\{name}" for name in missing))
+    return f"{where} ({'; '.join(problems)})"
+
+
+def _close_record(
+    record: dict[str, object],
+    fields: dict[str, int],
+    empty_values: set[object],
+    required: tuple[str, ...],
+    violations: list[dict[str, object]],
+) -> None:
+    """Note which required fields one author lacks; a single violation covers all its problems."""
+    missing = [name for name in required if not fields.get(name)]
+    record["present_fields"] = sorted(name for name, count in fields.items() if count)
+    record["missing_fields"] = missing
+    empty = record["author_index"] in empty_values
+    problems = []
+    if empty:
+        problems.append("empty or placeholder author value")
+    if missing:
+        problems.append("missing or empty associated author fields")
+    if problems:
+        violations.append({**record, "empty_value": empty, "reason": "; ".join(problems)})
+
+
+def _failure_message(violations: list[dict[str, object]], records: int, author_command: str) -> str:
+    """The failed records out of all records, each with its missing fields."""
+    if not records:
+        return (
+            f"No literal \\{author_command} author record was found in the preamble, so the "
+            "required author fields cannot be checked. Declare each author with "
+            f"\\{author_command}{{...}} before \\maketitle, or set "
+            "structure_checks.author_command to the command your template uses."
+        )
+    incomplete = [item for item in violations if "author_index" in item]
+    stray = [item for item in violations if "author_index" not in item]
+    sections = []
+    for label, items in (
+        (f"Incomplete author records ({len(incomplete)} of {records})", incomplete),
+        (f"Fields placed before the first \\{author_command}", stray),
+    ):
+        if items:
+            named = ", ".join(_problem(item) for item in items[:_MAX_NAMED_PROBLEMS])
+            sections.append(f"{label}: {named}{more_suffix(len(items) - _MAX_NAMED_PROBLEMS)}")
+    return "; ".join(sections) + "."
 
 
 def check_author_records(root: Path, main: str | None, options: StructureOptions) -> list[Finding]:
@@ -35,18 +94,15 @@ def check_author_records(root: Path, main: str | None, options: StructureOptions
     records: list[dict[str, object]] = []
     fields: dict[str, int] = {}
     violations: list[dict[str, object]] = []
+    empty_values: set[object] = set()
     ignored_until = -1
     configured = {options.author_command, *options.required_author_fields}
 
     def finish() -> None:
-        if not records:
-            return
-        record = records[-1]
-        missing = [name for name in options.required_author_fields if not fields.get(name)]
-        record["present_fields"] = sorted(name for name, count in fields.items() if count)
-        record["missing_fields"] = missing
-        if missing:
-            violations.append({**record, "reason": "missing or empty associated author fields"})
+        if records:
+            _close_record(
+                records[-1], fields, empty_values, options.required_author_fields, violations
+            )
 
     for command in document.commands:
         cancellation_point()
@@ -83,7 +139,7 @@ def check_author_records(root: Path, main: str | None, options: StructureOptions
             fields = {}
             records.append({"author_index": len(records) + 1, **location})
             if not nonempty and not reasons:
-                violations.append({**records[-1], "reason": "empty or placeholder author value"})
+                empty_values.add(records[-1]["author_index"])
         elif not records:
             violations.append({**location, "field": command.name, "reason": "field before author"})
         elif nonempty and not reasons:
@@ -94,13 +150,9 @@ def check_author_records(root: Path, main: str | None, options: StructureOptions
     reasons = sorted(set(uncertainty))
     # Any interpretation gap withholds every violation, unlike the manuscript policies.
     confirmed = violations if not reasons else []
-    places = format_locations(confirmed)
     message = "Checked each configured sequential literal author record."
     if confirmed:
-        message = (
-            f"{len(confirmed)} of {max(len(records), 1)} literal author records "
-            "lack a configured field" + (f": {places}" if places else "") + "."
-        )
+        message = _failure_message(confirmed, len(records), options.author_command)
     elif reasons:
         message += " Inconclusive: " + reasons[0].rstrip(".") + "."
     incomplete = bool(uncertainty)

@@ -10,6 +10,7 @@ from dataclasses import FrozenInstanceError
 from pathlib import Path
 from unittest.mock import patch
 
+from latexprep.finding_view import evidence_excerpt
 from latexprep.metadata_privacy import (
     MetadataEdit,
     MetadataPrivacyOptions,
@@ -152,7 +153,7 @@ class MetadataPrivacyTests(unittest.TestCase):
                 result.contents["main.tex"].decode(),
                 text.rsplit("\\author{Alice}", 1)[0] + "\\author{}\n",
             )
-            with patch("latexprep.metadata_privacy.MAX_COMMANDS", 1):
+            with patch("latexprep.tex_lexer.MAX_COMMANDS", 0):
                 self.assertTrue(has_blockers(plan_metadata_sanitization(root, options).findings))
 
     def test_conditionals_only_block_the_declarations_they_enclose(self):
@@ -170,6 +171,68 @@ class MetadataPrivacyTests(unittest.TestCase):
             plan = plan_metadata_sanitization(root, options)
             self.assertFalse(has_blockers(plan.findings), plan.findings)
             self.assertIn(b"\\author{Anonymous}", plan.contents["main.tex"])
+
+    def test_rejections_name_the_field_that_cannot_be_edited(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            options = MetadataPrivacyOptions(
+                edits=(MetadataEdit("main.tex", "author", "Alice", "Anonymous"),)
+            )
+            for text, expected in (
+                (r"\author{Bob}", "\\author does not hold the expected old value"),
+                (r"\author{Alice}\author{Alice}", "\\author was declared 2 times"),
+                (r"\title{Study}", "\\author was not found"),
+                (r"\iftrue\author{Alice}\fi", "\\author is inside conditional TeX"),
+                (r"{\author{Alice}}", "\\author is inside braces or an environment"),
+                (r"\author[Short]{Alice}", "\\author has an optional argument"),
+                (r"\csname author\endcsname\author{Alice}", "\\csname can change metadata"),
+            ):
+                with self.subTest(text=text):
+                    (root / "main.tex").write_text(text)
+                    plan = plan_metadata_sanitization(root, options)
+                    (finding,) = plan.findings
+                    self.assertEqual(finding.status, "inconclusive")
+                    self.assertIn(expected, finding.message)
+                    self.assertIn("expected_before", finding.next_step or "")
+                    self.assertNotIn("Alice", finding.message)
+
+    def test_hypersetup_keys_without_values_do_not_block_the_plan(self):
+        # hyperref defines colorlinks with a default of true and hidelinks as a void option,
+        # so \hypersetup{colorlinks, hidelinks} is valid and holds no text to edit.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "main.tex").write_text(
+                "\\hypersetup{colorlinks, pdfauthor={Alice}, hidelinks,\n pdftitle=Old}\n"
+            )
+            options = MetadataPrivacyOptions(
+                edits=(
+                    MetadataEdit("main.tex", "hypersetup.pdfauthor", "Alice", "Anonymous"),
+                    MetadataEdit("main.tex", "hypersetup.pdftitle", "Old", "New"),
+                )
+            )
+            plan = plan_metadata_sanitization(root, options)
+            self.assertFalse(has_blockers(plan.findings), plan.findings)
+            self.assertEqual(
+                plan.contents["main.tex"].decode(),
+                "\\hypersetup{colorlinks, pdfauthor={Anonymous}, hidelinks,\n pdftitle={New}}\n",
+            )
+
+    def test_malformed_hypersetup_names_the_key_or_line(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            options = MetadataPrivacyOptions(
+                edits=(MetadataEdit("main.tex", "hypersetup.pdfauthor", "Alice", ""),)
+            )
+            for text, expected in (
+                ("\\hypersetup{pdfauthor={Alice} trailing}", "hyperref key pdfauthor"),
+                ("\\hypersetup{colorlinks\n 3pt}", "hyperref key colorlinks"),
+                ("\\hypersetup{\npdfauthor={Alice},\n =x}", "\\hypersetup on line 3"),
+            ):
+                with self.subTest(text=text):
+                    (root / "main.tex").write_text(text)
+                    (finding,) = plan_metadata_sanitization(root, options).findings
+                    self.assertEqual(finding.status, "inconclusive")
+                    self.assertIn(expected, finding.message)
 
     def test_final_pdf_recheck_requires_evidence_and_selected_values(self):
         options = MetadataPrivacyOptions(
@@ -215,6 +278,52 @@ class MetadataPrivacyTests(unittest.TestCase):
             self.assertNotIn("alice@example.org", public)
             self.assertNotIn("Alice", public)
 
+    def test_failed_final_recheck_names_each_property_and_edit_without_values(self):
+        options = MetadataPrivacyOptions(
+            edits=(
+                MetadataEdit("main.tex", "hypersetup.pdfauthor", "Alice", ""),
+                MetadataEdit("main.tex", "email", "bob@example.org", ""),
+            )
+        )
+        properties = {"Pages": "3", "Author": "Alice", "Subject": "bob@example.org"}
+        (result,) = check_sanitized_pdf_metadata(
+            [
+                Finding(
+                    "pdf.metadata",
+                    "Properties",
+                    severity="info",
+                    status="passed",
+                    details={"properties": properties},
+                )
+            ],
+            options,
+        )
+        self.assertEqual(result.status, "failed")
+        self.assertNotIn("Checked selected metadata replacements", result.message)
+        self.assertIn(
+            "Edit 1: PDF property Author does not show the selected replacement", result.message
+        )
+        self.assertIn("Edit 2: PDF property Subject still contains the value", result.message)
+        self.assertIn("rebuild", result.message)
+        for secret in ("Alice", "bob@example.org"):
+            self.assertNotIn(secret, result.message)
+        # The terminal report shows the first few violations from the standard evidence keys.
+        self.assertIn("Edit 1: PDF property Author", evidence_excerpt(result))
+        clean = {"Pages": "3", "Author": "", "Subject": ""}
+        (passed,) = check_sanitized_pdf_metadata(
+            [
+                Finding(
+                    "pdf.metadata",
+                    "Properties",
+                    severity="info",
+                    status="passed",
+                    details={"properties": clean},
+                )
+            ],
+            options,
+        )
+        self.assertEqual(passed.status, "passed")
+
 
 def png_chunk(kind, value):
     return (
@@ -233,7 +342,7 @@ def png(*chunks):
 
 
 def exif(value, *, tag=0x013B, kind=2):
-    raw = value.encode("ascii") + b"\0"
+    raw = (value.encode("ascii") if isinstance(value, str) else value) + b"\0"
     stored = raw.ljust(4, b"\0") if len(raw) <= 4 else struct.pack("<I", 26)
     return (
         b"II\x2a\0"
@@ -393,6 +502,126 @@ class ImageMetadataTests(unittest.TestCase):
             (0xE1, b"http://ns.adobe.com/xmp/extension/\0" + b"a" * 32 + b"<x>" + text + b"</x>")
         )
         self.assertEqual(self.scan(extended, ".jpg").status, "failed")
+
+    def test_non_ascii_names_in_either_encoding_are_scanned_not_rejected(self):
+        name = "Müller"
+        cases = (
+            (".png", png((b"eXIf", exif(name.encode("utf-8"))))),
+            (".png", png((b"eXIf", exif(name.encode("latin-1"))))),
+            (".jpg", jpeg((0xE1, b"Exif\0\0" + exif(name.encode("utf-8"))))),
+            (".jpg", jpeg((0xFE, name.encode("latin-1")))),
+            (".jpg", jpeg((0xFE, name.encode("utf-8")))),
+            (".jpg", jpeg((0xE1, b"http://ns.adobe.com/xap/1.0/\0<x>" + name.encode("latin-1")))),
+            (
+                ".jpg",
+                jpeg(
+                    (
+                        0xE1,
+                        b"Exif\0\0"
+                        + exif(b"ASCII\0\0\0" + name.encode("latin-1"), tag=0x9286, kind=7),
+                    )
+                ),
+            ),
+        )
+        for suffix, data in cases:
+            with self.subTest(suffix=suffix, data=data[-24:]):
+                found = self.scan(data, suffix, terms=(name,))
+                self.assertEqual(found.status, "failed", found.details["issues"])
+                self.assertFalse(found.details["incomplete"])
+                self.assertEqual(len(found.details["matches"]), 1)
+                clean = self.scan(data, suffix, terms=("Someone Else",))
+                self.assertEqual(clean.status, "passed", clean.details["issues"])
+
+    def test_exif_user_comment_character_sets(self):
+        def comment(value):
+            return jpeg((0xE1, b"Exif\0\0" + exif(value, tag=0x9286, kind=7)))
+
+        text = b"Alice Researcher"
+        for charset in (b"\0" * 8, b"ASCII\0\0\0"):
+            with self.subTest(charset=charset):
+                self.assertEqual(self.scan(comment(charset + text), ".jpg").status, "failed")
+                blank = self.scan(comment(charset + b"    "), ".jpg")
+                self.assertEqual((blank.status, blank.details["limitations"]), ("passed", []))
+        # An empty comment written by a camera has no text and no character set to decode.
+        empty = self.scan(comment(b"\0" * 12), ".jpg")
+        self.assertEqual((empty.status, empty.details["limitations"]), ("passed", []))
+        for charset in (b"JIS\0\0\0\0\0", b"CUSTOM\0\0"):
+            with self.subTest(charset=charset):
+                result = self.scan(comment(charset + text), ".jpg")
+                self.assertEqual(result.status, "passed")
+                self.assertFalse(result.details["incomplete"])
+                self.assertEqual(
+                    result.details["limitations"],
+                    [
+                        {
+                            "path": "figure.jpg",
+                            "skipped": "EXIF UserComment in a JIS or unrecognized character set",
+                        }
+                    ],
+                )
+        utf16 = comment(b"UNICODE\0" + b"\xff\xfe" + "Alice Researcher".encode("utf-16-le"))
+        self.assertEqual(self.scan(utf16, ".jpg").status, "failed")
+        broken = comment(b"UNICODE\0" + b"A\0\xff")
+        self.assertEqual(self.scan(broken, ".jpg").status, "passed")
+
+    def test_match_output_limit_is_reported_only_when_matches_were_dropped(self):
+        def many(count):
+            return png(*((b"tEXt", b"Author\0Alice Researcher"),) * count)
+
+        with patch("latexprep.metadata_privacy._MAX_MATCHES", 3):
+            for count, limited in ((3, False), (4, True)):
+                with self.subTest(count=count):
+                    result = self.scan(many(count))
+                    self.assertEqual(len(result.details["matches"]), 3)
+                    self.assertIs(result.details["match_output_limited"], limited)
+
+    def test_messages_name_the_image_and_cause_of_an_incomplete_scan(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "fig").mkdir()
+            (root / "fig" / "plot.png").write_bytes(b"not a PNG")
+            (root / "photo.jpg").write_bytes(jpeg((0xE1, b"http://ns.adobe.com/other/\0data")))
+            (root / "ok.png").write_bytes(png())
+            (finding,) = check_image_metadata(
+                root, MetadataPrivacyOptions(image_identity_terms=("Alice",))
+            )
+        self.assertEqual(finding.status, "inconclusive")
+        self.assertIn("fig/plot.png: PNG signature is invalid", finding.message)
+        self.assertIn("(and 1 more)", finding.message)
+        self.assertIn("1 of 3 PNG/JPEG images were scanned", finding.message)
+        self.assertNotIn("not a PNG", finding.message)
+        self.assertIn("Re-save or re-export", finding.next_step or "")
+        # Decoding failures are described by kind, never with file contents.
+        text = self.scan(png((b"iTXt", b"Author\0\0\0en\0\0\xff")))
+        self.assertIn("unsupported character encoding", text.message)
+
+    def test_found_message_counts_images_and_mentions_unchecked_ones(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "a.png").write_bytes(png((b"tEXt", b"Author\0Alice")))
+            (root / "b.png").write_bytes(
+                png((b"tEXt", b"Author\0Alice"), (b"tEXt", b"Title\0Alice"))
+            )
+            (root / "broken.png").write_bytes(b"x")
+            (finding,) = check_image_metadata(
+                root, MetadataPrivacyOptions(image_identity_terms=("Alice",))
+            )
+        self.assertEqual(finding.status, "failed")
+        self.assertIn("metadata of 2 images", finding.message)
+        self.assertIn("broken.png: PNG signature is invalid", finding.message)
+
+    def test_passed_message_states_what_was_scanned_and_what_was_not(self):
+        clean = self.scan(png(), terms=("Bob Author",))
+        self.assertEqual(clean.status, "passed")
+        self.assertIn("metadata of 1 PNG/JPEG image.", clean.message)
+        for unscanned in ("PDF", "EPS", "SVG", "TIFF"):
+            self.assertIn(unscanned, clean.message)
+        with tempfile.TemporaryDirectory() as directory:
+            (finding,) = check_image_metadata(
+                Path(directory), MetadataPrivacyOptions(image_identity_terms=("Alice",))
+            )
+        self.assertEqual(finding.status, "passed")
+        self.assertIn("none was found", finding.message)
 
     def test_default_no_scan_and_symlinks_never_prove_absence(self):
         with tempfile.TemporaryDirectory() as directory:

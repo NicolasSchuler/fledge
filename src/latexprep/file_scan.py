@@ -15,6 +15,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO, NamedTuple, cast
 
+from .file_safety import byte_count_text
 from .models import Finding, Status
 from .redaction import SECRET_PATTERNS
 from .scheduler import cancellation_point
@@ -66,7 +67,10 @@ def inventory_files(root: Path) -> FileInventory:
                     else:
                         issues.append(f"Special entry was not read: {redact_secrets(name)}")
         except OSError:
-            issues.append("A project directory could not be inventoried.")
+            name = directory.relative_to(root).as_posix()
+            issues.append(
+                f"Directory could not be read (check its permissions): {redact_secrets(name)}"
+            )
     return FileInventory(dict(sorted(files.items())), issues)
 
 
@@ -80,7 +84,7 @@ def _open_regular_file(path: Path) -> Generator[tuple[BinaryIO, int], None, None
     with os.fdopen(descriptor, "rb") as stream:
         metadata = os.fstat(stream.fileno())
         if not stat.S_ISREG(metadata.st_mode):
-            raise OSError("File is not regular or exceeds the scan limit.")
+            raise OSError("File is not a regular file.")
         yield stream, metadata.st_size
 
 
@@ -88,10 +92,10 @@ def read_regular_file(path: Path, limit: int = MAX_SOURCE_BYTES) -> bytes:
     """Read a whole regular, unlinked file that holds at most ``limit`` bytes."""
     with _open_regular_file(path) as (stream, size):
         if size > limit:
-            raise OSError("File is not regular or exceeds the scan limit.")
+            raise OSError(f"File exceeds the scan limit of {byte_count_text(limit)}.")
         data = stream.read(limit + 1)
     if len(data) > limit:
-        raise OSError("File exceeds the scan limit.")
+        raise OSError(f"File exceeds the scan limit of {byte_count_text(limit)}.")
     return data
 
 
@@ -234,6 +238,11 @@ def location_label(item: Mapping[str, object]) -> str:
 def more_suffix(hidden: int) -> str:
     """`` (+N more)`` for ``hidden`` items left out of a listing, or nothing."""
     return f" (+{hidden} more)" if hidden > 0 else ""
+
+
+def plural(count: int, noun: str) -> str:
+    """``1 float``, ``3 floats``: a count with its regularly pluralized noun."""
+    return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
 
 
 def list_locations(items: Sequence[Mapping[str, object]], limit: int = 3) -> str:

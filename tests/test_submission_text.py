@@ -269,3 +269,31 @@ class SubmissionTextTests(unittest.TestCase):
             ("outer-- Roman– Sans– Normal– reset– still-- italic--", []),
         )
         self.assertEqual(convert_text(r"\texttt{\normalfont ordinary--}"), ("ordinary–", []))
+
+    def test_brackets_after_spacing_commands_are_kept_but_line_breaks_take_options(self) -> None:
+        for source, expected in (
+            (r"see\ [12] for", "see [12] for"),
+            (r"300\,[K] and", "300 [K] and"),
+            (r"x\;[y]", "x [y]"),
+            (r"a\par [b] c", "a [b] c"),
+            (r"line\\[2pt] next", "line next"),
+            (r"line\\ [2pt] next", "line next"),
+            (r"line\linebreak[2] next", "line next"),
+            (r"a\newline[b]", "a [b]"),
+        ):
+            with self.subTest(source=source):
+                self.assertEqual(convert_text(source), (expected, []))
+        self.assertEqual(
+            convert_text(r"one\sep[two]\and [three]", keyword_separators=True),
+            ("one; [two]; [three]", []),
+        )
+        self.write(r"\documentclass{article}\title{Data on 5\ [6] sites}")
+        title = read_submission_text(self.root, "main.tex")["title"]
+        self.assertEqual((title.status, title.draft), ("ready", "Data on 5 [6] sites"))
+
+    def test_a_command_name_cannot_belong_to_two_text_handlers(self) -> None:
+        from latexprep import submission_text
+
+        handler = submission_text._COMMAND_HANDLERS["emph"]
+        with self.assertRaisesRegex(RuntimeError, "emph"):
+            submission_text._handler_table((["emph"], handler), (["emph"], handler))

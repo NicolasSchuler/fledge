@@ -90,9 +90,21 @@ class OutputTransaction:
         exc_value: BaseException | None,
         traceback: TracebackType | None,
     ) -> None:
-        if exc_type is not None:
-            for path in reversed(self._created):
+        if exc_type is None:
+            return
+        # Try every directory: one that cannot be removed must neither hide the error
+        # that caused the rollback nor leave the remaining directories behind.
+        for path in reversed(self._created):
+            try:
                 shutil.rmtree(path)
+            except FileNotFoundError:
+                continue
+            except OSError as error:
+                if exc_value is not None:
+                    exc_value.add_note(
+                        f"Could not remove the partial output {path} ({error}); "
+                        "remove it manually before running again."
+                    )
 
     def create(self, path: Path, label: str = "Output") -> Path:
         # mkdir is exclusive, so a concurrent creation cannot be overwritten by a rename.
@@ -146,6 +158,8 @@ def publish_package(
     if public["outcome"] == "error":
         report.outcome = Outcome.ERROR
         report.artifacts.clear()
+        # No preview was published: findings must not point at exported files.
+        locate_previews(report, ())
         report.findings.append(
             Finding(
                 "report.redaction_limit",
@@ -194,6 +208,19 @@ def publish_documents(
         },
     }
     artifacts["report"] = str(output / "report.json")
+    verified: list[tuple[DocumentResult, VerifiedPackage]] = []
+    unverified: list[str] = []
+    for document in documents:
+        if document.package is None:
+            unverified.append(document.name)
+        else:
+            verified.append((document, document.package))
+    if unverified:
+        raise PreparationError(
+            f"No package was published because {', '.join(unverified)} did not verify; "
+            "resolve the blocking findings reported for the unverified documents and "
+            "prepare again"
+        )
     public = replace(report, artifacts=artifacts).to_dict()
     if public["outcome"] == "error":
         raise PreparationError(
@@ -203,12 +230,11 @@ def publish_documents(
     check_deadline()
     transaction.create(output)
     try:
-        for document in documents:
-            assert document.package is not None
+        for document, package in verified:
             if not publish_package(
                 transaction,
                 output / document.name,
-                document.package,
+                package,
                 document.report,
                 check_deadline,
             ):

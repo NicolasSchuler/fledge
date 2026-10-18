@@ -15,7 +15,13 @@ from latexprep.pdf_checks import (
     inspect_included_pdf_figures,
     inspect_pdf_details,
 )
-from latexprep.pdf_support import PdfRegion
+from latexprep.pdf_support import (
+    MAX_MEASUREMENT_PIXELS,
+    MAX_PAIR_CHECKS,
+    MAX_PARSED_NODES,
+    MIN_MEASUREMENT_DPI,
+    PdfRegion,
+)
 from latexprep.runtime import CommandResult, RuntimeLimits, ToolRunner
 from latexprep.scheduler import ResourceBudget
 from tests.support import live_tests_enabled
@@ -90,10 +96,17 @@ def trace_xml(
     )
 
 
-def gray_raster(*, blank: bool = False) -> bytes:
-    pixels = 306 * 396
+def gray_raster(*, blank: bool = False, width: int = 306, height: int = 396) -> bytes:
+    pixels = width * height
     ink = 0 if blank else pixels // 4
-    return b"P5\n306 396\n255\n" + b"\0" * ink + b"\xff" * (pixels - ink)
+    return f"P5\n{width} {height}\n255\n".encode() + b"\0" * ink + b"\xff" * (pixels - ink)
+
+
+def large_page_geometry(width: int, height: int) -> str:
+    return (
+        f"Page 1 size: {width} x {height} pts\nPage 1 rot: 0\n"
+        f"Page 1 MediaBox: 0 0 {width} {height}\nPage 1 CropBox: 0 0 {width} {height}\n"
+    )
 
 
 def color_trace(
@@ -153,6 +166,7 @@ class DetailRunner(ToolRunner):
         )
         self.missing: str | None = None
         self.failure: str | None = None
+        self.stderr = ""
         self.calls: list[tuple[list[str], Path, tuple[Path, ...]]] = []
         self.expected_budget: ResourceBudget | None = None
         self.block: asyncio.Event | None = None
@@ -201,7 +215,7 @@ class DetailRunner(ToolRunner):
         return CommandResult(
             0,
             output,
-            "",
+            self.stderr,
             resolved_command=argv,
             timed_out=self.failure == "timeout",
             output_limited=self.failure == "output",
@@ -333,6 +347,152 @@ class PdfDetailTests(unittest.IsolatedAsyncioTestCase):
             DetailRunner(info="Pages: 5001\nTitle: Paper\n"),
         )
         self.assertEqual([item.status for item in unreadable], ["inconclusive"])
+
+    async def test_poppler_error_reports_with_or_without_offsets_make_evidence_inconclusive(
+        self,
+    ) -> None:
+        options = PdfCheckOptions(required_metadata=("Title",))
+        for stderr in (
+            "Syntax Error (257): Unknown compression method in flate stream\n",
+            "Syntax Error: Unknown operator 'BAD'\n",
+            "I/O Error: Couldn't open file 'document.pdf'\n",
+            "Fontconfig error: Cannot load default config file\n",
+            "error: cannot find page tree\n",
+        ):
+            with self.subTest(stderr=stderr):
+                finding = await self.assert_status(options, "inconclusive", stderr=stderr)
+                self.assertIn("damaged or incomplete", finding.message)
+        # A repaired cross-reference table is a warning, not damaged evidence.
+        await self.assert_status(
+            options, "passed", stderr="Syntax Warning: No valid XRef size in trailer\n"
+        )
+
+    async def test_large_format_pages_keep_text_geometry_and_sparse_page_measurements(self) -> None:
+        # About A1: valid for measurement, yet beyond the 144 DPI comparison render limits.
+        width, height = 1684, 2384
+        geometry_output = large_page_geometry(width, height)
+        xml = text_xml().replace('height="792" width="612"', f'height="{height}" width="{width}"')
+        await self.assert_status(
+            PdfCheckOptions(min_text_size_pt=10),
+            "passed",
+            geometry=geometry_output,
+            xml=xml,
+        )
+        sparse = await self.assert_status(
+            PdfCheckOptions(min_page_ink_ratio=0.1),
+            "passed",
+            geometry=geometry_output,
+            raster=gray_raster(width=842, height=1192),
+        )
+        self.assertIn(f"{MAX_MEASUREMENT_PIXELS:,}", sparse.details["scope"])
+
+    async def test_page_beyond_the_measurement_raster_names_limit_and_setting(self) -> None:
+        # A0 at the highest allowed DPI needs far more than the measurement pixel limit.
+        options = PdfCheckOptions(min_page_ink_ratio=0.1, raster_dpi=144)
+        finding = await self.assert_status(
+            options, "inconclusive", geometry=large_page_geometry(2384, 3370)
+        )
+        self.assertIn(f"{MAX_MEASUREMENT_PIXELS:,}", finding.message)
+        self.assertIn("raster_dpi", finding.message)
+        self.assertEqual(finding.details["page"], 1)
+
+    async def test_sparse_page_tool_failure_is_one_finding_naming_the_pages(self) -> None:
+        options = PdfCheckOptions(min_page_ink_ratio=0.1)
+        result = await self.check(
+            options,
+            DetailRunner(missing="pdftoppm", info="Pages: 3\n", geometry=geometry(pages=3)),
+        )
+        self.assertEqual(len(result), 1, result)
+        self.assertEqual(result[0].status, "inconclusive")
+        self.assertEqual(result[0].details["pages"], [1, 2, 3])
+        self.assertIn("pages 1-3", result[0].message)
+        self.assertNotIn("page", result[0].details)
+
+    async def test_outcome_text_names_section_page_counts_and_budgets(self) -> None:
+        options = PdfCheckOptions(section_budgets=(PdfSectionBudget("Main text", 1, 23, 20),))
+        failure = await self.assert_status(options, "failed", info="Pages: 25\n")
+        self.assertEqual(
+            failure.message, "Main text spans 23 pages (pages 1-23), over its budget of 20."
+        )
+        self.assertEqual(
+            failure.details["violations"],
+            [
+                {
+                    "section": "Main text",
+                    "pages": 23,
+                    "maximum": 20,
+                    "reason": "Main text: 23 pages against a budget of 20",
+                }
+            ],
+        )
+        outside = await self.assert_status(options, "inconclusive", info="Pages: 10\n")
+        self.assertIn("only 10 pages", outside.message)
+        within = await self.assert_status(
+            PdfCheckOptions(section_budgets=(PdfSectionBudget("Main text", 1, 20, 20),)),
+            "passed",
+            info="Pages: 25\n",
+        )
+        self.assertEqual(within.message, "Main text spans 20 pages (pages 1-20); the budget is 20.")
+
+    async def test_sparse_page_outcome_states_measured_and_minimum_coverage(self) -> None:
+        options = PdfCheckOptions(min_page_ink_ratio=0.1)
+        failure = await self.assert_status(options, "failed", raster=gray_raster(blank=True))
+        self.assertEqual(
+            failure.message, "Page 1 has 0% inked pixels, below the configured minimum of 10%."
+        )
+        [violation] = failure.details["violations"]
+        self.assertEqual((violation["page"], violation["ink_ratio"]), (1, 0))
+        self.assertEqual(violation["reason"], "0% inked pixels against a minimum of 10%")
+        passed = await self.assert_status(options, "passed")
+        self.assertEqual(passed.message, "Page 1 has 25% inked pixels; the minimum is 10%.")
+
+    async def test_language_violations_state_declared_and_expected_values(self) -> None:
+        options = PdfCheckOptions(require_language=True, expected_language="en-GB")
+        mismatch = await self.assert_status(
+            options, "failed", objects=object_json(language="u:de-DE")
+        )
+        self.assertEqual(
+            mismatch.details["violations"],
+            ["Catalog language 'de-DE' differs from the configured language 'en-GB'."],
+        )
+        missing = await self.assert_status(options, "failed", objects=object_json(language=None))
+        self.assertEqual(
+            missing.details["violations"],
+            ["The PDF catalog declares no language; the configured language is 'en-GB'."],
+        )
+        bare = await self.assert_status(
+            PdfCheckOptions(require_language=True), "failed", objects=object_json(language=None)
+        )
+        self.assertEqual(bare.details["violations"], ["The PDF catalog declares no language."])
+
+    async def test_object_count_beyond_the_bounded_limit_is_not_reported_as_malformed_json(
+        self,
+    ) -> None:
+        objects = {f"obj:{number} 0 R": 0 for number in range(1, MAX_PARSED_NODES + 2)}
+        document = json.dumps(
+            {"version": 2, "pages": [{"object": "3 0 R"}], "qpdf": [{"jsonversion": 2}, objects]}
+        )
+        finding = await self.assert_status(
+            PdfCheckOptions(forbidden_action_types=("JavaScript",)),
+            "inconclusive",
+            objects=document,
+        )
+        self.assertIn(f"{MAX_PARSED_NODES + 1:,} objects", finding.message)
+        self.assertIn(f"{MAX_PARSED_NODES:,}", finding.message)
+        self.assertNotIn("JSON", finding.message)
+
+    async def test_overlap_comparisons_never_exceed_the_reported_cap(self) -> None:
+        options = PdfCheckOptions(overlap_min_area_ratio=0.4)
+        # 720 stacked boxes plus the base box form more pairs than the cap allows.
+        extra = '<text top="72" left="72" width="100" height="12" font="0">Other</text>'
+        result = await self.assert_status(options, "failed", xml=text_xml(extra=extra * 720))
+        self.assertEqual(result.details["comparisons"], MAX_PAIR_CHECKS)
+        self.assertEqual(result.details["violation_count"], MAX_PAIR_CHECKS)
+
+    def test_raster_dpi_message_names_the_allowed_range(self) -> None:
+        with self.assertRaises(PreparationError) as raised:
+            PdfCheckOptions(raster_dpi=MIN_MEASUREMENT_DPI - 1)
+        self.assertIn(str(MIN_MEASUREMENT_DPI), str(raised.exception))
 
     async def test_raster_preflight_and_partial_output_cleanup_bound_artifacts(self) -> None:
         options = PdfCheckOptions(min_page_ink_ratio=0.1)

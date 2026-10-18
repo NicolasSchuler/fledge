@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import tempfile
 import unittest
 import zipfile
@@ -17,8 +18,13 @@ from latexprep.config import Settings
 from latexprep.core import run_job
 from latexprep.job_context import JobRequest
 from latexprep.latexmk_build import BuildTools
-from latexprep.models import Finding, PreparationError
-from latexprep.publication import validate_destination
+from latexprep.models import Finding, PreparationError, Report
+from latexprep.publication import (
+    DocumentResult,
+    OutputTransaction,
+    publish_documents,
+    validate_destination,
+)
 
 
 def project(root: Path) -> None:
@@ -168,6 +174,53 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
                 result = await run_job(JobRequest("check", base / "input", Settings()))
             self.assertEqual(result.outcome, "blocked")
             build.assert_not_called()
+
+
+class OutputTransactionTests(unittest.TestCase):
+    def test_rollback_removes_every_directory_even_when_one_cannot_be_removed(self):
+        remove = shutil.rmtree
+        with tempfile.TemporaryDirectory() as directory:
+            first, second = Path(directory) / "first", Path(directory) / "second"
+
+            def refuse_second(path, *args, **kwargs):
+                if Path(path) == second:
+                    raise PermissionError(13, "Permission denied", str(path))
+                remove(path, *args, **kwargs)
+
+            with (
+                patch("latexprep.publication.shutil.rmtree", side_effect=refuse_second),
+                self.assertRaises(RuntimeError) as raised,
+            ):
+                with OutputTransaction() as transaction:
+                    transaction.create(first)
+                    transaction.create(second)
+                    raise RuntimeError("publication failed")
+            # The cause stays primary; the directory that stayed behind is named.
+            self.assertEqual(str(raised.exception), "publication failed")
+            notes = "\n".join(raised.exception.__notes__)
+            self.assertIn(str(second), notes)
+            self.assertIn("Permission denied", notes)
+            self.assertIn("remove it manually", notes)
+            self.assertFalse(first.exists())
+            self.assertTrue(second.exists())
+
+    def test_successful_transaction_keeps_what_it_created(self):
+        with tempfile.TemporaryDirectory() as directory:
+            created = Path(directory) / "output"
+            with OutputTransaction() as transaction:
+                transaction.create(created)
+            self.assertTrue(created.is_dir())
+
+    def test_unverified_document_is_refused_before_any_directory_is_created(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "output"
+            documents = [DocumentResult("paper", Report("prepare"), None)]
+            with OutputTransaction() as transaction:
+                with self.assertRaisesRegex(PreparationError, "paper did not verify"):
+                    publish_documents(
+                        transaction, output, documents, Report("prepare"), lambda: None
+                    )
+            self.assertFalse(output.exists())
 
 
 class CliTests(unittest.TestCase):

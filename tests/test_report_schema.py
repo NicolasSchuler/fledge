@@ -64,6 +64,8 @@ class ReportSchemaTests(unittest.TestCase):
     def test_schema_enumerations_match_the_code(self) -> None:
         properties = self.schema["properties"]
         self.assertEqual(set(properties["command"]["enum"]), REPORT_COMMANDS)
+        # "report" names no command; the withheld report keeps the command that was run.
+        self.assertNotIn("report", REPORT_COMMANDS)
         self.assertEqual(set(properties["outcome"]["enum"]), set(Outcome))
         finding = self.schema["$defs"]["finding"]["properties"]
         self.assertEqual(set(finding["severity"]["enum"]), SEVERITIES)

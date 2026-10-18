@@ -28,6 +28,7 @@ from .bibtex_syntax import (
     Declaration,
     Entry,
     Field,
+    describe_read_failure,
     parse_bibtex,
     read_doi,
     skip_trivia,
@@ -44,6 +45,7 @@ from .citation_graph import (
     graph_failures,
     index_entries,
     located_entries,
+    require_directory,
     uncertainty_messages,
 )
 from .expanded_document import commands_before_end, reachable_sources
@@ -62,6 +64,8 @@ from .text_edits import (
 
 _KEY = re.compile(r"(?!\*$)[^\s\\{}#$^~&%\x00-\x1f\x7f\"'(),=]+")
 _ENTRY_HEADER = re.compile("@" + ENTRY_TYPE.pattern)
+# Reasons quoted in a refusal; the rest are counted so one rerun can fix more than one.
+_MAX_LISTED_REASONS = 3
 # Operations in rule-catalogue order (BIB201-BIB206). A failure before any step
 # runs, such as graph selection or reading, is reported under the first requested one.
 _CATALOGUE_ORDER = (
@@ -217,6 +221,15 @@ def _apply(text: str, edits: list[TextEdit]) -> str:
         ) from error
 
 
+def _joined_reasons(reasons: list[str]) -> str:
+    """The first few ``reasons`` as one sentence, with a count of those left out."""
+    distinct = list(dict.fromkeys(reason.rstrip(".") for reason in reasons))
+    text = "; ".join(distinct[:_MAX_LISTED_REASONS])
+    if len(distinct) > _MAX_LISTED_REASONS:
+        text += f"; and {len(distinct) - _MAX_LISTED_REASONS} more"
+    return text + "."
+
+
 def _require_valid(document: BibDocument) -> BibDocument:
     if not document.valid:
         raise _Blocked(
@@ -239,14 +252,14 @@ def _read(root: Path, names: set[str]) -> dict[str, BibDocument]:
             if any(
                 root.joinpath(*parts[:index]).is_symlink() for index in range(1, len(parts) + 1)
             ):
-                raise ValueError("symbolic-link resources are unsupported")
+                raise ValueError("is or lies behind a symbolic link, which is not supported")
             document = reader.read(root / name, name)
             if document is None:
-                raise ValueError("resource exceeds the per-file or total bibliography byte limit")
+                raise ValueError("exceeds the per-file or total bibliography byte limit")
             if "\r" in document.text.replace("\r\n", ""):
-                raise ValueError("bare carriage-return newlines are unsupported")
+                raise ValueError("uses bare carriage-return line endings, which are not supported")
         except (OSError, UnicodeError, ValueError) as error:
-            raise _Blocked(f"{name}: {error}.", path=name) from error
+            raise _Blocked(f"{name} {describe_read_failure(error)}.", path=name) from error
         entries += len(_require_valid(document).records)
         if entries > MAX_BIB_ENTRIES:
             raise _Blocked("The bibliography entry count exceeds the supported limit.")
@@ -464,7 +477,7 @@ def _require_literal_graph(
         if citation.key not in index.keys and citation.key not in graph.inline_keys:
             reasons.append(f"Citation key {citation.key!r} is unresolved")
     if reasons:
-        raise _Blocked(reasons[0] + ".")
+        raise _Blocked(_joined_reasons(reasons))
 
 
 def _key_list_edits(key: str, item: _FieldSpan, mapping: dict[str, str]) -> list[TextEdit]:
@@ -549,7 +562,9 @@ def _mapping(
     _replace_documents(documents, edits)
     reasons = uncertainty_messages(index_entries(located_entries(documents.values())).uncertainties)
     if reasons:
-        raise _Blocked("The reviewed mapping is ambiguous: " + reasons[0] + ".", uncertain=False)
+        raise _Blocked(
+            "The reviewed mapping is ambiguous: " + _joined_reasons(reasons), uncertain=False
+        )
     sources: dict[str, str] = {}
     count = 0
     for path, changes in _citation_edits(inspection, mapping).items():
@@ -719,6 +734,7 @@ def plan_bibliography(
     requested = [operation for operation in _CATALOGUE_ORDER if getattr(options, operation)]
     if not requested:
         return {}, [], []
+    require_directory(root, "Bibliography input")
     findings: list[Finding] = []
     active = requested[0]
     try:

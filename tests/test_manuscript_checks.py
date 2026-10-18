@@ -347,7 +347,7 @@ class ManuscriptDetailTests(unittest.TestCase):
             "float_captions",
         )
         self.assertEqual(result.status, "failed", result.details)
-        self.assertEqual(result.message, "1 of 1 floats lack a caption: main.tex:2.")
+        self.assertEqual(result.message, "1 of 1 float without a caption: main.tex:2.")
         self.assertTrue(result.details["matches"])
         definitions = self.result(
             r"\newcommand{\R}{\mathbb{R}}\def\ours{Method}"
@@ -385,7 +385,8 @@ class ManuscriptDetailTests(unittest.TestCase):
         )
         self.assertEqual(result.status, "failed")
         self.assertEqual(
-            result.message, "3 of 4 floats lack a caption: main.tex:2, extra.tex:1, extra.tex:2."
+            result.message,
+            "3 of 4 floats without a caption: main.tex:2, extra.tex:1, extra.tex:2.",
         )
         self.write("many.tex", "\\begin{figure}\\end{figure}\n" * 5)
         many = self.result(
@@ -393,8 +394,101 @@ class ManuscriptDetailTests(unittest.TestCase):
         )
         self.assertEqual(
             many.message,
-            "5 of 5 floats lack a caption: many.tex:1, many.tex:2, many.tex:3, +2 more.",
+            "5 of 5 floats without a caption: many.tex:1, many.tex:2, many.tex:3, +2 more.",
         )
+
+    def test_failure_messages_name_the_offending_packages_fields_and_declarations(self) -> None:
+        allowlist = self.result(
+            r"\usepackage{graphicx,geometry}\usepackage{hyperref}",
+            ManuscriptCheckOptions(allowed_packages=("graphicx",)),
+            "package_allowlist",
+        )
+        self.assertEqual(
+            allowlist.message,
+            "2 of 2 direct package declarations not allowed: main.tex:2. "
+            "Not allowed: geometry, hyperref.",
+        )
+        self.assertEqual(
+            self.result(
+                r"\usepackage{geometry}",
+                ManuscriptCheckOptions(allowed_packages=()),
+                "package_allowlist",
+            ).message,
+            "1 of 1 direct package declaration not allowed: main.tex:2. Not allowed: geometry.",
+        )
+        abbreviations = self.result(
+            r"\abstract{CPU and GPU usage and HPC falls.}",
+            ManuscriptCheckOptions(abstract_abbreviation_policy="define"),
+            "abstract_abbreviations",
+        )
+        self.assertEqual(
+            abbreviations.message,
+            "3 abstract abbreviation candidates to review: main.tex:2. "
+            "Abbreviations: CPU, GPU, HPC.",
+        )
+        metadata = self.result(
+            r"\title{Study}\author{Author name}",
+            ManuscriptCheckOptions(required_metadata=("title", "author", "email")),
+            "required_metadata",
+        )
+        self.assertEqual(
+            metadata.message,
+            "2 of 3 required metadata fields missing or empty. Missing: author, email.",
+        )
+        declarations = self.result(
+            r"\section*{Data Availability}Data are available.",
+            ManuscriptCheckOptions(
+                required_declarations=(
+                    "Data Availability",
+                    "Funding",
+                    "Ethics",
+                    "Consent",
+                    "Conflicts",
+                )
+            ),
+            "required_declarations",
+        )
+        self.assertEqual(
+            declarations.message,
+            "4 of 5 required declarations missing or empty. "
+            "Missing: Funding, Ethics, Consent (+1 more).",
+        )
+
+    def test_counts_agree_with_their_nouns(self) -> None:
+        cited = self.result(
+            r"\abstract{Known \cite{a}.}",
+            ManuscriptCheckOptions(forbid_abstract_citations=True),
+            "abstract_citations",
+        )
+        self.assertEqual(cited.message, "1 citation command in the abstract: main.tex:2.")
+        hardcoded = self.result(
+            "See Figure 2 and Table 3.",
+            ManuscriptCheckOptions(check_hardcoded_references=True),
+            "hardcoded_references",
+        )
+        self.assertEqual(hardcoded.message, "2 hard-coded reference candidates: main.tex:2.")
+        figures = self.result(
+            r"\begin{figure}\end{figure}",
+            ManuscriptCheckOptions(
+                require_float_labels=True,
+                require_float_references=True,
+                require_figure_descriptions=True,
+            ),
+            "figure_descriptions",
+        )
+        self.assertEqual(figures.message, "1 figure without a usable Description: main.tex:2.")
+        misplaced = self.result(
+            r"\begin{figure}\label{a}\caption{A}\end{figure}",
+            ManuscriptCheckOptions(check_float_label_order=True),
+            "float_label_order",
+        )
+        self.assertEqual(misplaced.message, "1 float label placed before the caption: main.tex:2.")
+        lines = self.result(
+            r"\linenumbers",
+            ManuscriptCheckOptions(forbid_line_numbers=True),
+            "line_numbers",
+        )
+        self.assertEqual(lines.message, "Line numbering is active at 1 location: main.tex:2.")
 
     def test_comments_literal_examples_unselected_sources_and_end_document_excluded(self) -> None:
         self.write("unused.tex", r"\documentclass{article}\begin{figure}\end{figure}")
@@ -439,6 +533,17 @@ class ManuscriptDetailTests(unittest.TestCase):
         with patch("latexprep.expanded_document.MAX_TOTAL_SOURCE_BYTES", 16):
             result = self.result("Text.", options, "float_captions")
         self.assertEqual(result.status, "inconclusive")
+
+    def test_missing_figures_and_bibliographies_do_not_make_policies_inconclusive(self) -> None:
+        options = ManuscriptCheckOptions(require_float_captions=True)
+        for body in (
+            r"\includegraphics{missing.png}",
+            r"\bibliography{missing}",
+            r"\addbibresource{missing.bib}",
+        ):
+            with self.subTest(body=body):
+                result = self.result(body, options, "float_captions")
+                self.assertEqual(result.status, "passed", result.details)
 
     def test_metadata_reader_returns_only_unique_supported_literal_values(self) -> None:
         self.write(

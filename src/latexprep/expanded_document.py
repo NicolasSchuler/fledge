@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
+from .models import Finding
 from .scheduler import cancellation_point
 from .source_graph import (
     COMMA_LIST_FILE_COMMANDS,
@@ -232,18 +233,22 @@ class _Splice:
     uncertainty: list[str]
     chunks: list[str] = field(default_factory=list)
     segments: list[SourceSegment] = field(default_factory=list)
+    # Offsets in the expanded text of the comments blanked in the copied sources.
+    comment_starts: list[int] = field(default_factory=list)
     size: int = 0
     events: int = 0
     # Set at \end{document}: nothing after it, in any file, is manuscript content.
     stopped: bool = False
 
-    def append(self, value: str, path: str, line: int) -> None:
+    def append(self, value: str, path: str, line: int, comments: Sequence[int] = ()) -> None:
+        """Add ``value`` to the expanded text; ``comments`` are offsets inside it."""
         if not value:
             return
         if self.size + len(value) > MAX_TOTAL_SOURCE_BYTES:
-            raise ParseLimitExceeded
+            raise ParseLimitExceeded("expanded_size", self.size)
         self.segments.append(SourceSegment(self.size, self.size + len(value), path, line))
         self.chunks.append(value)
+        self.comment_starts.extend(self.size + offset for offset in comments)
         self.size += len(value)
 
     def expand(self, path: str, stack: tuple[str, ...]) -> None:
@@ -261,15 +266,22 @@ class _Splice:
         def line_of(offset: int) -> int:
             return bisect_right(newlines, offset - 1) + 1
 
+        def append_masked(start: int, end: int) -> None:
+            """Copy ``source.masked[start:end]``, keeping where its comments were."""
+            low = bisect_left(source.comment_starts, start)
+            high = bisect_left(source.comment_starts, end)
+            comments = [offset - start for offset in source.comment_starts[low:high]]
+            self.append(source.masked[start:end], path, line_of(start), comments)
+
         for command in commands_before_end(source):
             self.events += 1
             if self.events > MAX_COMMANDS:
-                raise ParseLimitExceeded
+                raise ParseLimitExceeded("command_count", command.start)
             if command.name == "endinput":
                 suffix = source.masked[command_end(command) :].split("\n", 1)[0]
                 if command.depth or suffix.strip():
                     self.uncertainty.append(f"{path}: unresolved endinput context")
-                self.append(source.masked[cursor : command.start], path, line_of(cursor))
+                append_masked(cursor, command.start)
                 return
             if command.name not in CONTENT_INPUT_COMMANDS:
                 continue
@@ -288,7 +300,7 @@ class _Splice:
                 self.uncertainty.append(
                     f"{path}: trailing grouped or optional syntax follows a source inclusion"
                 )
-            self.append(source.masked[cursor : command.start], path, line_of(cursor))
+            append_masked(cursor, command.start)
             self.expand(resolved[0], (*stack, path))
             # The shared lexer records subsequent groups as possible arguments.
             # Input has only one: preserve later groups and bare-input terminators.
@@ -306,9 +318,26 @@ class _Splice:
             None,
         )
         end = closing.start if closing else len(source.masked)
-        self.append(source.masked[cursor:end], path, line_of(cursor))
+        append_masked(cursor, end)
         if closing:
             self.stopped = True
+
+
+# A file that cannot be resolved only leaves the manuscript undecidable when it could
+# supply source text. A missing figure or bibliography cannot hold a title, abstract,
+# keywords, heading or declaration, so it never hides what a constraint looks for.
+_UNRESOLVED_FILE_RULES = frozenset({"source.missing_dependency", "source.case_mismatch"})
+_NON_CONTENT_FILE_COMMANDS = frozenset(
+    {"includegraphics", "includepdf", "bibliography", "addbibresource", "bibliographystyle"}
+)
+
+
+def unresolved_non_content_file(finding: Finding) -> bool:
+    """Whether ``finding`` reports a figure or bibliography file that cannot be found."""
+    return (
+        finding.rule in _UNRESOLVED_FILE_RULES
+        and finding.details.get("command") in _NON_CONTENT_FILE_COMMANDS
+    )
 
 
 def _graph_gaps(graph: SourceGraph, selected: set[str]) -> list[str]:
@@ -324,6 +353,7 @@ def _graph_gaps(graph: SourceGraph, selected: set[str]) -> list[str]:
         if finding.rule.startswith("source.")
         and (finding.path in scope or finding.path is None)
         and finding.status in {"failed", "inconclusive"}
+        and not unresolved_non_content_file(finding)
     )
     return gaps
 
@@ -340,9 +370,7 @@ def expand_document(
             assert graph.main is not None
             splice.expand(graph.main, ())
         text = "".join(splice.chunks)
-        commands = scan_commands(text)
-        if len(commands) > MAX_COMMANDS:
-            raise ParseLimitExceeded
+        commands = scan_commands(text, splice.comment_starts)
     except ParseLimitExceeded:
         splice.uncertainty.append("expanded manuscript exceeded a bounded parsing limit")
         text = "".join(splice.chunks)

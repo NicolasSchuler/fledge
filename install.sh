@@ -5,6 +5,10 @@
 
 set -euo pipefail
 
+# Written into a new installation directory before anything else, so --uninstall can
+# recognize and remove an installation that failed before its launcher existed.
+readonly INSTALL_MARKER=.fledge-installer
+
 usage() {
     cat <<'EOF'
 Usage: bash install.sh [--dry-run] [--yes] [--with-optional]
@@ -24,7 +28,10 @@ an existing Homebrew installation; see https://brew.sh if Homebrew is missing.
   --bin-dir DIR    Launcher directory. Default: ~/.local/bin
   --uninstall      Remove the installation directory and launcher that this
                    script created, using the same --prefix and --bin-dir. Only
-                   a launcher that runs that directory's environment qualifies.
+                   a launcher that runs that directory's environment qualifies;
+                   a directory holding this script's marker file (.fledge-installer)
+                   is removed even if the install failed before the launcher
+                   was written, and a launcher that is not Fledge's is left alone.
                    Homebrew and TeX packages are left installed.
   --help           Show this help.
 
@@ -48,9 +55,16 @@ fail() {
     exit 1
 }
 
+# Arguments: exit status, the step that failed, then the prefix, launcher directory
+# and source directory of this run.
 report_failure() {
-    printf 'Installation failed while %s (exit %s). Any completed dependency installs or partial environment are retained; inspect them before retrying.\n' "$2" "$1" >&2
-    exit "$1"
+    local status="$1" step="$2" prefix="$3" bin_dir="$4" source_dir="$5"
+    printf 'Installation failed while %s (exit %s). Completed dependency installs are retained.\n' "$step" "$status" >&2
+    if prefix_has_marker "$prefix"; then
+        printf 'A partial installation remains in %s. Remove it with this command, then run the installer again:\n' "$prefix" >&2
+        print_command bash "$source_dir/install.sh" --uninstall --prefix "$prefix" --bin-dir "$bin_dir" >&2
+    fi
+    exit "$status"
 }
 
 # Keep detection separate from installation so it can be exercised with mocks.
@@ -164,6 +178,11 @@ launcher_belongs_to() {
     [[ -f "$1" && ! -L "$1" ]] && grep -qxF -- "$(launcher_exec_line "$2")" "$1"
 }
 
+# Whether $1 is a real directory (not a symbolic link) that this installer created.
+prefix_has_marker() {
+    [[ -d "$1" && ! -L "$1" && -f "$1/$INSTALL_MARKER" && ! -L "$1/$INSTALL_MARKER" ]]
+}
+
 uninstall_fledge() {
     local prefix="$1" launcher="$2" dry_run="$3" accept="$4"
     case "$HOME/" in
@@ -173,9 +192,22 @@ uninstall_fledge() {
         fail "Installation directory is a symbolic link: $prefix. Nothing was removed; delete the link yourself if it is unwanted."
     [[ ! -e "$prefix" || -d "$prefix" ]] ||
         fail "Installation path is not a directory: $prefix. Nothing was removed."
-    launcher_belongs_to "$launcher" "$prefix" ||
-        fail "Launcher $launcher is missing or does not run $prefix/venv/bin/fledge. Nothing was removed; pass the --prefix and --bin-dir used for installation."
-    printf 'Uninstall plan for Fledge:\n  Remove launcher: %s\n' "$launcher"
+    # Either proof of ownership is enough: the launcher runs this prefix's environment,
+    # or the installer's marker is in the prefix. A failed install may have no launcher.
+    local owns_launcher=false owns_prefix=false
+    if launcher_belongs_to "$launcher" "$prefix"; then owns_launcher=true; fi
+    if prefix_has_marker "$prefix"; then owns_prefix=true; fi
+    if ! "$owns_launcher" && ! "$owns_prefix"; then
+        fail "Launcher $launcher is missing or does not run $prefix/venv/bin/fledge, and $prefix has no $INSTALL_MARKER file. Nothing was removed; pass the --prefix and --bin-dir used for installation."
+    fi
+    printf 'Uninstall plan for Fledge:\n'
+    if "$owns_launcher"; then
+        printf '  Remove launcher: %s\n' "$launcher"
+    elif [[ -e "$launcher" || -L "$launcher" ]]; then
+        printf '  Leave %s alone: it does not run this installation.\n' "$launcher"
+    else
+        printf '  No launcher at %s. If the install finished, rerun with its --bin-dir to remove the launcher too.\n' "$launcher"
+    fi
     if [[ -d "$prefix" ]]; then
         printf '  Remove installation directory and everything inside it: %s\n' "$prefix"
     else
@@ -186,14 +218,21 @@ uninstall_fledge() {
     if ! "$accept"; then confirm_plan || return 0; fi
     # Recheck after confirmation. Remove the environment first: while it remains,
     # the launcher still proves ownership, so a partial removal can be repeated.
-    launcher_belongs_to "$launcher" "$prefix" ||
+    if "$owns_launcher" && ! launcher_belongs_to "$launcher" "$prefix"; then
         fail "The launcher changed after the plan was shown. Nothing was removed."
+    fi
+    if "$owns_prefix" && ! prefix_has_marker "$prefix"; then
+        fail "The installation directory changed after the plan was shown. Nothing was removed."
+    fi
     rm -rf -- "$prefix"
-    rm -f -- "$launcher"
+    if "$owns_launcher"; then rm -f -- "$launcher"; fi
     printf '\nFledge removed. To install it again, rerun this script without --uninstall.\n'
 }
 
 check_destinations() {
+    if prefix_has_marker "$prefix"; then
+        fail "Installation directory already exists: $prefix, created by this installer. To replace or repair it, run: bash $(printf '%q' "$source_dir/install.sh") --uninstall --prefix $(printf '%q' "$prefix") --bin-dir $(printf '%q' "$bin_dir"), then run the installer again. Nothing was overwritten."
+    fi
     [[ ! -e "$prefix" && ! -L "$prefix" ]] ||
         fail "Installation directory already exists: $prefix. Choose a new --prefix; nothing was overwritten."
     [[ ! -e "$launcher" && ! -L "$launcher" ]] ||
@@ -325,7 +364,7 @@ main() {
     # Recheck immediately before the first writes, including after confirmation.
     check_destinations
     local current_step='installing external dependencies'
-    trap 'report_failure "$?" "$current_step"' ERR
+    trap 'report_failure "$?" "$current_step" "$prefix" "$bin_dir" "$source_dir"' ERR
     if "$install_tex"; then "$brew" install --cask mactex-no-gui; fi
     if [[ ${#formulas[@]} -gt 0 ]]; then "$brew" install "${formulas[@]}"; fi
     hash -r
@@ -349,6 +388,7 @@ main() {
     current_step='creating the private Python environment'
     mkdir -p -- "${prefix%/*}"
     mkdir -- "$prefix"
+    printf 'Created by Fledge install.sh. Remove with: bash install.sh --uninstall\n' > "$prefix/$INSTALL_MARKER"
     "$python" -m venv "$venv"
     current_step='installing the local Python package'
     "$venv/bin/python" -m pip install --disable-pip-version-check "$source_dir"

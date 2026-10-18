@@ -8,12 +8,14 @@ image preparation, richer PDF review output and platform/tool validation remain
 engineering work. Interpretation of scientific meaning, accessibility adequacy
 and anonymity still requires human judgment.
 
-This inventory reconciles the {download}`requirements <../requirements.md>` and original
-check ideas with the current checker implementations on 7 October 2026. The
-[catalogue](checks.md) has **156 registered diagnostic codes**, including subchecks
-and preparation guards. That is not a denominator for completed requirements;
-the grouped rows below also have different sizes and must not be used to compute
-a completion percentage. No code is reserved here for an unimplemented check.
+This inventory reconciles the {download}`original requirements <../requirements.md>`
+(a historical design record) and the original check ideas with the checker
+implementations. The [catalogue](checks.md) lists every registered diagnostic
+code, including subchecks and preparation guards, and is generated from the
+registered rules. The number of codes is not a denominator for completed
+requirements; the grouped rows below also have different sizes and must not be
+used to compute a completion percentage. No code is reserved here for an
+unimplemented check.
 
 ## How to read this backlog
 

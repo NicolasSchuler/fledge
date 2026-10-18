@@ -47,6 +47,5 @@ glossary
 
 development
 check-backlog
-parallelization-plan
 parallelization-benchmark
 ```

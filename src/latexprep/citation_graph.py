@@ -17,7 +17,7 @@ from typing import NamedTuple
 
 from .bibtex_syntax import BibDocument, Entry, field_literal
 from .expanded_document import commands_before_end, reachable_sources
-from .models import Finding
+from .models import Finding, PreparationError
 from .scheduler import cancellation_point
 from .source_graph import ArgumentLocation, ParsedSource, SourceGraph
 from .tex_lexer import Command, conditional_spans, in_conditional, split_argument_items
@@ -207,19 +207,62 @@ def resource_declarations(
     return resources, reasons
 
 
-def selected_resources(root: Path, main: str | None) -> set[str] | None:
-    """Return the resources one selected literal graph declares, or None if unavailable.
+class StyleReference(NamedTuple):
+    """A ``\\bibliographystyle`` name and the project .bst file it resolved to, if any."""
+
+    name: str
+    local_file: str | None
+
+
+class BibliographySelection(NamedTuple):
+    """What one selected main source declares about its bibliography.
+
+    ``resources`` is None when the whole tree is in scope. ``styles`` is None when no
+    selected document could be read, so the BibTeX style in use is unknown.
+    """
+
+    resources: set[str] | None
+    styles: list[StyleReference] | None
+
+
+def bibliography_styles(inspection: SourceGraph, selected: set[str]) -> list[StyleReference]:
+    """The BibTeX styles named by the selected sources, in source order."""
+    styles: list[StyleReference] = []
+    for name in sorted(selected):
+        cancellation_point()
+        for command in commands_before_end(inspection.sources[name]):
+            if command.name != "bibliographystyle" or not command.arguments:
+                continue
+            argument = command.arguments[0]
+            target = inspection.references.get(ArgumentLocation(name, argument.start, argument.end))
+            local = target[0] if target and target[1] == "bibliographystyle" else None
+            styles.append(StyleReference(argument.value.strip(), local))
+    return styles
+
+
+def selected_bibliography(root: Path, main: str | None) -> BibliographySelection:
+    """Resources and styles one selected literal graph declares; None where unavailable.
 
     An unselectable main source or a declaration that cannot be resolved keeps the
     documented whole-tree scope instead of silently narrowing the inspected files.
     """
     if main is None:
-        return None
+        return BibliographySelection(None, None)
     inspection = SourceGraph.build(root, main)
     if inspection.main is None:
-        return None
-    resources, _ = resource_declarations(inspection, reachable_sources(inspection))
-    return resources or None
+        return BibliographySelection(None, None)
+    selected = reachable_sources(inspection)
+    resources, _ = resource_declarations(inspection, selected)
+    return BibliographySelection(resources or None, bibliography_styles(inspection, selected))
+
+
+def require_directory(root: Path, purpose: str) -> None:
+    """Refuse a project root that is not a directory, naming ``purpose`` and the fix."""
+    if not root.is_dir():
+        raise PreparationError(
+            f"{purpose} must be a directory, but {root} is not. "
+            "Pass the project folder that holds the manuscript and its .bib files."
+        )
 
 
 def graph_failures(inspection: SourceGraph, selected: set[str]) -> list[Finding]:

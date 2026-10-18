@@ -19,6 +19,15 @@ from .runtime import RuntimeLimits, ToolRunner
 from .scheduler import ResourceBudget
 
 
+class JobDeadlineExceeded(TimeoutError):
+    """The whole-job deadline passed.
+
+    A ``TimeoutError`` subclass so that callers that already stop on a timeout keep
+    working, but distinct from the ``TimeoutError`` of an individual socket or
+    process, which must not be reported as the job running out of time.
+    """
+
+
 class JobExecution:
     """Create inside the job's coroutine: the whole-job deadline starts here."""
 
@@ -54,15 +63,20 @@ class JobExecution:
     async def bounded(self, work: Path) -> AsyncGenerator[None]:
         """Account tool processes and temporary bytes to ``work`` within the job deadline."""
         async with self.runner.job_scope(work, max_temp_bytes=self.settings.max_temporary_bytes):
-            async with asyncio.timeout(self.settings.job_timeout_seconds):
-                yield
+            try:
+                async with asyncio.timeout(self.settings.job_timeout_seconds) as deadline:
+                    yield
+            except TimeoutError as error:
+                if deadline.expired():
+                    raise JobDeadlineExceeded from error
+                raise
 
     def check_deadline(self) -> None:
         """Stop a synchronous step once the job is cancelled or its deadline has passed."""
         if self._task is not None and self._task.cancelling():
             raise asyncio.CancelledError
         if time.monotonic() >= self._deadline:
-            raise TimeoutError
+            raise JobDeadlineExceeded
 
     def statistics(self) -> dict[str, object]:
         """Reserved and observed resources and the elapsed time, for ``Report.execution``."""

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import ssl
+import sys
 import tempfile
 import threading
 import unittest
@@ -11,15 +13,20 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from latexprep import __version__
+from latexprep.bibtex_syntax import BibFileReader
 from latexprep.models import PreparationError
 from latexprep.online_checks import (
+    _DNS_SCRIPT,
     NetworkFailure,
     OnlineOptions,
     Response,
     _Client,
+    _collect,
+    _ConnectFailure,
     _exchange,
     _public_ip,
     _resolve,
+    _scan_bound,
     _target,
     check_online_references,
 )
@@ -60,9 +67,9 @@ class OnlineCheckTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         self.temporary.cleanup()
 
-    def reference(self, extra="doi={10.1234/example}", kind="article"):
+    def reference(self, extra="doi={10.1234/example}", kind="article", author="Smith, Ada"):
         self.bib.write_text(
-            f"@{kind}{{key, title={{A reference title}}, author={{Smith, Ada}}, "
+            f"@{kind}{{key, title={{A reference title}}, author={{{author}}}, "
             f"year={{2024}}, journal={{Example Journal}}, {extra}}}\n"
         )
 
@@ -144,17 +151,30 @@ class OnlineCheckTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(finding.details["outcome"], "input_coverage_incomplete")
         self.assertFalse(calls)
 
-    async def test_contact_email_reaches_only_the_user_agent_header(self):
+    async def test_contact_email_reaches_only_the_user_agent_header_of_crossref_requests(self):
         self.reference()
+        plain = f"fledge/{__version__} (explicit reference checks)"
         _, _, calls = await self.run_check(
             options(online_doi_resolution=True), Response(200), "online.doi_resolution", "NET001"
         )
-        self.assertEqual(calls[0][4], f"fledge/{__version__} (explicit reference checks)")
-        selected = options(online_doi_resolution=True, online_contact_email="paper@example.org")
-        _, findings, calls = await self.run_check(
-            selected, Response(200), "online.doi_resolution", "NET001"
+        self.assertEqual(calls[0][4], plain)
+        selected = options(
+            online_doi_resolution=True,
+            online_metadata=True,
+            online_contact_email="paper@example.org",
         )
-        self.assertEqual(calls[0][4], f"fledge/{__version__} (mailto:paper@example.org)")
+        _, findings, calls = await self.run_check(
+            selected,
+            lambda target: Response(200) if target.host == "doi.org" else document(metadata()),
+            "online.doi_resolution",
+            "NET001",
+        )
+        agents = {call[0].host: call[4] for call in calls}
+        self.assertEqual(
+            agents["api.crossref.org"], f"fledge/{__version__} (mailto:paper@example.org)"
+        )
+        # The contact address stays out of requests to every other host.
+        self.assertEqual(agents["doi.org"], plain)
         self.assertNotIn("paper@example.org", repr(findings))
         for value in (
             "",
@@ -341,8 +361,291 @@ class OnlineCheckTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(finding.status, expected)
             self.assertEqual((finding.path, finding.line), ("main.tex", 4))
-            self.assertEqual(len(calls), 1)
+            # A HEAD refusal or miss is asked again with GET before it is reported.
+            self.assertEqual(
+                [call[2] for call in calls], ["HEAD"] if status == 200 else ["HEAD", "GET"]
+            )
             self.assertIn("reproducibility", finding.message)
+
+    async def test_author_comparison_ignores_and_others_and_keeps_compound_names(self):
+        def authors(*families):
+            return metadata(author=[{"family": family} for family in families])
+
+        smith_jones_brown = authors("Smith", "Jones", "Brown")
+        for author, work, expected in (
+            # "and others" says the list is cut short: only the listed names are compared.
+            ("Smith, Ada and Jones, Bo and others", smith_jones_brown, "passed"),
+            ("Smith, Ada and Brown, Cy and others", smith_jones_brown, "failed"),
+            ("Smith, Ada and Jones, Bo", smith_jones_brown, "failed"),
+            (
+                "Smith, A. and Jones, B. and Brown, C. and Green, D. and others",
+                smith_jones_brown,
+                "failed",
+            ),
+            # Lowercase particles belong to the family name, in either BibTeX name form.
+            ("Jan van der Berg", authors("van der Berg"), "passed"),
+            ("van der Berg, Jan", authors("van der Berg"), "passed"),
+            ("Berg, Jan van der", authors("Berg"), "passed"),
+            ("Jan van der Berg", authors("Berg"), "passed"),
+            ("{van der Berg}, Jan", authors("Berg"), "passed"),
+            ("Jan van der Berg", authors("Bergmann"), "failed"),
+        ):
+            with self.subTest(author=author, expected=expected):
+                self.reference(author=author)
+                finding, _, _ = await self.run_check(
+                    options(online_metadata=True), document(work), "online.metadata", "NET002"
+                )
+                row = finding.details["comparisons"]["authors"]
+                self.assertEqual(row["matches"], expected == "passed")
+
+    async def test_metadata_finding_names_the_entry_and_the_first_differences(self):
+        self.reference(author="Smith, Ada and Jones, Bo and others")
+        work = metadata(
+            title=["Different title"],
+            author=[{"family": "Smith"}, {"family": "Brown"}],
+            issued={"date-parts": [[2023]]},
+        )
+        finding, _, _ = await self.run_check(
+            options(online_metadata=True), document(work), "online.metadata", "NET002"
+        )
+        self.assertIn("Entry 'key' differs from its Crossref record", finding.message)
+        self.assertIn(
+            "title: the entry has 'A reference title' but Crossref has 'Different title'",
+            finding.message,
+        )
+        self.assertIn(
+            "authors: the entry has 'Smith, Jones and others' but Crossref has 'Smith, Brown'",
+            finding.message,
+        )
+        self.assertIn("and 1 more field(s)", finding.message)
+        self.assertEqual(finding.details["comparisons"]["authors"]["local_truncated"], True)
+
+        finding, _, _ = await self.run_check(
+            options(online_metadata=True),
+            document(metadata(author=None)),
+            "online.metadata",
+            "NET002",
+        )
+        self.assertIn("Entry 'key': the comparison with Crossref is incomplete", finding.message)
+        self.assertIn("authors cannot be compared", finding.message)
+
+    async def test_candidate_and_notice_findings_name_the_entry_and_the_leads(self):
+        self.reference("url={https://example.org/paper}")
+        finding, _, _ = await self.run_check(
+            options(online_missing_doi=True),
+            document({"items": [metadata()]}),
+            "online.missing_doi",
+            "NET003",
+        )
+        self.assertIn("Entry 'key' has no DOI; Crossref suggests 10.1234/example", finding.message)
+        self.assertIn("'A reference title'", finding.message)
+        self.assertIn("title match 100%", finding.message)
+
+        self.reference("doi={10.1234/example}")
+        notice = metadata(
+            DOI="10.1234/notice",
+            **{"update-to": [{"DOI": "10.1234/example", "type": "retraction"}]},
+        )
+        finding, _, _ = await self.run_check(
+            options(online_notices=True),
+            document({"items": [notice], "total-results": 1}),
+            "online.notices",
+            "NET005",
+        )
+        self.assertIn(
+            "Entry 'key': Crossref reports retraction notice 10.1234/notice.", finding.message
+        )
+
+        self.reference("doi={10.1234/example}, archiveprefix={arXiv}", kind="unpublished")
+        relation = {"is-preprint-of": [{"id-type": "doi", "id": "10.1234/published"}]}
+        finding, _, _ = await self.run_check(
+            options(online_published_versions=True),
+            document(metadata(relation=relation)),
+            "online.published_version",
+            "NET004",
+        )
+        self.assertIn("published version (10.1234/published)", finding.message)
+
+    async def test_unsafe_url_finding_states_the_exact_reason_and_the_fix(self):
+        for url, reason in (
+            (
+                "https://example.org:8080/data",
+                "Only public HTTP/HTTPS URLs on their standard ports are supported",
+            ),
+            (
+                "https://example.org/data?session=1",
+                "Credential-bearing query parameters are never requested",
+            ),
+        ):
+            with self.subTest(url=url):
+                self.reference(f"url={{{url}}}")
+                finding, _, calls = await self.run_check(
+                    options(online_reference_links=True),
+                    Response(200),
+                    "online.reference_link",
+                    "NET006",
+                )
+                self.assertFalse(calls)
+                self.assertIn(f"URL check: unsafe target ({reason})", finding.message)
+                self.assertEqual(finding.details["reason"], reason)
+                self.assertTrue((finding.suggestion or "").startswith(reason))
+                self.assertIn("typo", finding.suggestion or "")
+
+    async def test_transient_outcomes_state_the_reason_and_one_concrete_next_step(self):
+        self.reference("url={https://example.org/paper}")
+
+        def raise_timeout(_target):
+            raise TimeoutError
+
+        def raise_certificate(_target):
+            error = ssl.SSLCertVerificationError(1, "certificate verify failed")
+            error.verify_message = "unable to get local issuer certificate"
+            raise error
+
+        def raise_reset(_target):
+            raise ConnectionResetError(54, "Connection reset by peer")
+
+        for response, outcome, reason, advice in (
+            (Response(429), "rate_limited", None, "Wait a few minutes and rerun"),
+            (
+                raise_timeout,
+                "timeout",
+                "No complete answer arrived within 10 seconds",
+                "raise online_timeout_seconds (at most 60)",
+            ),
+            (
+                raise_certificate,
+                "tls_failure",
+                "The server's certificate could not be verified "
+                "(unable to get local issuer certificate)",
+                "CA certificates",
+            ),
+            (
+                raise_reset,
+                "unavailable",
+                "The network connection failed (ConnectionResetError: Connection reset by peer)",
+                "does not use HTTP proxy settings",
+            ),
+            (Response(403), "access_denied", None, "Open the address in a browser"),
+        ):
+            with self.subTest(outcome=outcome):
+                finding, _, _ = await self.run_check(
+                    options(online_reference_links=True),
+                    response,
+                    "online.reference_link",
+                    "NET006",
+                )
+                self.assertEqual(finding.details["outcome"], outcome)
+                self.assertEqual(finding.details["reason"], reason)
+                self.assertIn(advice, finding.suggestion or "")
+                if reason:
+                    self.assertIn(f"({reason})", finding.message)
+
+    async def test_exhausted_request_budget_says_how_to_raise_it(self):
+        self.bib.write_text(
+            "@misc{one, url={https://example.org/one}}\n@misc{two, url={https://example.org/two}}\n"
+        )
+        _, findings, _ = await self.run_check(
+            options(online_reference_links=True, online_max_requests=1),
+            Response(200),
+            "online.reference_link",
+            "NET006",
+        )
+        (limited,) = [
+            item
+            for item in findings
+            if item.rule == "online.reference_link" and item.details["outcome"] == "request_limit"
+        ]
+        self.assertIn("The budget of 1 online requests is used up", limited.message)
+        self.assertIn("online_max_requests (at most 1000)", limited.suggestion or "")
+
+    async def test_crossref_lookup_failure_gives_the_reason_and_a_next_step(self):
+        self.reference()
+        finding, _, _ = await self.run_check(
+            options(online_metadata=True), Response(404), "online.metadata", "NET002"
+        )
+        self.assertIn("Crossref lookup: not found;", finding.message)
+        self.assertIn("DataCite", finding.suggestion or "")
+        finding, _, _ = await self.run_check(
+            options(online_metadata=True),
+            document(metadata(DOI="10.1234/other")),
+            "online.metadata",
+            "NET002",
+        )
+        self.assertIn("(Crossref returned the record of a different DOI)", finding.message)
+
+    async def test_head_refusals_are_confirmed_with_get_before_a_link_is_reported(self):
+        self.reference("url={https://example.org/paper}")
+        for first, second, outcome in (
+            (404, 200, "available"),
+            (403, 200, "available"),
+            (404, 404, "not_found"),
+            (403, 403, "access_denied"),
+        ):
+            with self.subTest(first=first, second=second):
+                methods = []
+
+                def answer(target, first=first, second=second, methods=methods):
+                    methods.append(len(methods))
+                    return Response(first if len(methods) == 1 else second)
+
+                finding, _, calls = await self.run_check(
+                    options(online_reference_links=True),
+                    answer,
+                    "online.reference_link",
+                    "NET006",
+                )
+                self.assertEqual([call[2] for call in calls], ["HEAD", "GET"])
+                self.assertEqual(finding.details["outcome"], outcome)
+
+    async def test_source_link_scan_reports_sorted_distinct_gaps_when_the_bound_is_hit(self):
+        (self.root / "main.tex").write_text(
+            "\\documentclass{article}\n\\begin{document}\n"
+            "\\url{\\first}\n\\url{\\second}\n"
+            "\\url{https://a.example.org/}\n\\url{https://b.example.org/}\n"
+            "\\url{https://c.example.org/}\n\\end{document}\n"
+        )
+        with patch("latexprep.online_checks._MAX_REFERENCES", 2):
+            _, links, gaps = _collect(self.root, "main.tex", options(online_replication_links=True))
+        self.assertEqual(len(links), 2)
+        self.assertIn("Source-link scan exceeded its 2-link bound", gaps)
+        self.assertEqual(gaps, sorted(set(gaps)))
+
+    async def test_input_limit_messages_are_built_from_the_limit_constants(self):
+        self.reference()
+        with patch("latexprep.online_checks._MAX_BIB_BYTES", 3 * 1024 * 1024):
+            with patch("latexprep.online_checks._MAX_INPUT_BYTES", 5 * 1024 * 1024):
+                self.assertEqual(
+                    _scan_bound(), "online scan bound of 3 MiB per file and 5 MiB in total"
+                )
+        with patch("latexprep.online_checks._MAX_BIB_BYTES", 16):
+            _, _, gaps = _collect(self.root, "main.tex", options(online_metadata=True))
+            self.assertEqual(gaps, [f"references.bib exceeds the {_scan_bound()}"])
+        self.bib.write_text("@misc{one, doi={10.1/a}}\n@misc{two, doi={10.1/b}}\n")
+        with patch("latexprep.online_checks._MAX_REFERENCES", 1):
+            _, _, gaps = _collect(self.root, "main.tex", options(online_metadata=True))
+        self.assertEqual(gaps, ["Online bibliography scan exceeded its 1-entry bound"])
+
+    async def test_unreadable_bibliographies_become_gaps_that_name_the_file_and_cause(self):
+        self.bib.write_bytes(b"@misc{k, title={\xff}}")
+        _, _, gaps = _collect(self.root, "main.tex", options(online_metadata=True))
+        self.assertEqual(
+            gaps, ["references.bib is not valid UTF-8 (first invalid byte at offset 16)"]
+        )
+        self.reference()
+        with patch.object(
+            BibFileReader, "read", side_effect=PermissionError(13, "Permission denied")
+        ):
+            _, _, gaps = _collect(self.root, "main.tex", options(online_metadata=True))
+        self.assertEqual(gaps, ["references.bib could not be read (Permission denied)"])
+
+    async def test_missing_input_directory_uses_the_shared_wording(self):
+        self.reference()
+        with self.assertRaises(PreparationError) as raised:
+            _collect(self.bib, "main.tex", options(online_metadata=True))
+        self.assertTrue(
+            str(raised.exception).startswith("Online reference input must be a directory, but ")
+        )
 
     async def test_malformed_json_and_nonliteral_inputs_never_pass(self):
         self.reference()
@@ -794,6 +1097,188 @@ class NetworkBoundaryTests(unittest.IsolatedAsyncioTestCase):
                     await _exchange(
                         _target("https://example.org/"), "93.184.216.34", "GET", True, 1024
                     )
+
+    async def exchange_bytes(self, payload, *, method="GET", body=True, connect=None):
+        reader = asyncio.StreamReader()
+        reader.feed_data(payload)
+        reader.feed_eof()
+        writer = SimpleNamespace(
+            write=lambda _: None,
+            drain=AsyncMock(),
+            close=lambda: None,
+            transport=SimpleNamespace(abort=lambda: None),
+        )
+        sock = SimpleNamespace(setblocking=lambda _: None, close=lambda: None)
+        with (
+            patch("latexprep.online_checks.socket.socket", return_value=sock),
+            patch.object(asyncio.get_running_loop(), "sock_connect", connect or AsyncMock()),
+            patch(
+                "latexprep.online_checks.asyncio.open_connection",
+                AsyncMock(return_value=(reader, writer)),
+            ),
+        ):
+            return await _exchange(
+                _target("https://example.org/"), "93.184.216.34", method, body, 1024
+            )
+
+    async def test_interim_responses_are_skipped_and_never_taken_as_the_final_answer(self):
+        response = await self.exchange_bytes(
+            b"HTTP/1.1 103 Early Hints\r\nLink: </style.css>; rel=preload\r\n\r\n"
+            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}"
+        )
+        self.assertEqual((response.status, response.body), (200, b"{}"))
+        for payload in (
+            b"HTTP/1.1 100 Continue\r\n\r\n",
+            b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\r\n",
+            (b"HTTP/1.1 103 Early Hints\r\n\r\n" * 5) + b"HTTP/1.1 200 OK\r\n\r\n",
+        ):
+            with self.subTest(payload=payload[:24]), self.assertRaises(NetworkFailure) as raised:
+                await self.exchange_bytes(payload, body=False)
+            self.assertEqual(raised.exception.outcome, "malformed")
+
+    async def test_failed_connection_is_reported_as_a_connect_failure(self):
+        for failure in (OSError(111, "Connection refused"), TimeoutError()):
+            with self.subTest(failure=type(failure).__name__):
+                with self.assertRaises(_ConnectFailure):
+                    await self.exchange_bytes(b"", connect=AsyncMock(side_effect=failure))
+
+    async def test_connection_failure_moves_on_to_the_next_validated_address(self):
+        attempts = []
+        v4, v6 = "93.184.216.34", "2606:2800:220:1:248:1893:25c8:1946"
+
+        async def exchange(target, address, *_args):
+            attempts.append(address)
+            if address == v4:
+                raise _ConnectFailure
+            return Response(200)
+
+        with (
+            patch("latexprep.online_checks._resolve", AsyncMock(return_value=(v6, v4))),
+            patch("latexprep.online_checks._exchange", exchange),
+        ):
+            result = await _Client(options(), None).fetch("https://example.org/")
+        self.assertEqual(result.outcome, "available")
+        # IPv4 is tried first; its failed connection leaves the IPv6 address to answer.
+        self.assertEqual(attempts, [v4, v6])
+
+        attempts.clear()
+
+        async def unreachable(target, address, *_args):
+            attempts.append(address)
+            raise _ConnectFailure
+
+        with (
+            patch("latexprep.online_checks._resolve", AsyncMock(return_value=(v6, v4))),
+            patch("latexprep.online_checks._exchange", unreachable),
+        ):
+            result = await _Client(options(), None).fetch("https://example.org/")
+        self.assertEqual((result.outcome, attempts), ("unavailable", [v4, v6]))
+        self.assertEqual(result.message, "Could not connect to any of the server's 2 addresses")
+
+        attempts.clear()
+
+        async def resets(target, address, *_args):
+            attempts.append(address)
+            raise ConnectionResetError(54, "Connection reset by peer")
+
+        with (
+            patch("latexprep.online_checks._resolve", AsyncMock(return_value=(v6, v4))),
+            patch("latexprep.online_checks._exchange", resets),
+        ):
+            result = await _Client(options(), None).fetch("https://example.org/")
+        # Only a failed connection justifies another address; a dropped request does not.
+        self.assertEqual((result.outcome, attempts), ("unavailable", [v4]))
+
+    async def test_connect_timeout_leaves_time_for_the_next_address(self):
+        timeouts = []
+
+        async def exchange(target, address, method, body, maximum, agent, connect_timeout):
+            timeouts.append(connect_timeout)
+            return Response(200)
+
+        addresses = ("93.184.216.34", "93.184.216.35")
+        with (
+            patch(
+                "latexprep.online_checks._resolve",
+                AsyncMock(side_effect=[addresses, addresses[:1]]),
+            ),
+            patch("latexprep.online_checks._exchange", exchange),
+        ):
+            client = _Client(options(online_timeout_seconds=8), None)
+            await client.fetch("https://example.org/")
+            await client.fetch("https://other.example.org/")
+        self.assertEqual(timeouts, [4.0, None])
+
+    async def test_unresolvable_host_has_its_own_outcome(self):
+        with patch("latexprep.online_checks._DNS_SCRIPT", "raise SystemExit(3)"):
+            with self.assertRaises(NetworkFailure) as raised:
+                await _resolve("no-such-host.example.org", 443)
+            result = await _Client(options(), None).fetch("https://no-such-host.example.org/")
+        self.assertEqual(raised.exception.outcome, "host_unresolved")
+        self.assertEqual(result.outcome, "host_unresolved")
+        self.assertEqual(
+            result.message, "The host name no-such-host.example.org could not be resolved"
+        )
+        # Any other resolver failure stays a generic unavailable answer.
+        with patch("latexprep.online_checks._DNS_SCRIPT", "raise SystemExit(2)"):
+            with self.assertRaises(NetworkFailure) as raised:
+                await _resolve("example.org", 443)
+        self.assertEqual(raised.exception.outcome, "unavailable")
+
+    async def test_resolver_script_exits_with_the_unresolved_status_for_a_bad_name(self):
+        # Run the shipped script with a resolver that reports an unknown name.
+        wrapper = (
+            "import socket, sys\n"
+            "def unknown(*args, **kwargs):\n"
+            "    raise socket.gaierror(8, 'nodename nor servname provided')\n"
+            "socket.getaddrinfo = unknown\n"
+            "sys.argv = ['resolver', 'bad.example.org', '443']\n"
+            "exec(compile(sys.stdin.read(), 'resolver', 'exec'))\n"
+        )
+        process = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-I",
+            "-c",
+            wrapper,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await asyncio.wait_for(process.communicate(_DNS_SCRIPT.encode()), 10)
+        self.assertEqual(process.returncode, 3)
+
+    async def test_https_to_http_redirect_is_refused_for_metadata_but_not_for_link_checks(self):
+        downgrade = Response(302, (("location", "http://example.org/data"),))
+        for body, outcome in ((True, "unsafe_target"), (False, "available")):
+            with self.subTest(body=body):
+                exchange = AsyncMock(side_effect=[downgrade, Response(200)])
+                with (
+                    patch(
+                        "latexprep.online_checks._resolve",
+                        AsyncMock(return_value=("93.184.216.34",)),
+                    ),
+                    patch("latexprep.online_checks._exchange", exchange),
+                ):
+                    result = await _Client(options(), None).fetch(
+                        "https://api.crossref.org/works/10.1234%2Fexample", body=body
+                    )
+                self.assertEqual(result.outcome, outcome)
+                if body:
+                    self.assertEqual(exchange.await_count, 1)
+                    self.assertEqual(
+                        result.message,
+                        "A metadata request was redirected from HTTPS to plain HTTP",
+                    )
+
+    def test_user_agent_carries_the_contact_address_only_for_crossref(self):
+        selected = options(online_contact_email="paper@example.org")
+        plain = f"fledge/{__version__} (explicit reference checks)"
+        self.assertEqual(
+            selected.user_agent_for("api.crossref.org"),
+            f"fledge/{__version__} (mailto:paper@example.org)",
+        )
+        for host in ("doi.org", "example.org", "api.crossref.org.example.org", "crossref.org"):
+            self.assertEqual(selected.user_agent_for(host), plain)
 
     def test_options_are_frozen_and_bounds_are_validated(self):
         base = OnlineOptions()

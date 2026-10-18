@@ -28,9 +28,11 @@ from .pdf_support import (
     COLOR_OPERATIONS,
     DOCUMENT,
     MAX_FIGURE_INPUTS,
+    MAX_MEASUREMENT_DPI,
     MAX_MEASUREMENT_PIXELS,
     MAX_PAIR_CHECKS,
     MAX_SAMPLES,
+    MIN_MEASUREMENT_DPI,
     PdfRegion,
     PdfToolSession,
     QpdfObjectGraph,
@@ -222,8 +224,14 @@ class PdfArtworkOptions:
             raise PreparationError("Select an artwork category with an explicit DPI threshold")
         if self.required_color_space not in {None, "rgb", "cmyk"}:
             raise PreparationError("required_color_space must be 'rgb' or 'cmyk'")
-        if type(self.raster_dpi) is not int or not 18 <= self.raster_dpi <= 144:
-            raise PreparationError("Artwork raster DPI must be an integer from 18 to 144")
+        if (
+            type(self.raster_dpi) is not int
+            or not MIN_MEASUREMENT_DPI <= self.raster_dpi <= MAX_MEASUREMENT_DPI
+        ):
+            raise PreparationError(
+                "Artwork raster DPI must be an integer from "
+                f"{MIN_MEASUREMENT_DPI} to {MAX_MEASUREMENT_DPI}"
+            )
         if type(self.background_gray) is not int or not 0 <= self.background_gray <= 255:
             raise PreparationError("Artwork background must be an 8-bit gray value")
         if type(self.ink_difference) is not int or not 1 <= self.ink_difference <= 255:
@@ -426,6 +434,13 @@ def _drawing_sample(drawing: _Drawing) -> dict[str, object]:
     }
 
 
+class _FontEvidence(NamedTuple):
+    """Whether every font is scalable, and why that could not be established if it failed."""
+
+    scalable: bool
+    failure: str | None = None
+
+
 class _Composition(NamedTuple):
     """Painted operations by kind for the whole selected PDF."""
 
@@ -434,6 +449,7 @@ class _Composition(NamedTuple):
     text: list[_Drawing]
     unsupported: bool
     scalable_text_fonts: bool
+    font_failure: str | None = None
 
     @property
     def classification(self) -> str:
@@ -442,28 +458,34 @@ class _Composition(NamedTuple):
         return "raster" if self.raster else "vector" if self.vector else "empty"
 
 
-def _composition(
-    drawings: list[_Drawing], unknown: set[int], scalable_text_fonts: bool
-) -> _Composition:
+def _composition(drawings: list[_Drawing], unknown: set[int], fonts: _FontEvidence) -> _Composition:
     raster = [d for d in drawings if d.node.tag in _IMAGE_OPERATIONS]
     text = [d for d in drawings if d.node.tag in _TEXT_OPERATIONS]
     vector = [d for d in drawings if d.node.tag in {"fill_path", "stroke_path"}]
-    if scalable_text_fonts:
+    if fonts.scalable:
         vector.extend(text)
     unsupported = (
         bool(unknown)
         or any(d.node.tag == "fill_shade" for d in drawings)
-        or bool(text and not scalable_text_fonts)
+        or bool(text and not fonts.scalable)
     )
-    return _Composition(raster, vector, text, unsupported, scalable_text_fonts)
+    return _Composition(raster, vector, text, unsupported, fonts.scalable, fonts.failure)
 
 
 def _composition_finding(composition: _Composition) -> Finding:
+    message = "Inventoried painted raster and vector operations."
+    if composition.font_failure is not None:
+        message = (
+            "Inventoried painted raster and vector operations, but pdffonts could not list "
+            f"the fonts ({composition.font_failure}), so text could not be counted as vector "
+            "artwork. Resolve that error and run the check again."
+        )
     return heuristic_finding(
         "pdf.artwork_composition",
-        "Inventoried painted raster and vector operations.",
+        message,
         [],
         incomplete=composition.unsupported or composition.classification == "empty",
+        font_inventory_error=composition.font_failure,
         classification=composition.classification,
         raster_operations=len(composition.raster),
         vector_operations=len(composition.vector),
@@ -508,33 +530,59 @@ def _placement_sampling(drawing: _Drawing) -> _PlacementSampling | None:
 
 
 def _category_resolution_finding(composition: _Composition, options: PdfArtworkOptions) -> Finding:
-    minimum = dict(options.category_min_dpi)[options.artwork_category or ""]
+    category = options.artwork_category or ""
+    minimum = dict(options.category_min_dpi)[category]
     measurements: list[object] = []
     violations: list[object] = []
+    lowest: tuple[float, int] | None = None
     incomplete = composition.unsupported
     for drawing in composition.raster:
         sampling = _placement_sampling(drawing)
         if sampling is None:
             incomplete = True
             continue
+        effective_dpi = min(sampling)
         measurement = {
             **_drawing_sample(drawing),
             "x_dpi": sampling.x_dpi,
             "y_dpi": sampling.y_dpi,
             "minimum_direction_dpi": sampling.minimum_direction_dpi,
+            "effective_dpi": effective_dpi,
         }
         measurements.append(measurement)
-        if min(sampling) < minimum:
+        if effective_dpi < minimum:
             violations.append(measurement)
+            if lowest is None or effective_dpi < lowest[0]:
+                lowest = (effective_dpi, drawing.page)
+    placements = len(composition.raster)
+    if lowest is not None:
+        message = (
+            f"Image placements below the {minimum:g} dpi minimum for '{category}': "
+            f"{len(violations)} of {placements}; the lowest is {lowest[0]:.0f} dpi "
+            f"on page {lowest[1]}."
+        )
+    elif not placements:
+        message = f"No raster image placements were found to compare with {minimum:g} dpi."
+    elif len(measurements) < placements:
+        message = (
+            f"{len(measurements)} of {placements} image placements are at or above the "
+            f"{minimum:g} dpi minimum for '{category}'; the others could not be measured."
+        )
+    else:
+        message = (
+            f"All {placements} image placements are at or above the {minimum:g} dpi minimum "
+            f"for '{category}'."
+        )
     return measurement_finding(
         _CATEGORY_RULE,
-        "Compared image placement sampling with the selected category.",
+        message,
         violations,
         incomplete=incomplete or (not composition.raster and not composition.vector),
         category=options.artwork_category,
         minimum_dpi=minimum,
         measurements=measurements[:MAX_SAMPLES],
         placement_count=len(composition.raster),
+        font_inventory_error=composition.font_failure,
         scope="Declared category and traced raster placements; axes and coarsest "
         "sampling includes rotation/shear. Vector operations have no raster DPI.",
     )
@@ -544,6 +592,7 @@ def _stroke_finding(
     drawings: list[_Drawing], options: PdfArtworkOptions, unknown: set[int]
 ) -> Finding:
     violations: list[object] = []
+    thinnest: tuple[float, int] | None = None
     measured = 0
     uncertain = bool(unknown)
     for drawing in drawings:
@@ -579,9 +628,23 @@ def _stroke_finding(
             violations.append(
                 {**_drawing_sample(drawing), "minimum_effective_width_pt": min(widths)}
             )
+            if thinnest is None or min(widths) < thinnest[0]:
+                thinnest = (min(widths), drawing.page)
+    minimum = options.min_stroke_width_pt
+    if thinnest is not None:
+        message = (
+            f"Strokes thinner than {minimum:g} pt after placement: {len(violations)}; "
+            f"the thinnest is {thinnest[0]:.3g} pt on page {thinnest[1]}."
+        )
+    elif measured == 0:
+        message = "No stroke could be measured for its thickness after placement."
+    else:
+        message = f"No measured stroke is thinner than {minimum:g} pt after placement."
+        if uncertain:
+            message += " Some strokes could not be measured."
     return heuristic_finding(
         "pdf.transformed_stroke_width",
-        "Measured stroke thickness normal to transformed straight segments.",
+        message,
         violations,
         incomplete=uncertain or measured == 0,
         measured_segments=measured,
@@ -846,9 +909,20 @@ def _raster_region_finding(artwork: _TracedArtwork, region: PdfRegion) -> Findin
     area = (region.right_pt - region.left_pt) * (region.bottom_pt - region.top_pt)
     coverage = _union_area(images, region.box) / area
     candidate = coverage >= (artwork.options.min_raster_region_coverage or 1) and not text
+    if candidate and not incomplete:
+        message = (
+            f"{region.name} on page {region.page} is {coverage:.1%} covered by raster images and "
+            "the page has no text operations; it may be a scan or a raster table."
+        )
+    else:
+        message = f"Raster images cover {coverage:.1%} of {region.name} on page {region.page}."
+        if text:
+            message += " The page has text operations, so the region cannot be called text-free."
+        elif incomplete:
+            message += " Some drawing operations could not be measured."
     return heuristic_finding(
         "pdf.raster_region_candidates",
-        f"Measured raster coverage in {region.name}.",
+        message,
         [{"page": region.page, "region": region.name, "raster_coverage": coverage}]
         if candidate and not incomplete
         else [],
@@ -893,22 +967,26 @@ async def _trace_output(session: PdfToolSession, pages: int) -> str | Preparatio
 
 async def _scalable_text_fonts(
     session: PdfToolSession, drawings: list[_Drawing], options: PdfArtworkOptions
-) -> bool:
+) -> _FontEvidence:
     """Whether every font is scalable, so painted text can count as vector artwork."""
     if not (options.classify_artwork or options.category_min_dpi) or not any(
         drawing.node.tag in _TEXT_OPERATIONS for drawing in drawings
     ):
-        return False
+        return _FontEvidence(False)
     try:
         font_types = await session.measure(
             "composition-fonts",
             ["pdffonts", DOCUMENT],
             lambda execution: [font["type"] for font in font_inventory(execution.stdout)],
         )
-    except (PreparationError, OSError):
-        # Text-bearing traces need this evidence and retain uncertainty.
-        return False
-    return bool(font_types) and all(kind in _SCALABLE_FONT_TYPES for kind in font_types)
+    except (PreparationError, OSError) as error:
+        # Text-bearing traces need this evidence and retain uncertainty; the cause is
+        # reported with the composition so the researcher can repair the tool or the PDF.
+        lines = str(error).splitlines()
+        return _FontEvidence(False, (lines[0] if lines else type(error).__name__)[:200])
+    return _FontEvidence(
+        bool(font_types) and all(kind in _SCALABLE_FONT_TYPES for kind in font_types)
+    )
 
 
 def _trace_unavailable(rules: list[str], error: Exception) -> list[Finding]:
@@ -936,7 +1014,7 @@ async def _drawing_findings(
     try:
         async with session.lease("drawing trace"):
             drawings, boxes, unknown = _drawing_trace(trace, pages)
-        scalable_text_fonts = await _scalable_text_fonts(session, drawings, options)
+        fonts = await _scalable_text_fonts(session, drawings, options)
         async with session.lease("artwork geometry"):
             for index, (box, size) in enumerate(zip(boxes, sizes, strict=True), 1):
                 if box[:2] != (0, 0) or any(
@@ -944,7 +1022,7 @@ async def _drawing_findings(
                     for actual, expected in zip(box[2:], size, strict=True)
                 ):
                     unsupported.add(index)
-            composition = _composition(drawings, unknown, scalable_text_fonts)
+            composition = _composition(drawings, unknown, fonts)
             result = []
             if options.classify_artwork:
                 result.append(_composition_finding(composition))
@@ -1354,14 +1432,22 @@ def _region_findings(
         "raster_dpi": options.raster_dpi,
     }
     findings = []
+    where = f"{region.name} on page {raster.page}"
     if options.max_figure_whitespace_ratio is not None:
+        limit = options.max_figure_whitespace_ratio
+        over = ink.outside_content_box_ratio > limit
+        if not ink.ink_pixels:
+            outcome = f"{where} has no content against the configured background"
+        else:
+            outcome = (
+                f"{where} leaves {ink.outside_content_box_ratio:.1%} of its area empty around "
+                f"the content, {'above' if over else 'within'} the {limit:.1%} limit"
+            )
         findings.append(
             heuristic_finding(
                 "pdf.figure_whitespace",
-                f"Measured the rendered content box in {region.name}.",
-                [details]
-                if ink.outside_content_box_ratio > options.max_figure_whitespace_ratio
-                else [],
+                outcome + ".",
+                [details] if over else [],
                 **details,
                 maximum_ratio=options.max_figure_whitespace_ratio,
                 scope="Area outside the ink box under the configured background; "
@@ -1372,7 +1458,13 @@ def _region_findings(
         findings.append(
             heuristic_finding(
                 "pdf.figure_edge_ink",
-                f"Measured ink near the boundary of {region.name}.",
+                (
+                    f"Ink touches the outer {options.figure_edge_band_pt:g} pt border of {where} "
+                    f"({ink.edge_ink_pixels} pixels); the figure may be cropped or framed."
+                    if ink.edge_ink_pixels
+                    else f"No ink touches the outer {options.figure_edge_band_pt:g} pt border "
+                    f"of {where}."
+                ),
                 [{**details, "edge_ink_pixels": ink.edge_ink_pixels}]
                 if ink.edge_ink_pixels
                 else [],
@@ -1631,9 +1723,30 @@ def _sample_contrast_finding(
         "channel_spreads": spreads,
         "allowed_channel_spread": sample.max_channel_spread,
     }
+    required = f"{sample.minimum_ratio:g}:1"
+    where = f"Sample '{sample.name}' on page {page}"
+    if not uniform:
+        message = (
+            f"{where} has uneven colours (channel values vary by up to {max(spreads)}; the "
+            f"allowed spread is {sample.max_channel_spread}), so its contrast is only known to "
+            f"lie between {minimum:.2f}:1 and {maximum:.2f}:1 against the required {required}. "
+            "Choose a uniform patch or allow a larger max_channel_spread."
+        )
+    elif maximum < sample.minimum_ratio:
+        message = (
+            f"{where} has a contrast ratio of at most {maximum:.2f}:1, below the required "
+            f"{required}."
+        )
+    elif minimum < sample.minimum_ratio:
+        message = (
+            f"{where} has a contrast ratio between {minimum:.2f}:1 and {maximum:.2f}:1, so the "
+            f"required {required} cannot be confirmed or ruled out."
+        )
+    else:
+        message = f"{where} has a contrast ratio of at least {minimum:.2f}:1 (required {required})."
     return heuristic_finding(
         _CONTRAST_RULE,
-        f"Compared rendered color patches for {sample.name}.",
+        message,
         [details] if uniform and maximum < sample.minimum_ratio else [],
         incomplete=not uniform or minimum < sample.minimum_ratio <= maximum,
         **details,

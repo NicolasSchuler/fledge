@@ -8,6 +8,7 @@ from pathlib import Path
 
 import click
 
+from .command_options import debug_option
 from .config import parse_settings_text, resolve_config_path
 from .models import Outcome, PreparationError
 from .presets import PRESETS, preset_names, preset_text
@@ -77,6 +78,7 @@ def _next_steps(directory: Path) -> list[str]:
 )
 @click.option("--force", is_flag=True, help="Overwrite an existing fledge.toml.")
 @click.option("--list", "list_presets", is_flag=True, help="List the presets and exit.")
+@debug_option
 def init_command(directory: Path, preset: str | None, force: bool, list_presets: bool) -> int:
     """Write fledge.toml into DIRECTORY (default: the current directory).
 

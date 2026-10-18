@@ -48,8 +48,15 @@ def is_scope_disclaimer(finding: Finding) -> bool:
     return finding.severity == "info" and finding.status in {"skipped", "not_applicable"}
 
 
+# Findings that disclose what leaves the machine. They are passed notices, but a reader
+# must see them without asking whenever the run sent anything.
+ALWAYS_LISTED_RULES = frozenset({"online.sharing"})
+
+
 def _hidden_by_default(finding: Finding) -> bool:
     # Passed results and scope disclaimers are counted but listed only on request.
+    if finding.rule in ALWAYS_LISTED_RULES:
+        return False
     return finding.status == "passed" or is_scope_disclaimer(finding)
 
 
@@ -77,11 +84,16 @@ _EVIDENCE_KEYS = (
     "nonembedded",
     "below_minimum",
     "candidates",
+    "issues",
 )
 _EVIDENCE_PAGE_KEYS = frozenset({"changed_pages", "differing_pages"})
 _EVIDENCE_ITEMS = 3
 _EVIDENCE_LABEL_CHARS = 120
-_EVIDENCE_NAME_KEYS = ("name", "key", "reference", "label", "reason")
+_EVIDENCE_NAME_KEYS = ("name", "key", "reference", "label", "doi", "reason")
+
+
+def _clipped(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
 def _evidence_label(item: object, pages: bool) -> str | None:
@@ -99,15 +111,22 @@ def _evidence_label(item: object, pages: bool) -> str | None:
         if location and type(item.get("line")) is int:
             location = f"{location}:{item['line']}"
         if type(item.get("page")) is int:
-            location = f"{location} (page {item['page']})" if location else f"page {item['page']}"
+            page = f"page {item['page']}"
+            reason = item.get("reason")
+            if location:
+                location = f"{location} ({page})"
+            elif isinstance(reason, str) and reason:
+                # Without a file, the reason is the only thing that says what the page shows.
+                suffix = f" ({page})"
+                location = _clipped(reason, _EVIDENCE_LABEL_CHARS - len(suffix)) + suffix
+            else:
+                location = page
         label = location or next(
             (item[key] for key in _EVIDENCE_NAME_KEYS if isinstance(item.get(key), str)), ""
         )
     if not isinstance(label, str) or not label:
         return None
-    return (
-        label if len(label) <= _EVIDENCE_LABEL_CHARS else label[: _EVIDENCE_LABEL_CHARS - 1] + "…"
-    )
+    return _clipped(label, _EVIDENCE_LABEL_CHARS)
 
 
 def evidence_excerpt(finding: Finding) -> str:
@@ -288,7 +307,8 @@ class FindingView:
 def finding_views(report: RedactedReport, *, show_hidden: bool) -> list[FindingView]:
     """One view per distinct finding, the most urgent first.
 
-    Passed results and scope disclaimers are listed only with ``show_hidden``.
+    Passed results and scope disclaimers are listed only with ``show_hidden``, except
+    the notices in ``ALWAYS_LISTED_RULES``.
     Tasks that never started because a prerequisite failed are left to
     :func:`not_run_summaries`.
     """

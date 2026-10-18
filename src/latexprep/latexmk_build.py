@@ -11,7 +11,6 @@ from __future__ import annotations
 import os
 import re
 import shutil
-import stat
 from dataclasses import KW_ONLY, dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import NamedTuple
@@ -26,7 +25,7 @@ from .build_dependencies import (
     read_recorder_trace,
 )
 from .build_log import log_findings, log_tail, read_bounded
-from .file_safety import MIB
+from .file_safety import MIB, byte_count_text
 from .loaded_options import (
     LoadedOptionsEvidence,
     LoadedOptionsProbe,
@@ -42,7 +41,9 @@ from .models import (
     Finding,
     PreparationError,
 )
+from .project import MAX_FOLDER_DEPTH, ImportLimits, import_project
 from .runtime import CommandResult, RuntimeLimits, ToolRunner, ToolVersion
+from .scheduler import run_in_thread
 
 # Only these policy-level log errors may be deselected. Tool failures, incomplete
 # output/recorder evidence, TeX errors and unresolved reruns remain build failures.
@@ -284,7 +285,7 @@ async def build_project(
     defer_biber = (
         bibliography_backend == "auto"
         and runner.biber_needs_preparation
-        and not _sources_may_use_biber(source)
+        and not await run_in_thread(_sources_may_use_biber, source)
     )
     if not defer_biber:
         return await _build_once(request, runner, _BiberPlan(deferred=False, note=None))
@@ -293,7 +294,7 @@ async def build_project(
             request, runner, _BiberPlan(deferred=True, note=_BIBER_NOT_PREPARED)
         )
     except _BiberRequired:
-        shutil.rmtree(work)
+        await run_in_thread(shutil.rmtree, work)
     return await _build_once(
         request, runner, _BiberPlan(deferred=False, note=_BIBER_PREPARED_AFTER_DEFERRAL)
     )
@@ -301,7 +302,7 @@ async def build_project(
 
 async def _build_once(request: BuildRequest, runner: ToolRunner, biber: _BiberPlan) -> BuildResult:
     """Run one isolated build; raise ``_BiberRequired`` if a deferred build needs Biber."""
-    tree = _prepare_tree(request, runner.limits.max_file_bytes)
+    tree = await run_in_thread(_prepare_tree, request, runner.limits.max_file_bytes)
     staged = _stage_loaded_options(request, tree)
     biber_setup = await _prepare_biber(request, runner, biber, tree.work.parent)
     result = BuildResult(
@@ -331,7 +332,7 @@ async def _build_once(request: BuildRequest, runner: ToolRunner, biber: _BiberPl
     result.tools.resource_roots = tuple(sorted(str(root) for root in declared_roots))
     max_output_bytes = runner.limits.max_output_bytes
     result.findings.extend(_log_evidence(request, tree, max_output_bytes, result))
-    result.findings.extend(_execution_findings(execution, request.main, result.log))
+    result.findings.extend(_execution_findings(execution, request.main, result.log, runner.limits))
     recorder = _read_recorder(request, tree, declared_roots, max_output_bytes)
     result.findings.extend(recorder.findings)
     result.recorder_complete = recorder.complete
@@ -519,21 +520,17 @@ def _prepare_tree(request: BuildRequest, max_total_bytes: int) -> _BuildTree:
 def _copy_source(source: Path, destination: Path, max_total_bytes: int) -> None:
     """Import a bounded project snapshot into a disposable writable build copy.
 
-    ``max_total_bytes`` is the per-job import budget: it caps the combined size
-    of every imported file rather than the size of any single one. Callers pass
-    ``RuntimeLimits.max_file_bytes``, which therefore acts as the whole-tree
-    limit here, not as a per-file limit.
+    The copy is made by ``import_project``, which opens every entry without
+    following links, so a link that appears during the copy is refused rather
+    than followed. ``max_total_bytes`` is the per-job import budget: it caps the
+    combined size of every imported file rather than the size of any single one.
+    Callers pass ``RuntimeLimits.max_file_bytes``, which therefore acts as the
+    whole-tree limit here, not as a per-file limit.
     """
-    total = count = 0
-    for item in source.rglob("*"):
-        info = item.lstat()
-        if stat.S_ISLNK(info.st_mode) or not (item.is_file() or item.is_dir()):
-            raise PreparationError(f"Build inputs must be regular files/directories: {item.name}")
-        count += 1
-        total += info.st_size if item.is_file() else 0
-        if count > _MAX_IMPORTED_ENTRIES or total > max_total_bytes:
-            raise PreparationError("Build input exceeds file-count or total-size limits")
-    shutil.copytree(source, destination)
+    limits = ImportLimits(
+        max_files=_MAX_IMPORTED_ENTRIES, max_bytes=max_total_bytes, max_depth=MAX_FOLDER_DEPTH
+    )
+    import_project(source, destination, limits, unwrap=False, exclude_metadata=False)
     # Imported snapshots may be read-only; writable disposable build copies are distinct.
     destination.chmod(0o700)
     for item in destination.rglob("*"):
@@ -606,34 +603,54 @@ def _controlled_rules(
     return rules
 
 
-def _execution_findings(execution: CommandResult, main: str, log: str) -> list[Finding]:
-    findings = []
-    for failed, rule, message in (
-        (execution.timed_out, "build.timeout", "The build exceeded its time limit."),
-        (
-            execution.output_limited,
-            "build.output_limit",
-            "The build exceeded its diagnostic output limit.",
-        ),
-        (
-            bool(execution.resource_exceeded),
-            "build.resource_limit",
-            execution.resource_exceeded or "",
-        ),
-        (
-            bool(execution.returncode),
-            "build.failed",
-            f"Build tool exited with status {execution.returncode}.",
-        ),
-    ):
-        if failed:
-            details: dict[str, object] = {"stderr": execution.stderr[-4000:]}
-            if rule == "build.failed":
-                # TeX reports the actual cause only in the log: latexmk's own
-                # stderr names the failed rule, not the offending input.
-                details["log_tail"] = log_tail(log)
-            findings.append(Finding(rule, message, severity="error", path=main, details=details))
-    return findings
+def _execution_findings(
+    execution: CommandResult, main: str, log: str, limits: RuntimeLimits
+) -> list[Finding]:
+    """The one finding that explains why latexmk did not exit normally, if it did not.
+
+    A limit that stopped the build also leaves the killed process with a signal
+    status, so the limit is reported alone: that status adds nothing the researcher
+    can act on.
+    """
+    details: dict[str, object] = {"stderr": execution.stderr[-4000:]}
+    if execution.timed_out:
+        rule = "build.timeout"
+        message = f"The build was stopped after {limits.timeout_seconds} s: it ran too long."
+        suggestion = (
+            "Check the end of the log for a loop or a very slow step. If the document "
+            f"needs longer, raise timeout_seconds (now {limits.timeout_seconds}) in your "
+            "configuration or pass --timeout-seconds."
+        )
+    elif execution.output_limited:
+        rule = "build.output_limit"
+        message = (
+            f"The build was stopped after printing more than "
+            f"{byte_count_text(limits.max_output_bytes)} of terminal output."
+        )
+        suggestion = (
+            "Look for a repeating error or warning at the end of the log and fix its "
+            "source. This output limit is not configurable."
+        )
+    elif execution.resource_exceeded:
+        rule = "build.resource_limit"
+        message = f"The build was stopped: {execution.resource_exceeded.rstrip('.')}."
+        suggestion = (
+            "Check for a runaway document. If it legitimately needs more, raise "
+            "build_memory_mb (memory), max_bytes (size of generated files) or "
+            "max_temporary_bytes (temporary disk) in your configuration."
+        )
+    elif execution.returncode:
+        rule = "build.failed"
+        message = f"Build tool exited with status {execution.returncode}."
+        suggestion = None
+        # TeX reports the actual cause only in the log: latexmk's own
+        # stderr names the failed rule, not the offending input.
+        details["log_tail"] = log_tail(log)
+    else:
+        return []
+    return [
+        Finding(rule, message, severity="error", path=main, suggestion=suggestion, details=details)
+    ]
 
 
 def _read_recorder(

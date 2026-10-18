@@ -11,7 +11,7 @@ from pathlib import Path
 from .config import Settings
 from .finding_view import is_scope_disclaimer
 from .formatting import FormattingOptions, format_project
-from .job_execution import JobExecution
+from .job_execution import JobDeadlineExceeded, JobExecution
 from .latexmk_build import build_project
 from .models import (
     BibliographyBackend,
@@ -32,6 +32,7 @@ from .pdf_checks import (
 )
 from .pdf_comparison import compare_pdfs
 from .pdf_inspection import inspect_pdf
+from .pdf_structure_checks import StructureOptions
 from .runtime import ToolRunner
 from .scheduler import ResourceBudget
 
@@ -67,7 +68,7 @@ def _selected_tools(settings: Settings) -> tuple[set[str], set[str]]:
     if settings.apply_formatting:
         required.add("tex-fmt")
     pdf_rules = set(configured_pdf_check_rules(settings.pdf_checks))
-    if pdf_rules & OBJECT_STRUCTURE_RULES:
+    if pdf_rules & OBJECT_STRUCTURE_RULES or _structure_checks_use_qpdf(settings.structure_checks):
         optional.add("qpdf")
     if pdf_rules & PAINT_TRACE_RULES:
         optional.add("mutool")
@@ -77,9 +78,21 @@ def _selected_tools(settings: Settings) -> tuple[set[str], set[str]]:
         rules = set(configured_artwork_rules(options))
         if "pdf.type3_glyph_programs" in rules:
             optional.add("qpdf")
-        if rules & DRAWING_TRACE_RULES:
+        # The colour-space comparison reads the same MuPDF trace as the drawing measurements.
+        if rules & DRAWING_TRACE_RULES or options.required_color_space is not None:
             optional.add("mutool")
     return required, optional
+
+
+def _structure_checks_use_qpdf(options: StructureOptions) -> bool:
+    """Whether any configured PDF structure check reads object data through qpdf."""
+    return (
+        options.check_table_structure
+        or options.check_link_structure
+        or options.require_figure_alt
+        or options.check_structure_references
+        or options.require_structure_tree
+    )
 
 
 def _version_command(name: str) -> list[str]:
@@ -206,7 +219,7 @@ async def run_doctor(
                     optional,
                     emit,
                 )
-    except TimeoutError:
+    except JobDeadlineExceeded:
         report.findings.append(
             Finding(
                 "execution.deadline",
@@ -274,12 +287,8 @@ async def _diagnose(
     sandbox_work.mkdir()
     try:
         result = await runner.run(["true"], cwd=sandbox_work, workspace=sandbox_work)
-        if not result.completed_normally:
-            raise PreparationError(
-                "Sandbox probe did not complete "
-                f"(exit={result.returncode}, timeout={result.timed_out}, "
-                f"output_limit={result.output_limited}, resource={result.resource_exceeded})."
-            )
+        if (reason := result.failure_reason("the sandbox probe")) is not None:
+            raise PreparationError(reason)
     except PreparationError as error:
         report.findings.append(
             Finding(

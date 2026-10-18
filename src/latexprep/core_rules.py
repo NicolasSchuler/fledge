@@ -306,8 +306,10 @@ RULES = (
         name="bibliography.undefined_macro",
         title="Undefined bibliography string macros",
         description=(
-            "Check string macros against local definitions and built-in month names; "
-            "incomplete parse coverage is inconclusive."
+            "Check string macros against local definitions, built-in month names and the "
+            "macros of the named bibliography style (the journal macros of the standard styles, "
+            "and the MACRO definitions of a project-shipped .bst file); incomplete parse "
+            "coverage is inconclusive."
         ),
         tests=(
             "tests.test_bibliography.BibliographyTests.test_literal_relationships_and_builtin_months_are_checked",

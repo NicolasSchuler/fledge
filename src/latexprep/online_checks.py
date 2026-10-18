@@ -29,20 +29,30 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any, NamedTuple, TypeVar
 from urllib.parse import parse_qsl, quote, urlencode, urljoin, urlsplit, urlunsplit
 
 from . import __version__
-from .bibtex_syntax import BibDocument, BibFileReader, Entry, field_literal, read_doi
-from .citation_graph import resource_declarations
+from .bibtex_syntax import (
+    BibDocument,
+    BibFileReader,
+    Entry,
+    describe_read_failure,
+    field_literal,
+    mebibytes,
+    read_doi,
+)
+from .citation_graph import require_directory, resource_declarations
 from .expanded_document import reachable_sources
 from .models import EvidenceKind, Finding, PreparationError, Severity, Status
 from .option_config import require_booleans
 from .scheduler import ResourceBudget, bounded_map, cancellation_point, run_in_thread
 from .source_graph import SourceGraph
-from .tex_lexer import ParseLimitExceeded, mask_literals, scan_commands
+from .tex_lexer import ParseLimitExceeded, scan_source_commands
 
 _CROSSREF = "https://api.crossref.org/works"
+# The only host that receives the contact address; Crossref's polite pool needs it there.
+_CROSSREF_HOST = urlsplit(_CROSSREF).hostname
 _MAX_INPUT_BYTES = 16 * 1024 * 1024
 _MAX_BIB_BYTES = 2 * 1024 * 1024
 _MAX_REFERENCES = 2000
@@ -60,6 +70,14 @@ _EMAIL = re.compile(
 # Crossref's polite pool keys on a contact address inside the product comment.
 _PRODUCT = f"fledge/{__version__}"
 _DEFAULT_USER_AGENT = f"{_PRODUCT} (explicit reference checks)"
+# Inclusive (low, high) bounds of the integer options, also quoted in messages.
+_OPTION_BOUNDS = {
+    "online_max_requests": (1, 1000),
+    "online_timeout_seconds": (1, 60),
+    "online_max_redirects": (0, 10),
+    "online_max_response_bytes": (1024, 4_194_304),
+    "online_jobs": (1, 8),
+}
 # Each selectable check's option and rule, in catalogue order (NET001-NET007).
 _CHECK_RULES = {
     "online_doi_resolution": "online.doi_resolution",
@@ -88,6 +106,16 @@ _SPECIAL_IPV6_NETWORKS = tuple(
 _SPECIAL_IPV4_NETWORKS = tuple(
     ipaddress.IPv4Network(prefix) for prefix in ("192.0.0.0/24", "192.88.99.0/24")
 )
+# Interim (1xx) responses a server may send before the final one; more is malformed.
+_MAX_INTERIM_RESPONSES = 4
+# A HEAD answer with one of these may only reflect a server that handles HEAD badly,
+# so the same URL is asked again with GET before the result is reported.
+_HEAD_RETRY_STATUSES = frozenset({403, 404, 405, 501})
+# Validated addresses tried in turn for one request; the first failed connection
+# attempt may use at most this share of the request's timeout.
+_MAX_ADDRESS_ATTEMPTS = 4
+_CONNECT_TIMEOUT_SHARE = 0.5
+_DNS_UNRESOLVED_EXIT = 3
 _T = TypeVar("_T")
 
 
@@ -108,6 +136,8 @@ class FetchOutcome(StrEnum):
     REDIRECT_LOOP = "redirect_loop"
     REDIRECT_LIMIT = "redirect_limit"
     TIMEOUT = "timeout"
+    HOST_UNRESOLVED = "host_unresolved"
+    TLS_FAILURE = "tls_failure"
     IDENTIFIER_MISMATCH = "identifier_mismatch"
     INPUT_UNAVAILABLE = "input_unavailable"
 
@@ -123,8 +153,9 @@ class OnlineOptions:
     unvisited entries instead of silently treating them as verified. Raise it
     deliberately (up to 1000) when complete reference coverage is required.
 
-    ``online_contact_email`` is sent only in the User-Agent request header, for
-    Crossref's polite pool. It never enters a finding, detail or report field.
+    ``online_contact_email`` is sent only in the User-Agent request header to
+    api.crossref.org, for Crossref's polite pool; every other host receives the plain
+    product User-Agent. It never enters a finding, detail or report field.
     """
 
     online: bool = False
@@ -146,13 +177,7 @@ class OnlineOptions:
 
     def __post_init__(self) -> None:
         require_booleans(self, "online", *_CHECK_RULES)
-        for name, low, high in (
-            ("online_max_requests", 1, 1000),
-            ("online_timeout_seconds", 1, 60),
-            ("online_max_redirects", 0, 10),
-            ("online_max_response_bytes", 1024, 4_194_304),
-            ("online_jobs", 1, 8),
-        ):
+        for name, (low, high) in _OPTION_BOUNDS.items():
             value = getattr(self, name)
             if type(value) is not int or not low <= value <= high:
                 raise PreparationError(f"{name} must be an integer from {low} to {high}")
@@ -182,9 +207,13 @@ class OnlineOptions:
 
     @property
     def user_agent(self) -> str:
-        """The exact User-Agent header value; the only place a contact address is used."""
+        """The User-Agent header value for Crossref; the only place a contact address is used."""
         email = self.online_contact_email
         return f"{_PRODUCT} (mailto:{email})" if email else _DEFAULT_USER_AGENT
+
+    def user_agent_for(self, host: str) -> str:
+        """The User-Agent for ``host``: the contact address goes to Crossref's API alone."""
+        return self.user_agent if host == _CROSSREF_HOST else _DEFAULT_USER_AGENT
 
     @property
     def selected_rules(self) -> list[str]:
@@ -203,6 +232,13 @@ class NetworkFailure(Exception):
     def __init__(self, outcome: FetchOutcome, message: str) -> None:
         super().__init__(message)
         self.outcome = outcome
+
+
+class _ConnectFailure(NetworkFailure):
+    """The TCP connection to one validated address failed; another address may work."""
+
+    def __init__(self, message: str = "Could not connect to the server") -> None:
+        super().__init__(FetchOutcome.UNAVAILABLE, message)
 
 
 @dataclass(frozen=True)
@@ -343,9 +379,12 @@ def _public_ip(value: str) -> str:
     return str(address)
 
 
-_DNS_SCRIPT = """import json,socket,sys
-rows=socket.getaddrinfo(sys.argv[1],int(sys.argv[2]),type=socket.SOCK_STREAM)
-addresses=sorted({row[4][0] for row in rows})
+# Exit status 3 tells the parent that the name does not resolve, as opposed to a
+# resolver that did not answer or output that was too large.
+_DNS_SCRIPT = f"""import json,socket,sys
+try: rows=socket.getaddrinfo(sys.argv[1],int(sys.argv[2]),type=socket.SOCK_STREAM)
+except socket.gaierror: raise SystemExit({_DNS_UNRESOLVED_EXIT})
+addresses=sorted({{row[4][0] for row in rows}})
 if not addresses or len(addresses)>32: raise SystemExit(2)
 print(json.dumps(addresses))
 """
@@ -402,6 +441,10 @@ async def _resolve(host: str, port: int) -> tuple[str, ...]:
                     FetchOutcome.UNAVAILABLE, "DNS response exceeded its byte limit"
                 )
         await process.wait()
+        if process.returncode == _DNS_UNRESOLVED_EXIT:
+            raise NetworkFailure(
+                FetchOutcome.HOST_UNRESOLVED, f"The host name {host} could not be resolved"
+            )
         if process.returncode or len(data) > 8192:
             raise NetworkFailure(FetchOutcome.UNAVAILABLE, "Public DNS resolution did not complete")
         addresses = json.loads(data)
@@ -442,6 +485,30 @@ class Response:
         return values[0] if values else None
 
 
+async def _read_head(reader: asyncio.StreamReader) -> Response:
+    """Read one HTTP status line and its header block into a body-less response."""
+    line = await reader.readline()
+    match = re.fullmatch(rb"HTTP/1\.[01] ([1-5]\d\d)(?: [^\r\n]*)?\r\n", line)
+    if match is None or len(line) > 8192:
+        raise NetworkFailure(FetchOutcome.MALFORMED, "Invalid HTTP status line")
+    headers = []
+    size = len(line)
+    while True:
+        line = await reader.readline()
+        size += len(line)
+        if size > 32_768 or len(headers) > 100 or not line.endswith(b"\r\n"):
+            raise NetworkFailure(
+                FetchOutcome.MALFORMED, "HTTP headers exceeded their bound or were incomplete"
+            )
+        if line == b"\r\n":
+            break
+        name, separator, value = line[:-2].partition(b":")
+        if not separator or not re.fullmatch(rb"[!#$%&'*+.^_`|~0-9A-Za-z-]+", name):
+            raise NetworkFailure(FetchOutcome.MALFORMED, "Invalid HTTP header")
+        headers.append((name.decode("ascii").lower(), value.decode("latin1").strip()))
+    return Response(int(match[1]), tuple(headers))
+
+
 async def _exchange(
     target: Target,
     address: str,
@@ -449,15 +516,24 @@ async def _exchange(
     body: bool,
     maximum: int,
     user_agent: str = _DEFAULT_USER_AGENT,
+    connect_timeout: float | None = None,
 ) -> Response:
-    """Connect to a numeric address once; TLS verifies the original DNS hostname."""
+    """Connect to a numeric address once; TLS verifies the original DNS hostname.
+
+    A failed or timed-out connection raises :class:`_ConnectFailure`, so the caller
+    can try another validated address of the same host.
+    """
     address = _public_ip(address)
     family = socket.AF_INET6 if ":" in address else socket.AF_INET
     sock = socket.socket(family, socket.SOCK_STREAM)
     sock.setblocking(False)
     writer: asyncio.StreamWriter | None = None
     try:
-        await asyncio.get_running_loop().sock_connect(sock, (address, target.port))
+        try:
+            async with asyncio.timeout(connect_timeout):
+                await asyncio.get_running_loop().sock_connect(sock, (address, target.port))
+        except (OSError, TimeoutError) as error:
+            raise _ConnectFailure from error
         context = ssl.create_default_context() if target.scheme == "https" else None
         reader, writer = await asyncio.open_connection(
             sock=sock,
@@ -474,26 +550,14 @@ async def _exchange(
         )
         writer.write(request.encode("ascii"))
         await writer.drain()
-        line = await reader.readline()
-        match = re.fullmatch(rb"HTTP/1\.[01] ([1-5]\d\d)(?: [^\r\n]*)?\r\n", line)
-        if match is None or len(line) > 8192:
-            raise NetworkFailure(FetchOutcome.MALFORMED, "Invalid HTTP status line")
-        headers = []
-        size = len(line)
-        while True:
-            line = await reader.readline()
-            size += len(line)
-            if size > 32_768 or len(headers) > 100 or not line.endswith(b"\r\n"):
-                raise NetworkFailure(
-                    FetchOutcome.MALFORMED, "HTTP headers exceeded their bound or were incomplete"
-                )
-            if line == b"\r\n":
-                break
-            name, separator, value = line[:-2].partition(b":")
-            if not separator or not re.fullmatch(rb"[!#$%&'*+.^_`|~0-9A-Za-z-]+", name):
-                raise NetworkFailure(FetchOutcome.MALFORMED, "Invalid HTTP header")
-            headers.append((name.decode("ascii").lower(), value.decode("latin1").strip()))
-        response = Response(int(match[1]), tuple(headers))
+        response = await _read_head(reader)
+        interim = 0
+        while 100 <= response.status < 200:
+            # An interim answer (100 Continue, 103 Early Hints) precedes the final one.
+            interim += 1
+            if response.status == 101 or interim > _MAX_INTERIM_RESPONSES:
+                raise NetworkFailure(FetchOutcome.MALFORMED, "Unsupported interim HTTP response")
+            response = await _read_head(reader)
         if not body or not 200 <= response.status < 300 or method == "HEAD":
             return response
         if response.header("content-encoding") not in {None, "identity"}:
@@ -569,6 +633,23 @@ def _http_outcome(status: int) -> FetchOutcome:
     return _HTTP_OUTCOMES.get(status, FetchOutcome.UNAVAILABLE)
 
 
+def _failed_fetch(outcome: FetchOutcome, url: str, redirects: list[str], reason: str) -> Fetch:
+    return Fetch(outcome, redact_url(url), redirects=tuple(redirects), message=reason)
+
+
+def _tls_reason(error: ssl.SSLError) -> str:
+    if isinstance(error, ssl.SSLCertVerificationError) and error.verify_message:
+        return f"The server's certificate could not be verified ({error.verify_message})"
+    return "The secure (TLS) connection could not be established"
+
+
+def _transport_reason(error: Exception) -> str:
+    detail = type(error).__name__
+    if isinstance(error, OSError) and error.strerror:
+        detail += f": {error.strerror}"
+    return f"The network connection failed ({detail})"
+
+
 class _Client:
     def __init__(self, options: OnlineOptions, budget: ResourceBudget | None) -> None:
         self.options, self.budget = options, budget
@@ -593,7 +674,7 @@ class _Client:
                 max(0.0, self.next_request.get(target.host, 0.0) - time.monotonic())
             )
             if self.requests >= self.options.online_max_requests:
-                raise NetworkFailure(FetchOutcome.REQUEST_LIMIT, "Online request budget exhausted")
+                raise self._budget_exhausted()
             reservation = (
                 self.budget.lease("online request", memory_mb=64)
                 if self.budget
@@ -603,32 +684,62 @@ class _Client:
                 # Different providers may have waited for the same shared resource slot.
                 # Admission and increment must not be separated by an await.
                 if self.requests >= self.options.online_max_requests:
-                    raise NetworkFailure(
-                        FetchOutcome.REQUEST_LIMIT, "Online request budget exhausted"
-                    )
+                    raise self._budget_exhausted()
                 self.requests += 1
                 self.next_request[target.host] = (
                     time.monotonic() + self.options.online_provider_interval_seconds
                 )
                 async with asyncio.timeout(self.options.online_timeout_seconds):
                     addresses = await _resolve(target.host, target.port)
-                    # Recheck injected/resolver answers and pin exactly one validated address.
+                    # Recheck injected/resolver answers; each request pins one validated address.
                     addresses = tuple(_public_ip(address) for address in addresses)
-                    if not addresses:
-                        raise NetworkFailure(
-                            FetchOutcome.UNAVAILABLE, "DNS returned no public addresses"
-                        )
-                    response = await _exchange(
-                        target,
-                        addresses[0],
-                        method,
-                        body,
-                        self.options.online_max_response_bytes,
-                        self.options.user_agent,
-                    )
+                    response = await self._exchange_first_reachable(target, addresses, method, body)
                 if response.status == 429:
                     self.throttled.add(target.host)
                 return response
+
+    def _budget_exhausted(self) -> NetworkFailure:
+        return NetworkFailure(
+            FetchOutcome.REQUEST_LIMIT,
+            f"The budget of {self.options.online_max_requests} online requests is used up",
+        )
+
+    async def _exchange_first_reachable(
+        self, target: Target, addresses: tuple[str, ...], method: str, body: bool
+    ) -> Response:
+        """Ask the first validated address that accepts a connection.
+
+        Only a failed connection moves on to the next address; IPv4 goes first because
+        a missing IPv6 route is the commoner failure, and the first connection attempt
+        gets a share of the timeout so that a silent address cannot use all of it.
+        """
+        ordered = sorted(addresses, key=lambda address: ":" in address)[:_MAX_ADDRESS_ATTEMPTS]
+        connect_timeout = (
+            self.options.online_timeout_seconds * _CONNECT_TIMEOUT_SHARE
+            if len(ordered) > 1
+            else None
+        )
+        failure: NetworkFailure | None = None
+        for address in ordered:
+            try:
+                return await _exchange(
+                    target,
+                    address,
+                    method,
+                    body,
+                    self.options.online_max_response_bytes,
+                    self.options.user_agent_for(target.host),
+                    connect_timeout,
+                )
+            except _ConnectFailure as error:
+                failure = error
+        if failure is None:
+            raise NetworkFailure(FetchOutcome.UNAVAILABLE, "DNS returned no public addresses")
+        if len(ordered) > 1:
+            raise _ConnectFailure(
+                f"Could not connect to any of the server's {len(ordered)} addresses"
+            ) from failure
+        raise failure
 
     async def fetch(self, url: str, *, body: bool = False) -> Fetch:
         key = (url, body)
@@ -645,7 +756,7 @@ class _Client:
                         )
                     visited.add(target.url)
                     response = await self._one(target, "GET" if body else "HEAD", body)
-                    if not body and response.status in {405, 501}:
+                    if not body and response.status in _HEAD_RETRY_STATUSES:
                         response = await self._one(target, "GET", False)
                     if response.status in {301, 302, 303, 307, 308}:
                         location = response.header("location")
@@ -655,7 +766,12 @@ class _Client:
                             )
                         current = urljoin(target.url, location)
                         # Validate even the final over-budget redirect without contacting it.
-                        _target(current)
+                        destination = _target(current)
+                        if body and target.scheme == "https" and destination.scheme == "http":
+                            raise NetworkFailure(
+                                FetchOutcome.UNSAFE_TARGET,
+                                "A metadata request was redirected from HTTPS to plain HTTP",
+                            )
                         redirects.append(redact_url(current))
                         continue
                     result = Fetch(
@@ -670,25 +786,22 @@ class _Client:
                         FetchOutcome.REDIRECT_LIMIT, "HTTP redirect limit exhausted"
                     )
             except NetworkFailure as error:
-                result = Fetch(
-                    error.outcome,
-                    redact_url(current),
-                    redirects=tuple(redirects),
-                    message=str(error),
-                )
+                result = _failed_fetch(error.outcome, current, redirects, str(error))
             except TimeoutError:
-                result = Fetch(
+                result = _failed_fetch(
                     FetchOutcome.TIMEOUT,
-                    redact_url(current),
-                    redirects=tuple(redirects),
-                    message="Network request exceeded its deadline",
+                    current,
+                    redirects,
+                    "No complete answer arrived within "
+                    f"{self.options.online_timeout_seconds} seconds",
+                )
+            except ssl.SSLError as error:
+                result = _failed_fetch(
+                    FetchOutcome.TLS_FAILURE, current, redirects, _tls_reason(error)
                 )
             except (OSError, ValueError, asyncio.IncompleteReadError) as error:
-                result = Fetch(
-                    FetchOutcome.UNAVAILABLE,
-                    redact_url(current),
-                    redirects=tuple(redirects),
-                    message=f"Network transport failed ({type(error).__name__})",
+                result = _failed_fetch(
+                    FetchOutcome.UNAVAILABLE, current, redirects, _transport_reason(error)
                 )
             self.cache[key] = result
             self.cache_bytes += len(result.response.body) if result.response else 0
@@ -706,6 +819,8 @@ class Reference:
     kind: str
     values: dict[str, str | None]
     doi: str | None = None
+    # The author list as written, braces included: they mark names that stay whole.
+    author_text: str | None = None
 
 
 def _bibliography_paths(root: Path, inspection: SourceGraph, gaps: list[str]) -> list[Path]:
@@ -732,20 +847,39 @@ def _entry_reference(document: BibDocument, entry: Entry) -> Reference:
     """The bounded literal values a lookup may share; a repeated field becomes unknown."""
     values: dict[str, str | None] = {}
     doi = None
+    author_text = None
     for item in entry.fields:
         if item.name in values:
             values[item.name] = None
             if item.name == "doi":
                 doi = None
+            if item.name == "author":
+                author_text = None
             continue
         value = field_literal(item, max_chars=8192)
         values[item.name] = None if value is None else value.replace("{", "").replace("}", "")
+        if item.name == "author":
+            author_text = value
         if item.name == "doi":
             doi = read_doi(item).identifier
             if doi is not None and _DOI.fullmatch(doi) is None:
                 doi = None
     return Reference(
-        entry.key, document.path, document.line(entry.start), entry.entry_type, values, doi
+        entry.key,
+        document.path,
+        document.line(entry.start),
+        entry.entry_type,
+        values,
+        doi,
+        author_text,
+    )
+
+
+def _scan_bound() -> str:
+    """The per-file and total size limits of the online bibliography scan."""
+    return (
+        f"online scan bound of {mebibytes(_MAX_BIB_BYTES)} per file and "
+        f"{mebibytes(_MAX_INPUT_BYTES)} in total"
     )
 
 
@@ -754,23 +888,24 @@ def _bibliography_references(root: Path, paths: list[Path], gaps: list[str]) -> 
     reader = BibFileReader(max_file_bytes=_MAX_BIB_BYTES, max_total_bytes=_MAX_INPUT_BYTES)
     for path in paths:
         cancellation_point()
+        name = path.relative_to(root).as_posix()
         if (
             path.is_symlink()
             or not path.is_file()
             or not path.resolve().is_relative_to(root.resolve())
         ):
-            gaps.append("A bibliography is not a regular contained file")
+            gaps.append(f"{name} is not a regular file inside the project")
             continue
         if path.stat().st_size > reader.allowance:
-            gaps.append("Online bibliography scan exceeded its 2 MiB/file or 16 MiB total bound")
+            gaps.append(f"{name} exceeds the {_scan_bound()}")
             continue
         try:
-            document = reader.read(path, path.relative_to(root).as_posix())
-        except UnicodeError:
-            gaps.append("A bibliography is not UTF-8")
+            document = reader.read(path, name)
+        except (OSError, UnicodeError) as error:
+            gaps.append(f"{name} {describe_read_failure(error)}")
             continue
         if document is None:
-            gaps.append("A bibliography grew beyond the bounded scan size")
+            gaps.append(f"{name} grew beyond the {_scan_bound()} while it was read")
             continue
         if not document.valid:
             gaps.append(f"{document.path}: bibliography syntax is incomplete")
@@ -778,7 +913,7 @@ def _bibliography_references(root: Path, paths: list[Path], gaps: list[str]) -> 
         for entry in document.entries:
             cancellation_point()
             if len(references) >= _MAX_REFERENCES:
-                gaps.append("Online bibliography scan exceeded its 2000-entry bound")
+                gaps.append(f"Online bibliography scan exceeded its {_MAX_REFERENCES}-entry bound")
                 break
             references.append(_entry_reference(document, entry))
     return references
@@ -786,8 +921,8 @@ def _bibliography_references(root: Path, paths: list[Path], gaps: list[str]) -> 
 
 def _source_links(
     inspection: SourceGraph, options: OnlineOptions, gaps: list[str]
-) -> tuple[list[Reference], bool]:
-    """Configured and literal source URLs; False when the link bound cut the scan short."""
+) -> list[Reference]:
+    """Configured and literal source URLs, up to the link bound."""
     links = [
         Reference(f"configured link {index}", None, None, "url", {"url": url})
         for index, url in enumerate(options.online_replication_urls, 1)
@@ -804,7 +939,7 @@ def _source_links(
             r"\\(url|nolinkurl)\b", lambda match: "\\" + match[1].capitalize(), source.text
         )
         try:
-            commands = scan_commands(mask_literals(text))
+            commands = scan_source_commands(text)
         except ParseLimitExceeded:
             gaps.append(f"{name}: URL command arguments are incomplete")
             continue
@@ -816,16 +951,15 @@ def _source_links(
                     continue
                 links.append(Reference("source link", name, command.line, "url", {"url": value}))
                 if len(links) >= _MAX_REFERENCES:
-                    gaps.append("Source-link scan exceeded its 2000-link bound")
-                    return links, False
-    return links, True
+                    gaps.append(f"Source-link scan exceeded its {_MAX_REFERENCES}-link bound")
+                    return links
+    return links
 
 
 def _collect(
     root: Path, main: str | None, options: OnlineOptions
 ) -> tuple[list[Reference], list[Reference], list[str]]:
-    if not root.is_dir():
-        raise PreparationError("Online reference input must be a directory")
+    require_directory(root, "Online reference input")
     gaps: list[str] = []
     # Both bibliography entries and source links are scoped by the selected graph.
     inspection = SourceGraph.build(root, main)
@@ -836,9 +970,7 @@ def _collect(
     )
     links: list[Reference] = []
     if options.online_replication_links:
-        links, complete = _source_links(inspection, options, gaps)
-        if not complete:
-            return references, links, gaps
+        links = _source_links(inspection, options, gaps)
     return references, links, sorted(set(gaps))
 
 
@@ -851,6 +983,7 @@ def _finding(
     severity: Severity = "warning",
     evidence: EvidenceKind = EvidenceKind.DIRECT,
     incomplete: bool = False,
+    suggestion: str | None = None,
     **details: Any,
 ) -> Finding:
     return Finding(
@@ -862,6 +995,7 @@ def _finding(
         line=reference.line,
         evidence_kind=evidence,
         incomplete=incomplete,
+        suggestion=suggestion,
         details={"citation_key": reference.key, **details},
     )
 
@@ -872,7 +1006,88 @@ def _fetch_details(result: Fetch) -> dict[str, Any]:
         "url": result.url,
         "http_status": result.response.status if result.response else None,
         "redirects": list(result.redirects),
+        "reason": result.message or None,
     }
+
+
+_OUTCOME_LABELS = {
+    FetchOutcome.HOST_UNRESOLVED: "host name could not be resolved",
+    FetchOutcome.TLS_FAILURE: "secure connection failed",
+}
+_NO_PROXY_NOTE = (
+    "This tool connects directly and does not use HTTP proxy settings, so a network "
+    "that only allows proxied access blocks these checks."
+)
+
+
+def _maximum(option: str) -> int:
+    return _OPTION_BOUNDS[option][1]
+
+
+def _outcome_label(outcome: FetchOutcome) -> str:
+    return _OUTCOME_LABELS.get(outcome) or outcome.replace("_", " ")
+
+
+def _fetch_summary(subject: str, result: Fetch) -> str:
+    """``subject``, the outcome in words and, in parentheses, the reason when one is known."""
+    text = f"{subject}: {_outcome_label(result.outcome)}"
+    return f"{text} ({result.message.rstrip('.')})" if result.message else text
+
+
+def _outcome_suggestion(result: Fetch) -> str | None:
+    """What to do about an outcome that is not a verdict on the link or record itself."""
+    outcome = result.outcome
+    if outcome is FetchOutcome.RATE_LIMITED:
+        return (
+            "The provider asked for fewer requests. Wait a few minutes and rerun, or raise "
+            "online_provider_interval_seconds to space the requests further apart."
+        )
+    if outcome is FetchOutcome.REQUEST_LIMIT:
+        return (
+            "The request budget for this run was used up before this entry. Raise "
+            f"online_max_requests (at most {_maximum('online_max_requests')}) in [online_checks] "
+            "and rerun."
+        )
+    if outcome is FetchOutcome.TIMEOUT:
+        return (
+            "The provider did not answer in time. Rerun later or raise online_timeout_seconds "
+            f"(at most {_maximum('online_timeout_seconds')}) in [online_checks]. {_NO_PROXY_NOTE}"
+        )
+    if outcome is FetchOutcome.TLS_FAILURE:
+        return (
+            "If every host fails this way, check that this Python can find your system's CA "
+            "certificates (python.org builds on macOS ship an 'Install Certificates.command'); "
+            "if only this host fails, its certificate is invalid and the site owner must fix it."
+        )
+    if outcome is FetchOutcome.HOST_UNRESOLVED:
+        return "Check the spelling of the host name and your network connection, then rerun."
+    if outcome is FetchOutcome.UNSAFE_TARGET:
+        return (
+            f"{result.message or 'This address cannot be requested'}. Correct the address if "
+            "it is a typo; otherwise it cannot be checked online."
+        )
+    if outcome is FetchOutcome.UNAVAILABLE:
+        return f"Rerun later; the provider or the network may be down. {_NO_PROXY_NOTE}"
+    if outcome in {FetchOutcome.ACCESS_DENIED, FetchOutcome.AUTHENTICATION_REQUIRED}:
+        return (
+            "The server refused an anonymous request. Open the address in a browser to confirm "
+            "that it works."
+        )
+    if outcome is FetchOutcome.REDIRECT_LIMIT:
+        return (
+            "Open the address in a browser. If its redirect chain is legitimately long, raise "
+            f"online_max_redirects (at most {_maximum('online_max_redirects')})."
+        )
+    if outcome is FetchOutcome.REDIRECT_LOOP:
+        return "The address redirects back to itself; correct it."
+    if outcome is FetchOutcome.RESPONSE_LIMIT:
+        return (
+            "The reply was larger than allowed. Raise online_max_response_bytes "
+            f"(at most {_maximum('online_max_response_bytes')})."
+        )
+    if outcome in {FetchOutcome.MALFORMED, FetchOutcome.IDENTIFIER_MISMATCH}:
+        return "The provider's reply was not usable; rerun later and compare the entry by hand."
+    return None
 
 
 # Link availability is decided only by these outcomes; any other is inconclusive.
@@ -889,10 +1104,11 @@ async def _health(client: _Client, reference: Reference, rule: str, url: str) ->
     return _finding(
         rule,
         reference,
-        f"URL check: {result.outcome.replace('_', ' ')}. "
+        f"{_fetch_summary('URL check', result)}. "
         "Availability does not establish identity or reproducibility.",
         status=status,
         severity="info" if status == "passed" else "warning",
+        suggestion=_outcome_suggestion(result) if status == "inconclusive" else None,
         **_fetch_details(result),
     )
 
@@ -980,40 +1196,177 @@ async def _metadata(client: _Client, url: str, *, items: bool = False) -> tuple[
 
 
 def _unavailable(rule: str, reference: Reference, fetched: Fetch) -> Finding:
+    suggestion = _outcome_suggestion(fetched)
+    if fetched.outcome in {FetchOutcome.NOT_FOUND, FetchOutcome.GONE}:
+        suggestion = (
+            "Check the DOI. Crossref does not hold DOIs registered by other agencies, such as "
+            "DataCite (used by Zenodo and arXiv)."
+        )
     return _finding(
         rule,
         reference,
-        f"Crossref lookup: {fetched.outcome.replace('_', ' ')}; "
-        "no metadata conclusion is available.",
+        f"{_fetch_summary('Crossref lookup', fetched)}; no metadata conclusion is available.",
+        suggestion=suggestion,
         provider="Crossref",
         **_fetch_details(fetched),
     )
 
 
-# Status and message of each metadata comparison outcome; {fields} lists mismatches.
-_METADATA_RESULTS: dict[str, tuple[Status, str]] = {
-    "mismatch": ("failed", "Metadata differences require review: {fields}"),
-    "incomplete": ("inconclusive", "Metadata comparison is incomplete."),
-    "agreement": ("passed", "Supported literal metadata agrees."),
+_METADATA_STATUS: dict[str, Status] = {
+    "mismatch": "failed",
+    "incomplete": "inconclusive",
+    "agreement": "passed",
 }
+_MAX_LISTED_DIFFERENCES = 2
+_MAX_LISTED_ITEMS = 3
+_MAX_QUOTED_CHARS = 80
+
+
+class _LocalName(NamedTuple):
+    """The family name of one BibTeX author, with and without its lowercase particles."""
+
+    full: str
+    last: str
+
+
+def _unbraced(text: str) -> str:
+    return text.replace("{", "").replace("}", "")
+
+
+def _starts_lowercase(word: str) -> bool:
+    return word[:1].islower()
+
+
+def _bibtex_words(text: str) -> list[str]:
+    """The words and separating commas of an author list; a braced group stays one word."""
+    words: list[str] = []
+    current: list[str] = []
+    depth = 0
+    for char in text:
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth = max(0, depth - 1)
+        if depth == 0 and (char.isspace() or char == ","):
+            if current:
+                words.append("".join(current))
+                current = []
+            if char == ",":
+                words.append(",")
+        else:
+            current.append(char)
+    if current:
+        words.append("".join(current))
+    return words
+
+
+def _family_name(words: list[str]) -> _LocalName | None:
+    """The family name of one author written as ``First von Last`` or ``von Last, First``."""
+    parts: list[list[str]] = [[]]
+    for word in words:
+        if word == ",":
+            parts.append([])
+        else:
+            parts[-1].append(word)
+    family = parts[0]
+    if not family:
+        return None
+    if len(parts) == 1:
+        # The von part runs from the first to the last lowercase word before the last word.
+        lowercase = [index for index, word in enumerate(family[:-1]) if _starts_lowercase(word)]
+        start = lowercase[0] if lowercase else len(family) - 1
+        last_start = lowercase[-1] + 1 if lowercase else len(family) - 1
+        family = family[start:]
+        last = family[last_start - start :]
+    else:
+        particles = 0
+        while particles < len(family) - 1 and _starts_lowercase(family[particles]):
+            particles += 1
+        last = family[particles:]
+    return _LocalName(_unbraced(" ".join(family)), _unbraced(" ".join(last)))
+
+
+def _parse_authors(text: str) -> tuple[list[_LocalName], bool] | None:
+    """Family names of a BibTeX author list; True when it ends in ``and others``."""
+    names: list[list[str]] = [[]]
+    for word in _bibtex_words(text):
+        if word.casefold() == "and":
+            names.append([])
+        else:
+            names[-1].append(word)
+    truncated = len(names) > 1 and [word.casefold() for word in names[-1]] == ["others"]
+    if truncated:
+        names.pop()
+    parsed = [_family_name(words) for words in names]
+    if not parsed or any(name is None for name in parsed):
+        return None
+    return [name for name in parsed if name is not None], truncated
+
+
+def _without_particles(family: str) -> str:
+    words = family.split()
+    while len(words) > 1 and _starts_lowercase(words[0]):
+        words.pop(0)
+    return " ".join(words)
+
+
+def _family_matches(name: _LocalName, remote: str) -> bool:
+    """Whether a Crossref family name equals the bibliography's, with or without particles."""
+    local_forms = {_normalized(name.full), _normalized(name.last)}
+    local_forms.add(_normalized(_without_particles(name.full)))
+    remote_forms = {_normalized(remote), _normalized(_without_particles(remote))}
+    return bool(local_forms & remote_forms)
+
+
+def _authors_agree(local: list[_LocalName], truncated: bool, remote: list[str]) -> bool:
+    """Same family names in order; a list ending in ``and others`` need match only its prefix."""
+    if truncated:
+        if len(local) > len(remote):
+            return False
+        remote = remote[: len(local)]
+    elif len(local) != len(remote):
+        return False
+    return all(_family_matches(name, family) for name, family in zip(local, remote, strict=True))
+
+
+def _quoted(values: list[str], *, others: bool = False) -> str:
+    text = ", ".join(values) if len(values) > 1 else (values[0] if values else "")
+    if others:
+        text += " and others"
+    if len(text) > _MAX_QUOTED_CHARS:
+        text = text[: _MAX_QUOTED_CHARS - 1] + "\u2026"
+    return repr(text)
+
+
+def _difference(field: str, row: dict[str, Any]) -> str:
+    return (
+        f"{field}: the entry has {_quoted(row['local'], others=row.get('local_truncated', False))}"
+        f" but Crossref has {_quoted(row['remote'])}"
+    )
+
+
+def _differences(comparisons: dict[str, dict[str, Any]], fields: list[str]) -> str:
+    """The first differing fields with the entry's and Crossref's value of each."""
+    listed = [_difference(field, comparisons[field]) for field in fields[:_MAX_LISTED_DIFFERENCES]]
+    if len(fields) > _MAX_LISTED_DIFFERENCES:
+        listed.append(f"and {len(fields) - _MAX_LISTED_DIFFERENCES} more field(s)")
+    return "; ".join(listed)
 
 
 def _compare_metadata(reference: Reference, work: dict[str, Any], source: str) -> Finding:
-    comparisons, missing = {}, []
+    comparisons: dict[str, dict[str, Any]] = {}
+    missing: list[str] = []
     remote_authors = _authors(work.get("author")) or []
-    local_author = reference.values.get("author")
-    local_authors = (
-        [
-            name.split(",", 1)[0].strip() if "," in name else name.split()[-1]
-            for name in re.split(r"\s+and\s+", local_author)
-            if name.strip()
-        ]
-        if local_author
-        else []
+    local_text = (
+        reference.author_text
+        if reference.author_text is not None
+        else reference.values.get("author")
     )
+    parsed = _parse_authors(local_text) if local_text else None
+    local_names, local_truncated = parsed or ([], False)
     pairs = {
         "title": ([reference.values.get("title")], _strings(work.get("title"))),
-        "authors": (local_authors, remote_authors),
+        "authors": ([name.full for name in local_names], remote_authors),
         "year": ([reference.values.get("year")], _years(work)),
         "venue": (
             [reference.values.get("journal") or reference.values.get("booktitle")],
@@ -1028,19 +1381,41 @@ def _compare_metadata(reference: Reference, work: dict[str, Any], source: str) -
         ):
             missing.append(field)
             continue
+        if field == "authors":
+            matches = _authors_agree(local_names, local_truncated, remote)
+            comparisons[field] = {
+                "local": local,
+                "remote": remote,
+                "matches": matches,
+                "local_truncated": local_truncated,
+            }
+            continue
         left, right = (
             [_normalized(value) for value in local if isinstance(value, str)],
             [_normalized(value) for value in remote if isinstance(value, str)],
         )
-        matches = left == right if field == "authors" else left[0] in right
-        comparisons[field] = {"local": local, "remote": remote, "matches": matches}
+        comparisons[field] = {"local": local, "remote": remote, "matches": left[0] in right}
     mismatch = [key for key, value in comparisons.items() if not value["matches"]]
     outcome = "mismatch" if mismatch else "incomplete" if missing else "agreement"
-    status, message = _METADATA_RESULTS[outcome]
+    status = _METADATA_STATUS[outcome]
+    key = reference.key
+    if outcome == "mismatch":
+        message = (
+            f"Entry {key!r} differs from its Crossref record "
+            f"({_differences(comparisons, mismatch)}). "
+            "Check which version is right before editing the entry."
+        )
+    elif outcome == "incomplete":
+        message = (
+            f"Entry {key!r}: the comparison with Crossref is incomplete because "
+            f"{', '.join(missing)} cannot be compared."
+        )
+    else:
+        message = f"Entry {key!r}: supported literal metadata agrees with Crossref."
     return _finding(
         "online.metadata",
         reference,
-        message.format(fields=", ".join(mismatch)),
+        message,
         status=status,
         severity="info" if status == "passed" else "warning",
         evidence=EvidenceKind.HEURISTIC,
@@ -1058,13 +1433,32 @@ def _compare_metadata(reference: Reference, work: dict[str, Any], source: str) -
     )
 
 
-_NO_CANDIDATE = (
-    "Crossref returned no candidate in the bounded search; this does not establish absence."
-)
-_PUBLISHED_CANDIDATES = (
-    "Review possible published-version candidates; title similarity does not establish identity."
-)
-_MISSING_DOI_CANDIDATES = "Review missing-DOI candidates; no bibliography was changed."
+_SEARCH_ROWS = 5
+_NOTICE_ROWS = 20
+
+
+def _unusable_reply(
+    fetched: Fetch, reason: str, outcome: FetchOutcome = FetchOutcome.MALFORMED
+) -> Fetch:
+    """``fetched`` replaced by a failure that says why the provider's reply was unusable."""
+    return Fetch(outcome, fetched.url, message=reason)
+
+
+def _candidate_list(candidates: list[dict[str, Any]]) -> str:
+    listed = [
+        f"{item['doi']} ({_quoted([item['title']])}, title match {item['title_similarity']:.0%})"
+        for item in candidates[:_MAX_LISTED_ITEMS]
+    ]
+    if len(candidates) > _MAX_LISTED_ITEMS:
+        listed.append(f"and {len(candidates) - _MAX_LISTED_ITEMS} more")
+    return "; ".join(listed)
+
+
+def _notice_list(notices: list[dict[str, Any]]) -> str:
+    listed = [f"{item['type']} notice {item['notice_doi']}" for item in notices[:_MAX_LISTED_ITEMS]]
+    if len(notices) > _MAX_LISTED_ITEMS:
+        listed.append(f"and {len(notices) - _MAX_LISTED_ITEMS} more")
+    return "; ".join(listed)
 
 
 async def _candidates(
@@ -1075,20 +1469,33 @@ async def _candidates(
         return _finding(
             rule,
             reference,
-            "A bounded literal title is required for candidate search.",
+            f"Entry {reference.key!r}: a literal title of at most 2048 characters is required "
+            "for the candidate search.",
             outcome="input_unavailable",
         )
-    url = _CROSSREF + "?" + urlencode({"query.bibliographic": title, "rows": 5})
+    url = _CROSSREF + "?" + urlencode({"query.bibliographic": title, "rows": _SEARCH_ROWS})
     message, fetched = await _metadata(client, url, items=True)
     if message is None:
         return _unavailable(rule, reference, fetched)
-    if len(message["items"]) > 5:
-        return _unavailable(rule, reference, Fetch(FetchOutcome.MALFORMED, fetched.url))
+    if len(message["items"]) > _SEARCH_ROWS:
+        return _unavailable(
+            rule,
+            reference,
+            _unusable_reply(
+                fetched, f"Crossref returned more than the {_SEARCH_ROWS} results asked for"
+            ),
+        )
     candidates: list[dict[str, Any]] = []
     for item in message["items"]:
         doi, titles = item.get("DOI"), _strings(item.get("title"))
         if not isinstance(doi, str) or _DOI.fullmatch(doi) is None or not titles:
-            return _unavailable(rule, reference, Fetch(FetchOutcome.MALFORMED, fetched.url))
+            return _unavailable(
+                rule,
+                reference,
+                _unusable_reply(
+                    fetched, "Crossref returned a result without a usable DOI or title"
+                ),
+            )
         if published and item.get("type") not in {
             "journal-article",
             "proceedings-article",
@@ -1099,7 +1506,11 @@ async def _candidates(
             continue
         authors = _authors(item.get("author", []))
         if authors is None:
-            return _unavailable(rule, reference, Fetch(FetchOutcome.MALFORMED, fetched.url))
+            return _unavailable(
+                rule,
+                reference,
+                _unusable_reply(fetched, "Crossref returned a result with unusable author names"),
+            )
         candidates.append(
             {
                 "doi": doi,
@@ -1117,20 +1528,32 @@ async def _candidates(
         )
     candidates.sort(key=lambda item: (-item["title_similarity"], item["doi"]))
     status: Status
+    key, listing = reference.key, _candidate_list(candidates)
     if not candidates:
-        outcome, status, message = "no_match", "passed", _NO_CANDIDATE
+        outcome, status = "no_match", "passed"
+        text = (
+            f"Entry {key!r}: Crossref returned no candidate in the bounded search; "
+            "this does not establish absence."
+        )
     elif published:
         # A published-version candidate is never more than a lead to review.
         outcome = "ambiguous_candidates" if len(candidates) > 1 else "candidate"
-        status, message = "inconclusive", _PUBLISHED_CANDIDATES
-    elif len(candidates) > 1:
-        outcome, status, message = "ambiguous_candidates", "inconclusive", _MISSING_DOI_CANDIDATES
+        status = "inconclusive"
+        text = (
+            f"Entry {key!r} may have a published version: {listing}. Title similarity does not "
+            "establish identity, so check each candidate."
+        )
     else:
-        outcome, status, message = "candidate", "failed", _MISSING_DOI_CANDIDATES
+        outcome = "ambiguous_candidates" if len(candidates) > 1 else "candidate"
+        status = "inconclusive" if len(candidates) > 1 else "failed"
+        text = (
+            f"Entry {key!r} has no DOI; Crossref suggests {listing}. Check each candidate "
+            "before adding a DOI; no bibliography was changed."
+        )
     return _finding(
         rule,
         reference,
-        message,
+        text,
         status=status,
         severity="info" if not candidates else "warning",
         evidence=EvidenceKind.HEURISTIC,
@@ -1138,7 +1561,7 @@ async def _candidates(
         provider="Crossref",
         source_url=fetched.url,
         candidates=candidates,
-        search_limit=5,
+        search_limit=_SEARCH_ROWS,
         identity_confirmed=False,
     )
 
@@ -1153,7 +1576,11 @@ def _preprint(reference: Reference) -> bool:
 
 
 async def _notices(client: _Client, reference: Reference) -> Finding:
-    url = _CROSSREF + "?" + urlencode({"filter": "updates:" + str(reference.doi), "rows": 20})
+    url = (
+        _CROSSREF
+        + "?"
+        + urlencode({"filter": "updates:" + str(reference.doi), "rows": _NOTICE_ROWS})
+    )
     message, fetched = await _metadata(client, url, items=True)
     if message is None:
         return _unavailable("online.notices", reference, fetched)
@@ -1168,7 +1595,11 @@ async def _notices(client: _Client, reference: Reference) -> Finding:
             or _DOI.fullmatch(doi) is None
         ):
             return _unavailable(
-                "online.notices", reference, Fetch(FetchOutcome.MALFORMED, fetched.url)
+                "online.notices",
+                reference,
+                _unusable_reply(
+                    fetched, "Crossref returned an update record that could not be read"
+                ),
             )
         matched = False
         for update in updates:
@@ -1180,12 +1611,22 @@ async def _notices(client: _Client, reference: Reference) -> Finding:
                 or not re.fullmatch(r"[A-Za-z][A-Za-z -]{0,127}", update["type"])
             ):
                 return _unavailable(
-                    "online.notices", reference, Fetch(FetchOutcome.MALFORMED, fetched.url)
+                    "online.notices",
+                    reference,
+                    _unusable_reply(
+                        fetched, "Crossref returned an update entry that could not be read"
+                    ),
                 )
             if update["DOI"].casefold() == str(reference.doi).casefold():
-                if len(notices) >= 20:
+                if len(notices) >= _NOTICE_ROWS:
                     return _unavailable(
-                        "online.notices", reference, Fetch(FetchOutcome.RESPONSE_LIMIT, fetched.url)
+                        "online.notices",
+                        reference,
+                        _unusable_reply(
+                            fetched,
+                            f"Crossref listed more than {_NOTICE_ROWS} notices",
+                            FetchOutcome.RESPONSE_LIMIT,
+                        ),
                     )
                 matched = True
                 notices.append(
@@ -1198,18 +1639,25 @@ async def _notices(client: _Client, reference: Reference) -> Finding:
                 )
         if not matched:
             return _unavailable(
-                "online.notices", reference, Fetch(FetchOutcome.IDENTIFIER_MISMATCH, fetched.url)
+                "online.notices",
+                reference,
+                _unusable_reply(
+                    fetched,
+                    "Crossref returned an update record that does not name this DOI",
+                    FetchOutcome.IDENTIFIER_MISMATCH,
+                ),
             )
     truncated = isinstance(message.get("total-results"), int) and message["total-results"] > len(
         message["items"]
     )
-    types = sorted({item["type"] for item in notices})
     return _finding(
         "online.notices",
         reference,
-        "Crossref reports update notices: " + ", ".join(types) + ". Read each attributed notice."
+        f"Entry {reference.key!r}: Crossref reports {_notice_list(notices)}. "
+        "Read each notice before citing this work."
         if notices
-        else "No Crossref update notice was returned; absence outside this provider is unverified.",
+        else f"Entry {reference.key!r}: no Crossref update notice was returned; "
+        "absence outside this provider is unverified.",
         status="inconclusive" if truncated else "failed" if notices else "passed",
         severity="warning" if notices or truncated else "info",
         incomplete=truncated,
@@ -1242,7 +1690,11 @@ async def _crossref_work(client: _Client, reference: Reference) -> tuple[Any, Fe
         return None, Fetch(FetchOutcome.INPUT_UNAVAILABLE, "")
     work, fetched = await _metadata(client, _CROSSREF + "/" + quote(reference.doi, safe=""))
     if work is not None and work["DOI"].casefold() != reference.doi.casefold():
-        return None, Fetch(FetchOutcome.IDENTIFIER_MISMATCH, fetched.url)
+        return None, _unusable_reply(
+            fetched,
+            "Crossref returned the record of a different DOI",
+            FetchOutcome.IDENTIFIER_MISMATCH,
+        )
     return work, fetched
 
 
@@ -1278,13 +1730,17 @@ async def _check_published_version(
     )
     if related and (not isinstance(related, list) or len(valid_related) != len(related)):
         return _unavailable(
-            "online.published_version", reference, Fetch(FetchOutcome.MALFORMED, fetched.url)
+            "online.published_version",
+            reference,
+            _unusable_reply(fetched, "Crossref returned a relation list that could not be read"),
         )
     if valid_related:
         return _finding(
             "online.published_version",
             reference,
-            "Crossref declares a published-version relation; review before changing the citation.",
+            f"Entry {reference.key!r}: Crossref declares a published version "
+            f"({', '.join(item['id'] for item in valid_related[:_MAX_LISTED_ITEMS])}). "
+            "Review it before changing the citation.",
             status="failed",
             provider="Crossref",
             source_url=fetched.url,
