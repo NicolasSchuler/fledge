@@ -9,13 +9,18 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
+from typing import Literal
 
-from .errors import PreparationError
-from .file_safety import MIB
+from .comment_markers import MarkerCategory, marker_pattern
+from .errors import SettingsError
 from .findings import Finding, Status, has_blockers
+from .limits import MIB
+from .option_config import require_pairs, validate_scalars
+from .path_safety import is_relative_posix_path
 from .report import Change, ChangeKind
 from .source import lint_sources
 from .source_graph import ArgumentLocation, SourceGraph
+from .tex_commands import ROOT_SUFFIXES
 from .tex_lexer import (
     MAX_SOURCE_BYTES,
     MAX_TOTAL_SOURCE_BYTES,
@@ -26,7 +31,7 @@ from .tex_lexer import (
     scan_source_commands,
     source_regions,
 )
-from .text_edits import unified_diff_text
+from .text_edits import TextEdit, apply_text_edits, unified_diff_text, with_bom
 
 # Comments read by tools rather than people, which comment removal must keep.
 _DIRECTIVE = re.compile(
@@ -44,53 +49,42 @@ _DIRECTIVE = re.compile(
 _LICENSE = re.compile(
     r"\b(?:copyright|license|licence|SPDX|LPPL|public domain|all rights reserved)\b", re.I
 )
-_PRIVATE = re.compile(r"\b(?:TODO|FIXME|XXX|private|internal|confidential|note to self)\b", re.I)
+_PRIVATE = marker_pattern(MarkerCategory.EDIT_MARKER, MarkerCategory.PRIVACY_KEYWORD)
 _FORMAT_MARKER = re.compile(r"^%\s*(?:tex-fmt|fmt|fledge|latex-prep)\s*:\s*(off|on)\b", re.I)
-# Comment editing stays inside authored document sources; class, style and
-# generated template internals are copied verbatim.
-_EDITABLE_SUFFIXES = {".tex", ".ltx", ".latex"}
 
 
-def _relative(value: str) -> bool:
-    path = PurePosixPath(value)
-    return (
-        bool(value)
-        and not path.is_absolute()
-        and ".." not in path.parts
-        and not any(character in value for character in "\\\x00\r\n")
-        and not re.match(r"^[A-Za-z]:", value)
-    )
+CommentPolicy = Literal["retain", "private", "all"]
+
+
+def _require_relative_path(name: str, value: object) -> None:
+    if not isinstance(value, str) or not is_relative_posix_path(
+        value, normalized=False, characters="no_line_breaks"
+    ):
+        raise SettingsError(f"{name} must be a path relative to the project", (name,))
 
 
 @dataclass(frozen=True)
 class SourceTransformOptions:
-    comment_policy: str = "retain"
+    comment_policy: CommentPolicy = "retain"
     merge_inputs: bool = False
     inline_bibliography: str | None = None
     filename_overrides: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
-        if self.comment_policy not in {"retain", "private", "all"}:
-            raise PreparationError("comment_policy must be retain, private or all")
-        if type(self.merge_inputs) is not bool:
-            raise PreparationError("merge_inputs must be a boolean")
-        if self.inline_bibliography is not None and (
-            not isinstance(self.inline_bibliography, str)
-            or not _relative(self.inline_bibliography)
-            or PurePosixPath(self.inline_bibliography).suffix != ".bbl"
-        ):
-            raise PreparationError("inline_bibliography must be a project-relative .bbl path")
-        if not isinstance(self.filename_overrides, tuple) or any(
-            not isinstance(pair, tuple)
-            or len(pair) != 2
-            or not all(isinstance(value, str) and _relative(value) for value in pair)
-            for pair in self.filename_overrides
-        ):
-            raise PreparationError(
-                "filename_overrides must map project paths to relative filenames"
-            )
-        if len({pair[0] for pair in self.filename_overrides}) != len(self.filename_overrides):
-            raise PreparationError("filename_overrides must use unique source paths")
+        validate_scalars(self)
+        if self.inline_bibliography is not None:
+            _require_relative_path("inline_bibliography", self.inline_bibliography)
+            if PurePosixPath(self.inline_bibliography).suffix != ".bbl":
+                raise SettingsError(
+                    "inline_bibliography must be a project-relative .bbl path",
+                    ("inline_bibliography",),
+                )
+        require_pairs(
+            "filename_overrides",
+            self.filename_overrides,
+            first=_require_relative_path,
+            second=_require_relative_path,
+        )
 
 
 @dataclass
@@ -143,7 +137,7 @@ def protected_spans(text: str) -> tuple[list[tuple[int, int]], bool]:
 def _remove_comments(text: str, policy: str) -> tuple[str, int, bool]:
     regions, unclosed = source_regions(text)
     protected, uncertain = protected_spans(text)
-    edits: list[tuple[int, int]] = []
+    edits: list[TextEdit] = []
     for start, end, kind in regions:
         if kind != "comment" or any(left <= start < right for left, right in protected):
             continue
@@ -152,10 +146,8 @@ def _remove_comments(text: str, policy: str) -> tuple[str, int, bool]:
         # Retain '%' and its original line terminator: removing either may join
         # tokens, introduce a space, or turn a comment-only line into a paragraph.
         if end > start + 1:
-            edits.append((start + 1, end))
-    for start, end in reversed(edits):
-        text = text[:start] + text[end:]
-    return text, len(edits), bool(unclosed) or uncertain
+            edits.append(TextEdit(start + 1, end, ""))
+    return apply_text_edits(text, edits), len(edits), bool(unclosed) or uncertain
 
 
 def _problem(
@@ -227,7 +219,7 @@ def _merge_inputs(graph: SourceGraph, texts: dict[str, str], plan: SourceTransfo
         # removal deletes only bodies the lexer masks anyway, so the proposal has the
         # inspected command sequence; pair each command with its inspected original.
         commands = scan_source_commands(text)
-        edits: list[tuple[int, int, str]] = []
+        edits: list[TextEdit] = []
         for index, command in enumerate(commands):
             if has_blockers(plan.findings):
                 break
@@ -297,11 +289,9 @@ def _merge_inputs(graph: SourceGraph, texts: dict[str, str], plan: SourceTransfo
                     name,
                 )
                 return text
-            edits.append((start, end, replacement))
+            edits.append(TextEdit(start, end, replacement))
             merged.add(target)
-        for start, end, replacement in reversed(edits):
-            text = text[:start] + replacement + text[end:]
-        return text
+        return apply_text_edits(text, edits)
 
     if graph.main is None:
         return
@@ -426,7 +416,9 @@ def plan_source_transforms(
                 plan, "source.comment_removal", "Some source files could not be parsed safely."
             )
         for name, text in list(texts.items()):
-            if PurePosixPath(name).suffix.lower() not in _EDITABLE_SUFFIXES:
+            # Comment editing stays inside authored document sources; class, style and
+            # generated template internals are copied verbatim.
+            if PurePosixPath(name).suffix.lower() not in ROOT_SUFFIXES:
                 continue
             commands = graph.sources[name].commands
             if any(command.name in {"catcode", "scantokens", "csname"} for command in commands):
@@ -474,9 +466,7 @@ def plan_source_transforms(
         return plan
     for name in sorted(plan.removals):
         source = graph.sources[name]
-        plan.removal_originals[name] = (
-            b"\xef\xbb\xbf" if source.bom else b""
-        ) + source.text.encode("utf-8")
+        plan.removal_originals[name] = with_bom(source.text, source.bom).encode("utf-8")
         plan.changes.append(
             Change(
                 name,
@@ -487,7 +477,7 @@ def plan_source_transforms(
     for name, text in texts.items():
         if name in plan.removals or text == graph.sources[name].text:
             continue
-        encoded = (b"\xef\xbb\xbf" if graph.sources[name].bom else b"") + text.encode("utf-8")
+        encoded = with_bom(text, graph.sources[name].bom).encode("utf-8")
         if len(encoded) > MAX_SOURCE_BYTES:
             _problem(
                 plan,
@@ -498,9 +488,7 @@ def plan_source_transforms(
             break
         plan.contents[name] = encoded
         original = graph.sources[name]
-        plan.originals[name] = (b"\xef\xbb\xbf" if original.bom else b"") + original.text.encode(
-            "utf-8"
-        )
+        plan.originals[name] = with_bom(original.text, original.bom).encode("utf-8")
         plan.changes.append(
             Change(
                 name,

@@ -162,7 +162,7 @@ async def run_documents(context: JobContext, report: Report) -> list[DocumentRes
         import_project,
         request.source,
         context.work / "shared-import",
-        ImportLimits(settings.max_files, settings.max_bytes, settings.max_depth),
+        ImportLimits.from_settings(settings),
     )
     report.findings.extend(imported.findings)
     report.changes.extend(imported.changes)

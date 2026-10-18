@@ -10,15 +10,15 @@ from functools import partial
 from pathlib import Path
 from typing import Any, NamedTuple, TypeVar, cast
 
-from .cancellation import cancellation_point, run_in_thread
+from .cancellation import run_in_thread
 from .errors import PreparationError
+from .file_safety import FileTooLargeError, read_regular_file
 from .findings import Finding
 from .pdf_previews import (
-    MIN_PNG_BYTES,
     PdfPreviewCollector,
     PdfPreviewStore,
     PreviewLimitError,
-    png_dimensions,
+    preview_dimensions,
 )
 from .pdf_support import (
     COMPARISON_DPI,
@@ -31,40 +31,29 @@ from .pdf_support import (
     page_count,
     parse_page_sizes,
     pdf_input,
+    pdfinfo_argv,
     pdfinfo_fields,
-    read_rgb_raster,
+    raster_filename,
+    render_page_argv,
     require_comparison_raster_fit,
     require_rendered_pages,
     unavailable_finding,
 )
+from .png_support import MIN_PNG_BYTES
+from .raster_pixels import RasterImage, count_changed_pixels, read_pnm_raster
 from .resource_budget import ResourceBudget
 from .runtime import CommandResult, CommandRunner
 from .workflow_options import ComparisonOptions
 
 _T = TypeVar("_T")
 _RENDER_HEADROOM_MB = 128
-_PIXEL_CHUNK = 3 * 1024  # a whole number of RGB pixels
+# Page counts and geometry (pdfinfo), text (pdftotext) and renders (pdftoppm).
+COMPARISON_TOOLS = frozenset({"pdfinfo", "pdftotext", "pdftoppm"})
 _SIDES = ("left", "right")
 
 
 def _unavailable(rule: str, error: Exception, details: dict[str, object] | None = None) -> Finding:
     return unavailable_finding(rule, error, suggestion=TOOL_FAILURE_SUGGESTION, details=details)
-
-
-def _render_argv(page: int, side: str, *output_options: str) -> list[str]:
-    return [
-        "pdftoppm",
-        *output_options,
-        "-r",
-        str(COMPARISON_DPI),
-        "-f",
-        str(page),
-        "-l",
-        str(page),
-        "-singlefile",
-        pdf_input(side),
-        "page",
-    ]
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,7 +112,7 @@ def _comparable_page_sizes(output: str, pages: int) -> list[tuple[float, float]]
 
 async def _prepare_side(session: PdfToolSession, name: str) -> _ComparisonSide:
     document = pdf_input(name)
-    info = await session.run(f"{name}/properties", ["pdfinfo", document])
+    info = await session.run(f"{name}/properties", pdfinfo_argv(document))
     pages = page_count(pdfinfo_fields(info.stdout))
     require_rendered_pages(pages)
     geometry, text = await gather_measurements(
@@ -167,23 +156,6 @@ def _pair_memory_mb(left: tuple[float, float], right: tuple[float, float]) -> in
     return math.ceil(3 * pixels / 1_048_576) + _RENDER_HEADROOM_MB
 
 
-def _changed_pixels(left: bytes, right: bytes, channel_tolerance: int) -> int:
-    count = 0
-    for start in range(0, len(left), _PIXEL_CHUNK):
-        cancellation_point()
-        stop = min(len(left), start + _PIXEL_CHUNK)
-        if left[start:stop] == right[start:stop]:
-            # Identical bytes cannot exceed any tolerance; scan only differing chunks.
-            continue
-        for offset in range(start, stop, 3):
-            if any(
-                abs(left[offset + channel] - right[offset + channel]) > channel_tolerance
-                for channel in range(3)
-            ):
-                count += 1
-    return count
-
-
 @dataclass(frozen=True, slots=True)
 class _PageRenders:
     """What every page-pair render of one comparison shares."""
@@ -196,24 +168,29 @@ class _PageRenders:
 async def _rendered_difference(renders: _PageRenders, page: int) -> dict[str, object] | None:
     session = renders.session
     name = f"page-{page:04d}"
-    rasters: list[tuple[tuple[int, int], bytes]] = []
+    rasters: list[RasterImage] = []
     try:
         for side in _SIDES:
             await session.run_without_lease(
-                f"{name}/{side}", _render_argv(page, side), memory_mb=_RENDER_HEADROOM_MB
+                f"{name}/{side}",
+                render_page_argv(page, COMPARISON_DPI, "rgb", pdf_input(side)),
+                memory_mb=_RENDER_HEADROOM_MB,
             )
-            path = session.work / name / side / "command/page.ppm"
+            path = session.work / name / side / "command" / raster_filename("rgb")
             rasters.append(
-                read_rgb_raster(
-                    path, max_pixels=_raster_pixel_count(renders.dimensions[side][page - 1])
+                read_pnm_raster(
+                    path,
+                    channels=3,
+                    max_pixels=_raster_pixel_count(renders.dimensions[side][page - 1]),
                 )
             )
             path.unlink()
-        (size_left, pixels_left), (size_right, pixels_right) = rasters
+        left, right = rasters
+        size_left, size_right = (left.width, left.height), (right.width, right.height)
         dimensions_changed = (
             renders.dimensions["left"][page - 1] != renders.dimensions["right"][page - 1]
         )
-        if size_left == size_right and pixels_left == pixels_right and not dimensions_changed:
+        if left == right and not dimensions_changed:
             return None
         measurement: dict[str, object] = {
             "page": page,
@@ -224,7 +201,7 @@ async def _rendered_difference(renders: _PageRenders, page: int) -> dict[str, ob
         options = renders.options
         if options is not None and size_left == size_right and not dimensions_changed:
             changed_pixels = await run_in_thread(
-                _changed_pixels, pixels_left, pixels_right, options.channel_tolerance
+                count_changed_pixels, left, right, options.channel_tolerance
             )
             ratio = changed_pixels / (size_left[0] * size_left[1])
             measurement.update(
@@ -437,18 +414,22 @@ async def _capture_png(
             if maximum < MIN_PNG_BYTES:
                 raise PreviewLimitError("Insufficient PNG preview or tool file byte allowance")
             await session.run_without_lease(
-                name, _render_argv(page, side, "-png"), memory_mb=_RENDER_HEADROOM_MB
+                name,
+                render_page_argv(page, COMPARISON_DPI, "png", pdf_input(side)),
+                memory_mb=_RENDER_HEADROOM_MB,
             )
-            path = session.work / name / "command/page.png"
-            if not path.is_file() or path.is_symlink():
-                raise PreparationError("Preview renderer did not produce a regular PNG image")
-            if path.stat().st_size > maximum:
-                raise PreviewLimitError("PNG image exceeds the preview or tool file byte limit")
-            with path.open("rb") as stream:
-                data = stream.read(maximum + 1)
-            if len(data) > maximum:
-                raise PreviewLimitError("PNG image exceeds the preview or tool file byte limit")
-            pixels = png_dimensions(data)
+            path = session.work / name / "command" / raster_filename("png")
+            try:
+                data = read_regular_file(path, maximum)
+            except FileTooLargeError:
+                raise PreviewLimitError(
+                    "PNG image exceeds the preview or tool file byte limit"
+                ) from None
+            except OSError:
+                raise PreparationError(
+                    "Preview renderer did not produce a regular PNG image"
+                ) from None
+            pixels = preview_dimensions(data)
             if pixels[0] * pixels[1] > _raster_pixel_count(size):
                 raise PreparationError("Preview PNG dimensions exceed the geometry reservation")
             return store.add_image(slot, side, data), pixels

@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from latexprep.errors import PreparationError
-from latexprep.pdf_comparison import _changed_pixels, compare_pdfs
+from latexprep.pdf_comparison import compare_pdfs
 from latexprep.pdf_inspection import PdfInspectionOptions, inspect_pdf
 from latexprep.pdf_support import (
     COMPARISON_DPI,
@@ -198,38 +198,6 @@ class PdfTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(is_type3(value), value)
         for value in ("Type 1", "Type 1C", "Type 30", "CID Type 3C", "TrueType", ""):
             self.assertFalse(is_type3(value), value)
-
-    def test_changed_pixels_matches_a_per_pixel_reference_across_chunk_boundaries(self) -> None:
-        def reference(left: bytes, right: bytes, tolerance: int) -> int:
-            return sum(
-                any(abs(left[i + c] - right[i + c]) > tolerance for c in range(3))
-                for i in range(0, len(left), 3)
-            )
-
-        # More than two 1024-pixel chunks, ending inside a partial chunk.
-        pixels = 2 * 1024 + 517
-        left = bytes((index * 7) % 256 for index in range(3 * pixels))
-        right = bytearray(left)
-        # Differences straddling chunk edges, in a lone channel, and within tolerance.
-        for pixel, channel, delta in (
-            (0, 0, 9),
-            (1023, 2, 1),
-            (1024, 1, 5),
-            (1025, 0, 2),
-            (2047, 1, 200),
-            (2048, 2, 3),
-            (pixels - 1, 0, 40),
-        ):
-            offset = 3 * pixel + channel
-            right[offset] = (right[offset] + delta) % 256
-        right = bytes(right)
-        for tolerance in (0, 1, 2, 5, 255):
-            with self.subTest(tolerance=tolerance):
-                self.assertEqual(
-                    _changed_pixels(left, right, tolerance), reference(left, right, tolerance)
-                )
-        self.assertEqual(_changed_pixels(left, left, 0), 0)
-        self.assertEqual(_changed_pixels(b"", b"", 0), 0)
 
     async def test_inspection_supports_documents_beyond_the_rendering_cap(self) -> None:
         findings = await inspect_pdf(

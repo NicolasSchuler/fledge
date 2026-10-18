@@ -15,58 +15,75 @@ from collections.abc import Awaitable, Callable, Collection, Iterator
 from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
+from typing import ClassVar
 
-from .errors import PreparationError
+from .errors import PreparationError, SettingsError
 from .findings import Finding, Severity
-from .option_config import require_booleans
+from .option_config import (
+    NONNEGATIVE_NUMBER,
+    NONZERO_FRACTION,
+    POSITIVE_INTEGER,
+    POSITIVE_NUMBER,
+    Bounds,
+    TextFormat,
+    require_choice,
+    require_integers,
+    require_numbers,
+    require_pairs,
+    require_records,
+    require_text,
+    require_unique_strings,
+    validate_scalars,
+)
 from .pdf_support import (
     COLOR_OPERATIONS,
-    DOCUMENT,
+    CONTRAST_RATIO_BOUNDS,
     MAX_FIGURE_INPUTS,
     MAX_MEASUREMENT_DIMENSION,
-    MAX_MEASUREMENT_DPI,
     MAX_MEASUREMENT_PIXELS,
     MAX_PAIR_CHECKS,
     MAX_PARSED_NODES,
+    MAX_REGIONS_PER_POLICY,
     MAX_SAMPLES,
     METADATA_FIELDS,
-    MIN_MEASUREMENT_DPI,
+    RASTER_SAMPLING_BOUNDS,
     PageFrames,
+    PdfPreflight,
     PdfRegion,
     PdfToolSession,
     QpdfObjectGraph,
     contains,
+    evaluate_font_policy,
     exceeds_measurement_raster,
     finite_number,
     font_inventory,
+    font_inventory_argv,
     heuristic_finding,
     intersection_area,
-    is_type3,
     layout_text_argv,
     measurement_finding,
     measurement_raster_size,
     mupdf_trace_argv,
-    open_measurement_session,
+    open_pdf_session,
     page_boxes_argv,
-    page_count,
     page_frames,
     parse_mupdf_trace,
     parse_page_sizes,
     parse_tool_xml,
-    pdfinfo_properties,
+    preflight_pdf,
     qpdf_objects_argv,
-    read_gray_raster,
+    read_measurement_raster,
     relative_luminance,
-    require_distinct_strings,
-    require_number,
     require_rendered_pages,
+    split_text_pages,
+    text_geometry_argv,
     unavailable_finding,
 )
+from .raster_pixels import InkMask
 from .resource_budget import ResourceBudget
 from .runtime import CommandResult, CommandRunner
 
-_PROPERTIES_ARGV = ("pdfinfo", "-enc", "UTF-8", "-isodates", DOCUMENT)
-# Rules measured from one evidence source; doctor maps them to optional tools.
+# Rules measured from one evidence source; required_pdf_check_tools maps them to tools.
 TEXT_GEOMETRY_RULES = frozenset(
     {"pdf.rendered_text_size", "pdf.printable_text_bounds", "pdf.text_overlap"}
 )
@@ -81,6 +98,8 @@ PAINT_TRACE_RULES = frozenset(
         "pdf.grayscale_separation",
     }
 )
+# A PDF name as /Name is written, without the slash: annotation subtypes and action types.
+_PDF_NAME = re.compile(r"[A-Za-z][A-Za-z0-9]*")
 _LAYOUT_SCOPE = (
     "Extractable Poppler text boxes only. Outlined/raster text, figures, tables, "
     "equations and clipping paths are not identified semantically."
@@ -89,25 +108,37 @@ _LAYOUT_SCOPE = (
 
 @dataclass(frozen=True)
 class PdfSectionBudget:
+    FIELD_BOUNDS: ClassVar[dict[str, Bounds]] = {
+        "start_page": POSITIVE_INTEGER,
+        "end_page": POSITIVE_INTEGER,
+        "max_pages": POSITIVE_INTEGER,
+    }
+
     name: str
     start_page: int
     end_page: int
     max_pages: int
 
     def __post_init__(self) -> None:
-        require_distinct_strings((self.name,), "Section name")
-        if (
-            any(
-                type(n) is not int or n < 1
-                for n in (self.start_page, self.end_page, self.max_pages)
-            )
-            or self.start_page > self.end_page
-        ):
-            raise PreparationError("Section budgets need positive, ordered inclusive page ranges")
+        require_text("name", self.name)
+        validate_scalars(self)
+        if self.start_page > self.end_page:
+            raise SettingsError("end_page must not be before start_page")
 
 
 @dataclass(frozen=True)
 class PdfCheckOptions:
+    FIELD_BOUNDS: ClassVar[dict[str, Bounds]] = {
+        **RASTER_SAMPLING_BOUNDS,
+        "min_text_size_pt": POSITIVE_NUMBER,
+        "geometry_tolerance_pt": NONNEGATIVE_NUMBER,
+        "overlap_min_area_ratio": NONZERO_FRACTION,
+        "min_page_ink_ratio": NONZERO_FRACTION,
+        "min_grayscale_luminance_difference": NONZERO_FRACTION,
+        "min_stroke_width_pt": POSITIVE_NUMBER,
+        "min_text_contrast": CONTRAST_RATIO_BOUNDS,
+    }
+
     section_budgets: tuple[PdfSectionBudget, ...] = ()
     min_text_size_pt: float | None = None
     text_size_regions: tuple[PdfRegion, ...] = ()
@@ -136,109 +167,74 @@ class PdfCheckOptions:
     forbid_type3_figure_fonts: bool = False
 
     def __post_init__(self) -> None:
-        require_booleans(
-            self,
-            "require_tagged",
-            "require_language",
-            "require_embedded_figure_fonts",
-            "forbid_type3_figure_fonts",
+        validate_scalars(self)
+        self._validate_regions()
+        self._validate_geometry()
+        self._validate_contrast()
+        self._validate_metadata()
+        self._validate_names()
+
+    def _validate_regions(self) -> None:
+        require_records(
+            "section_budgets",
+            self.section_budgets,
+            PdfSectionBudget,
+            max_items=MAX_REGIONS_PER_POLICY,
         )
-        for name, kind in (
-            ("section_budgets", PdfSectionBudget),
-            ("text_size_regions", PdfRegion),
-            ("printable_regions", PdfRegion),
-        ):
-            values = getattr(self, name)
-            if not isinstance(values, tuple) or any(not isinstance(v, kind) for v in values):
-                raise PreparationError(f"{name} must be an immutable tuple of {kind.__name__}")
-            if len(values) > 300:
-                raise PreparationError(f"{name} exceeds the 300-entry configuration limit")
+        for name in ("text_size_regions", "printable_regions"):
+            require_records(name, getattr(self, name), PdfRegion, max_items=MAX_REGIONS_PER_POLICY)
         if any(region.min_text_size_pt is None for region in self.text_size_regions):
-            raise PreparationError("Every text-size region needs a minimum text size")
-        for name in ("min_text_size_pt", "min_stroke_width_pt"):
-            if getattr(self, name) is not None:
-                require_number(getattr(self, name), name)
-        require_number(self.geometry_tolerance_pt, "Geometry tolerance", allow_zero=True)
-        for name in (
-            "overlap_min_area_ratio",
-            "min_page_ink_ratio",
-            "min_grayscale_luminance_difference",
-        ):
-            value = getattr(self, name)
-            if value is not None:
-                require_number(value, name)
-                if value > 1:
-                    raise PreparationError(f"{name} cannot exceed one")
-        if self.min_text_contrast is not None:
-            require_number(self.min_text_contrast, "Minimum text contrast")
-            if not 1 <= self.min_text_contrast <= 21 or self.contrast_background_rgb is None:
-                raise PreparationError(
-                    "Text contrast requires a ratio from 1 to 21 and background RGB"
-                )
-        if self.contrast_background_rgb is not None:
-            if (
-                not isinstance(self.contrast_background_rgb, tuple)
-                or len(self.contrast_background_rgb) != 3
-            ):
-                raise PreparationError(
-                    "Contrast background RGB must have three immutable components"
-                )
-            for value in self.contrast_background_rgb:
-                require_number(value, "Contrast background component", allow_zero=True)
-                if value > 1:
-                    raise PreparationError("Contrast background components must be in [0, 1]")
-        if self.printable_margins_pt is not None:
-            if (
-                not isinstance(self.printable_margins_pt, tuple)
-                or len(self.printable_margins_pt) != 4
-            ):
-                raise PreparationError("Printable margins must be (left, top, right, bottom)")
-            for value in self.printable_margins_pt:
-                require_number(value, "Printable margins", allow_zero=True)
-        if not isinstance(self.sparse_page_exemptions, tuple) or any(
-            type(page) is not int or page < 1 for page in self.sparse_page_exemptions
-        ):
-            raise PreparationError("Sparse-page exemptions must be a tuple of positive pages")
-        if (
-            type(self.raster_dpi) is not int
-            or not MIN_MEASUREMENT_DPI <= self.raster_dpi <= MAX_MEASUREMENT_DPI
-        ):
-            raise PreparationError(
-                f"Raster DPI must be an integer from {MIN_MEASUREMENT_DPI} to {MAX_MEASUREMENT_DPI}"
+            raise SettingsError(
+                "Every text_size_regions entry needs min_text_size_pt", ("text_size_regions",)
             )
-        if type(self.background_gray) is not int or not 0 <= self.background_gray <= 255:
-            raise PreparationError("Background gray must be an integer from 0 to 255")
-        if type(self.ink_difference) is not int or not 1 <= self.ink_difference <= 255:
-            raise PreparationError("Ink difference must be an integer from 1 to 255")
-        for name in (
-            "required_metadata",
-            "forbidden_annotation_types",
-            "forbidden_action_types",
-            "allowed_color_spaces",
-        ):
-            require_distinct_strings(getattr(self, name), name)
-        if not set(self.required_metadata) <= METADATA_FIELDS:
-            raise PreparationError("Required metadata must name supported pdfinfo text fields")
-        if not isinstance(self.expected_metadata, tuple) or any(
-            not isinstance(pair, tuple)
-            or len(pair) != 2
-            or not isinstance(pair[0], str)
-            or pair[0] not in METADATA_FIELDS
-            or not isinstance(pair[1], str)
-            or not pair[1].strip()
-            or "\0" in pair[1]
-            for pair in self.expected_metadata
-        ):
-            raise PreparationError(
-                "Expected metadata needs immutable (supported field, value) pairs"
+
+    def _validate_geometry(self) -> None:
+        require_numbers(
+            "printable_margins_pt",
+            self.printable_margins_pt,
+            count=4,
+            minimum=0,
+            description="(left, top, right, bottom)",
+            allow_none=True,
+        )
+        require_integers("sparse_page_exemptions", self.sparse_page_exemptions, minimum=1)
+
+    def _validate_contrast(self) -> None:
+        require_numbers(
+            "contrast_background_rgb",
+            self.contrast_background_rgb,
+            count=3,
+            minimum=0,
+            maximum=1,
+            description="(red, green, blue)",
+            allow_none=True,
+        )
+        if self.min_text_contrast is not None and self.contrast_background_rgb is None:
+            raise SettingsError(
+                "min_text_contrast requires contrast_background_rgb",
+                ("min_text_contrast", "contrast_background_rgb"),
             )
-        if len({key for key, _ in self.expected_metadata}) != len(self.expected_metadata):
-            raise PreparationError("Expected metadata fields cannot repeat")
-        if self.expected_language is not None:
-            require_distinct_strings((self.expected_language,), "Expected language")
+
+    def _validate_metadata(self) -> None:
+        require_unique_strings("required_metadata", self.required_metadata, choices=METADATA_FIELDS)
+        require_pairs(
+            "expected_metadata",
+            self.expected_metadata,
+            first=partial(require_choice, choices=sorted(METADATA_FIELDS)),
+            second=require_text,
+        )
+        require_text("expected_language", self.expected_language, allow_none=True)
+
+    def _validate_names(self) -> None:
         for name in ("forbidden_annotation_types", "forbidden_action_types"):
-            if any(not re.fullmatch(r"[A-Za-z][A-Za-z0-9]*", item) for item in getattr(self, name)):
-                raise PreparationError(f"{name} uses PDF names without a leading slash")
+            require_unique_strings(
+                name,
+                getattr(self, name),
+                item_format=TextFormat(_PDF_NAME, "a PDF name without a leading slash"),
+            )
+        require_unique_strings(
+            "allowed_color_spaces", self.allowed_color_spaces, allow_surrounding_whitespace=True
+        )
 
 
 def configured_pdf_check_rules(options: PdfCheckOptions) -> list[str]:
@@ -269,6 +265,23 @@ def figure_font_checks_enabled(options: PdfCheckOptions) -> bool:
     return options.require_embedded_figure_fonts or options.forbid_type3_figure_fonts
 
 
+def required_pdf_check_tools(options: PdfCheckOptions) -> set[str]:
+    """The external tools the configured measurements run, for setup diagnostics."""
+    rules = set(configured_pdf_check_rules(options))
+    tools = {"pdfinfo"} if rules else set()
+    if rules & TEXT_GEOMETRY_RULES:
+        tools.add("pdftohtml")
+    if rules & OBJECT_STRUCTURE_RULES:
+        tools.add("qpdf")
+    if rules & PAINT_TRACE_RULES:
+        tools.add("mutool")
+    if options.min_page_ink_ratio is not None:
+        tools.add("pdftoppm")
+    if figure_font_checks_enabled(options):
+        tools.add("pdffonts")
+    return tools
+
+
 async def extract_pdf_evidence(
     pdf: Path,
     work: Path,
@@ -281,19 +294,15 @@ async def extract_pdf_evidence(
     Empty pages remain empty evidence, not proof of anonymity or readability.
     No PDF text or metadata is copied into diagnostic messages by this helper.
     """
-    session = await open_measurement_session(pdf, work, runner, budget)
-    fields = await session.measure(
-        "properties", _PROPERTIES_ARGV, lambda result: pdfinfo_properties(result.stdout)
-    )
-    pages = page_count(fields)
+    preflight = await PdfPreflight.open(pdf, work, runner, budget)
 
     def extract(result: CommandResult) -> str:
-        if result.stdout.count("\f") != pages:
-            raise PreparationError("Text extraction did not report every PDF page boundary")
+        # Only the page boundaries are validated; the privacy scan reads the text as extracted.
+        split_text_pages(result.stdout, preflight.pages)
         return result.stdout
 
-    text = await session.measure("text", layout_text_argv(), extract)
-    return text, fields
+    text = await preflight.session.measure("text", layout_text_argv(), extract)
+    return text, preflight.fields
 
 
 def _metadata_findings(fields: dict[str, str], options: PdfCheckOptions) -> list[Finding]:
@@ -644,22 +653,9 @@ async def _layout_measurement(
         page_boxes_argv(pages),
         lambda execution: page_frames(execution.stdout, pages),
     )
-    # -i excludes image extraction, -nomerge preserves smaller text boxes.
     return await session.measure(
         "text-geometry",
-        [
-            "pdftohtml",
-            "-xml",
-            "-stdout",
-            "-i",
-            "-zoom",
-            "1",
-            "-noroundcoord",
-            "-nomerge",
-            "-enc",
-            "UTF-8",
-            DOCUMENT,
-        ],
+        text_geometry_argv(),
         lambda execution: _layout_findings(_text_pages(execution.stdout, pages), frames, options),
     )
 
@@ -671,7 +667,8 @@ def _ink_coverage(
     options: PdfCheckOptions,
     max_file_bytes: int,
 ) -> tuple[int, int, float]:
-    width, height, pixels = read_gray_raster(path, max_file_bytes)
+    image = read_measurement_raster(path, channels=1, max_file_bytes=max_file_bytes)
+    width, height = image.width, image.height
     if not (
         all(
             abs(actual - target) <= 1
@@ -683,8 +680,8 @@ def _ink_coverage(
         )
     ):
         raise PreparationError("Rendered dimensions disagree with the page-size preflight")
-    ink = sum(abs(value - options.background_gray) >= options.ink_difference for value in pixels)
-    return width, height, ink / len(pixels)
+    ink = InkMask.from_gray(image, options.background_gray, options.ink_difference).count()
+    return width, height, ink / len(image.data)
 
 
 def _percent(ratio: float) -> str:
@@ -1148,15 +1145,11 @@ async def inspect_pdf_details(
     configured = configured_pdf_check_rules(options)
     if not configured:
         return []
-    try:
-        session = await open_measurement_session(pdf, work, runner, budget)
-        fields = await session.measure(
-            "properties", _PROPERTIES_ARGV, lambda execution: pdfinfo_properties(execution.stdout)
-        )
-        pages = page_count(fields)
-    except (PreparationError, OSError) as error:
-        return [unavailable_finding(rule, error) for rule in configured]
-    result = [*_metadata_findings(fields, options), *_section_findings(pages, options)]
+    preflight = await preflight_pdf(pdf, work, runner, budget, configured)
+    if isinstance(preflight, list):
+        return preflight
+    session, pages = preflight.session, preflight.pages
+    result = [*_metadata_findings(preflight.fields, options), *_section_findings(pages, options)]
     if layout_rules := [rule for rule in configured if rule in TEXT_GEOMETRY_RULES]:
         result.extend(
             await _findings_or_unavailable(
@@ -1194,12 +1187,13 @@ async def inspect_pdf_details(
 
 def _figure_font_finding(execution: CommandResult, *, options: PdfCheckOptions) -> Finding:
     inventory = font_inventory(execution.stdout)
-    violations: list[object] = [
-        font
-        for font in inventory
-        if (options.require_embedded_figure_fonts and not font["embedded"])
-        or (options.forbid_type3_figure_fonts and is_type3(font["type"]))
-    ]
+    violations: list[object] = list(
+        evaluate_font_policy(
+            inventory,
+            require_embedded=options.require_embedded_figure_fonts,
+            forbid_type3=options.forbid_type3_figure_fonts,
+        ).violations
+    )
     # A figure without font resources (outlined or raster-only text) cannot
     # violate an embedding or Type 3 policy.
     return measurement_finding(
@@ -1241,10 +1235,10 @@ async def inspect_included_pdf_figures(
     result = []
     for index, figure in enumerate(dict.fromkeys(figures), 1):
         try:
-            session = await open_measurement_session(figure, work / str(index), runner, budget)
+            session = await open_pdf_session(figure, work / str(index), runner, budget)
             finding = await session.measure(
                 "fonts",
-                ["pdffonts", DOCUMENT],
+                font_inventory_argv(),
                 partial(_figure_font_finding, options=figure_options),
             )
         except (PreparationError, OSError) as error:

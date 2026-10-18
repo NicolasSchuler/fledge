@@ -11,6 +11,7 @@ from typing import Any, Literal, get_args
 
 from .cancellation import complete_despite_cancellation
 from .errors import PreparationError
+from .limits import DEFAULT_LEASE_MEMORY_MB
 
 # Expensive tool classes with their own concurrency limit inside the shared budget.
 ResourceClass = Literal["build", "render"]
@@ -104,7 +105,7 @@ class ResourceBudget:
         name: str,
         *,
         cpu: int = 1,
-        memory_mb: int = 64,
+        memory_mb: int = DEFAULT_LEASE_MEMORY_MB,
         kind: ResourceClass | None = None,
     ):
         self.validate(cpu=cpu, memory_mb=memory_mb, kind=kind)

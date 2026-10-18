@@ -13,24 +13,25 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
-from typing import NamedTuple
+from typing import ClassVar, NamedTuple
 
-from .errors import PreparationError
+from .errors import PreparationError, SettingsError
 from .findings import EvidenceKind, Finding
+from .option_config import NONNEGATIVE_NUMBER, POSITIVE_NUMBER, Bounds, validate_scalars
 from .pdf_support import (
-    DOCUMENT,
     TOOL_FAILURE_SUGGESTION,
+    attachment_list_argv,
+    evaluate_font_policy,
     font_inventory,
+    font_inventory_argv,
     gather_measurements,
+    image_list_argv,
     inventory_rows,
-    is_type3,
     layout_text_argv,
     normalized_text_pages,
-    open_inspection_session,
     page_boxes_argv,
-    page_count,
     parse_page_sizes,
-    pdfinfo_fields,
+    preflight_pdf,
     unavailable_finding,
 )
 from .resource_budget import ResourceBudget
@@ -55,6 +56,13 @@ _POLICY_SUGGESTIONS = {
 
 @dataclass(frozen=True)
 class PdfInspectionOptions:
+    FIELD_BOUNDS: ClassVar[dict[str, Bounds]] = {
+        "expected_page_width_pt": POSITIVE_NUMBER,
+        "expected_page_height_pt": POSITIVE_NUMBER,
+        "page_size_tolerance_pt": NONNEGATIVE_NUMBER,
+        "min_image_dpi": POSITIVE_NUMBER,
+    }
+
     expected_page_width_pt: float | None = None
     expected_page_height_pt: float | None = None
     page_size_tolerance_pt: float = 1.0
@@ -68,40 +76,12 @@ class PdfInspectionOptions:
     forbid_attachments: bool = False
 
     def __post_init__(self) -> None:
-        for value in (
-            self.require_consistent_page_size,
-            self.require_embedded_fonts,
-            self.forbid_type3_fonts,
-            self.forbid_encryption,
-            self.forbid_forms,
-            self.forbid_javascript,
-            self.forbid_attachments,
-        ):
-            if type(value) is not bool:
-                raise PreparationError("PDF policy switches must be booleans")
+        validate_scalars(self)
         if (self.expected_page_width_pt is None) != (self.expected_page_height_pt is None):
-            raise PreparationError("Expected PDF width and height must be supplied together")
-        for value in (
-            self.expected_page_width_pt,
-            self.expected_page_height_pt,
-            self.min_image_dpi,
-        ):
-            if value is not None and (
-                isinstance(value, bool)
-                or not isinstance(value, (int, float))
-                or not math.isfinite(value)
-                or value <= 0
-            ):
-                raise PreparationError(
-                    "PDF dimensions and image resolution must be positive finite numbers"
-                )
-        if (
-            isinstance(self.page_size_tolerance_pt, bool)
-            or not isinstance(self.page_size_tolerance_pt, (int, float))
-            or not math.isfinite(self.page_size_tolerance_pt)
-            or self.page_size_tolerance_pt < 0
-        ):
-            raise PreparationError("PDF page-size tolerance must be a nonnegative finite number")
+            raise SettingsError(
+                "expected_page_width_pt and expected_page_height_pt must be set together",
+                ("expected_page_width_pt", "expected_page_height_pt"),
+            )
 
 
 def configured_policy_rules(options: PdfInspectionOptions, max_pages: int | None) -> list[str]:
@@ -309,7 +289,12 @@ def _feature_findings(fields: dict[str, str], options: PdfInspectionOptions) -> 
 def _font_findings(output: str, context: _InspectionContext) -> list[Finding]:
     options = context.options
     inventory = font_inventory(output)
-    missing = [font["name"] for font in inventory if not font["embedded"]]
+    fonts = evaluate_font_policy(
+        inventory,
+        require_embedded=options.require_embedded_fonts,
+        forbid_type3=options.forbid_type3_fonts,
+    )
+    missing = [font["name"] for font in fonts.nonembedded]
     findings = [
         Finding(
             "pdf.fonts",
@@ -348,7 +333,7 @@ def _font_findings(output: str, context: _InspectionContext) -> list[Finding]:
                 )
             )
     if options.forbid_type3_fonts:
-        type3 = [font for font in inventory if is_type3(font["type"])]
+        type3 = fonts.type3
         findings.append(
             _policy_finding(
                 "pdf.type3_fonts",
@@ -547,7 +532,7 @@ _GEOMETRY = _Measurement(
 _INVENTORIES = (
     _Measurement(
         "fonts",
-        lambda _pages: ["pdffonts", DOCUMENT],
+        lambda _pages: font_inventory_argv(),
         "pdf.fonts_unavailable",
         ("pdf.font_embedding", "pdf.type3_fonts"),
         _font_findings,
@@ -557,19 +542,28 @@ _INVENTORIES = (
     ),
     _Measurement(
         "attachments",
-        lambda _pages: ["pdfdetach", "-list", DOCUMENT],
+        lambda _pages: attachment_list_argv(),
         "pdf.attachments_unavailable",
         ("pdf.attachments_policy",),
         _attachment_findings,
     ),
     _Measurement(
         "images",
-        lambda _pages: ["pdfimages", "-list", DOCUMENT],
+        lambda _pages: image_list_argv(),
         "pdf.images_unavailable",
         ("pdf.image_resolution",),
         _image_findings,
     ),
 )
+
+
+def required_inspection_tools() -> set[str]:
+    """The external tools of the inspection, which runs every measurement above.
+
+    Each tool is the command of a measurement's argument list, so the set cannot drift
+    from what the inspection runs; pdfinfo also reads the document properties first.
+    """
+    return {"pdfinfo", *(item.argv(1)[0] for item in (_GEOMETRY, *_INVENTORIES))}
 
 
 def _evaluate(
@@ -625,13 +619,19 @@ async def inspect_pdf(
     """Measure a PDF and evaluate only explicitly configured acceptance constraints."""
     options = options or PdfInspectionOptions()
     configured = configured_policy_rules(options, max_pages)
-    try:
-        session = await open_inspection_session(pdf, work, runner, budget)
-        info = await session.run("properties", ["pdfinfo", "-isodates", DOCUMENT])
-        fields = pdfinfo_fields(info.stdout)
-        pages = page_count(fields)
-    except (PreparationError, OSError) as error:
-        return [_unavailable(rule, error) for rule in ["pdf.inspection_unavailable", *configured]]
+    # The inspection runs under exactly the supplied budget; its failures name the tool step.
+    preflight = await preflight_pdf(
+        pdf,
+        work,
+        runner,
+        budget,
+        ["pdf.inspection_unavailable", *configured],
+        default_to_runner_budget=False,
+        suggestion=TOOL_FAILURE_SUGGESTION,
+    )
+    if isinstance(preflight, list):
+        return preflight
+    session, fields, pages = preflight.session, preflight.fields, preflight.pages
     context = _InspectionContext(pages, options, frozenset(configured))
     measurements = (_GEOMETRY, *_INVENTORIES)
     outcomes = await gather_measurements(

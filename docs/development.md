@@ -308,6 +308,16 @@ scheduling of tasks, and
 {download}`process_control.py <../src/latexprep/process_control.py>` the start
 and kill helpers for child processes.
 
+Option dataclasses validate in `__post_init__` with the kit in
+{download}`option_config.py <../src/latexprep/option_config.py>`, which also
+converts TOML tables into those classes. `validate_scalars` checks every boolean,
+integer, number and `Literal` field against its annotation and the limits in the
+class's `FIELD_BOUNDS`; `require_unique_strings`, `require_text`, `require_pairs`
+and their siblings check lists and text. A wrong type and an out-of-range value
+therefore give the same message, which names the key as a settings file spells it
+and states the accepted range. Write each limit once, as a named constant with its
+unit, and build the message from it rather than repeating the number.
+
 For normal preparation, online checks run once on the fresh archive extraction;
 source inspection and dry runs use the initial snapshot. Preserve the request
 budget per document when changing this dispatch. Controlled tests should make
@@ -328,9 +338,29 @@ that graph into one document whose offsets map back to file and line
 (`expand_document`), and
 {download}`literal_text.py <../src/latexprep/literal_text.py>` holds the shared
 command tables and plain-text reading used by manuscript, author-record and
-submission-text checks. Checks that scan every supplied file use the bounded
-inventory, reads, comment extraction and redaction in
-{download}`file_scan.py <../src/latexprep/file_scan.py>`. Bibliography checks,
+submission-text checks. The vocabularies those readers have in common (TeX file
+suffixes, math markers, macro-definition and citation commands) are in
+{download}`tex_commands.py <../src/latexprep/tex_commands.py>`, and the wording of
+unfinished-work and private-note markers is in
+{download}`comment_markers.py <../src/latexprep/comment_markers.py>`. Add a command
+or phrase there, not as a private list in a check.
+{download}`text_safety.py <../src/latexprep/text_safety.py>` escapes untrusted text
+for the terminal, HTML reports, CI annotations and one-line messages. Checks that
+scan every supplied file use the bounded inventory, per-scan byte budget, comment
+extraction and redaction in
+{download}`file_scan.py <../src/latexprep/file_scan.py>`. Every read of a
+project, build or bibliography file goes through `read_regular_file` or
+`read_file_prefix` in {download}`file_safety.py <../src/latexprep/file_safety.py>`,
+which opens the file without following a final link, checks the opened
+descriptor and never reads past its limit; do not reopen a file with
+`Path.read_bytes` after checking its size. Path rules live in
+{download}`path_safety.py <../src/latexprep/path_safety.py>`:
+`is_relative_posix_path` validates a project-relative name with explicit options
+(normalized spelling, whether `.` is allowed, how unusual characters are treated,
+a per-segment pattern), and `is_contained` and `is_link_free_regular_file` decide
+containment. The byte units and the few limits that several modules share are in
+{download}`limits.py <../src/latexprep/limits.py>`; a limit that one module uses
+stays beside its code. Bibliography checks,
 transformations and online lookups share the bounded BibTeX reader in
 {download}`bibtex_syntax.py <../src/latexprep/bibtex_syntax.py>` and the literal
 citation graph of the selected main file in
@@ -339,7 +369,20 @@ citation graph of the selected main file in
 PDF checkers share
 {download}`pdf_support.py <../src/latexprep/pdf_support.py>`: a tool session that
 freezes the inputs and runs each Poppler, qpdf or MuPDF command in its own
-directory, the parsers for their output, and the builders for measurement and
-unavailable-evidence findings. Sharing further parsed
+directory, the one argument builder for each tool command, the parsers for their
+output, the preflight (document, properties and page count) that marks every configured
+rule unavailable when it fails, and the builders for measurement and
+unavailable-evidence findings. A session remembers each completed read-only
+measurement by its arguments, so two checks that need the same output run the tool
+once. Each PDF adapter module states the external tools of its configured checks
+(`required_pdf_check_tools`, `required_artwork_tools`, `required_structure_tools`,
+`required_inspection_tools`, `COMPARISON_TOOLS`), and `fledge doctor` unions them.
+Binary image handling sits in two leaf modules that import no tool, runtime or
+scheduler code:
+{download}`png_support.py <../src/latexprep/png_support.py>` (the PNG encoder,
+validator, strict chunk walker and header reader) and
+{download}`raster_pixels.py <../src/latexprep/raster_pixels.py>` (the bounded PNM
+reader and the ink, extrema and changed-pixel analysis, which use only
+C-speed byte operations). Sharing further parsed
 evidence between checkers is a future maintenance tradeoff; extending a check does
 not require a new plugin framework.

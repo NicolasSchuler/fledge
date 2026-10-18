@@ -15,8 +15,8 @@ from types import TracebackType
 from typing import Self
 
 from .errors import PreparationError, RequestError
-from .file_safety import is_contained_regular_file
 from .findings import Finding
+from .path_safety import is_contained
 from .report import Outcome, Report
 
 # Workspace preview images and the published path of each.
@@ -275,7 +275,7 @@ def plan_previews(report: Report, work: Path, destination: Path) -> PreviewPlan:
                 continue
             path = Path(name)
             if path not in paths:
-                if path.suffix != ".png" or not is_contained_regular_file(work, path):
+                if path.suffix != ".png" or not is_contained(work, path, regular_file=True):
                     raise PreparationError("Preview adapter returned an invalid artifact")
                 if path.stat().st_size > _MAX_PREVIEW_BYTES or len(paths) >= _MAX_PREVIEWS:
                     raise PreparationError("Preview artifacts exceed bounded export limits")

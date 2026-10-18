@@ -27,6 +27,23 @@ class ManuscriptTests(unittest.TestCase):
         findings = check_manuscript(self.root, "main.tex", options)
         return next(item for item in findings if item.rule == rule)
 
+    def test_a_reference_that_resolves_differently_by_path_context_leaves_counts_inconclusive(
+        self,
+    ) -> None:
+        self.write("a/result.pdf", "a")
+        self.write("b/result.pdf", "b")
+        self.write("body.tex", r"\includegraphics{result.pdf}")
+        result = self.finding(
+            "\\documentclass{article}\n\\begin{document}\n"
+            "\\begin{abstract}Short text.\\end{abstract}\n"
+            "\\graphicspath{{a/}}\\input{body}\n\\graphicspath{{b/}}\\input{body}\n"
+            "\\end{document}\n",
+            ManuscriptOptions(abstract_max_words=5),
+            "manuscript.abstract_words",
+        )
+        self.assertEqual(result.status, "inconclusive")
+        self.assertIn("different path contexts", result.message)
+
     def test_expected_document_class_matches_and_mismatch_blocks(self) -> None:
         options = ManuscriptOptions(expected_document_class="article")
         for name, status in (("article", "passed"), ("report", "failed")):
@@ -602,11 +619,11 @@ class ManuscriptTests(unittest.TestCase):
             ({"require_abstract": "yes"}, "require_abstract must be a boolean"),
             (
                 {"required_sections": ("",)},
-                "required_sections must contain nonempty strings without surrounding spaces",
+                "required_sections must be a list of nonempty strings",
             ),
             (
                 {"forbidden_packages": ("amsmath", "todonotes", "amsmath")},
-                "forbidden_packages lists 'amsmath' twice",
+                "forbidden_packages lists 'amsmath' more than once",
             ),
             (
                 {"forbidden_class_options": ("a,b",)},

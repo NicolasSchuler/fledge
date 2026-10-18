@@ -21,7 +21,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Literal, NamedTuple
+from typing import ClassVar, Literal, NamedTuple
 from urllib.parse import urlsplit
 
 from .bibtex_syntax import (
@@ -56,11 +56,22 @@ from .citation_graph import (
     selected_bibliography,
     uncertainty_messages,
 )
-from .errors import PreparationError
-from .file_scan import more_suffix, read_regular_file
+from .errors import PreparationError, SettingsError
+from .file_safety import read_regular_file
+from .file_scan import more_suffix
 from .findings import EvidenceKind, Finding, Severity, Status
-from .option_config import require_booleans
-from .source_graph import SourceGraph
+from .limits import CANCELLATION_STRIDE_CHARS, MIB
+from .option_config import (
+    NONZERO_FRACTION,
+    Bounds,
+    TextFormat,
+    require_pairs,
+    require_text,
+    require_unique_strings,
+    validate_scalars,
+)
+from .source_graph import UNPARSED_SOURCE_RULES, SourceGraph
+from .tex_commands import ROOT_SUFFIXES
 
 _MONTHS = frozenset("jan feb mar apr may jun jul aug sep oct nov dec".split())
 # BibTeX styles define their own string macros. The standard styles (and the natbib and
@@ -73,7 +84,7 @@ _BASE_STYLE_MACROS = frozenset(
 _BASE_STYLES = frozenset(
     "plain unsrt alpha abbrv ieeetr acm siam apalike plainnat unsrtnat abbrvnat".split()
 )
-_MAX_STYLE_BYTES = 2 * 1024 * 1024
+_MAX_STYLE_BYTES = 2 * MIB
 _STYLE_MACRO = re.compile(r"^[ \t]*MACRO[ \t]*\{[ \t]*([^\s{}]+)[ \t]*\}", re.MULTILINE)
 _MAX_ROOTS = 32
 _MAX_FUZZY_ENTRIES = 2_000
@@ -81,16 +92,6 @@ _MAX_FUZZY_PAIRS = 20_000
 _MAX_FUZZY_TEXT = 2_000
 _MAX_LISTED_ENTRIES = 3
 _INHERITANCE = frozenset({"crossref", "xref", "xdata"})
-# Source findings on a .tex file that leave all-root discovery incomplete.
-_DISCOVERY_FAILURES = frozenset(
-    {
-        "source.encoding",
-        "source.size_limit",
-        "source.argument_limit",
-        "source.command_limit",
-        "source.link",
-    }
-)
 _SELECTION_UNAVAILABLE = "No complete bibliography resource selection is available"
 
 
@@ -455,8 +456,36 @@ def check_bibliography_integrity(root: Path, main: str | None = None) -> list[Fi
 # --- Citation coverage and field details ------------------------------------------
 
 
+_ENTRY_TYPE_OR_ANY = TextFormat(
+    re.compile(rf"\*|{LOWERCASE_NAME.pattern}"), "a lowercase entry type or '*'"
+)
+# A field name, or alternatives of which one suffices, such as "doi|url".
+_FIELD_OR_ALTERNATIVES = TextFormat(
+    re.compile(rf"{LOWERCASE_NAME.pattern}(?:\|{LOWERCASE_NAME.pattern})*"),
+    "a lowercase field name or alternatives such as 'doi|url'",
+)
+
+
+def _require_entry_type(name: str, value: object) -> None:
+    require_text(
+        name, value, expected=_ENTRY_TYPE_OR_ANY.description, pattern=_ENTRY_TYPE_OR_ANY.pattern
+    )
+
+
+def _require_field_alternatives(name: str, specs: object) -> None:
+    require_unique_strings(name, specs, item_format=_FIELD_OR_ALTERNATIVES)
+    if not isinstance(specs, tuple) or not specs:
+        raise SettingsError(f"{name} must list at least one field", (name,))
+    for spec in specs:
+        alternatives = spec.split("|")
+        if len(set(alternatives)) != len(alternatives):
+            raise SettingsError(f"{name} entry {spec!r} repeats an alternative", (name,))
+
+
 @dataclass(frozen=True)
 class BibliographyOptions:
+    FIELD_BOUNDS: ClassVar[dict[str, Bounds]] = {"fuzzy_duplicate_threshold": NONZERO_FRACTION}
+
     check_citation_coverage: bool = True
     check_uncited_entries: bool = True
     all_roots: bool = False
@@ -469,54 +498,16 @@ class BibliographyOptions:
     fuzzy_duplicate_threshold: float = 0.93
 
     def __post_init__(self) -> None:
-        require_booleans(
-            self,
-            "check_citation_coverage",
-            "check_uncited_entries",
-            "all_roots",
-            "check_page_ranges",
-            "check_urls",
-            "check_capitalization",
-            "check_fuzzy_duplicates",
+        validate_scalars(self)
+        require_unique_strings(
+            "doi_entry_types", self.doi_entry_types, item_format=_ENTRY_TYPE_OR_ANY
         )
-        threshold = self.fuzzy_duplicate_threshold
-        if type(threshold) not in {float, int} or not 0 < threshold <= 1:
-            raise PreparationError("fuzzy_duplicate_threshold must be greater than 0 and at most 1")
-        if (
-            not isinstance(self.doi_entry_types, tuple)
-            or any(
-                not isinstance(value, str) or (value != "*" and not LOWERCASE_NAME.fullmatch(value))
-                for value in self.doi_entry_types
-            )
-            or len(set(self.doi_entry_types)) != len(self.doi_entry_types)
-        ):
-            raise PreparationError("doi_entry_types must be unique lowercase entry types or '*'")
-        if not isinstance(self.required_fields, tuple):
-            raise PreparationError("required_fields must be a tuple of entry-type and field tuples")
-        kinds: set[str] = set()
-        for row in self.required_fields:
-            if not isinstance(row, tuple) or len(row) != 2:
-                raise PreparationError("Each required_fields row must contain a type and fields")
-            kind, fields = row
-            if not isinstance(kind, str) or (kind != "*" and not LOWERCASE_NAME.fullmatch(kind)):
-                raise PreparationError("Required-field entry types must be lowercase or '*'")
-            if kind in kinds:
-                raise PreparationError("Required-field entry types must be unique")
-            kinds.add(kind)
-            if (
-                not isinstance(fields, tuple)
-                or not fields
-                or any(
-                    not isinstance(spec, str)
-                    or any(not LOWERCASE_NAME.fullmatch(name) for name in spec.split("|"))
-                    or len(set(spec.split("|"))) != len(spec.split("|"))
-                    for spec in fields
-                )
-                or len(set(fields)) != len(fields)
-            ):
-                raise PreparationError(
-                    "Required fields must be unique lowercase names or 'field|alternative'"
-                )
+        require_pairs(
+            "required_fields",
+            self.required_fields,
+            first=_require_entry_type,
+            second=_require_field_alternatives,
+        )
 
     @property
     def any_enabled(self) -> bool:
@@ -906,7 +897,7 @@ def _unprotected_tokens(value: str) -> list[str]:
     depth = 0
     plain: list[str] = []
     for index, char in enumerate(value):
-        if index % 4096 == 0:
+        if index % CANCELLATION_STRIDE_CHARS == 0:
             cancellation_point()
         if char == "{":
             depth += 1
@@ -1154,8 +1145,8 @@ def _all_root_graphs(
     for item in inspection.findings:
         if (
             item.path
-            and Path(item.path).suffix.lower() in {".tex", ".ltx", ".latex"}
-            and item.rule in _DISCOVERY_FAILURES
+            and Path(item.path).suffix.lower() in ROOT_SUFFIXES
+            and item.rule in UNPARSED_SOURCE_RULES
         ):
             uncertainties.append(
                 Uncertainty(f"All-root discovery is incomplete: {item.path}: {item.message}")

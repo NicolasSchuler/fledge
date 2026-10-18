@@ -367,6 +367,45 @@ class DoctorTests(unittest.IsolatedAsyncioTestCase):
         report = await run_doctor(Settings())
         self.assertNotIn("mutool", report.tools)
 
+    async def test_text_geometry_checks_list_pdftohtml_as_an_advisory_tool(self):
+        from latexprep.pdf_checks import PdfCheckOptions
+
+        for options in (
+            PdfCheckOptions(min_text_size_pt=8),
+            PdfCheckOptions(printable_margins_pt=(10, 10, 10, 10)),
+            PdfCheckOptions(overlap_min_area_ratio=0.5),
+        ):
+            with self.subTest(options=options):
+                report = await run_doctor(Settings(pdf_checks=options))
+                self.assertTrue(report.tools["pdftohtml"]["installed"])
+                self.assertFalse(report.tools["pdftohtml"]["required"])
+        report = await run_doctor(Settings())
+        self.assertNotIn("pdftohtml", report.tools)
+
+    def test_configured_checks_select_the_tools_their_adapters_name(self):
+        from latexprep.doctor import _selected_tools
+        from latexprep.pdf_artwork import PdfArtworkOptions
+        from latexprep.pdf_checks import PdfCheckOptions
+        from latexprep.pdf_structure_checks import StructureOptions
+
+        required, optional = _selected_tools(Settings())
+        self.assertLessEqual(
+            {"pdfinfo", "pdftotext", "pdftoppm", "pdffonts", "pdfdetach", "pdfimages"}, required
+        )
+        self.assertFalse({"qpdf", "mutool", "pdftohtml"} & (required | optional))
+        required, optional = _selected_tools(
+            Settings(
+                pdf_checks=PdfCheckOptions(
+                    require_language=True, min_stroke_width_pt=0.1, overlap_min_area_ratio=0.5
+                ),
+                structure_checks=StructureOptions(check_table_structure=True),
+                included_figure_artwork=PdfArtworkOptions(classify_type3_glyphs=True),
+            )
+        )
+        # The automatic bibliography strategy lists its two backends as advisory tools too.
+        self.assertEqual(optional - {"bibtex", "biber"}, {"qpdf", "mutool", "pdftohtml"})
+        self.assertFalse(optional & required)
+
     async def test_cancellation_propagates_to_the_active_work(self):
         started = asyncio.Event()
         cancelled = asyncio.Event()

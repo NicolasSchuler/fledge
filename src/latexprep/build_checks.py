@@ -2,25 +2,52 @@
 
 from __future__ import annotations
 
-import math
 import re
 from dataclasses import asdict, dataclass
+from functools import partial
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any, ClassVar, NamedTuple
 
 from .build_dependencies import PACKAGE_FILENAME, LoadedPackage, parse_declared_date
 from .cancellation import bounded_map, cancellation_point
-from .errors import PreparationError
+from .errors import PreparationError, SettingsError
 from .findings import EvidenceKind, Finding, Status
 from .latexmk_build import BuildResult
 from .loaded_options import loaded_options_unavailable
+from .option_config import (
+    NONNEGATIVE_NUMBER,
+    Bounds,
+    TextFormat,
+    require_pairs,
+    require_text,
+    require_unique_strings,
+    validate_scalars,
+)
 from .resource_budget import ResourceBudget
 from .runtime import CommandRunner
 from .setting_choices import ENGINES
 
+# The first TeX Live release was 1996; the upper bound only rejects an obvious typo.
+MIN_TEXLIVE_YEAR = 1996
+MAX_TEXLIVE_YEAR = 2100
+_PACKAGE_FILENAME_FORMAT = TextFormat(PACKAGE_FILENAME, "a literal .sty or .cls filename")
+_PACKAGE_FILENAME_TEXT = partial(
+    require_text, expected=_PACKAGE_FILENAME_FORMAT.description, pattern=PACKAGE_FILENAME
+)
+
+
+def _require_declared_date(name: str, value: object) -> None:
+    if not isinstance(value, str) or parse_declared_date(value) is None:
+        raise SettingsError(f"{name} must be a date written YYYY-MM-DD or YYYY/MM/DD", (name,))
+
 
 @dataclass(frozen=True)
 class BuildCheckOptions:
+    FIELD_BOUNDS: ClassVar[dict[str, Bounds]] = {
+        "overfull_tolerance_pt": NONNEGATIVE_NUMBER,
+        "expected_texlive_year": Bounds(MIN_TEXLIVE_YEAR, MAX_TEXLIVE_YEAR),
+    }
+
     overfull_tolerance_pt: float | None = None
     inventory_loaded_packages: bool = False
     inventory_loaded_options: bool = False
@@ -32,63 +59,36 @@ class BuildCheckOptions:
     expected_texlive_year: int | None = None
 
     def __post_init__(self) -> None:
-        if self.overfull_tolerance_pt is not None and (
-            isinstance(self.overfull_tolerance_pt, bool)
-            or not isinstance(self.overfull_tolerance_pt, (int, float))
-            or not math.isfinite(self.overfull_tolerance_pt)
-            or self.overfull_tolerance_pt < 0
-        ):
-            raise PreparationError("overfull_tolerance_pt must be a finite nonnegative number")
-        if self.expected_texlive_year is not None and (
-            type(self.expected_texlive_year) is not int
-            or not 1996 <= self.expected_texlive_year <= 2100
-        ):
-            raise PreparationError("expected_texlive_year must be a four-digit TeX Live year")
+        validate_scalars(self)
         for name in (
-            "inventory_loaded_packages",
-            "inventory_loaded_options",
-            "check_local_package_shadows",
+            "allowed_loaded_packages",
+            "forbidden_loaded_packages",
+            "required_loaded_packages",
         ):
-            if type(getattr(self, name)) is not bool:
-                raise PreparationError(f"{name} must be a boolean")
-        for names in (
-            self.allowed_loaded_packages,
-            self.forbidden_loaded_packages,
-            self.required_loaded_packages,
-        ):
-            if names is None:
-                continue
-            if (
-                not isinstance(names, tuple)
-                or any(
-                    not isinstance(name, str) or not PACKAGE_FILENAME.fullmatch(name)
-                    for name in names
-                )
-                or len(set(names)) != len(names)
-            ):
-                raise PreparationError(
-                    "Loaded package policies require unique literal .sty/.cls filenames"
-                )
+            require_unique_strings(
+                name,
+                getattr(self, name),
+                item_format=_PACKAGE_FILENAME_FORMAT,
+                allow_none=name == "allowed_loaded_packages",
+            )
+        require_pairs(
+            "minimum_package_dates",
+            self.minimum_package_dates,
+            first=_PACKAGE_FILENAME_TEXT,
+            second=_require_declared_date,
+        )
         if set(self.required_loaded_packages) & set(self.forbidden_loaded_packages):
-            raise PreparationError("A loaded package cannot be both required and forbidden")
+            raise SettingsError(
+                "A loaded package cannot be both required and forbidden",
+                ("required_loaded_packages", "forbidden_loaded_packages"),
+            )
         if self.allowed_loaded_packages is not None and set(self.required_loaded_packages) - set(
             self.allowed_loaded_packages
         ):
-            raise PreparationError(
-                "Required packages must be included in the loaded-package allowlist"
+            raise SettingsError(
+                "required_loaded_packages must all appear in allowed_loaded_packages",
+                ("required_loaded_packages", "allowed_loaded_packages"),
             )
-        if not isinstance(self.minimum_package_dates, tuple):
-            raise PreparationError("minimum_package_dates must contain filename/date pairs")
-        seen = set()
-        for item in self.minimum_package_dates:
-            if not isinstance(item, tuple) or len(item) != 2:
-                raise PreparationError("minimum_package_dates must contain filename/date pairs")
-            name, value = item
-            if not isinstance(name, str) or not PACKAGE_FILENAME.fullmatch(name) or name in seen:
-                raise PreparationError("Minimum package dates require unique .sty/.cls filenames")
-            if not isinstance(value, str) or parse_declared_date(value) is None:
-                raise PreparationError("Minimum package dates must use YYYY-MM-DD or YYYY/MM/DD")
-            seen.add(name)
 
 
 def _finding(

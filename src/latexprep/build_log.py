@@ -8,7 +8,9 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
+from .file_safety import read_file_prefix
 from .findings import Finding, Severity
+from .path_safety import contained_relative_name, lexically_escapes
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,11 +61,16 @@ _OVERFLOW = re.compile(r"\(([\d.]+)pt too (wide|high)\)")
 _MAX_MESSAGE_CHARS = 2000
 
 
-def read_bounded(path: Path, limit: int) -> str:
-    if not path.is_file():
-        return ""
-    with path.open("rb") as stream:
-        return stream.read(limit).decode("utf-8", errors="replace")
+def read_bounded(path: Path, limit: int) -> tuple[str, bool]:
+    """The first ``limit`` bytes of a regular, unlinked log as text, and whether that is all.
+
+    A missing, linked or unreadable log reads as empty and incomplete.
+    """
+    try:
+        data = read_file_prefix(path, limit + 1)
+    except OSError:
+        return "", False
+    return data[:limit].decode("utf-8", errors="replace"), len(data) <= limit
 
 
 def log_tail(log: str, *, lines: int = 60, max_characters: int = 8000) -> str:
@@ -128,11 +135,10 @@ def _log_finding(
 def _source_path(filename: Path, main: str, project: Path | None, cwd: Path | None) -> str | None:
     """The project-relative source a compiler diagnostic names, if it is one."""
     if project is not None and cwd is not None:
-        resolved = (filename if filename.is_absolute() else cwd / filename).resolve()
-        return (
-            resolved.relative_to(project).as_posix() if resolved.is_relative_to(project) else None
+        return contained_relative_name(
+            project, filename if filename.is_absolute() else cwd / filename
         )
     if filename.is_absolute():
         return None
-    relative = Path(os.path.normpath(str(Path(main).parent / filename)))
-    return None if ".." in relative.parts else relative.as_posix()
+    relative = os.path.normpath(str(Path(main).parent / filename))
+    return None if lexically_escapes(relative) else Path(relative).as_posix()

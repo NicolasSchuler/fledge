@@ -18,6 +18,7 @@ from pathlib import Path, PurePosixPath
 
 from .bbl_checks import check_bbl
 from .cancellation import cancellation_point
+from .comment_markers import MarkerCategory, matching_category
 from .errors import PreparationError
 from .expanded_document import (
     ExpandedDocument,
@@ -26,6 +27,7 @@ from .expanded_document import (
     expand_document,
     reachable_sources,
 )
+from .file_safety import read_file_prefix
 from .file_scan import (
     MAX_SCAN_MATCHES,
     ByteBudget,
@@ -34,24 +36,27 @@ from .file_scan import (
     location_label,
     marked_comments,
     more_suffix,
-    read_file_prefix,
     redact_secrets,
     tex_comments,
 )
 from .findings import EvidenceKind, Finding
+from .limits import MIB
 from .literal_text import PACKAGE_COMMANDS, first_argument_names, plain_text
+from .png_support import read_png_header
 from .source_graph import SourceGraph
 from .submission_checks import SubmissionOptions
+from .tex_commands import ROOT_SUFFIXES
 from .tex_lexer import in_conditional, in_half_open_span
 
 FIGURE_COLOR_SPACES = ("rgb", "cmyk")
 _MAX_LISTED = 3
-_MAX_IMAGE_HEADER_BYTES = 4 * 1024 * 1024
-_MANUSCRIPT_SUFFIXES = {".tex", ".ltx", ".latex"}
+_MAX_IMAGE_HEADER_BYTES = 4 * MIB
 # Vector figures have no raster colour space to read from a header. PDF figures are
 # measured on the built document; EPS and PostScript are not measured at all.
 _VECTOR_FIGURE_SUFFIXES = {".pdf", ".eps", ".ps"}
 _RASTER_FIGURE_SUFFIXES = {".png", ".jpg", ".jpeg"}
+# PNG IHDR colour types: gray, truecolour, palette, gray with alpha, truecolour with alpha.
+_PNG_COLOR_FAMILIES = {0: "gray", 2: "rgb", 3: "rgb", 4: "gray", 6: "rgb"}
 _DEFAULT_OPTIONS = SubmissionOptions()
 
 # Each package documents that it must be loaded after hyperref. Keep this list
@@ -66,36 +71,10 @@ _AFTER_HYPERREF = {
 
 # Narrow, explicit private-note markers. Only the category and location are
 # reported; comment text is never copied into the report.
-_PRIVATE_MARKERS: tuple[tuple[str, re.Pattern[str]], ...] = (
-    (
-        "review correspondence",
-        re.compile(
-            r"(?i)\b(?:reviewers?|referees?)\s*#\s*\d+\b|\b(?:reviewer|referee)\s+\d+\b|"
-            r"\b(?:responses?|repl(?:y|ies)|answers?)\s+(?:to|for)\s+(?:the\s+)?"
-            r"(?:reviewers?|referees?|editors?)\b|"
-            r"\b(?:requested|asked|suggested|raised|demanded)\s+by\s+(?:the\s+)?"
-            r"(?:reviewers?|referees?|editors?|meta-?reviewers?)\b|"
-            r"\b(?:for|in)\s+(?:the|our)\s+rebuttal\b"
-        ),
-    ),
-    (
-        "distribution restriction",
-        re.compile(
-            r"(?i)\b(?:do\s+not|don['\u2019]?t|never)\s+"
-            r"(?:submit|share|distribute|publish|circulate|upload|release)\b|"
-            r"\bnot\s+for\s+(?:distribution|publication|submission|circulation)\b|"
-            r"\b(?:internal|private)\s+(?:use\s+)?only\b|"
-            r"\bconfidential\b(?!\s+(?:comput|transaction|virtual|vms?\b|container|inference|"
-            r"data|information|learning|ml\b|ai\b|channel|cloud|enclave))"
-        ),
-    ),
-    (
-        "private note",
-        re.compile(
-            r"(?i)\b(?:private|personal)\s+(?:notes?|comments?|remarks?)\b|"
-            r"\bnote\s+to\s+(?:self|myself|ourselves|co-?authors?)\b"
-        ),
-    ),
+_PRIVATE_MARKER_CATEGORIES = (
+    MarkerCategory.REVIEW_CORRESPONDENCE,
+    MarkerCategory.DISTRIBUTION_RESTRICTION,
+    MarkerCategory.PRIVATE_NOTE,
 )
 _INITIALS_NOTE = re.compile(r"^[\s%]*\[?([A-Z]{2,3})\]?\s*:\s+\S")
 # A name written out in an \author argument is split into at most this many words when
@@ -133,11 +112,11 @@ def _private_marker(comment: str, author_initials: frozenset[str] = frozenset())
     Capital letters before a colon only count as an author's note when they are the
     initials of a literal ``\\author`` name; acronyms such as ``MLP:`` are ordinary.
     """
-    reason = next((label for label, pattern in _PRIVATE_MARKERS if pattern.search(comment)), None)
+    category = matching_category(comment, _PRIVATE_MARKER_CATEGORIES)
+    if category is not None:
+        return category.value
     initials = _INITIALS_NOTE.match(comment)
-    if reason is None and initials and initials.group(1) in author_initials:
-        reason = "author-initials note"
-    return reason
+    return "author-initials note" if initials and initials.group(1) in author_initials else None
 
 
 def _label(location: Location) -> str:
@@ -240,9 +219,8 @@ def _eps_finding(figures: list[str], main: str) -> list[Finding]:
 
 
 def _png_space(data: bytes) -> str | None:
-    if len(data) < 26 or not data.startswith(b"\x89PNG\r\n\x1a\n") or data[12:16] != b"IHDR":
-        return None
-    return {0: "gray", 2: "rgb", 3: "rgb", 4: "gray", 6: "rgb"}.get(data[25])
+    header = read_png_header(data)
+    return None if header is None else _PNG_COLOR_FAMILIES.get(header.color_type)
 
 
 def _jpeg_space(data: bytes) -> tuple[str | None, int | None]:
@@ -372,7 +350,7 @@ def _private_markers(root: Path, author_initials: frozenset[str]) -> list[Findin
     budget = ByteBudget()
     for name, path in files.items():
         cancellation_point()
-        if path.suffix.lower() not in _MANUSCRIPT_SUFFIXES:
+        if path.suffix.lower() not in ROOT_SUFFIXES:
             continue
         try:
             text = budget.read(path).decode("utf-8-sig")

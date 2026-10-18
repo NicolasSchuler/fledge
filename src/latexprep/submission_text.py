@@ -10,13 +10,13 @@ from pathlib import Path
 from typing import Literal, NamedTuple, get_args
 
 from .expanded_document import (
-    MACRO_DEFINITION_COMMANDS,
     ExpandedDocument,
     definition_spans,
     environment_regions,
     expand_document,
 )
 from .literal_text import KEYWORD_ENVIRONMENTS, TEXT_WRAPPERS
+from .tex_commands import MACRO_DEFINITION_COMMANDS
 from .tex_lexer import (
     MAX_ARGUMENT_CHARS,
     Argument,
@@ -26,6 +26,7 @@ from .tex_lexer import (
     read_group,
     skip_space,
 )
+from .text_safety import escape_single_line_text, is_unsafe_character
 
 FieldName = Literal["title", "abstract", "keywords"]
 FIELD_NAMES: tuple[FieldName, ...] = get_args(FieldName)
@@ -97,14 +98,6 @@ class SubmissionField:
     candidates: list[str] = field(default_factory=list)
 
 
-def safe_display(value: str) -> str:
-    """Show controls as visible escapes rather than sending them to a terminal."""
-    return "".join(
-        f"\\u{ord(char):04x}" if unicodedata.category(char) in {"Cc", "Cf"} else char
-        for char in value
-    )
-
-
 @dataclass(frozen=True, slots=True)
 class _ConversionContext:
     """What holds for one field and for the groups nested inside it."""
@@ -166,18 +159,22 @@ class _Converter:
     def convert(self) -> tuple[str, list[str]]:
         value = self.value
         if self.context.depth > _MAX_GROUP_DEPTH or len(value) > MAX_ARGUMENT_CHARS:
-            return safe_display(value), ["Text exceeds bounded conversion limits"]
-        if any(
-            unicodedata.category(char) in {"Cc", "Cf"} and char not in "\n\r\t" for char in value
-        ):
-            self.issues.append("Unsupported control or directional character needs manual review")
+            return escape_single_line_text(value), ["Text exceeds bounded conversion limits"]
+        # The draft shows these characters as escapes, so the export is never copy-ready.
+        if any(is_unsafe_character(char) and char not in "\n\r\t" for char in value):
+            self.issues.append(
+                "Unsupported control, directional, private-use or unassigned character "
+                "needs manual review"
+            )
         # Payloads keep their comments for conversion; only group matching skips them.
         self._grouped = _mask_comments(value)
         position = 0
         while position < len(value):
             position = self._step(position)
         draft = unicodedata.normalize("NFC", " ".join("".join(self.out).split()))
-        return safe_display(draft), sorted({safe_display(issue) for issue in self.issues})
+        return escape_single_line_text(draft), sorted(
+            {escape_single_line_text(issue) for issue in self.issues}
+        )
 
     def _group(self, start: int, opening: str = "{", closing: str = "}") -> Argument | None:
         argument = read_group(self._grouped, start, opening, closing)
@@ -518,7 +515,7 @@ class _FieldReader:
             # Active characters can change tokenization and even punctuation
             # inside math. Preserve the field instead of guessing where the
             # locally assigned meaning is in force.
-            return safe_display(" ".join(raw_text.split())), [
+            return escape_single_line_text(" ".join(raw_text.split())), [
                 "Locally defined active character needs manual review: " + char
                 for char in sorted(used_active)
             ]
@@ -538,7 +535,7 @@ class _FieldReader:
                 issues.append("Locally defined declaration needs manual review: " + name)
             drafts.append(draft)
             location = self.document.location(declaration.position)
-            path = safe_display(location.path) if location.path is not None else None
+            path = escape_single_line_text(location.path) if location.path is not None else None
             locations.append({"path": path, "line": location.line})
             issues.extend([*declaration.reasons, *unknown])
         if len(declarations) > 1:
@@ -548,7 +545,7 @@ class _FieldReader:
             _field_status(len(declarations), issues, draft),
             draft,
             locations,
-            sorted({safe_display(issue) for issue in issues}),
+            sorted({escape_single_line_text(issue) for issue in issues}),
             drafts if len(drafts) > 1 else [],
         )
 

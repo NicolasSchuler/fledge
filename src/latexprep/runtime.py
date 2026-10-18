@@ -15,14 +15,16 @@ import stat
 import tempfile
 import time
 from collections.abc import AsyncGenerator
-from dataclasses import KW_ONLY, astuple, dataclass, replace
+from dataclasses import KW_ONLY, dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, Self
+from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple, Protocol, Self
 
 from .biber_toolchain import BiberPreparation, create_biber_toolchain
 from .cancellation import complete_despite_cancellation
 from .errors import PreparationError, SandboxRefusedError
-from .file_safety import MIB, DirectoryIdentity, FileIdentity, regular_file_identity
+from .file_safety import DirectoryIdentity, FileIdentity, regular_file_identity
+from .limits import IO_CHUNK_BYTES, MIB
+from .option_config import POSITIVE_INTEGER, Bounds, validate_scalars
 from .process_control import kill_process_group, start_process
 from .resource_monitor import (
     ActiveCommand,
@@ -42,21 +44,24 @@ from .toolchain import Toolchain, tool_path
 if TYPE_CHECKING:
     from .resource_budget import ResourceBudget
 
-_READ_CHUNK_BYTES = 64 * 1024
 _UNLEASED_MEMORY_MB = 256
 _PDFDETACH_VERSION = re.compile(r"^pdfdetach version \S+")
 
 
 @dataclass(frozen=True, slots=True)
 class RuntimeLimits:
+    FIELD_BOUNDS: ClassVar[dict[str, Bounds]] = dict.fromkeys(
+        ("timeout_seconds", "max_output_bytes", "max_memory_mb", "max_file_bytes"),
+        POSITIVE_INTEGER,
+    )
+
     timeout_seconds: int = 120
     max_output_bytes: int = 2 * MIB
     max_memory_mb: int = 2048
     max_file_bytes: int = 256 * MIB
 
     def __post_init__(self) -> None:
-        if any(type(value) is not int or value < 1 for value in astuple(self)):
-            raise PreparationError("Tool resource limits must be positive integers")
+        validate_scalars(self)
 
     def to_report(self) -> dict[str, int]:
         return {
@@ -300,7 +305,7 @@ class _BoundedOutput:
         self.limited = False
 
     async def collect(self, stream: asyncio.StreamReader, buffer: bytearray) -> None:
-        while chunk := await stream.read(_READ_CHUNK_BYTES):
+        while chunk := await stream.read(IO_CHUNK_BYTES):
             if self.limited:
                 # Keep draining after the kill: the process counts as finished
                 # only once every pipe reaches end-of-file, and a reader that

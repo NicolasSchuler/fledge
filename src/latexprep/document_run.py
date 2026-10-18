@@ -119,9 +119,7 @@ async def run_project(context: JobContext, report: Report) -> VerifiedPackage | 
     if request.command is JobCommand.PDF:
         await check_standalone_pdf(context, report)
         return None
-    limits = ImportLimits(
-        max_files=settings.max_files, max_bytes=settings.max_bytes, max_depth=settings.max_depth
-    )
+    limits = ImportLimits.from_settings(settings)
     context.emit("Importing a separate project snapshot")
     imported = await context.thread_operation(
         "import project", import_project, request.source, context.work / "import", limits
@@ -742,12 +740,7 @@ class DocumentRun:
             return None
         # The archive is our own bounded output; preserve byte/count limits without
         # rejecting legitimate highly compressible sources on ratio alone.
-        final_limits = ImportLimits(
-            max_files=settings.max_files,
-            max_bytes=settings.max_bytes,
-            max_depth=settings.max_depth,
-            max_ratio=settings.max_bytes,
-        )
+        final_limits = ImportLimits.from_settings(settings, max_ratio=settings.max_bytes)
         extracted = await context.thread_operation(
             "extract archive",
             import_project,

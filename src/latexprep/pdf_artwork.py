@@ -9,32 +9,40 @@ from __future__ import annotations
 
 import base64
 import binascii
-import json
 import math
 import re
-import struct
 import xml.etree.ElementTree as ET
-import zlib
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any, ClassVar, Literal, NamedTuple
 
 from .cancellation import cancellation_point
-from .errors import PreparationError
+from .errors import PreparationError, SettingsError
 from .findings import Finding
-from .option_config import require_booleans
-from .pdf_previews import PNG_SIGNATURE
+from .option_config import (
+    EIGHT_BIT_VALUE,
+    FRACTION,
+    NONNEGATIVE_NUMBER,
+    NONZERO_FRACTION,
+    POSITIVE_NUMBER,
+    Bounds,
+    require_integers,
+    require_number,
+    require_pairs,
+    require_records,
+    require_text,
+    validate_scalars,
+)
 from .pdf_support import (
     COLOR_OPERATIONS,
-    DOCUMENT,
+    CONTRAST_RATIO_BOUNDS,
     MAX_FIGURE_INPUTS,
-    MAX_MEASUREMENT_DPI,
-    MAX_MEASUREMENT_PIXELS,
     MAX_PAIR_CHECKS,
+    MAX_REGIONS_PER_POLICY,
     MAX_SAMPLES,
-    MIN_MEASUREMENT_DPI,
+    RASTER_SAMPLING_BOUNDS,
     PdfRegion,
     PdfToolSession,
     QpdfObjectGraph,
@@ -42,27 +50,27 @@ from .pdf_support import (
     exceeds_measurement_raster,
     finite_number,
     font_inventory,
+    font_inventory_argv,
     heuristic_finding,
     intersection_area,
     is_object_reference,
     measurement_finding,
     measurement_raster_size,
     mupdf_trace_argv,
-    open_measurement_session,
     page_boxes_argv,
-    page_count,
     page_frames,
     parse_mupdf_trace,
-    pdfinfo_properties,
+    parse_qpdf_json_v2,
+    preflight_pdf,
+    qpdf_decoded_objects_argv,
     qpdf_objects_argv,
-    read_gray_raster,
-    read_rgb_raster,
+    read_measurement_raster,
     relative_luminance,
-    require_distinct_strings,
-    require_number,
     require_rendered_pages,
     unavailable_finding,
 )
+from .png_support import encode_gray_png
+from .raster_pixels import InkMask, PixelBox, RasterImage, channel_extrema
 from .resource_budget import ResourceBudget
 from .runtime import CommandResult, CommandRunner
 
@@ -98,6 +106,7 @@ _SIMPLE_GLYPH_OPERATORS = frozenset(
     "q Q cm w J j M d ri i g G rg RG k K cs CS sc SC m l c v y h re n W W* d0 d1 [ ]".split()
 )
 _PAINT_OPERATORS = frozenset("S s f F f* B B* b b*".split())
+ColorSpaceFamily = Literal["rgb", "cmyk"]
 _REGION_RULES = ("pdf.figure_whitespace", "pdf.figure_edge_ink")
 _PREVIEW_RULE = "pdf.grayscale_preview"
 _CONTRAST_RULE = "pdf.rendered_sample_contrast"
@@ -120,6 +129,11 @@ DRAWING_TRACE_RULES = frozenset(
 class PdfContrastSample:
     """User-selected foreground/background patches, with no inferred text semantics."""
 
+    FIELD_BOUNDS: ClassVar[dict[str, Bounds]] = {
+        "minimum_ratio": CONTRAST_RATIO_BOUNDS,
+        "max_channel_spread": EIGHT_BIT_VALUE,
+    }
+
     name: str
     foreground: PdfRegion
     background: PdfRegion
@@ -127,20 +141,26 @@ class PdfContrastSample:
     max_channel_spread: int = 0
 
     def __post_init__(self) -> None:
-        require_distinct_strings((self.name,), "Contrast sample name")
+        require_text("name", self.name)
+        validate_scalars(self)
         if not isinstance(self.foreground, PdfRegion) or not isinstance(self.background, PdfRegion):
-            raise PreparationError("Contrast samples require foreground and background PDF regions")
+            raise SettingsError("Contrast samples require foreground and background PDF regions")
         if self.foreground.page != self.background.page:
-            raise PreparationError("Foreground and background samples must be on the same page")
-        require_number(self.minimum_ratio, "Minimum rendered sample contrast")
-        if not 1 <= self.minimum_ratio <= 21:
-            raise PreparationError("Minimum rendered sample contrast must be in [1, 21]")
-        if type(self.max_channel_spread) is not int or not 0 <= self.max_channel_spread <= 255:
-            raise PreparationError("Sample channel spread must be an integer from 0 to 255")
+            raise SettingsError("Foreground and background samples must be on the same page")
 
 
 @dataclass(frozen=True)
 class PdfArtworkOptions:
+    FIELD_BOUNDS: ClassVar[dict[str, Bounds]] = {
+        **RASTER_SAMPLING_BOUNDS,
+        "printer_mark_max_length_pt": POSITIVE_NUMBER,
+        "figure_edge_band_pt": POSITIVE_NUMBER,
+        "min_stroke_width_pt": POSITIVE_NUMBER,
+        "max_figure_whitespace_ratio": FRACTION,
+        "min_raster_region_coverage": NONZERO_FRACTION,
+        "geometry_tolerance_pt": NONNEGATIVE_NUMBER,
+    }
+
     detect_printer_marks: bool = False
     trim_regions: tuple[PdfRegion, ...] = ()
     printer_mark_max_length_pt: float | None = None
@@ -160,85 +180,58 @@ class PdfArtworkOptions:
     min_raster_region_coverage: float | None = None
     grayscale_preview: bool = False
     contrast_samples: tuple[PdfContrastSample, ...] = ()
-    required_color_space: str | None = None
+    required_color_space: ColorSpaceFamily | None = None
     raster_dpi: int = 72
     background_gray: int = 255
     ink_difference: int = 5
     geometry_tolerance_pt: float = 0.5
 
     def __post_init__(self) -> None:
-        require_booleans(
-            self,
-            "detect_printer_marks",
-            "check_clipping",
-            "classify_artwork",
-            "classify_type3_glyphs",
-            "forbid_bitmap_type3_glyphs",
-            "grayscale_preview",
+        validate_scalars(self)
+        require_records(
+            "trim_regions",
+            self.trim_regions,
+            PdfRegion,
+            max_items=MAX_REGIONS_PER_POLICY,
+            distinct_by=lambda region: region.page,
+            distinct_description="page",
         )
-        for name in ("trim_regions", "figure_regions", "drawing_regions", "raster_regions"):
-            values = getattr(self, name)
-            if (
-                not isinstance(values, tuple)
-                or len(values) > 300
-                or any(not isinstance(value, PdfRegion) for value in values)
-            ):
-                raise PreparationError(f"{name} requires at most 300 immutable PDF regions")
-        if len({region.page for region in self.trim_regions}) != len(self.trim_regions):
-            raise PreparationError("Only one trim region may be supplied for each page")
-        if (
-            not isinstance(self.contrast_samples, tuple)
-            or len(self.contrast_samples) > 300
-            or any(not isinstance(sample, PdfContrastSample) for sample in self.contrast_samples)
-        ):
-            raise PreparationError("Contrast samples require at most 300 immutable sample pairs")
-        for name in ("printer_mark_max_length_pt", "figure_edge_band_pt", "min_stroke_width_pt"):
-            if getattr(self, name) is not None:
-                require_number(getattr(self, name), name)
-        for name in ("max_figure_whitespace_ratio", "min_raster_region_coverage"):
-            value = getattr(self, name)
-            if value is not None:
-                require_number(value, name, allow_zero=name == "max_figure_whitespace_ratio")
-                if value > 1:
-                    raise PreparationError(f"{name} cannot exceed one")
+        for name in ("figure_regions", "drawing_regions", "raster_regions"):
+            require_records(name, getattr(self, name), PdfRegion, max_items=MAX_REGIONS_PER_POLICY)
+        require_records(
+            "contrast_samples",
+            self.contrast_samples,
+            PdfContrastSample,
+            max_items=MAX_REGIONS_PER_POLICY,
+        )
+        require_integers("printer_mark_exemptions", self.printer_mark_exemptions, minimum=1)
         if self.detect_printer_marks and (
             not self.trim_regions or self.printer_mark_max_length_pt is None
         ):
-            raise PreparationError("Printer marks need explicit trim regions and maximum length")
-        if bool(self.raster_regions) != (self.min_raster_region_coverage is not None):
-            raise PreparationError("Raster candidates need explicit regions and minimum coverage")
-        if not isinstance(self.printer_mark_exemptions, tuple) or any(
-            type(page) is not int or page < 1 for page in self.printer_mark_exemptions
-        ):
-            raise PreparationError("Printer-mark exemptions require immutable positive pages")
-        if self.artwork_category is not None:
-            require_distinct_strings((self.artwork_category,), "Artwork category")
-        if not isinstance(self.category_min_dpi, tuple) or any(
-            not isinstance(pair, tuple) or len(pair) != 2 for pair in self.category_min_dpi
-        ):
-            raise PreparationError("Category DPI requires immutable category/minimum pairs")
-        require_distinct_strings(
-            tuple(pair[0] for pair in self.category_min_dpi), "Artwork categories"
-        )
-        for _, minimum in self.category_min_dpi:
-            require_number(minimum, "Category minimum DPI")
-        if self.category_min_dpi and self.artwork_category not in dict(self.category_min_dpi):
-            raise PreparationError("Select an artwork category with an explicit DPI threshold")
-        if self.required_color_space not in {None, "rgb", "cmyk"}:
-            raise PreparationError("required_color_space must be 'rgb' or 'cmyk'")
-        if (
-            type(self.raster_dpi) is not int
-            or not MIN_MEASUREMENT_DPI <= self.raster_dpi <= MAX_MEASUREMENT_DPI
-        ):
-            raise PreparationError(
-                "Artwork raster DPI must be an integer from "
-                f"{MIN_MEASUREMENT_DPI} to {MAX_MEASUREMENT_DPI}"
+            raise SettingsError(
+                "Printer marks need trim_regions and printer_mark_max_length_pt",
+                ("detect_printer_marks", "trim_regions", "printer_mark_max_length_pt"),
             )
-        if type(self.background_gray) is not int or not 0 <= self.background_gray <= 255:
-            raise PreparationError("Artwork background must be an 8-bit gray value")
-        if type(self.ink_difference) is not int or not 1 <= self.ink_difference <= 255:
-            raise PreparationError("Artwork ink difference must be an integer from 1 to 255")
-        require_number(self.geometry_tolerance_pt, "Artwork geometry tolerance", allow_zero=True)
+        if bool(self.raster_regions) != (self.min_raster_region_coverage is not None):
+            raise SettingsError(
+                "Raster candidates need raster_regions and min_raster_region_coverage together",
+                ("raster_regions", "min_raster_region_coverage"),
+            )
+        self._validate_categories()
+
+    def _validate_categories(self) -> None:
+        require_text("artwork_category", self.artwork_category, allow_none=True)
+        require_pairs(
+            "category_min_dpi",
+            self.category_min_dpi,
+            first=require_text,
+            second=partial(require_number, minimum=0, exclusive_minimum=True),
+        )
+        if self.category_min_dpi and self.artwork_category not in dict(self.category_min_dpi):
+            raise SettingsError(
+                "artwork_category must name a category listed in category_min_dpi",
+                ("artwork_category", "category_min_dpi"),
+            )
 
 
 def configured_artwork_rules(options: PdfArtworkOptions) -> list[str]:
@@ -264,6 +257,22 @@ def configured_artwork_rules(options: PdfArtworkOptions) -> list[str]:
         )
         if enabled
     ]
+
+
+def required_artwork_tools(options: PdfArtworkOptions) -> set[str]:
+    """The external tools the configured measurements run, for setup diagnostics."""
+    rules = set(configured_artwork_rules(options))
+    tools = {"pdfinfo"} if rules else set()
+    if rules & DRAWING_TRACE_RULES or options.required_color_space is not None:
+        # The colour-space comparison reads the same MuPDF trace as the drawing measurements.
+        tools.add("mutool")
+    if "pdf.type3_glyph_programs" in rules:
+        tools.add("qpdf")
+    if rules & {*_REGION_RULES, _PREVIEW_RULE, _CONTRAST_RULE}:
+        tools.add("pdftoppm")
+    if options.classify_artwork or options.category_min_dpi:
+        tools.add("pdffonts")
+    return tools
 
 
 def artwork_checks_enabled(options: PdfArtworkOptions) -> bool:
@@ -978,7 +987,7 @@ async def _scalable_text_fonts(
     try:
         font_types = await session.measure(
             "composition-fonts",
-            ["pdffonts", DOCUMENT],
+            font_inventory_argv(),
             lambda execution: [font["type"] for font in font_inventory(execution.stdout)],
         )
     except (PreparationError, OSError) as error:
@@ -1244,19 +1253,13 @@ def _decoded_type3_finding(
     references: set[str],
     options: PdfArtworkOptions,
 ) -> Finding:
-    try:
-        document = json.loads(execution.stdout)
-        entries = document["qpdf"]
-        if len(entries) != 2 or entries[0]["jsonversion"] != 2 or not isinstance(entries[1], dict):
-            raise ValueError("Unsupported stream JSON")
-        for reference in references:
-            key = "obj:" + reference
-            value = entries[1][key]
-            if not isinstance(value, dict):
-                raise ValueError("Invalid stream object")
-            objects.objects[key] = value
-    except (ValueError, KeyError, TypeError, RecursionError) as error:
-        raise PreparationError("qpdf did not return every selected glyph/Form program") from error
+    failure = "qpdf did not return every selected glyph/Form program"
+    decoded = parse_qpdf_json_v2(execution.stdout, failure).objects
+    for reference in references:
+        key = "obj:" + reference
+        if not isinstance(decoded.get(key), dict):
+            raise PreparationError(failure)
+        objects.objects[key] = decoded[key]
     return _type3_finding(objects, options)
 
 
@@ -1291,41 +1294,10 @@ async def _inspect_type3(
                 references.add(reference)
     if len(references) > 1000:
         raise PreparationError("Type 3 program selection exceeds the bounded object limit")
-    selectors = [
-        "--json-object=" + ",".join(reference.split()[:2]) for reference in sorted(references)
-    ]
     return await session.measure(
         "glyph-programs",
-        [
-            "qpdf",
-            "--json=2",
-            "--json-key=qpdf",
-            "--decode-level=all",
-            "--json-stream-data=inline",
-            *selectors,
-            DOCUMENT,
-        ],
+        qpdf_decoded_objects_argv(references),
         partial(_decoded_type3_finding, objects=objects, references=references, options=options),
-    )
-
-
-def _gray_png(width: int, height: int, pixels: bytes) -> bytes:
-    """Encode already validated 8-bit grayscale pixels without another dependency."""
-
-    def chunk(kind: bytes, payload: bytes) -> bytes:
-        return (
-            struct.pack(">I", len(payload))
-            + kind
-            + payload
-            + struct.pack(">I", zlib.crc32(kind + payload))
-        )
-
-    rows = b"".join(b"\0" + pixels[y * width : (y + 1) * width] for y in range(height))
-    return (
-        PNG_SIGNATURE
-        + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 0, 0, 0, 0))
-        + chunk(b"IDAT", zlib.compress(rows))
-        + chunk(b"IEND", b"")
     )
 
 
@@ -1358,9 +1330,7 @@ class _RenderedFigures:
 
 class _GrayPage(NamedTuple):
     page: int
-    width: int
-    height: int
-    pixels: bytes
+    image: RasterImage
     width_pt: float
     height_pt: float
 
@@ -1373,49 +1343,31 @@ class _RegionInk(NamedTuple):
 
 
 def _region_ink(
-    raster: _GrayPage, pixels: tuple[int, int, int, int], options: PdfArtworkOptions
+    raster: _GrayPage, ink: InkMask, pixels: PixelBox, options: PdfArtworkOptions
 ) -> _RegionInk:
     """Ink count, boundary ink and the ink bounding box within a pixel rectangle."""
     left, top, right, bottom = pixels
-    width, height = raster.width, raster.height
-    min_x, min_y, max_x, max_y = right, bottom, left - 1, top - 1
+    width, height = ink.width, ink.height
     band = options.figure_edge_band_pt or 0
     band_x = math.ceil(band * width / raster.width_pt)
     band_y = math.ceil(band * height / raster.height_pt)
-    edge_ink = 0
-    ink = 0
-    for y in range(top, bottom):
-        cancellation_point()
-        ink_x = [
-            x
-            for x in range(left, right)
-            if abs(raster.pixels[y * width + x] - options.background_gray) >= options.ink_difference
-        ]
-        if not ink_x:
-            continue
-        ink += len(ink_x)
-        min_x, max_x, min_y, max_y = (
-            min(min_x, ink_x[0]),
-            max(max_x, ink_x[-1]),
-            min(min_y, y),
-            max(max_y, y),
-        )
-        edge_ink += sum(
-            x < left + band_x or x >= right - band_x or y < top + band_y or y >= bottom - band_y
-            for x in ink_x
-        )
-    if not ink:
-        return _RegionInk(0, edge_ink, 1, None)
+    count = ink.count(pixels)
+    bounds = ink.bounds(pixels) if count else None
+    if bounds is None:
+        return _RegionInk(0, 0, 1, None)
+    # Boundary ink lies outside the rectangle shrunk by the band on every side.
+    inner = ink.count((left + band_x, top + band_y, right - band_x, bottom - band_y))
+    min_x, min_y, max_x, max_y = bounds
     total = (right - left) * (bottom - top)
     return _RegionInk(
-        ink,
-        edge_ink,
-        1 - ((max_x - min_x + 1) * (max_y - min_y + 1) / total),
+        count,
+        count - inner,
+        1 - ((max_x - min_x) * (max_y - min_y) / total),
         (
             min_x * raster.width_pt / width,
             min_y * raster.height_pt / height,
-            (max_x + 1) * raster.width_pt / width,
-            (max_y + 1) * raster.height_pt / height,
+            max_x * raster.width_pt / width,
+            max_y * raster.height_pt / height,
         ),
     )
 
@@ -1483,7 +1435,7 @@ def _grayscale_preview_finding(figures: _RenderedFigures, raster: _GrayPage) -> 
     preview = figures.preview_directory / f"page-{raster.page}.png"
     preview.parent.mkdir(exist_ok=True)
     # Copy validated bytes while this operation still owns its render lease.
-    encoded = _gray_png(raster.width, raster.height, raster.pixels)
+    encoded = encode_gray_png(raster.image.width, raster.image.height, raster.image.data)
     if len(encoded) > figures.max_file_bytes:
         raise PreparationError("Encoded artwork preview exceeds the file limit")
     preview.write_bytes(encoded)
@@ -1506,12 +1458,14 @@ def _rendered_page_findings(
     size: tuple[float, float],
     expected: tuple[int, int],
 ) -> list[Finding]:
-    width, height, pixels = read_gray_raster(path, figures.max_file_bytes)
+    image = read_measurement_raster(path, channels=1, max_file_bytes=figures.max_file_bytes)
+    width, height = image.width, image.height
     if any(
         abs(actual - target) > 1 for actual, target in zip((width, height), expected, strict=True)
     ):
         raise PreparationError("Artwork render dimensions disagree with page geometry")
-    raster = _GrayPage(page, width, height, pixels, *size)
+    raster = _GrayPage(page, image, *size)
+    ink_mask: InkMask | None = None
     findings: list[Finding] = []
     if figures.options.grayscale_preview:
         findings.append(_grayscale_preview_finding(figures, raster))
@@ -1546,7 +1500,11 @@ def _rendered_page_findings(
                 for rule in figures.region_rules
             )
             continue
-        ink = _region_ink(raster, (left, top, right, bottom), figures.options)
+        if ink_mask is None:
+            ink_mask = InkMask.from_gray(
+                image, figures.options.background_gray, figures.options.ink_difference
+            )
+        ink = _region_ink(raster, ink_mask, (left, top, right, bottom), figures.options)
         findings.extend(_region_findings(figures, raster, region, ink))
     return findings
 
@@ -1651,23 +1609,6 @@ def _pixel_region(
     return left, top, right, bottom
 
 
-def _pixel_colors(
-    pixels: bytes, width: int, box: tuple[int, int, int, int]
-) -> tuple[tuple[int, int, int], tuple[int, int, int]]:
-    minima = [255, 255, 255]
-    maxima = [0, 0, 0]
-    left, top, right, bottom = box
-    for y in range(top, bottom):
-        cancellation_point()
-        for x in range(left, right):
-            offset = (y * width + x) * 3
-            for channel in range(3):
-                value = pixels[offset + channel]
-                minima[channel] = min(minima[channel], value)
-                maxima[channel] = max(maxima[channel], value)
-    return (minima[0], minima[1], minima[2]), (maxima[0], maxima[1], maxima[2])
-
-
 def _contrast_interval(
     foreground: tuple[float, float], background: tuple[float, float]
 ) -> tuple[float, float]:
@@ -1694,11 +1635,10 @@ def _sample_unavailable(sample: PdfContrastSample, page: int, error: Exception) 
 def _sample_contrast_finding(
     sample: PdfContrastSample,
     page: int,
-    pixels: bytes,
-    width: int,
-    boxes: tuple[tuple[int, int, int, int], tuple[int, int, int, int]],
+    image: RasterImage,
+    boxes: tuple[PixelBox, PixelBox],
 ) -> Finding:
-    colors = [_pixel_colors(pixels, width, box) for box in boxes]
+    colors = [channel_extrema(image, box) for box in boxes]
     spreads = [
         max(high - low for low, high in zip(minimum, maximum, strict=True))
         for minimum, maximum in colors
@@ -1769,9 +1709,8 @@ def _rendered_contrast_findings(
     samples: tuple[PdfContrastSample, ...],
     max_file_bytes: int,
 ) -> list[Finding]:
-    if not path.is_file() or path.stat().st_size > max_file_bytes:
-        raise PreparationError("Contrast render exceeds the configured file limit or is missing")
-    dimensions, pixels = read_rgb_raster(path, max_pixels=MAX_MEASUREMENT_PIXELS)
+    image = read_measurement_raster(path, channels=3, max_file_bytes=max_file_bytes)
+    dimensions = (image.width, image.height)
     if any(abs(actual - target) > 1 for actual, target in zip(dimensions, expected, strict=True)):
         raise PreparationError("Contrast render dimensions disagree with page geometry")
     findings: list[Finding] = []
@@ -1786,7 +1725,7 @@ def _rendered_contrast_findings(
             pixel_visits += sum((box[2] - box[0]) * (box[3] - box[1]) for box in boxes)
             if pixel_visits > _MAX_PIXEL_VISITS:
                 raise PreparationError("Contrast patches exceed the bounded pixel sampling work")
-            findings.append(_sample_contrast_finding(sample, page, pixels, dimensions[0], boxes))
+            findings.append(_sample_contrast_finding(sample, page, image, boxes))
         except PreparationError as error:
             findings.append(_sample_unavailable(sample, page, error))
     return findings
@@ -1926,14 +1865,11 @@ async def _inspect_artwork(
     configured = configured_artwork_rules(options)
     if not configured:
         return []
+    preflight = await preflight_pdf(pdf, work, runner, budget, configured)
+    if isinstance(preflight, list):
+        return preflight
+    session, pages = preflight.session, preflight.pages
     try:
-        session = await open_measurement_session(pdf, work, runner, budget)
-        fields = await session.measure(
-            "properties",
-            ["pdfinfo", "-enc", "UTF-8", DOCUMENT],
-            lambda result: pdfinfo_properties(result.stdout),
-        )
-        pages = page_count(fields)
         unsupported, sizes = await session.measure(
             "geometry", page_boxes_argv(pages), lambda result: page_frames(result.stdout, pages)
         )

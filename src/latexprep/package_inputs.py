@@ -7,9 +7,9 @@ from dataclasses import replace
 from pathlib import Path, PurePosixPath
 
 from .cancellation import cancellation_point
-from .file_safety import is_contained_regular_file, is_plain_relative_name
 from .findings import Finding
 from .package_inventory import selection_inventory
+from .path_safety import is_contained, is_relative_posix_path
 from .report import Change, ChangeKind
 from .source import analyze_selected_sources
 
@@ -36,7 +36,7 @@ def generated_bibliography_inputs(
     for suffix in GENERATED_BIBLIOGRAPHY_SUFFIXES:
         name = main_path.stem + suffix
         candidate = (main_path.parent / name).as_posix()
-        if name in read and is_contained_regular_file(root, root / candidate):
+        if name in read and is_contained(root, root / candidate, regular_file=True):
             retained.add(candidate)
     return retained
 
@@ -98,7 +98,9 @@ def select_package_inputs(
     unusable: list[Finding] = []
     for name in sorted(included):
         cancellation_point()
-        if not is_plain_relative_name(name) or not is_contained_regular_file(root, root / name):
+        if not is_relative_posix_path(name) or not is_contained(
+            root, root / name, regular_file=True
+        ):
             unusable.append(
                 Finding(
                     "package.dependencies",

@@ -15,18 +15,20 @@ from pathlib import Path
 from typing import Literal
 
 from .cancellation import cancellation_point
+from .file_safety import FileTooLargeError, read_regular_file
 from .findings import Finding, Severity, Status
+from .limits import CANCELLATION_STRIDE_CHARS, KIB, MIB
 from .text_edits import with_bom
 
-MAX_BIB_FILE_BYTES = 16 * 1024 * 1024
+MAX_BIB_FILE_BYTES = 16 * MIB
 # Keyed entries, @string and @preamble declarations count alike, per file and per
 # declared resource set.
 MAX_BIB_ENTRIES = 100_000
 # A manuscript's declared resources share these bounds in checks and transformations.
 MAX_RESOURCE_FILES = 128
-MAX_RESOURCES_TOTAL_BYTES = 32 * 1024 * 1024
+MAX_RESOURCES_TOTAL_BYTES = 32 * MIB
 # Longest literal field value read as one scalar.
-_MAX_FIELD_CHARS = 64 * 1024
+_MAX_FIELD_CHARS = 64 * KIB
 _MAX_NESTING = 256
 # Field names, string-macro names and bare value tokens.
 IDENTIFIER = re.compile(r"[^\s\"#%'(),={}]+")
@@ -152,7 +154,7 @@ class BibtexSyntaxError(Exception):
 def skip_trivia(text: str, position: int) -> int:
     """The first offset at or after ``position`` that is not whitespace or a % comment."""
     while position < len(text):
-        if position % 4096 == 0:
+        if position % CANCELLATION_STRIDE_CHARS == 0:
             cancellation_point()
         if text[position].isspace():
             position += 1
@@ -194,7 +196,7 @@ class _Parser:
         self.position = start
         depth = 1 if opening == "{" else 0
         while self.position < len(self.text):
-            if self.position % 4096 == 0:
+            if self.position % CANCELLATION_STRIDE_CHARS == 0:
                 cancellation_point()
             char = self.text[self.position]
             if char == "\\":
@@ -266,7 +268,7 @@ class _Parser:
         closing = "}" if opening == "{" else ")"
         depth = 1
         while self.position < len(self.text):
-            if self.position % 4096 == 0:
+            if self.position % CANCELLATION_STRIDE_CHARS == 0:
                 cancellation_point()
             char = self.text[self.position]
             if char == "\\":
@@ -391,13 +393,13 @@ class BibFileReader:
     def read(self, path: Path, name: str) -> BibDocument | None:
         """Parse ``path`` as ``name``; None when it exceeds the allowance.
 
-        Raises OSError when the file cannot be read and UnicodeError when it is
-        not UTF-8. Bytes of a file that fails to decode still count as read.
+        Raises OSError when the file is a link or special file or cannot be read,
+        and UnicodeError when it is not UTF-8. Bytes of a file that fails to
+        decode still count as read.
         """
-        allowance = self.allowance
-        with path.open("rb") as stream:
-            raw = stream.read(allowance + 1)
-        if len(raw) > allowance:
+        try:
+            raw = read_regular_file(path, self.allowance)
+        except FileTooLargeError:
             return None
         self.total_bytes += len(raw)
         text = raw.decode("utf-8")
@@ -407,7 +409,7 @@ class BibFileReader:
 
 def mebibytes(count: int) -> str:
     """A byte limit as whole MiB, for messages built from the limit constants."""
-    return f"{count // (1024 * 1024)} MiB"
+    return f"{count // MIB} MiB"
 
 
 def describe_read_failure(error: Exception) -> str:

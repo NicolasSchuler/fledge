@@ -3,7 +3,10 @@
 Manuscript checks, author records and submission text read the same small set of
 commands. This module is the one place that says which commands carry prose,
 which only hold keys or layout values, and how literal text is recovered without
-executing TeX. Every other control sequence stays visible as unresolved.
+executing TeX. Every other control sequence stays visible as unresolved. The
+tables are built on the vocabularies in ``tex_commands`` (citation commands, math
+markers) and ``comment_markers`` (placeholder wording), so other readers that
+need those lists derive them from the same names.
 """
 
 from __future__ import annotations
@@ -11,7 +14,16 @@ from __future__ import annotations
 import re
 from typing import NamedTuple, TypedDict
 
+from .comment_markers import MarkerCategory, marker_pattern
+from .tex_commands import (
+    MATH_DELIMITER,
+    MATH_ENVIRONMENT_PATTERN,
+    MATH_MARKER,
+    PRINTED_CITATION_COMMANDS,
+    with_capitalized_forms,
+)
 from .tex_lexer import Command, ParseLimitExceeded, mask_literals, scan_commands
+from .text_edits import TextEdit, apply_text_edits
 
 # Formatting wrappers whose argument is retained as ordinary text.
 TEXT_WRAPPERS = frozenset(
@@ -33,24 +45,19 @@ TEXT_WRAPPERS = frozenset(
         "mathbf",
     }
 )
+# Cross-references: their argument is a label key.
+REFERENCE_COMMANDS = frozenset(
+    {"ref", "pageref", "eqref", "autoref", "cref", "Cref", "nameref", "vref"}
+)
 # Label, citation and reference commands: their arguments are keys, never prose.
+# \nameref and \vref print text taken from their target, so the literal scan leaves
+# them unresolved instead of counting them as nothing.
 KEY_ARGUMENT_COMMANDS = frozenset(
     {
         "label",
-        "cite",
-        "citep",
-        "citet",
-        "citeauthor",
-        "citeyear",
-        "parencite",
-        "textcite",
-        "ref",
-        "pageref",
-        "eqref",
-        "autoref",
-        "cref",
-        "Cref",
         "nocite",
+        *with_capitalized_forms(PRINTED_CITATION_COMMANDS),
+        *(REFERENCE_COMMANDS - {"nameref", "vref"}),
     }
 )
 # Structural, bibliographic and layout commands that contribute no countable
@@ -185,13 +192,7 @@ HEADING_DEPTHS = {
     "subparagraph": 5,
 }
 PACKAGE_COMMANDS = frozenset({"usepackage", "RequirePackage", "RequirePackageWithOptions"})
-REFERENCE_COMMANDS = frozenset(
-    {"ref", "pageref", "eqref", "autoref", "cref", "Cref", "nameref", "vref"}
-)
 KEYWORD_ENVIRONMENTS = frozenset({"keywords", "keyword", "IEEEkeywords"})
-MATH_ENVIRONMENTS = ("equation", "equation*", "align", "align*", "displaymath", "math")
-# Regular-expression alternation of the math environment names.
-MATH_ENVIRONMENT_PATTERN = "|".join(map(re.escape, MATH_ENVIRONMENTS))
 
 # Display and inline math to drop. In the inline form an escaped character is consumed
 # as a pair and the loop is possessive, so a stray ``$`` with no partner fails in
@@ -206,6 +207,11 @@ _MATH_PATTERNS = tuple(
     )
 )
 
+_PLACEHOLDER_MARKER = marker_pattern(
+    MarkerCategory.EDIT_MARKER,
+    MarkerCategory.TO_BE_DETERMINED,
+    MarkerCategory.UNCERTAINTY_MARK,
+)
 _PLACEHOLDER_VALUES = frozenset(
     {
         "placeholder",
@@ -242,7 +248,7 @@ def scan_literal_text(value: str) -> LiteralText:
     )
     for pattern in _MATH_PATTERNS:
         value = pattern.sub(" ", value)
-    if re.search(r"(?<!\\)\$|\\[()[\]]", value):
+    if MATH_DELIMITER.search(value):
         uncertain.add("unbalanced math delimiters")
     try:
         commands = scan_commands(value)
@@ -251,7 +257,7 @@ def scan_literal_text(value: str) -> LiteralText:
         if error.reason in {"unclosed_group", "oversized_group"}:
             return LiteralText("", ["unclosed or oversized argument"], 1)
         return LiteralText("", ["more commands or argument text than the literal scan supports"], 1)
-    edits: list[tuple[int, int, str]] = []
+    edits: list[TextEdit] = []
     covered_until = -1
     for command in commands:
         if command.start < covered_until:
@@ -260,7 +266,7 @@ def scan_literal_text(value: str) -> LiteralText:
         if interpretation is None:
             uncertain.add("\\" + command.name)
             unresolved_macros += 1
-            edits.append((command.start, command.name_end, " "))
+            edits.append(TextEdit(command.start, command.name_end, " "))
             continue
         stop = command.name_end
         if interpretation.dropped_arguments:
@@ -270,10 +276,8 @@ def scan_literal_text(value: str) -> LiteralText:
             )
             stop = max((argument.end + 1 for argument in dropped), default=stop)
             covered_until = stop
-        edits.append((command.start, stop, interpretation.replacement))
-    for start, stop, replacement in reversed(edits):
-        value = value[:start] + replacement + value[stop:]
-    text = value.replace("{", "").replace("}", "").replace("~", " ")
+        edits.append(TextEdit(command.start, stop, interpretation.replacement))
+    text = apply_text_edits(value, edits).replace("{", "").replace("}", "").replace("~", " ")
     return LiteralText(text, sorted(uncertain), unresolved_macros)
 
 
@@ -289,7 +293,7 @@ def plain_argument_text(command: Command, index: int = 0) -> tuple[str, list[str
         return "", ["missing literal argument"]
     raw = command.arguments[index].value
     value, uncertainty = plain_text(raw)
-    if not value.strip() and re.search(r"(?<!\\)\$|\\[([]", raw):
+    if not value.strip() and MATH_MARKER.search(raw):
         uncertainty.append("only mathematical content is observable")
     return " ".join(value.split()), uncertainty
 
@@ -298,7 +302,7 @@ def is_placeholder_text(value: str) -> bool:
     """Whether a literal value is an obvious template placeholder rather than content."""
     normalized = value.casefold().strip(" .<>[]")
     return bool(
-        re.search(r"\b(?:todo|tbd|fixme|xxx)\b|\?\?", normalized)
+        _PLACEHOLDER_MARKER.search(normalized)
         or normalized in _PLACEHOLDER_VALUES
         or re.fullmatch(
             r"(?:insert|add|enter|replace with|your) .*(?:here|description|text)", normalized

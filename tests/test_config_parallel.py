@@ -70,7 +70,7 @@ class ParallelConfigTests(unittest.TestCase):
                 self.assertEqual(getattr(load_settings(None, {name: 64}), name), 64)
             with (
                 self.subTest(setting=name, value=65),
-                self.assertRaisesRegex(PreparationError, "at most 64"),
+                self.assertRaisesRegex(PreparationError, f"{name} must be an integer from 1 to 64"),
             ):
                 load_settings(None, {name: 65})
 

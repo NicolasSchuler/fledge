@@ -622,7 +622,9 @@ class BibliographyBackendTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(finding.code, "BLD201")
                 self.assertEqual(finding.status, status)
-        with self.assertRaisesRegex(PreparationError, "Bibliography backend"):
+        with self.assertRaisesRegex(
+            PreparationError, "bibliography_backend must be one of auto, bibtex, biber"
+        ):
             await self.build("bibtex;unexpected-command", {})
 
     async def test_required_backend_version_is_reported_and_unavailable_is_inconclusive(

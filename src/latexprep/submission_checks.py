@@ -13,28 +13,40 @@ import stat
 import unicodedata
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import KW_ONLY, dataclass, field, fields, replace
-from functools import lru_cache
+from functools import lru_cache, partial
+from itertools import islice
 from pathlib import Path
+from typing import ClassVar, Literal
 from urllib.parse import unquote
 
 from .cancellation import cancellation_point
-from .errors import PreparationError
+from .comment_markers import MarkerCategory, marker_pattern
+from .errors import SettingsError
 from .file_scan import (
-    MAX_SCAN_ENTRIES,
     MAX_SCAN_MATCHES,
     ByteBudget,
     check_status,
     inventory_files,
-    is_relative_project_path,
-    marked_comments,
     more_suffix,
     redact_findings,
     redact_secrets,
     tex_comments,
 )
 from .findings import EvidenceKind, Finding
+from .option_config import (
+    POSITIVE_INTEGER,
+    Bounds,
+    TextFormat,
+    require_choice,
+    require_pairs,
+    require_text,
+    require_unique_strings,
+    validate_scalars,
+)
+from .path_safety import is_relative_posix_path
 from .redaction import SECRET_PATTERNS
 from .source import analyze_sources
+from .tex_commands import TEX_SOURCE_SUFFIXES
 from .tex_lexer import (
     MAX_SOURCE_BYTES,
     MAX_TOTAL_SOURCE_BYTES,
@@ -43,11 +55,23 @@ from .tex_lexer import (
     source_regions,
 )
 
-IDENTITY_TERM_MATCHING = ("word", "substring")
+IdentityTermMatching = Literal["word", "substring"]
+DELIVERABLE_KINDS = ("file", "pdf", "zip", "text")
+# Bounds on configured values, so a settings file cannot make the scan unbounded.
+_MAX_LISTED_ENTRIES = 256  # entries in one list setting
+_MAX_TERM_CHARACTERS = 1024  # characters in one identity term or extension
+_MAX_CHARACTER_SET_CHARACTERS = 4096  # characters in filename_allowed_characters
+_MAX_PAIR_CHARACTERS = 4096  # characters in a deliverable or template path or value
+_BBL_FORMAT_VERSION = re.compile(r"[0-9]{1,4}(?:\.[0-9]{1,4}){0,3}")
+_FINAL_EXTENSION = TextFormat(
+    re.compile(r"\.[A-Za-z0-9_+-]+"), "a dot-prefixed final extension such as .tex"
+)
 # Matches named in a message; the details list every match up to MAX_SCAN_MATCHES.
 _MAX_LISTED = 3
 # Longer file names are shortened in messages; the details keep them whole.
 _MAX_LABEL_CHARS = 120
+# PDF information-dictionary entries compared with the identity terms.
+_MAX_PDF_METADATA_ENTRIES = 10_000
 _TEXT_EXTENSIONS = {
     ".tex",
     ".ltx",
@@ -83,7 +107,7 @@ _TEXT_EXTENSIONS = {
     ".pdf_tex",
     ".log",
 }
-_TEX_EXTENSIONS = {".tex", ".ltx", ".latex", ".sty", ".cls", ".def", ".cfg", ".dtx"}
+_TEX_EXTENSIONS = TEX_SOURCE_SUFFIXES | {".dtx"}
 _ASSET_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg", ".eps", ".ps", ".svg", ".csv", ".dat"}
 _PLACEHOLDERS = {"your_api_key_here", "your_password_here", "example_password", "changemechangeme"}
 _HINT = re.compile(
@@ -92,7 +116,14 @@ _HINT = re.compile(
     r"\b(?:at our (?:university|institution|laboratory)|in our previous work|"
     r"our (?:institution|laboratory|university)|the authors are (?:at|from))\b"
 )
-_NOTE = re.compile(r"(?i)\b(?:TODO|FIXME|XXX|private note|do not submit|internal only)\b|\?\?")
+# Unfinished-work markers and private-note or distribution-restriction phrases; review
+# correspondence is left to the default private-note advisory.
+_PRIVATE_COMMENT_MARKER = marker_pattern(
+    MarkerCategory.EDIT_MARKER,
+    MarkerCategory.UNCERTAINTY_MARK,
+    MarkerCategory.PRIVATE_NOTE,
+    MarkerCategory.DISTRIBUTION_RESTRICTION,
+)
 _SHELL = re.compile(
     r"\\write\s*18\b|\\(?:ShellEscape|ShellEscapeAsync)\b|\\sys_shell_now:[A-Za-z]+\b"
 )
@@ -102,19 +133,21 @@ _VERSION = re.compile(
 )
 
 
-def validate_bbl_format_version(value: object) -> None:
-    """A biblatex .bbl format version such as "3.3", as written in the .bbl header."""
-    if value is not None and (
-        not isinstance(value, str) or not re.fullmatch(r"[0-9]{1,4}(?:\.[0-9]{1,4}){0,3}", value)
-    ):
-        raise PreparationError(
-            'biblatex_bbl_format_version must be a version such as "3.3", as written on the '
-            "second line of a biblatex .bbl file."
+def _require_project_path(name: str, value: object) -> None:
+    require_text(name, value, expected="a relative project path", max_length=_MAX_PAIR_CHARACTERS)
+    if not isinstance(value, str) or not is_relative_posix_path(value):
+        raise SettingsError(
+            f"{name} must be a safe path relative to the project, without '..'", (name,)
         )
 
 
 @dataclass(frozen=True)
 class SubmissionOptions:
+    FIELD_BOUNDS: ClassVar[dict[str, Bounds]] = {
+        "filename_max_length": POSITIVE_INTEGER,
+        "max_archive_bytes": POSITIVE_INTEGER,
+    }
+
     identity_terms: tuple[str, ...] = ()
     scan_identity_hints: bool = False
     scan_secrets: bool = False
@@ -127,71 +160,59 @@ class SubmissionOptions:
     max_archive_bytes: int | None = None
     report_unused_assets: bool = False
     template_references: tuple[tuple[str, str], ...] = ()
-    identity_term_matching: str = "word"
+    identity_term_matching: IdentityTermMatching = "word"
     check_bbl_coverage: bool = False
     require_bbl: bool = False
     biblatex_bbl_format_version: str | None = None
 
     def __post_init__(self) -> None:
-        if self.identity_term_matching not in IDENTITY_TERM_MATCHING:
-            raise PreparationError("identity_term_matching must be 'word' or 'substring'.")
-        validate_bbl_format_version(self.biblatex_bbl_format_version)
-        for name in (
-            "scan_identity_hints",
-            "scan_secrets",
-            "scan_private_comments",
-            "check_shell_escape",
-            "report_unused_assets",
-            "check_bbl_coverage",
-            "require_bbl",
-        ):
-            if type(getattr(self, name)) is not bool:
-                raise PreparationError(f"{name} must be a boolean.")
-        for name in ("filename_max_length", "max_archive_bytes"):
-            value = getattr(self, name)
-            if value is not None and (type(value) is not int or value < 1):
-                raise PreparationError(f"{name} must be a positive integer.")
-        for name in ("identity_terms", "allowed_extensions"):
-            values = getattr(self, name)
-            if (
-                not isinstance(values, tuple)
-                or len(values) > 256
-                or any(
-                    not isinstance(value, str) or not value.strip() or len(value) > 1024
-                    for value in values
-                )
-                or len(set(values)) != len(values)
-            ):
-                raise PreparationError(f"{name} must contain unique nonempty strings.")
-        if any(re.fullmatch(r"\.[A-Za-z0-9_+-]+", ext) is None for ext in self.allowed_extensions):
-            raise PreparationError("allowed_extensions must contain dot-prefixed final extensions.")
-        chars = self.filename_allowed_characters
-        if chars is not None and (not isinstance(chars, str) or not chars or len(chars) > 4096):
-            raise PreparationError("filename_allowed_characters must be a nonempty literal set.")
-        for name in ("required_deliverables", "template_references"):
-            pairs = getattr(self, name)
-            if not isinstance(pairs, tuple) or len(pairs) > 256:
-                raise PreparationError(f"{name} must be a tuple of path/value pairs.")
-            seen = set()
-            for pair in pairs:
-                if (
-                    not isinstance(pair, tuple)
-                    or len(pair) != 2
-                    or not all(
-                        isinstance(value, str)
-                        and value
-                        and "\x00" not in value
-                        and len(value) <= 4096
-                        for value in pair
-                    )
-                ):
-                    raise PreparationError(f"{name} must contain nonempty string pairs.")
-                path, value = pair
-                if not is_relative_project_path(path) or path in seen:
-                    raise PreparationError(f"{name} requires unique safe relative project paths.")
-                seen.add(path)
-                if name == "required_deliverables" and value not in {"file", "pdf", "zip", "text"}:
-                    raise PreparationError("Deliverable kind must be file, pdf, zip or text.")
+        validate_scalars(self)
+        require_text(
+            "biblatex_bbl_format_version",
+            self.biblatex_bbl_format_version,
+            expected='a version such as "3.3", as written on the second line of a biblatex '
+            ".bbl file",
+            pattern=_BBL_FORMAT_VERSION,
+            allow_none=True,
+        )
+        require_unique_strings(
+            "identity_terms",
+            self.identity_terms,
+            max_items=_MAX_LISTED_ENTRIES,
+            max_length=_MAX_TERM_CHARACTERS,
+            allow_surrounding_whitespace=True,
+        )
+        require_unique_strings(
+            "allowed_extensions",
+            self.allowed_extensions,
+            max_items=_MAX_LISTED_ENTRIES,
+            max_length=_MAX_TERM_CHARACTERS,
+            allow_surrounding_whitespace=True,
+            item_format=_FINAL_EXTENSION,
+        )
+        require_text(
+            "filename_allowed_characters",
+            self.filename_allowed_characters,
+            expected="a nonempty set of literal characters",
+            max_length=_MAX_CHARACTER_SET_CHARACTERS,
+            allow_none=True,
+        )
+        require_pairs(
+            "required_deliverables",
+            self.required_deliverables,
+            first=_require_project_path,
+            second=partial(require_choice, choices=DELIVERABLE_KINDS),
+            max_items=_MAX_LISTED_ENTRIES,
+        )
+        require_pairs(
+            "template_references",
+            self.template_references,
+            first=_require_project_path,
+            second=partial(
+                require_text, expected="a nonempty path", max_length=_MAX_PAIR_CHARACTERS
+            ),
+            max_items=_MAX_LISTED_ENTRIES,
+        )
 
 
 _DEFAULT_OPTIONS = SubmissionOptions()
@@ -237,10 +258,6 @@ def _secrets(text: str) -> list[tuple[int, str, str]]:
             if len(result) >= MAX_SCAN_MATCHES:
                 return result
     return result
-
-
-def _private_note(comment: str) -> str | None:
-    return "private note" if _NOTE.search(comment) else None
 
 
 def _short(value: str) -> str:
@@ -460,9 +477,9 @@ class _ContentScan:
             )
         notes = self.private_comments.matches
         if self.private_comments.enabled and notes.has_room:
+            marked = (c for c in comments if _PRIVATE_COMMENT_MARKER.search(c.text))
             notes.items.extend(
-                {"path": name, "line": marker.line}
-                for marker in marked_comments(comments, _private_note, notes.room)
+                {"path": name, "line": comment.line} for comment in islice(marked, notes.room)
             )
         if tex and any(rule.enabled for rule in self.rules if rule.lexical):
             self._active_source(name, text)
@@ -862,7 +879,7 @@ def check_pdf_identity(
     else:
         for index, (key, value) in enumerate(metadata.items(), 1):
             cancellation_point()
-            if index > MAX_SCAN_ENTRIES:
+            if index > _MAX_PDF_METADATA_ENTRIES:
                 issues.append("PDF metadata exceeds the entry limit.")
                 break
             if (

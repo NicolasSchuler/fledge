@@ -48,6 +48,10 @@ the first release of `fledge-latex` is 0.3.0.
   A build that still writes a `.bcf` is discarded and rebuilt once with Biber.
 - Stage findings stay separate when their evidence differs, and unavailable PDF
   measurements are marked incomplete instead of being reported as passes.
+- The opt-in private-comment scan (`PRV005`) now shares the phrases of the default
+  `PRV007` advisory for private notes and distribution restrictions (for example
+  "note to self", "not for distribution" and "confidential"), besides `TODO`,
+  `FIXME`, `XXX` and `??`. Reviewer correspondence stays with `PRV007`.
 - The version is read from one place, `latexprep.__version__`; `pyproject.toml`
   declares it as dynamic.
 - The source archive now carries every script that the documentation tests load
@@ -68,6 +72,25 @@ the first release of `fledge-latex` is 0.3.0.
 - A missing external tool now names the package that provides it (Poppler, qpdf,
   MuPDF, `tex-fmt` or TeX Live) with the commands that install it. A
   `build.execution_unavailable` finding records the missing tool as `details.tool`.
+- Settings errors name the key as you write it in a settings file and state what it
+  accepts, for example `jobs must be an integer from 1 to 64` or
+  `pdf_checks.raster_dpi must be an integer from 18 to 144`, and a value of the wrong
+  type gets the same message. Messages call a TOML array a list instead of an
+  immutable tuple. The `manuscript` and `pdf` constraints that are top-level keys
+  (`abstract_min_words`, `min_image_dpi`, `expected_page_width_pt` and the rest) now
+  name their key instead of "PDF dimensions and image resolution must be positive
+  finite numbers". `build_jobs`, `render_jobs`, `wrap_length` and `tab_size` each
+  name only the setting that is out of range.
+- An unknown key inside a settings table, such as `[pdf_checks] raster_dp`, suggests
+  the closest valid key and lists the valid ones, as an unknown top-level key already
+  did.
+- `online_replication_urls` now rejects a URL listed twice, which only spent the
+  request budget twice, and a `filename_allowed_characters` of spaces alone is
+  rejected as empty.
+- Rendered-page measurements are much faster: ink coverage (`PDF205`), figure
+  whitespace and edge ink, contrast samples and the changed-pixel count of a rendered
+  comparison now use byte operations instead of per-pixel Python loops. Results are
+  unchanged.
 
 ### Added
 
@@ -138,6 +161,30 @@ the first release of `fledge-latex` is 0.3.0.
 - The Linux sandbox (Bubblewrap) refusing to start was blamed on `latexmk`; the
   report now says the sandbox refused.
 - A corrupt Homebrew install receipt crashed tool discovery on macOS.
+- Terminal output and one-line messages now show private-use, unassigned and lone
+  surrogate characters (for example the remains of an undecodable file name) as
+  `\uXXXX` escapes instead of passing them on, and copy-ready submission text asks
+  for manual review of them as it already did for control characters. Escapes
+  beyond the basic plane in HTML reports and CI annotations are now `\UXXXXXXXX`;
+  the earlier `\uXXXXX` form could not be told from a shorter escape followed by a
+  digit.
+- Manuscript checks (the abstract citation policy, word counts and the detection of
+  unexpanded constructs) treated most natbib and biblatex citation commands, for
+  example `\citealp`, `\fullcite` and `\Textcite`, as unknown macros. They now
+  recognize every citation command that the bibliography checks do, including the
+  capitalized forms; the abstract citation policy also counts multi-citation
+  commands such as `\parencites`.
+- Manuscript constraint checks did not become inconclusive when a source file was
+  a symbolic link or one reference selected different files in different path
+  contexts, although the citation checks already did.
+- `PRV005` did not read comments in `.tikz` and `.pgf` files.
+- The author-record check treated a `\NewDocumentCommand` or
+  `\DeclareDocumentCommand` declaration of the author command as an author record
+  and reported the result as inconclusive.
+- An abstract made only of an `aligned`, `alignat` or similar math environment is
+  now reported as having no literal text outside mathematics.
+- Formatting skipped `.tex`, `.ltx` and `.latex` files whose extension was not
+  lower case, such as `MAIN.TEX`.
 - The build copy could follow a link that appeared while the project was being
   copied; it now refuses it.
 - If publishing the output failed, the rollback stopped at the first directory it
@@ -145,6 +192,20 @@ the first release of `fledge-latex` is 0.3.0.
 - A tool version failure printed the tool's absolute path and up to 500
   characters of its error output; it now names the tool and what went wrong.
 - The JSON report schema listed a `report` command that Fledge does not have.
+- Reads of sources, bibliographies, build logs and build evidence checked a file
+  and then opened it again, so a file replaced in between by a link or a named pipe,
+  or grown past its size limit, could still be read. Each read now opens the file
+  once, refuses links and special files at that point, and stops at its limit. A
+  build log that is a link is therefore reported as unavailable instead of followed.
+- A path in the settings (`workflow.documents` `main`, `source_directory` and
+  `include`, `package.include`, formatting exclusions, source-transform paths) or
+  given as `--main` was not checked for a Windows drive prefix such as `C:`
+  everywhere; every one of these places now refuses it, as project import already
+  did.
+- The PDF inspection accepted an ambiguous `pdfinfo` report (a repeated property
+  such as `Pages` or `Title`) that the other PDF checks refused, and the rendered
+  comparison and the inspection accepted extracted text without its final page
+  boundary. Every PDF check now applies the same preflight and page-boundary rules.
 
 ### Documentation
 

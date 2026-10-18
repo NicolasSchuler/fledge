@@ -9,21 +9,26 @@ from collections.abc import Callable, Iterator
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import ClassVar, Literal
 
 from .cancellation import bounded_map
 from .errors import PreparationError, SettingsError
-from .file_safety import MIB
 from .findings import Finding, has_blockers
+from .limits import MIB
+from .option_config import Bounds, require_unique_strings, validate_scalars
+from .path_safety import is_relative_posix_path
 from .report import Change, ChangeKind
 from .resource_budget import ResourceBudget
 from .runtime import CommandResult, CommandRunner
 from .source_transform import protected_spans
+from .tex_commands import ROOT_SUFFIXES
 from .text_edits import unified_diff_text
 
 _MAX_SOURCE_BYTES = 8 * MIB
 _FORMATTER_MEMORY_MB = 128
 MIN_WRAP_LENGTH = 20
 MAX_TAB_SIZE = 16
+BlankLines = Literal["formatter", "preserve", "collapse"]
 _WHITESPACE = re.compile(r"\s+")
 # Longest piece of tex-fmt's own message quoted in a finding.
 _MAX_FORMATTER_MESSAGE_CHARS = 200
@@ -33,35 +38,27 @@ _ABSOLUTE_PATH = re.compile(r"(?<![\w.~-])/(?:[\w.@+~-]+/)*[\w.@+~-]*")
 
 @dataclass(frozen=True)
 class FormattingOptions:
+    FIELD_BOUNDS: ClassVar[dict[str, Bounds]] = {
+        "wrap_length": Bounds(MIN_WRAP_LENGTH),
+        "tab_size": Bounds(1, MAX_TAB_SIZE),
+    }
+
     exclude: tuple[str, ...] = ()
-    blank_lines: str = "formatter"
+    blank_lines: BlankLines = "formatter"
     # Read from the top-level wrap_length and tab_size settings.
     wrap_length: int = 80
     tab_size: int = 2
 
     def __post_init__(self) -> None:
-        for name in ("wrap_length", "tab_size"):
-            value = getattr(self, name)
-            if type(value) is not int or value < 1:
-                raise SettingsError(f"{name} must be a positive integer", (name,))
-        if self.wrap_length < MIN_WRAP_LENGTH or self.tab_size > MAX_TAB_SIZE:
-            raise SettingsError(
-                f"wrap_length must be >={MIN_WRAP_LENGTH} and tab_size must be <={MAX_TAB_SIZE}",
-                ("wrap_length", "tab_size"),
-            )
-        if not isinstance(self.exclude, tuple) or any(
-            not isinstance(pattern, str)
-            or not pattern
-            or pattern.startswith("/")
-            or ".." in pattern.split("/")
-            or any(c in pattern for c in "\\\x00\r\n")
+        validate_scalars(self)
+        require_unique_strings("exclude", self.exclude, allow_surrounding_whitespace=True)
+        if any(
+            not is_relative_posix_path(pattern, normalized=False, characters="no_line_breaks")
             for pattern in self.exclude
         ):
-            raise PreparationError("formatting exclusions must be project-relative glob patterns")
-        if len(set(self.exclude)) != len(self.exclude):
-            raise PreparationError("formatting exclusions must be unique")
-        if self.blank_lines not in {"formatter", "preserve", "collapse"}:
-            raise PreparationError("blank_lines must be formatter, preserve or collapse")
+            raise SettingsError(
+                "exclude entries must be glob patterns relative to the project", ("exclude",)
+            )
 
 
 def _lines_with_blank_state(text: str) -> Iterator[tuple[str, bool]]:
@@ -337,7 +334,7 @@ async def format_project(
     all_paths = sorted(
         path
         for path in source.rglob("*")
-        if path.is_file() and path.suffix in {".tex", ".ltx", ".latex"}
+        if path.is_file() and path.suffix.lower() in ROOT_SUFFIXES
     )
     excluded = {
         path.relative_to(source).as_posix()

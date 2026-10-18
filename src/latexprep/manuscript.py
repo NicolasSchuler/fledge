@@ -11,7 +11,7 @@ from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, TypedDict
+from typing import ClassVar, Literal, TypedDict
 
 from .cancellation import cancellation_point
 from .errors import SettingsError
@@ -27,7 +27,6 @@ from .literal_text import (
     HEADING_DEPTHS,
     KEY_ARGUMENT_COMMANDS,
     KEYWORD_ENVIRONMENTS,
-    MATH_ENVIRONMENT_PATTERN,
     PACKAGE_COMMANDS,
     Declaration,
     first_argument_names,
@@ -36,13 +35,28 @@ from .literal_text import (
     plain_text,
     scan_literal_text,
 )
-from .option_config import require_booleans
-from .source_graph import ParsedSource, SourceGraph
+from .option_config import (
+    NONNEGATIVE_INTEGER,
+    Bounds,
+    require_text,
+    require_unique_strings,
+    validate_scalars,
+)
+from .source_graph import INCOMPLETE_GRAPH_RULES, ParsedSource, SourceGraph
+from .tex_commands import MATH_MARKER
 from .tex_lexer import CONTROL_SEQUENCE, Command, conditional_spans, in_conditional
 
 
 @dataclass(frozen=True)
 class ManuscriptOptions:
+    # Word and keyword counts; zero is a valid limit.
+    FIELD_BOUNDS: ClassVar[dict[str, Bounds]] = {
+        "abstract_min_words": NONNEGATIVE_INTEGER,
+        "abstract_max_words": NONNEGATIVE_INTEGER,
+        "keywords_min_count": NONNEGATIVE_INTEGER,
+        "keywords_max_count": NONNEGATIVE_INTEGER,
+    }
+
     expected_document_class: str | None = None
     required_class_options: tuple[str, ...] = ()
     forbidden_class_options: tuple[str, ...] = ()
@@ -55,11 +69,15 @@ class ManuscriptOptions:
     required_sections: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        require_booleans(self, "require_abstract")
-        if self.expected_document_class is not None and (
-            not isinstance(self.expected_document_class, str)
-            or literal_list(self.expected_document_class) != [self.expected_document_class]
-        ):
+        validate_scalars(self)
+        document_class = self.expected_document_class
+        require_text(
+            "expected_document_class",
+            document_class,
+            expected="a single nonempty class name",
+            allow_none=True,
+        )
+        if document_class is not None and literal_list(document_class) != [document_class]:
             raise SettingsError(
                 "expected_document_class must be a single nonempty class name",
                 ("expected_document_class",),
@@ -70,17 +88,7 @@ class ManuscriptOptions:
             "forbidden_packages",
             "required_sections",
         ):
-            values = getattr(self, name)
-            if not isinstance(values, tuple) or any(
-                not isinstance(value, str) or not value.strip() or value != value.strip()
-                for value in values
-            ):
-                raise SettingsError(
-                    f"{name} must contain nonempty strings without surrounding spaces", (name,)
-                )
-            repeated = sorted({value for value in values if values.count(value) > 1})
-            if repeated:
-                raise SettingsError(f"{name} lists {', '.join(map(repr, repeated))} twice", (name,))
+            require_unique_strings(name, getattr(self, name))
         for name in ("required_class_options", "forbidden_class_options", "forbidden_packages"):
             for value in getattr(self, name):
                 if literal_list(value) != [value]:
@@ -94,11 +102,6 @@ class ManuscriptOptions:
             ("keywords_min_count", "keywords_max_count"),
         ):
             lower, upper = getattr(self, lower_name), getattr(self, upper_name)
-            for limit_name, value in ((lower_name, lower), (upper_name, upper)):
-                if value is not None and (type(value) is not int or value < 0):
-                    raise SettingsError(
-                        f"{limit_name} must be a nonnegative integer", (limit_name,)
-                    )
             if lower is not None and upper is not None and lower > upper:
                 raise SettingsError(
                     f"{lower_name} must not exceed {upper_name}", (lower_name, upper_name)
@@ -122,32 +125,7 @@ _COUNT_METHOD = (
     "not a rendered word count."
 )
 _WORD = re.compile(r"[^\W_]+(?:['’\-‑][^\W_]+)*")
-_MATH_ONLY = re.compile(rf"(?<!\\)\$|\\[([]|\\begin\{{(?:{MATH_ENVIRONMENT_PATTERN})\}}")
 _CITATION_AND_REFERENCE_COMMANDS = KEY_ARGUMENT_COMMANDS - {"label", "nocite"}
-# A resolved source finding records how a reference was interpreted; only an
-# unresolved one of these leaves the manuscript interpretation incomplete.
-_INCOMPLETE_SOURCE_RULES = {
-    "source.encoding",
-    "source.size_limit",
-    "source.argument_limit",
-    "source.command_limit",
-    "source.literal_unclosed",
-    "source.input_cycle",
-    "source.input_depth",
-    "source.expansion_limit",
-    "source.dynamic_path",
-    "source.nested_file_command",
-    "source.conditional_dependency",
-    "source.path_literal_context",
-    "source.external_path",
-    "source.ambiguous_dependency",
-    "source.case_mismatch",
-    "source.custom_path",
-    "source.unsupported_command",
-    "source.missing_dependency",
-    "source.subfile_structure",
-    "source.font_options",
-}
 _SYNTAX_CHANGING_COMMANDS = {"csname", "catcode", "scantokens"}
 _KEYWORD_COUNT_METHOD = (
     "Nonempty phrases separated by commas, semicolons, \\sep, or \\and in \\keywords{} "
@@ -287,7 +265,7 @@ def _graph_reasons(graph: SourceGraph, selected: set[str], content: set[str]) ->
         f"{item.path}: {item.message}"
         for item in graph.findings
         if item.path in scope
-        and item.rule in _INCOMPLETE_SOURCE_RULES
+        and item.rule in INCOMPLETE_GRAPH_RULES
         and item.status != "passed"
         and not unresolved_non_content_file(item)
     )
@@ -398,7 +376,7 @@ def _abstract_count(block: _Block) -> _AbstractCount:
     count = len(_WORD.findall(text))
     nonempty_text = bool(text.strip())
     content_uncertainty = []
-    if not nonempty_text and _MATH_ONLY.search(block.value):
+    if not nonempty_text and MATH_MARKER.search(block.value):
         content_uncertainty.append(
             "abstract has no literal text outside mathematics; nonempty rendered "
             "content is not established by the lexical count"

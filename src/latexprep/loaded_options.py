@@ -7,6 +7,7 @@ commands.  Recorder agreement is required before reporting a complete inventory.
 
 from __future__ import annotations
 
+import codecs
 import functools
 import os
 import re
@@ -24,8 +25,9 @@ from .build_dependencies import (
     parse_declared_date,
 )
 from .errors import PreparationError
-from .file_safety import MIB
+from .file_safety import FileTooLargeError, read_regular_file
 from .findings import Finding
+from .limits import MIB
 from .setting_choices import Engine
 
 _MAX_PACKAGES = 2048
@@ -75,11 +77,12 @@ class LoadedOptionsProbe:
 def stage_loaded_options(project: Path, main: str, work: Path) -> LoadedOptionsProbe:
     """Add a line-neutral hook only to the existing disposable project copy."""
     main_path = project / main
-    if main_path.stat().st_size > _MAX_MAIN_BYTES:
+    try:
+        original = read_regular_file(main_path, _MAX_MAIN_BYTES)
+    except FileTooLargeError:
         raise PreparationError(
             f"Loaded-option instrumentation supports main files up to {_MAX_MAIN_BYTES // MIB} MiB"
-        )
-    original = main_path.read_bytes()
+        ) from None
     token = secrets.token_hex(16)
     hook = work / f"latexprep-loaded-options-{token}.tex"
     hook_bytes = _hook_template().replace("TOKEN", token).encode("ascii")
@@ -92,7 +95,7 @@ def stage_loaded_options(project: Path, main: str, work: Path) -> LoadedOptionsP
     prefix = (r"\input{" + relative_hook + r"}\relax ").encode("ascii")
     # Preserve a UTF-8 BOM and every original newline, including diagnostics on
     # the first source line.  No wrapper changes jobname or selected main file.
-    offset = 3 if original.startswith(b"\xef\xbb\xbf") else 0
+    offset = len(codecs.BOM_UTF8) if original.startswith(codecs.BOM_UTF8) else 0
     staged = original[:offset] + prefix + original[offset:]
     main_path.write_bytes(staged)
     return LoadedOptionsProbe(

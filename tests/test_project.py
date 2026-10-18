@@ -13,6 +13,7 @@ import zlib
 from pathlib import Path
 from unittest.mock import patch
 
+from latexprep.config import Settings, load_settings
 from latexprep.errors import PreparationError
 from latexprep.project import (
     MAX_FOLDER_DEPTH,
@@ -719,9 +720,21 @@ class ProjectTests(unittest.TestCase):
         self.assertTrue((self.base / "shallow.zip").exists())
 
     def test_limits_reject_invalid_values(self) -> None:
-        for value in (0, -1, True, 1.5):
-            with self.subTest(value=value), self.assertRaises(PreparationError):
-                ImportLimits(max_files=value)  # type: ignore[arg-type]
+        for name in ("max_files", "max_bytes", "max_depth", "max_ratio"):
+            for value in (0, -1, True, 1.5):
+                with self.subTest(name=name, value=value):
+                    with self.assertRaisesRegex(
+                        PreparationError, f"{name} must be a positive integer"
+                    ):
+                        ImportLimits(**{name: value})  # type: ignore[arg-type]
+
+    def test_limits_follow_the_job_settings(self) -> None:
+        settings = load_settings(None, {"max_files": 7, "max_bytes": 4096, "max_depth": 3})
+        self.assertEqual(ImportLimits.from_settings(settings), ImportLimits(7, 4096, 3))
+        self.assertEqual(
+            ImportLimits.from_settings(settings, max_ratio=4096), ImportLimits(7, 4096, 3, 4096)
+        )
+        self.assertEqual(ImportLimits.from_settings(Settings()), ImportLimits())
 
 
 if __name__ == "__main__":

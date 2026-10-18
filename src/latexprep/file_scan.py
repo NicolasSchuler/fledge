@@ -8,20 +8,18 @@ lexer's literal regions. Discovered secrets are redacted from every reported val
 from __future__ import annotations
 
 import os
-import stat
-from collections.abc import Callable, Generator, Iterable, Mapping, Sequence
-from contextlib import contextmanager
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
-from pathlib import Path, PurePosixPath
-from typing import BinaryIO, NamedTuple, cast
+from pathlib import Path
+from typing import NamedTuple, cast
 
 from .cancellation import cancellation_point
-from .file_safety import byte_count_text
+from .file_safety import read_file_prefix, read_regular_file
 from .findings import Finding, Status
+from .limits import MAX_PROJECT_ENTRIES
 from .redaction import SECRET_PATTERNS
 from .tex_lexer import MAX_SOURCE_BYTES, MAX_TOTAL_SOURCE_BYTES, source_regions
 
-MAX_SCAN_ENTRIES = 10_000
 MAX_SCAN_MATCHES = 200
 _SKIPPED_DIRECTORIES = frozenset({".git", ".hg", ".svn", "__MACOSX"})
 
@@ -50,7 +48,7 @@ def inventory_files(root: Path) -> FileInventory:
             with os.scandir(directory) as listing:
                 for entry in listing:
                     entries += 1
-                    if entries > MAX_SCAN_ENTRIES:
+                    if entries > MAX_PROJECT_ENTRIES:
                         return FileInventory(
                             files, [*issues, "Project inventory exceeded the entry limit."]
                         )
@@ -72,37 +70,6 @@ def inventory_files(root: Path) -> FileInventory:
                 f"Directory could not be read (check its permissions): {redact_secrets(name)}"
             )
     return FileInventory(dict(sorted(files.items())), issues)
-
-
-@contextmanager
-def _open_regular_file(path: Path) -> Generator[tuple[BinaryIO, int], None, None]:
-    """Open an unlinked regular file without blocking on special files; yield it and its size."""
-    cancellation_point()
-    if path.is_symlink():
-        raise OSError("Linked files are outside the scan.")
-    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    with os.fdopen(descriptor, "rb") as stream:
-        metadata = os.fstat(stream.fileno())
-        if not stat.S_ISREG(metadata.st_mode):
-            raise OSError("File is not a regular file.")
-        yield stream, metadata.st_size
-
-
-def read_regular_file(path: Path, limit: int = MAX_SOURCE_BYTES) -> bytes:
-    """Read a whole regular, unlinked file that holds at most ``limit`` bytes."""
-    with _open_regular_file(path) as (stream, size):
-        if size > limit:
-            raise OSError(f"File exceeds the scan limit of {byte_count_text(limit)}.")
-        data = stream.read(limit + 1)
-    if len(data) > limit:
-        raise OSError(f"File exceeds the scan limit of {byte_count_text(limit)}.")
-    return data
-
-
-def read_file_prefix(path: Path, size: int) -> bytes:
-    """Read at most the first ``size`` bytes of a regular, unlinked file of any length."""
-    with _open_regular_file(path) as (stream, _):
-        return stream.read(size)
 
 
 @dataclass(slots=True)
@@ -205,19 +172,6 @@ def redact_findings(findings: list[Finding], secrets: set[str]) -> list[Finding]
         )
         for item in findings
     ]
-
-
-def is_relative_project_path(value: str) -> bool:
-    """Whether ``value`` is a normalized relative POSIX path that stays inside the project."""
-    path = PurePosixPath(value)
-    return (
-        not path.is_absolute()
-        and ".." not in path.parts
-        and "\\" not in value
-        and path.as_posix() == value
-        and value not in {"", "."}
-        and "\x00" not in value
-    )
 
 
 def check_status(*, failed: bool, incomplete: bool) -> Status:

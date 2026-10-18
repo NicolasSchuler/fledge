@@ -15,13 +15,14 @@ from dataclasses import dataclass
 from typing import Literal, NamedTuple
 
 from .cancellation import cancellation_point
-from .file_safety import MIB
+from .limits import CANCELLATION_STRIDE_CHARS, KIB, MIB
+from .tex_commands import DEFINITION_COMMANDS
 
 # Bounds shared by every reader of the lexical subset.
-MAX_SOURCE_BYTES = 8 * 1024 * 1024
-MAX_TOTAL_SOURCE_BYTES = 32 * 1024 * 1024
+MAX_SOURCE_BYTES = 8 * MIB
+MAX_TOTAL_SOURCE_BYTES = 32 * MIB
 MAX_COMMANDS = 100_000
-MAX_ARGUMENT_CHARS = 64 * 1024
+MAX_ARGUMENT_CHARS = 64 * KIB
 # Groups read after one command: its brace arguments and bracket options together.
 _MAX_GROUPS_PER_COMMAND = 6
 # Arguments may together span this many times the scanned text, because commands nest.
@@ -50,10 +51,6 @@ _VERBATIM_COMMANDS = frozenset({"verb", "lstinline", "mintinline", "url", "nolin
 # The url package's \path takes a braced or ``|``-delimited argument. TikZ shares the name
 # for \path[options] (a) -- (b), whose arguments are ordinary markup, not literal text.
 _URL_PATH_OPENERS = "{|"
-# Tokens after these commands name a macro being defined, not a conditional being run.
-DEFINITION_COMMANDS = frozenset(
-    {"newif", "def", "gdef", "edef", "xdef", "let", "futurelet", "global", "long", "protected"}
-)
 # Package conditionals that take braced branches instead of ending with \fi.
 _ARGUMENT_CONDITIONALS = frozenset(
     {
@@ -90,7 +87,7 @@ ParseLimit = Literal[
 
 _PARSE_LIMIT_DESCRIPTIONS: dict[ParseLimit, str] = {
     "unclosed_group": "a brace group is never closed",
-    "oversized_group": f"a brace group is longer than {MAX_ARGUMENT_CHARS // 1024} KiB",
+    "oversized_group": f"a brace group is longer than {MAX_ARGUMENT_CHARS // KIB} KiB",
     "argument_budget": "the command arguments together exceed the supported total size",
     "command_count": f"the text has more than {MAX_COMMANDS:,} commands",
     "expanded_size": f"the expanded text is larger than {MAX_TOTAL_SOURCE_BYTES // MIB} MiB",
@@ -253,7 +250,7 @@ def source_regions(text: str) -> RegionScan:
     unclosed: list[int] = []
     pos = 0
     while pos < len(text):
-        if pos % 4096 == 0:
+        if pos % CANCELLATION_STRIDE_CHARS == 0:
             cancellation_point()
         if text[pos] == "%":
             end = text.find("\n", pos)
@@ -374,7 +371,7 @@ def scan_commands(masked: str, comments: Sequence[int] = ()) -> list[Command]:
     line = 1
     argument_chars = 0
     while pos < len(masked):
-        if pos % 4096 == 0:
+        if pos % CANCELLATION_STRIDE_CHARS == 0:
             cancellation_point()
         char = masked[pos]
         if char == "\n":

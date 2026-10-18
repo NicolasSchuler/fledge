@@ -192,7 +192,7 @@ class ConfigDiscoveryTests(unittest.TestCase):
         for text, message in (
             ("[checks]\nselect = [\n", "Cannot read settings"),
             ('[checks]\nselect = ["BOGUS"]\n', "Unknown checks.select"),
-            ('[checks]\nselect = "TEX"\n', "checks.select must be an array"),
+            ('[checks]\nselect = "TEX"\n', "checks.select must be a list"),
             ("[checks]\nignore = [false]\n", "checks.ignore\\[0\\] must be a string"),
             ("[checks]\nunknown = true\n", "Unknown checks setting"),
         ):

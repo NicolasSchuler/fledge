@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import difflib
 import tomllib
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field, fields, is_dataclass, replace
 from pathlib import Path
-from typing import Any, get_type_hints
+from typing import Any, ClassVar, get_type_hints
 
 from .bibliography_checks import BibliographyOptions
 from .bibliography_transform import BibliographyTransformOptions
@@ -16,25 +15,29 @@ from .check_policy import unselected_policy_updates
 from .check_selection import CheckSelection
 from .errors import PreparationError, RequestError, SettingsError
 from .formatting import FormattingOptions
+from .limits import DEFAULT_MAX_FOLDER_LEVELS, DEFAULT_MAX_PROJECT_BYTES, MAX_PROJECT_ENTRIES
 from .manuscript import ManuscriptOptions
 from .manuscript_checks import ManuscriptCheckOptions
 from .metadata_privacy import MetadataPrivacyOptions
 from .online_checks import OnlineOptions
-from .option_config import read_options, require_booleans
+from .option_config import (
+    POSITIVE_INTEGER,
+    Bounds,
+    closest_names,
+    read_options,
+    read_top_level_options,
+    require_text,
+    require_unique_strings,
+    validate_scalars,
+    with_suggestions,
+)
 from .pdf_artwork import PdfArtworkOptions
 from .pdf_checks import PdfCheckOptions
 from .pdf_inspection import PdfInspectionOptions
 from .pdf_structure_checks import StructureOptions
 from .presets import preset_values
 from .review_policy import ReportingOptions
-from .setting_choices import (
-    BIBLIOGRAPHY_BACKENDS,
-    ENGINES,
-    LAYOUTS,
-    BibliographyBackend,
-    Engine,
-    Layout,
-)
+from .setting_choices import BibliographyBackend, Engine, Layout
 from .source_transform import SourceTransformOptions
 from .submission_checks import SubmissionOptions
 from .workflow_options import PackageOptions, WorkflowOptions
@@ -55,26 +58,8 @@ RENAMED_SETTINGS: dict[str, str] = {
     "format": "apply_formatting",
 }
 
-_CHOICES: dict[str, tuple[str, ...]] = {
-    "layout": LAYOUTS,
-    "engine": ENGINES,
-    "bibliography_backend": BIBLIOGRAPHY_BACKENDS,
-}
-_SWITCHES = ("apply_formatting", "normalize_doi", "cleanup")
-_POSITIVE_INTEGERS = (
-    "jobs",
-    "build_jobs",
-    "render_jobs",
-    "memory_mb",
-    "build_memory_mb",
-    "timeout_seconds",
-    "job_timeout_seconds",
-    "max_temporary_bytes",
-    "max_files",
-    "max_bytes",
-    "max_depth",
-)
-_PDF_METADATA_SOURCES = frozenset({"title", "author"})
+# Source-document fields whose value a PDF property may be required to match.
+_PDF_METADATA_SOURCES = ("title", "author")
 
 
 def _bibliography_edit_tables(value: object) -> object:
@@ -110,6 +95,22 @@ class Settings:
     ``manuscript`` and ``pdf`` hold constraints that TOML and reports spell as
     top-level keys, as do ``formatting_options.wrap_length`` and ``tab_size``.
     """
+
+    FIELD_BOUNDS: ClassVar[dict[str, Bounds]] = {
+        "jobs": Bounds(1, MAX_CONCURRENCY),
+        "build_jobs": Bounds(1, MAX_CONCURRENCY),
+        "render_jobs": Bounds(1, MAX_CONCURRENCY),
+        "memory_mb": Bounds(MIN_MEMORY_MB),
+        "build_memory_mb": Bounds(MIN_BUILD_MEMORY_MB),
+        "timeout_seconds": POSITIVE_INTEGER,
+        "job_timeout_seconds": POSITIVE_INTEGER,
+        "max_temporary_bytes": POSITIVE_INTEGER,
+        "source_date_epoch": Bounds(0, MAX_SOURCE_DATE_EPOCH),
+        "max_files": POSITIVE_INTEGER,
+        "max_bytes": POSITIVE_INTEGER,
+        "max_depth": POSITIVE_INTEGER,
+        "max_pages": POSITIVE_INTEGER,
+    }
 
     checks: CheckSelection = field(default_factory=CheckSelection)
     structure_checks: StructureOptions = field(default_factory=StructureOptions)
@@ -150,48 +151,22 @@ class Settings:
     job_timeout_seconds: int = 600
     max_temporary_bytes: int = 2_147_483_648
     source_date_epoch: int | None = None
-    max_files: int = 10000
-    max_bytes: int = 268435456
-    max_depth: int = 32
+    max_files: int = MAX_PROJECT_ENTRIES
+    max_bytes: int = DEFAULT_MAX_PROJECT_BYTES
+    max_depth: int = DEFAULT_MAX_FOLDER_LEVELS
     max_pages: int | None = None
 
     def __post_init__(self) -> None:
         for name, kind in _OPTION_TYPES.items():
             if not isinstance(getattr(self, name), kind):
                 raise SettingsError(f"{name} must be a settings table", (name,))
-        metadata = self.match_source_pdf_metadata
-        if (
-            not isinstance(metadata, tuple)
-            or any(
-                not isinstance(item, str) or item not in _PDF_METADATA_SOURCES for item in metadata
-            )
-            or len(set(metadata)) != len(metadata)
-        ):
-            raise SettingsError(
-                "match_source_pdf_metadata must list unique title/author fields",
-                ("match_source_pdf_metadata",),
-            )
-        if self.main is not None and (not isinstance(self.main, str) or not self.main.strip()):
-            raise SettingsError("main must be a nonempty relative filename", ("main",))
-        for name, allowed in _CHOICES.items():
-            value = getattr(self, name)
-            if not isinstance(value, str) or value not in allowed:
-                raise SettingsError(f"{name} must be one of {', '.join(sorted(allowed))}", (name,))
-        require_booleans(self, *_SWITCHES)
-        for name in _POSITIVE_INTEGERS:
-            value = getattr(self, name)
-            if type(value) is not int or value < 1:
-                raise SettingsError(f"{name} must be a positive integer", (name,))
-        epoch = self.source_date_epoch
-        if epoch is not None and (
-            type(epoch) is not int or not 0 <= epoch <= MAX_SOURCE_DATE_EPOCH
-        ):
-            raise SettingsError(
-                "source_date_epoch must be a nonnegative supported Unix timestamp",
-                ("source_date_epoch",),
-            )
-        if self.max_pages is not None and (type(self.max_pages) is not int or self.max_pages < 1):
-            raise SettingsError("max_pages must be a positive integer", ("max_pages",))
+        validate_scalars(self)
+        require_unique_strings(
+            "match_source_pdf_metadata",
+            self.match_source_pdf_metadata,
+            choices=_PDF_METADATA_SOURCES,
+        )
+        require_text("main", self.main, expected="a nonempty relative filename", allow_none=True)
         self._validate_combinations()
 
     def _validate_combinations(self) -> None:
@@ -209,19 +184,6 @@ class Settings:
             raise SettingsError(
                 "Choose source matching or an explicit expected PDF value for each metadata field",
                 ("match_source_pdf_metadata", "pdf_checks"),
-            )
-        if self.jobs > MAX_CONCURRENCY:
-            raise SettingsError(f"jobs must be at most {MAX_CONCURRENCY}", ("jobs",))
-        if self.build_jobs > MAX_CONCURRENCY or self.render_jobs > MAX_CONCURRENCY:
-            raise SettingsError(
-                f"build_jobs and render_jobs must be at most {MAX_CONCURRENCY}",
-                ("build_jobs", "render_jobs"),
-            )
-        if self.memory_mb < MIN_MEMORY_MB or self.build_memory_mb < MIN_BUILD_MEMORY_MB:
-            raise SettingsError(
-                f"memory_mb must be >={MIN_MEMORY_MB} and "
-                f"build_memory_mb must be >={MIN_BUILD_MEMORY_MB}",
-                ("memory_mb", "build_memory_mb"),
             )
         if self.build_memory_mb + COORDINATOR_MEMORY_MB > self.memory_mb:
             raise SettingsError(
@@ -285,13 +247,6 @@ _OPTION_TYPES: dict[str, type] = {
 _OPTION_TABLES = {
     name: kind for name, kind in _OPTION_TYPES.items() if name not in _FLATTENED_GROUPS
 }
-# Manuscript name lists that TOML supplies as arrays.
-_NAME_LISTS = (
-    "required_class_options",
-    "forbidden_class_options",
-    "forbidden_packages",
-    "required_sections",
-)
 # The top-level TOML settings, in their current spelling.
 SETTING_NAMES: frozenset[str] = frozenset(
     {item.name for item in fields(Settings) if item.name not in _FLATTENED_GROUPS}
@@ -361,15 +316,9 @@ def _read_settings_file(path: Path) -> dict[str, object]:
 def _unknown_settings_error(
     unknown: list[str], known: frozenset[str], path: Path | None
 ) -> RequestError:
-    guesses = {
-        name: close[0]
-        for name in unknown
-        if (close := difflib.get_close_matches(name, sorted(known), n=1))
-    }
+    guesses = closest_names(unknown, known)
     where = f" in {path}" if path is not None else ""
-    message = f"Unknown setting(s){where}: " + ", ".join(
-        f"{name} (did you mean {guesses[name]}?)" if name in guesses else name for name in unknown
-    )
+    message = f"Unknown setting(s){where}: " + with_suggestions(unknown, guesses)
     fix = f"Rename or remove {'it' if len(unknown) == 1 else 'them'}{where}."
     if len(guesses) < len(unknown):
         fix += f" Valid top-level settings: {', '.join(sorted(known))}."
@@ -463,19 +412,13 @@ def _build_settings(values: dict[str, Any], path: Path | None) -> Settings:
     grouped: dict[str, dict[str, Any]] = {group: {} for group in _FLATTENED_GROUPS}
     for name in [name for name in values if _TOP_LEVEL_FIELDS.get(name) in grouped]:
         grouped[_TOP_LEVEL_FIELDS[name]][name] = values.pop(name)
-    for name in _NAME_LISTS:
-        if name in grouped["manuscript"]:
-            value = grouped["manuscript"][name]
-            if not isinstance(value, (tuple, list)):
-                raise SettingsError(f"{name} must be an array of unique nonempty strings", (name,))
-            grouped["manuscript"][name] = tuple(value)
     if isinstance(metadata := values.get("match_source_pdf_metadata"), list):
         values["match_source_pdf_metadata"] = tuple(metadata)
     settings = Settings(
         **values,
         **tables,
-        manuscript=ManuscriptOptions(**grouped["manuscript"]),
-        pdf=PdfInspectionOptions(**grouped["pdf"]),
+        manuscript=read_top_level_options(ManuscriptOptions, grouped["manuscript"]),
+        pdf=read_top_level_options(PdfInspectionOptions, grouped["pdf"]),
     )
     return settings if path is None else _resolve_relative_paths(settings, path.parent)
 

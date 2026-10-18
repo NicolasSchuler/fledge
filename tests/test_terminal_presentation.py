@@ -16,12 +16,8 @@ from latexprep.finding_view import RenderOptions
 from latexprep.findings import Finding
 from latexprep.report import Outcome, Report
 from latexprep.terminal_progress import TerminalProgress
-from latexprep.terminal_report import (
-    print_report,
-    render_compact,
-    render_terminal,
-    sanitize_terminal_text,
-)
+from latexprep.terminal_report import print_report, render_compact, render_terminal
+from latexprep.text_safety import sanitize_terminal_text
 
 
 class TerminalBuffer(StringIO):

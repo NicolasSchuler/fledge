@@ -17,7 +17,6 @@ import difflib
 import html
 import ipaddress
 import json
-import math
 import re
 import socket
 import ssl
@@ -29,7 +28,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any, ClassVar, NamedTuple
 from urllib.parse import parse_qsl, quote, urlencode, urljoin, urlsplit, urlunsplit
 
 from . import __version__
@@ -49,10 +48,11 @@ from .cancellation import (
     run_in_thread,
 )
 from .citation_graph import require_directory, resource_declarations
-from .errors import PreparationError
 from .expanded_document import reachable_sources
 from .findings import EvidenceKind, Finding, Severity, Status
-from .option_config import require_booleans
+from .limits import MIB
+from .option_config import Bounds, require_text, require_unique_strings, validate_scalars
+from .path_safety import is_contained
 from .process_control import kill_unfinished, start_process
 from .resource_budget import ResourceBudget
 from .source_graph import SourceGraph
@@ -61,8 +61,8 @@ from .tex_lexer import ParseLimitExceeded, scan_source_commands
 _CROSSREF = "https://api.crossref.org/works"
 # The only host that receives the contact address; Crossref's polite pool needs it there.
 _CROSSREF_HOST = urlsplit(_CROSSREF).hostname
-_MAX_INPUT_BYTES = 16 * 1024 * 1024
-_MAX_BIB_BYTES = 2 * 1024 * 1024
+_MAX_INPUT_BYTES = 16 * MIB
+_MAX_BIB_BYTES = 2 * MIB
 _MAX_REFERENCES = 2000
 _SECRET_KEY = re.compile(
     r"token|secret|password|passwd|api.?key|authorization|signature|credential|session|jwt|bearer"
@@ -86,6 +86,11 @@ _OPTION_BOUNDS = {
     "online_max_response_bytes": (1024, 4_194_304),
     "online_jobs": (1, 8),
 }
+# Seconds between requests to one provider.
+_PROVIDER_INTERVAL_BOUNDS = Bounds(0.1, 60)
+_MAX_REPLICATION_URLS = 1000
+# The longest email address that SMTP can route (RFC 5321).
+_MAX_EMAIL_CHARACTERS = 254
 # Each selectable check's option and rule, in catalogue order (NET001-NET007).
 _CHECK_RULES = {
     "online_doi_resolution": "online.doi_resolution",
@@ -165,6 +170,11 @@ class OnlineOptions:
     product User-Agent. It never enters a finding, detail or report field.
     """
 
+    FIELD_BOUNDS: ClassVar[dict[str, Bounds]] = {
+        **{name: Bounds(low, high) for name, (low, high) in _OPTION_BOUNDS.items()},
+        "online_provider_interval_seconds": _PROVIDER_INTERVAL_BOUNDS,
+    }
+
     online: bool = False
     online_doi_resolution: bool = False
     online_metadata: bool = False
@@ -183,34 +193,21 @@ class OnlineOptions:
     online_provider_interval_seconds: float = 1.0
 
     def __post_init__(self) -> None:
-        require_booleans(self, "online", *_CHECK_RULES)
-        for name, (low, high) in _OPTION_BOUNDS.items():
-            value = getattr(self, name)
-            if type(value) is not int or not low <= value <= high:
-                raise PreparationError(f"{name} must be an integer from {low} to {high}")
-        interval = self.online_provider_interval_seconds
-        if (
-            isinstance(interval, bool)
-            or not isinstance(interval, (int, float))
-            or not math.isfinite(interval)
-            or not 0.1 <= interval <= 60
-        ):
-            raise PreparationError("online_provider_interval_seconds must be from 0.1 to 60")
-        if (
-            not isinstance(self.online_replication_urls, tuple)
-            or len(self.online_replication_urls) > 1000
-            or any(not isinstance(url, str) or not url for url in self.online_replication_urls)
-        ):
-            raise PreparationError(
-                "online_replication_urls must be a tuple of at most 1000 nonempty URLs"
-            )
-        email = self.online_contact_email
-        if email is not None and (
-            not isinstance(email, str) or len(email) > 254 or _EMAIL.fullmatch(email) is None
-        ):
-            raise PreparationError(
-                "online_contact_email must be one simple email address of at most 254 characters"
-            )
+        validate_scalars(self)
+        require_unique_strings(
+            "online_replication_urls",
+            self.online_replication_urls,
+            max_items=_MAX_REPLICATION_URLS,
+            allow_surrounding_whitespace=True,
+        )
+        require_text(
+            "online_contact_email",
+            self.online_contact_email,
+            expected="one simple email address",
+            pattern=_EMAIL,
+            max_length=_MAX_EMAIL_CHARACTERS,
+            allow_none=True,
+        )
 
     @property
     def user_agent(self) -> str:
@@ -864,11 +861,7 @@ def _bibliography_references(root: Path, paths: list[Path], gaps: list[str]) -> 
     for path in paths:
         cancellation_point()
         name = path.relative_to(root).as_posix()
-        if (
-            path.is_symlink()
-            or not path.is_file()
-            or not path.resolve().is_relative_to(root.resolve())
-        ):
+        if not is_contained(root, path, regular_file=True):
             gaps.append(f"{name} is not a regular file inside the project")
             continue
         if path.stat().st_size > reader.allowance:

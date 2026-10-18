@@ -16,7 +16,8 @@ from .config import load_settings, resolve_config_path
 from .errors import PreparationError
 from .project import ImportLimits, import_project
 from .report import Outcome
-from .submission_text import FIELD_NAMES, read_submission_text, safe_display
+from .submission_text import FIELD_NAMES, read_submission_text
+from .text_safety import escape_single_line_text
 
 
 @click.command("submission-text")
@@ -48,11 +49,11 @@ def submission_text_command(
             resolve_config_path(source, config, isolated=isolated), {"main": main}
         )
         with TemporaryDirectory(prefix="fledge-submission-text-") as temporary:
-            limits = ImportLimits(settings.max_files, settings.max_bytes, settings.max_depth)
+            limits = ImportLimits.from_settings(settings)
             imported = import_project(source, Path(temporary) / "project", limits)
             fields = read_submission_text(imported.root, settings.main)
     except (PreparationError, OSError) as error:
-        click.echo(safe_display(f"Cannot export submission text: {error}"), err=True)
+        click.echo(escape_single_line_text(f"Cannot export submission text: {error}"), err=True)
         raise click.exceptions.Exit(Outcome.ERROR.exit_code) from error
     if json_output:
         payload = {"fields": {name: asdict(value) for name, value in fields.items()}}

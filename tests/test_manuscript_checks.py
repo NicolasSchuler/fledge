@@ -122,6 +122,16 @@ class ManuscriptDetailTests(unittest.TestCase):
         )
         self.assertEqual(nested.status, "failed")
 
+    def test_every_citation_command_spelling_counts_as_an_abstract_citation(self) -> None:
+        for command in ("citealp", "Textcite", "Parencite", "fullcite", "parencites"):
+            with self.subTest(command=command):
+                result = self.result(
+                    "\\abstract{Findings \\" + command + "{key}.}",
+                    ManuscriptCheckOptions(forbid_abstract_citations=True),
+                    "abstract_citations",
+                )
+                self.assertEqual(result.status, "failed")
+
     def test_abstract_abbreviations(self) -> None:
         self.policy(
             "abstract_abbreviations",

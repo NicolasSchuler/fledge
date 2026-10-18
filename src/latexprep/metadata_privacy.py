@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import codecs
 import html
 import re
 import unicodedata
@@ -11,17 +12,16 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
 from .cancellation import cancellation_point
-from .errors import PreparationError
-from .file_scan import (
-    check_status,
-    inventory_files,
-    is_relative_project_path,
-    plural,
-    read_regular_file,
-    redact_secrets,
-)
+from .errors import PreparationError, SettingsError
+from .file_safety import read_regular_file
+from .file_scan import check_status, inventory_files, plural, redact_secrets
 from .findings import Finding, has_blockers
+from .limits import MIB
+from .option_config import require_choice, require_records, require_text, require_unique_strings
+from .path_safety import is_relative_posix_path
+from .png_support import iter_png_chunks
 from .report import Change, ChangeKind
+from .tex_commands import ROOT_SUFFIXES
 from .tex_lexer import (
     MAX_SOURCE_BYTES,
     MAX_TOTAL_SOURCE_BYTES,
@@ -35,7 +35,8 @@ from .tex_lexer import (
     scan_commands,
     source_regions,
 )
-from .text_edits import unified_diff_text
+from .text_edits import OverlappingEdits, TextEdit, apply_text_edits, unified_diff_text, with_bom
+from .text_safety import is_unsafe_character
 
 _PDF_FIELDS = {
     "hypersetup.pdftitle": "Title",
@@ -44,12 +45,16 @@ _PDF_FIELDS = {
     "hypersetup.pdfkeywords": "Keywords",
 }
 _FIELDS = {*_PDF_FIELDS, "title", "author", "email", "affiliation"}
-_MAX_IMAGE_BYTES = 32 * 1024 * 1024
-_MAX_IMAGE_TOTAL = 128 * 1024 * 1024
-_MAX_METADATA_BYTES = 1024 * 1024
-_MAX_METADATA_TOTAL = 4 * 1024 * 1024
+_MAX_IMAGE_BYTES = 32 * MIB
+_MAX_IMAGE_TOTAL = 128 * MIB
+_MAX_METADATA_BYTES = MIB
+_MAX_METADATA_TOTAL = 4 * MIB
 _MAX_IMAGE_COUNT = 2000
 _MAX_ENTRIES = 4096
+_MAX_EDITS = 256  # selected source metadata edits
+_MAX_IDENTITY_TERMS = 256
+_MAX_TERM_CHARACTERS = 1024  # characters in one identity term
+_MAX_EDIT_TEXT_CHARACTERS = 65536  # characters in an edit's expected or replacement text
 _MAX_MATCHES = 200
 # Problems named in a message; the finding's details list every one.
 _MAX_LISTED_PROBLEMS = 3
@@ -60,18 +65,9 @@ _UNSCANNED_FIGURE_FORMATS = "PDF, EPS, SVG, TIFF, GIF and WebP"
 _DYNAMIC_COMMANDS = frozenset({"catcode", "csname", "scantokens", "ExplSyntaxOn", "directlua"})
 
 
-def _safe_manuscript_path(value: str) -> bool:
-    """A project path that is also free of colons and control or format characters."""
-    return (
-        is_relative_project_path(value)
-        and ":" not in value
-        and not any(unicodedata.category(char).startswith("C") for char in value)
-    )
-
-
 def _literal(value: str) -> bool:
     return not any(char in value for char in "\\{}%#$&^~") and not any(
-        unicodedata.category(char).startswith("C") and char not in "\r\n\t" for char in value
+        is_unsafe_character(char) and char not in "\r\n\t" for char in value
     )
 
 
@@ -83,18 +79,26 @@ class MetadataEdit:
     replacement: str
 
     def __post_init__(self) -> None:
-        if (
-            not isinstance(self.path, str)
-            or not _safe_manuscript_path(self.path)
-            or (PurePosixPath(self.path).suffix.lower() not in {".tex", ".ltx", ".latex"})
+        require_text("path", self.path, expected="a safe relative TeX manuscript path")
+        if not is_relative_posix_path(self.path, characters="literal") or (
+            PurePosixPath(self.path).suffix.lower() not in ROOT_SUFFIXES
         ):
-            raise PreparationError("Metadata edits require a safe relative TeX manuscript path")
-        if not isinstance(self.field, str) or self.field not in _FIELDS:
-            raise PreparationError("Metadata edit field is outside the supported literal subset")
+            raise SettingsError("path must be a safe relative TeX manuscript path", ("path",))
+        require_choice("field", self.field, sorted(_FIELDS))
         for name in ("expected_before", "replacement"):
             value = getattr(self, name)
-            if not isinstance(value, str) or len(value) > 65536 or not _literal(value):
-                raise PreparationError(f"Metadata {name} requires bounded plain literal text")
+            require_text(
+                name,
+                value,
+                expected="bounded plain literal text",
+                max_length=_MAX_EDIT_TEXT_CHARACTERS,
+                allow_blank=True,
+            )
+            if not _literal(value):
+                raise SettingsError(
+                    f"{name} must be plain literal text without TeX commands or control characters",
+                    (name,),
+                )
 
 
 @dataclass(frozen=True)
@@ -103,25 +107,21 @@ class MetadataPrivacyOptions:
     image_identity_terms: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        if (
-            not isinstance(self.edits, tuple)
-            or len(self.edits) > 256
-            or any(not isinstance(edit, MetadataEdit) for edit in self.edits)
-        ):
-            raise PreparationError("Metadata edits must be an immutable bounded list")
-        if len({(edit.path, edit.field) for edit in self.edits}) != len(self.edits):
-            raise PreparationError("Each source metadata field may have only one selected edit")
-        values = self.image_identity_terms
-        if (
-            not isinstance(values, tuple)
-            or len(values) > 256
-            or any(
-                not isinstance(value, str) or not value.strip() or len(value) > 1024
-                for value in values
-            )
-            or len(set(values)) != len(values)
-        ):
-            raise PreparationError("Image identity terms must be unique nonempty bounded strings")
+        require_records(
+            "edits",
+            self.edits,
+            MetadataEdit,
+            max_items=_MAX_EDITS,
+            distinct_by=lambda edit: (edit.path, edit.field),
+            distinct_description="source metadata field",
+        )
+        require_unique_strings(
+            "image_identity_terms",
+            self.image_identity_terms,
+            max_items=_MAX_IDENTITY_TERMS,
+            max_length=_MAX_TERM_CHARACTERS,
+            allow_surrounding_whitespace=True,
+        )
         expected: dict[str, str] = {}
         for edit in self.edits:
             if edit.field in _PDF_FIELDS:
@@ -217,7 +217,7 @@ def _selected_command_problem(command: Command, text: str) -> str | None:
     return None
 
 
-def _edit_spans(text: str, edits: Sequence[MetadataEdit]) -> list[tuple[int, int, str]]:
+def _edit_spans(text: str, edits: Sequence[MetadataEdit]) -> list[TextEdit]:
     regions, unclosed = source_regions(text)
     if unclosed:
         raise PreparationError("An unclosed literal region prevents metadata editing")
@@ -280,7 +280,7 @@ def _edit_spans(text: str, edits: Sequence[MetadataEdit]) -> list[tuple[int, int
         replacement = edit.replacement
         if edit.field.startswith("hypersetup.") and text[start - 1 : start] != "{":
             replacement = "{" + replacement + "}"
-        replacements.append((start, end, replacement))
+        replacements.append(TextEdit(start, end, replacement))
     return replacements
 
 
@@ -313,15 +313,15 @@ def plan_metadata_sanitization(
             total += len(original)
             if total > MAX_TOTAL_SOURCE_BYTES:
                 raise PreparationError("Metadata sources exceed the total source-byte limit")
-            bom = original.startswith(b"\xef\xbb\xbf")
+            bom = original.startswith(codecs.BOM_UTF8)
             text = original.decode("utf-8-sig")
-            spans = _edit_spans(text, selected)
-            prepared = text
-            for start, end, value in sorted(spans, reverse=True):
-                prepared = prepared[:start] + value + prepared[end:]
+            try:
+                prepared = apply_text_edits(text, _edit_spans(text, selected))
+            except OverlappingEdits:
+                raise PreparationError("Metadata edits address overlapping source text") from None
             if prepared != text:
                 plan.originals[name] = original
-                plan.contents[name] = (b"\xef\xbb\xbf" if bom else b"") + prepared.encode("utf-8")
+                plan.contents[name] = with_bom(prepared, bom).encode("utf-8")
                 plan.changes.append(
                     Change(
                         name,
@@ -665,63 +665,43 @@ def _photoshop(contents: bytes, result: _MetadataText) -> None:
 
 
 def _png_metadata(data: bytes) -> _MetadataText:
-    if not data.startswith(b"\x89PNG\r\n\x1a\n"):
-        raise PreparationError("PNG signature is invalid")
     result = _MetadataText()
-    cursor = 8
-    chunks = 0
-    while cursor < len(data):
-        chunks += 1
-        if chunks > _MAX_ENTRIES or cursor + 12 > len(data):
-            raise PreparationError("PNG chunk structure is incomplete or oversized")
-        length = int.from_bytes(data[cursor : cursor + 4], "big")
-        kind = data[cursor + 4 : cursor + 8]
-        end = cursor + 8 + length
-        if end + 4 > len(data):
-            raise PreparationError("PNG chunk exceeds its file")
-        contents = data[cursor + 8 : end]
-        if zlib.crc32(kind + contents) != int.from_bytes(data[end : end + 4], "big"):
-            raise PreparationError("PNG chunk checksum is invalid")
-        if kind in {b"tEXt", b"zTXt", b"iTXt", b"eXIf"}:
-            if len(contents) > _MAX_METADATA_BYTES:
-                raise PreparationError("PNG metadata block exceeds the size limit")
-            if kind == b"eXIf":
-                _exif(contents, result)
-            elif kind == b"tEXt":
-                key, value = contents.split(b"\0", 1)
-                result.append(("PNG tEXt", (key + b" " + value).decode("latin-1")))
-            elif kind == b"zTXt":
-                key, compressed = contents.split(b"\0", 1)
-                if not compressed or compressed[0] != 0:
-                    raise PreparationError("Unsupported PNG text compression")
-                result.append(
-                    ("PNG zTXt", (key + b" " + _inflate(compressed[1:])).decode("latin-1"))
+    for chunk in iter_png_chunks(data, max_chunks=_MAX_ENTRIES):
+        kind, contents = chunk
+        if kind not in {b"tEXt", b"zTXt", b"iTXt", b"eXIf"}:
+            continue
+        if len(contents) > _MAX_METADATA_BYTES:
+            raise PreparationError("PNG metadata block exceeds the size limit")
+        if kind == b"eXIf":
+            _exif(contents, result)
+        elif kind == b"tEXt":
+            key, value = contents.split(b"\0", 1)
+            result.append(("PNG tEXt", (key + b" " + value).decode("latin-1")))
+        elif kind == b"zTXt":
+            key, compressed = contents.split(b"\0", 1)
+            if not compressed or compressed[0] != 0:
+                raise PreparationError("Unsupported PNG text compression")
+            result.append(("PNG zTXt", (key + b" " + _inflate(compressed[1:])).decode("latin-1")))
+        else:
+            key, remaining = contents.split(b"\0", 1)
+            if len(remaining) < 4 or remaining[0] not in {0, 1} or remaining[1] != 0:
+                raise PreparationError("Unsupported PNG international text compression")
+            language, translated, value = remaining[2:].split(b"\0", 2)
+            if remaining[0]:
+                value = _inflate(value)
+            result.append(
+                (
+                    "PNG iTXt",
+                    key.decode("latin-1")
+                    + " "
+                    + language.decode("ascii")
+                    + " "
+                    + translated.decode("utf-8")
+                    + " "
+                    + value.decode("utf-8"),
                 )
-            else:
-                key, remaining = contents.split(b"\0", 1)
-                if len(remaining) < 4 or remaining[0] not in {0, 1} or remaining[1] != 0:
-                    raise PreparationError("Unsupported PNG international text compression")
-                language, translated, value = remaining[2:].split(b"\0", 2)
-                if remaining[0]:
-                    value = _inflate(value)
-                result.append(
-                    (
-                        "PNG iTXt",
-                        key.decode("latin-1")
-                        + " "
-                        + language.decode("ascii")
-                        + " "
-                        + translated.decode("utf-8")
-                        + " "
-                        + value.decode("utf-8"),
-                    )
-                )
-        elif kind == b"IEND":
-            if length or end + 4 != len(data):
-                raise PreparationError("PNG has malformed termination or uninspected trailing data")
-            return result
-        cursor = end + 4
-    raise PreparationError("PNG termination was not found")
+            )
+    return result
 
 
 def _jpeg_metadata(data: bytes) -> _MetadataText:

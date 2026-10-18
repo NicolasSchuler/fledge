@@ -12,6 +12,7 @@ from typing import Any, Self
 from .cancellation import cancel_and_drain
 from .defects import is_expected_failure, summarize_traceback
 from .errors import PreparationError
+from .limits import DEFAULT_LEASE_MEMORY_MB
 from .resource_budget import ResourceBudget, ResourceClass
 
 
@@ -31,7 +32,7 @@ class Task:
     # Start only after each of these tasks finished, whatever its result.
     waits_for: tuple[str, ...] = ()
     cpu: int = 1
-    memory_mb: int = 64
+    memory_mb: int = DEFAULT_LEASE_MEMORY_MB
     kind: ResourceClass | None = None
     is_success: Callable[[Any], bool] | None = None
 

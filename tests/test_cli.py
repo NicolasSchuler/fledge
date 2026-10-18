@@ -261,11 +261,11 @@ class RequestErrorTests(unittest.TestCase):
 
     def test_every_setting_at_fault_is_named_in_the_order_of_the_message(self):
         config = self.source / ".fledge.toml"
-        config.write_text("build_jobs = 100\n")
+        config.write_text("memory_mb = 300\nbuild_memory_mb = 1024\n")
         finding = self.request_error("inspect", str(self.source))
         shown = scrub_local_paths(str(config))
         self.assertIn(
-            f"Change build_jobs in {shown}; render_jobs in {shown}, then rerun",
+            f"Change memory_mb in {shown}; build_memory_mb in {shown}, then rerun",
             finding["next_step"],
         )
 

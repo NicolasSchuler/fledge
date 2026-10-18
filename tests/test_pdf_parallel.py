@@ -18,7 +18,7 @@ from latexprep.pdf_check_pipeline import inspect_standalone_pdf
 from latexprep.pdf_checks import PdfCheckOptions
 from latexprep.pdf_comparison import _pair_memory_mb, compare_pdfs
 from latexprep.pdf_inspection import PdfInspectionOptions, inspect_pdf
-from latexprep.pdf_support import read_rgb_raster
+from latexprep.raster_pixels import read_pnm_raster
 from latexprep.resource_budget import ResourceBudget
 from latexprep.runtime import CommandResult, ToolRunner
 from latexprep.submission_checks import SubmissionOptions
@@ -592,7 +592,7 @@ class ParallelPdfTests(unittest.IsolatedAsyncioTestCase):
         raster = self.root / "oversized.ppm"
         raster.write_bytes(b"P6\n2 2\n255\n" + b"\0" * 12)
         with self.assertRaisesRegex(PreparationError, "oversized raster dimensions"):
-            read_rgb_raster(raster, max_pixels=1)
+            read_pnm_raster(raster, channels=3, max_pixels=1)
 
 
 if __name__ == "__main__":

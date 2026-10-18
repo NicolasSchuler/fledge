@@ -13,6 +13,7 @@ from .check_policy import selected_findings
 from .config import Settings
 from .errors import PreparationError, RequestError
 from .findings import Finding
+from .path_safety import is_relative_posix_path
 from .pdf_check_pipeline import PdfCheckSettings
 from .pdf_previews import PdfPreviewCollector, PdfPreviewStore
 from .report import Outcome, Report, outcome_from_findings
@@ -131,8 +132,7 @@ def select_and_review(report: Report, settings: Settings) -> None:
 
 def names_project_file(snapshot: Path, main: str) -> bool:
     """Whether ``main`` is a relative path to a file inside the imported project."""
-    path = Path(main)
-    return not path.is_absolute() and ".." not in path.parts and (snapshot / main).is_file()
+    return is_relative_posix_path(main, normalized=False) and (snapshot / main).is_file()
 
 
 def main_selection_error(main: str, roots: list[str]) -> RequestError:

@@ -150,6 +150,15 @@ class SubmissionTextTests(unittest.TestCase):
         fields = read_submission_text(self.root, "main.tex")
         self.assertEqual(fields["title"].status, "unresolved")
 
+    def test_private_use_text_is_visible_and_needs_review_like_other_unsafe_characters(
+        self,
+    ) -> None:
+        self.write("\\documentclass{article}\\title{Symbol \ue000 here}")
+        title = read_submission_text(self.root, "main.tex")["title"]
+        self.assertEqual(title.status, "unresolved")
+        self.assertEqual(title.draft, "Symbol \\ue000 here")
+        self.assertIn("private-use", " ".join(title.issues))
+
     def test_cli_conflicting_config_and_import_budget(self) -> None:
         self.write(r"\documentclass{article}\title{A paper}")
         config = self.root / "fledge.toml"

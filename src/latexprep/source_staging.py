@@ -18,9 +18,9 @@ from .bibliography_transform import normalize_dois, plan_bibliography
 from .cancellation import cancellation_point
 from .config import Settings
 from .errors import PreparationError
-from .file_safety import is_contained_regular_file
 from .findings import Finding, has_blockers
 from .metadata_privacy import plan_metadata_sanitization
+from .path_safety import is_contained
 from .project import plan_cleanup
 from .report import Change
 from .source import plan_flatten
@@ -28,15 +28,10 @@ from .source_transform import plan_source_transforms
 from .workflow_options import DocumentOptions
 
 
-def _is_inside(root: Path, path: Path) -> bool:
-    """Whether ``path`` is not a link and resolves inside ``root``."""
-    return not path.is_symlink() and path.resolve().is_relative_to(root.resolve())
-
-
 def stage_document(snapshot: Path, destination: Path, document: DocumentOptions) -> Path:
     """Materialize one explicit file selection from an already validated import."""
     source = snapshot / document.source_directory
-    if not source.is_dir() or not _is_inside(snapshot, source):
+    if not source.is_dir() or not is_contained(snapshot, source):
         raise PreparationError(f"Missing or external source_directory for document {document.name}")
     files = sorted(path for path in source.rglob("*") if path.is_file() or path.is_symlink())
     matched: set[str] = set()
@@ -49,7 +44,7 @@ def stage_document(snapshot: Path, destination: Path, document: DocumentOptions)
         }
         if document.include and not patterns:
             continue
-        if not _is_inside(source, path):
+        if not is_contained(source, path):
             raise PreparationError(f"Document {document.name} contains an unsafe input")
         matched.update(patterns)
         selected.append((path, relative))
@@ -88,7 +83,7 @@ def apply_contents(
     for relative, data in sorted(contents.items()):
         cancellation_point()
         path = root / relative
-        if not is_contained_regular_file(root, path):
+        if not is_contained(root, path, regular_file=True):
             raise PreparationError(f"Invalid transformation path: {relative}")
         if originals is not None and path.read_bytes() != originals[relative]:
             raise PreparationError(f"Source changed after formatting was planned: {relative}")
@@ -133,7 +128,10 @@ def _source_edit(prepared: Path, main: str, settings: Settings, retained: set[st
             raise PreparationError("Source removal plan lacks complete preconditions")
         for name, original in plan.removal_originals.items():
             candidate = prepared / name
-            if not _is_inside(prepared, candidate) or candidate.read_bytes() != original:
+            if (
+                not is_contained(prepared, candidate, regular_file=True)
+                or candidate.read_bytes() != original
+            ):
                 raise PreparationError("Source changed after removal was planned")
         apply_contents(prepared, plan.contents, originals=plan.originals)
         for name in sorted(plan.removals - retained):

@@ -20,68 +20,22 @@ from .cancellation import cancellation_point
 from .errors import PreparationError
 from .expanded_document import commands_before_end, reachable_sources
 from .findings import Finding
-from .source_graph import ArgumentLocation, ParsedSource, SourceGraph
+from .source_graph import INCOMPLETE_GRAPH_RULES, ArgumentLocation, ParsedSource, SourceGraph
+from .tex_commands import (
+    CITATION_COMMANDS,
+    COMMAND_DEFINITION_COMMANDS,
+    MULTICITE_COMMANDS,
+    PRIMITIVE_DEFINITION_COMMANDS,
+)
 from .tex_lexer import Command, conditional_spans, in_conditional, split_argument_items
 
-CITATION_COMMANDS = frozenset(
-    "cite citep citet citealp citealt citeauthor citeyear citeyearpar "
-    "parencite textcite autocite footcite footcitetext smartcite supercite "
-    "fullcite footfullcite notecite pnotecite fnotecite citeurl citetitle nocite".split()
-)
-MULTICITE_COMMANDS = frozenset(
-    "cites parencites textcites autocites footcites footcitetexts smartcites supercites".split()
-)
 _RESOURCE_COMMANDS = frozenset({"bibliography", "addbibresource"})
 # Entry fields that name other entries' keys.
 RELATIONSHIP_FIELDS = frozenset({"crossref", "xref", "xdata", "related", "entryset"})
 # Fields holding literal key lists: relationships and biblatex's alternate keys.
 KEY_LIST_FIELDS = RELATIONSHIP_FIELDS | {"ids"}
-# Source findings that leave the selected literal graph incomplete.
-_GRAPH_FAILURE_RULES = frozenset(
-    {
-        "source.encoding",
-        "source.size_limit",
-        "source.argument_limit",
-        "source.command_limit",
-        "source.literal_unclosed",
-        "source.input_cycle",
-        "source.input_depth",
-        "source.expansion_limit",
-        "source.dynamic_path",
-        "source.nested_file_command",
-        "source.conditional_dependency",
-        "source.path_literal_context",
-        "source.external_path",
-        "source.ambiguous_dependency",
-        "source.case_mismatch",
-        "source.custom_path",
-        "source.unsupported_command",
-        "source.missing_dependency",
-        "source.link",
-        "source.context_ambiguity",
-        "source.subfile_structure",
-        "source.font_options",
-    }
-)
 _MAX_LISTED_UNCERTAINTIES = 32
-_DEFINITIONS = frozenset(
-    {
-        "newcommand",
-        "renewcommand",
-        "providecommand",
-        "DeclareRobustCommand",
-        "NewDocumentCommand",
-        "RenewDocumentCommand",
-        "ProvideDocumentCommand",
-        "DeclareDocumentCommand",
-        "def",
-        "gdef",
-        "edef",
-        "xdef",
-        "let",
-        "futurelet",
-    }
-)
+_DEFINITIONS = COMMAND_DEFINITION_COMMANDS | PRIMITIVE_DEFINITION_COMMANDS
 # Expansion, category codes and bibliography-backend declarations can reach any
 # citation; no lexical argument inspection bounds what they may later execute.
 _EXECUTION = frozenset(
@@ -273,7 +227,7 @@ def graph_failures(inspection: SourceGraph, selected: set[str]) -> list[Finding]
     return [
         item
         for item in inspection.findings
-        if item.path in scope and item.rule in _GRAPH_FAILURE_RULES and item.status != "passed"
+        if item.path in scope and item.rule in INCOMPLETE_GRAPH_RULES and item.status != "passed"
     ]
 
 

@@ -357,6 +357,28 @@ class SubmissionTests(unittest.TestCase):
         self.assertEqual((self.root / "main.tex").read_bytes(), before)
         self.assertEqual(self.incomplete(rule, options).status, "inconclusive")
 
+    def test_private_comment_scan_shares_the_private_note_phrases_and_reads_tikz_comments(
+        self,
+    ) -> None:
+        rule = "submission.private_comments"
+        options = SubmissionOptions(scan_private_comments=True)
+        for comment in (
+            "note to self: fix",
+            "Do not submit this figure",
+            "not for distribution",
+            "personal notes",
+        ):
+            with self.subTest(comment=comment):
+                self.write("main.tex", f"% {comment}\n")
+                self.assertEqual(self.result(rule, options).status, "failed")
+        self.write("main.tex", "% a confidential computing enclave\n% an ordinary remark\n")
+        self.assertEqual(self.result(rule, options).status, "passed")
+        self.write("main.tex", "")
+        self.write("figures/plot.tikz", "% TODO redraw\n")
+        result = self.result(rule, options)
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.details["matches"], [{"path": "figures/plot.tikz", "line": 1}])
+
     def test_comment_scan_ignores_literal_regions_and_marks_unclosed_input(self) -> None:
         options = SubmissionOptions(scan_private_comments=True)
         rule = "submission.private_comments"

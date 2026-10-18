@@ -15,22 +15,19 @@ from .findings import Finding, has_blockers
 from .formatting import FormattingOptions, format_project
 from .job_execution import JobDeadlineExceeded, JobExecution
 from .latexmk_build import build_project
-from .pdf_artwork import DRAWING_TRACE_RULES, configured_artwork_rules
-from .pdf_checks import (
-    OBJECT_STRUCTURE_RULES,
-    PAINT_TRACE_RULES,
-    TEXT_GEOMETRY_RULES,
-    configured_pdf_check_rules,
-)
-from .pdf_comparison import compare_pdfs
-from .pdf_inspection import inspect_pdf
-from .pdf_structure_checks import StructureOptions
+from .pdf_artwork import required_artwork_tools
+from .pdf_checks import required_pdf_check_tools
+from .pdf_comparison import COMPARISON_TOOLS, compare_pdfs
+from .pdf_inspection import inspect_pdf, required_inspection_tools
+from .pdf_structure_checks import required_structure_tools
+from .pdf_support import PDF_TOOLS, pdf_tool_version_argv
 from .report import Outcome, Report, outcome_from_findings
 from .resource_budget import ResourceBudget
 from .runtime import ToolRunner
 from .setting_choices import BibliographyBackend, Engine
 
-_PDF_TOOLS = ("pdfinfo", "pdftotext", "pdftoppm", "pdffonts", "pdfdetach", "pdfimages")
+# The built-in PDF stage inspects and compares one document, so these tools are required.
+_PDF_PIPELINE_TOOLS = frozenset(required_inspection_tools() | COMPARISON_TOOLS)
 _BIBLIOGRAPHY_BACKENDS: tuple[BibliographyBackend, ...] = ("bibtex", "biber")
 _DOCUMENT = "\\documentclass{article}\n\\begin{document}\nFledge setup test.\n"
 _REFERENCE = "@article{doctor,author={Example, Alice},title={Setup test},year={2026}}\n"
@@ -47,7 +44,7 @@ def diagnostic_engines(settings: Settings) -> tuple[Engine, ...]:
 
 
 def _selected_tools(settings: Settings) -> tuple[set[str], set[str]]:
-    required = {"latexmk", *diagnostic_engines(settings), *_PDF_TOOLS}
+    required = {"latexmk", *diagnostic_engines(settings), *_PDF_PIPELINE_TOOLS}
     if "xelatex" in required:
         required.add("xdvipdfmx")
     # Optional measurement adapters are advisory here; a version probe cannot
@@ -61,39 +58,23 @@ def _selected_tools(settings: Settings) -> tuple[set[str], set[str]]:
         optional.update(_BIBLIOGRAPHY_BACKENDS)
     if settings.apply_formatting:
         required.add("tex-fmt")
-    pdf_rules = set(configured_pdf_check_rules(settings.pdf_checks))
-    if pdf_rules & OBJECT_STRUCTURE_RULES or _structure_checks_use_qpdf(settings.structure_checks):
-        optional.add("qpdf")
-    if pdf_rules & PAINT_TRACE_RULES:
-        optional.add("mutool")
-    if pdf_rules & TEXT_GEOMETRY_RULES:
-        optional.add("pdftohtml")
-    for options in (settings.rendered_pdf_artwork, settings.included_figure_artwork):
-        rules = set(configured_artwork_rules(options))
-        if "pdf.type3_glyph_programs" in rules:
-            optional.add("qpdf")
-        # The colour-space comparison reads the same MuPDF trace as the drawing measurements.
-        if rules & DRAWING_TRACE_RULES or options.required_color_space is not None:
-            optional.add("mutool")
-    return required, optional
-
-
-def _structure_checks_use_qpdf(options: StructureOptions) -> bool:
-    """Whether any configured PDF structure check reads object data through qpdf."""
-    return (
-        options.check_table_structure
-        or options.check_link_structure
-        or options.require_figure_alt
-        or options.check_structure_references
-        or options.require_structure_tree
+    # Each adapter names the tools its configured checks run; those beyond the pipeline
+    # (qpdf, MuPDF, pdftohtml) are advisory.
+    optional.update(
+        required_pdf_check_tools(settings.pdf_checks)
+        | required_structure_tools(settings.structure_checks)
+        | required_artwork_tools(settings.rendered_pdf_artwork)
+        | required_artwork_tools(settings.included_figure_artwork)
     )
+    optional -= required
+    return required, optional
 
 
 def _version_command(name: str) -> list[str]:
     if name == "latexmk":
         return [name, "-norc", "-v"]
-    if name in {*_PDF_TOOLS, "pdftohtml", "mutool"}:
-        return [name, "-v"]
+    if name in PDF_TOOLS:
+        return pdf_tool_version_argv(name)
     return [name, "--version"]
 
 
@@ -397,7 +378,7 @@ async def _diagnose(
             continue
         _exercised(report, build_tools)
         report.execution["bibliography_exercised"] = settings.bibliography_backend != "auto"
-        if not _ready(report, set(_PDF_TOOLS)):
+        if not _ready(report, set(_PDF_PIPELINE_TOOLS)):
             report.stages.append({"name": f"{engine}: PDF pipeline", "status": "skipped"})
             continue
         emit(f"Inspecting, extracting text and rendering the built-in {engine} PDF")
@@ -422,7 +403,7 @@ async def _diagnose(
                 )
             )
         if _record_stage(report, f"{engine}: PDF pipeline", [*inspected, *compared]):
-            _exercised(report, set(_PDF_TOOLS))
+            _exercised(report, set(_PDF_PIPELINE_TOOLS))
     if settings.bibliography_backend == "auto":
         await _diagnose_bibliographies(report, root, settings, runner, budget, emit)
 

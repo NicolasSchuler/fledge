@@ -21,14 +21,14 @@ from .source_graph import (
     FILE_COMMANDS,
     IMPORT_COMMANDS,
     MAX_INPUT_DEPTH,
-    SECOND_ARGUMENT_FILE_COMMANDS,
     ArgumentLocation,
     ParsedSource,
     SourceGraph,
+    file_argument_index,
 )
+from .tex_commands import DEFINITION_COMMANDS, MACRO_DEFINITION_COMMANDS
 from .tex_lexer import (
     CONTROL_SEQUENCE,
-    DEFINITION_COMMANDS,
     MAX_COMMANDS,
     MAX_TOTAL_SOURCE_BYTES,
     Command,
@@ -44,33 +44,6 @@ from .tex_lexer import (
 # Commands that splice another manuscript source into the document. Class and
 # style files are package evidence, not manuscript content.
 CONTENT_INPUT_COMMANDS = frozenset({"input", "include", *IMPORT_COMMANDS})
-# Commands whose arguments declare a macro or environment. Neither the command nor
-# its replacement body is executed where it stands, so it is never an unknown
-# construct in the surrounding manuscript.
-MACRO_DEFINITION_COMMANDS = DEFINITION_COMMANDS | {
-    "newcommand",
-    "renewcommand",
-    "providecommand",
-    "DeclareRobustCommand",
-    "newcommandx",
-    "renewcommandx",
-    "newenvironment",
-    "renewenvironment",
-    "NewDocumentCommand",
-    "RenewDocumentCommand",
-    "ProvideDocumentCommand",
-    "DeclareDocumentCommand",
-    "NewDocumentEnvironment",
-    "RenewDocumentEnvironment",
-    "DeclareMathOperator",
-    "DeclarePairedDelimiter",
-    "newtheorem",
-    "declaretheorem",
-    "newcolumntype",
-    "newlength",
-    "newsavebox",
-    "newcounter",
-}
 # Definitions written with TeX primitives take their name and replacement text
 # without braces around the name, so the lexer records no arguments for them.
 _PRIMITIVE_DEFINITIONS = DEFINITION_COMMANDS
@@ -99,11 +72,7 @@ def reachable_sources(graph: SourceGraph, kinds: Container[str] | None = None) -
         for name in graph.visited
         for command in commands_before_end(graph.sources[name])
         if command.name in FILE_COMMANDS and command.arguments
-        for argument in command.arguments[
-            (1 if command.name in SECOND_ARGUMENT_FILE_COMMANDS else 0) : (
-                2 if command.name in SECOND_ARGUMENT_FILE_COMMANDS else 1
-            )
-        ]
+        for argument in command.arguments[file_argument_index(command.name) :][:1]
         for item in split_argument_items(
             argument, comma_separated=command.name in COMMA_LIST_FILE_COMMANDS
         )
@@ -285,7 +254,7 @@ class _Splice:
                 return
             if command.name not in CONTENT_INPUT_COMMANDS:
                 continue
-            argument_index = 1 if command.name in IMPORT_COMMANDS else 0
+            argument_index = file_argument_index(command.name)
             if command.depth or len(command.arguments) <= argument_index:
                 self.uncertainty.append(f"{path}: nonliteral or grouped inclusion")
                 continue
@@ -341,6 +310,12 @@ def unresolved_non_content_file(finding: Finding) -> bool:
 
 
 def _graph_gaps(graph: SourceGraph, selected: set[str]) -> list[str]:
+    """The gaps in the spliced text: every unresolved ``source.*`` finding in scope.
+
+    That is a superset of ``INCOMPLETE_GRAPH_RULES``, which names only the findings that make
+    the dependency graph incomplete; other unresolved findings, such as an unsupported
+    search-path form, are gaps here as well.
+    """
     gaps = []
     if graph.main not in selected:
         gaps.append("no inspectable selected main source")

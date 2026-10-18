@@ -27,8 +27,9 @@ from .build_dependencies import (
 from .build_log import log_findings, log_tail, read_bounded
 from .cancellation import run_in_thread
 from .errors import PreparationError, ToolUnavailableError
-from .file_safety import MIB, byte_count_text
+from .file_safety import byte_count_text, read_regular_file
 from .findings import Finding
+from .limits import MAX_WORKSPACE_ENTRIES, MIB
 from .loaded_options import (
     LoadedOptionsEvidence,
     LoadedOptionsProbe,
@@ -36,9 +37,11 @@ from .loaded_options import (
     loaded_options_unavailable,
     stage_loaded_options,
 )
+from .option_config import require_unique_strings, validate_scalars
+from .path_safety import is_relative_posix_path
 from .project import MAX_FOLDER_DEPTH, ImportLimits, import_project
 from .runtime import CommandResult, RuntimeLimits, ToolRunner, ToolVersion
-from .setting_choices import BIBLIOGRAPHY_BACKENDS, ENGINES, BibliographyBackend, Engine
+from .setting_choices import BibliographyBackend, Engine
 
 # Only these policy-level log errors may be deselected. Tool failures, incomplete
 # output/recorder evidence, TeX errors and unresolved reruns remain build failures.
@@ -49,7 +52,6 @@ _ENGINE_MODES: dict[Engine, str] = {
     "lualatex": "-lualatex",
 }
 _MAIN_COMPONENT = re.compile(r"[A-Za-z0-9_.-]+")
-_MAX_IMPORTED_ENTRIES = 20_000
 _MAX_LOADED_PACKAGES = 2048
 _PDF_HEADER = b"%PDF-"
 _BIBER_HINT_SUFFIXES = frozenset(
@@ -158,24 +160,12 @@ class BuildRequest:
     ignored_log_checks: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        if self.engine not in ENGINES:
-            raise PreparationError(f"Unsupported TeX engine: {self.engine}")
-        if self.bibliography_backend not in BIBLIOGRAPHY_BACKENDS:
-            raise PreparationError("Bibliography backend must be auto, bibtex or biber")
-        if type(self.inventory_loaded_options) is not bool:
-            raise PreparationError("inventory_loaded_options must be a boolean")
-        if not isinstance(self.ignored_log_checks, tuple) or any(
-            not isinstance(code, str) or code not in SELECTABLE_BUILD_ERRORS
-            for code in self.ignored_log_checks
-        ):
-            raise PreparationError("Only undefined-citation/reference log checks may be ignored")
-        relative = PurePosixPath(self.main)
-        if (
-            relative.is_absolute()
-            or relative.suffix != ".tex"
-            or ".." in relative.parts
-            or not relative.parts
-            or any(not _MAIN_COMPONENT.fullmatch(part) for part in relative.parts)
+        validate_scalars(self)
+        require_unique_strings(
+            "ignored_log_checks", self.ignored_log_checks, choices=SELECTABLE_BUILD_ERRORS
+        )
+        if PurePosixPath(self.main).suffix != ".tex" or not is_relative_posix_path(
+            self.main, normalized=False, component_pattern=_MAIN_COMPONENT
         ):
             raise PreparationError(
                 "Build main must be a relative .tex path with letters, digits, underscores, "
@@ -242,8 +232,9 @@ def _sources_may_use_biber(source: Path, max_bytes: int = _MAX_BIBER_HINT_BYTES)
                 or not path.is_file()
             ):
                 continue
-            total += path.stat().st_size
-            if total > max_bytes or b"biblatex" in path.read_bytes():
+            data = read_regular_file(path, max_bytes - total)
+            total += len(data)
+            if b"biblatex" in data:
                 return True
     except OSError:
         return True
@@ -426,9 +417,9 @@ def _log_evidence(
 ) -> list[Finding]:
     """Read the bounded final-pass log into ``result`` and return its findings."""
     log_path = tree.output / f"{request.stem}.log"
-    result.log = read_bounded(log_path, max_bytes)
+    result.log, complete = read_bounded(log_path, max_bytes)
     findings = log_findings(result.log, request.main, tree.project, tree.cwd)
-    if not log_path.is_file() or log_path.stat().st_size > max_bytes:
+    if not complete:
         findings.append(
             Finding(
                 "build.log_unavailable",
@@ -527,7 +518,7 @@ def _copy_source(source: Path, destination: Path, max_total_bytes: int) -> None:
     whole-tree limit here, not as a per-file limit.
     """
     limits = ImportLimits(
-        max_files=_MAX_IMPORTED_ENTRIES, max_bytes=max_total_bytes, max_depth=MAX_FOLDER_DEPTH
+        max_files=MAX_WORKSPACE_ENTRIES, max_bytes=max_total_bytes, max_depth=MAX_FOLDER_DEPTH
     )
     import_project(source, destination, limits, unwrap=False, exclude_metadata=False)
     # Imported snapshots may be read-only; writable disposable build copies are distinct.

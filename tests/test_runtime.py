@@ -361,7 +361,7 @@ class BuildTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_oversized_build_input_names_the_limit_and_its_value(self) -> None:
         (self.source / "extra.tex").write_text("more")
-        with patch.object(latexmk_build, "_MAX_IMPORTED_ENTRIES", 1):
+        with patch.object(latexmk_build, "MAX_WORKSPACE_ENTRIES", 1):
             with self.assertRaisesRegex(PreparationError, "exceeds the 1 entry limit"):
                 await build_project(
                     self.source, "main.tex", self.root / "entries", "pdflatex", FakeBuildRunner()

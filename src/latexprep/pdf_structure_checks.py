@@ -10,21 +10,29 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from typing import ClassVar
 
 from .cancellation import cancellation_point
-from .errors import PreparationError
+from .errors import PreparationError, SettingsError
 from .findings import Finding
-from .option_config import require_booleans
+from .limits import MAX_PDF_NESTING_LEVELS
+from .option_config import (
+    Bounds,
+    TextFormat,
+    require_records,
+    require_text,
+    require_unique_strings,
+    validate_scalars,
+)
 from .pdf_support import (
-    DOCUMENT,
     MAX_INSPECTION_PAGES,
     QpdfObjectGraph,
     is_object_reference,
+    layout_text_argv,
     measurement_finding,
-    open_measurement_session,
-    page_count,
-    pdfinfo_properties,
+    preflight_pdf,
     qpdf_objects_argv,
+    split_text_pages,
     unavailable_finding,
 )
 from .resource_budget import ResourceBudget
@@ -33,6 +41,10 @@ from .runtime import CommandRunner
 _LIMIT = 10000
 # Configuration bound on explicit heading expectations (not on the page they may name).
 _MAX_HEADING_EXPECTATIONS = 300
+_MAX_HEADING_TITLE_CHARACTERS = 256
+_MAX_HEADING_NUMBER_CHARACTERS = 64
+# Associated author-block commands, such as affiliation or email, that must follow each author.
+_MAX_AUTHOR_FIELDS = 32
 _COMMAND = re.compile(r"[A-Za-z][A-Za-z@]{0,63}")
 _STANDARD_ROLES = frozenset(
     "/" + role
@@ -45,27 +57,34 @@ _STANDARD_ROLES = frozenset(
 )
 
 
+def _require_single_line(name: str, value: object, max_length: int) -> None:
+    if (
+        not isinstance(value, str)
+        or len(value) > max_length
+        or value != value.strip()
+        or any(ord(character) < 32 for character in value)
+    ):
+        raise SettingsError(
+            f"{name} must be one line of at most {max_length} characters "
+            "without surrounding spaces",
+            (name,),
+        )
+
+
 @dataclass(frozen=True)
 class HeadingExpectation:
+    FIELD_BOUNDS: ClassVar[dict[str, Bounds]] = {"page": Bounds(1, MAX_INSPECTION_PAGES)}
+
     page: int
     title: str
     number: str
 
     def __post_init__(self) -> None:
-        if type(self.page) is not int or not 1 <= self.page <= MAX_INSPECTION_PAGES:
-            raise PreparationError(
-                f"Heading page must be an integer from 1 to {MAX_INSPECTION_PAGES}"
-            )
-        for name, value, limit in (("title", self.title, 256), ("number", self.number, 64)):
-            if (
-                not isinstance(value, str)
-                or len(value) > limit
-                or value != value.strip()
-                or any(ord(character) < 32 for character in value)
-            ):
-                raise PreparationError(f"Heading {name} must be a bounded single-line string")
+        validate_scalars(self)
+        _require_single_line("title", self.title, _MAX_HEADING_TITLE_CHARACTERS)
+        _require_single_line("number", self.number, _MAX_HEADING_NUMBER_CHARACTERS)
         if not self.title:
-            raise PreparationError("Heading title cannot be empty")
+            raise SettingsError("title must not be empty", ("title",))
 
 
 @dataclass(frozen=True)
@@ -80,43 +99,36 @@ class StructureOptions:
     check_structure_references: bool = False
 
     def __post_init__(self) -> None:
-        if not isinstance(self.author_command, str) or not _COMMAND.fullmatch(self.author_command):
-            raise PreparationError(
-                "Author command must be a literal command name without backslash"
+        validate_scalars(self)
+        require_text(
+            "author_command",
+            self.author_command,
+            expected="a command name without the backslash",
+            pattern=_COMMAND,
+        )
+        require_unique_strings(
+            "required_author_fields",
+            self.required_author_fields,
+            max_items=_MAX_AUTHOR_FIELDS,
+            item_format=TextFormat(_COMMAND, "a command name without the backslash"),
+        )
+        if self.author_command in self.required_author_fields:
+            raise SettingsError(
+                "required_author_fields must not list the author_command itself",
+                ("required_author_fields", "author_command"),
             )
-        if (
-            not isinstance(self.required_author_fields, tuple)
-            or len(self.required_author_fields) > 32
-            or any(
-                not isinstance(value, str) or not _COMMAND.fullmatch(value)
-                for value in self.required_author_fields
-            )
-            or len(set(self.required_author_fields)) != len(self.required_author_fields)
-            or self.author_command in self.required_author_fields
-        ):
-            raise PreparationError("Required author fields must be unique associated command names")
-        if (
-            not isinstance(self.heading_expectations, tuple)
-            or len(self.heading_expectations) > _MAX_HEADING_EXPECTATIONS
-            or any(not isinstance(value, HeadingExpectation) for value in self.heading_expectations)
-            or len({(value.page, value.title) for value in self.heading_expectations})
-            != len(self.heading_expectations)
-        ):
-            raise PreparationError("Heading expectations must be unique HeadingExpectation records")
-        require_booleans(
-            self,
-            "require_structure_tree",
-            "check_table_structure",
-            "check_link_structure",
-            "require_figure_alt",
-            "check_structure_references",
+        require_records(
+            "heading_expectations",
+            self.heading_expectations,
+            HeadingExpectation,
+            max_items=_MAX_HEADING_EXPECTATIONS,
+            distinct_by=lambda heading: (heading.page, heading.title),
+            distinct_description="page and title",
         )
 
 
 def _heading_findings(text: str, pages: int, options: StructureOptions) -> list[Finding]:
-    if text.count("\f") != pages or text.split("\f")[-1].strip():
-        raise PreparationError("Text extraction did not report every PDF page boundary")
-    extracted = text.split("\f")[:-1]
+    extracted = split_text_pages(text, pages)
     results = []
     for expectation in options.heading_expectations:
         expected = " ".join((expectation.number + " " + expectation.title).split())
@@ -191,7 +203,7 @@ class _Structure:
         role = self.objects.resolve(value)
         seen = set()
         while isinstance(role, str) and role in self.roles:
-            if role in seen or len(seen) > 100:
+            if role in seen or len(seen) > MAX_PDF_NESTING_LEVELS:
                 raise PreparationError("PDF structure role mapping is cyclic or excessively deep")
             seen.add(role)
             role = self.objects.resolve(self.roles[role])
@@ -204,7 +216,7 @@ class _Structure:
     def _visit(self, raw: object, parent: int | None, page: str | None, depth: int) -> None:
         cancellation_point()
         self.steps += 1
-        if self.steps > _LIMIT or depth > 100:
+        if self.steps > _LIMIT or depth > MAX_PDF_NESTING_LEVELS:
             raise PreparationError("PDF structure tree exceeds bounded traversal limits")
         reference = raw if is_object_reference(raw) else None
         if reference:
@@ -269,7 +281,7 @@ class _Structure:
         while pending:
             value, depth = pending.pop()
             steps += 1
-            if steps > _LIMIT or depth > 100:
+            if steps > _LIMIT or depth > MAX_PDF_NESTING_LEVELS:
                 raise PreparationError("Structure parent number tree exceeds traversal limits")
             if isinstance(value, str):
                 if value in seen:
@@ -561,6 +573,17 @@ def _object_rules(options: StructureOptions) -> list[str]:
     ]
 
 
+def required_structure_tools(options: StructureOptions) -> set[str]:
+    """The external tools the configured checks run, for setup diagnostics."""
+    object_rules = _object_rules(options)
+    tools = {"pdfinfo"} if object_rules or options.heading_expectations else set()
+    if options.heading_expectations:
+        tools.add("pdftotext")
+    if object_rules:
+        tools.add("qpdf")
+    return tools
+
+
 def _object_findings(output: str, pages: int, options: StructureOptions) -> list[Finding]:
     rules = _object_rules(options)
     objects = QpdfObjectGraph(output, pages)
@@ -608,23 +631,17 @@ async def inspect_pdf_structure(
     configured = (["pdf.expected_headings"] if options.heading_expectations else []) + object_rules
     if not configured:
         return []
-    try:
-        session = await open_measurement_session(pdf, work, runner, budget)
-        properties = await session.measure(
-            "properties",
-            ["pdfinfo", "-enc", "UTF-8", DOCUMENT],
-            lambda result: pdfinfo_properties(result.stdout),
-        )
-        pages = page_count(properties)
-    except (PreparationError, OSError) as error:
-        return [unavailable_finding(rule, error) for rule in configured]
+    preflight = await preflight_pdf(pdf, work, runner, budget, configured)
+    if isinstance(preflight, list):
+        return preflight
+    session, pages = preflight.session, preflight.pages
     findings = []
     if options.heading_expectations:
         try:
             findings.extend(
                 await session.measure(
                     "headings",
-                    ["pdftotext", "-layout", "-enc", "UTF-8", DOCUMENT, "-"],
+                    layout_text_argv(),
                     lambda result: _heading_findings(result.stdout, pages, options),
                 )
             )

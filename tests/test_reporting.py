@@ -15,7 +15,7 @@ from unittest.mock import patch
 from latexprep.ci_annotations import render_ci_annotations
 from latexprep.diagnostic_bundle import export_diagnostic_bundle
 from latexprep.errors import PreparationError
-from latexprep.file_scan import read_regular_file
+from latexprep.file_safety import read_regular_file
 from latexprep.finding_view import RenderOptions, evidence_excerpt, is_scope_disclaimer
 from latexprep.findings import Finding
 from latexprep.html_report import render_html

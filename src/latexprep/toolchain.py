@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Protocol
 
 from .errors import ToolUnavailableError
-from .file_safety import MIB
+from .limits import MIB
 
 # Tools declared up front, so every command of a job shares one stable grant set.
 _SANDBOXED_TOOL_NAMES = (

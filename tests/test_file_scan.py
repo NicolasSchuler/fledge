@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from latexprep.file_scan import inventory_files, plural, read_regular_file
+from latexprep.file_scan import inventory_files, plural
 
 
 class InventoryTests(unittest.TestCase):
@@ -27,31 +27,6 @@ class InventoryTests(unittest.TestCase):
             inventory.issues, ["Directory could not be read (check its permissions): figures/raw"]
         )
         self.assertEqual(list(inventory.files), ["main.tex"])
-
-
-class BoundedReadTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
-
-    def test_special_file_and_oversized_file_get_different_messages(self) -> None:
-        os.mkfifo(self.root / "pipe")
-        with self.assertRaisesRegex(OSError, "not a regular file"):
-            read_regular_file(self.root / "pipe")
-        large = self.root / "large.tex"
-        large.write_bytes(b"x" * 2048)
-        with self.assertRaisesRegex(OSError, "exceeds the scan limit of 1 KiB"):
-            read_regular_file(large, 1024)
-        self.assertEqual(read_regular_file(large, 2048), b"x" * 2048)
-
-    def test_linked_file_is_refused(self) -> None:
-        target = self.root / "target.tex"
-        target.write_text("x")
-        link = self.root / "link.tex"
-        link.symlink_to(target)
-        with self.assertRaisesRegex(OSError, "Linked files"):
-            read_regular_file(link)
 
 
 class PluralTests(unittest.TestCase):

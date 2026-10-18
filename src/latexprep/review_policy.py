@@ -6,14 +6,17 @@ evaluate the explicitly supplied frozen options against the original finding.
 
 from __future__ import annotations
 
-import unicodedata
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass, replace
+from typing import ClassVar
 
-from .errors import PreparationError
+from .errors import SettingsError
 from .findings import Finding
+from .option_config import POSITIVE_INTEGER, Bounds, require_records, require_text, validate_scalars
+from .path_safety import is_relative_posix_path
 from .report import Outcome, Report
 from .rules import BY_CODE
+from .text_safety import is_unsafe_character
 
 # Explicitly enumerated presentation/content policies. New checks are ineligible
 # until their evidence and safety contract have been reviewed here.
@@ -105,27 +108,14 @@ REVIEWABLE_CODES = frozenset(
         "FMT001",
     }
 )
+# Characters of a decision's reason, and decisions in one list.
+_MAX_REASON_CHARACTERS = 4096
+_MAX_REVIEW_DECISIONS = 1024
 _COMPARISON_CODES = frozenset({"CMP001", "CMP002", "CMP003"})
 # The stage that compares the baseline PDF with the prepared one. Only differences found
 # there can be accepted as intended; the workflow tags those findings with this label.
 BASELINE_VERSUS_PREPARED_STAGE = "baseline versus prepared"
 _REVIEW_DIAGNOSTICS = {"report.review_unmatched", "report.review_ineligible"}
-
-
-def is_literal_relative_path(path: str) -> bool:
-    """A literal project-relative POSIX path, safe to scope a decision or link a file.
-
-    Absolute and drive paths, backslashes, empty or dot segments and control
-    characters are rejected; the path is never interpreted as a glob.
-    """
-    return (
-        bool(path)
-        and not path.startswith("/")
-        and "\\" not in path
-        and ":" not in path
-        and all(part not in {"", ".", ".."} for part in path.split("/"))
-        and not any(unicodedata.category(char).startswith("C") for char in path)
-    )
 
 
 @dataclass(frozen=True)
@@ -136,6 +126,13 @@ class ReviewRule:
     a start without an end selects one line/page. Missing evidence never matches a
     constrained location, and a sampled aggregate cannot establish complete scope.
     """
+
+    FIELD_BOUNDS: ClassVar[dict[str, Bounds]] = {
+        "line_start": POSITIVE_INTEGER,
+        "line_end": POSITIVE_INTEGER,
+        "page_start": POSITIVE_INTEGER,
+        "page_end": POSITIVE_INTEGER,
+    }
 
     code: str
     reason: str
@@ -148,35 +145,34 @@ class ReviewRule:
     document: str | None = None
 
     def __post_init__(self) -> None:
+        validate_scalars(self)
         if not isinstance(self.code, str) or self.code not in BY_CODE:
-            raise PreparationError("Review decisions require an exact registered check code")
-        if not isinstance(self.reason, str) or not self.reason.strip():
-            raise PreparationError("Every review decision requires a nonempty reason")
-        if len(self.reason) > 4096:
-            raise PreparationError("Review reasons must be at most 4096 characters")
+            raise SettingsError("code must be an exact registered check code", ("code",))
+        require_text(
+            "reason",
+            self.reason,
+            expected="a nonempty explanation",
+            max_length=_MAX_REASON_CHARACTERS,
+        )
         for name in ("path", "document"):
             value = getattr(self, name)
             if value is not None and (
-                not isinstance(value, str) or not is_literal_relative_path(value)
+                not isinstance(value, str)
+                or not is_relative_posix_path(value, characters="literal")
             ):
-                raise PreparationError(f"Review {name} must be a literal safe relative path")
-        if self.stage is not None and (
-            not isinstance(self.stage, str)
-            or not self.stage.strip()
-            or any(unicodedata.category(char).startswith("C") for char in self.stage)
-        ):
-            raise PreparationError("Review stage must be nonempty text without control characters")
+                raise SettingsError(f"{name} must be a literal safe relative path", (name,))
+        require_text("stage", self.stage, expected="nonempty text", allow_none=True)
+        if self.stage is not None and any(map(is_unsafe_character, self.stage)):
+            raise SettingsError("stage must not contain control characters", ("stage",))
         for kind in ("line", "page"):
             start, end = getattr(self, f"{kind}_start"), getattr(self, f"{kind}_end")
-            if any(
-                value is not None and (type(value) is not int or value < 1)
-                for value in (start, end)
-            ):
-                raise PreparationError(f"Review {kind} endpoints must be positive integers")
             if end is not None and (start is None or end < start):
-                raise PreparationError(f"Review {kind} range requires an ordered start and end")
+                raise SettingsError(
+                    f"{kind}_end needs a {kind}_start that is not after it",
+                    (f"{kind}_start", f"{kind}_end"),
+                )
         if self.line_start is not None and self.path is None:
-            raise PreparationError("Review line scope requires an exact path")
+            raise SettingsError("line_start requires an exact path", ("line_start", "path"))
 
 
 @dataclass(frozen=True)
@@ -186,11 +182,14 @@ class ReportingOptions:
 
     def __post_init__(self) -> None:
         for name in ("suppressions", "accepted_exceptions"):
-            values = getattr(self, name)
-            if not isinstance(values, tuple) or any(not isinstance(v, ReviewRule) for v in values):
-                raise PreparationError(f"reporting.{name} must be immutable review rules")
-            if len(values) > 1024 or len(set(values)) != len(values):
-                raise PreparationError(f"reporting.{name} requires at most 1024 unique decisions")
+            require_records(
+                name,
+                getattr(self, name),
+                ReviewRule,
+                max_items=_MAX_REVIEW_DECISIONS,
+                distinct_by=lambda rule: rule,
+                distinct_description="decision",
+            )
 
 
 def _affected_pages(finding: Finding) -> set[int] | None:

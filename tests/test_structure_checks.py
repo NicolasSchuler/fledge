@@ -120,6 +120,22 @@ class AuthorRecordTests(unittest.TestCase):
         self.assertEqual(len(custom.details["records"]), 1)
         self.assertEqual(self.check("\\email{orphan@example.org}\\author{Ada}")[0].status, "failed")
 
+    def test_a_declaration_of_the_author_command_is_not_a_record_however_it_is_written(
+        self,
+    ) -> None:
+        for declaration in (
+            "\\newcommand{\\person}[1]{#1}",
+            "\\NewDocumentCommand{\\person}{m}{#1}",
+            "\\DeclareDocumentCommand{\\person}{m}{#1}",
+        ):
+            with self.subTest(declaration=declaration):
+                result = self.check(
+                    declaration + "\\person{Ada}\\contact{ada@example.org}",
+                    StructureOptions(author_command="person", required_author_fields=("contact",)),
+                )[0]
+                self.assertEqual(result.status, "passed")
+                self.assertEqual(len(result.details["records"]), 1)
+
     def test_grouped_and_dynamic_records_are_inconclusive(self) -> None:
         for source in (
             "\\author{Ada}\\affiliation{Lab}\\box{\\email{ada@example.org}}",

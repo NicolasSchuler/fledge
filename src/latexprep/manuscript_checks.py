@@ -12,12 +12,11 @@ from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, NamedTuple, TypedDict, get_args
+from typing import ClassVar, Literal, NamedTuple, TypedDict
 
 from .cancellation import cancellation_point
-from .errors import PreparationError
+from .errors import SettingsError
 from .expanded_document import (
-    MACRO_DEFINITION_COMMANDS,
     EnvironmentRegion,
     ExpandedDocument,
     Location,
@@ -32,7 +31,6 @@ from .findings import EvidenceKind, Finding, Severity
 from .literal_text import (
     HEADING_DEPTHS,
     KNOWN_TEXT_COMMANDS,
-    MATH_ENVIRONMENT_PATTERN,
     PACKAGE_COMMANDS,
     REFERENCE_COMMANDS,
     TEXT_WRAPPERS,
@@ -44,7 +42,14 @@ from .literal_text import (
     plain_argument_text,
     plain_text,
 )
-from .option_config import require_booleans
+from .option_config import Bounds, require_unique_strings, validate_scalars
+from .tex_commands import (
+    MACRO_DEFINITION_COMMANDS,
+    MATH_MARKER,
+    MULTICITE_COMMANDS,
+    PRINTED_CITATION_COMMANDS,
+    with_capitalized_forms,
+)
 from .tex_lexer import (
     Command,
     conditional_spans,
@@ -56,11 +61,15 @@ from .tex_lexer import (
 )
 
 AbbreviationPolicy = Literal["forbid", "define"]
-_ABBREVIATION_POLICIES: tuple[AbbreviationPolicy, ...] = get_args(AbbreviationPolicy)
 
 
 @dataclass(frozen=True)
 class ManuscriptCheckOptions:
+    # Heading depths run from part (-1) to subparagraph (5).
+    FIELD_BOUNDS: ClassVar[dict[str, Bounds]] = {
+        "max_heading_depth": Bounds(min(HEADING_DEPTHS.values()), max(HEADING_DEPTHS.values()))
+    }
+
     allowed_packages: tuple[str, ...] | None = None
     inventory_packages: bool = False
     check_layout_manipulation: bool = False
@@ -83,58 +92,21 @@ class ManuscriptCheckOptions:
     forbid_line_numbers: bool = False
 
     def __post_init__(self) -> None:
-        require_booleans(
-            self,
-            "inventory_packages",
-            "check_layout_manipulation",
-            "forbid_abstract_citations",
-            "check_empty_sections",
-            "check_hardcoded_references",
-            "check_orcid",
-            "require_float_captions",
-            "require_float_labels",
-            "check_float_label_order",
-            "require_float_references",
-            "check_float_reference_order",
-            "require_figure_descriptions",
-            "require_line_numbers",
-            "forbid_line_numbers",
-        )
+        validate_scalars(self)
         if self.require_line_numbers and self.forbid_line_numbers:
-            raise PreparationError("Choose require_line_numbers or forbid_line_numbers, not both")
-        for name in (
-            "allowed_packages",
-            "abstract_abbreviation_exceptions",
-            "required_metadata",
-            "required_declarations",
-        ):
-            values = getattr(self, name)
-            if values is None and name == "allowed_packages":
-                continue
-            if (
-                not isinstance(values, tuple)
-                or any(
-                    not isinstance(value, str) or not value or value != value.strip()
-                    for value in values
-                )
-                or len(set(values)) != len(values)
-            ):
-                raise PreparationError(f"{name} must contain unique nonempty strings")
+            raise SettingsError(
+                "Choose require_line_numbers or forbid_line_numbers, not both",
+                ("require_line_numbers", "forbid_line_numbers"),
+            )
+        require_unique_strings("allowed_packages", self.allowed_packages, allow_none=True)
+        for name in ("abstract_abbreviation_exceptions", "required_declarations"):
+            require_unique_strings(name, getattr(self, name))
+        require_unique_strings("required_metadata", self.required_metadata, choices=_METADATA)
         if self.allowed_packages is not None and any(
             literal_list(value) != [value] for value in self.allowed_packages
         ):
-            raise PreparationError("allowed_packages must contain single literal package names")
-        # A tuple, not a set: an unhashable configured value must reach this message.
-        if self.abstract_abbreviation_policy not in (None, *_ABBREVIATION_POLICIES):
-            raise PreparationError("abstract_abbreviation_policy must be 'forbid' or 'define'")
-        if self.max_heading_depth is not None and (
-            type(self.max_heading_depth) is not int or not -1 <= self.max_heading_depth <= 5
-        ):
-            raise PreparationError("max_heading_depth must be an integer from -1 to 5")
-        if set(self.required_metadata) - set(_METADATA):
-            raise PreparationError(
-                "required_metadata must name title, author, affiliation, "
-                "email or corresponding_author"
+            raise SettingsError(
+                "allowed_packages must contain single literal package names", ("allowed_packages",)
             )
 
 
@@ -145,22 +117,8 @@ _METADATA = {
     "email": {"email"},
     "corresponding_author": {"correspondingauthor"},
 }
-_CITATIONS = {
-    "cite",
-    "citep",
-    "citet",
-    "parencite",
-    "textcite",
-    "autocite",
-    "footcite",
-    "citeauthor",
-    "citeyear",
-    "citeyearpar",
-    "Citep",
-    "Citet",
-    "Cite",
-    "supercite",
-}
+# Commands that print a citation, in the spellings natbib and biblatex define.
+_CITATIONS = with_capitalized_forms(PRINTED_CITATION_COMMANDS | MULTICITE_COMMANDS)
 _ORCID = {"orcid", "ORCID", "orcidlink"}
 _LAYOUT = {
     "newpage",
@@ -201,6 +159,82 @@ _LENGTHS = {
     "intextsep",
 }
 _FLOAT_ENVIRONMENTS = frozenset({"figure", "figure*", "table", "table*"})
+# Interpreted commands beyond the shared vocabularies (headings, citations, references,
+# packages, text wrappers and non-content layout commands).
+_DOCUMENT_STRUCTURE_COMMANDS = {
+    "documentclass",
+    "begin",
+    "end",
+    "endinput",
+    "input",
+    "include",
+    "abstract",
+    "keywords",
+    "Description",
+    "declaration",
+    "caption",
+    "date",
+    "thanks",
+    "item",
+}
+_NOTE_AND_LINK_COMMANDS = {
+    "footnote",
+    "footnotemark",
+    "footnotetext",
+    "url",
+    "href",
+    "textsuperscript",
+    "textsubscript",
+}
+_TABLE_COMMANDS = {"multicolumn", "multirow"}
+_COLOR_COMMANDS = {"color", "textcolor"}
+# Widths that scale with the layout; the page-geometry lengths are in _LENGTHS.
+_RELATIVE_WIDTHS = {"linewidth", "columnwidth"}
+# Symbols and operators of inline and display mathematics, whose content these
+# policies do not read. The last four are the control symbols \( \) \[ \].
+_MATH_COMMANDS = {
+    "text",
+    "mathit",
+    "mathsf",
+    "mathcal",
+    "frac",
+    "sqrt",
+    "sum",
+    "prod",
+    "int",
+    "left",
+    "right",
+    "leq",
+    "geq",
+    "times",
+    "cdot",
+    "ldots",
+    "alpha",
+    "beta",
+    "gamma",
+    "delta",
+    "epsilon",
+    "theta",
+    "lambda",
+    "mu",
+    "pi",
+    "sigma",
+    "phi",
+    "omega",
+    "in",
+    "to",
+    "infty",
+    "not",
+    "quad",
+    "qquad",
+    "overline",
+    "hat",
+    "bar",
+    "(",
+    ")",
+    "[",
+    "]",
+}
 # Every command these policies interpret; anything else in the document body is
 # an unexpanded construct that may hide or generate what a policy looks for.
 _INTERPRETED_COMMANDS = (
@@ -216,149 +250,12 @@ _INTERPRETED_COMMANDS = (
     # the two cannot disagree about which commands are merely structural.
     | KNOWN_TEXT_COMMANDS
     | {name for names in _METADATA.values() for name in names}
-    | {
-        "documentclass",
-        "begin",
-        "end",
-        "endinput",
-        "input",
-        "include",
-        "label",
-        "caption",
-        "Description",
-        "declaration",
-        "abstract",
-        "keywords",
-        "thanks",
-        "and",
-        "sep",
-        "maketitle",
-        "date",
-        "today",
-        "includegraphics",
-        "graphicspath",
-        "bibliography",
-        "bibliographystyle",
-        "addbibresource",
-        "printbibliography",
-        "nocite",
-        "tableofcontents",
-        "listoffigures",
-        "listoftables",
-        "appendix",
-        "centering",
-        "raggedright",
-        "raggedleft",
-        "flushleft",
-        "hfill",
-        "vfill",
-        "noindent",
-        "par",
-        "newline",
-        "linebreak",
-        "item",
-        "hline",
-        "cline",
-        "toprule",
-        "midrule",
-        "bottomrule",
-        "cmidrule",
-        "multicolumn",
-        "multirow",
-        "rule",
-        "url",
-        "href",
-        "footnote",
-        "footnotemark",
-        "footnotetext",
-        "textsuperscript",
-        "textsubscript",
-        "textwidth",
-        "linewidth",
-        "columnwidth",
-        "setlength",
-        "addtolength",
-        "hspace",
-        "vspace",
-        "hskip",
-        "vskip",
-        "kern",
-        "setcounter",
-        "addtocounter",
-        "refstepcounter",
-        "stepcounter",
-        "pagestyle",
-        "thispagestyle",
-        "pagenumbering",
-        "hypersetup",
-        "selectfont",
-        "normalfont",
-        "normalsize",
-        "TeX",
-        "LaTeX",
-        "textcolor",
-        "color",
-        "bfseries",
-        "itshape",
-        "sffamily",
-        "ttfamily",
-        "mathrm",
-        "mathbf",
-        "mathit",
-        "mathsf",
-        "mathcal",
-        "frac",
-        "sqrt",
-        "sum",
-        "prod",
-        "int",
-        "left",
-        "right",
-        "leq",
-        "geq",
-        "times",
-        "cdot",
-        "ldots",
-        "alpha",
-        "beta",
-        "gamma",
-        "delta",
-        "epsilon",
-        "theta",
-        "lambda",
-        "mu",
-        "pi",
-        "sigma",
-        "phi",
-        "omega",
-        "in",
-        "to",
-        "infty",
-        "not",
-        "nonumber",
-        "quad",
-        "qquad",
-        "displaystyle",
-        "text",
-        "overline",
-        "hat",
-        "bar",
-        "\\",
-        "%",
-        "&",
-        "#",
-        "_",
-        "{",
-        "}",
-        ",",
-        ";",
-        "!",
-        " ",
-        "(",
-        ")",
-        "[",
-        "]",
-    }
+    | _DOCUMENT_STRUCTURE_COMMANDS
+    | _NOTE_AND_LINK_COMMANDS
+    | _TABLE_COMMANDS
+    | _COLOR_COMMANDS
+    | _RELATIVE_WIDTHS
+    | _MATH_COMMANDS
 )
 _INTERPRETED_ENVIRONMENTS = {
     "document",
@@ -426,9 +323,6 @@ _GENERATED_CONTENT = {
     "listoffigures",
     "listoftables",
 }
-# Mathematics makes a section nonempty. The environment names are matched as
-# prefixes, so starred and related environments such as aligned count as well.
-_MATH_CONTENT = re.compile(rf"(?<!\\)\$|\\[([]|\\begin\{{(?:{MATH_ENVIRONMENT_PATTERN})")
 # Constructs that could construct, rename or conditionally execute a package
 # declaration. Macro definitions cannot: they only name a replacement body.
 _PACKAGE_GENERATORS = {
@@ -706,7 +600,8 @@ def _content(document: ExpandedDocument, start: int, end: int) -> tuple[bool, li
     plain, reasons = plain_text(text)
     if any(command.name in _GENERATED_CONTENT for command in commands):
         return True, []
-    if _MATH_CONTENT.search(text):
+    # Mathematics makes a section nonempty.
+    if MATH_MARKER.search(text):
         return True, []
     # Unknown commands prevent an empty-content claim even when their arguments
     # happen to contain text; semantic content cannot be inferred from an argument.

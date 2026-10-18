@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import os
 import re
-import stat
 import xml.etree.ElementTree as ET
 from dataclasses import asdict, dataclass, field, replace
 from datetime import date
@@ -21,14 +20,16 @@ from pathlib import Path
 from typing import Literal, NamedTuple
 
 from .errors import PreparationError
-from .file_safety import is_contained_regular_file
+from .file_safety import FileTooLargeError, read_regular_file
+from .limits import KIB
+from .path_safety import is_contained, is_link_free_regular_file
 from .setting_choices import Engine
 from .tex_lexer import ParseLimitExceeded, mask_literals, scan_commands, scan_source_commands
 
 _MAX_ROWS = 50_000
 _MAX_RULES = 256
 _MAX_PATH = 4096
-_MAX_PACKAGE_HEADER_BYTES = 32 * 1024
+_MAX_PACKAGE_HEADER_BYTES = 32 * KIB
 _MAX_CONTROL_FILES = 1000
 _NUMBER = r"(?:\d+(?:\.\d*)?|\.\d+)"
 _HEADER = re.compile(
@@ -146,28 +147,16 @@ class BibliographyEvidence:
         }
 
 
-def _is_owned_regular_file(path: Path, root: Path) -> bool:
-    """Check every owned component before resolution can hide a symlink."""
-    if not path.is_relative_to(root):
-        return False
-    try:
-        return (
-            stat.S_ISREG(path.lstat().st_mode)
-            and not root.is_symlink()
-            and all(not part.is_symlink() for part in path.parents if part.is_relative_to(root))
-        )
-    except OSError:
-        return False
-
-
 def _read_owned_bytes(path: Path, root: Path, max_bytes: int) -> bytes:
-    if not _is_owned_regular_file(path, root):
+    """Read at most ``max_bytes`` of a regular file reached through no link below ``root``."""
+    if not is_link_free_regular_file(root, path):
         raise PreparationError(f"{path.name} is missing or is not an owned regular file")
-    with path.open("rb") as stream:
-        data = stream.read(max_bytes + 1)
-    if len(data) > max_bytes:
-        raise PreparationError(f"{path.name} exceeds the dependency evidence size limit")
-    return data
+    try:
+        return read_regular_file(path, max_bytes)
+    except FileTooLargeError:
+        raise PreparationError(f"{path.name} exceeds the dependency evidence size limit") from None
+    except OSError:
+        raise PreparationError(f"{path.name} is missing or is not an owned regular file") from None
 
 
 def _read_evidence_lines(path: Path, root: Path, max_bytes: int) -> list[str]:
@@ -363,8 +352,8 @@ def collect_submission_dependencies(
                 if path in generated:
                     generated_count += 1
                     generated_reads.add(relative)
-                elif not _is_owned_regular_file(path, project) or not _is_owned_regular_file(
-                    source / relative, source
+                elif not is_link_free_regular_file(project, path) or not is_link_free_regular_file(
+                    source, source / relative
                 ):
                     raise PreparationError(
                         "Observed project input is missing, generated without evidence, "
@@ -375,7 +364,7 @@ def collect_submission_dependencies(
             elif path in generated and path.is_relative_to(output):
                 generated_count += 1
                 generated_reads.add(path.relative_to(output).as_posix())
-            elif path in owned and _is_owned_regular_file(path, project.parent):
+            elif path in owned and is_link_free_regular_file(project.parent, path):
                 generated_count += 1
             elif any(path.resolve().is_relative_to(root) for root in roots):
                 system_count += 1
@@ -469,16 +458,17 @@ def read_bibliography_evidence(output: Path, limit: int) -> BibliographyEvidence
     for path in sorted(files, key=lambda item: (item.suffix != ".bcf", str(item))):
         relative = path.relative_to(output).as_posix()
         try:
-            if not is_contained_regular_file(output, path):
+            if not is_contained(output, path, regular_file=True):
                 raise PreparationError("control file is not an owned regular file")
-            total += path.stat().st_size
-            if total > limit:
+            try:
+                data = read_regular_file(path, limit - total)
+            except FileTooLargeError:
                 raise PreparationError(
                     "combined control evidence exceeds the diagnostic size limit"
-                )
-            data = path.read_bytes()
-            if len(data) > limit:
-                raise PreparationError("control file exceeds the diagnostic size limit")
+                    if total
+                    else "control file exceeds the diagnostic size limit"
+                ) from None
+            total += len(data)
             text = data.decode("utf-8")
             if path.suffix == ".bcf":
                 _require_biber_control(text)

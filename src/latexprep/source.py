@@ -14,7 +14,9 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
+from .comment_markers import MarkerCategory, marker_pattern
 from .errors import PreparationError
+from .file_safety import read_regular_file
 from .findings import EvidenceKind, Finding
 from .literal_text import REFERENCE_COMMANDS
 from .report import Change, ChangeKind
@@ -22,7 +24,6 @@ from .source_graph import (
     DEFAULT_SUFFIXES_BY_FILE_COMMAND,
     FILE_COMMANDS,
     GRAPHICS_SUFFIXES,
-    ROOT_SUFFIXES,
     TOOLCHAIN_FILE_COMMANDS,
     SourceGraph,
     is_document_root,
@@ -30,16 +31,20 @@ from .source_graph import (
     path_comparison_key,
     project_files,
 )
+from .tex_commands import MANUSCRIPT_SUFFIXES, ROOT_SUFFIXES
 from .tex_lexer import (
     MAX_SOURCE_BYTES,
     ParseLimitExceeded,
     scan_source_commands,
     split_argument_items,
 )
-from .text_edits import unified_diff_text
+from .text_edits import TextEdit, apply_text_edits, unified_diff_text, with_bom
 
-# Manuscript text, as opposed to class, style and generated template internals.
-_MANUSCRIPT_SUFFIXES = {".tex", ".ltx", ".latex", ".tikz", ".pgf"}
+# Active manuscript text is matched case-sensitively: lowercase "todo" or "xxx" can be
+# ordinary words of the manuscript, unlike the capitalised markers.
+_EDIT_MARKER = marker_pattern(
+    MarkerCategory.EDIT_MARKER, MarkerCategory.UNCERTAINTY_MARK, ignore_case=False
+)
 # Ordinary formatting such as \textcolor is not an editing marker.
 _EDIT_COMMANDS = {
     "todo",
@@ -89,12 +94,10 @@ def discover_roots(root: Path) -> list[str]:
     """
     roots: list[str] = []
     for name, path in project_files(root).items():
-        if path.suffix.lower() not in ROOT_SUFFIXES or path.is_symlink():
-            continue
-        if path.stat().st_size > MAX_SOURCE_BYTES:
+        if path.suffix.lower() not in ROOT_SUFFIXES:
             continue
         try:
-            text = path.read_bytes().decode("utf-8-sig")
+            text = read_regular_file(path, MAX_SOURCE_BYTES).decode("utf-8-sig")
         except (UnicodeDecodeError, OSError):
             continue
         try:
@@ -117,9 +120,9 @@ def lint_sources(graph: SourceGraph) -> list[Finding]:
         if graph.main and name not in graph.visited:
             continue
         # Template internals are not authored manuscript text.
-        if Path(name).suffix.lower() not in _MANUSCRIPT_SUFFIXES:
+        if Path(name).suffix.lower() not in MANUSCRIPT_SUFFIXES:
             continue
-        for match in re.finditer(r"\b(?:TODO|FIXME|XXX)\b|\?\?", source.masked):
+        for match in _EDIT_MARKER.finditer(source.masked):
             findings.append(
                 Finding(
                     "source.edit_marker",
@@ -494,13 +497,15 @@ def plan_flatten(
         edits[location.path][(location.start, location.end)] = replacement
     for name, replacements in edits.items():
         source = graph.sources[name]
-        rewritten = source.text
-        for (start, end), replacement in sorted(replacements.items(), reverse=True):
-            rewritten = rewritten[:start] + replacement + rewritten[end:]
+        rewritten = apply_text_edits(
+            source.text,
+            (
+                TextEdit(start, end, replacement)
+                for (start, end), replacement in replacements.items()
+            ),
+        )
         if rewritten != source.text:
-            plan.contents[name] = (b"\xef\xbb\xbf" if source.bom else b"") + rewritten.encode(
-                "utf-8"
-            )
+            plan.contents[name] = with_bom(rewritten, source.bom).encode("utf-8")
             diff = unified_diff_text(
                 name, source.text, rewritten, destination=plan.mapping.get(name, name)
             )

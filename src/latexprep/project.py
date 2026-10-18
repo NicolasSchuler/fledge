@@ -13,7 +13,6 @@ from __future__ import annotations
 import contextlib
 import errno
 import os
-import re
 import shutil
 import stat
 import struct
@@ -24,15 +23,23 @@ import zlib
 from collections.abc import Generator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import IO, BinaryIO, NamedTuple
+from typing import IO, BinaryIO, ClassVar, NamedTuple, Protocol, Self
 
 from .cancellation import cancellation_point
 from .errors import PreparationError
-from .file_safety import MIB, byte_count_text
+from .file_safety import byte_count_text
 from .findings import Finding
+from .limits import (
+    DEFAULT_MAX_FOLDER_LEVELS,
+    DEFAULT_MAX_PROJECT_BYTES,
+    IO_CHUNK_BYTES,
+    MAX_PROJECT_ENTRIES,
+    MIB,
+)
+from .option_config import POSITIVE_INTEGER, Bounds, validate_scalars
+from .path_safety import relative_path_problem
 from .report import Change, ChangeKind
 
-_CHUNK_SIZE = 64 * 1024
 _MAX_ZIP_DIRECTORY_BYTES = 16 * MIB
 _IMPORT_TIMEOUT_SECONDS = 60.0
 # Deepest folder nesting walked when the caller sets no depth limit. Each level
@@ -42,7 +49,6 @@ _METADATA_DIRS = {".git", ".hg", ".svn", "__MACOSX"}
 _RESERVED_NAMES = {"con", "prn", "aux", "nul", "conin$", "conout$"} | {
     f"{prefix}{number}" for prefix in ("com", "lpt") for number in "123456789¹²³"
 }
-_DRIVE_PREFIX = re.compile(r"[A-Za-z]:")
 # Finder custom-folder-icon file: the name ends with a carriage return.
 _ICON_FILE = "Icon\r"
 _AUXILIARY_SUFFIXES = (
@@ -85,20 +91,47 @@ _DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 _FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
 
 
+class ImportLimitSettings(Protocol):
+    """The settings that bound a project import; ``config.Settings`` provides them."""
+
+    @property
+    def max_files(self) -> int: ...
+
+    @property
+    def max_bytes(self) -> int: ...
+
+    @property
+    def max_depth(self) -> int: ...
+
+
 @dataclass(frozen=True)
 class ImportLimits:
     """Import bounds; max_files counts directory entries as well as files."""
 
-    max_files: int = 10_000
-    max_bytes: int = 256 * MIB
-    max_depth: int = 32
+    FIELD_BOUNDS: ClassVar[dict[str, Bounds]] = dict.fromkeys(
+        ("max_files", "max_bytes", "max_depth", "max_ratio"), POSITIVE_INTEGER
+    )
+
+    max_files: int = MAX_PROJECT_ENTRIES
+    max_bytes: int = DEFAULT_MAX_PROJECT_BYTES
+    max_depth: int = DEFAULT_MAX_FOLDER_LEVELS
     max_ratio: int = 200
 
     def __post_init__(self) -> None:
-        for name in ("max_files", "max_bytes", "max_depth", "max_ratio"):
-            value = getattr(self, name)
-            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-                raise PreparationError(f"{name} must be a positive integer.")
+        validate_scalars(self)
+
+    @classmethod
+    def from_settings(cls, settings: ImportLimitSettings, *, max_ratio: int | None = None) -> Self:
+        """The limits that a job's ``max_files``, ``max_bytes`` and ``max_depth`` set.
+
+        The compression ratio keeps its default unless ``max_ratio`` is given.
+        """
+        bounds = {
+            "max_files": settings.max_files,
+            "max_bytes": settings.max_bytes,
+            "max_depth": settings.max_depth,
+        }
+        return cls(**bounds) if max_ratio is None else cls(**bounds, max_ratio=max_ratio)
 
 
 _DEFAULT_IMPORT_LIMITS = ImportLimits()
@@ -174,18 +207,15 @@ def _normalize_path(name: str) -> str:
 
     Names that are merely nonportable are accepted; see ``_portability_reasons``.
     """
-    if not name or name.startswith("/") or "\\" in name or "\x00" in name:
-        raise PreparationError(f"Unsafe project path: {name!r}.")
-    parts = name.split("/")
-    if ".." in parts:
+    problem = relative_path_problem(name, normalized=False)
+    if problem == "traversal":
         raise PreparationError(f"Project path traversal is forbidden: {name!r}.")
-    parts = [part for part in parts if part not in {"", "."}]
-    if not parts:
+    if problem == "current":
         raise PreparationError(f"Empty project path: {name!r}.")
-    if _DRIVE_PREFIX.match(parts[0]):
-        # A Windows drive-letter prefix is an absolute or drive-relative path there.
+    if problem is not None:
+        # Includes a Windows drive prefix, an absolute or drive-relative path there.
         raise PreparationError(f"Unsafe project path: {name!r}.")
-    return "/".join(parts)
+    return "/".join(part for part in name.split("/") if part not in {"", "."})
 
 
 def _portability_reasons(path: str) -> list[str]:
@@ -575,7 +605,9 @@ def _copy_bytes(
     compressed_size: int | None = None,
 ) -> None:
     total = 0
-    while chunk := source.read(min(_CHUNK_SIZE, budget.limits.max_bytes - budget.total_bytes + 1)):
+    while chunk := source.read(
+        min(IO_CHUNK_BYTES, budget.limits.max_bytes - budget.total_bytes + 1)
+    ):
         budget.add_bytes(len(chunk), path)
         total += len(chunk)
         if (
@@ -737,7 +769,7 @@ def _write_archive(stream: BinaryIO, directory_fd: int, entries: list[_Entry]) -
             with zipped.open(info, "w") as writer:
                 if not entry.is_dir:
                     with _open_regular(directory_fd, entry.path) as reader:
-                        while chunk := reader.read(_CHUNK_SIZE):
+                        while chunk := reader.read(IO_CHUNK_BYTES):
                             cancellation_point()
                             writer.write(chunk)
                         cancellation_point()

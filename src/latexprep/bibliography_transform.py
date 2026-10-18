@@ -35,9 +35,7 @@ from .bibtex_syntax import (
 )
 from .cancellation import cancellation_point
 from .citation_graph import (
-    CITATION_COMMANDS,
     KEY_LIST_FIELDS,
-    MULTICITE_COMMANDS,
     Citation,
     CitationGraph,
     LocatedEntry,
@@ -49,12 +47,19 @@ from .citation_graph import (
     require_directory,
     uncertainty_messages,
 )
-from .errors import PreparationError
+from .errors import SettingsError
 from .expanded_document import commands_before_end, reachable_sources
 from .findings import Finding
-from .option_config import require_booleans
+from .option_config import (
+    TextFormat,
+    require_pairs,
+    require_text,
+    require_unique_strings,
+    validate_scalars,
+)
 from .report import Change, ChangeKind
 from .source_graph import SourceGraph
+from .tex_commands import CITATION_COMMANDS, MULTICITE_COMMANDS
 from .tex_lexer import split_argument_items
 from .text_edits import (
     OverlappingEdits,
@@ -65,6 +70,7 @@ from .text_edits import (
 )
 
 _KEY = re.compile(r"(?!\*$)[^\s\\{}#$^~&%\x00-\x1f\x7f\"'(),=]+")
+_FIELD_NAME_FORMAT = TextFormat(LOWERCASE_NAME, "a lowercase field name")
 _ENTRY_HEADER = re.compile("@" + ENTRY_TYPE.pattern)
 # Reasons quoted in a refusal; the rest are counted so one rerun can fix more than one.
 _MAX_LISTED_REASONS = 3
@@ -78,6 +84,10 @@ _CATALOGUE_ORDER = (
     "field_edits",
     "order_entries",
 )
+
+
+def _require_key(name: str, value: object) -> None:
+    require_text(name, value, expected="a literal BibTeX key", pattern=_KEY)
 
 
 @dataclass(frozen=True)
@@ -99,53 +109,53 @@ class BibliographyTransformOptions:
     order_entries: bool = False
 
     def __post_init__(self) -> None:
-        require_booleans(self, "format_entries", "cited_only", "order_entries")
-        if (
-            not isinstance(self.remove_fields, tuple)
-            or any(
-                not isinstance(name, str) or not LOWERCASE_NAME.fullmatch(name)
-                for name in self.remove_fields
-            )
-            or len(set(self.remove_fields)) != len(self.remove_fields)
-            or set(self.remove_fields) & KEY_LIST_FIELDS
-        ):
-            raise PreparationError(
-                "remove_fields must contain unique lowercase, non-relationship field names"
+        validate_scalars(self)
+        require_unique_strings("remove_fields", self.remove_fields, item_format=_FIELD_NAME_FORMAT)
+        related = sorted(set(self.remove_fields) & KEY_LIST_FIELDS)
+        if related:
+            raise SettingsError(
+                f"remove_fields cannot remove relationship fields ({', '.join(related)}); "
+                "use key_renames or merge_keys",
+                ("remove_fields",),
             )
         for name in ("key_renames", "merge_keys"):
-            rows = getattr(self, name)
-            if not isinstance(rows, tuple) or any(
-                not isinstance(row, tuple)
-                or len(row) != 2
-                or any(not isinstance(key, str) or not _KEY.fullmatch(key) for key in row)
-                for row in rows
-            ):
-                raise PreparationError(f"{name} must contain literal (source, target) key tuples")
-            if len({row[0] for row in rows}) != len(rows):
-                raise PreparationError(f"{name} source keys must be unique")
+            require_pairs(name, getattr(self, name), first=_require_key, second=_require_key)
+        self._validate_field_edits()
+
+    def _validate_field_edits(self) -> None:
         if not isinstance(self.field_edits, tuple):
-            raise PreparationError("field_edits must be a tuple of guarded field edits")
+            raise SettingsError(
+                "field_edits must be a list of guarded field edits", ("field_edits",)
+            )
         seen: set[tuple[str, str]] = set()
-        for row in self.field_edits:
+        for index, row in enumerate(self.field_edits):
+            label = f"field_edits[{index}]"
             if not isinstance(row, tuple) or len(row) != 4:
-                raise PreparationError("Each field edit needs key, field, expected and replacement")
-            key, name, expected, replacement = row
-            if (
-                not isinstance(key, str)
-                or not _KEY.fullmatch(key)
-                or not isinstance(name, str)
-                or not LOWERCASE_NAME.fullmatch(name)
-                or name in KEY_LIST_FIELDS
-                or name in self.remove_fields
-                or (key, name) in seen
-                or any(
-                    value is not None and (not isinstance(value, str) or "\x00" in value)
-                    for value in (expected, replacement)
+                raise SettingsError(
+                    f"{label} needs key, field, expected and replacement", ("field_edits",)
                 )
-            ):
-                raise PreparationError(
-                    "Field edits need unique literal keys, non-relationship fields and text "
-                    "values; they cannot overlap remove_fields"
+            key, name, expected, replacement = row
+            _require_key(f"{label} key", key)
+            require_text(
+                f"{label} field",
+                name,
+                expected=_FIELD_NAME_FORMAT.description,
+                pattern=_FIELD_NAME_FORMAT.pattern,
+            )
+            for part, value in (("expected", expected), ("replacement", replacement)):
+                require_text(f"{label} {part}", value, allow_blank=True, allow_none=True)
+            if name in KEY_LIST_FIELDS:
+                raise SettingsError(
+                    f"{label} edits the relationship field {name}; use key_renames or merge_keys",
+                    ("field_edits",),
+                )
+            if name in self.remove_fields:
+                raise SettingsError(
+                    f"{label} edits {name}, which remove_fields also removes", ("field_edits",)
+                )
+            if (key, name) in seen:
+                raise SettingsError(
+                    f"field_edits lists {name} of {key} more than once", ("field_edits",)
                 )
             seen.add((key, name))
 

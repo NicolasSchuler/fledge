@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from .cancellation import cancellation_point
-from .file_safety import is_contained_regular_file, is_plain_relative_name
+from .path_safety import is_contained, is_relative_posix_path
 from .project import cleanup_reason
 from .report import Change
 
@@ -42,11 +42,13 @@ class _InventoryRow:
 
 def _regular_file_size(root: Path | None, name: str) -> int | None:
     """Do not follow unsafe or unavailable source paths just to obtain a size."""
-    if root is None or not is_plain_relative_name(name):
+    if root is None or not is_relative_posix_path(name):
         return None
     candidate = root / name
     try:
-        return candidate.stat().st_size if is_contained_regular_file(root, candidate) else None
+        return (
+            candidate.stat().st_size if is_contained(root, candidate, regular_file=True) else None
+        )
     except OSError:
         return None
 

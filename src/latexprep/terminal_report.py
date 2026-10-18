@@ -1,13 +1,11 @@
 """Rich terminal and plain compact reports, plus the terminal check catalogue.
 
 No terminal markup or control sequence from inputs reaches the terminal: every
-untrusted text passes through :func:`sanitize_terminal_text`.
+untrusted text passes through :func:`~latexprep.text_safety.sanitize_terminal_text`.
 """
 
 from __future__ import annotations
 
-import re
-import unicodedata
 from collections import Counter
 from collections.abc import Sequence
 from io import StringIO
@@ -34,6 +32,7 @@ from .finding_view import (
 from .findings import Finding
 from .report import Outcome, Report
 from .rule_definition import Rule
+from .text_safety import sanitize_terminal_text
 
 # Larger change sets are summarized by kind; every entry remains in the JSON report.
 MAX_LISTED_CHANGES = 20
@@ -46,28 +45,6 @@ OUTCOME_STYLES: dict[Outcome, str] = {
     Outcome.ERROR: "bold red",
     Outcome.CANCELLED: "bold yellow",
 }
-
-
-def _visible_format_character(char: str) -> str:
-    """Show an invisible format character, such as a bidi override, as a visible escape."""
-    code = ord(char)
-    return f"\\u{code:04x}" if code <= 0xFFFF else f"\\U{code:08x}"
-
-
-def sanitize_terminal_text(value: str) -> str:
-    """Remove escape sequences and control characters, keeping newlines and tabs.
-
-    Invisible format characters (Unicode category Cf, for example right-to-left
-    overrides that can reorder a displayed path) are shown as ``\\uXXXX`` escapes.
-    """
-    # File names and diagnostics are untrusted text, never terminal escape commands.
-    value = re.sub(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)", "", value)
-    value = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", value)
-    return "".join(
-        _visible_format_character(char) if unicodedata.category(char) == "Cf" else char
-        for char in value
-        if char in "\n\t" or (ord(char) >= 32 and not 127 <= ord(char) <= 159)
-    )
 
 
 def _one_line(value: str) -> str:

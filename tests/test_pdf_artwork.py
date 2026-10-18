@@ -3,8 +3,11 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import math
+import random
 import struct
 import tempfile
+import time
 import unittest
 import zlib
 from dataclasses import replace
@@ -17,10 +20,13 @@ from latexprep.errors import PreparationError
 from latexprep.pdf_artwork import (
     PdfArtworkOptions,
     PdfContrastSample,
+    _GrayPage,
+    _region_ink,
     inspect_artwork_inputs,
     inspect_pdf_artwork,
 )
 from latexprep.pdf_support import PdfRegion
+from latexprep.raster_pixels import InkMask, RasterImage
 from latexprep.resource_budget import ResourceBudget
 from latexprep.runtime import CommandResult, ToolRunner
 
@@ -662,9 +668,15 @@ class PdfArtworkTests(unittest.IsolatedAsyncioTestCase):
                 if not signaled:
                     signaled = True
                     loop.call_soon_threadsafe(started.set)
+                # Vectorized pixel scans finish within milliseconds, so each checkpoint
+                # takes a moment to stand in for a substantial job in the worker thread.
+                time.sleep(0.001)
                 owned_cancellation_point()
 
-            with patch("latexprep.pdf_artwork.cancellation_point", side_effect=progress):
+            with (
+                patch("latexprep.pdf_artwork.cancellation_point", side_effect=progress),
+                patch("latexprep.raster_pixels.cancellation_point", side_effect=progress),
+            ):
                 task = asyncio.create_task(self.check(options, runner))
                 await asyncio.wait_for(started.wait(), 2)
                 # The timer must run before this substantial pixel job finishes.
@@ -767,6 +779,71 @@ class PdfArtworkTests(unittest.IsolatedAsyncioTestCase):
         runner = ArtworkRunner()
         self.assertEqual(await self.check(PdfArtworkOptions(), runner), [])
         self.assertFalse(any(call[0][0] == "mutool" for call in runner.calls))
+
+
+class RegionInkTests(unittest.TestCase):
+    def test_ink_edge_ink_and_content_bounds_match_a_per_pixel_reference(self) -> None:
+        rng = random.Random(11)
+        for case in range(400):
+            width, height = rng.randint(1, 24), rng.randint(1, 20)
+            pixels = bytearray([255]) * (width * height)
+            for _ in range(rng.randint(0, 10)):
+                pixels[rng.randrange(width * height)] = rng.randrange(256)
+            width_pt, height_pt = rng.uniform(10, 200), rng.uniform(10, 200)
+            left, right = sorted(rng.randint(0, width) for _ in range(2))
+            top, bottom = sorted(rng.randint(0, height) for _ in range(2))
+            if left == right or top == bottom:
+                continue
+            options = PdfArtworkOptions(
+                figure_edge_band_pt=rng.choice([None, 0.5, 6, 500]),
+                background_gray=rng.choice([255, 0, 100]),
+                ink_difference=rng.randint(1, 255),
+            )
+            band = options.figure_edge_band_pt or 0
+            band_x, band_y = (
+                math.ceil(band * width / width_pt),
+                math.ceil(band * height / height_pt),
+            )
+            ink = [
+                (x, y)
+                for y in range(top, bottom)
+                for x in range(left, right)
+                if abs(pixels[y * width + x] - options.background_gray) >= options.ink_difference
+            ]
+            image = RasterImage(width, height, 1, bytes(pixels))
+            result = _region_ink(
+                _GrayPage(1, image, width_pt, height_pt),
+                InkMask.from_gray(image, options.background_gray, options.ink_difference),
+                (left, top, right, bottom),
+                options,
+            )
+            with self.subTest(case=case):
+                self.assertEqual(result.ink_pixels, len(ink))
+                if not ink:
+                    self.assertEqual(result[1:], (0, 1, None))
+                    continue
+                edge = sum(
+                    x < left + band_x
+                    or x >= right - band_x
+                    or y < top + band_y
+                    or y >= bottom - band_y
+                    for x, y in ink
+                )
+                xs, ys = [x for x, _ in ink], [y for _, y in ink]
+                area = (max(xs) - min(xs) + 1) * (max(ys) - min(ys) + 1)
+                self.assertEqual(result.edge_ink_pixels, edge)
+                self.assertEqual(
+                    result.outside_content_box_ratio, 1 - area / ((right - left) * (bottom - top))
+                )
+                self.assertEqual(
+                    result.content_bounds_pt,
+                    (
+                        min(xs) * width_pt / width,
+                        min(ys) * height_pt / height,
+                        (max(xs) + 1) * width_pt / width,
+                        (max(ys) + 1) * height_pt / height,
+                    ),
+                )
 
 
 if __name__ == "__main__":

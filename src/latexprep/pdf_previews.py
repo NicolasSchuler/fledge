@@ -15,14 +15,10 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .errors import PreparationError
-from .file_safety import MIB
-from .pdf_support import MAX_RASTER_DIMENSION, MAX_RASTER_PIXELS
+from .limits import MIB
+from .png_support import MIN_PNG_BYTES, png_dimensions
+from .raster_pixels import MAX_RASTER_DIMENSION, MAX_RASTER_PIXELS
 
-PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
-_PNG_END = b"\x00\x00\x00\x00IEND\xaeB`\x82"
-# Signature (8) + IHDR chunk (25) + a minimal empty IDAT chunk (12) + IEND chunk (12): no
-# complete PNG image is shorter.
-MIN_PNG_BYTES = 57
 MAX_PREVIEW_BYTES = 12 * MIB
 
 
@@ -30,22 +26,9 @@ class PreviewLimitError(PreparationError):
     """An optional preview exceeded its independent storage limit."""
 
 
-def png_dimensions(data: bytes) -> tuple[int, int]:
-    """Validate the framing and dimensions of internally rendered PNG bytes."""
-    if (
-        len(data) < MIN_PNG_BYTES
-        or not data.startswith(PNG_SIGNATURE + b"\x00\x00\x00\rIHDR")
-        or not data.endswith(_PNG_END)
-    ):
-        raise PreparationError("Preview renderer did not produce a complete PNG image")
-    width, height = int.from_bytes(data[16:20]), int.from_bytes(data[20:24])
-    if (
-        min(width, height) < 1
-        or max(width, height) > MAX_RASTER_DIMENSION
-        or width * height > MAX_RASTER_PIXELS
-    ):
-        raise PreparationError("Preview renderer produced oversized PNG dimensions")
-    return width, height
+def preview_dimensions(data: bytes) -> tuple[int, int]:
+    """Validate the framing and dimensions of internally rendered preview PNG bytes."""
+    return png_dimensions(data, max_dimension=MAX_RASTER_DIMENSION, max_pixels=MAX_RASTER_PIXELS)
 
 
 @dataclass
@@ -94,7 +77,7 @@ class PdfPreviewStore:
         return self._selected
 
     def add_image(self, slot: int, side: str, data: bytes) -> str:
-        png_dimensions(data)
+        preview_dimensions(data)
         if len(data) > self.remaining_bytes:
             raise PreviewLimitError("The shared PDF preview byte limit was reached")
         image_id = f"pdf-preview-{slot:04d}-{side}"

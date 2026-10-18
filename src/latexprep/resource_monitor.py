@@ -18,9 +18,9 @@ from typing import NamedTuple, Protocol
 
 from .cancellation import complete_despite_cancellation
 from .errors import PreparationError
+from .limits import MAX_WORKSPACE_ENTRIES
 from .process_control import kill_process_group, kill_unfinished, start_process
 
-_MAX_WORKSPACE_ENTRIES = 20_000
 _MAX_GROUP_PROCESSES = 32
 _PROCESS_TABLE_TIMEOUT_SECONDS = 2
 _PROCESS_LISTING_PROGRAM = "/bin/ps"
@@ -128,8 +128,8 @@ def workspace_violation(workspace: Path, max_file_bytes: int) -> str | None:
     total = count = 0
     for directory, directories, filenames in os.walk(workspace, followlinks=False):
         count += len(directories) + len(filenames)
-        if count > _MAX_WORKSPACE_ENTRIES:
-            return f"Workspace entry count exceeded {_MAX_WORKSPACE_ENTRIES}"
+        if count > MAX_WORKSPACE_ENTRIES:
+            return f"Workspace entry count exceeded {MAX_WORKSPACE_ENTRIES}"
         for name in filenames:
             with contextlib.suppress(FileNotFoundError):
                 size = (Path(directory) / name).lstat().st_size

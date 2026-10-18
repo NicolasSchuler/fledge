@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import html
 import json
 import math
-import unicodedata
 from base64 import b64encode
 from collections.abc import Mapping
 from urllib.parse import quote
@@ -19,9 +17,10 @@ from .finding_view import (
     size_label,
 )
 from .findings import Finding
-from .pdf_previews import MAX_PREVIEW_BYTES, png_dimensions
+from .path_safety import is_relative_posix_path
+from .pdf_previews import MAX_PREVIEW_BYTES, preview_dimensions
 from .report import Report
-from .review_policy import is_literal_relative_path
+from .text_safety import escape_html_text
 
 _STYLE = (
     "body{font:16px/1.5 system-ui,sans-serif;max-width:1100px;margin:2rem auto;padding:0 1rem;"
@@ -63,19 +62,11 @@ _STYLE = (
 )
 
 
-def _visible_controls(value: object) -> str:
-    rendered = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
-    return "".join(
-        f"\\u{ord(char):04x}"
-        if unicodedata.category(char).startswith("C") and char not in "\n\t"
-        else char
-        for char in rendered
-    )
-
-
 def _escape_html(value: object) -> str:
     """Escape untrusted text for HTML content and attributes; controls become visible."""
-    return html.escape(_visible_controls(value), quote=True)
+    return escape_html_text(
+        value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+    )
 
 
 def _boxes(value: object) -> list[tuple[float, float, float, float]]:
@@ -93,7 +84,7 @@ def _pdf_link(path: object, page: int) -> str | None:
     if not isinstance(path, str) or not path.lower().endswith(".pdf"):
         return None
     relative = path[1:] if path.startswith("/") and not path.startswith("//") else path
-    if not is_literal_relative_path(relative):
+    if not is_relative_posix_path(relative, characters="literal"):
         return None
     return quote(path, safe="/") + f"#page={page}"
 
@@ -235,7 +226,7 @@ def _preview_image(descriptor: Mapping[str, object], images: Mapping[str, bytes]
     if not isinstance(data, bytes) or len(data) > MAX_PREVIEW_BYTES:
         return None
     try:
-        png_dimensions(data)
+        preview_dimensions(data)
     except PreparationError:
         return None
     return data

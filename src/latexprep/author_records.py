@@ -15,14 +15,14 @@ from .file_scan import check_status, location_label, more_suffix
 from .findings import EvidenceKind, Finding
 from .literal_text import is_placeholder_text, plain_argument_text
 from .pdf_structure_checks import StructureOptions
+from .tex_commands import COMMAND_DEFINITION_COMMANDS, PRIMITIVE_DEFINITION_COMMANDS
 from .tex_lexer import in_conditional
 
 _RULE = "manuscript.author_records"
 _MAX_REPORTED_RECORDS = 100
 # Records and fields named in the message; the details list up to _MAX_REPORTED_RECORDS.
 _MAX_NAMED_PROBLEMS = 3
-_DECLARATION_COMMANDS = {"newcommand", "renewcommand", "providecommand", "DeclareRobustCommand"}
-_DYNAMIC_COMMANDS = {"def", "gdef", "xdef", "edef", "csname", "catcode", "let"}
+_DYNAMIC_COMMANDS = PRIMITIVE_DEFINITION_COMMANDS | {"csname", "catcode"}
 
 
 def _problem(item: dict[str, object]) -> str:
@@ -108,7 +108,7 @@ def check_author_records(root: Path, main: str | None, options: StructureOptions
         cancellation_point()
         if command.start < ignored_until:
             continue
-        if command.name in _DECLARATION_COMMANDS:
+        if command.name in COMMAND_DEFINITION_COMMANDS:
             # The declaration's literal command token is not an author record.
             ignored_until = command_end(command)
             continue

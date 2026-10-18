@@ -10,7 +10,7 @@ from rich.progress import Progress, SpinnerColumn, TaskID, TextColumn, TimeElaps
 from rich.table import Column
 from rich.text import Text
 
-from .terminal_report import sanitize_terminal_text
+from .text_safety import sanitize_terminal_text
 
 
 class TerminalProgress:

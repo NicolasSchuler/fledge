@@ -7,6 +7,7 @@ paths and ambiguous lookups are recorded as findings instead of being guessed.
 
 from __future__ import annotations
 
+import codecs
 import posixpath
 import re
 import unicodedata
@@ -17,8 +18,12 @@ from typing import Literal, NamedTuple, Self
 
 from .cancellation import cancellation_point
 from .errors import PreparationError
-from .file_safety import MIB
+from .file_safety import FileTooLargeError, read_regular_file
 from .findings import EvidenceKind, Finding
+from .limits import KIB, MIB
+from .literal_text import HEADING_DEPTHS, KEY_ARGUMENT_COMMANDS, REFERENCE_COMMANDS, TEXT_WRAPPERS
+from .path_safety import has_drive_prefix, lexically_escapes
+from .tex_commands import ROOT_SUFFIXES, TEX_SOURCE_SUFFIXES
 from .tex_lexer import (
     MAX_ARGUMENT_CHARS,
     MAX_COMMANDS,
@@ -57,7 +62,7 @@ _ARGUMENT_LIMIT_ADVICE: dict[ParseLimit, tuple[str, str]] = {
         "Add the missing closing brace, or remove the extra opening brace.",
     ),
     "oversized_group": (
-        f"A brace group on this line is longer than {MAX_ARGUMENT_CHARS // 1024} KiB.",
+        f"A brace group on this line is longer than {MAX_ARGUMENT_CHARS // KIB} KiB.",
         "Move the long text out of the command argument, for example into its own file.",
     ),
     "argument_budget": (
@@ -66,19 +71,47 @@ _ARGUMENT_LIMIT_ADVICE: dict[ParseLimit, tuple[str, str]] = {
     ),
 }
 
-_SOURCE_SUFFIXES = {
-    ".tex",
-    ".ltx",
-    ".latex",
-    ".sty",
-    ".cls",
-    ".def",
-    ".cfg",
-    ".tikz",
-    ".pgf",
-    ".bbl",
+# Findings about a source file the graph tried to read but could not parse. Every
+# command and reference in such a file is unknown, so a reader that needs the file's
+# content (a document root, a citation) cannot continue past one.
+UNPARSED_SOURCE_RULES = frozenset(
+    {
+        "source.encoding",
+        "source.size_limit",
+        "source.argument_limit",
+        "source.command_limit",
+        "source.link",
+    }
+)
+# Findings that leave the literal graph incomplete: an unparsed file, or a reference
+# whose file or path context the scan cannot establish. A finding of one of these rules
+# only matters while it is unresolved; a resolved lookup-order or conditional dependency
+# is evidence, not a gap. Findings of other rules (for example ``source.path_option``) are
+# advisories about how a reference was written and do not make the graph incomplete.
+INCOMPLETE_GRAPH_RULES = UNPARSED_SOURCE_RULES | {
+    # The traversal stopped or skipped text.
+    "source.literal_unclosed",
+    "source.input_cycle",
+    "source.input_depth",
+    "source.expansion_limit",
+    # A reference is not a literal path in a known context.
+    "source.dynamic_path",
+    "source.nested_file_command",
+    "source.conditional_dependency",
+    "source.path_literal_context",
+    "source.custom_path",
+    "source.unsupported_command",
+    "source.subfile_structure",
+    "source.font_options",
+    # A literal path does not select exactly one file.
+    "source.external_path",
+    "source.ambiguous_dependency",
+    "source.case_mismatch",
+    "source.missing_dependency",
+    "source.context_ambiguity",
 }
-ROOT_SUFFIXES = {".tex", ".ltx", ".latex"}
+# Every TeX-like input is parsed; the generated bibliography is read as TeX as well.
+_SOURCE_SUFFIXES = TEX_SOURCE_SUFFIXES | {".bbl"}
 # Graphics lookup order of the default pdfTeX graphics rules.
 GRAPHICS_SUFFIXES = (".pdf", ".png", ".jpg", ".mps", ".jpeg", ".jbig2", ".jb2", ".eps", ".ps")
 # Suffixes TeX tries, in order, before the bare name of a suffixless reference.
@@ -119,6 +152,13 @@ FILE_COMMANDS = frozenset(DEFAULT_SUFFIXES_BY_FILE_COMMAND)
 # Commands taking a directory and then a file name.
 IMPORT_COMMANDS = frozenset({"import", "subimport", "inputfrom", "subinputfrom"})
 SECOND_ARGUMENT_FILE_COMMANDS = frozenset({*IMPORT_COMMANDS, "DTLloaddb", "inputminted"})
+
+
+def file_argument_index(command_name: str) -> int:
+    """The index of the argument that names the file: after the directory, if there is one."""
+    return 1 if command_name in SECOND_ARGUMENT_FILE_COMMANDS else 0
+
+
 # File commands whose argument is a comma-separated list of names.
 COMMA_LIST_FILE_COMMANDS = frozenset(
     {"bibliography", "usepackage", "RequirePackage", "RequirePackageWithOptions"}
@@ -135,7 +175,8 @@ TOOLCHAIN_FILE_COMMANDS = frozenset(
         "LoadClassWithOptions",
     }
 )
-_SUPPORTED_FONT_COMMANDS = {"setmainfont", "setsansfont", "setmonofont", "fontspec"}
+# Font commands whose font file is followed; the other font commands are unsupported.
+_SUPPORTED_FONT_COMMANDS = frozenset({"setmainfont", "setsansfont", "setmonofont", "fontspec"})
 _UNSUPPORTED_COMMANDS = {
     "includefrom",
     "subincludefrom",
@@ -165,70 +206,45 @@ _UNSUPPORTED_COMMANDS = {
     "luadirect",
     "luaexec",
 }
-_FONT_COMMANDS = {
-    "setmainfont",
-    "setsansfont",
-    "setmonofont",
-    "fontspec",
-    "newfontfamily",
-    "newfontface",
-}
-_TEXT_COMMANDS = {
-    "url",
-    "nolinkurl",
-    "path",
-    "href",
-    "hyperref",
-    "label",
-    "ref",
-    "pageref",
-    "eqref",
-    "autoref",
-    "cref",
-    "Cref",
-    "nameref",
-    "vref",
-    "cite",
-    "citep",
-    "citet",
-    "parencite",
-    "textcite",
-    "nocite",
-    "citeauthor",
-    "citeyear",
-    "texttt",
-    "textbf",
-    "textit",
-    "textrm",
-    "textsf",
-    "text",
-    "emph",
-    "mbox",
-    "fbox",
-    "caption",
-    "captionof",
-    "title",
-    "author",
-    "thanks",
-    "footnote",
-    "section",
-    "subsection",
-    "subsubsection",
-    "paragraph",
-    "chapter",
-    "part",
-    "hypersetup",
-    "ProvidesPackage",
-    "ProvidesClass",
-    "ProvidesFile",
-    "typeout",
-    "PackageWarning",
-    "PackageInfo",
-    "ClassWarning",
-    "ClassInfo",
-    "bibfield",
-    "field",
-}
+_FONT_COMMANDS = _SUPPORTED_FONT_COMMANDS | {"newfontfamily", "newfontface"}
+# Commands whose arguments hold prose, keys or declarations, never a file the document
+# reads: the shared prose tables plus the groups below.
+_TEXT_COMMANDS = frozenset(
+    {
+        *TEXT_WRAPPERS,
+        *KEY_ARGUMENT_COMMANDS,
+        *REFERENCE_COMMANDS,
+        *HEADING_DEPTHS,
+        # Links: the address is an argument, but not a project file.
+        "url",
+        "nolinkurl",
+        "path",
+        "href",
+        "hyperref",
+        "hypersetup",
+        # Boxes, captions and front matter.
+        "text",
+        "fbox",
+        "caption",
+        "captionof",
+        "title",
+        "author",
+        "thanks",
+        "footnote",
+        # Package, class and file declarations, and their messages.
+        "ProvidesPackage",
+        "ProvidesClass",
+        "ProvidesFile",
+        "typeout",
+        "PackageWarning",
+        "PackageInfo",
+        "ClassWarning",
+        "ClassInfo",
+        # biblatex field access.
+        "bibfield",
+        "field",
+    }
+)
 # Arguments are control-sequence names, never files: biblatex's generated .bbl
 # guards itself with \@ifundefined{ver@biblatex.sty}.
 _MACRO_NAME_COMMANDS = {"@ifundefined", "@namedef", "@nameuse"}
@@ -511,11 +527,10 @@ class SourceGraph:
             )
             return None
         try:
-            size = path.stat().st_size
-        except OSError as error:
-            self._unreadable(name, error)
-            return None
-        if size > MAX_SOURCE_BYTES or self._source_bytes + size > MAX_TOTAL_SOURCE_BYTES:
+            raw = read_regular_file(
+                path, min(MAX_SOURCE_BYTES, MAX_TOTAL_SOURCE_BYTES - self._source_bytes)
+            )
+        except FileTooLargeError:
             self._uncertain(
                 "source.size_limit",
                 f"Source parsing exceeded the {MAX_SOURCE_BYTES // MIB} MiB per-file "
@@ -524,8 +539,6 @@ class SourceGraph:
                 suggestion="Reduce the selected source set or inspect this file separately.",
             )
             return None
-        try:
-            raw = path.read_bytes()
         except OSError as error:
             self._unreadable(name, error)
             return None
@@ -559,7 +572,7 @@ class SourceGraph:
             )
             return None
         source = ParsedSource(
-            text, masked, commands, raw.startswith(b"\xef\xbb\xbf"), tuple(comments)
+            text, masked, commands, raw.startswith(codecs.BOM_UTF8), tuple(comments)
         )
         spans = conditional_spans(commands)
         for command in commands:
@@ -596,11 +609,10 @@ class SourceGraph:
         if main is not None:
             candidate = posixpath.normpath(main)
             escapes = (
-                main.startswith(("/", "\\"))
-                or re.match(r"^[A-Za-z]:", main)
-                or candidate == ".."
-                or candidate.startswith("../")
+                main.startswith("/")
                 or "\\" in main
+                or has_drive_prefix(main)
+                or lexically_escapes(candidate)
             )
             if escapes or candidate not in self.files:
                 roots = f" Document roots found: {_listed(self.roots)}." if self.roots else ""
@@ -728,7 +740,7 @@ class SourceGraph:
                     "Use a direct literal reference outside groups and macro arguments. "
                     + _NEEDED_FOR_RESTRUCTURING,
                 )
-            file_index = 1 if command.name in SECOND_ARGUMENT_FILE_COMMANDS else 0
+            file_index = file_argument_index(command.name)
             if len(command.arguments) <= file_index:
                 self._uncertain(
                     "source.dynamic_path",
@@ -786,7 +798,7 @@ class SourceGraph:
             )
             return None
         path = posixpath.normpath(posixpath.join(self.cwd if base is None else base, value))
-        if path == ".." or path.startswith("../"):
+        if lexically_escapes(path):
             self._error(
                 "source.external_path",
                 f"Dependency {value!r} resolves outside the selected project.",
@@ -1182,7 +1194,7 @@ class SourceGraph:
                     self.search_arguments[location] = "./"
                     self._visit(target, search, (*stack, name), (directory, *context))
                 continue
-            index = 1 if command.name in SECOND_ARGUMENT_FILE_COMMANDS else 0
+            index = file_argument_index(command.name)
             if len(command.arguments) <= index:
                 continue
             font_directory = None

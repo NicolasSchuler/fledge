@@ -15,19 +15,20 @@ from .errors import PreparationError
 from .finding_view import redact_report
 from .findings import Finding
 from .html_report import render_redacted_html
+from .limits import MIB
+from .path_safety import is_relative_posix_path
 from .report import Outcome, Report
-from .review_policy import is_literal_relative_path
 
 _TEXT_SUFFIXES = frozenset(
     {".log", ".txt", ".tex", ".bib", ".diff", ".json", ".out", ".err", ".sty", ".cls"}
 )
-_MAX_ARTIFACT_BYTES = 2 * 1024 * 1024
-_MAX_ARTIFACT_TOTAL = 8 * 1024 * 1024
+_MAX_ARTIFACT_BYTES = 2 * MIB
+_MAX_ARTIFACT_TOTAL = 8 * MIB
 
 
 def _scratch_text(root: Path, relative: str) -> str:
     if (
-        not is_literal_relative_path(relative)
+        not is_relative_posix_path(relative, characters="literal")
         or PurePosixPath(relative).suffix.lower() not in _TEXT_SUFFIXES
     ):
         raise PreparationError("Diagnostic artifacts require allowlisted relative text-file paths")

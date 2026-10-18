@@ -1,4 +1,4 @@
-"""Shared PDF tool sessions, Poppler/qpdf/MuPDF output parsing and finding builders.
+"""Shared PDF tool sessions, argument builders, Poppler/qpdf/MuPDF output parsing and findings.
 
 Coordinates are PDF points. Page boxes use the bottom-left PDF frame as reported
 by Poppler; regions and text boxes use the top-left frame of an unrotated,
@@ -7,19 +7,37 @@ uncropped page. Every adapter runs one tool per new directory on frozen inputs.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import math
 import re
 import xml.etree.ElementTree as ET
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, NamedTuple, Self, TypeGuard, TypeVar
+from typing import Any, ClassVar, Literal, NamedTuple, Self, TypeGuard, TypeVar
 
 from .cancellation import bounded_map, run_in_thread
-from .errors import PreparationError
+from .errors import PreparationError, SettingsError
 from .findings import EvidenceKind, Finding, Severity
+from .limits import DEFAULT_LEASE_MEMORY_MB, MAX_PDF_NESTING_LEVELS
+from .option_config import (
+    EIGHT_BIT_MAXIMUM,
+    EIGHT_BIT_VALUE,
+    NONNEGATIVE_NUMBER,
+    POSITIVE_INTEGER,
+    POSITIVE_NUMBER,
+    Bounds,
+    require_text,
+    validate_scalars,
+)
+from .raster_pixels import (
+    MAX_RASTER_DIMENSION,
+    MAX_RASTER_PIXELS,
+    RasterImage,
+    read_pnm_raster,
+)
 from .resource_budget import ResourceBudget
 from .runtime import CommandResult, CommandRunner, ToolVersion
 
@@ -30,13 +48,23 @@ MAX_INSPECTION_PAGES = 5000
 MAX_RENDERED_PAGES = 300
 # Comparison and preview renders use this resolution; every page must fit it.
 COMPARISON_DPI = 144
-MAX_RASTER_PIXELS = 16_000_000
-MAX_RASTER_DIMENSION = 8192
 # Configured measurement renders use their own, lower resolution and limits.
 MAX_MEASUREMENT_PIXELS = 4_000_000
 MAX_MEASUREMENT_DIMENSION = 4000
 MIN_MEASUREMENT_DPI = 18
 MAX_MEASUREMENT_DPI = 144
+# How a rendered page is sampled for ink, as the pdf_checks and rendered/included artwork
+# tables spell it: the resolution, the paper gray value and the gray difference that counts
+# as ink. The defaults differ between those tables; the limits do not.
+RASTER_SAMPLING_BOUNDS = {
+    "raster_dpi": Bounds(MIN_MEASUREMENT_DPI, MAX_MEASUREMENT_DPI),
+    "background_gray": EIGHT_BIT_VALUE,
+    "ink_difference": Bounds(1, EIGHT_BIT_MAXIMUM),
+}
+# WCAG contrast ratios run from 1:1 (identical colors) to 21:1 (black on white).
+CONTRAST_RATIO_BOUNDS = Bounds(1, 21)
+# Entries in one configured list of regions, section budgets or contrast samples.
+MAX_REGIONS_PER_POLICY = 300
 # PDF 1.7 Annex C: readers need not support pages beyond 14,400 units on a side. Larger
 # reported sizes are treated as damaged geometry, which also keeps raster arithmetic finite.
 MAX_PAGE_DIMENSION_PT = 14_400
@@ -63,13 +91,33 @@ EVIDENCE_LIMITATION_SUGGESTION = (
     "Resolve the stated evidence/tool limitation and repeat the configured check."
 )
 _OBJECT_REFERENCE = re.compile(r"[0-9]+ [0-9]+ R")
+# Every external tool the PDF adapters can run; qpdf alone reports its version with --version.
+PDF_TOOLS = frozenset(
+    {
+        "pdfinfo",
+        "pdftotext",
+        "pdftoppm",
+        "pdffonts",
+        "pdfdetach",
+        "pdfimages",
+        "pdftohtml",
+        "qpdf",
+        "mutool",
+    }
+)
 _VERSION_ARGUMENTS = {"qpdf": "--version"}
-# pdftoppm option and output file for each supported measurement raster.
+# pdftoppm option and output file for each supported page raster.
 _RASTER_FORMATS: dict[str, tuple[tuple[str, ...], str]] = {
     "gray": (("-gray",), "page.pgm"),
     "rgb": ((), "page.ppm"),
+    "png": (("-png",), "page.png"),
 }
 _DOCUMENT_NAME = "document"
+
+
+def pdf_tool_version_argv(tool: str) -> list[str]:
+    """The command that prints the version of one of the ``PDF_TOOLS``."""
+    return [tool, _VERSION_ARGUMENTS.get(tool, "-v")]
 
 
 def pdf_input(name: str) -> str:
@@ -80,12 +128,81 @@ def pdf_input(name: str) -> str:
 DOCUMENT = pdf_input(_DOCUMENT_NAME)
 
 
+# Every external command the PDF checks run is built here, so equal measurements share
+# one argument list (and one memoized result within a session).
+
+
+def pdfinfo_argv(document: str = DOCUMENT) -> list[str]:
+    """Document properties, with ISO 8601 dates and UTF-8 text.
+
+    Every PDF check shares this form. The parsers split each line at its first colon,
+    which an ISO date does not move, and Poppler writes UTF-8 whatever the locale.
+    """
+    return ["pdfinfo", "-enc", "UTF-8", "-isodates", document]
+
+
 def page_boxes_argv(pages: int, document: str = DOCUMENT) -> list[str]:
     return ["pdfinfo", "-box", "-f", "1", "-l", str(pages), document]
 
 
 def layout_text_argv(document: str = DOCUMENT) -> list[str]:
     return ["pdftotext", "-enc", "UTF-8", "-layout", document, "-"]
+
+
+def font_inventory_argv(document: str = DOCUMENT) -> list[str]:
+    return ["pdffonts", document]
+
+
+def text_geometry_argv(document: str = DOCUMENT) -> list[str]:
+    """Poppler XML text boxes: ``-i`` excludes image extraction, ``-nomerge`` keeps
+    smaller text boxes apart."""
+    return [
+        "pdftohtml",
+        "-xml",
+        "-stdout",
+        "-i",
+        "-zoom",
+        "1",
+        "-noroundcoord",
+        "-nomerge",
+        "-enc",
+        "UTF-8",
+        document,
+    ]
+
+
+def attachment_list_argv(document: str = DOCUMENT) -> list[str]:
+    return ["pdfdetach", "-list", document]
+
+
+def image_list_argv(document: str = DOCUMENT) -> list[str]:
+    return ["pdfimages", "-list", document]
+
+
+def render_page_argv(
+    page: int, dpi: int, raster: Literal["gray", "rgb", "png"], document: str = DOCUMENT
+) -> list[str]:
+    """Render one page as a single file named ``raster_filename(raster)`` in the working
+    directory: 8-bit PGM (gray), PPM (rgb) or PNG."""
+    options, _ = _RASTER_FORMATS[raster]
+    return [
+        "pdftoppm",
+        "-f",
+        str(page),
+        "-l",
+        str(page),
+        "-singlefile",
+        *options,
+        "-r",
+        str(dpi),
+        document,
+        "page",
+    ]
+
+
+def raster_filename(raster: Literal["gray", "rgb", "png"]) -> str:
+    """The file ``render_page_argv`` writes in a command's working directory."""
+    return _RASTER_FORMATS[raster][1]
 
 
 def qpdf_objects_argv() -> list[str]:
@@ -100,6 +217,26 @@ def qpdf_objects_argv() -> list[str]:
     ]
 
 
+def qpdf_decoded_objects_argv(references: Iterable[str]) -> list[str]:
+    """qpdf JSON v2 data for the selected indirect objects, with decoded inline streams.
+
+    ``references`` are indirect references such as ``12 0 R``; only they are decoded, so
+    image pixels and font files are never expanded.
+    """
+    selectors = [
+        "--json-object=" + ",".join(reference.split()[:2]) for reference in sorted(references)
+    ]
+    return [
+        "qpdf",
+        "--json=2",
+        "--json-key=qpdf",
+        "--decode-level=all",
+        "--json-stream-data=inline",
+        *selectors,
+        DOCUMENT,
+    ]
+
+
 def mupdf_trace_argv(pages: int) -> list[str]:
     return ["mutool", "trace", DOCUMENT, f"1-{pages}"]
 
@@ -109,7 +246,7 @@ async def freeze_pdf_inputs(
 ) -> tuple[Path, dict[str, Path]]:
     """Copy regular PDF inputs into a new workspace; return it resolved with the copies."""
     async with (
-        budget.lease(f"{work.name}: freeze PDF inputs", memory_mb=64)
+        budget.lease(f"{work.name}: freeze PDF inputs", memory_mb=DEFAULT_LEASE_MEMORY_MB)
         if budget is not None
         else nullcontext()
     ):
@@ -162,6 +299,13 @@ class PdfToolSession:
     runner: CommandRunner
     budget: ResourceBudget | None
     versions: dict[str, ToolVersion] = field(default_factory=dict)
+    # Completed read-only measurements, and a lock for each argument list; see ``measure``.
+    _measured: dict[tuple[str, ...], CommandResult] = field(
+        default_factory=dict, init=False, repr=False
+    )
+    _measure_locks: dict[tuple[str, ...], asyncio.Lock] = field(
+        default_factory=dict, init=False, repr=False
+    )
 
     @classmethod
     async def open(
@@ -175,7 +319,11 @@ class PdfToolSession:
         return cls(work, inputs, runner, budget)
 
     def lease(
-        self, label: str, *, memory_mb: int = 64, kind: Literal["render"] | None = None
+        self,
+        label: str,
+        *,
+        memory_mb: int = DEFAULT_LEASE_MEMORY_MB,
+        kind: Literal["render"] | None = None,
     ) -> AbstractAsyncContextManager[object]:
         if self.budget is None:
             return nullcontext()
@@ -197,7 +345,7 @@ class PdfToolSession:
         version_work.mkdir(parents=True)
         command_work.mkdir()
         self.versions[tool] = await self.runner.tool_version(
-            [tool, _VERSION_ARGUMENTS.get(tool, "-v")], version_work
+            pdf_tool_version_argv(tool), version_work
         )
         result = await self.runner.run(
             actual,
@@ -217,10 +365,22 @@ class PdfToolSession:
     async def measure(
         self, name: str, argv: Sequence[str], parse: Callable[[CommandResult], _T]
     ) -> _T:
-        """Keep command output parsing within the same bounded resource lease."""
-        async with self.lease(name):
-            result = await self.run_without_lease(name, argv, memory_mb=64)
-            self._require_bounded_output(result)
+        """Run a read-only measurement and parse its output within one bounded lease.
+
+        The session remembers each completed result by argument list, so asking for the
+        same measurement again (the page boxes for two checks, say) parses the earlier
+        output instead of running the tool again. Concurrent requests for one argument
+        list take turns outside any lease, so the tool still runs once; if the first is
+        cancelled or fails, the next runs it. Only deterministic, read-only commands
+        belong here; renders and anything that writes use ``run`` or ``render_page``.
+        """
+        key = tuple(argv)
+        async with self._measure_locks.setdefault(key, asyncio.Lock()), self.lease(name):
+            result = self._measured.get(key)
+            if result is None:
+                result = await self.run_without_lease(name, argv, memory_mb=DEFAULT_LEASE_MEMORY_MB)
+                self._require_bounded_output(result)
+                self._measured[key] = result
             return parse(result)
 
     async def render_page(
@@ -233,21 +393,8 @@ class PdfToolSession:
         raster: Literal["gray", "rgb"],
     ) -> _T:
         """Render one page of the document and parse the raster file in a worker thread."""
-        options, filename = _RASTER_FORMATS[raster]
-        argv = [
-            "pdftoppm",
-            "-f",
-            str(page),
-            "-l",
-            str(page),
-            "-singlefile",
-            *options,
-            "-r",
-            str(dpi),
-            DOCUMENT,
-            "page",
-        ]
-        path = self.work / name / "command" / filename
+        argv = render_page_argv(page, dpi, raster)
+        path = self.work / name / "command" / raster_filename(raster)
         async with self.lease(name, memory_mb=MEASUREMENT_RENDER_MEMORY_MB, kind="render"):
             try:
                 result = await self.run_without_lease(
@@ -267,17 +414,22 @@ class PdfToolSession:
             raise PreparationError("PDF measurement exceeds the diagnostic output limit")
 
 
-async def open_measurement_session(
-    pdf: Path, work: Path, runner: CommandRunner, budget: ResourceBudget | None
+async def open_pdf_session(
+    pdf: Path,
+    work: Path,
+    runner: CommandRunner,
+    budget: ResourceBudget | None,
+    *,
+    default_to_runner_budget: bool = True,
 ) -> PdfToolSession:
-    """One frozen document; configured measurements default to the runner's budget."""
-    return await PdfToolSession.open(work, {_DOCUMENT_NAME: pdf}, runner, budget or runner.budget)
+    """One frozen document.
 
-
-async def open_inspection_session(
-    pdf: Path, work: Path, runner: CommandRunner, budget: ResourceBudget | None
-) -> PdfToolSession:
-    """One frozen document under exactly the supplied budget."""
+    Configured measurements default to the runner's budget when none is supplied, so
+    their commands stay admitted and bounded. The basic inspection passes
+    ``default_to_runner_budget=False`` and runs under exactly the supplied budget.
+    """
+    if default_to_runner_budget:
+        budget = budget or runner.budget
     return await PdfToolSession.open(work, {_DOCUMENT_NAME: pdf}, runner, budget)
 
 
@@ -376,30 +528,18 @@ def heuristic_finding(
     )
 
 
-def require_number(value: object, name: str, *, allow_zero: bool = False) -> None:
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, (float, int))
-        or not math.isfinite(value)
-        or (value < 0 if allow_zero else value <= 0)
-    ):
-        raise PreparationError(
-            f"{name} must be a {'nonnegative' if allow_zero else 'positive'} number"
-        )
-
-
-def require_distinct_strings(values: tuple[str, ...], name: str) -> None:
-    if not isinstance(values, tuple) or any(
-        not isinstance(value, str) or not value.strip() or "\0" in value for value in values
-    ):
-        raise PreparationError(f"{name} must be an immutable tuple of nonempty strings")
-    if len(values) != len(set(values)):
-        raise PreparationError(f"{name} cannot contain duplicates")
-
-
 @dataclass(frozen=True)
 class PdfRegion:
     """A named rectangle in top-left PDF points on one page."""
+
+    FIELD_BOUNDS: ClassVar[dict[str, Bounds]] = {
+        "page": POSITIVE_INTEGER,
+        "left_pt": NONNEGATIVE_NUMBER,
+        "top_pt": NONNEGATIVE_NUMBER,
+        "right_pt": NONNEGATIVE_NUMBER,
+        "bottom_pt": NONNEGATIVE_NUMBER,
+        "min_text_size_pt": POSITIVE_NUMBER,
+    }
 
     name: str
     page: int
@@ -410,15 +550,12 @@ class PdfRegion:
     min_text_size_pt: float | None = None
 
     def __post_init__(self) -> None:
-        require_distinct_strings((self.name,), "Region name")
-        if type(self.page) is not int or self.page < 1:
-            raise PreparationError("Region pages must be positive integers")
-        for value in self.box:
-            require_number(value, "Region coordinates", allow_zero=True)
+        require_text("name", self.name)
+        validate_scalars(self)
         if self.left_pt >= self.right_pt or self.top_pt >= self.bottom_pt:
-            raise PreparationError("Regions must have positive width and height")
-        if self.min_text_size_pt is not None:
-            require_number(self.min_text_size_pt, "Region minimum text size")
+            raise SettingsError(
+                "A region needs right_pt greater than left_pt and bottom_pt greater than top_pt"
+            )
 
     @property
     def box(self) -> tuple[float, float, float, float]:
@@ -450,6 +587,58 @@ def pdfinfo_properties(output: str) -> dict[str, str]:
         raise PreparationError("Ambiguous duplicate pdfinfo properties prevent reliable comparison")
     page_count(fields)
     return fields
+
+
+@dataclass(frozen=True, slots=True)
+class PdfPreflight:
+    """A frozen document whose pdfinfo properties and page count are established."""
+
+    session: PdfToolSession
+    fields: dict[str, str]
+    pages: int
+
+    @classmethod
+    async def open(
+        cls,
+        pdf: Path,
+        work: Path,
+        runner: CommandRunner,
+        budget: ResourceBudget | None,
+        *,
+        default_to_runner_budget: bool = True,
+    ) -> Self:
+        """Freeze ``pdf`` and read its properties; raises when either cannot be established."""
+        session = await open_pdf_session(
+            pdf, work, runner, budget, default_to_runner_budget=default_to_runner_budget
+        )
+        fields = await session.measure(
+            "properties", pdfinfo_argv(), lambda result: pdfinfo_properties(result.stdout)
+        )
+        return cls(session, fields, page_count(fields))
+
+
+async def preflight_pdf(
+    pdf: Path,
+    work: Path,
+    runner: CommandRunner,
+    budget: ResourceBudget | None,
+    rules: Iterable[str],
+    *,
+    default_to_runner_budget: bool = True,
+    suggestion: str = EVIDENCE_LIMITATION_SUGGESTION,
+) -> PdfPreflight | list[Finding]:
+    """The preflighted document, or each rule of ``rules`` as unavailable evidence.
+
+    Without a readable document, page count and unambiguous properties no configured
+    measurement has anything to measure, so none of them may pass. A failure arrives as
+    the list of unavailable findings the caller returns as its result.
+    """
+    try:
+        return await PdfPreflight.open(
+            pdf, work, runner, budget, default_to_runner_budget=default_to_runner_budget
+        )
+    except (PreparationError, OSError) as error:
+        return [unavailable_finding(rule, error, suggestion=suggestion) for rule in rules]
 
 
 def require_rendered_pages(pages: int, subject: str = "Rendered comparison") -> None:
@@ -499,15 +688,32 @@ def require_comparison_raster_fit(sizes: Sequence[tuple[float, float]]) -> None:
             )
 
 
-def normalized_text_pages(text: str, pages: int) -> list[str]:
-    """Split pdftotext output at form feeds, normalizing line ends and trailing blanks."""
-    text = text.replace("\r\n", "\n").replace("\r", "\n")
+def split_text_pages(text: str, pages: int) -> list[str]:
+    """The pages of pdftotext output, split at its form feeds.
+
+    pdftotext ends every page with a form feed, so a complete extraction holds exactly
+    ``pages`` of them and nothing but whitespace after the last. Anything else lost or
+    gained a page boundary and is refused. The pages keep their line ends as extracted;
+    ``normalized_text_pages`` is the variant that also canonicalizes them.
+    """
     extracted = text.split("\f")
-    if extracted and not extracted[-1].strip():
-        extracted.pop()
-    if len(extracted) != pages:
-        raise PreparationError("Extracted text did not preserve the expected page boundaries")
-    return ["\n".join(line.rstrip(" \t") for line in page.split("\n")) for page in extracted]
+    if len(extracted) != pages + 1 or extracted[-1].strip():
+        raise PreparationError("Text extraction did not report every PDF page boundary")
+    return extracted[:-1]
+
+
+def normalized_text_pages(text: str, pages: int) -> list[str]:
+    """``split_text_pages`` with canonical line ends (LF) and no trailing blanks on a line.
+
+    Pages compared between two PDFs, or tested for emptiness, go through this form so the
+    producer's line-end convention and trailing spaces never register as differences.
+    """
+
+    def canonical(page: str) -> str:
+        lines = page.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+        return "\n".join(line.rstrip(" \t") for line in lines)
+
+    return [canonical(page) for page in split_text_pages(text, pages)]
 
 
 class PageFrames(NamedTuple):
@@ -588,49 +794,45 @@ def is_type3(font_type: object) -> bool:
     return re.fullmatch(r"Type\s*3", str(font_type), re.IGNORECASE) is not None
 
 
-def read_rgb_raster(
-    path: Path, *, max_pixels: int = MAX_RASTER_PIXELS
-) -> tuple[tuple[int, int], bytes]:
-    if not path.is_file() or path.is_symlink() or path.stat().st_size > 3 * max_pixels + 1024:
-        raise PreparationError("Renderer did not produce a bounded raster page")
-    with path.open("rb") as stream:
-        # Validate the header before allocating pixel buffers; reading the entire
-        # file and then slicing it transiently duplicates a full page in memory.
-        header = re.match(rb"P6\s+(\d+)\s+(\d+)\s+255(?:\r\n|\s)", stream.read(1024))
-        if header is None:
-            raise PreparationError("Renderer output is not a supported RGB PPM page")
-        width, height = int(header[1]), int(header[2])
-        if (
-            min(width, height) < 1
-            or max(width, height) > MAX_RASTER_DIMENSION
-            or width * height > min(max_pixels, MAX_RASTER_PIXELS)
-        ):
-            raise PreparationError("Renderer output has invalid or oversized raster dimensions")
-        stream.seek(header.end())
-        pixels = stream.read(width * height * 3 + 1)
-    if len(pixels) != width * height * 3:
-        raise PreparationError("Renderer output has invalid or oversized raster dimensions")
-    return (width, height), pixels
+class FontPolicyOutcome(NamedTuple):
+    """The fonts of one inventory that break each font policy, in inventory order."""
+
+    nonembedded: list[dict[str, object]]
+    type3: list[dict[str, object]]
+    # Fonts that break a policy that is switched on; the observations above ignore the switches.
+    violations: list[dict[str, object]]
 
 
-def read_gray_raster(path: Path, max_file_bytes: int) -> tuple[int, int, bytes]:
-    if (
-        not path.is_file()
-        or path.is_symlink()
-        or path.stat().st_size > min(max_file_bytes, MAX_MEASUREMENT_PIXELS + 100)
-    ):
-        raise PreparationError("A complete bounded grayscale render was not produced")
-    data = path.read_bytes()
-    header = re.match(rb"P5\s+(\d+)\s+(\d+)\s+255(?:\r\n|\s)", data)
-    if header is None:
-        raise PreparationError("Renderer did not produce supported 8-bit grayscale PGM data")
-    width, height = int(header[1]), int(header[2])
-    if min(width, height) < 1 or width * height > MAX_MEASUREMENT_PIXELS:
-        raise PreparationError("Grayscale render exceeds the safe pixel limit")
-    pixels = data[header.end() :]
-    if len(pixels) != width * height:
-        raise PreparationError("Grayscale render is truncated or contains unexpected trailing data")
-    return width, height, pixels
+def evaluate_font_policy(
+    inventory: Sequence[dict[str, object]], *, require_embedded: bool, forbid_type3: bool
+) -> FontPolicyOutcome:
+    """Apply the embedding and Type 3 font policies to a ``font_inventory``.
+
+    The single definition of a violating font for the manuscript PDF, where the policies
+    are separate findings that each read their own list, and for input figures, which
+    report the fonts breaking any enabled policy.
+    """
+    nonembedded = [font for font in inventory if not font["embedded"]]
+    type3 = [font for font in inventory if is_type3(font["type"])]
+    violations = [
+        font
+        for font in inventory
+        if (require_embedded and not font["embedded"]) or (forbid_type3 and is_type3(font["type"]))
+    ]
+    return FontPolicyOutcome(nonembedded, type3, violations)
+
+
+def read_measurement_raster(
+    path: Path, *, channels: Literal[1, 3], max_file_bytes: int
+) -> RasterImage:
+    """A configured measurement render: at most ``MAX_MEASUREMENT_PIXELS`` pixels."""
+    return read_pnm_raster(
+        path,
+        channels=channels,
+        max_pixels=MAX_MEASUREMENT_PIXELS,
+        max_dimension=MAX_RASTER_DIMENSION,
+        max_file_bytes=max_file_bytes,
+    )
 
 
 def finite_number(value: str | None) -> float:
@@ -713,28 +915,49 @@ def is_object_reference(value: object) -> TypeGuard[str]:
     return isinstance(value, str) and _OBJECT_REFERENCE.fullmatch(value) is not None
 
 
+class QpdfJson(NamedTuple):
+    """The object table of a qpdf JSON v2 document, and its page list (empty unless requested)."""
+
+    objects: dict[str, Any]
+    pages: list[Any]
+
+
+def parse_qpdf_json_v2(output: str, failure: str, *, pages: int | None = None) -> QpdfJson:
+    """Validate the envelope of qpdf ``--json=2`` output and return its object table.
+
+    The envelope is the format version, the ``qpdf`` entry holding the header and the
+    objects, and, when ``pages`` is given, a page list of exactly that length. Any
+    deviation raises ``PreparationError(failure)``: the caller names what it needed.
+    """
+    try:
+        document = json.loads(output)
+        entries = document["qpdf"]
+        if (
+            document["version"] != 2
+            or len(entries) != 2
+            or entries[0]["jsonversion"] != 2
+            or not isinstance(entries[1], dict)
+        ):
+            raise ValueError("unsupported JSON shape")
+        page_list: list[Any] = []
+        if pages is not None:
+            page_list = document["pages"]
+            if not isinstance(page_list, list) or len(page_list) != pages:
+                raise ValueError("incomplete page data")
+    except (ValueError, KeyError, TypeError, RecursionError) as error:
+        raise PreparationError(failure) from error
+    return QpdfJson(entries[1], page_list)
+
+
 class QpdfObjectGraph:
     """qpdf JSON v2 object access with bounded, cycle-aware reference traversal."""
 
     def __init__(self, output: str, pages: int):
-        try:
-            document = json.loads(output)
-            entries = document["qpdf"]
-            if (
-                document["version"] != 2
-                or len(entries) != 2
-                or entries[0]["jsonversion"] != 2
-                or not isinstance(entries[1], dict)
-            ):
-                raise ValueError("unsupported JSON shape")
-            self.objects = entries[1]
-            self.pages = document["pages"]
-            if not isinstance(self.pages, list) or len(self.pages) != pages:
-                raise ValueError("incomplete page data")
-        except (ValueError, KeyError, TypeError, RecursionError) as error:
-            raise PreparationError(
-                "qpdf did not return complete supported JSON v2 object data"
-            ) from error
+        document = parse_qpdf_json_v2(
+            output, "qpdf did not return complete supported JSON v2 object data", pages=pages
+        )
+        self.objects = document.objects
+        self.pages = document.pages
         if len(self.objects) > MAX_PARSED_NODES:
             raise PreparationError(
                 f"The PDF has {len(self.objects):,} objects; object-level checks support at most "
@@ -755,7 +978,7 @@ class QpdfObjectGraph:
     def resolve(self, value: object) -> object:
         seen: set[str] = set()
         while is_object_reference(value):
-            if value in seen or len(seen) > 100:
+            if value in seen or len(seen) > MAX_PDF_NESTING_LEVELS:
                 raise PreparationError("qpdf contains a cyclic direct-reference chain")
             seen.add(value)
             value = self.lookup("obj:" + value)
@@ -775,7 +998,7 @@ class QpdfObjectGraph:
         while pending:
             value, depth = pending.pop()
             visited += 1
-            if visited > MAX_PARSED_NODES or depth > 100:
+            if visited > MAX_PARSED_NODES or depth > MAX_PDF_NESTING_LEVELS:
                 raise PreparationError("qpdf object graph exceeds the bounded traversal limit")
             if is_object_reference(value):
                 if value in references:

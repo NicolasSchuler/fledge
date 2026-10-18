@@ -120,6 +120,18 @@ class FormattingTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(linked.contents, {})
 
+    async def test_source_files_are_recognised_by_extension_in_any_letter_case(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            source = base / "source"
+            source.mkdir()
+            (source / "MAIN.TEX").write_text("original\n")
+            (source / "notes.txt").write_text("not TeX\n")
+            output = CommandResult(0, "formatted\n", "", resolved_command=[])
+            with patch("latexprep.formatting.shutil.which", return_value="/fake/tex-fmt"):
+                result = await format_with(source, base / "work", FakeFormatter([output, output]))
+            self.assertEqual(set(result.contents), {"MAIN.TEX"})
+
     async def test_blank_line_policy(self):
         original = "a\n\n\nb\n"
         preserved = await self.proposal(original, original, blank_lines="preserve")
