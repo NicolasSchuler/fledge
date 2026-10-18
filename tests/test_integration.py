@@ -11,12 +11,13 @@ import zipfile
 import zlib
 from pathlib import Path
 
+from latexprep.command_runner import RuntimeLimits
 from latexprep.config import Settings
 from latexprep.core import run_job
 from latexprep.job_context import JobRequest
 from latexprep.manuscript import ManuscriptOptions
 from latexprep.pdf_inspection import PdfInspectionOptions, inspect_pdf
-from latexprep.runtime import RuntimeLimits, ToolRunner
+from latexprep.runtime import ToolRunner
 from tests.support import live_tests_enabled
 
 

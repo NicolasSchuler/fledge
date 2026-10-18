@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import graphlib
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import KW_ONLY, dataclass, field
 from enum import StrEnum
 from typing import Any, Self
@@ -120,22 +121,14 @@ class Scheduler:
             for dependency in task.dependencies:
                 if dependency not in by_name:
                     raise PreparationError(f"Task {task.name} has unknown dependency {dependency}")
-        visited: set[str] = set()
-        active: set[str] = set()
-
-        def visit(name: str) -> None:
-            if name in active:
-                raise PreparationError(f"Cyclic task dependency at {name}")
-            if name in visited:
-                return
-            active.add(name)
-            for dependency in by_name[name].dependencies:
-                visit(dependency)
-            active.remove(name)
-            visited.add(name)
-
-        for name in by_name:
-            visit(name)
+        try:
+            graphlib.TopologicalSorter(
+                {name: task.dependencies for name, task in by_name.items()}
+            ).prepare()
+        except graphlib.CycleError as error:
+            raise PreparationError(
+                f"Cyclic task dependency: {' -> '.join(error.args[1])}"
+            ) from error
         return by_name
 
     async def _invoke(self, task: Task) -> TaskResult:
@@ -182,75 +175,105 @@ class Scheduler:
         return result
 
     async def execute(self, tasks: list[Task]) -> dict[str, TaskResult]:
-        pending = self._validate(tasks)
-        results: dict[str, TaskResult] = {}
-        running: dict[asyncio.Task[TaskResult], Task] = {}
+        """Run the tasks in dependency order and return every task's result by name.
 
-        def record(result: TaskResult) -> None:
-            if result.name not in results:
-                results[result.name] = result
-                self.on_result(result)
-
-        def ready(task: Task) -> bool:
-            return all(dependency in results for dependency in task.dependencies)
-
+        Every task gets exactly one result, passed to ``on_result`` when it is recorded.
+        A cancellation (or any other ``BaseException``) stops the running tasks, records
+        the unfinished ones as cancelled and propagates once all of them have stopped.
+        """
+        execution = _Execution(self._validate(tasks), self._run_task, self.on_result)
         try:
-            while pending or running:
-                for name, task in list(pending.items()):
-                    if not ready(task):
-                        continue
-                    failed = [
-                        dependency
-                        for dependency in task.needs_success_of
-                        if not results[dependency].succeeded
-                    ]
-                    del pending[name]
-                    if failed:
-                        record(
-                            TaskResult(
-                                name,
-                                TaskStatus.BLOCKED,
-                                error=f"Prerequisite failed: {', '.join(failed)}",
-                                blocked_by=tuple(failed),
-                            )
-                        )
-                    else:
-                        running[asyncio.create_task(self._run_task(task))] = task
-                if running:
-                    completed, _ = await asyncio.wait(running, return_when=asyncio.FIRST_COMPLETED)
-                    for future in sorted(completed, key=lambda item: running[item].name):
-                        result = future.result()
-                        running.pop(future)
-                        record(result)
-                elif pending and not any(ready(task) for task in pending.values()):
-                    raise PreparationError("No schedulable task remains")
+            while execution.pending or execution.running:
+                execution.start_ready()
+                await execution.collect_completed()
         except BaseException:
-            await cancel_and_drain(running)
-            for future, task in running.items():
-                if future.cancelled():
-                    record(
-                        TaskResult(
-                            task.name,
-                            TaskStatus.CANCELLED,
-                            error="Cancelled while queued or running",
-                        )
-                    )
-                elif future.exception() is None:
-                    record(future.result())
-                else:
-                    failure = future.exception()
-                    record(
-                        TaskResult(
-                            task.name,
-                            TaskStatus.FAILED,
-                            error=f"{type(failure).__name__}: {failure}",
-                        )
-                    )
-            for name in pending:
-                record(
+            await execution.settle_unfinished()
+            raise
+        return {name: execution.results[name] for name in sorted(execution.results)}
+
+
+class _Execution:
+    """The state of one ``Scheduler.execute`` call: waiting, running and finished tasks."""
+
+    def __init__(
+        self,
+        pending: dict[str, Task],
+        run_task: Callable[[Task], Coroutine[Any, Any, TaskResult]],
+        on_result: Callable[[TaskResult], None],
+    ) -> None:
+        self._run_task = run_task
+        self._on_result = on_result
+        self.pending = pending
+        self.running: dict[asyncio.Task[TaskResult], Task] = {}
+        self.results: dict[str, TaskResult] = {}
+
+    def _record(self, result: TaskResult) -> None:
+        if result.name not in self.results:
+            self.results[result.name] = result
+            self._on_result(result)
+
+    def _ready(self, task: Task) -> bool:
+        return all(dependency in self.results for dependency in task.dependencies)
+
+    def start_ready(self) -> None:
+        """Start each waiting task whose prerequisites finished, or block it."""
+        for name, task in list(self.pending.items()):
+            if not self._ready(task):
+                continue
+            failed = [
+                dependency
+                for dependency in task.needs_success_of
+                if not self.results[dependency].succeeded
+            ]
+            del self.pending[name]
+            if failed:
+                self._record(
                     TaskResult(
-                        name, TaskStatus.CANCELLED, error="Cancelled before prerequisites completed"
+                        name,
+                        TaskStatus.BLOCKED,
+                        error=f"Prerequisite failed: {', '.join(failed)}",
+                        blocked_by=tuple(failed),
                     )
                 )
-            raise
-        return {name: results[name] for name in sorted(results)}
+            else:
+                self.running[asyncio.create_task(self._run_task(task))] = task
+
+    async def collect_completed(self) -> None:
+        """Wait for at least one running task to finish and record the finished ones."""
+        if self.running:
+            completed, _ = await asyncio.wait(self.running, return_when=asyncio.FIRST_COMPLETED)
+            for future in sorted(completed, key=lambda item: self.running[item].name):
+                result = future.result()
+                self.running.pop(future)
+                self._record(result)
+        elif self.pending and not any(self._ready(task) for task in self.pending.values()):
+            # Invariant: ``_validate`` rejected unknown dependencies and cycles, so a
+            # pending task is always ready once nothing runs. Fail loudly rather than
+            # loop forever should a scheduling bug ever break that.
+            raise PreparationError("No schedulable task remains")
+
+    async def settle_unfinished(self) -> None:
+        """Stop the running tasks and record every unfinished task's result."""
+        await cancel_and_drain(self.running)
+        for future, task in self.running.items():
+            if future.cancelled():
+                self._record(
+                    TaskResult(
+                        task.name, TaskStatus.CANCELLED, error="Cancelled while queued or running"
+                    )
+                )
+            elif future.exception() is None:
+                self._record(future.result())
+            else:
+                failure = future.exception()
+                self._record(
+                    TaskResult(
+                        task.name, TaskStatus.FAILED, error=f"{type(failure).__name__}: {failure}"
+                    )
+                )
+        for name in self.pending:
+            self._record(
+                TaskResult(
+                    name, TaskStatus.CANCELLED, error="Cancelled before prerequisites completed"
+                )
+            )

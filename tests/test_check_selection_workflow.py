@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from latexprep.check_selection import CheckSelection
+from latexprep.compact_report import render_compact
 from latexprep.config import Settings
 from latexprep.core import run_job
 from latexprep.findings import Finding
@@ -16,10 +17,10 @@ from latexprep.job_context import JobRequest
 from latexprep.latexmk_build import build_project
 from latexprep.manuscript import ManuscriptOptions
 from latexprep.online_checks import OnlineOptions
-from latexprep.pdf_artwork import PdfArtworkOptions
+from latexprep.pdf_artwork_options import PdfArtworkOptions
 from latexprep.report import Report
-from latexprep.submission_checks import SubmissionOptions
-from latexprep.terminal_report import render_compact, render_terminal
+from latexprep.submission_options import SubmissionOptions
+from latexprep.terminal_report import render_terminal
 from tests.test_multi_document import build as fixture_build
 from tests.test_multi_document import project
 from tests.test_runtime import FakeBuildRunner

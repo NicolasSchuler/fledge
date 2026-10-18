@@ -1,24 +1,23 @@
-"""Bounded scans of supplied project files, and the wording shared by their results.
+"""Bounded scans of supplied project files: an inventory and a byte budget for reading them.
 
 Inventories never follow links or enter version-control folders, and reads accept
-only regular files within explicit byte limits. Comments are found with the shared
-lexer's literal regions. Discovered secrets are redacted from every reported value.
+only regular files within explicit byte limits. Names reported in issues are redacted
+of secrets. The comments of a source are ``tex_comments``'s, and the wording of results
+is ``finding_text``'s.
 """
 
 from __future__ import annotations
 
 import os
-from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
-from typing import NamedTuple, cast
+from typing import NamedTuple
 
 from .cancellation import cancellation_point
 from .file_safety import read_file_prefix, read_regular_file
-from .findings import Finding, Status
 from .limits import MAX_PROJECT_ENTRIES
-from .redaction import SECRET_PATTERNS
-from .tex_lexer import MAX_SOURCE_BYTES, MAX_TOTAL_SOURCE_BYTES, source_regions
+from .redaction import redact_secrets
+from .tex_lexer import MAX_SOURCE_BYTES, MAX_TOTAL_SOURCE_BYTES
 
 MAX_SCAN_MATCHES = 200
 _SKIPPED_DIRECTORIES = frozenset({".git", ".hg", ".svn", "__MACOSX"})
@@ -90,125 +89,3 @@ class ByteBudget:
         data = read_file_prefix(path, size)
         self.used += len(data)
         return data
-
-
-class TexComment(NamedTuple):
-    """A TeX comment's 1-based line and its text after ``%``, up to the line feed."""
-
-    line: int
-    text: str
-
-
-class CommentMarker(NamedTuple):
-    """A comment line and the category of note it carries."""
-
-    line: int
-    reason: str
-
-
-def tex_comments(text: str) -> list[TexComment]:
-    """Extract TeX comments with their line numbers, skipping the lexer's literal regions."""
-    result = []
-    line = 1
-    previous = 0
-    for start, _, kind in source_regions(text).regions:
-        if kind != "comment":
-            continue
-        line += text.count("\n", previous, start)
-        previous = start
-        # The comment text runs to the line feed, keeping any carriage return.
-        end = text.find("\n", start)
-        result.append(TexComment(line, text[start + 1 : len(text) if end < 0 else end]))
-    return result
-
-
-def marked_comments(
-    comments: Iterable[TexComment], classify: Callable[[str], str | None], limit: int
-) -> list[CommentMarker]:
-    """The first ``limit`` comments that ``classify`` labels as private notes.
-
-    Only the line and category are returned; comment text never reaches a report.
-    """
-    markers: list[CommentMarker] = []
-    for comment in comments:
-        if len(markers) >= limit:
-            break
-        reason = classify(comment.text)
-        if reason is not None:
-            markers.append(CommentMarker(comment.line, reason))
-    return markers
-
-
-def redact_secrets(value: str) -> str:
-    """Replace every secret-shaped substring with ``[REDACTED]``."""
-    for _, pattern in SECRET_PATTERNS:
-        value = pattern.sub("[REDACTED]", value)
-    return value
-
-
-def redact_findings(findings: list[Finding], secrets: set[str]) -> list[Finding]:
-    """Remove discovered secret values and secret-shaped text from every reported string."""
-    ordered_secrets = sorted(secrets, key=len, reverse=True)
-
-    def clean(value: object) -> object:
-        if isinstance(value, str):
-            cancellation_point()
-            for secret in ordered_secrets:
-                value = value.replace(secret, "[REDACTED]")
-            return redact_secrets(value)
-        if isinstance(value, list):
-            return [clean(item) for item in value]
-        if isinstance(value, dict):
-            return {str(clean(key)): clean(item) for key, item in value.items()}
-        return value
-
-    return [
-        replace(
-            item,
-            path=str(clean(item.path)) if item.path else None,
-            message=str(clean(item.message)),
-            suggestion=str(clean(item.suggestion)) if item.suggestion else None,
-            details=cast(dict[str, object], clean(item.details)),
-        )
-        for item in findings
-    ]
-
-
-def check_status(*, failed: bool, incomplete: bool) -> Status:
-    """A confirmed violation fails even when other evidence is incomplete."""
-    if failed:
-        return "failed"
-    return "inconclusive" if incomplete else "passed"
-
-
-def location_label(item: Mapping[str, object]) -> str:
-    """``path:line`` for a reported item, ``path`` without a line, or nothing without a path."""
-    path, line = item.get("path"), item.get("line")
-    if not isinstance(path, str):
-        return ""
-    return f"{path}:{line}" if isinstance(line, int) else path
-
-
-def more_suffix(hidden: int) -> str:
-    """`` (+N more)`` for ``hidden`` items left out of a listing, or nothing."""
-    return f" (+{hidden} more)" if hidden > 0 else ""
-
-
-def plural(count: int, noun: str) -> str:
-    """``1 float``, ``3 floats``: a count with its regularly pluralized noun."""
-    return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
-
-
-def list_locations(items: Sequence[Mapping[str, object]], limit: int = 3) -> str:
-    """Distinct item locations, the first ``limit`` named: ``a.tex:1, b.tex (+2 more)``."""
-    places = list(dict.fromkeys(filter(None, map(location_label, items))))
-    return ", ".join(places[:limit]) + more_suffix(len(places) - limit)
-
-
-def format_locations(items: Sequence[Mapping[str, object]], limit: int = 3) -> str:
-    """Distinct violation locations, counting the remainder: ``a.tex:1, b.tex:2, +1 more``."""
-    places = list(
-        dict.fromkeys(location_label(item) for item in items if isinstance(item.get("path"), str))
-    )
-    extra = len(places) - limit
-    return ", ".join(places[:limit]) + (f", +{extra} more" if extra > 0 else "")

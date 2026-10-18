@@ -11,11 +11,12 @@ from latexprep.errors import PreparationError
 from latexprep.findings import Finding
 from latexprep.option_config import read_options
 from latexprep.submission_checks import (
-    SubmissionOptions,
     check_pdf_identity,
     check_submission,
     check_submission_archive,
 )
+from latexprep.submission_options import SubmissionOptions
+from latexprep.submission_scan_findings import DEFAULT_SCAN_LIMITS, ScanLimits
 
 
 class SubmissionTests(unittest.TestCase):
@@ -33,10 +34,11 @@ class SubmissionTests(unittest.TestCase):
         path.write_bytes(value.encode() if isinstance(value, str) else value)
         return path
 
-    def result(self, rule: str, options: SubmissionOptions) -> Finding:
-        return next(
-            item for item in check_submission(self.root, "main.tex", options) if item.rule == rule
-        )
+    def result(
+        self, rule: str, options: SubmissionOptions, limits: ScanLimits = DEFAULT_SCAN_LIMITS
+    ) -> Finding:
+        findings = check_submission(self.root, "main.tex", options, limits=limits)
+        return next(item for item in findings if item.rule == rule)
 
     def incomplete(self, rule: str, options: SubmissionOptions) -> Finding:
         with patch(
@@ -71,10 +73,11 @@ class SubmissionTests(unittest.TestCase):
         self.assertEqual((bad.code, bad.status), ("PRV002", "failed"))
         self.assertEqual({item["channel"] for item in bad.details["matches"]}, {"text", "metadata"})
         self.assertEqual(check_pdf_identity("", {}, options)[0].status, "inconclusive")
-        with patch("latexprep.submission_checks.MAX_TOTAL_SOURCE_BYTES", 4):
-            self.assertEqual(
-                check_pdf_identity("very long text", {"A": "B"}, options)[0].status, "inconclusive"
-            )
+        tiny = ScanLimits(max_pdf_evidence_bytes=4)
+        self.assertEqual(
+            check_pdf_identity("very long text", {"A": "B"}, options, limits=tiny)[0].status,
+            "inconclusive",
+        )
 
     def test_short_identity_terms_match_whole_words_unless_substring_is_requested(self) -> None:
         rule = "submission.identity_terms"
@@ -175,11 +178,12 @@ class SubmissionTests(unittest.TestCase):
         self.assertEqual(
             missing.message, "Required deliverables not satisfied (1): missing.pdf is missing"
         )
-        with patch("latexprep.submission_checks.MAX_SCAN_MATCHES", 2):
-            self.write("a.tex", "Identity\n" * 5)
-            capped = self.result(
-                "submission.identity_terms", SubmissionOptions(identity_terms=("Identity",))
-            )
+        self.write("a.tex", "Identity\n" * 5)
+        capped = self.result(
+            "submission.identity_terms",
+            SubmissionOptions(identity_terms=("Identity",)),
+            limits=ScanLimits(max_matches=2),
+        )
         self.assertEqual(capped.message, "2+ matches: a.tex:1, a.tex:2")
 
     def test_file_policy_messages_give_the_limit_the_characters_and_the_extension(self) -> None:
@@ -541,12 +545,13 @@ class SubmissionTests(unittest.TestCase):
 
     def test_match_limits_and_uncertain_inventory_do_not_claim_missing_files(self) -> None:
         self.write("main.tex", "Identity term\n" * 100)
-        with patch("latexprep.submission_checks.MAX_SCAN_MATCHES", 2):
-            result = self.result(
-                "submission.identity_terms", SubmissionOptions(identity_terms=("Identity",))
-            )
-            self.assertEqual(len(result.details["matches"]), 2)
-            self.assertTrue(result.details["match_output_limited"])
+        result = self.result(
+            "submission.identity_terms",
+            SubmissionOptions(identity_terms=("Identity",)),
+            limits=ScanLimits(max_matches=2),
+        )
+        self.assertEqual(len(result.details["matches"]), 2)
+        self.assertTrue(result.details["match_output_limited"])
         options = SubmissionOptions(required_deliverables=(("unknown.pdf", "pdf"),))
         self.assertEqual(self.incomplete("submission.deliverables", options).status, "inconclusive")
         with patch(

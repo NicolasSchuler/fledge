@@ -1,33 +1,35 @@
-"""Literal citations of one selected manuscript and the bibliography entries they reach.
+"""Literal citations, bibliography declarations and styles of one selected manuscript.
 
-Shared by bibliography checks, bibliography transformations, generated-bibliography
-(.bbl) checks and online lookups. Only the bounded literal source graph is read:
-TeX is not executed, macros are not expanded, and a bibliography backend's
-inheritance, filters and reference sections are not applied. Constructs outside
-that subset become uncertainties instead of evidence.
+This module owns what the TeX side says: which keys the selected sources cite, which
+bibliography resources and BibTeX styles they declare, and which constructs make that
+evidence incomplete (``Uncertainty``). It is shared by bibliography checks,
+transformations, generated-bibliography (.bbl) checks and online lookups. Only the
+bounded literal source graph is read: TeX is not executed, macros are not expanded,
+and a bibliography backend's inheritance, filters and reference sections are not
+applied. Constructs outside that subset become uncertainties instead of evidence.
+What the .bib files say about themselves lives in ``bibliography_index``.
 """
 
 from __future__ import annotations
 
-from collections import defaultdict, deque
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
-from .bibtex_syntax import BibDocument, Entry, field_literal
 from .cancellation import cancellation_point
 from .errors import PreparationError
 from .expanded_document import commands_before_end, reachable_sources
 from .findings import Finding
-from .source_graph import INCOMPLETE_GRAPH_RULES, ArgumentLocation, ParsedSource, SourceGraph
+from .source_graph import INCOMPLETE_GRAPH_RULES, ArgumentLocation, SourceGraph
+from .source_loading import ParsedSource
 from .tex_commands import (
     CITATION_COMMANDS,
     COMMAND_DEFINITION_COMMANDS,
     MULTICITE_COMMANDS,
     PRIMITIVE_DEFINITION_COMMANDS,
 )
-from .tex_lexer import Command, conditional_spans, in_conditional, split_argument_items
+from .tex_lexer import Argument, Command, conditional_spans, in_conditional, split_argument_items
 
 _RESOURCE_COMMANDS = frozenset({"bibliography", "addbibresource"})
 # Entry fields that name other entries' keys.
@@ -35,6 +37,9 @@ RELATIONSHIP_FIELDS = frozenset({"crossref", "xref", "xdata", "related", "entrys
 # Fields holding literal key lists: relationships and biblatex's alternate keys.
 KEY_LIST_FIELDS = RELATIONSHIP_FIELDS | {"ids"}
 _MAX_LISTED_UNCERTAINTIES = 32
+# A multicite command with this many arguments and options together goes beyond what the
+# lexical scan reads reliably.
+_MULTICITE_LEXICAL_LIMIT = 6
 _DEFINITIONS = COMMAND_DEFINITION_COMMANDS | PRIMITIVE_DEFINITION_COMMANDS
 # Expansion, category codes and bibliography-backend declarations can reach any
 # citation; no lexical argument inspection bounds what they may later execute.
@@ -271,6 +276,18 @@ def _execution_gaps(command: Command, spans: list[tuple[int, int]]) -> Iterator[
         yield "bibliography scope/filter is unsupported"
 
 
+def _citation_shape_gaps(
+    command: Command, arguments: Sequence[Argument], *, multicite: bool
+) -> Iterator[str]:
+    """What is unverified about the arguments and placement of one citation command."""
+    if not arguments:
+        yield "citation has no supported key argument"
+    if command.depth:
+        yield "grouped citation execution is unverified"
+    if multicite and len(command.arguments) + len(command.options) >= _MULTICITE_LEXICAL_LIMIT:
+        yield "multicite exceeds lexical argument coverage"
+
+
 def _read_citation(
     graph: CitationGraph, name: str, source: ParsedSource, command: Command
 ) -> Iterator[str]:
@@ -283,12 +300,7 @@ def _read_citation(
             yield f"unsupported citation-like command \\{command.name}"
         return
     arguments = command.arguments if multicite else command.arguments[:1]
-    if not arguments:
-        yield "citation has no supported key argument"
-    if command.depth:
-        yield "grouped citation execution is unverified"
-    if multicite and len(command.arguments) + len(command.options) >= 6:
-        yield "multicite exceeds lexical argument coverage"
+    yield from _citation_shape_gaps(command, arguments, multicite=multicite)
     for argument in arguments:
         keys = citation_keys(argument.value)
         if keys is None or source.text[argument.start : argument.end] != argument.value:
@@ -347,91 +359,3 @@ def build_citation_graph(inspection: SourceGraph) -> CitationGraph:
     graph.uncertainties = bounded_uncertainties(uncertainties)
     graph.unused_uncertainties = bounded_uncertainties(unused)
     return graph
-
-
-@dataclass(frozen=True, slots=True)
-class LocatedEntry:
-    """A keyed entry and the document that holds it."""
-
-    document: BibDocument
-    entry: Entry
-
-    @property
-    def identity(self) -> tuple[str, int]:
-        return self.document.path, self.entry.start
-
-
-def located_entries(documents: Iterable[BibDocument]) -> list[LocatedEntry]:
-    return [LocatedEntry(document, entry) for document in documents for entry in document.entries]
-
-
-@dataclass(frozen=True, slots=True)
-class EntryIndex:
-    """Keys, aliases and literal relationships of a set of entries."""
-
-    entries: list[LocatedEntry]
-    # Every key and ids alias, mapped to the entries it identifies.
-    keys: dict[str, list[LocatedEntry]]
-    # Keys each entry's relationship fields name; entry-set members point back to their set.
-    relationships: dict[tuple[str, int], set[str]]
-    uncertainties: list[Uncertainty]
-
-    def reachable(self, graph: CitationGraph) -> set[tuple[str, int]]:
-        """Identities reached from the graph's citations, \\nocite{*} and relationships."""
-        queue: deque[LocatedEntry] = deque(self.entries if graph.nocite_all else [])
-        for citation in graph.citations:
-            queue.extend(self.keys.get(citation.key, []))
-        reached: set[tuple[str, int]] = set()
-        while queue:
-            cancellation_point()
-            reference = queue.popleft()
-            if reference.identity in reached:
-                continue
-            reached.add(reference.identity)
-            for target in self.relationships.get(reference.identity, set()):
-                queue.extend(self.keys.get(target, []))
-        return reached
-
-
-def index_entries(references: list[LocatedEntry]) -> EntryIndex:
-    keys: dict[str, list[LocatedEntry]] = defaultdict(list)
-    relationships: dict[tuple[str, int], set[str]] = defaultdict(set)
-    reasons: list[str] = []
-    sets: list[tuple[str, list[str]]] = []
-    for reference in references:
-        cancellation_point()
-        entry = reference.entry
-        keys[entry.key].append(reference)
-        for item in entry.fields:
-            if item.name not in KEY_LIST_FIELDS:
-                continue
-            value = field_literal(item)
-            targets = citation_keys(value) if value is not None else None
-            if targets is None:
-                reasons.append(f"{reference.document.path}: {entry.key} has dynamic {item.name}")
-            elif item.name == "ids":
-                for target in targets:
-                    keys[target].append(reference)
-            else:
-                relationships[reference.identity].update(targets)
-                if item.name == "entryset":
-                    sets.append((entry.key, targets))
-    for key, targets in keys.items():
-        if len({target.identity for target in targets}) > 1:
-            reasons.append(f"Citation key or alias {key!r} identifies multiple entries")
-    for targets in relationships.values():
-        for key in targets:
-            if key not in keys:
-                reasons.append(f"Bibliography relationship target {key!r} is unresolved")
-    # A backend may render a set when one member is cited. Retaining both
-    # directions avoids calling its set or sibling entries definitely unused.
-    for key, members in sets:
-        for member in members:
-            for reference in keys.get(member, []):
-                relationships[reference.identity].add(key)
-    return EntryIndex(
-        references,
-        dict(keys),
-        dict(relationships),
-        bounded_uncertainties(map(Uncertainty, reasons)),
-    )

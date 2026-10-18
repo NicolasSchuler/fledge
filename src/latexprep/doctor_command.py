@@ -6,9 +6,9 @@ import asyncio
 from pathlib import Path
 
 import click
-from rich.console import Console
 
 from .command_options import (
+    QUIET_HELP,
     debug_option,
     discard_closed_stdout,
     record_cancellation,
@@ -16,28 +16,35 @@ from .command_options import (
     reject_config_with_isolated,
     settings_file_options,
 )
-from .config import load_settings, resolve_config_path
+from .config import Settings, load_settings
+from .config_discovery import resolve_config_path
 from .doctor import run_doctor
 from .finding_view import RenderOptions
 from .findings import cancelled_finding
 from .report import UNFINISHED_SCOPE, Report
 from .report_formats import OutputFormat, write_report
 from .setting_choices import ENGINES, Engine
+from .terminal_console import stderr_console, stdout_console
 from .terminal_progress import TerminalProgress
 
 
-@click.command("doctor")
+@click.command("doctor", short_help="Test that your TeX setup works.")
 @click.argument(
     "project",
     required=False,
     metavar="[PROJECT]",
     type=click.Path(exists=True, path_type=Path),
 )
-@click.option("--engine", type=click.Choice(ENGINES))
+@click.option(
+    "--engine",
+    type=click.Choice(ENGINES),
+    help="TeX engine to test instead of the configured one "
+    f"(default {Settings().engine} unless a settings file chooses another).",
+)
 @settings_file_options
 @debug_option
 @click.option("--json", "json_output", is_flag=True, help="Print the structured setup report.")
-@click.option("--quiet", is_flag=True, help="Hide progress; retain the final report.")
+@click.option("--quiet", is_flag=True, help=QUIET_HELP)
 def doctor_command(
     project: Path | None,
     engine: Engine | None,
@@ -62,7 +69,7 @@ def doctor_command(
             else None
         )
         settings = load_settings(selected, {"engine": engine})
-        with TerminalProgress(Console(stderr=True), quiet=quiet) as progress:
+        with TerminalProgress(stderr_console(), quiet=quiet) as progress:
             report = asyncio.run(run_doctor(settings, progress=progress))
         report.execution["config_path"] = str(selected) if selected is not None else None
         report.execution["project"] = str(project) if project is not None else None
@@ -83,7 +90,7 @@ def doctor_command(
         write_report(
             report,
             OutputFormat.JSON if json_output else OutputFormat.TERMINAL,
-            console=Console(),
+            console=stdout_console(),
             options=RenderOptions(show_passed=True),
         )
     except BrokenPipeError:

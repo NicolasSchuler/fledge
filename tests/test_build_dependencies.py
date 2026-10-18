@@ -4,7 +4,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from latexprep.build_dependencies import collect_submission_dependencies, read_recorder_trace
+from latexprep.build_dependencies import (
+    DependencyRequest,
+    collect_submission_dependencies,
+    read_recorder_trace,
+)
+from latexprep.build_workspace import BuildLayout
 from latexprep.errors import PreparationError
 
 
@@ -80,24 +85,24 @@ class SubmissionDependenciesTests(unittest.TestCase):
         )
 
     def collect(self, *, complete: bool = True, max_bytes: int = 2_097_152):
+        layout = BuildLayout(self.source, self.project.parent, self.project, self.output, self.cwd)
         return collect_submission_dependencies(
-            source=self.source,
-            project=self.project,
-            cwd=self.cwd,
-            output=self.output,
-            main="article/main.tex",
-            engine="pdflatex",
-            recorder=read_recorder_trace(self.fls, self.output, self.cwd, max_bytes),
-            recorder_complete=complete,
-            resource_roots=(self.toolchain,),
-            max_bytes=max_bytes,
+            DependencyRequest(
+                layout=layout,
+                main="article/main.tex",
+                engine="pdflatex",
+                recorder=read_recorder_trace(self.fls, self.output, self.cwd, max_bytes),
+                recorder_complete=complete,
+                resource_roots=(self.toolchain,),
+                max_bytes=max_bytes,
+            )
         )
 
     def assert_incomplete(self, fragment: str = "") -> None:
         result = self.collect()
         self.assertIsNone(result.inputs, result)
-        self.assertFalse(result.details["complete"])
-        self.assertIn(fragment, str(result.details["uncertainty"]))
+        self.assertFalse(result.to_details()["complete"])
+        self.assertIn(fragment, str(result.to_details()["uncertainty"]))
 
     def test_unions_tex_and_backend_sources_without_shipping_generated_or_system_files(self):
         for name in (
@@ -142,10 +147,10 @@ class SubmissionDependenciesTests(unittest.TestCase):
                 "refs.bib",
                 "local.bst",
             },
-            result.details,
+            result.to_details(),
         )
-        self.assertEqual(result.details["toolchain_inputs"], 1)
-        self.assertEqual(result.details["generated_inputs"], 3)
+        self.assertEqual(result.toolchain_inputs, 1)
+        self.assertEqual(result.generated_inputs, 3)
         # Generated files the build read, relative to the directory that holds them.
         self.assertEqual(result.generated_reads, {"main.aux", "main.bbl", "article/rebuilt.dat"})
 

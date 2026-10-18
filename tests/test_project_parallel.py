@@ -10,7 +10,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
-from latexprep import project
+from latexprep import project_archive
 from latexprep.cancellation import run_in_thread
 
 
@@ -18,7 +18,7 @@ class ArchiveCancellationTests(unittest.IsolatedAsyncioTestCase):
     async def test_cancel_during_file_copy_skips_later_files_and_removes_partial_archive(self):
         started, release = threading.Event(), threading.Event()
         opened = []
-        original_open = project._open_regular
+        original_open = project_archive.open_regular
 
         @contextmanager
         def delayed_open(directory, relative):
@@ -37,8 +37,10 @@ class ArchiveCancellationTests(unittest.IsolatedAsyncioTestCase):
             for name in ("a.tex", "b.tex"):
                 (source / name).write_bytes(b"bounded archive fixture\n" * 100)
             archive = base / "submission.zip"
-            with patch("latexprep.project._open_regular", side_effect=delayed_open):
-                task = asyncio.create_task(run_in_thread(project.create_archive, source, archive))
+            with patch("latexprep.project_archive.open_regular", side_effect=delayed_open):
+                task = asyncio.create_task(
+                    run_in_thread(project_archive.create_archive, source, archive)
+                )
                 try:
                     self.assertTrue(await asyncio.to_thread(started.wait, 5))
                     task.cancel()

@@ -8,11 +8,9 @@ from unittest.mock import patch
 
 from latexprep.errors import PreparationError
 from latexprep.findings import Finding
-from latexprep.manuscript_checks import (
-    ManuscriptCheckOptions,
-    check_manuscript_policies,
-    read_literal_metadata,
-)
+from latexprep.manuscript_check_options import ManuscriptCheckOptions
+from latexprep.manuscript_checks import check_manuscript_policies
+from latexprep.manuscript_metadata_checks import read_literal_metadata
 
 
 class ManuscriptDetailTests(unittest.TestCase):
@@ -405,7 +403,7 @@ class ManuscriptDetailTests(unittest.TestCase):
         )
         self.assertEqual(
             many.message,
-            "5 of 5 floats without a caption: many.tex:1, many.tex:2, many.tex:3, +2 more.",
+            "5 of 5 floats without a caption: many.tex:1, many.tex:2, many.tex:3 (+2 more).",
         )
 
     def test_failure_messages_name_the_offending_packages_fields_and_declarations(self) -> None:

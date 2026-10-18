@@ -11,7 +11,8 @@ from unittest.mock import patch
 from click.testing import CliRunner
 
 from latexprep.cli import USAGE_EXIT_CODE, cli
-from latexprep.config import load_settings, resolve_config_path
+from latexprep.config import load_settings
+from latexprep.config_discovery import resolve_config_path
 from latexprep.init_command import STARTER
 from latexprep.presets import PRESETS, preset_text
 from latexprep.report import Outcome

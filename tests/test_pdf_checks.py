@@ -5,25 +5,28 @@ import json
 import tempfile
 import unittest
 from dataclasses import replace
+from itertools import chain, combinations, islice
 from pathlib import Path
 
+from latexprep.command_runner import CommandResult, RuntimeLimits
 from latexprep.errors import PreparationError
+from latexprep.measurement_findings import MAX_SAMPLES
+from latexprep.pdf_check_options import PdfCheckOptions, PdfRegion, PdfSectionBudget
 from latexprep.pdf_checks import (
-    PdfCheckOptions,
-    PdfSectionBudget,
     extract_pdf_evidence,
     inspect_included_pdf_figures,
     inspect_pdf_details,
 )
-from latexprep.pdf_support import (
+from latexprep.pdf_geometry import (
     MAX_MEASUREMENT_PIXELS,
     MAX_PAIR_CHECKS,
-    MAX_PARSED_NODES,
     MIN_MEASUREMENT_DPI,
-    PdfRegion,
+    relative_luminance,
 )
+from latexprep.pdf_paint_checks import MAX_PAGE_PALETTE_COLORS
+from latexprep.pdf_tool_output import MAX_PARSED_NODES
 from latexprep.resource_budget import ResourceBudget
-from latexprep.runtime import CommandResult, RuntimeLimits, ToolRunner
+from latexprep.runtime import ToolRunner
 from tests.support import live_tests_enabled
 
 
@@ -679,6 +682,60 @@ class PdfDetailTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(failure.evidence_kind, "heuristic")
         self.assertIn("semantic color-only encoding", failure.details["scope"])
         await self.assert_status(options, "inconclusive", trace=color_trace(space="DeviceCMYK"))
+
+    async def test_separation_compares_a_bounded_number_of_pairs_and_counts_every_close_one(
+        self,
+    ) -> None:
+        pages, minimum = 9, 0.0005
+        grays = [float(f"{value / 255:.6f}") for value in range(256)]
+        trace = '<document filename="document.pdf">' + "".join(
+            f'<page number="{page}" mediabox="0 0 612 792">'
+            + "".join(
+                f'<fill_path colorspace="DeviceGray" color="{value:.6f}" transform="1 0 0 1 0 0"/>'
+                for value in grays
+            )
+            + "</page>"
+            for page in range(1, pages + 1)
+        )
+        trace += "</document>"
+        luminances = [relative_luminance((value,) * 3) for value in grays]
+        pairs = islice(
+            chain.from_iterable(combinations(luminances, 2) for _ in range(pages)), MAX_PAIR_CHECKS
+        )
+        expected = sum(abs(first - second) < minimum for first, second in pairs)
+        self.assertGreater(expected, MAX_SAMPLES // 10)
+        finding = await self.assert_status(
+            PdfCheckOptions(min_grayscale_luminance_difference=minimum),
+            "failed",
+            trace=trace,
+            info=f"Pages: {pages}\n",
+            geometry=geometry(pages=pages),
+        )
+        self.assertEqual(finding.details["compared_pairs"], MAX_PAIR_CHECKS)
+        self.assertEqual(finding.details["violation_count"], expected)
+        self.assertEqual(len(finding.details["violations"]), min(expected, MAX_SAMPLES))
+        # Pairs beyond the cap were never compared, so the measurement says it is partial.
+        self.assertTrue(finding.details["incomplete"])
+        self.assertEqual(finding.details["page_palette_entries"], pages * len(grays))
+
+    async def test_a_page_palette_beyond_its_cap_is_only_partly_compared(self) -> None:
+        colors = MAX_PAGE_PALETTE_COLORS + 44
+        trace = (
+            '<document filename="document.pdf"><page number="1" mediabox="0 0 612 792">'
+            + "".join(
+                f'<fill_path colorspace="DeviceGray" color="{value / colors:.6f}" '
+                'transform="1 0 0 1 0 0"/>'
+                for value in range(colors)
+            )
+            + "</page></document>"
+        )
+        finding = await self.assert_status(
+            PdfCheckOptions(min_grayscale_luminance_difference=0.0000001),
+            "inconclusive",
+            trace=trace,
+        )
+        self.assertEqual(finding.details["page_palette_entries"], MAX_PAGE_PALETTE_COLORS)
+        self.assertEqual(finding.details["violation_count"], 0)
 
     async def test_evidence_helper_bounds_text_and_retains_empty_page_evidence(self) -> None:
         text, properties = await extract_pdf_evidence(self.pdf, self.work(), DetailRunner())

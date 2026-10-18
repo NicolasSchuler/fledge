@@ -3,6 +3,14 @@
 The hook reads kernel registers, not literal source declarations.  These lists
 do not describe package defaults, every consumed global option, or later setup
 commands.  Recorder agreement is required before reporting a complete inventory.
+
+How the hook is built. Its TOKEN substitutions are generated lowercase hexadecimal,
+never source text or paths. Detokenization expands each register once, not the
+commands held in its option values; transport is native character units encoded as
+UTF-32BE hex so braces, pipes and newlines cannot forge rows. The kernel clears
+@filelist at begin-document unless listfiles was requested. File hooks retain our own
+bounded names without changing that user setting; the values themselves are still
+read only after document execution.
 """
 
 from __future__ import annotations
@@ -18,20 +26,19 @@ from datetime import date
 from importlib import resources
 from pathlib import Path
 
-from .build_dependencies import (
-    PACKAGE_FILENAME,
-    LoadedPackage,
-    PackageOrigin,
-    parse_declared_date,
-)
 from .errors import PreparationError
 from .file_safety import FileTooLargeError, read_regular_file
 from .findings import Finding
 from .limits import MIB
+from .package_headers import PACKAGE_FILENAME, LoadedPackage, PackageOrigin, parse_declared_date
 from .setting_choices import Engine
 
 _MAX_PACKAGES = 2048
 _MAX_FIELD_UNITS = 16_384
+# Each native character unit travels as eight uppercase hexadecimal digits (UTF-32BE).
+_HEX_DIGITS_PER_UNIT = 8
+# Most characters of the hook's own "unsupported" reason quoted in an error.
+_MAX_UNSUPPORTED_REASON_CHARS = 200
 _MAX_EVIDENCE_BYTES = 2 * MIB
 _MAX_MAIN_BYTES = 8 * MIB
 # The oldest kernel whose post-document option registers the hook reads.
@@ -51,21 +58,18 @@ _SCOPE = (
 
 @functools.cache
 def _hook_template() -> str:
-    """The hook in loaded_options_hook.tex, application-owned TeX only.
-
-    The TOKEN substitutions are generated lowercase hexadecimal, never source
-    text or paths. Detokenization expands each register once, not the commands
-    held in its option values; transport is native character units encoded as
-    UTF-32BE hex so braces, pipes and newlines cannot forge rows. The kernel
-    clears @filelist at begin-document unless listfiles was requested. File hooks
-    retain our own bounded names without changing that user setting; the values
-    themselves are still read only after document execution.
-    """
+    """The hook in loaded_options_hook.tex, application-owned TeX only."""
     return resources.files("latexprep").joinpath(_HOOK_RESOURCE).read_text(encoding="ascii")
 
 
 @dataclass(frozen=True, slots=True)
 class LoadedOptionsProbe:
+    """A staged option hook: its random token, where it and its output are, and its bytes.
+
+    ``hook_bytes`` and ``staged_bytes`` (the main file with the hook's ``\\input``
+    prepended) are kept so the evidence can be refused if either changed during the build.
+    """
+
     token: str
     hook: Path
     sidecar: Path
@@ -172,15 +176,20 @@ class LoadedOptionsEvidence:
 
 
 def _native_string(value: str, engine: Engine) -> str:
-    if len(value) > 8 * _MAX_FIELD_UNITS or len(value) % 8 or not _UPPERCASE_HEX.fullmatch(value):
+    width = _HEX_DIGITS_PER_UNIT
+    if (
+        len(value) > width * _MAX_FIELD_UNITS
+        or len(value) % width
+        or not _UPPERCASE_HEX.fullmatch(value)
+    ):
         raise PreparationError("Option field is unavailable, oversized or malformed")
-    units = [int(value[index : index + 8], 16) for index in range(0, len(value), 8)]
+    units = [int(value[index : index + width], 16) for index in range(0, len(value), width)]
     unsupported = PreparationError("Option field contains unsupported native character units")
     if engine == "pdflatex":
         # pdfTeX reports bytes; together they must form UTF-8 text.
         try:
             return bytes(units).decode("utf-8")
-        except (ValueError, UnicodeError) as error:
+        except ValueError as error:
             raise unsupported from error
     # XeTeX and LuaTeX report code points; surrogates and values beyond Unicode
     # are not characters.
@@ -212,7 +221,7 @@ def _parse_options(text: str, token: str, engine: Engine) -> KernelOptions:
     names: set[str] = set()
     for row in records:
         if row.startswith("UNSUPPORTED|"):
-            reason = row[:200].removeprefix("UNSUPPORTED|")
+            reason = row[:_MAX_UNSUPPORTED_REASON_CHARS].removeprefix("UNSUPPORTED|")
             raise PreparationError(f"Unsupported option instrumentation: {reason}")
         name = row.removeprefix("PACKAGE|")
         options, raw_options = next(records, None), next(records, None)

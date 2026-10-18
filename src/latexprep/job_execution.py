@@ -14,9 +14,10 @@ from contextlib import asynccontextmanager, contextmanager
 from dataclasses import asdict
 from pathlib import Path
 
+from .command_runner import RuntimeLimits
 from .config import COORDINATOR_MEMORY_MB, Settings
 from .resource_budget import ResourceBudget
-from .runtime import RuntimeLimits, ToolRunner
+from .runtime import ToolRunner
 
 
 class JobDeadlineExceeded(TimeoutError):

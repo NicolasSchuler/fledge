@@ -15,7 +15,8 @@ from click.testing import CliRunner
 
 from latexprep.check_selection import CheckSelection
 from latexprep.cli import USAGE_EXIT_CODE, cli
-from latexprep.config import load_settings, resolve_config_path
+from latexprep.config import load_settings
+from latexprep.config_discovery import resolve_config_path
 from latexprep.errors import PreparationError
 from latexprep.redaction import scrub_local_paths
 from latexprep.report import Outcome, Report
@@ -174,10 +175,25 @@ class ConfigDiscoveryTests(unittest.TestCase):
 
     def test_home_ancestor_is_not_a_user_configuration_fallback(self) -> None:
         self.write(self.root / "latex-prep.toml")
-        with patch("latexprep.config.Path.home", return_value=self.root):
+        with patch("latexprep.config_discovery.Path.home", return_value=self.root):
             self.assertIsNone(resolve_config_path(self.source))
             # A deliberately selected home directory is still an input folder.
             self.assertEqual(resolve_config_path(self.root), self.root / "latex-prep.toml")
+
+    def test_system_temporary_directory_is_not_a_configuration_fallback(self) -> None:
+        # A file another user planted in a shared directory must not configure a job.
+        shared = self.root / "shared"
+        shared.mkdir()
+        (shared / ".git").mkdir()
+        self.write(shared / "latex-prep.toml")
+        (shared / ".git").rmdir()
+        project = shared / "project"
+        project.mkdir()
+        with patch("latexprep.config_discovery.tempfile.gettempdir", return_value=str(shared)):
+            self.assertIsNone(resolve_config_path(project))
+            # A deliberately selected temporary directory is still an input folder.
+            self.assertEqual(resolve_config_path(shared), shared / "latex-prep.toml")
+        self.assertEqual(resolve_config_path(project), shared / "latex-prep.toml")
 
     def test_file_inputs_start_beside_the_file_and_never_inside_zip(self) -> None:
         archive = self.source / "paper.zip"

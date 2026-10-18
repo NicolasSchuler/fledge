@@ -10,12 +10,18 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
-from latexprep import latexmk_build, project
+from latexprep import build_workspace, latexmk_build, project
 from latexprep.build_log import log_findings
+from latexprep.command_runner import (
+    CommandFailure,
+    CommandResult,
+    RuntimeLimits,
+    ToolVersion,
+)
 from latexprep.errors import PreparationError, SandboxRefusedError
 from latexprep.latexmk_build import build_project
-from latexprep.runtime import CommandResult, RuntimeLimits, ToolRunner, ToolVersion
-from latexprep.sandbox import sandbox_refusal, tool_environment, with_ulimits
+from latexprep.runtime import ToolRunner
+from latexprep.tool_launch import create_tool_environment, sandbox_refusal, with_ulimits
 
 
 async def never_reports(pid: int, workspace: Path, *, max_file_bytes: int) -> str:
@@ -343,7 +349,7 @@ class BuildTests(unittest.IsolatedAsyncioTestCase):
         secret.write_text("outside the project")
         victim = self.source / "data.tex"
         victim.write_text("inside the project")
-        scan = project._folder_entries
+        scan = project.folder_entries
 
         def scan_then_swap(*args, **kwargs):
             entries = scan(*args, **kwargs)
@@ -351,7 +357,7 @@ class BuildTests(unittest.IsolatedAsyncioTestCase):
             victim.symlink_to(secret)
             return entries
 
-        with patch.object(project, "_folder_entries", scan_then_swap):
+        with patch.object(project, "folder_entries", scan_then_swap):
             with self.assertRaisesRegex(PreparationError, "replaced by a link"):
                 await build_project(
                     self.source, "main.tex", self.root / "build", "pdflatex", FakeBuildRunner()
@@ -359,9 +365,25 @@ class BuildTests(unittest.IsolatedAsyncioTestCase):
         copied = [path for path in (self.root / "build").rglob("*") if path.is_file()]
         self.assertFalse([path for path in copied if path.read_text() == "outside the project"])
 
+    async def test_report_records_how_long_the_build_command_took(self) -> None:
+        class TimedBuildRunner(FakeBuildRunner):
+            async def run(self, argv, cwd, workspace, **kwargs):
+                result = await super().run(argv, cwd, workspace, **kwargs)
+                if argv[-1] in {"-v", "--version"}:
+                    return result
+                return replace(result, duration_seconds=2.5)
+
+        result = await build_project(
+            self.source, "main.tex", self.root / "timed", "pdflatex", TimedBuildRunner()
+        )
+        self.assertTrue(result.success, result.findings)
+        execution = result.tools.to_report()["execution"]
+        assert isinstance(execution, dict)
+        self.assertEqual(execution["duration_seconds"], 2.5)
+
     async def test_oversized_build_input_names_the_limit_and_its_value(self) -> None:
         (self.source / "extra.tex").write_text("more")
-        with patch.object(latexmk_build, "MAX_WORKSPACE_ENTRIES", 1):
+        with patch.object(build_workspace, "MAX_WORKSPACE_ENTRIES", 1):
             with self.assertRaisesRegex(PreparationError, "exceeds the 1 entry limit"):
                 await build_project(
                     self.source, "main.tex", self.root / "entries", "pdflatex", FakeBuildRunner()
@@ -376,13 +398,13 @@ class BuildTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_copying_the_project_does_not_block_the_event_loop(self) -> None:
         threads: list[int] = []
-        prepare = latexmk_build._prepare_tree
+        prepare = latexmk_build.prepare_layout
 
         def recorded(*args, **kwargs):
             threads.append(threading.get_ident())
             return prepare(*args, **kwargs)
 
-        with patch.object(latexmk_build, "_prepare_tree", recorded):
+        with patch.object(latexmk_build, "prepare_layout", recorded):
             await build_project(
                 self.source, "main.tex", self.root / "build", "pdflatex", FakeBuildRunner()
             )
@@ -550,6 +572,66 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(PreparationError, "it printed no version"):
             await runner.tool_version([self.perl, "-e", "exit 0;"], self.work)
 
+    async def test_tool_state_exists_during_the_command_and_is_removed_after_it(self) -> None:
+        runner = LifecycleRunner()
+        result = await runner.run(
+            [self.perl, "-e", 'print $ENV{TMPDIR}; print -d $ENV{TMPDIR} ? " exists" : " missing"'],
+            self.work,
+            self.work,
+        )
+        temporary, state = result.stdout.rsplit(" ", 1)[0], result.stdout.rsplit(" ", 1)[1]
+        self.assertEqual(state, "exists")
+        self.assertTrue(Path(temporary).is_relative_to(self.work / ".tool-state"))
+        self.assertFalse(Path(temporary).exists())
+        self.assertEqual(list((self.work / ".tool-state").iterdir()), [])
+
+    async def test_tool_state_is_removed_even_when_the_command_is_refused(self) -> None:
+        runner = LifecycleRunner(RuntimeLimits(max_memory_mb=64))
+        with self.assertRaises(ValueError):
+            await runner.run([self.perl, "-e", "exit 0"], self.work, self.work, memory_mb=128)
+        self.assertEqual(list((self.work / ".tool-state").glob("invocation-*")), [])
+
+    async def test_command_duration_is_measured(self) -> None:
+        runner = LifecycleRunner()
+        result = await runner.run(
+            [self.perl, "-e", "select(undef, undef, undef, 0.3)"], self.work, self.work
+        )
+        self.assertGreaterEqual(result.duration_seconds, 0.25)
+        self.assertLess(result.duration_seconds, 10)
+
+    def test_failure_names_the_cause_and_the_value_that_was_exceeded(self) -> None:
+        limits = RuntimeLimits(timeout_seconds=7, max_output_bytes=3 * 1024 * 1024)
+        cases = (
+            (dict(timed_out=True, returncode=-9), CommandFailure.TIMEOUT, "stopped after 7 s"),
+            (dict(output_limited=True, returncode=-9), CommandFailure.OUTPUT_LIMIT, "3 MiB"),
+            (
+                dict(resource_exceeded="Aggregate tool memory exceeded 9 MiB", returncode=-9),
+                CommandFailure.RESOURCE_LIMIT,
+                "exceeded 9 MiB",
+            ),
+            (dict(returncode=2, stderr="boom"), CommandFailure.EXIT_STATUS, "failed (2): boom"),
+        )
+        for fields in cases:
+            arguments, failure, expected = fields
+            with self.subTest(failure=failure):
+                result = CommandResult(
+                    arguments.pop("returncode"),
+                    "",
+                    arguments.pop("stderr", ""),
+                    resolved_command=["tool"],
+                    **arguments,
+                )
+                self.assertIs(result.failure, failure)
+                self.assertIn(expected, result.failure_reason("tool", limits) or "")
+        clean = CommandResult(0, "", "", resolved_command=["tool"])
+        self.assertIsNone(clean.failure)
+        self.assertIsNone(clean.failure_reason("tool", limits))
+        # Without limits the older, value-free wording remains.
+        timed_out = CommandResult(-9, "", "", resolved_command=["tool"], timed_out=True)
+        self.assertEqual(
+            timed_out.failure_reason("tool"), "tool exceeded the configured time limit"
+        )
+
     async def test_resource_accounting_failure_is_closed(self) -> None:
         runner = LifecycleRunner()
 
@@ -584,11 +666,11 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             },
         ):
             runner = ToolRunner()
-            environment = tool_environment(
+            environment = create_tool_environment(
                 self.work,
                 runner.toolchain.context(Path(self.perl)),
                 source_date_epoch=runner.source_date_epoch,
-            )
+            ).variables
         self.assertEqual(environment["TEXINPUTS"], ".:")
         # latexmk warns when USER is unset; a neutral name keeps the real one private.
         self.assertEqual(environment["USER"], "fledge")
@@ -596,13 +678,26 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn(key, environment)
         self.assertTrue(environment["TEXMFHOME"].startswith(str(self.work)))
 
-    async def test_environment_keeps_long_log_lines_unwrapped(self) -> None:
+    async def test_environment_names_the_state_directory_it_created(self) -> None:
         runner = ToolRunner()
-        environment = tool_environment(
+        environment = create_tool_environment(
             self.work,
             runner.toolchain.context(Path(self.perl)),
             source_date_epoch=runner.source_date_epoch,
         )
+        state = environment.state_directory
+        self.assertEqual(state.parent, self.work / ".tool-state")
+        for name in ("tmp", "config", "cache", "texmf", "texmf-config", "texmf-var"):
+            self.assertTrue((state / name).is_dir(), name)
+        self.assertEqual(environment.variables["TMPDIR"], str(state / "tmp"))
+
+    async def test_environment_keeps_long_log_lines_unwrapped(self) -> None:
+        runner = ToolRunner()
+        environment = create_tool_environment(
+            self.work,
+            runner.toolchain.context(Path(self.perl)),
+            source_date_epoch=runner.source_date_epoch,
+        ).variables
         self.assertEqual(environment["max_print_line"], "1000")
         self.assertEqual(environment["error_line"], "254")
         self.assertEqual(environment["half_error_line"], "238")
@@ -616,11 +711,11 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             "\\documentclass{article}\n\\begin{document}\\cite{" + key + "}\\end{document}\n"
         )
         runner = ToolRunner()
-        environment = tool_environment(
+        environment = create_tool_environment(
             self.work,
             runner.toolchain.context(Path(pdflatex).resolve()),
             source_date_epoch=runner.source_date_epoch,
-        )
+        ).variables
         process = await asyncio.create_subprocess_exec(
             pdflatex,
             "-interaction=nonstopmode",
@@ -638,12 +733,12 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
 
     def test_file_size_limit_uses_a_shell_that_counts_kibibyte_units(self) -> None:
         wrapped = with_ulimits(["/usr/bin/true"], max_file_bytes=4096, timeout_seconds=120)
-        self.assertEqual(wrapped[3:6], ["latexprep-limits", "4", "120"])
+        self.assertEqual(wrapped[3:7], ["fledge-limits", "4", "120", "256"])
         self.assertEqual(wrapped[-1], "/usr/bin/true")
         # Dash counts 512-byte blocks and would halve the limit, so bash wins
         # wherever it exists; macOS /bin/sh is bash and agrees either way.
         self.assertEqual(wrapped[0], "/bin/bash" if Path("/bin/bash").is_file() else "/bin/sh")
-        with patch("latexprep.sandbox.os.path.isfile", return_value=False):
+        with patch("latexprep.tool_launch.os.path.isfile", return_value=False):
             limited = with_ulimits(["/usr/bin/true"], max_file_bytes=4096, timeout_seconds=120)
             self.assertEqual(limited[0], "/bin/sh")
 

@@ -7,19 +7,19 @@ import unicodedata
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Literal, NamedTuple, get_args
+from typing import ClassVar, Literal, NamedTuple, get_args
 
 from .expanded_document import (
     ExpandedDocument,
-    definition_spans,
     environment_regions,
     expand_document,
 )
 from .literal_text import KEYWORD_ENVIRONMENTS, TEXT_WRAPPERS
-from .tex_commands import MACRO_DEFINITION_COMMANDS
+from .tex_commands import MACRO_DEFINITION_COMMANDS, PRIMITIVE_DEFINITION_COMMANDS
 from .tex_lexer import (
     MAX_ARGUMENT_CHARS,
     Argument,
+    definition_spans,
     in_conditional,
     in_half_open_span,
     merge_spans,
@@ -79,8 +79,6 @@ _VERBATIM_URL_COMMANDS = frozenset({"url", "nolinkurl", "path"})
 # Wrappers that restore ordinary punctuation inside typewriter text.
 _ROMAN_WRAPPERS = frozenset({"textrm", "textsf", "textnormal"})
 _LIGATURES = (("---", "—"), ("--", "–"), ("``", "“"), ("''", "”"))
-# TeX primitives that assign a name written directly after them, without braces.
-_PRIMITIVE_ASSIGNMENTS = frozenset({"def", "gdef", "edef", "xdef", "let", "futurelet"})
 # Line breaks take an optional bracketed length or priority; other spacing does not,
 # so a bracket after them is ordinary text.
 _LINE_BREAK_COMMANDS = frozenset({"\\", "linebreak"})
@@ -144,6 +142,20 @@ def _mask_comments(value: str) -> str:
         else:
             cursor += 1
     return "".join(masked)
+
+
+_Handler = Callable[["_Converter", _ControlWord], int]
+
+
+def _handler_table(*groups: tuple[Iterable[str], _Handler]) -> dict[str, _Handler]:
+    """Map every command name to its handler; a name in two groups is a programming error."""
+    table: dict[str, _Handler] = {}
+    for names, handler in groups:
+        for name in names:
+            if name in table:
+                raise RuntimeError(f"Command \\{name} is assigned to more than one text handler")
+            table[name] = handler
+    return table
 
 
 class _Converter:
@@ -256,7 +268,7 @@ class _Converter:
         word = _ControlWord(position, token.group(1), stop, cursor, self._group(cursor))
         if word.name in self.context.redefined_commands:
             return self._redefined(word)
-        handler = _COMMAND_HANDLERS.get(word.name)
+        handler = self._HANDLERS.get(word.name)
         if handler is None:
             return self._unsupported(word, self._after_argument(word))
         return handler(self, word)
@@ -334,30 +346,16 @@ class _Converter:
             self.context = replace(self.context, literal_punctuation=False)
         return word.cursor
 
-
-_Handler = Callable[[_Converter, _ControlWord], int]
-
-
-def _handler_table(*groups: tuple[Iterable[str], _Handler]) -> dict[str, _Handler]:
-    """Map every command name to its handler; a name in two groups is a programming error."""
-    table: dict[str, _Handler] = {}
-    for names, handler in groups:
-        for name in names:
-            if name in table:
-                raise RuntimeError(f"Command \\{name} is assigned to more than one text handler")
-            table[name] = handler
-    return table
-
-
-_COMMAND_HANDLERS = _handler_table(
-    (TEXT_WRAPPERS | {"text", "href"}, _Converter._wrapper),
-    (_VERBATIM_URL_COMMANDS, _Converter._url),
-    (_ACCENTS, _Converter._accent),
-    (_SYMBOLS, _Converter._symbol),
-    ("%&#_{}$", _Converter._escaped_character),
-    (("par", "newline", "linebreak", "\\", " ", ",", ";", "sep", "and"), _Converter._space),
-    (("em", "itshape", "bfseries", "normalfont", "protect"), _Converter._font_switch),
-)
+    # The command groups are disjoint, so each name has exactly one handler.
+    _HANDLERS: ClassVar[dict[str, _Handler]] = _handler_table(
+        (TEXT_WRAPPERS | {"text", "href"}, _wrapper),
+        (_VERBATIM_URL_COMMANDS, _url),
+        (_ACCENTS, _accent),
+        (_SYMBOLS, _symbol),
+        ("%&#_{}$", _escaped_character),
+        (("par", "newline", "linebreak", "\\", " ", ",", ";", "sep", "and"), _space),
+        (("em", "itshape", "bfseries", "normalfont", "protect"), _font_switch),
+    )
 
 
 def convert_text(
@@ -395,14 +393,14 @@ def _local_definitions(document: ExpandedDocument) -> tuple[frozenset[str], froz
         for command in source.commands:
             if command.name not in MACRO_DEFINITION_COMMANDS:
                 continue
-            if command.arguments and command.name not in _PRIMITIVE_ASSIGNMENTS:
+            if command.arguments and command.name not in PRIMITIVE_DEFINITION_COMMANDS:
                 target = command.arguments[0].value.strip()
             else:
                 target = source.masked[command.name_end :].lstrip()
             token = _TEXT_CONTROL_SEQUENCE.match(target)
             if token is not None:
                 redefined.add(token.group(1))
-            elif target and command.name in _PRIMITIVE_ASSIGNMENTS:
+            elif target and command.name in PRIMITIVE_DEFINITION_COMMANDS:
                 active_characters.add(target[0])
             elif "environment" in command.name.casefold() and re.fullmatch(r"[A-Za-z]+", target):
                 redefined.add(target)

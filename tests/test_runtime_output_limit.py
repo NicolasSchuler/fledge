@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from latexprep.runtime import RuntimeLimits
+from latexprep.command_runner import RuntimeLimits
 from tests.test_runtime import LifecycleRunner
 
 

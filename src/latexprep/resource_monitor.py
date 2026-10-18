@@ -2,7 +2,9 @@
 
 Limits are enforced by reactive samples, not by an OS hard RSS limit. A job scope
 shares one monitor across concurrent commands and includes the coordinating
-parent process; a command outside a job scope is watched on its own.
+parent process; a command outside a job scope is watched on its own. How processes
+are listed is ``process_table``'s concern, and starting and killing them is
+``process_control``'s.
 """
 
 from __future__ import annotations
@@ -11,27 +13,33 @@ import asyncio
 import contextlib
 import os
 import time
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Sequence
 from dataclasses import dataclass, field
+from enum import StrEnum
 from pathlib import Path
-from typing import NamedTuple, Protocol
+from typing import NamedTuple
 
 from .cancellation import complete_despite_cancellation
 from .errors import PreparationError
 from .limits import MAX_WORKSPACE_ENTRIES
 from .process_control import kill_process_group, kill_unfinished, start_process
+from .process_table import ProcessSample, ProcessTable
 
+# Processes one tool command may have running at once, its own group included. TeX and
+# its helpers (latexmk, bibtex or biber, makeindex, dvipdfmx) use a handful; a fork bomb
+# reaches this within a sample.
 _MAX_GROUP_PROCESSES = 32
 _PROCESS_TABLE_TIMEOUT_SECONDS = 2
 _PROCESS_LISTING_PROGRAM = "/bin/ps"
-
-
-class ProcessSample(NamedTuple):
-    """One process's resident memory, attributed to the process group it counts against."""
-
-    pid: int
-    group: int
-    rss_kb: int
+# A workspace may hold this many times the single-file ceiling in total. The ceiling
+# bounds one runaway file; the multiple bounds many files that are each below it.
+_WORKSPACE_TOTAL_FILE_LIMITS = 4
+# How often a job is sampled: tightly while it ramps up, because runaway allocation and
+# output growth almost always show in the first seconds, then at a relaxed rate because
+# every sample walks the whole job tree.
+_RAMP_UP_SECONDS = 3.0
+_RAMP_UP_SAMPLE_SECONDS = 0.1
+_STEADY_SAMPLE_SECONDS = 0.5
 
 
 class GroupUsage(NamedTuple):
@@ -39,13 +47,12 @@ class GroupUsage(NamedTuple):
     failure: str | None
 
 
-class ProcessTable(Protocol):
-    """How the platform lists processes; the sandbox backend supplies it."""
+class MemoryAccounting(StrEnum):
+    """Whether the monitor could measure memory use; ``ResourceStatistics`` says why not."""
 
-    @property
-    def process_columns(self) -> str: ...
-
-    def parse_processes(self, output: bytes, registered: set[int]) -> list[ProcessSample]: ...
+    NOT_SAMPLED = "not sampled"
+    SAMPLED = "sampled parent and registered process groups"
+    UNAVAILABLE = "unavailable"
 
 
 @dataclass(slots=True)
@@ -54,7 +61,8 @@ class ResourceStatistics:
 
     memory_limit_mb: int
     parent_memory_reservation_mb: int | None
-    memory_accounting: str = "not sampled"
+    memory_accounting: MemoryAccounting = MemoryAccounting.NOT_SAMPLED
+    memory_accounting_problem: str | None = None
     memory_enforcement: str = "reactive samples; not an OS hard RSS limit"
     sample_interval_seconds: float = 0.1
     peak_parent_rss_mb: float | None = None
@@ -106,7 +114,8 @@ def _sample_interval(start: float) -> float:
     seconds, where the shorter interval bounds the overshoot; afterwards the
     repeated walk of the whole job tree costs more than the added precision.
     """
-    return 0.1 if time.monotonic() - start < 3.0 else 0.5
+    ramping_up = time.monotonic() - start < _RAMP_UP_SECONDS
+    return _RAMP_UP_SAMPLE_SECONDS if ramping_up else _STEADY_SAMPLE_SECONDS
 
 
 def _peak(current: float | None, value: float) -> float:
@@ -123,31 +132,66 @@ def _group_usage(samples: list[ProcessSample], pid: int, memory_mb: int) -> Grou
     return GroupUsage(resident_kb, None)
 
 
-def workspace_violation(workspace: Path, max_file_bytes: int) -> str | None:
-    """Walk one workspace. Blocking: callers on the event loop use a worker thread."""
-    total = count = 0
-    for directory, directories, filenames in os.walk(workspace, followlinks=False):
-        count += len(directories) + len(filenames)
-        if count > MAX_WORKSPACE_ENTRIES:
-            return f"Workspace entry count exceeded {MAX_WORKSPACE_ENTRIES}"
+class _WorkspaceTally:
+    """Entries and bytes counted under one workspace, and the first limit it broke."""
+
+    def __init__(self, max_file_bytes: int) -> None:
+        self._max_file_bytes = max_file_bytes
+        self._entries = 0
+        self._bytes = 0
+        self.violation: str | None = None
+
+    def add_entries(self, count: int) -> None:
+        self._entries += count
+        if self.violation is None and self._entries > MAX_WORKSPACE_ENTRIES:
+            self.violation = f"Workspace entry count exceeded {MAX_WORKSPACE_ENTRIES}"
+
+    def add_file(self, size: int) -> None:
+        self._bytes += size
+        if self.violation is not None:
+            return
+        if size > self._max_file_bytes:
+            self.violation = "A generated file exceeded the file size limit"
+        elif self._bytes > _WORKSPACE_TOTAL_FILE_LIMITS * self._max_file_bytes:
+            self.violation = "Workspace exceeded the total disk limit"
+
+
+class StorageUsage(NamedTuple):
+    """What one walk of a job tree found: its size, and each workspace's first violation."""
+
+    tree_bytes: int
+    violations: tuple[str | None, ...]
+
+
+def measure_storage(root: Path, workspaces: Sequence[Path], max_file_bytes: int) -> StorageUsage:
+    """Walk ``root`` once, counting every file and checking each workspace under it.
+
+    ``workspaces`` lie inside ``root``. Blocking: callers on the event loop use a
+    worker thread. A file that disappears during the walk is skipped.
+    """
+    tallies = [_WorkspaceTally(max_file_bytes) for _ in workspaces]
+    tree_bytes = 0
+    for directory, directories, filenames in os.walk(root, followlinks=False):
+        here = Path(directory)
+        owners = [
+            tally
+            for workspace, tally in zip(workspaces, tallies, strict=True)
+            if here.is_relative_to(workspace)
+        ]
+        for tally in owners:
+            tally.add_entries(len(directories) + len(filenames))
         for name in filenames:
             with contextlib.suppress(FileNotFoundError):
-                size = (Path(directory) / name).lstat().st_size
-                if size > max_file_bytes:
-                    return "A generated file exceeded the file size limit"
-                total += size
-                if total > 4 * max_file_bytes:
-                    return "Workspace exceeded the total disk limit"
-    return None
+                size = (here / name).lstat().st_size
+                tree_bytes += size
+                for tally in owners:
+                    tally.add_file(size)
+    return StorageUsage(tree_bytes, tuple(tally.violation for tally in tallies))
 
 
-def _tree_bytes(root: Path) -> int:
-    total = 0
-    for directory, _, files in os.walk(root, followlinks=False):
-        for name in files:
-            with contextlib.suppress(FileNotFoundError):
-                total += (Path(directory) / name).lstat().st_size
-    return total
+def workspace_violation(workspace: Path, max_file_bytes: int) -> str | None:
+    """The first limit one workspace exceeds, or ``None``. Blocking: use a worker thread."""
+    return measure_storage(workspace, (workspace,), max_file_bytes).violations[0]
 
 
 class ResourceMonitor:
@@ -251,11 +295,9 @@ class ResourceMonitor:
     def _job_storage(
         self, scope: JobScope, workspaces: tuple[Path, ...]
     ) -> tuple[tuple[str | None, ...], int]:
-        """Walk every active workspace and the whole job tree in one worker-thread pass."""
-        failures = tuple(
-            workspace_violation(workspace, scope.max_file_bytes) for workspace in workspaces
-        )
-        return failures, _tree_bytes(scope.root)
+        """Walk the job tree once, checking every active workspace on the way."""
+        usage = measure_storage(scope.root, workspaces, scope.max_file_bytes)
+        return usage.violations, usage.tree_bytes
 
     def _account_memory(
         self, samples: list[ProcessSample], commands: dict[int, ActiveCommand]
@@ -264,11 +306,13 @@ class ResourceMonitor:
         parent = os.getpid()
         parent_kb = sum(sample.rss_kb for sample in samples if sample.pid == parent)
         if not parent_kb:
-            statistics.memory_accounting = "unavailable: parent process absent"
+            statistics.memory_accounting = MemoryAccounting.UNAVAILABLE
+            statistics.memory_accounting_problem = "parent process absent"
             if commands or statistics.commands:
                 self.fail_job("Job resource accounting omitted the parent process")
         else:
-            statistics.memory_accounting = "sampled parent and registered process groups"
+            statistics.memory_accounting = MemoryAccounting.SAMPLED
+            statistics.memory_accounting_problem = None
         tool_kb = sum(
             sample.rss_kb for sample in samples if sample.group in commands and sample.pid != parent
         )
@@ -296,9 +340,11 @@ class ResourceMonitor:
                 samples = await self._sample_processes()
             # OSError includes the TimeoutError of a process table that never answered.
             except (OSError, ValueError, PreparationError) as error:
-                self.statistics.memory_accounting = f"unavailable: {error}"
+                problem = str(error) or type(error).__name__
+                self.statistics.memory_accounting = MemoryAccounting.UNAVAILABLE
+                self.statistics.memory_accounting_problem = problem
                 if commands or self.active_commands or self.statistics.commands:
-                    self.fail_job(f"Job resource accounting failed: {error}")
+                    self.fail_job(f"Job resource accounting failed: {problem}")
                 samples = []
             if samples:
                 self._account_memory(samples, commands)

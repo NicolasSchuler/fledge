@@ -10,15 +10,14 @@ from dataclasses import FrozenInstanceError
 from pathlib import Path
 from unittest.mock import patch
 
-from latexprep.bibliography_checks import BibliographyOptions
+from latexprep.bibliography_options import BibliographyOptions
 from latexprep.build_checks import BuildCheckOptions
 from latexprep.config import Settings, load_settings
 from latexprep.errors import PreparationError
-from latexprep.manuscript_checks import ManuscriptCheckOptions
+from latexprep.manuscript_check_options import ManuscriptCheckOptions
 from latexprep.online_checks import OnlineOptions
-from latexprep.pdf_checks import PdfCheckOptions, PdfSectionBudget
-from latexprep.pdf_support import PdfRegion
-from latexprep.submission_checks import SubmissionOptions
+from latexprep.pdf_check_options import PdfCheckOptions, PdfRegion, PdfSectionBudget
+from latexprep.submission_options import SubmissionOptions
 
 _EXAMPLE = """
 main = "main.tex"

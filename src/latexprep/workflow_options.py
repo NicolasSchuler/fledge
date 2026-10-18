@@ -1,4 +1,8 @@
-"""Explicit document packages and preservation policy, independent of any publisher."""
+"""Options for packaging several documents and for comparing PDFs, independent of any publisher.
+
+Owns the settings tables ``workflow`` (documents, baseline builds, comparison tolerance) and
+``package`` (extra files to ship). It does not run workflows or comparisons; the job does.
+"""
 
 from __future__ import annotations
 
@@ -29,6 +33,13 @@ _DOCUMENT_NAME = re.compile(rf"[A-Za-z0-9][A-Za-z0-9_-]{{0,{MAX_DOCUMENT_NAME_CH
 
 @dataclass(frozen=True)
 class ComparisonOptions:
+    """How much a rendered page may differ from its reference before it counts as changed.
+
+    ``channel_tolerance`` is the per-pixel difference of a color channel (0 to 255) that
+    is still treated as equal; ``max_changed_pixel_ratio`` is the share of a page's pixels
+    (0 to 1) that may differ. The defaults demand an exact match.
+    """
+
     FIELD_BOUNDS: ClassVar[dict[str, Bounds]] = {
         "channel_tolerance": EIGHT_BIT_VALUE,
         "max_changed_pixel_ratio": FRACTION,
@@ -42,6 +53,7 @@ class ComparisonOptions:
 
 
 def _relative(value: str, label: str, *, directory: bool = False) -> None:
+    """Require a nonempty relative POSIX path without ``..``; a directory may be ``.``."""
     if not isinstance(value, str) or not is_relative_posix_path(
         value, normalized=False, allow_current=directory, characters="no_controls"
     ):
@@ -68,6 +80,14 @@ class PackageOptions:
 
 @dataclass(frozen=True)
 class DocumentOptions:
+    """One document of a multi-document job: where it lives, how to build it, what to ship.
+
+    ``name`` labels its stages and files in reports. ``main`` is its root ``.tex`` file
+    and ``include`` lists extra files or patterns, both relative to ``source_directory``.
+    ``engine`` overrides the job's TeX engine; ``reference_pdf`` is the PDF its build is
+    compared with. Every path is a relative POSIX path that stays inside the project.
+    """
+
     name: str
     main: str
     source_directory: str = "."
@@ -98,6 +118,13 @@ class DocumentOptions:
 
 @dataclass(frozen=True)
 class WorkflowOptions:
+    """The ``workflow`` settings table: several documents, repeated baselines, tolerance.
+
+    Without ``documents`` the job prepares the single document selected by ``main`` or
+    found in the project. ``baseline_runs`` builds the unmodified source that many times
+    to confirm the build is repeatable. Document names must differ, ignoring case.
+    """
+
     FIELD_BOUNDS: ClassVar[dict[str, Bounds]] = {"baseline_runs": Bounds(1, MAX_BASELINE_RUNS)}
 
     documents: tuple[DocumentOptions, ...] = ()

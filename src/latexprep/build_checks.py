@@ -8,11 +8,11 @@ from functools import partial
 from pathlib import Path
 from typing import Any, ClassVar, NamedTuple
 
-from .build_dependencies import PACKAGE_FILENAME, LoadedPackage, parse_declared_date
+from .build_result import BuildResult
 from .cancellation import bounded_map, cancellation_point
+from .command_runner import CommandRunner
 from .errors import PreparationError, SettingsError
 from .findings import EvidenceKind, Finding, Status
-from .latexmk_build import BuildResult
 from .loaded_options import loaded_options_unavailable
 from .option_config import (
     NONNEGATIVE_NUMBER,
@@ -23,13 +23,15 @@ from .option_config import (
     require_unique_strings,
     validate_scalars,
 )
+from .package_headers import PACKAGE_FILENAME, LoadedPackage, parse_declared_date
 from .resource_budget import ResourceBudget
-from .runtime import CommandRunner
 from .setting_choices import ENGINES
 
 # The first TeX Live release was 1996; the upper bound only rejects an obvious typo.
 MIN_TEXLIVE_YEAR = 1996
 MAX_TEXLIVE_YEAR = 2100
+_SHADOW_RULE = "build.local_package_shadow"
+_DISTRIBUTION_RULE = "build.tex_distribution"
 _PACKAGE_FILENAME_FORMAT = TextFormat(PACKAGE_FILENAME, "a literal .sty or .cls filename")
 _PACKAGE_FILENAME_TEXT = partial(
     require_text, expected=_PACKAGE_FILENAME_FORMAT.description, pattern=PACKAGE_FILENAME
@@ -218,7 +220,7 @@ def check_tex_distribution(
     )
     if banner is None:
         return Finding(
-            "build.tex_distribution",
+            _DISTRIBUTION_RULE,
             "The TeX distribution is unknown: the build recorded no engine version output"
             + (f"; expected TeX Live {expected} cannot be confirmed." if expected else "."),
             severity="warning" if expected is not None else "info",
@@ -236,7 +238,7 @@ def check_tex_distribution(
         name, year = f"MiKTeX {miktex.group(1)}", None
     else:
         return Finding(
-            "build.tex_distribution",
+            _DISTRIBUTION_RULE,
             f"The TeX distribution could not be identified from {engine} output{policy}.",
             severity="warning" if expected is not None else "info",
             status="inconclusive",
@@ -244,7 +246,7 @@ def check_tex_distribution(
         )
     mismatch = expected is not None and year != expected
     return Finding(
-        "build.tex_distribution",
+        _DISTRIBUTION_RULE,
         f"Built with {name} via {engine}{policy}.",
         severity="warning" if mismatch else "info",
         status="failed" if mismatch else "passed",
@@ -402,7 +404,7 @@ async def check_local_package_shadows(
     if not _recorder_complete(result):
         return [
             _finding(
-                "build.local_package_shadow",
+                _SHADOW_RULE,
                 "Local package shadow checks need a complete successful recorder trace.",
                 "inconclusive",
             )
@@ -412,11 +414,7 @@ async def check_local_package_shadows(
         if package.origin == "project":
             by_name.setdefault(package.name, []).append(package)
     if not by_name:
-        return [
-            _finding(
-                "build.local_package_shadow", "No local class/package files were loaded.", "passed"
-            )
-        ]
+        return [_finding(_SHADOW_RULE, "No local class/package files were loaded.", "passed")]
 
     async def inspect(name: str) -> Finding:
         packages = by_name[name]
@@ -424,7 +422,7 @@ async def check_local_package_shadows(
             # One lookup cannot tell which of several same-named local files a
             # system counterpart shadows, and they must not share a workspace.
             return _finding(
-                "build.local_package_shadow",
+                _SHADOW_RULE,
                 f"Cannot establish the system counterpart for {name}: "
                 f"{len(packages)} loaded local files share this name.",
                 "inconclusive",
@@ -435,48 +433,56 @@ async def check_local_package_shadows(
     return await bounded_map(list(by_name), inspect, limit=budget.cpu_slots if budget else 1)
 
 
+async def _system_lookup(name: str, leaf: Path, runner: CommandRunner) -> list[str]:
+    """The system paths ``kpsewhich`` finds for ``name``; empty when it finds none."""
+    (leaf / "version").mkdir()
+    await runner.tool_version(["kpsewhich", "--version"], leaf / "version")
+    command_work = leaf / "lookup"
+    command_work.mkdir()
+    execution = await runner.run(
+        ["kpsewhich", "--format=tex", name], cwd=command_work, workspace=command_work
+    )
+    # kpsewhich exits with status 1 when it finds no file.
+    if not execution.within_limits or execution.returncode not in {0, 1}:
+        raise PreparationError(
+            f"System package lookup did not complete: {execution.failure_reason('kpsewhich')}"
+        )
+    paths = execution.stdout.strip().splitlines()
+    if execution.returncode == 1 and not paths:
+        return []
+    if len(paths) != 1 or not Path(paths[0]).is_absolute():
+        raise PreparationError("System package lookup returned ambiguous evidence")
+    return paths
+
+
 async def _local_package_shadow(
     package: LoadedPackage, work: Path, runner: CommandRunner
 ) -> Finding:
     leaf = work / package.name
     leaf.mkdir(parents=True)
     try:
-        (leaf / "version").mkdir()
-        await runner.tool_version(["kpsewhich", "--version"], leaf / "version")
-        command_work = leaf / "lookup"
-        command_work.mkdir()
-        execution = await runner.run(
-            ["kpsewhich", "--format=tex", package.name],
-            cwd=command_work,
-            workspace=command_work,
-        )
-        # kpsewhich exits with status 1 when it finds no file.
-        if not execution.within_limits or execution.returncode not in {0, 1}:
-            raise PreparationError("System package lookup did not complete")
-        paths = execution.stdout.strip().splitlines()
-        if execution.returncode == 1 and not paths:
-            return _finding(
-                "build.local_package_shadow",
-                f"{package.name}: no system counterpart was found.",
-                "passed",
-                details={"project_path": package.path},
-            )
-        if len(paths) != 1 or not Path(paths[0]).is_absolute():
-            raise PreparationError("System package lookup returned ambiguous evidence")
-        return Finding(
-            "build.local_package_shadow",
-            f"Local {package.path} shadows a system file of the same name; "
-            "review whether that override is intended.",
-            severity="warning",
-            status="failed",
-            path=package.path,
-            evidence_kind=EvidenceKind.DERIVED,
-            details={"system_file": paths[0]},
-            suggestion="Compare the local file with the intended toolchain or template.",
-        )
+        paths = await _system_lookup(package.name, leaf, runner)
     except (PreparationError, OSError) as error:
         return _finding(
-            "build.local_package_shadow",
+            _SHADOW_RULE,
             f"Cannot establish the system counterpart for {package.name}: {error}",
             "inconclusive",
         )
+    if not paths:
+        return _finding(
+            _SHADOW_RULE,
+            f"{package.name}: no system counterpart was found.",
+            "passed",
+            details={"project_path": package.path},
+        )
+    return Finding(
+        _SHADOW_RULE,
+        f"Local {package.path} shadows a system file of the same name; "
+        "review whether that override is intended.",
+        severity="warning",
+        status="failed",
+        path=package.path,
+        evidence_kind=EvidenceKind.DERIVED,
+        details={"system_file": paths[0]},
+        suggestion="Compare the local file with the intended toolchain or template.",
+    )

@@ -1,15 +1,18 @@
 """Staging copies of an imported project: document selection, transformations and flattening.
 
-Every write goes to a new directory in the job workspace; the imported snapshot
-is never modified. Workers never write source files: each plan is validated
-completely before the first file changes.
+This is the orchestration layer between the planners and the file system. Planners
+(``metadata_privacy``, ``bibliography_transform``, ``source_transform``,
+``flat_layout``) only propose; this module decides the order, applies a proposal, and
+copies files into the job workspace. Every write goes to a new directory there; the
+imported snapshot is never modified. Workers never write source files: each plan is
+validated completely before the first file changes.
 """
 
 from __future__ import annotations
 
 import fnmatch
 import shutil
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple
@@ -19,11 +22,11 @@ from .cancellation import cancellation_point
 from .config import Settings
 from .errors import PreparationError
 from .findings import Finding, has_blockers
-from .metadata_privacy import plan_metadata_sanitization
+from .flat_layout import plan_flatten
+from .metadata_source_edits import plan_metadata_sanitization
 from .path_safety import is_contained
-from .project import plan_cleanup
+from .project_cleanup import plan_cleanup
 from .report import Change
-from .source import plan_flatten
 from .source_transform import plan_source_transforms
 from .workflow_options import DocumentOptions
 
@@ -45,7 +48,10 @@ def stage_document(snapshot: Path, destination: Path, document: DocumentOptions)
         if document.include and not patterns:
             continue
         if not is_contained(source, path):
-            raise PreparationError(f"Document {document.name} contains an unsafe input")
+            raise PreparationError(
+                f"Document {document.name} contains an unsafe input, {relative!r}, which is a "
+                "link or leads outside its source directory; replace it with the file itself"
+            )
         matched.update(patterns)
         selected.append((path, relative))
     missing = set(document.include) - matched
@@ -79,14 +85,16 @@ def apply_contents(
     """Write proposed file contents after validating every target and precondition."""
     targets: list[tuple[Path, bytes]] = []
     if originals is not None and set(contents) != set(originals):
-        raise PreparationError("Formatting proposals lack complete original-byte preconditions")
+        raise PreparationError(
+            "Proposed contents lack the original bytes needed to confirm the files did not change"
+        )
     for relative, data in sorted(contents.items()):
         cancellation_point()
         path = root / relative
         if not is_contained(root, path, regular_file=True):
             raise PreparationError(f"Invalid transformation path: {relative}")
         if originals is not None and path.read_bytes() != originals[relative]:
-            raise PreparationError(f"Source changed after formatting was planned: {relative}")
+            raise PreparationError(f"Source changed after its edit was planned: {relative}")
         targets.append((path, data))
     for path, data in targets:
         cancellation_point()
@@ -141,6 +149,33 @@ def _source_edit(prepared: Path, main: str, settings: Settings, retained: set[st
     return _StagedEdit(plan.changes, plan.findings, apply)
 
 
+def _staged_edits(
+    prepared: Path, main: str, settings: Settings, retained: set[str]
+) -> Iterator[_StagedEdit]:
+    """Plan each selected edit just before it is applied: later plans read the earlier results."""
+    yield _metadata_edit(prepared, settings)
+    yield _bibliography_edit(prepared, main, settings)
+    if settings.normalize_doi:
+        yield _doi_edit(prepared, main)
+    yield _source_edit(prepared, main, settings, retained)
+
+
+def _apply_edits(
+    edits: Iterator[_StagedEdit], changes: list[Change], findings: list[Finding]
+) -> bool:
+    """Apply the edits in order, collecting their changes and findings; whether all applied.
+
+    A blocked edit is reported but not applied, and later edits are not planned.
+    """
+    for edit in edits:
+        findings.extend(edit.findings)
+        changes.extend(edit.changes)
+        if has_blockers(edit.findings):
+            return False
+        edit.apply()
+    return True
+
+
 @dataclass(frozen=True, slots=True)
 class TransformOutcome:
     """The staged copy after the selected transformations, and what they changed or found."""
@@ -174,21 +209,7 @@ def transform_sources(
             if candidate.is_file():
                 candidate.unlink()
         changes.extend(cleanup)
-    edits: list[Callable[[], _StagedEdit]] = [
-        lambda: _metadata_edit(prepared, settings),
-        lambda: _bibliography_edit(prepared, main, settings),
-        *([lambda: _doi_edit(prepared, main)] if settings.normalize_doi else []),
-        lambda: _source_edit(prepared, main, settings, retained),
-    ]
-    for plan in edits:
-        edit = plan()
-        findings.extend(edit.findings)
-        changes.extend(edit.changes)
-        if has_blockers(edit.findings):
-            # A blocked edit is reported but not applied, and later edits are not planned.
-            break
-        edit.apply()
-    else:
+    if _apply_edits(_staged_edits(prepared, main, settings, retained), changes, findings):
         # Every edit applied, including the source edit, which keeps retained files.
         changes = [
             change

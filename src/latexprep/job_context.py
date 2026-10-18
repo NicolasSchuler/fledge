@@ -1,26 +1,29 @@
-"""The request, settings and resources every stage of one job shares, and its report bookkeeping."""
+"""The request, settings and resources every stage of one job shares.
+
+Report bookkeeping lives in ``job_report`` and choosing the main file in
+``main_selection``; this module holds only what every stage reads or calls.
+"""
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import ParamSpec, TypeVar
 
 from .cancellation import run_in_thread
-from .check_policy import selected_findings
 from .config import Settings
-from .errors import PreparationError, RequestError
-from .findings import Finding
-from .path_safety import is_relative_posix_path
+from .errors import PreparationError
+from .import_budget import ImportLimits
 from .pdf_check_pipeline import PdfCheckSettings
 from .pdf_previews import PdfPreviewCollector, PdfPreviewStore
-from .report import Outcome, Report, outcome_from_findings
+from .project import ImportedProject, import_project
+from .report import Report
 from .resource_budget import ResourceBudget
-from .review_policy import apply_reviews, has_unaccepted_blockers
 from .runtime import ToolRunner
 
+P = ParamSpec("P")
 R = TypeVar("R")
 
 
@@ -37,6 +40,8 @@ class JobCommand(StrEnum):
 
 # Commands that run the source workflow on one or more selected documents.
 DOCUMENT_COMMANDS = frozenset({JobCommand.INSPECT, JobCommand.CHECK, JobCommand.PREPARE})
+# Commands that can export page previews, and so need a directory to save them in.
+PREVIEW_COMMANDS = frozenset({JobCommand.CHECK, JobCommand.PDF, JobCommand.PREPARE})
 
 
 @dataclass(frozen=True)
@@ -72,11 +77,19 @@ class JobContext:
     emit: Callable[[str], None]
 
     async def thread_operation(
-        self, name: str, function: Callable[..., R], *args: Any, **kwargs: Any
+        self, name: str, function: Callable[P, R], /, *args: P.args, **kwargs: P.kwargs
     ) -> R:
         """Run a blocking reader or writer in a worker thread under a default lease."""
         async with self.budget.lease(name):
             return await run_in_thread(function, *args, **kwargs)
+
+    @property
+    def preview_serial(self) -> bool:
+        """Whether comparisons must run one at a time.
+
+        Comparisons that collect previews share one store, so they cannot overlap.
+        """
+        return self.request.pdf_previews is not None
 
     def previews(self, stage: str) -> PdfPreviewCollector | None:
         """A preview collector for one PDF comparison when previews were requested."""
@@ -102,47 +115,21 @@ def pdf_check_settings(settings: Settings) -> PdfCheckSettings:
     )
 
 
-def record_findings(report: Report, findings: Iterable[Finding], stage: str) -> None:
-    """Add findings tagged with the stage that produced them."""
-    report.findings.extend(
-        replace(finding, details={**finding.details, "stage": stage}) for finding in findings
+async def import_input(
+    context: JobContext,
+    report: Report,
+    *,
+    operation: str = "import project",
+    directory: str = "import",
+) -> ImportedProject:
+    """Import a separate snapshot of the input; its findings and changes enter the report."""
+    imported = await context.thread_operation(
+        operation,
+        import_project,
+        context.request.source,
+        context.work / directory,
+        ImportLimits.from_settings(context.settings),
     )
-
-
-def is_blocked(report: Report, settings: Settings) -> bool:
-    """Whether a selected, unaccepted blocking finding stops the job; changes nothing."""
-    selected = selected_findings(report.findings, settings.checks)
-    return has_unaccepted_blockers(selected, settings.reporting)
-
-
-def job_outcome(report: Report, settings: Settings) -> Outcome:
-    """Classify a completed run from its selected findings."""
-    selected = selected_findings(report.findings, settings.checks)
-    return outcome_from_findings(
-        selected, blocked=has_unaccepted_blockers(selected, settings.reporting)
-    )
-
-
-def select_and_review(report: Report, settings: Settings) -> None:
-    """Apply check selection to the report once, then the configured review decisions."""
-    report.findings = selected_findings(report.findings, settings.checks)
-    reviewed = apply_reviews(report, settings.reporting)
-    report.findings, report.outcome = reviewed.findings, reviewed.outcome
-
-
-def names_project_file(snapshot: Path, main: str) -> bool:
-    """Whether ``main`` is a relative path to a file inside the imported project."""
-    return is_relative_posix_path(main, normalized=False) and (snapshot / main).is_file()
-
-
-def main_selection_error(main: str, roots: list[str]) -> RequestError:
-    found = (
-        f"documents found in the input: {', '.join(roots)}"
-        if roots
-        else "no file with \\documentclass was found in the input"
-    )
-    return RequestError(
-        f"main must name a source file inside the project: {main}",
-        "Set --main (or main in the configuration) to a .tex path relative to the input "
-        f"folder or ZIP root; {found}.",
-    )
+    report.findings.extend(imported.findings)
+    report.changes.extend(imported.changes)
+    return imported

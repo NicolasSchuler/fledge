@@ -9,19 +9,20 @@ from dataclasses import asdict, replace
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+from latexprep.command_runner import CommandResult
 from latexprep.config import Settings
 from latexprep.errors import PreparationError, ToolUnavailableError
 from latexprep.findings import has_blockers
 from latexprep.job_context import pdf_check_settings
-from latexprep.pdf_artwork import PdfArtworkOptions
+from latexprep.pdf_artwork_options import PdfArtworkOptions
+from latexprep.pdf_check_options import PdfCheckOptions
 from latexprep.pdf_check_pipeline import inspect_standalone_pdf
-from latexprep.pdf_checks import PdfCheckOptions
-from latexprep.pdf_comparison import _pair_memory_mb, compare_pdfs
+from latexprep.pdf_comparison import compare_pdfs, pair_memory_mb
 from latexprep.pdf_inspection import PdfInspectionOptions, inspect_pdf
 from latexprep.raster_pixels import read_pnm_raster
 from latexprep.resource_budget import ResourceBudget
-from latexprep.runtime import CommandResult, ToolRunner
-from latexprep.submission_checks import SubmissionOptions
+from latexprep.runtime import ToolRunner
+from latexprep.submission_options import SubmissionOptions
 from tests.test_pdf import FakePdfRunner
 
 
@@ -488,7 +489,7 @@ class ParallelPdfTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_geometry_memory_request_rejects_rendering_before_launch(self) -> None:
         runner = RecordingPdfRunner(pages=1)
-        required = _pair_memory_mb((612, 792), (612, 792))
+        required = pair_memory_mb((612, 792), (612, 792))
         self.assertGreater(required, 128)
         budget = ResourceBudget(4, required - 1, render_jobs=4)
         findings = await compare_pdfs(

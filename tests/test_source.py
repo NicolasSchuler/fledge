@@ -7,12 +7,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from latexprep.findings import has_blockers
-from latexprep.source import (
-    analyze_selected_sources,
-    analyze_sources,
-    discover_roots,
-    plan_flatten,
-)
+from latexprep.flat_layout import plan_flatten
+from latexprep.source_analysis import analyze_selected_sources, analyze_sources, discover_roots
+from latexprep.source_graph import SourceGraph
 from latexprep.tex_lexer import MAX_ARGUMENT_CHARS, mask_literals
 
 
@@ -72,8 +69,8 @@ class SourceTests(unittest.TestCase):
 
         with (
             patch.object(Path, "read_bytes", read_selected),
-            patch("latexprep.source_graph.MAX_SOURCE_BYTES", 128),
-            patch("latexprep.source_graph.MAX_TOTAL_SOURCE_BYTES", 128),
+            patch("latexprep.source_loading.MAX_SOURCE_BYTES", 128),
+            patch("latexprep.source_loading.MAX_TOTAL_SOURCE_BYTES", 128),
         ):
             selected = analyze_selected_sources(self.root, "main.tex")
         self.assertTrue(selected.complete, selected.findings)
@@ -774,7 +771,7 @@ class SourceTests(unittest.TestCase):
         self.write("body.tex", "One \\a \\b \\c \\d \\e \\f.\n")
         with (
             patch("latexprep.tex_lexer.MAX_COMMANDS", 5),
-            patch("latexprep.source_graph.MAX_COMMANDS", 5),
+            patch("latexprep.source_loading.MAX_COMMANDS", 5),
         ):
             item = self.finding(
                 analyze_selected_sources(self.root, "main.tex").findings, "source.command_limit"
@@ -860,6 +857,19 @@ class SourceTests(unittest.TestCase):
         self.assertEqual(roots.details["other_roots"], ["other.tex"])
         self.assertNotIn("initial", roots.message.lower())
         self.assertIn("Flat layout supports one document root per package", roots.message)
+
+    def test_graph_completeness_and_other_roots_describe_the_walk(self) -> None:
+        self.write("main.tex", "\\documentclass{article}\n\\input{body}\n")
+        self.write("body.tex", "Body.\n")
+        self.write("other.tex", "\\documentclass{article}\n")
+        graph = SourceGraph.build(self.root, "main.tex")
+        self.assertTrue(graph.is_complete)
+        self.assertEqual(graph.other_roots(), ["other.tex"])
+        self.write("body.tex", "\\input{\\chosen}\n")
+        self.assertFalse(SourceGraph.build(self.root, "main.tex").is_complete)
+        self.write("body.tex", "Body.\n")
+        self.write("main.tex", "\\documentclass{article}\n\\input{missing}\n")
+        self.assertFalse(SourceGraph.build(self.root, "main.tex").is_complete)
 
     def test_long_unicode_collisions_keep_counter_and_byte_limit(self) -> None:
         self.write("main.tex", "\\documentclass{article}")
@@ -1065,7 +1075,8 @@ class SourceTests(unittest.TestCase):
 
     def test_imported_metadata_is_visible_and_subfile_content_is_explicitly_uncertain(self) -> None:
         from latexprep.manuscript import ManuscriptOptions, check_manuscript
-        from latexprep.manuscript_checks import ManuscriptCheckOptions, check_manuscript_policies
+        from latexprep.manuscript_check_options import ManuscriptCheckOptions
+        from latexprep.manuscript_checks import check_manuscript_policies
 
         self.write("main.tex", "\\documentclass{article}\n\\import{parts/}{metadata}\n")
         self.write(

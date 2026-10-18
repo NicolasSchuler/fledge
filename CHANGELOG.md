@@ -32,9 +32,20 @@ the first release of `fledge-latex` is 0.3.0.
   `included_figure_artwork`. The former names are still accepted in settings files
   and presets, but a file or preset layer must not use both spellings of one
   setting. Reports record the current names. The `--format` option is unchanged.
+- **Check catalogue JSON.** `fledge rules --json` now prints an object with
+  `schema_version` and a `rules` list instead of a bare list; `fledge rule CODE
+  --json` and `fledge submission-text --json` gain `schema_version` too.
+- **Removed `--non-interactive`.** The hidden flag did nothing, because Fledge never
+  prompts; remove it from scripts.
 
 ### Changed
 
+- Option help names the defaults it quotes from the settings, and avoids internal terms
+  such as "CPU slots", "page-pair renderers" and "isolated build". The command list
+  is no longer cut off, and `fledge rule CODE` no longer prints test names (they stay
+  in the JSON form). `--main` has one help text everywhere.
+- The "Not checked" hint names the example presets in alphabetical order, taken from
+  the packaged presets.
 - The distribution is published as **`fledge-latex`**, because the PyPI project
   named `fledge` is unrelated. The `fledge` command, the `latex-prep` alias and the
   `latexprep` module are unchanged. Remove an earlier source-checkout installation
@@ -44,6 +55,8 @@ the first release of `fledge-latex` is 0.3.0.
 - The missing-`.bbl` note (`TEX009`) is a scope note instead of a failed result,
   shown only with `--show-passed` unless `submission_checks.require_bbl = true`
   turns it into a warning.
+- The `backend` detail of the missing-`.bbl` finding (`TEX009`) is now `bibtex`,
+  spelled like the `bbl_format` detail of the coverage finding; it was `BibTeX`.
 - On macOS, the Biber toolchain is prepared only when a source mentions biblatex.
   A build that still writes a `.bcf` is discarded and rebuilt once with Biber.
 - Stage findings stay separate when their evidence differs, and unavailable PDF
@@ -87,13 +100,38 @@ the first release of `fledge-latex` is 0.3.0.
 - `online_replication_urls` now rejects a URL listed twice, which only spent the
   request budget twice, and a `filename_allowed_characters` of spaces alone is
   rejected as empty.
+- Lists of places in messages end with `(+N more)` throughout. Manuscript-constraint
+  messages (for example the floats without a caption) used `, +N more` before.
+- In JSON reports, `execution.observed.memory_accounting` is now one of
+  `sampled parent and registered process groups`, `not sampled` or `unavailable`; the
+  reason accounting was unavailable is in the new `memory_accounting_problem`. The
+  build entry `tools.execution` records the build command's `duration_seconds`.
 - Rendered-page measurements are much faster: ink coverage (`PDF205`), figure
   whitespace and edge ink, contrast samples and the changed-pixel count of a rendered
   comparison now use byte operations instead of per-pixel Python loops. Results are
   unchanged.
+- Messages about the output, preview output, reference PDF and job timeout no longer
+  name command-line flags where the job library reports them; they name the output
+  or the setting instead.
+- Source-preparation messages name the files and causes behind them: comment
+  removal lists the source files that could not be parsed, an unsafe document input
+  and a missing, linked or non-plain required input are told apart, a failed second
+  `tex-fmt` pass reports its exit status, and inlining a bibliography into a project
+  with missing files is reported as failed rather than inconclusive.
+- Comparison findings record the pixel-share tolerance as `max_changed_pixel_ratio`
+  (formerly `pixel_tolerance`), next to `channel_tolerance`.
+- Image-metadata matches (`PRV103`) name well-known fields: `EXIF Artist (0x013b)`
+  instead of `EXIF tag 0x013b`, and `JPEG IPTC 2:116 (CopyrightNotice)` instead of
+  `JPEG IPTC 2:116`.
+- Artwork findings (`PDF301` to `PDF313`) lead with the outcome and the numbers that
+  matter, such as the lowest image resolution, the thinnest stroke or the pages with
+  printer marks, instead of describing the method.
 
 ### Added
 
+- `--json-report` names the option that saves the JSON report; `--report` remains an
+  alias. The HTML report has a `<main>` landmark, a title that names the command and
+  document, captions on its tables, and dark-mode and print styles.
 - JSON reports carry `schema_version`, and the schema is published with the
   documentation.
 - Opt-in check `BIB110` verifies the biblatex `.bbl` format version a receiving
@@ -126,11 +164,17 @@ the first release of `fledge-latex` is 0.3.0.
 
 ### Fixed
 
+- Redirected terminal reports no longer carry trailing spaces on wrapped lines.
+- Configuration discovery no longer reads a settings file from the system temporary
+  directory, where any local user could have placed one.
 - A crash exited with 1, the code for "passed with advisories", so CI read it as
   success; it now exits 4 with a plain message.
 - `bib check`, `fmt` and `pdf check` failed when the settings defined
   `workflow.documents`; they now ignore it.
 - A stray socket timeout was reported as the job deadline being exceeded.
+- When the combined report of a multi-document `prepare` could not be represented
+  within the redaction limits, the command failed with an exception; it now reports a
+  `report.redaction_limit` error and publishes nothing, as it does for one document.
 - Copy-ready submission text silently dropped a `[...]` that followed a control
   space, `\,` or `\;`.
 - A stray `$` could make the source scan hang through exponential regex
@@ -161,6 +205,12 @@ the first release of `fledge-latex` is 0.3.0.
 - The Linux sandbox (Bubblewrap) refusing to start was blamed on `latexmk`; the
   report now says the sandbox refused.
 - A corrupt Homebrew install receipt crashed tool discovery on macOS.
+- The temporary state directory of every tool command stayed in the job workspace
+  until the job ended, so long jobs counted thousands of leftover directories against
+  the workspace and storage limits; each is removed when its command ends.
+- Removing discovered secrets from submission findings recursed without a bound, so
+  an unusually deep or self-referencing value crashed it; such a finding is now
+  withheld whole and says so.
 - Terminal output and one-line messages now show private-use, unassigned and lone
   surrogate characters (for example the remains of an undecodable file name) as
   `\uXXXX` escapes instead of passing them on, and copy-ready submission text asks

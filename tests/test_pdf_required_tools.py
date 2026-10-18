@@ -12,18 +12,14 @@ import unittest
 from collections.abc import Awaitable
 from pathlib import Path
 
-from latexprep.pdf_artwork import (
+from latexprep.pdf_artwork import inspect_pdf_artwork
+from latexprep.pdf_artwork_options import (
     PdfArtworkOptions,
     PdfContrastSample,
-    inspect_pdf_artwork,
     required_artwork_tools,
 )
-from latexprep.pdf_checks import (
-    PdfCheckOptions,
-    inspect_included_pdf_figures,
-    inspect_pdf_details,
-    required_pdf_check_tools,
-)
+from latexprep.pdf_check_options import PdfCheckOptions, PdfRegion, required_pdf_check_tools
+from latexprep.pdf_checks import inspect_included_pdf_figures, inspect_pdf_details
 from latexprep.pdf_comparison import COMPARISON_TOOLS, compare_pdfs
 from latexprep.pdf_inspection import (
     PdfInspectionOptions,
@@ -36,9 +32,9 @@ from latexprep.pdf_structure_checks import (
     inspect_pdf_structure,
     required_structure_tools,
 )
-from latexprep.pdf_support import PDF_TOOLS, PdfRegion
+from latexprep.pdf_tools import PDF_TOOLS
+from tests.support import ArtworkRunner
 from tests.test_pdf import FakePdfRunner
-from tests.test_pdf_artwork import ArtworkRunner
 from tests.test_pdf_checks import DetailRunner
 
 REGION = PdfRegion("Area", 1, 10, 10, 90, 90)

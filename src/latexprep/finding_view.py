@@ -1,29 +1,25 @@
 """One display view per finding, shared by every report renderer.
 
 Titles, locations, status labels, evidence excerpts, stage de-duplication,
-ordering and default visibility are derived here once. Renderers only escape the
-view's text for their medium: terminal, compact, HTML or CI annotations.
+ordering and default visibility are derived here once, and so are the report-wide
+summary lines (result counts, change counts, check selection). Renderers only escape
+the text for their medium: terminal, compact, HTML or CI annotations. Views are built
+only from a ``RedactedReport``.
 """
 
 from __future__ import annotations
 
 import json
+from collections import Counter
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from typing import NamedTuple, NewType
+from typing import NamedTuple
 
-from .findings import Finding
-from .report import Report
+from .execution_records import CheckSelectionRecord
+from .findings import DetailKey, Finding
+from .report import RedactedReport
 from .review_policy import review_marker
 from .rules import BY_NAME
-
-# A report whose output fields were redacted together; views are built only from one.
-RedactedReport = NewType("RedactedReport", Report)
-
-
-def redact_report(report: Report) -> RedactedReport:
-    """Sanitize every output field once, before any of it is displayed."""
-    return RedactedReport(report.redacted_copy())
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -44,11 +40,6 @@ DEFAULT_RENDER_OPTIONS = RenderOptions()
 _STATUS_LABELS = {"skipped": "not checked", "not_applicable": "not applicable"}
 
 
-def is_scope_disclaimer(finding: Finding) -> bool:
-    """Informational notes that a check was out of scope; shown only on request."""
-    return finding.severity == "info" and finding.status in {"skipped", "not_applicable"}
-
-
 # Findings that disclose what leaves the machine. They are passed notices, but a reader
 # must see them without asking whenever the run sent anything.
 ALWAYS_LISTED_RULES = frozenset({"online.sharing"})
@@ -58,7 +49,7 @@ def _hidden_by_default(finding: Finding) -> bool:
     # Passed results and scope disclaimers are counted but listed only on request.
     if finding.rule in ALWAYS_LISTED_RULES:
         return False
-    return finding.status == "passed" or is_scope_disclaimer(finding)
+    return finding.status == "passed" or finding.is_scope_disclaimer
 
 
 def size_label(value: object) -> str:
@@ -77,17 +68,17 @@ def size_label(value: object) -> str:
 # Checkers keep their evidence in these detail lists behind a generic message.
 _EVIDENCE_KEYS = (
     "matches",
-    "violations",
+    DetailKey.VIOLATIONS,
     "missing",
     "entries",
-    "changed_pages",
-    "differing_pages",
+    DetailKey.CHANGED_PAGES,
+    DetailKey.DIFFERING_PAGES,
     "nonembedded",
     "below_minimum",
     "candidates",
     "issues",
 )
-_EVIDENCE_PAGE_KEYS = frozenset({"changed_pages", "differing_pages"})
+_EVIDENCE_PAGE_KEYS = frozenset({DetailKey.CHANGED_PAGES, DetailKey.DIFFERING_PAGES})
 _EVIDENCE_ITEMS = 3
 _EVIDENCE_LABEL_CHARS = 120
 _EVIDENCE_NAME_KEYS = ("name", "key", "reference", "label", "doi", "reason")
@@ -111,8 +102,8 @@ def _evidence_label(item: object, pages: bool) -> str | None:
         )
         if location and type(item.get("line")) is int:
             location = f"{location}:{item['line']}"
-        if type(item.get("page")) is int:
-            page = f"page {item['page']}"
+        if type(item.get(DetailKey.PAGE)) is int:
+            page = f"page {item[DetailKey.PAGE]}"
             reason = item.get("reason")
             if location:
                 location = f"{location} ({page})"
@@ -143,8 +134,8 @@ def evidence_excerpt(finding: Finding) -> str:
         if not isinstance(items, (list, tuple)) or not items:
             continue
         hidden = 0
-        count = finding.details.get("violation_count")
-        if key == "violations" and type(count) is int and count > len(items):
+        count = finding.details.get(DetailKey.VIOLATION_COUNT)
+        if key == DetailKey.VIOLATIONS and type(count) is int and count > len(items):
             hidden = count - len(items)
         labels = [_evidence_label(item, key in _EVIDENCE_PAGE_KEYS) for item in items]
         shown = list(dict.fromkeys(label for label in labels if label is not None))[
@@ -167,15 +158,15 @@ def _location(finding: Finding, stages: tuple[str, ...]) -> str:
         location = f"{document}: {location}"
     if finding.line is not None:
         location += f":{finding.line}"
-    elif finding.details.get("input_line") is not None:
-        location += f" (reported input line {finding.details['input_line']}; file unresolved)"
+    elif (input_line := finding.details.get(DetailKey.INPUT_LINE)) is not None:
+        location += f" (reported input line {input_line}; file unresolved)"
     page = finding.page
     if page is not None:
         location += f" (page {page})"
     if stages:
         location += f" [{', '.join(stages)}]"
-    elif "stage" in finding.details:
-        location += f" [{finding.details['stage']}]"
+    elif DetailKey.STAGE in finding.details:
+        location += f" [{finding.details[DetailKey.STAGE]}]"
     return location
 
 
@@ -189,7 +180,7 @@ def _priority(finding: Finding) -> int:
 
 def _blocked_by(finding: Finding) -> tuple[str, ...]:
     """Failed prerequisites of a task the scheduler never started, if this records one."""
-    prerequisites = finding.details.get("blocked_by")
+    prerequisites = finding.details.get(DetailKey.BLOCKED_BY)
     if finding.rule != "execution.task" or finding.status != "skipped":
         return ()
     if not isinstance(prerequisites, list):
@@ -208,15 +199,16 @@ def _identity(finding: Finding) -> tuple[object, ...]:
         finding.severity,
         finding.status,
         finding.message,
-        str(details.get("document", "")),
+        str(details.get(DetailKey.DOCUMENT, "")),
         finding.path,
         finding.line,
-        str(details.get("page")),
-        str(details.get("input_line")),
+        str(details.get(DetailKey.PAGE)),
+        str(details.get(DetailKey.INPUT_LINE)),
         finding.evidence_kind,
         finding.incomplete,
         json.dumps(
-            {key: value for key, value in details.items() if key != "stage"}, sort_keys=True
+            {key: value for key, value in details.items() if key != DetailKey.STAGE},
+            sort_keys=True,
         ),
         review_marker(finding),
     )
@@ -241,7 +233,7 @@ def merge_stage_copies(findings: Iterable[Finding]) -> list[StagedFinding]:
         groups.setdefault(_identity(finding), []).append(finding)
     entries = []
     for members in groups.values():
-        unstaged = next((item for item in members if "stage" not in item.details), None)
+        unstaged = next((item for item in members if DetailKey.STAGE not in item.details), None)
         if unstaged is not None or len(members) == 1:
             entries.append(StagedFinding(unstaged or members[0], ()))
             continue
@@ -256,7 +248,7 @@ def not_run_summaries(report: RedactedReport) -> list[str]:
     for finding in report.findings:
         if prerequisites := _blocked_by(finding):
             key = (finding.document or "", prerequisites)
-            task = str(finding.details.get("task", finding.message))
+            task = str(finding.details.get(DetailKey.TASK, finding.message))
             if task not in groups.setdefault(key, []):
                 groups[key].append(task)
     lines = []
@@ -268,6 +260,41 @@ def not_run_summaries(report: RedactedReport) -> list[str]:
             + f"{' and '.join(prerequisites)} failed: {', '.join(sorted(tasks))}"
         )
     return lines
+
+
+def result_counts(report: RedactedReport) -> str:
+    """The one-line tally of errors, warnings and unresolved or passed results."""
+    findings = [entry.finding for entry in merge_stage_copies(report.findings)]
+    errors = sum(item.severity == "error" and item.status != "passed" for item in findings)
+    warnings = sum(item.severity == "warning" and item.status != "passed" for item in findings)
+    statuses = Counter(item.status for item in findings)
+    # Informational scope notes are neither failures nor missing evidence: count them apart.
+    skipped_notes = sum(item.status == "skipped" and item.is_scope_disclaimer for item in findings)
+    not_applicable = statuses["not_applicable"] + skipped_notes
+    incomplete = statuses["inconclusive"] + statuses["skipped"] - skipped_notes
+    return (
+        f"{errors} error{'s' if errors != 1 else ''}, "
+        f"{warnings} warning{'s' if warnings != 1 else ''}, {incomplete} incomplete, "
+        f"{not_applicable} not applicable, "
+        f"{statuses['passed']} passed result{'s' if statuses['passed'] != 1 else ''}"
+    )
+
+
+def change_summary(report: RedactedReport) -> str:
+    """The changes counted by kind, most frequent first: ``exclude: 3, move: 1``."""
+    kinds = Counter(change.kind for change in report.changes)
+    ordered = sorted(kinds.items(), key=lambda item: (-item[1], item[0]))
+    return ", ".join(f"{kind}: {count}" for kind, count in ordered)
+
+
+def selection_description(selection: CheckSelectionRecord | None) -> str | None:
+    """What the check selection restricts, or None when every check was selected."""
+    if selection is None or (selection.select == ("ALL",) and not selection.ignore):
+        return None
+    return (
+        f"Checks: select {', '.join(selection.select) or '(none)'}; "
+        f"ignore {', '.join(selection.ignore) or '(none)'}; required validation retained"
+    )
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

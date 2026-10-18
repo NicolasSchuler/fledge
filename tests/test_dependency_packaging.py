@@ -10,17 +10,17 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from latexprep.bibliography_transform import BibliographyTransformOptions
+from latexprep.build_result import BuildResult
 from latexprep.check_selection import CheckSelection
 from latexprep.config import Settings
 from latexprep.core import run_job
 from latexprep.errors import PreparationError
 from latexprep.findings import Finding
 from latexprep.job_context import JobRequest
-from latexprep.latexmk_build import BuildResult
 from latexprep.package_inputs import generated_bibliography_inputs
 from latexprep.report import Report
 from latexprep.source_transform import SourceTransformOptions
-from latexprep.submission_checks import SubmissionOptions
+from latexprep.submission_options import SubmissionOptions
 from latexprep.workflow_options import DocumentOptions, WorkflowOptions
 
 

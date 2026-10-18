@@ -1,75 +1,73 @@
 """Literal dependency graph of a LaTeX project, built on the bounded lexical subset.
 
-Resolution uses the selected main file's compilation directory and supported
-literal import/subfile contexts. Dynamic paths, unknown file readers, scoped
-paths and ambiguous lookups are recorded as findings instead of being guessed.
+``SourceGraph.build`` selects the main file, then walks it in source order, following
+each literal file reference into the file it names. Resolution uses the selected main
+file's compilation directory and supported literal import/subfile contexts. Dynamic
+paths, unknown file readers, scoped paths and ambiguous lookups are recorded as
+findings instead of being guessed.
+
+The graph owns the walk and its results: sources, references, dependencies and
+findings. Reading and lexing files is ``source_loading``; judging commands is
+``source_command_checks``; turning a name into a file is ``source_resolution``; the
+command tables are ``source_file_commands``.
+
+The walk. ``_visit`` reads a file and goes through its commands in order. A file
+command is resolved in the current lookup scope, its reference is recorded, and the
+file it names is visited in turn with the scope that command establishes (an
+``\\import`` or ``\\subfile`` adds a directory). A ``\\graphicspath`` changes the
+graphics search path for the rest of the file and for what the file's inputs leave
+behind, which is why a visit returns the search path in force at its end. A visit is
+skipped when the same file was already walked with the same search path, directory
+context and subfiles state.
 """
 
 from __future__ import annotations
 
-import codecs
 import posixpath
 import re
-import unicodedata
-from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Literal, NamedTuple, Self
 
 from .cancellation import cancellation_point
 from .errors import PreparationError
-from .file_safety import FileTooLargeError, read_regular_file
-from .findings import EvidenceKind, Finding
-from .limits import KIB, MIB
-from .literal_text import HEADING_DEPTHS, KEY_ARGUMENT_COMMANDS, REFERENCE_COMMANDS, TEXT_WRAPPERS
+from .findings import Finding, has_blockers
 from .path_safety import has_drive_prefix, lexically_escapes
-from .tex_commands import ROOT_SUFFIXES, TEX_SOURCE_SUFFIXES
+from .project_files import is_parsed_source, known_path_index, project_files
+from .source_command_checks import SourceChecks, check_source
+from .source_file_commands import (
+    COMMA_LIST_FILE_COMMANDS,
+    FILE_COMMANDS,
+    IMPORT_COMMANDS,
+    SUPPORTED_FONT_COMMANDS,
+    TRAVERSED_COMMANDS,
+    file_argument_index,
+    is_literal_text,
+)
+from .source_findings import GraphFindings, listed_names
+from .source_loading import LoadBudget, ParsedSource, is_document_root, load_source
+from .source_resolution import (
+    LookupScope,
+    ProjectTree,
+    Reference,
+    SystemReference,
+    project_path,
+    resolve_reference,
+)
+from .tex_commands import ROOT_SUFFIXES
 from .tex_lexer import (
-    MAX_ARGUMENT_CHARS,
     MAX_COMMANDS,
-    MAX_SOURCE_BYTES,
-    MAX_TOTAL_SOURCE_BYTES,
     Argument,
     Command,
-    ParseLimit,
-    ParseLimitExceeded,
-    blank_regions,
-    comment_starts,
-    conditional_spans,
-    in_conditional,
     read_group,
-    scan_commands,
     skip_space,
-    source_regions,
     split_argument_items,
 )
 
 MAX_INPUT_DEPTH = 128
-# Most paths named in one message; the rest are counted.
-_MAX_LISTED_PATHS = 5
-# Appended to advice for constructs the scan cannot follow, to say when they matter.
-_NEEDED_FOR_RESTRUCTURING = (
-    'Flat layout (layout = "flat") and source transformations need this; '
-    'layout = "preserve" does not.'
-)
-_COPY_INTO_PROJECT = (
-    "Copy the file into the project and refer to it by a path relative to the project folder."
-)
-# What to tell the user for each way an argument can defeat the lexer's bounds.
-_ARGUMENT_LIMIT_ADVICE: dict[ParseLimit, tuple[str, str]] = {
-    "unclosed_group": (
-        "A brace group opened on this line is never closed.",
-        "Add the missing closing brace, or remove the extra opening brace.",
-    ),
-    "oversized_group": (
-        f"A brace group on this line is longer than {MAX_ARGUMENT_CHARS // KIB} KiB.",
-        "Move the long text out of the command argument, for example into its own file.",
-    ),
-    "argument_budget": (
-        "The command arguments in this file together exceed the supported total size.",
-        "Split the file, or shorten long or deeply nested command arguments.",
-    ),
-}
+_FONT_EXTENSIONS = frozenset({".otf", ".ttf", ".ttc"})
+_FONT_OPTION_KEYS = frozenset({"Path", "Ligatures", "Scale", "Renderer", "Numbers"})
+_FONT_PATH_OPTION = re.compile(r"(?:^|,)\s*Path\s*=\s*(\{[^{}]*\}|[^,]*)")
 
 # Findings about a source file the graph tried to read but could not parse. Every
 # command and reference in such a file is unknown, so a reader that needs the file's
@@ -110,219 +108,6 @@ INCOMPLETE_GRAPH_RULES = UNPARSED_SOURCE_RULES | {
     "source.missing_dependency",
     "source.context_ambiguity",
 }
-# Every TeX-like input is parsed; the generated bibliography is read as TeX as well.
-_SOURCE_SUFFIXES = TEX_SOURCE_SUFFIXES | {".bbl"}
-# Graphics lookup order of the default pdfTeX graphics rules.
-GRAPHICS_SUFFIXES = (".pdf", ".png", ".jpg", ".mps", ".jpeg", ".jbig2", ".jb2", ".eps", ".ps")
-# Suffixes TeX tries, in order, before the bare name of a suffixless reference.
-DEFAULT_SUFFIXES_BY_FILE_COMMAND: dict[str, tuple[str, ...]] = {
-    "input": (".tex",),
-    "include": (".tex",),
-    "includegraphics": GRAPHICS_SUFFIXES,
-    "bibliography": (".bib",),
-    "addbibresource": (".bib",),
-    "bibliographystyle": (".bst",),
-    "documentclass": (".cls",),
-    "usepackage": (".sty",),
-    "RequirePackage": (".sty",),
-    "RequirePackageWithOptions": (".sty",),
-    "LoadClass": (".cls",),
-    "LoadClassWithOptions": (".cls",),
-    "import": (".tex",),
-    "subimport": (".tex",),
-    "inputfrom": (".tex",),
-    "subinputfrom": (".tex",),
-    "subfile": (".tex",),
-    "pgfplotstableread": (),
-    "pgfplotstabletypeset": (),
-    "csvreader": (),
-    "csvautotabular": (),
-    "DTLloaddb": (),
-    "lstinputlisting": (),
-    "inputminted": (),
-    "verbatiminput": (),
-    "VerbatimInput": (),
-    "includepdf": (".pdf",),
-    "setmainfont": (),
-    "setsansfont": (),
-    "setmonofont": (),
-    "fontspec": (),
-}
-FILE_COMMANDS = frozenset(DEFAULT_SUFFIXES_BY_FILE_COMMAND)
-# Commands taking a directory and then a file name.
-IMPORT_COMMANDS = frozenset({"import", "subimport", "inputfrom", "subinputfrom"})
-SECOND_ARGUMENT_FILE_COMMANDS = frozenset({*IMPORT_COMMANDS, "DTLloaddb", "inputminted"})
-
-
-def file_argument_index(command_name: str) -> int:
-    """The index of the argument that names the file: after the directory, if there is one."""
-    return 1 if command_name in SECOND_ARGUMENT_FILE_COMMANDS else 0
-
-
-# File commands whose argument is a comma-separated list of names.
-COMMA_LIST_FILE_COMMANDS = frozenset(
-    {"bibliography", "usepackage", "RequirePackage", "RequirePackageWithOptions"}
-)
-# Class, package and style commands that TeX may also satisfy from the toolchain.
-TOOLCHAIN_FILE_COMMANDS = frozenset(
-    {
-        "bibliographystyle",
-        "documentclass",
-        "usepackage",
-        "RequirePackage",
-        "RequirePackageWithOptions",
-        "LoadClass",
-        "LoadClassWithOptions",
-    }
-)
-# Font commands whose font file is followed; the other font commands are unsupported.
-_SUPPORTED_FONT_COMMANDS = frozenset({"setmainfont", "setsansfont", "setmonofont", "fontspec"})
-_UNSUPPORTED_COMMANDS = {
-    "includefrom",
-    "subincludefrom",
-    "subfileinclude",
-    "externaldocument",
-    "includepdfmerge",
-    "addplot",
-    "addplot3",
-    "csvloop",
-    "includesvg",
-    "includeinkscape",
-    "includestandalone",
-    "includeonly",
-    "openin",
-    "openout",
-    "read",
-    "IfFileExists",
-    "InputIfFileExists",
-    "DeclareGraphicsExtensions",
-    "DeclareGraphicsRule",
-    "newread",
-    "newwrite",
-    "catcode",
-    "scantokens",
-    "csname",
-    "directlua",
-    "luadirect",
-    "luaexec",
-}
-_FONT_COMMANDS = _SUPPORTED_FONT_COMMANDS | {"newfontfamily", "newfontface"}
-# Commands whose arguments hold prose, keys or declarations, never a file the document
-# reads: the shared prose tables plus the groups below.
-_TEXT_COMMANDS = frozenset(
-    {
-        *TEXT_WRAPPERS,
-        *KEY_ARGUMENT_COMMANDS,
-        *REFERENCE_COMMANDS,
-        *HEADING_DEPTHS,
-        # Links: the address is an argument, but not a project file.
-        "url",
-        "nolinkurl",
-        "path",
-        "href",
-        "hyperref",
-        "hypersetup",
-        # Boxes, captions and front matter.
-        "text",
-        "fbox",
-        "caption",
-        "captionof",
-        "title",
-        "author",
-        "thanks",
-        "footnote",
-        # Package, class and file declarations, and their messages.
-        "ProvidesPackage",
-        "ProvidesClass",
-        "ProvidesFile",
-        "typeout",
-        "PackageWarning",
-        "PackageInfo",
-        "ClassWarning",
-        "ClassInfo",
-        # biblatex field access.
-        "bibfield",
-        "field",
-    }
-)
-# Arguments are control-sequence names, never files: biblatex's generated .bbl
-# guards itself with \@ifundefined{ver@biblatex.sty}.
-_MACRO_NAME_COMMANDS = {"@ifundefined", "@namedef", "@nameuse"}
-_PATH_LIKE = re.compile(
-    r"""
-    (?: ^ | [\s,=] )      # the value's start or a list/key separator
-    [^\s{}]+              # a name without spaces or groups
-    \. (?: tex | ltx | bib | bst | sty | cls | pdf | png | jpe?g | eps | svg
-         | csv | tsv | dat | txt | json | xml | ttf | otf )
-    (?: $ | [\s,] )       # the value's end or a list separator
-    """,
-    re.IGNORECASE | re.VERBOSE,
-)
-# Commands whose resolved target is read as TeX source in the current path context;
-# a subfile is traversed with its own directory as context instead.
-_TRAVERSED_COMMANDS = frozenset(
-    {
-        "input",
-        "include",
-        "documentclass",
-        "usepackage",
-        "RequirePackage",
-        "RequirePackageWithOptions",
-        "LoadClass",
-        "LoadClassWithOptions",
-    }
-)
-
-
-def _listed(names: Sequence[str]) -> str:
-    """Comma-separated ``names``; many of them are cut short and counted."""
-    shown = ", ".join(names[:_MAX_LISTED_PATHS])
-    hidden = len(names) - _MAX_LISTED_PATHS
-    return f"{shown} and {hidden} more" if hidden > 0 else shown
-
-
-def path_comparison_key(value: str) -> str:
-    """Key under which paths collide on case-insensitive or normalizing file systems."""
-    return unicodedata.normalize("NFC", value).casefold()
-
-
-def project_files(root: Path) -> dict[str, Path]:
-    """Map every project-relative POSIX path (files and links) to its path, in stable order."""
-    if not root.is_dir():
-        raise PreparationError(f"Source project is not a directory: {root}")
-    return {
-        path.relative_to(root).as_posix(): path
-        for path in sorted(
-            root.rglob("*"),
-            key=lambda path: (path_comparison_key(path.as_posix()), path.as_posix()),
-        )
-        if path.is_file() or path.is_symlink()
-    }
-
-
-def is_document_root(commands: list[Command]) -> bool:
-    """Whether a source declares a document class or opens the document environment."""
-    return any(
-        command.name == "documentclass" or command.begins("document") for command in commands
-    )
-
-
-def is_literal_text(value: str) -> bool:
-    """Whether ``value`` is nonempty and free of TeX syntax that could change its meaning."""
-    return bool(value) and not any(char in value for char in "\\{}#$^~&%\n\r\x00")
-
-
-@dataclass(frozen=True, slots=True)
-class ParsedSource:
-    """One readable project source and its lexical scan."""
-
-    text: str
-    # ``text`` with comments and literal regions blanked; offsets are unchanged.
-    masked: str
-    commands: list[Command]
-    bom: bool = False
-    # Offsets of the comments blanked in ``masked``, in order.
-    comment_starts: tuple[int, ...] = ()
 
 
 class ArgumentLocation(NamedTuple):
@@ -340,21 +125,34 @@ class FileReference(NamedTuple):
     command: str
 
 
-class SystemReference(NamedTuple):
-    """A class, package or style reference left for the TeX toolchain to resolve."""
+class _Frame(NamedTuple):
+    """One visit of a file: the lookup state it starts with.
 
-    path: str
-    command: Command
-    reference: str
-    basename: str
+    ``search`` is the graphics search path in force, ``context`` the directories of the
+    files entered so far (innermost first), and ``subfile`` whether the file is read as a
+    ``\\subfile`` body, of which only the part between ``\\begin{document}`` and
+    ``\\end{document}`` counts.
+    """
 
-
-class _TraversalState(NamedTuple):
     path: str
     search: tuple[str, ...]
+    context: tuple[str, ...] = ()
+    subfile: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class _Visit:
+    """The file being walked: its parsed source, the files above it, and its lookup context."""
+
+    path: str
+    source: ParsedSource
+    stack: tuple[str, ...]
     context: tuple[str, ...]
-    subfile: bool
-    subfiles_package_loaded: bool
+
+    @property
+    def inner_stack(self) -> tuple[str, ...]:
+        """The files above any file this one reads: those above it, and itself."""
+        return (*self.stack, self.path)
 
 
 # "project" reads every source file (to discover document roots); "selected" reads
@@ -367,18 +165,13 @@ class SourceGraph:
 
     Construct with :meth:`build`. ``findings`` holds every finding in order;
     ``uncertainties`` is the inconclusive subset outside the supported lexical subset.
+    ``references`` maps each literal file argument to the file it names, and
+    ``search_arguments`` the arguments a flat layout must rewrite for directory changes.
     """
 
     def __init__(self, root: Path) -> None:
-        self.root = root.resolve()
         self.files = project_files(root)
-        # Every path suffix and directory prefix, for cheap "could this name a
-        # project file anywhere" tests before a lookup context is established.
-        self.known_paths: set[str] = set()
-        for filename in self.files:
-            parts = filename.split("/")
-            self.known_paths.update("/".join(parts[start:]) for start in range(len(parts)))
-            self.known_paths.update("/".join(parts[:end]) + "/" for end in range(1, len(parts)))
+        self.known_paths = known_path_index(self.files)
         self.sources: dict[str, ParsedSource] = {}
         self.findings: list[Finding] = []
         self.uncertainties: list[Finding] = []
@@ -394,9 +187,9 @@ class SourceGraph:
         self.main: str | None = None
         # Compilation directory of the main file; paths resolve relative to it.
         self.cwd = ""
-        self._cache: dict[_TraversalState, tuple[str, ...]] = {}
-        self._source_bytes = 0
-        self._parsed_commands = 0
+        self._reporter = GraphFindings(self.findings, self.uncertainties)
+        self._cache: dict[tuple[_Frame, bool], tuple[str, ...]] = {}
+        self._budget = LoadBudget()
         self._attempted: set[str] = set()
         self._events = 0
 
@@ -417,7 +210,7 @@ class SourceGraph:
         if graph.main:
             graph.cwd = posixpath.dirname(graph.main)
             graph.dependencies.add(graph.main)
-            graph._visit(graph.main, (), ())
+            graph._visit(_Frame(graph.main, ()), ())
         if scope == "selected":
             graph.roots = graph._document_roots()
         return graph
@@ -427,14 +220,31 @@ class SourceGraph:
         """Files the graph tried to read but could not parse; their references are unknown."""
         return self._attempted.difference(self.sources)
 
+    @property
+    def is_complete(self) -> bool:
+        """Whether the walk followed everything: no uncertainty and no blocking finding.
+
+        Rewriting sources (merging inputs, inlining a bibliography) needs this; a graph
+        with a gap cannot say which files a rewrite would touch.
+        """
+        return not self.uncertainties and not has_blockers(self.findings)
+
+    def other_roots(self, *, include_subfiles: bool = True) -> list[str]:
+        """The document roots other than the main file.
+
+        A subfile body declares its own root; ``include_subfiles=False`` leaves those
+        out, since a flat package keeps them under the main file.
+        """
+        return [
+            name
+            for name in self.roots
+            if name != self.main and (include_subfiles or name not in self.subfile_targets)
+        ]
+
     def _load_project_sources(self) -> None:
         for name, path in self.files.items():
             cancellation_point()
-            if (
-                path.is_symlink()
-                or path.suffix.lower() in _SOURCE_SUFFIXES
-                or name.endswith((".pdf_tex", ".eps_tex", ".pstex_t"))
-            ):
+            if is_parsed_source(name, path):
                 self._load(name)
 
     def _document_roots(self) -> list[str]:
@@ -444,165 +254,18 @@ class SourceGraph:
             if Path(name).suffix.lower() in ROOT_SUFFIXES and is_document_root(source.commands)
         ]
 
-    def _uncertain(
-        self,
-        rule: str,
-        message: str,
-        path: str,
-        line: int | None = None,
-        suggestion: str | None = None,
-        details: dict[str, object] | None = None,
-    ) -> None:
-        finding = Finding(
-            rule,
-            message,
-            status="inconclusive",
-            path=path,
-            line=line,
-            suggestion=suggestion,
-            details=details or {},
-        )
-        if finding not in self.uncertainties:
-            self.uncertainties.append(finding)
-            self.findings.append(finding)
-
-    def _unreadable(self, name: str, error: OSError) -> None:
-        """Record that a source could not be read, naming the cause but not the local path."""
-        cause = (error.strerror or type(error).__name__).lower()
-        self._uncertain(
-            "source.encoding",
-            f"Source could not be read ({cause}); its contents were not changed.",
-            name,
-            suggestion="Make the file readable, then prepare it again.",
-        )
-
-    def _parse_limit_reached(self, name: str, text: str, error: ParseLimitExceeded) -> None:
-        """Record which bound of the lexical subset a source exceeded, and where."""
-        line = text.count("\n", 0, error.offset) + 1
-        if error.reason == "command_count":
-            self._uncertain(
-                "source.command_limit",
-                f"This file has more than {MAX_COMMANDS:,} TeX commands, more than can be checked.",
-                name,
-                line,
-                "Split the file or reduce the selected source set.",
-            )
-            return
-        message, suggestion = _ARGUMENT_LIMIT_ADVICE[error.reason]
-        self._uncertain("source.argument_limit", message, name, line, suggestion)
-
-    def _names_project_file(self, command: Command) -> bool:
-        """Whether a class/package reference can name a file inside the project.
-
-        Lookup context is not established while a file is loaded, so this only
-        rejects names with no matching project file under any directory.
-        """
-        if not command.arguments:
-            return False
-        suffixes = DEFAULT_SUFFIXES_BY_FILE_COMMAND[command.name]
-        for item in split_argument_items(
-            command.arguments[0], comma_separated=command.name in COMMA_LIST_FILE_COMMANDS
-        ):
-            if not is_literal_text(item.value):
-                return True
-            if item.value in self.known_paths or any(
-                item.value + suffix in self.known_paths for suffix in suffixes
-            ):
-                return True
-        return False
-
     def _load(self, name: str) -> ParsedSource | None:
+        """The parsed source of ``name``, loading and checking it on first use."""
         if name in self.sources:
             return self.sources[name]
         if name in self._attempted:
             return None
         self._attempted.add(name)
-        path = self.files[name]
-        if path.is_symlink():
-            self._uncertain(
-                "source.link",
-                "Symbolic links are outside the supported source subset.",
-                name,
-                suggestion="Supply the actual project file inside the project.",
-            )
+        source = load_source(name, self.files[name], self._budget, self._reporter)
+        if source is None:
             return None
-        try:
-            raw = read_regular_file(
-                path, min(MAX_SOURCE_BYTES, MAX_TOTAL_SOURCE_BYTES - self._source_bytes)
-            )
-        except FileTooLargeError:
-            self._uncertain(
-                "source.size_limit",
-                f"Source parsing exceeded the {MAX_SOURCE_BYTES // MIB} MiB per-file "
-                f"or {MAX_TOTAL_SOURCE_BYTES // MIB} MiB total limit.",
-                name,
-                suggestion="Reduce the selected source set or inspect this file separately.",
-            )
-            return None
-        except OSError as error:
-            self._unreadable(name, error)
-            return None
-        self._source_bytes += len(raw)
-        try:
-            text = raw.decode("utf-8-sig")
-        except UnicodeDecodeError:
-            self._uncertain(
-                "source.encoding",
-                "Source is not valid UTF-8; its encoding was not changed.",
-                name,
-                suggestion="Convert an explicit copy to UTF-8 before preparing it.",
-            )
-            return None
-        regions, unclosed = source_regions(text)
-        masked = blank_regions(text, regions)
-        comments = comment_starts(regions)
-        try:
-            commands = scan_commands(masked, comments)
-        except ParseLimitExceeded as error:
-            self._parse_limit_reached(name, text, error)
-            return None
-        self._parsed_commands += len(commands)
-        if self._parsed_commands > MAX_COMMANDS:
-            self._uncertain(
-                "source.command_limit",
-                f"The project's sources together have more than {MAX_COMMANDS:,} TeX commands, "
-                "more than can be checked.",
-                name,
-                suggestion="Reduce the selected source set or inspect this file separately.",
-            )
-            return None
-        source = ParsedSource(
-            text, masked, commands, raw.startswith(codecs.BOM_UTF8), tuple(comments)
-        )
-        spans = conditional_spans(commands)
-        for command in commands:
-            if command.name != "graphicspath" and command.name not in FILE_COMMANDS:
-                continue
-            if not in_conditional(spans, command.start):
-                continue
-            # Toolchain classes and packages are covered by recorded build inputs.
-            if command.name in TOOLCHAIN_FILE_COMMANDS and not self._names_project_file(command):
-                continue
-            self._uncertain(
-                "source.conditional_dependency",
-                "Conditional TeX control flow encloses a file reference; "
-                "the static scan does not establish which branch executes.",
-                name,
-                command.line,
-                suggestion="Make the dependency unconditional so it can be followed. "
-                'With layout = "preserve" the files the build read are shipped anyway.',
-            )
         self.sources[name] = source
-        for offset in unclosed:
-            self._uncertain(
-                "source.literal_unclosed",
-                "A literal region has no closing delimiter; "
-                "later commands cannot be inspected reliably.",
-                name,
-                text.count("\n", 0, offset) + 1,
-            )
-        for command in commands:
-            self._check_command(name, source, command)
+        check_source(SourceChecks(name, source, self.known_paths, self._reporter))
         return source
 
     def _select_main(self, main: str | None) -> str | None:
@@ -615,7 +278,7 @@ class SourceGraph:
                 or lexically_escapes(candidate)
             )
             if escapes or candidate not in self.files:
-                roots = f" Document roots found: {_listed(self.roots)}." if self.roots else ""
+                roots = f" Document roots found: {listed_names(self.roots)}." if self.roots else ""
                 self.findings.append(
                     Finding(
                         "source.main_invalid",
@@ -639,7 +302,7 @@ class SourceGraph:
         self.findings.append(
             Finding(
                 "source.root_ambiguous" if self.roots else "source.root_missing",
-                f"Multiple document roots were found: {_listed(self.roots)}."
+                f"Multiple document roots were found: {listed_names(self.roots)}."
                 if self.roots
                 else "No literal document root could be selected.",
                 severity="error",
@@ -650,305 +313,27 @@ class SourceGraph:
         )
         return None
 
-    def _check_command(self, name: str, source: ParsedSource, command: Command) -> None:
-        if (
-            command.name in {"usepackage", "RequirePackage"}
-            and command.arguments
-            and "subfiles" in {item.value for item in split_argument_items(command.arguments[0])}
-            and any("v1" in option.value.split(",") for option in command.options)
-        ):
-            self._uncertain(
-                "source.subfile_structure",
-                "The subfiles v1 preamble execution mode is unsupported.",
-                name,
-                command.line,
-            )
-        if command.name in {"ProvidesPackage", "ProvidesClass", "ProvidesFile"}:
-            if command.arguments and "/" in command.arguments[0].value:
-                self._uncertain(
-                    "source.path_identity",
-                    "The declared package, class, or file identity contains a directory path.",
-                    name,
-                    command.line,
-                    "Flat layout would move this file and change the declared identity; "
-                    'use layout = "preserve" to keep it.',
-                )
-        if command.name in _UNSUPPORTED_COMMANDS or (
-            command.name in _FONT_COMMANDS and command.name not in _SUPPORTED_FONT_COMMANDS
-        ):
-            self._uncertain(
-                "source.unsupported_command",
-                f"\\{command.name} may depend on paths or runtime lookup "
-                "outside the supported literal subset.",
-                name,
-                command.line,
-                "Replace this command with a literal file reference the scan can follow. "
-                + _NEEDED_FOR_RESTRUCTURING,
-                {"command": command.name},
-            )
-        elif (
-            command.name not in FILE_COMMANDS
-            and command.name not in _TEXT_COMMANDS
-            and command.name not in _MACRO_NAME_COMMANDS
-            and command.name != "graphicspath"
-        ):
-            for argument in (*command.options, *command.arguments):
-                if is_literal_text(argument.value) and (
-                    _PATH_LIKE.search(argument.value)
-                    or ("/" in argument.value and argument.value.strip() in self.known_paths)
-                ):
-                    self._uncertain(
-                        "source.custom_path",
-                        f"\\{command.name} has a possible file argument "
-                        "whose lookup semantics are unknown.",
-                        name,
-                        command.line,
-                        "Name the file with a supported command such as \\input or "
-                        "\\includegraphics. " + _NEEDED_FOR_RESTRUCTURING,
-                        {"command": command.name, "argument": argument.value},
-                    )
-                    break
-        if command.name in FILE_COMMANDS or command.name == "graphicspath":
-            for option in command.options:
-                subfiles_parent = (
-                    command.name == "documentclass"
-                    and command.arguments
-                    and command.arguments[0].value.strip() == "subfiles"
-                )
-                if (
-                    not subfiles_parent
-                    and command.name not in _SUPPORTED_FONT_COMMANDS
-                    and is_literal_text(option.value)
-                    and _PATH_LIKE.search(option.value)
-                ):
-                    self._uncertain(
-                        "source.path_option",
-                        f"\\{command.name} has a file-like option "
-                        "with unsupported lookup semantics.",
-                        name,
-                        command.line,
-                        "Simplify the option so it no longer looks like a file path. "
-                        + _NEEDED_FOR_RESTRUCTURING,
-                    )
-            if command.depth and command.name != "graphicspath":
-                self._uncertain(
-                    "source.nested_file_command",
-                    f"\\{command.name} occurs inside a group or macro argument; "
-                    "its execution context is not established.",
-                    name,
-                    command.line,
-                    "Use a direct literal reference outside groups and macro arguments. "
-                    + _NEEDED_FOR_RESTRUCTURING,
-                )
-            file_index = file_argument_index(command.name)
-            if len(command.arguments) <= file_index:
-                self._uncertain(
-                    "source.dynamic_path",
-                    f"\\{command.name} does not have a supported literal filename argument.",
-                    name,
-                    command.line,
-                )
-            for argument in command.arguments[file_index : file_index + 1]:
-                if (
-                    source.text[argument.start : argument.end]
-                    != source.masked[argument.start : argument.end]
-                ):
-                    self._uncertain(
-                        "source.path_literal_context",
-                        f"\\{command.name} contains comments or literal commands "
-                        "inside its path argument.",
-                        name,
-                        command.line,
-                        "Use a plain filename argument before flattening.",
-                    )
+    def _tree(self) -> ProjectTree:
+        return ProjectTree(self.files, self.cwd, self._load)
 
-    def _error(
-        self,
-        rule: str,
-        message: str,
-        name: str,
-        command: Command,
-        details: dict[str, object] | None = None,
-        *,
-        suggestion: str | None = None,
-    ) -> None:
-        finding = Finding(
-            rule,
-            message,
-            severity="error",
-            path=name,
-            line=command.line,
-            suggestion=suggestion,
-            details=details or {},
-        )
-        if finding not in self.findings:
-            self.findings.append(finding)
-
-    def _inside(
-        self, value: str, name: str, command: Command, *, base: str | None = None
-    ) -> str | None:
-        if value.startswith(("/", "\\\\", "~")) or re.match(r"^[A-Za-z][A-Za-z0-9+.-]*:", value):
-            self._error(
-                "source.external_path",
-                f"Dependency {value!r} uses an absolute, external, or user-specific path.",
-                name,
-                command,
-                {"reference": value},
-                suggestion=_COPY_INTO_PROJECT,
-            )
-            return None
-        path = posixpath.normpath(posixpath.join(self.cwd if base is None else base, value))
-        if lexically_escapes(path):
-            self._error(
-                "source.external_path",
-                f"Dependency {value!r} resolves outside the selected project.",
-                name,
-                command,
-                {"reference": value},
-                suggestion=_COPY_INTO_PROJECT,
-            )
-            return None
-        return path
-
-    def _resolve(
-        self,
-        value: str,
-        name: str,
-        command: Command,
-        search: tuple[str, ...],
-        context: tuple[str, ...] = (),
-        *,
-        base: str | None = None,
-    ) -> str | None:
-        if (
-            base is None
-            and context
-            and (
-                command.name == "subfile"
-                or (command.name == "bibliography" and self.subfiles_package_loaded)
-            )
-        ):
-            base = context[0]
-        initial = self._inside(value, name, command, base=base)
-        if initial is None:
-            return None
-        if not is_literal_text(value):
-            self._uncertain(
-                "source.dynamic_path",
-                f"\\{command.name} has a dynamic or unsupported filename expression.",
-                name,
-                command.line,
-                "Make the filename literal. " + _NEEDED_FOR_RESTRUCTURING,
-                {"command": command.name},
-            )
-            return None
-        suffixes = DEFAULT_SUFFIXES_BY_FILE_COMMAND[command.name]
-        paths = [initial]
-        if base is None and command.name in {
-            "input",
-            "include",
-            "includegraphics",
-            "subfile",
-            *TOOLCHAIN_FILE_COMMANDS,
-        }:
-            for directory in context:
-                path = self._inside(value, name, command, base=directory)
-                if path is not None:
-                    paths.append(path)
-        if command.name == "includegraphics":
-            for directory in search:
-                path = self._inside(posixpath.join(directory, value), name, command)
-                if path is not None:
-                    paths.append(path)
-        candidates: list[str] = []
-        for path in paths:
-            if command.name == "include":
-                candidates.append(path + ".tex")
-            elif PurePosixPath(path).suffix:
-                candidates.append(path)
-            else:
-                # TeX appends each default suffix before trying the bare name.
-                candidates.extend(path + suffix for suffix in suffixes)
-                candidates.append(path)
-        # Candidates keep TeX's lookup order: base paths first, then declared search
-        # directories, and the extensions each command tries within one directory.
-        found: list[str] = []
-        for candidate in candidates:
-            if candidate not in self.files or candidate in found:
-                continue
-            if self.files[candidate].is_symlink():
-                self._load(candidate)
-                continue
-            found.append(candidate)
-        if len(found) > 1:
-            self.findings.append(
-                Finding(
-                    "source.ambiguous_dependency",
-                    f"Reference {value!r} also matches {', '.join(found[1:])}; "
-                    f"TeX's lookup order selects {found[0]}.",
-                    severity="warning",
-                    status="passed",
-                    path=name,
-                    line=command.line,
-                    evidence_kind=EvidenceKind.HEURISTIC,
-                    suggestion="Name the intended file with an explicit extension "
-                    "to remove the dependence on lookup order.",
-                    details={
-                        "reference": value,
-                        "selected": found[0],
-                        "alternatives": found[1:],
-                        "resolved_by": "TeX lookup order",
-                    },
-                )
-            )
-        if found:
-            self.dependencies.add(found[0])
-            return found[0]
-        if command.name in TOOLCHAIN_FILE_COMMANDS and "/" not in value:
-            (suffix,) = suffixes
-            basename = value if PurePosixPath(value).suffix else value + suffix
-            self.system_references.append(SystemReference(name, command, value, basename))
-            return None
-        mismatches = sorted(
-            {
-                path
-                for candidate in candidates
-                for path in self.files
-                if path_comparison_key(candidate) == path_comparison_key(path)
-            }
-        )
-        if mismatches:
-            self._error(
-                "source.case_mismatch",
-                f"Dependency {value!r} differs in case or Unicode normalization "
-                f"from: {', '.join(mismatches)}.",
-                name,
-                command,
-                {"reference": value, "candidates": mismatches, "command": command.name},
-                suggestion=f"Change the reference to match {mismatches[0]!r} exactly, "
-                "or rename the file.",
-            )
-        else:
-            tried = list(dict.fromkeys(candidates))
-            self._error(
-                "source.missing_dependency",
-                f"Literal dependency {value!r} is missing from the project; "
-                f"looked for {_listed(tried)}.",
-                name,
-                command,
-                {"reference": value, "candidates": candidates, "command": command.name},
-                suggestion=f"Add the file to the project or correct the name in \\{command.name}.",
-            )
-        return None
+    def _project_path(self, visit: _Visit, command: Command, value: str, base: str) -> str | None:
+        reference = Reference(value, visit.path, command)
+        return project_path(reference, self._tree(), self._reporter, base=base)
 
     def _search_paths(
-        self, name: str, command: Command, context: tuple[str, ...] = ()
+        self, visit: _Visit, command: Command, context: tuple[str, ...]
     ) -> tuple[str, ...] | None:
+        """The directories a ``\\graphicspath`` declares, or ``None`` when it is not literal.
+
+        The argument is recorded in ``search_arguments`` so a flat layout rewrites it to
+        the current directory.
+        """
+        name = visit.path
         if not command.arguments:
             return None
         argument = command.arguments[0]
         if command.depth:
-            self._uncertain(
+            self._reporter.uncertain(
                 "source.scoped_search_path",
                 "A scoped or macro-defined \\graphicspath is outside the supported subset.",
                 name,
@@ -961,7 +346,7 @@ class SourceGraph:
             pos = skip_space(argument.value, pos)
             group = read_group(argument.value, pos)
             if group is None or not is_literal_text(group.value.strip()):
-                self._uncertain(
+                self._reporter.uncertain(
                     "source.dynamic_search_path",
                     "\\graphicspath must contain a literal list such as {{figures/}{plots/}}.",
                     name,
@@ -970,7 +355,7 @@ class SourceGraph:
                 return None
             value = group.value.strip()
             if not value.endswith("/"):
-                self._uncertain(
+                self._reporter.uncertain(
                     "source.search_path_syntax",
                     "A supported graphicspath directory must end with a slash.",
                     name,
@@ -979,7 +364,7 @@ class SourceGraph:
                 return None
             if context and self.subfiles_package_loaded:
                 value = posixpath.relpath(posixpath.join(context[0], value), self.cwd or ".") + "/"
-            if self._inside(value, name, command) is None:
+            if self._project_path(visit, command, value, self.cwd) is None:
                 return None
             paths.append(value)
             pos = group.end + 1
@@ -992,12 +377,12 @@ class SourceGraph:
         location = ArgumentLocation(name, argument.start, argument.end)
         previous = self.references.get(location)
         if previous and previous.target != target:
-            self._error(
+            self._reporter.error(
                 "source.context_ambiguity",
                 "The same reference selects different files under different path contexts: "
                 f"{previous.target} and {target}.",
                 name,
-                command,
+                command.line,
                 {"candidates": [previous.target, target]},
                 suggestion="Give the file a name that resolves to the same file from every "
                 "directory that reads it.",
@@ -1005,11 +390,19 @@ class SourceGraph:
         else:
             self.references[location] = FileReference(target, command.name)
 
-    def _font_directory(self, name: str, source: ParsedSource, command: Command) -> str | None:
-        if not command.arguments or PurePosixPath(
-            command.arguments[0].value.strip()
-        ).suffix.lower() not in {".otf", ".ttf", ".ttc"}:
-            self._uncertain(
+    def _font_directory(self, visit: _Visit, command: Command) -> str | None:
+        """The directory a font command's ``Path`` option names, or ``None`` when unsupported.
+
+        Only an explicit local font file and the options in ``_FONT_OPTION_KEYS`` are
+        followed. The ``Path`` argument is recorded in ``search_arguments`` so a flat
+        layout rewrites it.
+        """
+        name = visit.path
+        source = visit.source
+        if not command.arguments or (
+            PurePosixPath(command.arguments[0].value.strip()).suffix.lower() not in _FONT_EXTENSIONS
+        ):
+            self._reporter.uncertain(
                 "source.unsupported_command",
                 "Only explicit local .otf/.ttf/.ttc font filenames are supported; "
                 "font-family lookup is not inferred.",
@@ -1021,19 +414,17 @@ class SourceGraph:
         seen_path = False
         for option in command.options:
             if source.text[option.start : option.end] != option.value:
-                self._uncertain("source.font_options", "Font options contain masked text.", name)
+                self._reporter.uncertain(
+                    "source.font_options", "Font options contain masked text.", name
+                )
                 return None
             for part in option.value.split(","):
                 key, separator, value = part.partition("=")
                 key, value = key.strip(), value.strip()
                 if value.startswith("{") and value.endswith("}"):
                     value = value[1:-1]
-                if (
-                    not separator
-                    or key not in {"Path", "Ligatures", "Scale", "Renderer", "Numbers"}
-                    or not is_literal_text(value)
-                ):
-                    self._uncertain(
+                if not separator or key not in _FONT_OPTION_KEYS or not is_literal_text(value):
+                    self._reporter.uncertain(
                         "source.font_options",
                         "Font options may select additional faces or dynamic filenames; "
                         "only Path, Ligatures, Scale, Renderer and Numbers are supported.",
@@ -1041,27 +432,33 @@ class SourceGraph:
                         command.line,
                     )
                     return None
-                if key == "Path":
-                    if seen_path or not value.endswith("/"):
-                        self._uncertain(
-                            "source.font_options",
-                            "A font Path must be a single literal directory ending in '/'.",
-                            name,
-                            command.line,
-                        )
-                        return None
-                    seen_path = True
-                    directory = value
-                    match = re.search(r"(?:^|,)\s*Path\s*=\s*(\{[^{}]*\}|[^,]*)", option.value)
-                    if match:
-                        start, end = match.span(1)
-                        location = ArgumentLocation(name, option.start + start, option.start + end)
-                        self.search_arguments[location] = (
-                            "{./}" if option.value[start:end].startswith("{") else "./"
-                        )
+                if key != "Path":
+                    continue
+                if seen_path or not value.endswith("/"):
+                    self._reporter.uncertain(
+                        "source.font_options",
+                        "A font Path must be a single literal directory ending in '/'.",
+                        name,
+                        command.line,
+                    )
+                    return None
+                seen_path = True
+                directory = value
+                match = _FONT_PATH_OPTION.search(option.value)
+                if match:
+                    start, end = match.span(1)
+                    location = ArgumentLocation(name, option.start + start, option.start + end)
+                    self.search_arguments[location] = (
+                        "{./}" if option.value[start:end].startswith("{") else "./"
+                    )
         return directory
 
     def _subfile_commands(self, name: str, source: ParsedSource) -> list[Command]:
+        """The commands of a subfile body, or none when the file is not a supported subfile.
+
+        A subfile has one ``subfiles`` document class naming the main file as its parent
+        and one document environment; only the commands inside that environment are read.
+        """
         declarations = [command for command in source.commands if command.name == "documentclass"]
         starts = [command for command in source.commands if command.begins("document", exact=True)]
         ends = [command for command in source.commands if command.ends("document", exact=True)]
@@ -1073,7 +470,7 @@ class SourceGraph:
             or declarations[0].arguments[0].value != "subfiles"
             or not declarations[0].start < starts[0].start < ends[0].start
         ):
-            self._uncertain(
+            self._reporter.uncertain(
                 "source.subfile_structure",
                 "A subfile requires one literal subfiles class and document environment.",
                 name,
@@ -1081,16 +478,19 @@ class SourceGraph:
             return []
         declaration = declarations[0]
         if len(declaration.options) != 1 or not is_literal_text(declaration.options[0].value):
-            self._uncertain(
+            self._reporter.uncertain(
                 "source.subfile_structure", "A subfile requires an explicit parent path.", name
             )
             return []
         parent_argument = declaration.options[0].stripped()
-        parent = self._inside(
-            parent_argument.value, name, declaration, base=posixpath.dirname(name)
+        parent = project_path(
+            Reference(parent_argument.value, name, declaration),
+            self._tree(),
+            self._reporter,
+            base=posixpath.dirname(name),
         )
         if parent is None or parent != self.main:
-            self._uncertain(
+            self._reporter.uncertain(
                 "source.subfile_structure",
                 "The subfile parent must name the selected main file exactly.",
                 name,
@@ -1105,129 +505,165 @@ class SourceGraph:
             if starts[0].start < command.start < ends[0].start
         ]
 
-    def _visit(
-        self,
-        name: str,
-        search: tuple[str, ...],
-        stack: tuple[str, ...],
-        context: tuple[str, ...] = (),
-        subfile: bool = False,
-    ) -> tuple[str, ...]:
+    def _visit(self, frame: _Frame, stack: tuple[str, ...]) -> tuple[str, ...]:
+        """Walk the file of ``frame`` and return the graphics search path in force at its end.
+
+        ``stack`` holds the files being read above this one. A file already on it is a
+        cycle, and a stack at ``MAX_INPUT_DEPTH`` is too deep; both are reported and the
+        visit returns the search path it was given. A file that cannot be loaded is not
+        visited at all. The walk stops, with a finding, once the whole graph has
+        processed ``MAX_COMMANDS`` commands.
+        """
+        name = frame.path
         if name in stack:
-            self._uncertain(
+            self._reporter.uncertain(
                 "source.input_cycle",
                 "Source input contains a cycle; execution order is not established.",
                 name,
                 details={"cycle": [*stack, name]},
             )
-            return search
+            return frame.search
         if len(stack) >= MAX_INPUT_DEPTH:
-            self._uncertain(
+            self._reporter.uncertain(
                 "source.input_depth",
                 "Source input exceeds the bounded dependency traversal depth.",
                 name,
             )
-            return search
-        state = _TraversalState(name, search, context, subfile, self.subfiles_package_loaded)
-        if state in self._cache:
-            return self._cache[state]
+            return frame.search
+        key = (frame, self.subfiles_package_loaded)
+        if key in self._cache:
+            return self._cache[key]
         source = self._load(name)
         if source is None:
-            return search
+            return frame.search
         self.visited.add(name)
-        commands = self._subfile_commands(name, source) if subfile else source.commands
+        visit = _Visit(name, source, stack, frame.context)
+        commands = self._subfile_commands(name, source) if frame.subfile else source.commands
+        search = frame.search
         for command in commands:
             self._events += 1
             if self._events > MAX_COMMANDS:
-                self._uncertain(
+                self._reporter.uncertain(
                     "source.expansion_limit",
                     "Dependency traversal exceeded its bounded command budget.",
                     name,
                     command.line,
                 )
                 return search
-            if command.name == "graphicspath":
-                paths = self._search_paths(name, command, context)
-                if paths is not None:
-                    search = paths
-                continue
-            if command.name not in FILE_COMMANDS or not command.arguments:
-                continue
-            if command.name in {"usepackage", "RequirePackage"} and any(
-                item.value == "subfiles" for item in split_argument_items(command.arguments[0])
-            ):
-                self.subfiles_package_loaded = True
-            if command.name == "documentclass" and command.arguments[0].value == "subfiles":
-                self._uncertain(
-                    "source.path_option",
-                    "Compiling a subfiles class as the main root requires inherited preamble "
-                    "semantics outside this subset; select the parent document.",
-                    name,
-                    command.line,
-                )
-                continue
-            if command.name in IMPORT_COMMANDS:
-                if len(command.arguments) < 2:
-                    continue
-                directory_argument, argument = (item.stripped() for item in command.arguments[:2])
-                if not all(
-                    is_literal_text(item.value) and source.text[item.start : item.end] == item.value
-                    for item in (directory_argument, argument)
-                ):
-                    self._uncertain(
-                        "source.dynamic_path",
-                        "Import paths must be plain literal arguments.",
-                        name,
-                        command.line,
-                    )
-                    continue
-                parent = context[0] if context and command.name.startswith("sub") else self.cwd
-                directory = self._inside(directory_argument.value, name, command, base=parent)
-                if directory is None:
-                    continue
-                target = self._resolve(argument.value, name, command, (), base=directory)
-                if target is not None:
-                    self._record_reference(name, argument, target, command)
-                    location = ArgumentLocation(
-                        name, directory_argument.start, directory_argument.end
-                    )
-                    self.search_arguments[location] = "./"
-                    self._visit(target, search, (*stack, name), (directory, *context))
-                continue
-            index = file_argument_index(command.name)
-            if len(command.arguments) <= index:
-                continue
-            font_directory = None
-            if command.name in _SUPPORTED_FONT_COMMANDS:
-                directory = self._font_directory(name, source, command)
-                if directory is None:
-                    continue
-                font_directory = self._inside(directory, name, command)
-                if font_directory is None:
-                    continue
-            for argument in split_argument_items(
-                command.arguments[index], comma_separated=command.name in COMMA_LIST_FILE_COMMANDS
-            ):
-                if (
-                    source.text[argument.start : argument.end]
-                    != source.masked[argument.start : argument.end]
-                ):
-                    continue
-                target = self._resolve(
-                    argument.value, name, command, search, context, base=font_directory
-                )
-                if target is None:
-                    continue
-                self._record_reference(name, argument, target, command)
-                if command.name == "subfile":
-                    self._visit(
-                        target,
-                        search,
-                        (*stack, name),
-                        (posixpath.dirname(target), *context),
-                        True,
-                    )
-                if command.name in _TRAVERSED_COMMANDS:
-                    search = self._visit(target, search, (*stack, name), context)
-        self._cache[state] = search
+            search = self._visit_command(visit, command, search)
+        self._cache[key] = search
         return search
+
+    def _visit_command(
+        self, visit: _Visit, command: Command, search: tuple[str, ...]
+    ) -> tuple[str, ...]:
+        """Follow one command of the visited file; return the graphics search path afterwards."""
+        if command.name == "graphicspath":
+            paths = self._search_paths(visit, command, visit.context)
+            return search if paths is None else paths
+        if command.name not in FILE_COMMANDS or not command.arguments:
+            return search
+        if command.name in {"usepackage", "RequirePackage"} and any(
+            item.value == "subfiles" for item in split_argument_items(command.arguments[0])
+        ):
+            self.subfiles_package_loaded = True
+        if command.name == "documentclass" and command.arguments[0].value == "subfiles":
+            self._reporter.uncertain(
+                "source.path_option",
+                "Compiling a subfiles class as the main root requires inherited preamble "
+                "semantics outside this subset; select the parent document.",
+                visit.path,
+                command.line,
+            )
+        elif command.name in IMPORT_COMMANDS:
+            self._visit_import(visit, command, search)
+        else:
+            search = self._visit_file_command(visit, command, search)
+        return search
+
+    def _visit_import(self, visit: _Visit, command: Command, search: tuple[str, ...]) -> None:
+        """Follow ``\\import`` and its relatives: a directory argument, then a file in it."""
+        if len(command.arguments) < 2:
+            return
+        name, source = visit.path, visit.source
+        directory_argument, argument = (item.stripped() for item in command.arguments[:2])
+        if not all(
+            is_literal_text(item.value) and source.text[item.start : item.end] == item.value
+            for item in (directory_argument, argument)
+        ):
+            self._reporter.uncertain(
+                "source.dynamic_path",
+                "Import paths must be plain literal arguments.",
+                name,
+                command.line,
+            )
+            return
+        parent = visit.context[0] if visit.context and command.name.startswith("sub") else self.cwd
+        directory = self._project_path(visit, command, directory_argument.value, parent)
+        if directory is None:
+            return
+        scope = LookupScope(base=directory, subfiles_loaded=self.subfiles_package_loaded)
+        target = self._resolve(visit, command, argument.value, scope)
+        if target is None:
+            return
+        self._record_reference(name, argument, target, command)
+        location = ArgumentLocation(name, directory_argument.start, directory_argument.end)
+        self.search_arguments[location] = "./"
+        self._visit(
+            _Frame(target, search, (directory, *visit.context)),
+            visit.inner_stack,
+        )
+
+    def _visit_file_command(
+        self, visit: _Visit, command: Command, search: tuple[str, ...]
+    ) -> tuple[str, ...]:
+        """Follow a command whose file argument is a name or a list of names.
+
+        Each literal name is resolved and recorded. A ``\\subfile`` is read with its own
+        directory as context; the commands in ``TRAVERSED_COMMANDS`` are read in the
+        current context, and what they leave of the search path is returned.
+        """
+        index = file_argument_index(command.name)
+        if len(command.arguments) <= index:
+            return search
+        font_directory = None
+        if command.name in SUPPORTED_FONT_COMMANDS:
+            directory = self._font_directory(visit, command)
+            if directory is None:
+                return search
+            font_directory = self._project_path(visit, command, directory, self.cwd)
+            if font_directory is None:
+                return search
+        source = visit.source
+        for argument in split_argument_items(
+            command.arguments[index], comma_separated=command.name in COMMA_LIST_FILE_COMMANDS
+        ):
+            if (
+                source.text[argument.start : argument.end]
+                != source.masked[argument.start : argument.end]
+            ):
+                continue
+            scope = LookupScope(search, visit.context, font_directory, self.subfiles_package_loaded)
+            target = self._resolve(visit, command, argument.value, scope)
+            if target is None:
+                continue
+            self._record_reference(visit.path, argument, target, command)
+            if command.name == "subfile":
+                subfile_context = (posixpath.dirname(target), *visit.context)
+                self._visit(_Frame(target, search, subfile_context, True), visit.inner_stack)
+            if command.name in TRAVERSED_COMMANDS:
+                search = self._visit(_Frame(target, search, visit.context), visit.inner_stack)
+        return search
+
+    def _resolve(
+        self, visit: _Visit, command: Command, value: str, scope: LookupScope
+    ) -> str | None:
+        """Resolve one file name; a found file joins the dependencies, a toolchain one is kept."""
+        resolution = resolve_reference(
+            Reference(value, visit.path, command), scope, self._tree(), self._reporter
+        )
+        if resolution.target is not None:
+            self.dependencies.add(resolution.target)
+        if resolution.system is not None:
+            self.system_references.append(resolution.system)
+        return resolution.target

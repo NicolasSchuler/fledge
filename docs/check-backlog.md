@@ -200,8 +200,8 @@ violating and unavailable/ambiguous evidence. The implementation/test pairs are:
 | Optional online references | {download}`online_checks.py <../src/latexprep/online_checks.py>` | {download}`test_online_checks.py <../tests/test_online_checks.py>` |
 | Source transformations | {download}`source_transform.py <../src/latexprep/source_transform.py>` | {download}`test_source_transform.py <../tests/test_source_transform.py>` |
 | Bibliography transformations | {download}`bibliography_transform.py <../src/latexprep/bibliography_transform.py>` | {download}`test_bibliography_transform.py <../tests/test_bibliography_transform.py>` |
-| Artwork geometry, pixels and glyph programs | {download}`pdf_artwork.py <../src/latexprep/pdf_artwork.py>` | {download}`test_pdf_artwork.py <../tests/test_pdf_artwork.py>` |
-| Metadata edits and image metadata | {download}`metadata_privacy.py <../src/latexprep/metadata_privacy.py>` | {download}`test_metadata_privacy.py <../tests/test_metadata_privacy.py>` |
+| Artwork geometry, pixels and glyph programs | {download}`pdf_artwork.py <../src/latexprep/pdf_artwork.py>`, {download}`pdf_artwork_options.py <../src/latexprep/pdf_artwork_options.py>`, {download}`pdf_artwork_trace.py <../src/latexprep/pdf_artwork_trace.py>`, {download}`pdf_artwork_drawings.py <../src/latexprep/pdf_artwork_drawings.py>`, {download}`pdf_printer_marks.py <../src/latexprep/pdf_printer_marks.py>`, {download}`pdf_type3_glyphs.py <../src/latexprep/pdf_type3_glyphs.py>`, {download}`pdf_artwork_rendered.py <../src/latexprep/pdf_artwork_rendered.py>` | {download}`test_pdf_artwork.py <../tests/test_pdf_artwork.py>` |
+| Metadata edits and image metadata | {download}`metadata_privacy.py <../src/latexprep/metadata_privacy.py>`, {download}`metadata_source_edits.py <../src/latexprep/metadata_source_edits.py>`, {download}`image_metadata.py <../src/latexprep/image_metadata.py>` | {download}`test_metadata_privacy.py <../tests/test_metadata_privacy.py>` |
 | Author records | {download}`author_records.py <../src/latexprep/author_records.py>` | {download}`test_structure_checks.py <../tests/test_structure_checks.py>` |
 | PDF structure | {download}`pdf_structure_checks.py <../src/latexprep/pdf_structure_checks.py>` | {download}`test_structure_checks.py <../tests/test_structure_checks.py>` |
 | Review decisions and offline outputs | {download}`review_policy.py <../src/latexprep/review_policy.py>`, {download}`html_report.py <../src/latexprep/html_report.py>`, {download}`ci_annotations.py <../src/latexprep/ci_annotations.py>`, {download}`diagnostic_bundle.py <../src/latexprep/diagnostic_bundle.py>` | {download}`test_reporting.py <../tests/test_reporting.py>` |
@@ -244,7 +244,7 @@ pass on macOS with the sealed Biber copy; they run only with
 ### Source evidence
 
 {download}`SourceGraph <../src/latexprep/source_graph.py>` and
-{download}`plan_flatten <../src/latexprep/source.py>` are exercised by
+{download}`plan_flatten <../src/latexprep/flat_layout.py>` are exercised by
 {download}`SourceTests <../tests/test_source.py>`:
 `test_markers_labels_and_refs_are_heuristics_not_blockers`,
 `test_nested_paths_and_collisions_are_rewritten_not_globally_replaced`,
@@ -294,7 +294,7 @@ inlining.
 
 ### Bibliography evidence
 
-{download}`check_bibliography_integrity <../src/latexprep/bibliography_checks.py>` and
+{download}`check_bibliography_integrity <../src/latexprep/bibliography_integrity.py>` and
 {download}`normalize_dois <../src/latexprep/bibliography_transform.py>` are
 exercised by {download}`BibliographyTests <../tests/test_bibliography.py>`:
 `test_duplicate_keys_and_dois_include_conflicts_without_merging`,

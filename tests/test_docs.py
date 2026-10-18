@@ -43,6 +43,21 @@ def _defined_tests() -> tuple[set[str], dict[str, set[str]]]:
 
 
 class DocumentationTests(unittest.TestCase):
+    def test_documentation_links_match_the_documentation_url_of_the_project(self) -> None:
+        import tomllib
+
+        from latexprep.documentation_links import (
+            CONFIGURATION_GUIDE,
+            DOCUMENTATION_URL,
+            INSTALLATION_GUIDE,
+        )
+
+        with (ROOT / "pyproject.toml").open("rb") as stream:
+            declared = tomllib.load(stream)["project"]["urls"]["Documentation"]
+        self.assertEqual(DOCUMENTATION_URL, declared)
+        self.assertEqual(INSTALLATION_GUIDE, declared + "installation.html")
+        self.assertEqual(CONFIGURATION_GUIDE, declared + "configuration.html")
+
     def test_check_catalogue_table_matches_registered_rules(self) -> None:
         generator = _generator()
         current = generator.DOCUMENT.read_text(encoding="utf-8")

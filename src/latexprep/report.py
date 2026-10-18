@@ -1,11 +1,17 @@
-"""The report a job produces, with its outcome, changes and sanitized serialization."""
+"""The report a job produces, with its outcome, changes and sanitized serialization.
+
+This module owns what every command ends in: the ``Report``, its ``Outcome`` and exit
+codes, the ``Change`` and ``StageRecord`` entries, and the JSON layout described by
+``docs/_static/report.schema.json``. How a report is displayed is in the renderer
+modules; the findings it collects are in :mod:`latexprep.findings`.
+"""
 
 from __future__ import annotations
 
 import json
 from dataclasses import KW_ONLY, asdict, dataclass, field
 from enum import StrEnum
-from typing import NotRequired, TypedDict
+from typing import Any, Literal, NewType, NotRequired, TypedDict
 
 from .findings import REQUEST_ERROR_RULE, SEVERITIES, STATUSES, EvidenceKind, Finding
 from .redaction import redact_data, scrub_local_paths
@@ -37,6 +43,7 @@ class Outcome(StrEnum):
 
     @property
     def exit_code(self) -> int:
+        """The process exit code: 0 passed, 1 advisories, 2 exceptions, 3 blocked, 4 error."""
         return _EXIT_CODE_BY_OUTCOME[self]
 
 
@@ -65,11 +72,22 @@ class ChangeKind(StrEnum):
     METADATA_SANITIZATION = "metadata_sanitization"
 
 
+# How a stage ended. Scheduled tasks and builds report succeeded, failed, blocked or
+# cancelled; setup diagnostics report passed, failed, inconclusive or skipped.
+StageStatus = Literal[
+    "succeeded", "failed", "blocked", "cancelled", "passed", "inconclusive", "skipped"
+]
+
+
 class StageRecord(TypedDict):
-    """One task, build or diagnostic step in ``Report.stages``."""
+    """One task, build or diagnostic step in ``Report.stages``.
+
+    ``name`` identifies the stage; for a multi-document job ``document`` says which
+    document it belongs to. The optional times are seconds.
+    """
 
     name: str
-    status: str
+    status: StageStatus
     command: NotRequired[list[str]]
     elapsed_seconds: NotRequired[float]
     queue_seconds: NotRequired[float]
@@ -78,6 +96,13 @@ class StageRecord(TypedDict):
 
 @dataclass(frozen=True, slots=True)
 class Change:
+    """One edit a preparation makes, or would make, to the separate copy.
+
+    ``path`` is the source path inside the project, ``destination`` the path in the
+    copy when it moves, and ``diff`` the unified diff of a rewrite. The original input
+    is never edited.
+    """
+
     path: str
     _: KW_ONLY
     kind: ChangeKind
@@ -88,6 +113,16 @@ class Change:
 
 @dataclass(slots=True)
 class Report:
+    """What a command found, changed and did, as one serializable record.
+
+    A report starts as ``Outcome.BLOCKED`` so that a run that never reaches its end
+    fails closed instead of passing; whoever finishes the run sets the real outcome.
+    ``command`` is one of ``REPORT_COMMANDS``. ``settings``, ``tools`` and ``execution``
+    are descriptive records for people and scripts; renderers read the parts they need
+    through :mod:`latexprep.execution_records`. Output goes through ``redacted_copy``,
+    ``to_dict`` or ``to_json``, which remove credentials and generalize local paths.
+    """
+
     command: str
     _: KW_ONLY
     outcome: Outcome = Outcome.BLOCKED
@@ -121,27 +156,7 @@ class Report:
         if "artifacts" in values:
             values["artifacts"] = artifacts
         try:
-            # These finite, application-defined enums and registered rule IDs are
-            # control data, not manuscript content (a password could be "passed").
-            # Redaction returns plain strings, so the original enum members are restored;
-            # a value outside an enum withholds the report.
-            if self.command in REPORT_COMMANDS:
-                values["command"] = self.command
-            values["outcome"] = Outcome(self.outcome)
-            for item, original in zip(values["findings"], self.findings, strict=True):
-                if original.code is not None:
-                    item["rule"] = original.rule
-                if original.severity in SEVERITIES:
-                    item["severity"] = original.severity
-                if original.status in STATUSES:
-                    item["status"] = original.status
-                item["evidence_kind"] = EvidenceKind(original.evidence_kind)
-                item["incomplete"] = original.incomplete
-            for item, original in zip(values["changes"], self.changes, strict=True):
-                item["kind"] = ChangeKind(original.kind)
-            values["findings"] = [Finding(**item) for item in values["findings"]]
-            values["changes"] = [Change(**item) for item in values["changes"]]
-            result = Report(**values)
+            result = Report(**self._with_control_data(values))
         except (KeyError, TypeError, ValueError) as error:
             # A short credential can also occur in a schema key. Never reconstruct
             # from raw content or throw a diagnostic containing that content; the
@@ -154,7 +169,34 @@ class Report:
             return _withheld_report(self.command, "invalid_stage_record")
         return result
 
+    def _with_control_data(self, values: dict[str, Any]) -> dict[str, Any]:
+        """Redacted ``values`` with the original enums and rule names restored.
+
+        These finite, application-defined enums and registered rule IDs are control data,
+        not manuscript content (a password could be "passed"). Redaction returns plain
+        strings, so the original enum members are restored; a value outside an enum
+        raises, which withholds the report. Findings and changes become objects again.
+        """
+        if self.command in REPORT_COMMANDS:
+            values["command"] = self.command
+        values["outcome"] = Outcome(self.outcome)
+        for item, original in zip(values["findings"], self.findings, strict=True):
+            if original.code is not None:
+                item["rule"] = original.rule
+            if original.severity in SEVERITIES:
+                item["severity"] = original.severity
+            if original.status in STATUSES:
+                item["status"] = original.status
+            item["evidence_kind"] = EvidenceKind(original.evidence_kind)
+            item["incomplete"] = original.incomplete
+        for item, original in zip(values["changes"], self.changes, strict=True):
+            item["kind"] = ChangeKind(original.kind)
+        values["findings"] = [Finding(**item) for item in values["findings"]]
+        values["changes"] = [Change(**item) for item in values["changes"]]
+        return values
+
     def sorted_findings(self) -> list[Finding]:
+        """The findings in a stable order that does not depend on the order checks ran in."""
         return sorted(
             self.findings,
             key=lambda item: (
@@ -173,28 +215,49 @@ class Report:
         )
 
     def to_dict(self) -> dict[str, object]:
-        public = self.redacted_copy()
-        result: dict[str, object] = {"schema_version": REPORT_SCHEMA_VERSION, **asdict(public)}
-        result["findings"] = [
-            {**asdict(finding), "code": finding.code, "next_step": finding.next_step}
-            for finding in public.sorted_findings()
-        ]
-        for finding in result["findings"]:
-            # The explicit suggestion, if any, is the first choice of next_step.
-            del finding["suggestion"]
-        result["changes"] = [
-            asdict(change)
-            for change in sorted(
-                public.changes,
-                key=lambda item: (item.path, item.kind, item.destination or "", item.reason),
-            )
-        ]
-        result["tools"] = dict(sorted(public.tools.items()))
-        result["stages"] = sorted(public.stages, key=lambda item: str(item["name"]))
-        return result
+        """The sanitized report in its JSON layout, with deterministic ordering."""
+        return redacted_dict(redact_report(self))
 
     def to_json(self) -> str:
-        return json.dumps(self.to_dict(), indent=2, ensure_ascii=False) + "\n"
+        """``to_dict`` as indented UTF-8 JSON text ending in a newline."""
+        return redacted_json(redact_report(self))
+
+
+# A report whose output fields were redacted together; renderers are built on one so that
+# a report is sanitized once per run, however many formats are written.
+RedactedReport = NewType("RedactedReport", Report)
+
+
+def redact_report(report: Report) -> RedactedReport:
+    """Sanitize every output field once, before any of it is displayed or saved."""
+    return RedactedReport(report.redacted_copy())
+
+
+def redacted_dict(public: RedactedReport) -> dict[str, object]:
+    """The JSON layout of an already sanitized report, with deterministic ordering."""
+    result: dict[str, object] = {"schema_version": REPORT_SCHEMA_VERSION, **asdict(public)}
+    result["findings"] = [
+        {**asdict(finding), "code": finding.code, "next_step": finding.next_step}
+        for finding in public.sorted_findings()
+    ]
+    for finding in result["findings"]:
+        # The explicit suggestion, if any, is the first choice of next_step.
+        del finding["suggestion"]
+    result["changes"] = [
+        asdict(change)
+        for change in sorted(
+            public.changes,
+            key=lambda item: (item.path, item.kind, item.destination or "", item.reason),
+        )
+    ]
+    result["tools"] = dict(sorted(public.tools.items()))
+    result["stages"] = sorted(public.stages, key=lambda item: str(item["name"]))
+    return result
+
+
+def redacted_json(public: RedactedReport) -> str:
+    """``redacted_dict`` as indented UTF-8 JSON text ending in a newline."""
+    return json.dumps(redacted_dict(public), indent=2, ensure_ascii=False) + "\n"
 
 
 # Why a report was withheld: its size or nesting exceeded the redaction limits.

@@ -17,10 +17,10 @@ from pathlib import Path
 from typing import TypeVar
 from unittest.mock import patch
 
+from latexprep.bibliography_controls import read_bibliography_evidence
 from latexprep.bibtex_syntax import BibFileReader, describe_read_failure
-from latexprep.build_dependencies import read_bibliography_evidence
 from latexprep.build_log import read_bounded
-from latexprep.source import discover_roots
+from latexprep.source_analysis import discover_roots
 from latexprep.source_graph import SourceGraph
 
 T = TypeVar("T")
@@ -159,7 +159,7 @@ class SourceGraphLoadTests(ReadersTestCase):
         graph = self.build("")
         self.write("big.tex", b"x" * 64)
         graph.files["big.tex"] = self.root / "big.tex"
-        with patch("latexprep.source_graph.MAX_SOURCE_BYTES", 16):
+        with patch("latexprep.source_loading.MAX_SOURCE_BYTES", 16):
             self.assertIsNone(graph._load("big.tex"))
         self.assertIn("source.size_limit", {finding.rule for finding in graph.findings})
 

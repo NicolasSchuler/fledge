@@ -7,9 +7,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from latexprep.command_runner import CommandResult, ToolVersion
 from latexprep.findings import has_blockers
 from latexprep.resource_budget import ResourceBudget
-from latexprep.runtime import CommandResult, ToolRunner, ToolVersion
+from latexprep.runtime import ToolRunner
 from tests.test_formatting import format_with
 
 

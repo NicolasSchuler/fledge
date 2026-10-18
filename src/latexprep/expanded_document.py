@@ -9,6 +9,7 @@ literal graph is recorded as uncertainty instead of being guessed.
 from __future__ import annotations
 
 from bisect import bisect_left, bisect_right
+from collections import defaultdict, deque
 from collections.abc import Container, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -16,27 +17,22 @@ from typing import NamedTuple
 
 from .cancellation import cancellation_point
 from .findings import Finding
-from .source_graph import (
+from .source_file_commands import (
     COMMA_LIST_FILE_COMMANDS,
     FILE_COMMANDS,
     IMPORT_COMMANDS,
-    MAX_INPUT_DEPTH,
-    ArgumentLocation,
-    ParsedSource,
-    SourceGraph,
     file_argument_index,
 )
-from .tex_commands import DEFINITION_COMMANDS, MACRO_DEFINITION_COMMANDS
+from .source_graph import MAX_INPUT_DEPTH, ArgumentLocation, SourceGraph
+from .source_loading import ParsedSource
 from .tex_lexer import (
-    CONTROL_SEQUENCE,
     MAX_COMMANDS,
     MAX_TOTAL_SOURCE_BYTES,
     Command,
     ParseLimitExceeded,
+    command_end,
     conditional_spans,
     in_conditional,
-    merge_spans,
-    read_group,
     scan_commands,
     split_argument_items,
 )
@@ -44,9 +40,6 @@ from .tex_lexer import (
 # Commands that splice another manuscript source into the document. Class and
 # style files are package evidence, not manuscript content.
 CONTENT_INPUT_COMMANDS = frozenset({"input", "include", *IMPORT_COMMANDS})
-# Definitions written with TeX primitives take their name and replacement text
-# without braces around the name, so the lexer records no arguments for them.
-_PRIMITIVE_DEFINITIONS = DEFINITION_COMMANDS
 
 
 def commands_before_end(source: ParsedSource) -> list[Command]:
@@ -64,68 +57,35 @@ def commands_before_end(source: ParsedSource) -> list[Command]:
     return result
 
 
+def _active_locations(graph: SourceGraph) -> set[ArgumentLocation]:
+    """Where the visited files name a file before their ``\\end{document}`` or ``\\endinput``."""
+    locations: set[ArgumentLocation] = set()
+    for name in graph.visited:
+        for command in commands_before_end(graph.sources[name]):
+            if command.name not in FILE_COMMANDS:
+                continue
+            for argument in command.arguments[file_argument_index(command.name) :][:1]:
+                items = split_argument_items(
+                    argument, comma_separated=command.name in COMMA_LIST_FILE_COMMANDS
+                )
+                locations.update(ArgumentLocation(name, item.start, item.end) for item in items)
+    return locations
+
+
 def reachable_sources(graph: SourceGraph, kinds: Container[str] | None = None) -> set[str]:
     """Sources the main file reaches through active file commands, optionally of ``kinds``."""
+    active = _active_locations(graph)
+    reads: dict[str, set[str]] = defaultdict(set)
+    for location, reference in graph.references.items():
+        if location in active and (kinds is None or reference.command in kinds):
+            reads[location.path].add(reference.target)
     reached = {graph.main} if graph.main else set()
-    active_keys = {
-        (name, item.start, item.end)
-        for name in graph.visited
-        for command in commands_before_end(graph.sources[name])
-        if command.name in FILE_COMMANDS and command.arguments
-        for argument in command.arguments[file_argument_index(command.name) :][:1]
-        for item in split_argument_items(
-            argument, comma_separated=command.name in COMMA_LIST_FILE_COMMANDS
-        )
-    }
-    active = {
-        (name, start, end): target
-        for (name, start, end), (target, kind) in graph.references.items()
-        if (kinds is None or kind in kinds) and (name, start, end) in active_keys
-    }
-    while True:
-        additions = {target for (name, _, _), target in active.items() if name in reached}
-        if additions <= reached:
-            return reached & graph.visited
-        reached.update(additions)
-
-
-def command_end(command: Command) -> int:
-    """The offset just after a command's last recorded argument or option."""
-    return max(
-        (argument.end + 1 for argument in (*command.arguments, *command.options)),
-        default=command.name_end,
-    )
-
-
-def _definition_end(text: str, command: Command) -> int:
-    """Return the offset after a definition's name, parameters and replacement body."""
-    stop = command_end(command)
-    if command.name not in _PRIMITIVE_DEFINITIONS:
-        return stop
-    line_end = text.find("\n", stop)
-    line_end = len(text) if line_end < 0 else line_end
-    cursor = stop
-    # \let\a\b and \def\x#1{…} place the defined name outside any group.
-    for _ in range(2 if command.name in {"let", "futurelet"} else 1):
-        token = CONTROL_SEQUENCE.match(text, cursor)
-        if token is None:
-            break
-        cursor = stop = token.end()
-    opening = text.find("{", cursor, line_end)
-    if opening >= 0:
-        body = read_group(text, opening)
-        if body is not None:
-            return body.end + 1
-    return stop
-
-
-def definition_spans(text: str, commands: Sequence[Command]) -> list[tuple[int, int]]:
-    """Return merged offset ranges covering definition commands and their bodies."""
-    return merge_spans(
-        (command.start, _definition_end(text, command))
-        for command in commands
-        if command.name in MACRO_DEFINITION_COMMANDS
-    )
+    pending = deque(reached)
+    while pending:
+        for target in reads[pending.popleft()] - reached:
+            reached.add(target)
+            pending.append(target)
+    return reached & graph.visited
 
 
 class Location(NamedTuple):
@@ -220,7 +180,25 @@ class _Splice:
         self.comment_starts.extend(self.size + offset for offset in comments)
         self.size += len(value)
 
+    def _inclusion_target(self, path: str, command: Command) -> str | None:
+        """The file a ``\\input``-like command splices in, or ``None`` after noting why not."""
+        index = file_argument_index(command.name)
+        if command.depth or len(command.arguments) <= index:
+            self.uncertainty.append(f"{path}: nonliteral or grouped inclusion")
+            return None
+        argument = command.arguments[index].stripped()
+        resolved = self.graph.references.get(ArgumentLocation(path, argument.start, argument.end))
+        if resolved is None:
+            self.uncertainty.append(f"{path}: unresolved literal inclusion")
+            return None
+        if len(command.arguments) > index + 1 or command.options:
+            self.uncertainty.append(
+                f"{path}: trailing grouped or optional syntax follows a source inclusion"
+            )
+        return resolved.target
+
     def expand(self, path: str, stack: tuple[str, ...]) -> None:
+        """Append the masked text of ``path`` up to its end, splicing in each literal input."""
         cancellation_point()
         if path in stack or len(stack) >= MAX_INPUT_DEPTH:
             self.uncertainty.append("cyclic or excessively deep literal input graph")
@@ -232,15 +210,13 @@ class _Splice:
         cursor = 0
         newlines = [index for index, char in enumerate(source.masked) if char == "\n"]
 
-        def line_of(offset: int) -> int:
-            return bisect_right(newlines, offset - 1) + 1
-
         def append_masked(start: int, end: int) -> None:
             """Copy ``source.masked[start:end]``, keeping where its comments were."""
             low = bisect_left(source.comment_starts, start)
             high = bisect_left(source.comment_starts, end)
             comments = [offset - start for offset in source.comment_starts[low:high]]
-            self.append(source.masked[start:end], path, line_of(start), comments)
+            line = bisect_right(newlines, start - 1) + 1
+            self.append(source.masked[start:end], path, line, comments)
 
         for command in commands_before_end(source):
             self.events += 1
@@ -254,42 +230,30 @@ class _Splice:
                 return
             if command.name not in CONTENT_INPUT_COMMANDS:
                 continue
-            argument_index = file_argument_index(command.name)
-            if command.depth or len(command.arguments) <= argument_index:
-                self.uncertainty.append(f"{path}: nonliteral or grouped inclusion")
+            target = self._inclusion_target(path, command)
+            if target is None:
                 continue
-            argument = command.arguments[argument_index].stripped()
-            resolved = self.graph.references.get(
-                ArgumentLocation(path, argument.start, argument.end)
-            )
-            if resolved is None:
-                self.uncertainty.append(f"{path}: unresolved literal inclusion")
-                continue
-            if len(command.arguments) > argument_index + 1 or command.options:
-                self.uncertainty.append(
-                    f"{path}: trailing grouped or optional syntax follows a source inclusion"
-                )
             append_masked(cursor, command.start)
-            self.expand(resolved[0], (*stack, path))
+            self.expand(target, (*stack, path))
             # The shared lexer records subsequent groups as possible arguments.
             # Input has only one: preserve later groups and bare-input terminators.
-            cursor = command.arguments[argument_index].end
+            cursor = command.arguments[file_argument_index(command.name)].end
             if source.masked[cursor : cursor + 1] == "}":
                 cursor += 1
             if self.stopped:
                 return
-        closing = next(
-            (
-                command
-                for command in source.commands
-                if command.ends("document") and not command.depth
-            ),
-            None,
-        )
-        end = closing.start if closing else len(source.masked)
-        append_masked(cursor, end)
+        closing = _document_end(source)
+        append_masked(cursor, closing.start if closing else len(source.masked))
         if closing:
             self.stopped = True
+
+
+def _document_end(source: ParsedSource) -> Command | None:
+    """The top-level ``\\end{document}`` of a source, if it has one."""
+    return next(
+        (command for command in source.commands if command.ends("document") and not command.depth),
+        None,
+    )
 
 
 # A file that cannot be resolved only leaves the manuscript undecidable when it could

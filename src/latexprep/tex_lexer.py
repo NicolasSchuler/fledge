@@ -16,7 +16,7 @@ from typing import Literal, NamedTuple
 
 from .cancellation import cancellation_point
 from .limits import CANCELLATION_STRIDE_CHARS, KIB, MIB
-from .tex_commands import DEFINITION_COMMANDS
+from .tex_commands import DEFINITION_COMMANDS, MACRO_DEFINITION_COMMANDS
 
 # Bounds shared by every reader of the lexical subset.
 MAX_SOURCE_BYTES = 8 * MIB
@@ -46,6 +46,11 @@ VERBATIM_ENVIRONMENTS = frozenset(
         "comment",
     }
 )
+# The ``\end`` that closes each verbatim environment, spaces allowed as TeX allows them.
+_VERBATIM_END = {
+    name: re.compile(r"\\end\s*\{\s*" + re.escape(name) + r"\s*\}")
+    for name in VERBATIM_ENVIRONMENTS
+}
 # Commands whose argument is read verbatim, either braced or between a repeated delimiter.
 _VERBATIM_COMMANDS = frozenset({"verb", "lstinline", "mintinline", "url", "nolinkurl", "path"})
 # The url package's \path takes a braced or ``|``-delimited argument. TikZ shares the name
@@ -244,6 +249,69 @@ def _is_url_path_form(text: str, pos: int) -> bool:
     return opener < len(text) and text[opener] in _URL_PATH_OPENERS
 
 
+class _LiteralEnd(NamedTuple):
+    """Where a verbatim-like region ends, and whether it was closed by its own delimiter."""
+
+    end: int
+    closed: bool
+
+
+def _verbatim_environment(text: str, pos: int) -> _LiteralEnd | None:
+    """The end of a verbatim environment whose ``\\begin`` command ends at ``pos``, if it is one."""
+    environment = read_group(text, skip_trivia(text, pos))
+    closing_pattern = _VERBATIM_END.get(environment.value.strip()) if environment else None
+    if environment is None or closing_pattern is None:
+        return None
+    closing = closing_pattern.search(text, environment.end + 1)
+    return _LiteralEnd(closing.end(), True) if closing else _LiteralEnd(len(text), False)
+
+
+def _skip_verbatim_options(text: str, pos: int, command: str) -> int:
+    """Skip the optional argument (and a ``\\mintinline`` language) before a literal argument."""
+    cursor = skip_trivia(text, pos)
+    option = read_group(text, cursor, "[", "]")
+    if option:
+        cursor = skip_trivia(text, option.end + 1)
+    if command == "mintinline":
+        language = read_group(text, cursor)
+        if language:
+            cursor = skip_trivia(text, language.end + 1)
+    return cursor
+
+
+def _verbatim_command(text: str, name: str, pos: int) -> _LiteralEnd | None:
+    """The end of the literal argument of ``\\verb``, ``\\url`` and kin, whose name ends at ``pos``.
+
+    The argument is braced, or runs to the next copy of its first character on the line.
+    """
+    cursor = pos + 1 if text.startswith("*", pos) else pos
+    if name != "verb":
+        cursor = _skip_verbatim_options(text, cursor, name)
+    if cursor >= len(text) or text[cursor].isspace():
+        return None
+    if text[cursor] == "{" and name != "verb":
+        argument = read_group(text, cursor)
+        return _LiteralEnd(argument.end + 1, True) if argument else _LiteralEnd(len(text), False)
+    line_end = _line_end(text, cursor)
+    close = text.find(text[cursor], cursor + 1, line_end)
+    return _LiteralEnd(close + 1, True) if close >= 0 else _LiteralEnd(line_end, False)
+
+
+def _literal_after(text: str, name: str, pos: int) -> _LiteralEnd | None:
+    """The literal region that the control sequence ``name``, ending at ``pos``, opens, if any."""
+    if name == "begin":
+        return _verbatim_environment(text, pos)
+    if name in _VERBATIM_COMMANDS and (name != "path" or _is_url_path_form(text, pos)):
+        return _verbatim_command(text, name, pos)
+    return None
+
+
+def _line_end(text: str, pos: int) -> int:
+    """The offset of the line break that ends the line holding ``pos``, or the text's end."""
+    end = text.find("\n", pos)
+    return len(text) if end < 0 else end
+
+
 def source_regions(text: str) -> RegionScan:
     """Return comment and literal regions and unclosed literal offsets, without TeX expansion."""
     regions: list[Region] = []
@@ -253,65 +321,22 @@ def source_regions(text: str) -> RegionScan:
         if pos % CANCELLATION_STRIDE_CHARS == 0:
             cancellation_point()
         if text[pos] == "%":
-            end = text.find("\n", pos)
-            end = len(text) if end < 0 else end
+            end = _line_end(text, pos)
             regions.append(Region(pos, end - (text[end - 1 : end] == "\r"), "comment"))
             pos = end
             continue
-        if text[pos] != "\\":
+        token = CONTROL_SEQUENCE.match(text, pos) if text[pos] == "\\" else None
+        if token is None:
             pos += 1
             continue
-        token = CONTROL_SEQUENCE.match(text, pos)
-        if not token:
-            pos += 1
+        literal = _literal_after(text, token.group(1), token.end())
+        if literal is None:
+            pos = token.end()
             continue
-        name, end = token.group(1), token.end()
-        if name == "begin":
-            environment = read_group(text, skip_trivia(text, end))
-            if environment and environment.value.strip() in VERBATIM_ENVIRONMENTS:
-                closing = re.search(
-                    r"\\end\s*\{\s*" + re.escape(environment.value.strip()) + r"\s*\}",
-                    text[environment.end + 1 :],
-                )
-                if closing:
-                    end = environment.end + 1 + closing.end()
-                else:
-                    end = len(text)
-                    unclosed.append(pos)
-                regions.append(Region(pos, end, "literal"))
-                pos = end
-                continue
-        if name in _VERBATIM_COMMANDS and (name != "path" or _is_url_path_form(text, end)):
-            cursor = end
-            if cursor < len(text) and text[cursor] == "*":
-                cursor += 1
-            if name != "verb":
-                cursor = skip_trivia(text, cursor)
-                option = read_group(text, cursor, "[", "]")
-                if option:
-                    cursor = skip_trivia(text, option.end + 1)
-                if name == "mintinline":
-                    language = read_group(text, cursor)
-                    if language:
-                        cursor = skip_trivia(text, language.end + 1)
-            if cursor < len(text) and not text[cursor].isspace():
-                if text[cursor] == "{" and name != "verb":
-                    argument = read_group(text, cursor)
-                    end = argument.end + 1 if argument else len(text)
-                    if not argument:
-                        unclosed.append(pos)
-                else:
-                    delimiter = text[cursor]
-                    line_end = text.find("\n", cursor)
-                    line_end = len(text) if line_end < 0 else line_end
-                    close = text.find(delimiter, cursor + 1, line_end)
-                    end = close + 1 if close >= 0 else line_end
-                    if close < 0:
-                        unclosed.append(pos)
-                regions.append(Region(pos, end, "literal"))
-                pos = end
-                continue
-        pos = end
+        regions.append(Region(pos, literal.end, "literal"))
+        if not literal.closed:
+            unclosed.append(pos)
+        pos = literal.end
     return RegionScan(regions, unclosed)
 
 
@@ -355,6 +380,51 @@ def comment_starts(regions: Iterable[Region]) -> list[int]:
     return [region.start for region in regions if region.kind == "comment"]
 
 
+def _bare_input_name(masked: str, pos: int) -> list[Argument]:
+    """The file name of ``\\input name``, written without braces, as a one-item argument list."""
+    start = skip_space(masked, pos)
+    match = _BARE_INPUT_NAME.match(masked, start)
+    return [Argument(start, match.end(), match.group())] if match else []
+
+
+class _Groups(NamedTuple):
+    arguments: list[Argument]
+    options: list[Argument]
+
+
+def _read_following_groups(masked: str, cursor: int, comments: Sequence[int]) -> _Groups:
+    """The brace groups (arguments) and bracket groups (options) that follow a command.
+
+    Reading stops at a paragraph break (see ``_has_blank_line``), at text that opens no
+    group, or after ``_MAX_GROUPS_PER_COMMAND`` groups.
+    """
+    arguments: list[Argument] = []
+    options: list[Argument] = []
+    for _ in range(_MAX_GROUPS_PER_COMMAND):
+        skipped = skip_space(masked, cursor)
+        # A paragraph break ends argument scanning: the next group starts
+        # new text instead of completing this command.
+        if _has_blank_line(masked, cursor, skipped, comments):
+            break
+        cursor = skipped
+        option = read_group(masked, cursor, "[", "]")
+        argument = read_group(masked, cursor)
+        if option:
+            options.append(option)
+            cursor = option.end + 1
+        elif argument:
+            arguments.append(argument)
+            cursor = argument.end + 1
+        else:
+            # An unbalanced brace leaves every later argument span
+            # unreadable, but an unmatched bracket is ordinary text such
+            # as "[0, 1)" and only ends this command's arguments.
+            if cursor < len(masked) and masked[cursor] == "{":
+                raise ParseLimitExceeded(_unreadable_group_reason(masked, cursor), cursor)
+            break
+    return _Groups(arguments, options)
+
+
 def scan_commands(masked: str, comments: Sequence[int] = ()) -> list[Command]:
     """Return the commands of literal-masked text with their following groups.
 
@@ -370,6 +440,7 @@ def scan_commands(masked: str, comments: Sequence[int] = ()) -> list[Command]:
     depth = pos = 0
     line = 1
     argument_chars = 0
+    argument_budget = min(MAX_SOURCE_BYTES, len(masked) * _ARGUMENT_BUDGET_FACTOR)
     while pos < len(masked):
         if pos % CANCELLATION_STRIDE_CHARS == 0:
             cancellation_point()
@@ -380,52 +451,24 @@ def scan_commands(masked: str, comments: Sequence[int] = ()) -> list[Command]:
             depth += 1
         elif char == "}":
             depth = max(0, depth - 1)
-        elif char == "\\":
-            token = CONTROL_SEQUENCE.match(masked, pos)
-            if token:
-                cursor = token.end()
-                if cursor < len(masked) and masked[cursor] == "*":
-                    cursor += 1
-                arguments: list[Argument] = []
-                options: list[Argument] = []
-                name = token.group(1)
-                for _ in range(_MAX_GROUPS_PER_COMMAND):
-                    skipped = skip_space(masked, cursor)
-                    # A paragraph break ends argument scanning: the next group starts
-                    # new text instead of completing this command.
-                    if _has_blank_line(masked, cursor, skipped, comments):
-                        break
-                    cursor = skipped
-                    option = read_group(masked, cursor, "[", "]")
-                    argument = read_group(masked, cursor)
-                    if option:
-                        options.append(option)
-                        cursor = option.end + 1
-                    elif argument:
-                        arguments.append(argument)
-                        cursor = argument.end + 1
-                    else:
-                        # An unbalanced brace leaves every later argument span
-                        # unreadable, but an unmatched bracket is ordinary text such
-                        # as "[0, 1)" and only ends this command's arguments.
-                        if cursor < len(masked) and masked[cursor] == "{":
-                            raise ParseLimitExceeded(
-                                _unreadable_group_reason(masked, cursor), cursor
-                            )
-                        break
-                argument_chars += sum(len(group.value) for group in (*arguments, *options))
-                if argument_chars > min(MAX_SOURCE_BYTES, len(masked) * _ARGUMENT_BUDGET_FACTOR):
-                    raise ParseLimitExceeded("argument_budget", pos)
-                if not arguments and name == "input":
-                    start = skip_space(masked, token.end())
-                    match = _BARE_INPUT_NAME.match(masked, start)
-                    if match:
-                        arguments.append(Argument(start, match.end(), match.group()))
-                result.append(Command(name, pos, line, depth, tuple(arguments), tuple(options)))
-                if len(result) > MAX_COMMANDS:
-                    raise ParseLimitExceeded("command_count", pos)
-                pos = token.end()
-                continue
+        elif char == "\\" and (token := CONTROL_SEQUENCE.match(masked, pos)):
+            name, name_end = token.group(1), token.end()
+            groups = _read_following_groups(
+                masked, name_end + masked.startswith("*", name_end), comments
+            )
+            argument_chars += sum(
+                len(group.value) for group in (*groups.arguments, *groups.options)
+            )
+            if argument_chars > argument_budget:
+                raise ParseLimitExceeded("argument_budget", pos)
+            arguments = groups.arguments
+            if not arguments and name == "input":
+                arguments.extend(_bare_input_name(masked, name_end))
+            result.append(Command(name, pos, line, depth, tuple(arguments), tuple(groups.options)))
+            if len(result) > MAX_COMMANDS:
+                raise ParseLimitExceeded("command_count", pos)
+            pos = name_end
+            continue
         pos += 1
     return result
 
@@ -460,6 +503,46 @@ def merge_spans(spans: Iterable[tuple[int, int]]) -> list[tuple[int, int]]:
         else:
             merged.append((start, end))
     return merged
+
+
+def command_end(command: Command) -> int:
+    """The offset just after a command's last recorded argument or option."""
+    return max(
+        (argument.end + 1 for argument in (*command.arguments, *command.options)),
+        default=command.name_end,
+    )
+
+
+def _definition_end(text: str, command: Command) -> int:
+    """Return the offset after a definition's name, parameters and replacement body."""
+    stop = command_end(command)
+    if command.name not in DEFINITION_COMMANDS:
+        return stop
+    # Definitions written with TeX primitives take their name and replacement text
+    # without braces around the name, so the lexer records no arguments for them.
+    line_end = _line_end(text, stop)
+    cursor = stop
+    # \let\a\b and \def\x#1{…} place the defined name outside any group.
+    for _ in range(2 if command.name in {"let", "futurelet"} else 1):
+        token = CONTROL_SEQUENCE.match(text, cursor)
+        if token is None:
+            break
+        cursor = stop = token.end()
+    opening = text.find("{", cursor, line_end)
+    if opening >= 0:
+        body = read_group(text, opening)
+        if body is not None:
+            return body.end + 1
+    return stop
+
+
+def definition_spans(text: str, commands: Sequence[Command]) -> list[tuple[int, int]]:
+    """Return merged offset ranges covering definition commands and their bodies."""
+    return merge_spans(
+        (command.start, _definition_end(text, command))
+        for command in commands
+        if command.name in MACRO_DEFINITION_COMMANDS
+    )
 
 
 def conditional_spans(commands: list[Command]) -> list[tuple[int, int]]:

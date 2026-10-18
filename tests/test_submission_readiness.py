@@ -12,13 +12,14 @@ from unittest.mock import AsyncMock, patch
 
 from latexprep.config import load_settings
 from latexprep.core import run_job
-from latexprep.document_tasks import _submission_readiness
+from latexprep.document_tasks import source_readiness_findings
 from latexprep.errors import PreparationError
-from latexprep.finding_view import is_scope_disclaimer
+from latexprep.figure_color_space import JpegColor, jpeg_color_family, png_color_family
 from latexprep.findings import Finding
 from latexprep.job_context import JobRequest
-from latexprep.manuscript_checks import ManuscriptCheckOptions, check_manuscript_policies
-from latexprep.submission_checks import SubmissionOptions
+from latexprep.manuscript_check_options import ManuscriptCheckOptions
+from latexprep.manuscript_checks import check_manuscript_policies
+from latexprep.submission_options import SubmissionOptions
 from latexprep.submission_readiness_checks import check_submission_readiness
 
 from .support import fake_build
@@ -96,11 +97,11 @@ class BibliographyBblTests(ReadinessCase):
         self.assertEqual(
             (missing.code, missing.severity, missing.status), ("TEX009", "info", "not_applicable")
         )
-        self.assertTrue(is_scope_disclaimer(missing))
+        self.assertTrue(missing.is_scope_disclaimer)
         self.assertEqual((missing.path, missing.line), ("main.tex", 5))
         self.assertIn("main.bbl is not in the package", missing.message)
         self.assertIn("submission_checks.require_bbl", missing.message)
-        self.assertEqual(missing.details["backend"], "BibTeX")
+        self.assertEqual(missing.details["backend"], "bibtex")
         self.assertFalse(missing.details["require_bbl"])
         self.write("old/paper.bbl", "\\begin{thebibliography}{1}\\end{thebibliography}")
         self.assertIn("old/paper.bbl", self.one("source.bibliography_bbl").message)
@@ -138,7 +139,7 @@ class BibliographyBblTests(ReadinessCase):
             with self.subTest(severity=severity):
                 findings = [
                     item
-                    for item in _submission_readiness(self.root, "main.tex", settings)
+                    for item in source_readiness_findings(self.root, "main.tex", settings)
                     if item.rule == "source.bibliography_bbl"
                 ]
                 self.assertEqual([item.severity for item in findings], [severity])
@@ -234,7 +235,7 @@ class BibliographyBblTests(ReadinessCase):
         config.write_text('[submission_checks]\nbiblatex_bbl_format_version = "3.3"\n')
         findings = [
             item
-            for item in _submission_readiness(self.root, "main.tex", load_settings(config, {}))
+            for item in source_readiness_findings(self.root, "main.tex", load_settings(config, {}))
             if item.rule == "bibliography.bbl_format_version"
         ]
         self.assertEqual([(item.code, item.status) for item in findings], [("BIB110", "failed")])
@@ -320,6 +321,22 @@ class FigureTests(ReadinessCase):
         self.assertIn("shell escape", finding.message)
         self.document("\\usepackage{graphicx}\n", "\\includegraphics{photo.pdf}")
         self.assertEqual(self.findings("source.eps_figures"), [])
+
+    def test_jpeg_walker_reads_the_frame_and_stops_quietly_at_damage(self) -> None:
+        self.assertEqual(jpeg_color_family(jpeg(3)), JpegColor("rgb", None))
+        self.assertEqual(jpeg_color_family(jpeg(4, adobe_transform=2)), JpegColor("cmyk", 2))
+        self.assertEqual(jpeg_color_family(jpeg(1)), JpegColor("gray", None))
+        # Restart markers and fill bytes before the frame header carry no length.
+        padded = b"\xff\xd8\xff\xd0\xff\xff" + jpeg(3)[2:]
+        self.assertEqual(jpeg_color_family(padded), JpegColor("rgb", None))
+        # Not a JPEG, a truncated segment, or a stream that ends before any frame header.
+        for damaged in (b"", b"GIF89a", jpeg(3)[:12], b"\xff\xd8\xff\xd9"):
+            with self.subTest(damaged=damaged):
+                self.assertEqual(jpeg_color_family(damaged).family, None)
+        self.assertEqual(png_color_family(png(6)), "rgb")
+        self.assertEqual(png_color_family(png(4)), "gray")
+        self.assertIsNone(png_color_family(png(1)))
+        self.assertIsNone(png_color_family(b"\x89PNG"))
 
     def test_vector_figures_are_not_applicable_to_the_raster_color_space_policy(self) -> None:
         self.write("plot.eps", "%!PS\n")

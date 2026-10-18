@@ -7,10 +7,10 @@ import unittest
 from pathlib import Path
 from typing import Any
 
+from latexprep.build_result import BuildResult
 from latexprep.cancellation import AnalysisCancelled, bounded_map, cancellation_point, run_in_thread
 from latexprep.errors import PreparationError
 from latexprep.findings import Finding
-from latexprep.latexmk_build import BuildResult
 from latexprep.resource_budget import ResourceBudget
 from latexprep.scheduler import Scheduler, Task
 

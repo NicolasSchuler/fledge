@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, patch
 from click.testing import CliRunner
 
 from latexprep.cli import cli
+from latexprep.command_runner import CommandResult
 from latexprep.config import Settings
 from latexprep.doctor import diagnostic_engines, run_doctor
 from latexprep.errors import PreparationError
@@ -20,7 +21,7 @@ from latexprep.findings import Finding
 from latexprep.job_execution import JobDeadlineExceeded
 from latexprep.report import Outcome
 from latexprep.resource_monitor import ResourceMonitor
-from latexprep.runtime import CommandResult, ToolRunner
+from latexprep.runtime import ToolRunner
 from latexprep.workflow_options import DocumentOptions, WorkflowOptions
 from tests.support import fake_build_result, write_project
 from tests.test_pdf import FakePdfRunner
@@ -311,7 +312,7 @@ class DoctorTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(report.tools["pdflatex"]["exercised"])
 
     async def test_optional_tools_are_advisory_only_when_enabled(self):
-        from latexprep.pdf_checks import PdfCheckOptions
+        from latexprep.pdf_check_options import PdfCheckOptions
 
         with patch(
             "latexprep.doctor.shutil.which",
@@ -355,7 +356,7 @@ class DoctorTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(report.tools["qpdf"]["installed"])
 
     async def test_required_color_space_alone_lists_mutool(self):
-        from latexprep.pdf_artwork import PdfArtworkOptions
+        from latexprep.pdf_artwork_options import PdfArtworkOptions
 
         for field in ("rendered_pdf_artwork", "included_figure_artwork"):
             with self.subTest(setting=field):
@@ -368,7 +369,7 @@ class DoctorTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("mutool", report.tools)
 
     async def test_text_geometry_checks_list_pdftohtml_as_an_advisory_tool(self):
-        from latexprep.pdf_checks import PdfCheckOptions
+        from latexprep.pdf_check_options import PdfCheckOptions
 
         for options in (
             PdfCheckOptions(min_text_size_pt=8),
@@ -384,8 +385,8 @@ class DoctorTests(unittest.IsolatedAsyncioTestCase):
 
     def test_configured_checks_select_the_tools_their_adapters_name(self):
         from latexprep.doctor import _selected_tools
-        from latexprep.pdf_artwork import PdfArtworkOptions
-        from latexprep.pdf_checks import PdfCheckOptions
+        from latexprep.pdf_artwork_options import PdfArtworkOptions
+        from latexprep.pdf_check_options import PdfCheckOptions
         from latexprep.pdf_structure_checks import StructureOptions
 
         required, optional = _selected_tools(Settings())

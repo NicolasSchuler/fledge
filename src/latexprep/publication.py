@@ -1,7 +1,10 @@
 """Publish verified packages, previews and reports into new directories outside the input.
 
 Publication is one transaction: it creates its directories exclusively and
-removes exactly those again when any later step fails.
+removes exactly those again when any later step fails. A report that cannot be
+represented safely is refused up front, before any directory exists: the refusal is
+recorded in the report as a ``report.redaction_limit`` error, never raised. A step
+that raises leaves ``report.artifacts`` to the caller, which clears it.
 """
 
 from __future__ import annotations
@@ -12,7 +15,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import TracebackType
-from typing import Self
+from typing import NamedTuple, Self
 
 from .errors import PreparationError, RequestError
 from .findings import Finding
@@ -21,8 +24,11 @@ from .report import Outcome, Report
 
 # Workspace preview images and the published path of each.
 PreviewPlan = tuple[tuple[Path, Path], ...]
-_MAX_PREVIEW_BYTES = 16_000_000
-_MAX_PREVIEWS = 10000
+# Largest single preview image exported, in decimal megabytes (16 MB), and the most
+# images one job exports: together they bound what a hostile or runaway renderer can
+# make the publication step copy.
+_MAX_PREVIEW_IMAGE_BYTES = 16_000_000
+_MAX_PREVIEW_IMAGES = 10_000
 # Each package directory holds these files; the keys name them in report artifacts.
 _PACKAGE_FILES = (
     ("sources", "sources"),
@@ -30,6 +36,7 @@ _PACKAGE_FILES = (
     ("pdf", "manuscript.pdf"),
     ("report", "report.json"),
 )
+_REFUSAL_SUGGESTION = "Use an output path without credential values or reduce report size."
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,6 +55,18 @@ class DocumentResult:
     name: str
     report: Report
     package: VerifiedPackage | None
+
+
+@dataclass(frozen=True, slots=True)
+class DocumentPackages:
+    """The results of every selected document; all must have a package to be published."""
+
+    results: tuple[DocumentResult, ...]
+
+
+# What a finished job offers for publication: one package, the packages of several
+# selected documents, or nothing because the job did not produce a verified package.
+JobOutput = VerifiedPackage | DocumentPackages | None
 
 
 def validate_destination(source: Path, destination: Path, option: str) -> Path:
@@ -78,10 +97,12 @@ class OutputTransaction:
     """Directories one publication creates; a failure removes every one of them.
 
     Only directories created by ``create`` are removed, never previous or concurrent data.
+    ``progress`` receives a message when a failure starts the removal.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, progress: Callable[[str], None] | None = None) -> None:
         self._created: list[Path] = []
+        self._progress = progress or (lambda _message: None)
 
     def __enter__(self) -> Self:
         return self
@@ -94,6 +115,8 @@ class OutputTransaction:
     ) -> None:
         if exc_type is None:
             return
+        if self._created:
+            self._progress("Publication failed; removing the partial output")
         # Try every directory: one that cannot be removed must neither hide the error
         # that caused the rollback nor leave the remaining directories behind.
         for path in reversed(self._created):
@@ -131,8 +154,71 @@ def _copy_previews(previews: PreviewPlan, check_deadline: Callable[[], None]) ->
     for source, destination in previews:
         check_deadline()
         destination.parent.mkdir(parents=True, exist_ok=True)
-        with destination.open("xb") as stream:
-            stream.write(source.read_bytes())
+        with source.open("rb") as origin, destination.open("xb") as stream:
+            shutil.copyfileobj(origin, stream)
+
+
+class _RenderedReport(NamedTuple):
+    """A report as it will be published: the artifact paths it names and its JSON text."""
+
+    artifacts: dict[str, str]
+    text: str
+
+
+def _render_report(report: Report, artifacts: dict[str, str]) -> _RenderedReport | None:
+    """The report with its final artifact paths, or None when it cannot be represented safely.
+
+    Final paths are included before the first publication mutation: paths themselves
+    can contain credentials or push the complete report beyond redaction limits.
+    """
+    public = replace(report, artifacts=artifacts).to_dict()
+    if public["outcome"] == "error":
+        return None
+    return _RenderedReport(artifacts, _json_text(public))
+
+
+def _refuse(report: Report, message: str) -> None:
+    """Record that nothing is published because the report cannot be represented safely."""
+    report.outcome = Outcome.ERROR
+    report.artifacts.clear()
+    # No preview was published: findings must not point at exported files.
+    locate_previews(report, ())
+    report.findings.append(
+        Finding(
+            "report.redaction_limit",
+            f"{message} no output was published.",
+            severity="error",
+            status="inconclusive",
+            suggestion=_REFUSAL_SUGGESTION,
+        )
+    )
+
+
+def _package_artifacts(report: Report, output: Path) -> dict[str, str]:
+    return {
+        **report.artifacts,
+        **{kind: str(output / filename) for kind, filename in _PACKAGE_FILES},
+    }
+
+
+def _write_package(
+    transaction: OutputTransaction,
+    output: Path,
+    package: VerifiedPackage,
+    rendered: _RenderedReport,
+    previews: PreviewPlan,
+    check_deadline: Callable[[], None],
+) -> None:
+    """Create ``output`` and write one package, its previews and its rendered report."""
+    check_deadline()
+    transaction.create(output)
+    shutil.copytree(package.sources, output / "sources")
+    check_deadline()
+    shutil.copyfile(package.archive, output / "submission.zip")
+    shutil.copyfile(package.pdf, output / "manuscript.pdf")
+    _copy_previews(previews, check_deadline)
+    check_deadline()
+    _write_new_text(output / "report.json", rendered.text)
 
 
 def publish_package(
@@ -150,44 +236,13 @@ def publish_package(
     represented safely; nothing is written then.
     """
     check_deadline()
-    artifacts = {
-        **report.artifacts,
-        **{kind: str(output / filename) for kind, filename in _PACKAGE_FILES},
-    }
-    # Include final paths before the first publication mutation: paths themselves
-    # can contain credentials or push the complete report beyond redaction limits.
-    public = replace(report, artifacts=artifacts).to_dict()
-    if public["outcome"] == "error":
-        report.outcome = Outcome.ERROR
-        report.artifacts.clear()
-        # No preview was published: findings must not point at exported files.
-        locate_previews(report, ())
-        report.findings.append(
-            Finding(
-                "report.redaction_limit",
-                "The final report could not be safely represented; no output was published.",
-                severity="error",
-                status="inconclusive",
-                suggestion="Use an output path without credential values or reduce report size.",
-            )
-        )
+    rendered = _render_report(report, _package_artifacts(report, output))
+    if rendered is None:
+        _refuse(report, "The final report could not be safely represented;")
         return False
-    text = _json_text(public)
+    _write_package(transaction, output, package, rendered, previews, check_deadline)
+    report.artifacts.update(rendered.artifacts)
     check_deadline()
-    transaction.create(output)
-    try:
-        shutil.copytree(package.sources, output / "sources")
-        check_deadline()
-        shutil.copyfile(package.archive, output / "submission.zip")
-        shutil.copyfile(package.pdf, output / "manuscript.pdf")
-        _copy_previews(previews, check_deadline)
-        check_deadline()
-        _write_new_text(output / "report.json", text)
-        report.artifacts.update(artifacts)
-        check_deadline()
-    except BaseException:
-        report.artifacts.clear()
-        raise
     return True
 
 
@@ -199,17 +254,14 @@ def publish_documents(
     check_deadline: Callable[[], None],
     *,
     previews: PreviewPlan = (),
-) -> None:
-    """Publish each verified document package beside the combined report."""
-    artifacts = {
-        **report.artifacts,
-        **{
-            f"{document.name}.{kind}": str(output / document.name / filename)
-            for document in documents
-            for kind, filename in _PACKAGE_FILES
-        },
-    }
-    artifacts["report"] = str(output / "report.json")
+) -> bool:
+    """Publish each verified document package beside the combined report.
+
+    Returns False, recording why in ``report``, when the combined report or the report
+    of any document cannot be represented safely; nothing is written then. Every
+    document must have a verified package: the caller publishes only when none is
+    missing, so a missing one is a defect and raises.
+    """
     verified: list[tuple[DocumentResult, VerifiedPackage]] = []
     unverified: list[str] = []
     for document in documents:
@@ -223,31 +275,45 @@ def publish_documents(
             "resolve the blocking findings reported for the unverified documents and "
             "prepare again"
         )
-    public = replace(report, artifacts=artifacts).to_dict()
-    if public["outcome"] == "error":
-        raise PreparationError(
-            "Final multi-document report cannot be safely represented; no output published"
+    artifacts = {
+        **report.artifacts,
+        **{
+            f"{document.name}.{kind}": str(output / document.name / filename)
+            for document in documents
+            for kind, filename in _PACKAGE_FILES
+        },
+        "report": str(output / "report.json"),
+    }
+    rendered = _render_report(report, artifacts)
+    if rendered is None:
+        _refuse(report, "The final multi-document report could not be safely represented;")
+        return False
+    # Render every document's report before creating anything, so a refusal leaves no output.
+    rendered_documents = []
+    for document, _ in verified:
+        rendered_document = _render_report(
+            document.report, _package_artifacts(document.report, output / document.name)
         )
-    text = _json_text(public)
+        if rendered_document is None:
+            _refuse(
+                report,
+                f"The report of document {document.name} could not be safely represented;",
+            )
+            return False
+        rendered_documents.append(rendered_document)
     check_deadline()
     transaction.create(output)
-    try:
-        for document, package in verified:
-            if not publish_package(
-                transaction,
-                output / document.name,
-                package,
-                document.report,
-                check_deadline,
-            ):
-                raise PreparationError(f"Cannot safely publish document {document.name}")
-        _copy_previews(previews, check_deadline)
-        _write_new_text(output / "report.json", text)
+    for (document, package), rendered_document in zip(verified, rendered_documents, strict=True):
+        _write_package(
+            transaction, output / document.name, package, rendered_document, (), check_deadline
+        )
+        document.report.artifacts.update(rendered_document.artifacts)
         check_deadline()
-        report.artifacts.update(artifacts)
-    except BaseException:
-        report.artifacts.clear()
-        raise
+    _copy_previews(previews, check_deadline)
+    _write_new_text(output / "report.json", rendered.text)
+    check_deadline()
+    report.artifacts.update(rendered.artifacts)
+    return True
 
 
 def publish_previews(
@@ -263,9 +329,29 @@ def publish_previews(
     _write_new_text(destination / "report.json", report.to_json())
 
 
+def _check_exportable_preview(work: Path, path: Path, *, exported: int) -> None:
+    """Refuse a preview that is not a PNG file of the workspace, or one beyond the limits."""
+    if path.suffix != ".png" or not is_contained(work, path, regular_file=True):
+        raise PreparationError(
+            f"A page preview is not a PNG image inside the job's workspace: {path.name}. "
+            "This is a defect in a preview renderer; report it with the JSON report."
+        )
+    if path.stat().st_size > _MAX_PREVIEW_IMAGE_BYTES:
+        raise PreparationError(
+            f"The page preview {path.name} is larger than the "
+            f"{_MAX_PREVIEW_IMAGE_BYTES // 1_000_000} MB limit and cannot be exported. "
+            "Turn off the grayscale preview setting, or check fewer pages."
+        )
+    if exported >= _MAX_PREVIEW_IMAGES:
+        raise PreparationError(
+            f"More than {_MAX_PREVIEW_IMAGES} page previews would be exported. "
+            "Turn off the grayscale preview setting, or check fewer documents at a time."
+        )
+
+
 def plan_previews(report: Report, work: Path, destination: Path) -> PreviewPlan:
     """Number every preview image the findings reference for export to ``destination``."""
-    paths: list[Path] = []
+    paths: dict[Path, None] = {}
     for finding in report.sorted_findings():
         artifacts = finding.details.get("artifacts", [])
         if not isinstance(artifacts, list):
@@ -275,11 +361,8 @@ def plan_previews(report: Report, work: Path, destination: Path) -> PreviewPlan:
                 continue
             path = Path(name)
             if path not in paths:
-                if path.suffix != ".png" or not is_contained(work, path, regular_file=True):
-                    raise PreparationError("Preview adapter returned an invalid artifact")
-                if path.stat().st_size > _MAX_PREVIEW_BYTES or len(paths) >= _MAX_PREVIEWS:
-                    raise PreparationError("Preview artifacts exceed bounded export limits")
-                paths.append(path)
+                _check_exportable_preview(work, path, exported=len(paths))
+                paths[path] = None
     return tuple(
         (source, destination / f"page-{index:04d}.png") for index, source in enumerate(paths, 1)
     )

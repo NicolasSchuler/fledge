@@ -5,7 +5,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from latexprep.file_scan import inventory_files, plural
+from latexprep.file_scan import inventory_files
+from latexprep.finding_text import plural
 
 
 class InventoryTests(unittest.TestCase):

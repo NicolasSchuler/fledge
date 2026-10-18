@@ -9,7 +9,8 @@ from pathlib import Path
 import click
 
 from .command_options import debug_option
-from .config import parse_settings_text, resolve_config_path
+from .config import parse_settings_text
+from .config_discovery import resolve_config_path
 from .errors import PreparationError
 from .presets import PRESETS, preset_names, preset_text
 from .report import Outcome
@@ -64,7 +65,41 @@ def _next_steps(directory: Path) -> list[str]:
     ]
 
 
-@click.command("init")
+def _check_target(target: Path, force: bool) -> None:
+    """Refuse to write through a link or special file, or over a file without ``--force``."""
+    if target.is_symlink() or (target.exists() and not target.is_file()):
+        raise InitError(f"{target} is not a regular file; refusing to write through it")
+    if target.exists() and not force:
+        raise InitError(f"{target} already exists; pass --force to overwrite it")
+
+
+def _write_settings(target: Path, text: str, force: bool) -> None:
+    """Validate ``text`` as settings, then write it; an invalid file is never written."""
+    # Validate before writing, so --force never replaces a file with an invalid one.
+    try:
+        parse_settings_text(text, target)
+    except PreparationError as error:
+        raise InitError(f"Cannot write a valid {target}: {error}") from error
+    try:
+        with target.open("w" if force else "x", encoding="utf-8") as stream:
+            stream.write(text)
+    except OSError as error:
+        raise InitError(f"Cannot write a valid {target}: {error}") from error
+
+
+def _announce_precedence(target: Path, previous: Path | None, current: Path | None) -> None:
+    """Warn when another settings file wins here, or note which one this file now outranks."""
+    if current is not None and current != target.resolve():
+        click.echo(
+            f"Warning: {current} takes precedence over {CONFIG_NAME} here; "
+            f"move or merge it, or pass --config {target}.",
+            err=True,
+        )
+    elif previous is not None and previous != target.resolve():
+        click.echo(f"Note: this file now takes precedence over {previous}.")
+
+
+@click.command("init", short_help="Write a starter fledge.toml settings file.")
 @click.argument(
     "directory",
     required=False,
@@ -94,36 +129,15 @@ def init_command(directory: Path, preset: str | None, force: bool, list_presets:
         _print_presets()
         return 0
     target = directory / CONFIG_NAME
-    if target.is_symlink() or (target.exists() and not target.is_file()):
-        raise InitError(f"{target} is not a regular file; refusing to write through it")
-    if target.exists() and not force:
-        raise InitError(f"{target} already exists; pass --force to overwrite it")
+    _check_target(target, force)
+    text = STARTER
     if preset is not None:
         text = f"# Written by `fledge init --preset {preset}`.\n" + preset_text(preset)
-    else:
-        text = STARTER
-    # Validate before writing, so --force never replaces a file with an invalid one.
-    try:
-        parse_settings_text(text, target)
-    except PreparationError as error:
-        raise InitError(f"Cannot write a valid {target}: {error}") from error
     previous = _nearest_config(directory)
-    try:
-        with target.open("w" if force else "x", encoding="utf-8") as stream:
-            stream.write(text)
-    except OSError as error:
-        raise InitError(f"Cannot write a valid {target}: {error}") from error
-    current = _nearest_config(directory)
+    _write_settings(target, text, force)
     origin = f" from the {preset} preset" if preset is not None else ""
     click.echo(f"Wrote {target}{origin}.")
-    if current is not None and current != target.resolve():
-        click.echo(
-            f"Warning: {current} takes precedence over {CONFIG_NAME} here; "
-            f"move or merge it, or pass --config {target}.",
-            err=True,
-        )
-    elif previous is not None and previous != target.resolve():
-        click.echo(f"Note: this file now takes precedence over {previous}.")
+    _announce_precedence(target, previous, _nearest_config(directory))
     if preset is not None:
         click.echo(
             "Fill in the commented placeholders from your venue's current instructions; "

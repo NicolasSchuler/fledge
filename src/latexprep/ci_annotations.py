@@ -7,10 +7,9 @@ from .finding_view import (
     RenderOptions,
     finding_views,
     not_run_summaries,
-    redact_report,
 )
 from .path_safety import is_relative_posix_path
-from .report import Report
+from .report import RedactedReport, Report, redact_report
 from .text_safety import escape_annotation_text
 
 
@@ -18,7 +17,13 @@ def render_ci_annotations(
     report: Report, *, options: RenderOptions = DEFAULT_RENDER_OPTIONS
 ) -> str:
     """GitHub Actions annotations; each untrusted finding occupies one physical line."""
-    public = redact_report(report)
+    return render_redacted_ci_annotations(redact_report(report), options=options)
+
+
+def render_redacted_ci_annotations(
+    public: RedactedReport, *, options: RenderOptions = DEFAULT_RENDER_OPTIONS
+) -> str:
+    """Annotations for a report that was already redacted."""
     lines = []
     for view in finding_views(public, show_hidden=options.show_passed):
         finding = view.finding

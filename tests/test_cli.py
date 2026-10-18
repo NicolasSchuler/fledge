@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import io
 import json
 import os
@@ -13,16 +14,27 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+import click
 from click.testing import CliRunner
 
-from latexprep.cli import USAGE_EXIT_CODE, _settings_suggestion, cli, main
+from latexprep.build_result import BuildResult
+from latexprep.cli import (
+    ADVANCED_OPTIONS,
+    USAGE_EXIT_CODE,
+    CommandOptions,
+    _settings_suggestion,
+    cli,
+    main,
+)
+from latexprep.compact_report import render_compact
+from latexprep.config import Settings
 from latexprep.finding_view import RenderOptions
 from latexprep.findings import Finding
-from latexprep.latexmk_build import BuildResult
 from latexprep.redaction import scrub_local_paths
 from latexprep.report import Change, ChangeKind, Outcome, Report
+from latexprep.rule_definition import RULE_SCHEMA_VERSION
 from latexprep.rules import RULES
-from latexprep.terminal_report import render_compact, render_terminal
+from latexprep.terminal_report import render_terminal
 
 
 class CommandTests(unittest.TestCase):
@@ -70,12 +82,13 @@ class CommandTests(unittest.TestCase):
     def test_catalogue_and_explanation_are_available_without_a_project(self):
         result = self.runner.invoke(cli, ["rules", "--json"])
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertEqual(
-            {row["code"] for row in json.loads(result.stdout)}, {rule.code for rule in RULES}
-        )
+        catalogue = json.loads(result.stdout)
+        self.assertEqual(catalogue["schema_version"], RULE_SCHEMA_VERSION)
+        self.assertEqual({row["code"] for row in catalogue["rules"]}, {rule.code for rule in RULES})
         result = self.runner.invoke(cli, ["rule", "TEX001", "--json"])
         self.assertEqual(result.exit_code, 0)
         item = json.loads(result.stdout)
+        self.assertEqual(item["schema_version"], RULE_SCHEMA_VERSION)
         self.assertEqual(item["name"], "source.edit_marker")
         self.assertTrue(item["tests"] and item["fix"])
         self.assertEqual(self.runner.invoke(cli, ["rule", "UNKNOWN"]).exit_code, USAGE_EXIT_CODE)
@@ -153,7 +166,8 @@ class CommandTests(unittest.TestCase):
         html = self.root / "missing-parent" / "report.html"
         saved = self.root / "report.json"
         with patch(
-            "latexprep.cli.validate_destination", side_effect=lambda _source, path, _option: path
+            "latexprep.report_files.validate_destination",
+            side_effect=lambda _source, path, _option: path,
         ):
             result = self.runner.invoke(
                 cli,
@@ -202,7 +216,7 @@ class RequestErrorTests(unittest.TestCase):
         existing.mkdir()
         finding = self.request_error("prepare", str(self.source), "--output", str(existing))
         self.assertIn("Output already exists", finding["message"])
-        self.assertIn("Choose a new --output path", finding["next_step"])
+        self.assertIn("Choose a new output path", finding["next_step"])
         # Reports show the home and temporary directories generically.
         self.assertIn(scrub_local_paths(str(existing)), finding["next_step"])
 
@@ -214,7 +228,7 @@ class RequestErrorTests(unittest.TestCase):
         )
         self.assertEqual(result.exit_code, 4, result.output)
         [finding] = json.loads(result.stdout)["findings"]
-        self.assertIn("Choose a new --report path", finding["next_step"])
+        self.assertIn("Choose a new --json-report path", finding["next_step"])
 
     def test_missing_input_suggests_checking_the_path(self):
         finding = self.request_error("inspect", str(self.root / "missing"))
@@ -223,8 +237,8 @@ class RequestErrorTests(unittest.TestCase):
 
     def test_prepare_without_output_suggests_output_or_dry_run(self):
         finding = self.request_error("prepare", str(self.source))
-        self.assertIn("--output", finding["next_step"])
-        self.assertIn("--dry-run", finding["next_step"])
+        self.assertIn("output directory", finding["next_step"])
+        self.assertIn("dry run", finding["next_step"])
 
     def test_unknown_main_lists_the_documents_found(self):
         finding = self.request_error("inspect", str(self.source), "--main", "nope.tex")
@@ -401,18 +415,116 @@ class HelpTests(unittest.TestCase):
             "--preview-output",
             "--diagnostics",
             "--html-report",
+            "--json-report",
             "--report",
         ):
             self.assertIn(option, advanced)
             self.assertNotIn(f"{option} ", common)
 
-    def test_non_interactive_is_hidden_but_still_accepted(self):
-        self.assertNotIn("--non-interactive", self.help_text("prepare"))
+    def test_formatting_check_flag_stays_accepted_as_documented_no_op(self):
         with tempfile.TemporaryDirectory() as directory:
-            result = CliRunner().invoke(
-                cli, ["inspect", directory, "--non-interactive", "--quiet", "--json"]
-            )
+            result = CliRunner().invoke(cli, ["fmt", directory, "--check", "--quiet", "--json"])
         self.assertNotEqual(result.exit_code, USAGE_EXIT_CODE, result.output)
+
+    def test_removed_non_interactive_flag_is_a_usage_error(self):
+        result = CliRunner().invoke(cli, ["inspect", ".", "--non-interactive"])
+        self.assertEqual(result.exit_code, USAGE_EXIT_CODE, result.output)
+
+    def test_every_parameter_of_a_job_command_is_a_command_options_field(self):
+        fields_ = {item.name for item in dataclasses.fields(CommandOptions)}
+        seen = set()
+        for path in (
+            ("inspect",),
+            ("check",),
+            ("prepare",),
+            ("bib", "check"),
+            ("fmt",),
+            ("pdf", "check"),
+        ):
+            command: click.Command = cli
+            for name in path:
+                assert isinstance(command, click.Group)
+                command = command.commands[name]
+            for parameter in command.params:
+                if parameter.expose_value:
+                    self.assertIn(parameter.name, fields_, (path, parameter.name))
+                    seen.add(parameter.name)
+        self.assertEqual(ADVANCED_OPTIONS - seen, set(), "ADVANCED_OPTIONS names a missing option")
+
+    def test_help_quotes_defaults_from_the_settings(self):
+        settings = Settings()
+        text = self.help_text("prepare")
+        for expected in (
+            f"(default {settings.jobs})",
+            f"(default {settings.build_jobs})",
+            f"(default {settings.render_jobs})",
+            f"(default {settings.timeout_seconds})",
+            f"(default {settings.job_timeout_seconds})",
+            f"(default {settings.engine})",
+            f"default {settings.layout}.",
+        ):
+            self.assertIn(expected, text)
+
+    def test_main_option_has_one_help_everywhere(self):
+        helps = set()
+        for path in (("inspect",), ("check",), ("prepare",), ("bib", "check")):
+            command: click.Command = cli
+            for name in path:
+                assert isinstance(command, click.Group)
+                command = command.commands[name]
+            [main_parameter] = [item for item in command.params if item.name == "main"]
+            helps.add((main_parameter.help, main_parameter.metavar))
+        submission = cli.commands["submission-text"]
+        [main_parameter] = [item for item in submission.params if item.name == "main"]
+        helps.add((main_parameter.help, main_parameter.metavar))
+        self.assertEqual(len(helps), 1, helps)
+
+    def test_quiet_option_has_one_help_everywhere(self):
+        helps = set()
+        for command in (cli.commands["inspect"], cli.commands["doctor"]):
+            [quiet] = [item for item in command.params if item.name == "quiet"]
+            helps.add(quiet.help)
+        self.assertEqual(len(helps), 1, helps)
+
+    def test_options_without_obvious_meaning_have_help(self):
+        for command, option in (("doctor", "--engine"), ("submission-text", "--field")):
+            with self.subTest(option=option):
+                self.assertRegex(self.help_text(command), rf"{option}[^\n]*\n?\s+\S")
+                [parameter] = [item for item in cli.commands[command].params if option in item.opts]
+                self.assertTrue(parameter.help)
+
+    def test_command_list_is_not_truncated(self):
+        overview = CliRunner().invoke(cli, ["--help"], terminal_width=80).output
+        self.assertNotIn("...", overview.split("Commands:")[1])
+        self.assertIn("Build the PDF and check the sources and the PDF.", overview)
+
+    def test_help_avoids_internal_jargon(self):
+        everything = " ".join(
+            self.help_text(*path)
+            for path in (("check",), ("prepare",), ("pdf", "check"), ("doctor",), ("rule",))
+        )
+        for jargon in ("CPU slots", "page-pair", "isolated build", "in isolation"):
+            self.assertNotIn(jargon, everything)
+
+    def test_json_report_and_its_former_name_both_save_the_report(self):
+        for flag in ("--json-report", "--report"):
+            with self.subTest(flag=flag), tempfile.TemporaryDirectory() as directory:
+                saved = Path(directory) / "report.json"
+                project = Path(directory) / "project"
+                project.mkdir()
+                (project / "main.tex").write_text("\\documentclass{article}\n")
+                result = CliRunner().invoke(
+                    cli, ["inspect", str(project), flag, str(saved), "--quiet", "--isolated"]
+                )
+                self.assertNotEqual(result.exit_code, USAGE_EXIT_CODE, result.output)
+                self.assertEqual(json.loads(saved.read_text())["command"], "inspect")
+
+    def test_rule_explanation_leaves_test_ids_to_the_json_form(self):
+        result = CliRunner().invoke(cli, ["rule", "TEX001"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertNotIn("tests.", result.output)
+        self.assertNotIn("Behavioral tests", result.output)
+        self.assertNotIn("tests.", CliRunner().invoke(cli, ["rules"]).output)
 
     def test_commands_without_advanced_options_keep_one_options_section(self):
         text = self.help_text("rules")
@@ -423,7 +535,7 @@ class HelpTests(unittest.TestCase):
         overview = self.help_text()
         self.assertIn("'fledge rules' lists the checks", overview)
         self.assertIn("Reports list findings", overview)
-        self.assertIn("List every check with its stable code", overview)
+        self.assertIn("List every check with its code and title", overview)
         self.assertIn("Explain the check with code CODE", self.help_text("rule"))
 
 
@@ -668,6 +780,35 @@ class PresentationTests(unittest.TestCase):
         self.assertIn("-a", render_terminal(report, options=RenderOptions(show_diff=True)))
 
 
+class RedactionOncePerRunTests(unittest.TestCase):
+    def test_one_redaction_serves_every_file_and_the_final_report(self):
+        from latexprep.redaction import redact_data
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            project = root / "project"
+            project.mkdir()
+            (project / "main.tex").write_text("\\documentclass{article}\n")
+            report = Report("inspect", outcome=Outcome.PASSED)
+            for output_format in ("terminal", "compact", "json", "html", "ci"):
+                destinations = {
+                    option: root / f"{output_format}-{option[2:]}"
+                    for option in ("--html-report", "--json-report", "--diagnostics")
+                }
+                arguments = ["inspect", str(project), "--quiet", "--output-format", output_format]
+                for option, destination in destinations.items():
+                    arguments += [option, str(destination)]
+                with (
+                    self.subTest(output_format=output_format),
+                    patch("latexprep.cli.run_job", new=AsyncMock(return_value=report)),
+                    patch("latexprep.report.redact_data", wraps=redact_data) as redaction,
+                ):
+                    result = CliRunner().invoke(cli, arguments)
+                self.assertEqual(result.exit_code, 0, result.output)
+                self.assertTrue(all(path.exists() for path in destinations.values()))
+                self.assertEqual(redaction.call_count, 1)
+
+
 class UnexpectedFailureTests(unittest.TestCase):
     """A defect ends with the error exit code, never with a pass or an advisory code."""
 
@@ -737,7 +878,9 @@ class UnexpectedFailureTests(unittest.TestCase):
                 self.assertEqual(report["scope"], "run did not finish")
 
     def test_crash_while_writing_the_report_exits_4_with_one_plain_line(self):
-        with patch("latexprep.cli.write_report", side_effect=RuntimeError("renderer defect")):
+        with patch(
+            "latexprep.cli.write_redacted_report", side_effect=RuntimeError("renderer defect")
+        ):
             code, out, err = self.run_main("inspect", str(self.source), "--quiet")
         self.assertEqual(code, 4)
         self.assertEqual(out, "")
@@ -748,7 +891,9 @@ class UnexpectedFailureTests(unittest.TestCase):
 
     def test_crash_while_saving_an_optional_report_file_is_recorded_in_the_report(self):
         html = self.root / "report.html"
-        with patch("latexprep.cli.render_html", side_effect=RuntimeError("html defect")):
+        with patch(
+            "latexprep.report_files.render_redacted_html", side_effect=RuntimeError("html defect")
+        ):
             code, report, _ = self.inspect_json("--html-report", str(html))
         self.assertEqual(code, 4)
         self.assertEqual(report["outcome"], "error")
@@ -760,7 +905,8 @@ class UnexpectedFailureTests(unittest.TestCase):
                 with (
                     patch.dict(os.environ, environment),
                     patch(
-                        "latexprep.cli.write_report", side_effect=RuntimeError("renderer defect")
+                        "latexprep.cli.write_redacted_report",
+                        side_effect=RuntimeError("renderer defect"),
                     ),
                 ):
                     code, _, err = self.run_main("inspect", str(self.source), "--quiet", *flags)
@@ -812,7 +958,7 @@ class UnexpectedFailureTests(unittest.TestCase):
                 self.assertNotEqual(report["scope"], "request validation")
 
     def test_closed_output_pipe_keeps_the_verdict_and_prints_nothing(self):
-        with patch("latexprep.cli.write_report", side_effect=BrokenPipeError):
+        with patch("latexprep.cli.write_redacted_report", side_effect=BrokenPipeError):
             code, _, err = self.run_main("inspect", str(self.source), "--quiet")
         # The TODO marker is an advisory: exit code 1, not an error.
         self.assertEqual(code, 1)
@@ -836,7 +982,7 @@ class UnexpectedFailureTests(unittest.TestCase):
             with self.subTest(option=option):
                 destination = self.root / "no-such-folder" / directory
                 with patch(
-                    "latexprep.cli.validate_destination",
+                    "latexprep.report_files.validate_destination",
                     side_effect=lambda _source, path, _option: path,
                 ):
                     code, report, _ = self.inspect_json(option, str(destination))

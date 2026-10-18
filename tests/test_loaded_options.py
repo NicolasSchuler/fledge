@@ -11,8 +11,9 @@ from importlib import resources
 from pathlib import Path
 
 from latexprep.build_checks import BuildCheckOptions, check_build_details
+from latexprep.build_result import BuildResult
 from latexprep.errors import PreparationError
-from latexprep.latexmk_build import BuildResult, build_project
+from latexprep.latexmk_build import build_project
 from latexprep.loaded_options import (
     _native_string,
     _parse_options,

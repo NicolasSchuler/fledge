@@ -238,7 +238,7 @@ class Toolchain:
     @property
     def resource_roots(self) -> frozenset[Path]:
         """Stable toolchain roots; command results carry their exact declared roots."""
-        return self.context(Path("/bin/sh")).resource_roots
+        return self._roots
 
     def context(self, executable: Path) -> ToolContext:
         if executable not in self._contexts:

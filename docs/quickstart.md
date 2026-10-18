@@ -54,7 +54,7 @@ archive: /private/tmp/submission/submission.zip
 pdf: /private/tmp/submission/manuscript.pdf
 report: /private/tmp/submission/report.json
 
-Not checked (needs your settings): anonymity, page limit, ZIP size limit, forbidden packages, strict font embedding, image resolution, 93 other opt-in checks. Set them in fledge.toml (start with fledge init --preset arxiv|anonymous-review|camera-ready); see https://nicolasschuler.github.io/fledge/configuration.html
+Not checked (needs your settings): anonymity, page limit, ZIP size limit, forbidden packages, strict font embedding, image resolution, 93 other opt-in checks. Set them in fledge.toml (start with fledge init --preset anonymous-review|arxiv|camera-ready); see https://nicolasschuler.github.io/fledge/configuration.html
 ```
 
 The last line lists opt-in checks that did not run; step 4 below switches on

@@ -35,6 +35,36 @@ class SourceTransformTests(unittest.TestCase):
         self.assertEqual((plan.contents, plan.removals, plan.changes), ({}, set(), []))
         self.assertIn("bounded literal parsing limits", plan.findings[-1].message)
 
+    def test_comment_removal_names_the_files_that_could_not_be_parsed(self) -> None:
+        self.write("main.tex", "\\documentclass{article}\n% note\n")
+        self.write("broken.tex", b"caf\xe9")
+        plan = self.plan(comment_policy="all")
+        problem = next(f for f in plan.findings if f.code == "TEX201" and f.path is None)
+        self.assertIn("broken.tex", problem.message)
+        self.assertEqual(problem.details["files"], ["broken.tex"])
+        self.assertTrue(problem.suggestion)
+        self.assertEqual((plan.contents, plan.changes), ({}, []))
+
+    def test_an_incomplete_graph_blocks_merging_and_inlining_in_the_same_way(self) -> None:
+        self.write("main.tex", "\\documentclass{article}\n\\input{missing}\n\\bibliography{refs}\n")
+        self.write("main.bbl", "\\begin{thebibliography}{1}\\end{thebibliography}\n")
+        for code, options in (
+            ("TEX202", {"merge_inputs": True}),
+            ("TEX203", {"inline_bibliography": "main.bbl"}),
+        ):
+            with self.subTest(code=code):
+                plan = self.plan(**options)
+                problem = next(f for f in plan.findings if f.code == code)
+                self.assertEqual(problem.status, "failed")
+                self.assertIn("complete unambiguous literal dependency graph", problem.message)
+                self.assertEqual((plan.contents, plan.removals), ({}, set()))
+
+    def test_a_graph_with_only_unfollowed_constructs_is_inconclusive_not_failed(self) -> None:
+        self.write("main.tex", "\\documentclass{article}\n\\include{body}\n")
+        self.write("body.tex", "Body.\n")
+        problem = next(f for f in self.plan(merge_inputs=True).findings if f.code == "TEX202")
+        self.assertEqual(problem.status, "inconclusive")
+
     def test_a_comment_line_between_input_and_its_file_is_merged(self) -> None:
         self.write("main.tex", "\\documentclass{article}\n\\input\n% the body\n{body}\n")
         self.write("body.tex", "Body.\n")

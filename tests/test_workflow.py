@@ -13,16 +13,17 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+from latexprep.build_result import BuildTools
 from latexprep.cli import main
 from latexprep.config import Settings
 from latexprep.core import run_job
 from latexprep.errors import PreparationError
 from latexprep.findings import Finding
 from latexprep.job_context import JobRequest
-from latexprep.latexmk_build import BuildTools
 from latexprep.publication import (
     DocumentResult,
     OutputTransaction,
+    plan_previews,
     publish_documents,
     validate_destination,
 )
@@ -167,6 +168,44 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result.outcome, "blocked")
             self.assertTrue(any(item.rule == "source.edit_marker" for item in result.findings))
 
+    async def test_bibliography_command_skips_root_discovery_and_the_reference_pdf(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            project(base / "input")
+            reference = base / "reference.pdf"
+            reference.write_bytes(b"%PDF-fixture")
+            with (
+                patch(
+                    "latexprep.main_selection.discover_roots", side_effect=AssertionError("scan")
+                ),
+                patch(
+                    "latexprep.runtime.ToolRunner.freeze_input",
+                    side_effect=AssertionError("reference PDF snapshot"),
+                ),
+            ):
+                result = await run_job(
+                    JobRequest(
+                        "bib",
+                        base / "input",
+                        Settings(main="main.tex"),
+                        reference_pdf=reference,
+                    )
+                )
+        self.assertEqual(result.main, "main.tex")
+        self.assertNotEqual(result.outcome, "error")
+
+    async def test_input_without_a_document_says_no_main_file_was_found(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            (base / "input").mkdir()
+            (base / "input/notes.txt").write_text("not a document\n")
+            with patch("latexprep.document_tasks.build_project", new=AsyncMock()) as build:
+                result = await run_job(JobRequest("check", base / "input", Settings()))
+            build.assert_not_called()
+        [finding] = [item for item in result.findings if item.rule == "project.main_selection"]
+        self.assertIn("no file with \\documentclass was found", finding.message)
+        self.assertNotIn("0 candidate roots", finding.message)
+
     async def test_ambiguous_root_blocks_without_running_tools(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
@@ -176,6 +215,63 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
                 result = await run_job(JobRequest("check", base / "input", Settings()))
             self.assertEqual(result.outcome, "blocked")
             build.assert_not_called()
+
+
+class PublicationLimitTests(unittest.TestCase):
+    def preview_report(self, *artifacts: Path) -> Report:
+        return Report(
+            "check",
+            findings=[
+                Finding(
+                    "pdf.grayscale_preview",
+                    "Generated",
+                    severity="info",
+                    status="passed",
+                    details={"artifacts": [str(path) for path in artifacts]},
+                )
+            ],
+        )
+
+    def test_repeated_previews_are_numbered_once_in_order(self):
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory).resolve()
+            first, second = work / "a.png", work / "b.png"
+            first.write_bytes(b"one")
+            second.write_bytes(b"two")
+            plan = plan_previews(
+                self.preview_report(first, second, first), work, work / "out" / "previews"
+            )
+        self.assertEqual(
+            plan,
+            (
+                (first, work / "out/previews/page-0001.png"),
+                (second, work / "out/previews/page-0002.png"),
+            ),
+        )
+
+    def test_a_preview_over_the_size_limit_names_the_file_and_the_way_out(self):
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory).resolve()
+            image = work / "large.png"
+            image.write_bytes(b"x" * 8)
+            with (
+                patch("latexprep.publication._MAX_PREVIEW_IMAGE_BYTES", 4),
+                self.assertRaisesRegex(
+                    PreparationError, r"large\.png is larger than .* grayscale preview"
+                ),
+            ):
+                plan_previews(self.preview_report(image), work, work / "previews")
+
+    def test_a_preview_outside_the_workspace_is_refused_as_a_defect(self):
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory).resolve() / "work"
+            work.mkdir()
+            outside = Path(directory).resolve() / "elsewhere.png"
+            outside.write_bytes(b"png")
+            with self.assertRaisesRegex(
+                PreparationError, "not a PNG image inside the job's workspace"
+            ):
+                plan_previews(self.preview_report(outside), work, work / "previews")
 
 
 class OutputTransactionTests(unittest.TestCase):
@@ -205,6 +301,19 @@ class OutputTransactionTests(unittest.TestCase):
             self.assertIn("remove it manually", notes)
             self.assertFalse(first.exists())
             self.assertTrue(second.exists())
+
+    def test_rollback_announces_the_removal_only_when_something_was_created(self):
+        messages: list[str] = []
+        with tempfile.TemporaryDirectory() as directory:
+            created = Path(directory) / "output"
+            with self.assertRaises(RuntimeError), OutputTransaction(messages.append) as transaction:
+                raise RuntimeError("before anything was created")
+            self.assertEqual(messages, [])
+            with self.assertRaises(RuntimeError), OutputTransaction(messages.append) as transaction:
+                transaction.create(created)
+                raise RuntimeError("publication failed")
+            self.assertFalse(created.exists())
+        self.assertEqual(messages, ["Publication failed; removing the partial output"])
 
     def test_successful_transaction_keeps_what_it_created(self):
         with tempfile.TemporaryDirectory() as directory:

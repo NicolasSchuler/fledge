@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
-import json
 import math
 import random
 import struct
@@ -16,41 +14,53 @@ from typing import Any
 from unittest.mock import patch
 
 from latexprep.cancellation import cancellation_point as owned_cancellation_point
+from latexprep.command_runner import CommandResult
 from latexprep.errors import PreparationError
-from latexprep.pdf_artwork import (
+from latexprep.pdf_artwork import inspect_artwork_inputs, inspect_pdf_artwork
+from latexprep.pdf_artwork_drawings import (
+    color_family,
+    effective_stroke_widths,
+    placement_sampling,
+    union_area,
+)
+from latexprep.pdf_artwork_options import (
+    ArtworkLimits,
+    ArtworkRule,
     PdfArtworkOptions,
     PdfContrastSample,
-    _GrayPage,
-    _region_ink,
-    inspect_artwork_inputs,
-    inspect_pdf_artwork,
+    configured_artwork_rules,
 )
-from latexprep.pdf_support import PdfRegion
+from latexprep.pdf_artwork_rendered import GrayPage, region_ink
+from latexprep.pdf_artwork_rules import RULES
+from latexprep.pdf_artwork_trace import (
+    Box,
+    Matrix,
+    Point,
+    misaligned_frame_pages,
+    parse_drawing_trace,
+)
+from latexprep.pdf_check_options import PdfRegion
+from latexprep.pdf_tool_output import parse_mupdf_trace
 from latexprep.raster_pixels import InkMask, RasterImage
+from latexprep.redaction import redact_data
 from latexprep.resource_budget import ResourceBudget
-from latexprep.runtime import CommandResult, ToolRunner
+from tests.support import (
+    ArtworkRunner,
+    contrast_sample,
+    raster,
+    rectangle,
+    rgb_raster,
+    trace,
+    type3_objects,
+)
 
 
 def region(name: str = "Figure", *, left: float = 0, right: float = 100) -> PdfRegion:
     return PdfRegion(name, 1, left, 0, right, 100)
 
 
-def trace(content: str = "", *, box: str = "0 0 100 100") -> str:
-    return f'<document><page number="1" mediabox="{box}">{content}</page></document>'
-
-
 def image(*, matrix: str = "100 0 0 100 0 0", width: int = 300, height: int = 300) -> str:
     return f'<fill_image transform="{matrix}" width="{width}" height="{height}" alpha="1"/>'
-
-
-def rectangle(
-    *, tag: str = "fill_path", left: int = 10, top: int = 10, right: int = 90, bottom: int = 90
-) -> str:
-    return (
-        f'<{tag} transform="1 0 0 1 0 0"><moveto x="{left}" y="{top}"/>'
-        f'<lineto x="{right}" y="{top}"/><lineto x="{right}" y="{bottom}"/>'
-        f'<lineto x="{left}" y="{bottom}"/><closepath/></{tag}>'
-    )
 
 
 def stroke(
@@ -67,147 +77,9 @@ def stroke(
     )
 
 
-def raster(*, box: tuple[int, int, int, int] = (10, 10, 90, 90), background: int = 255) -> bytes:
-    pixels = bytearray([background] * 10_000)
-    for y in range(box[1], box[3]):
-        for x in range(box[0], box[2]):
-            pixels[y * 100 + x] = 255 - background
-    return b"P5\n100 100\n255\n" + bytes(pixels)
-
-
-def type3_objects(
-    program: bytes = b"500 0 d0 0 0 20 20 re f", *, filtered: bool = False, nested: bool = False
-) -> str:
-    objects: dict[str, object] = {
-        "trailer": {"value": {"/Root": "1 0 R"}},
-        "obj:1 0 R": {"value": {"/Type": "/Catalog", "/Pages": "2 0 R"}},
-        "obj:2 0 R": {"value": {"/Kids": ["3 0 R"]}},
-        "obj:3 0 R": {"value": {"/Resources": {"/Font": {"/F1": "4 0 R"}}}},
-        "obj:4 0 R": {
-            "value": {
-                "/Subtype": "/Type3",
-                "/CharProcs": {"/A": "5 0 R"},
-                "/Resources": {"/XObject": {"/Picture": "6 0 R"}},
-            }
-        },
-        "obj:5 0 R": {
-            "stream": {
-                "dict": {"/Filter": "/FlateDecode"} if filtered else {},
-                "data": base64.b64encode(program).decode(),
-            }
-        },
-        "obj:6 0 R": {"value": {"/Subtype": "/Image"}},
-    }
-    if nested:
-        objects["obj:6 0 R"] = {
-            "stream": {
-                "dict": {"/Subtype": "/Form", "/Resources": {"/XObject": {"/Picture": "7 0 R"}}},
-                "data": base64.b64encode(b"/Picture Do").decode(),
-            }
-        }
-        objects["obj:7 0 R"] = {"value": {"/Subtype": "/Image"}}
-    return json.dumps(
-        {"version": 2, "pages": [{"object": "3 0 R"}], "qpdf": [{"jsonversion": 2}, objects]}
-    )
-
-
-def rgb_raster(
-    *,
-    foreground: tuple[int, int, int] = (0, 0, 0),
-    background: tuple[int, int, int] = (255, 255, 255),
-    alternate: tuple[int, int, int] | None = None,
-) -> bytes:
-    pixels = bytearray(bytes(background) * 10_000)
-    for y in range(10, 20):
-        for x in range(10, 20):
-            value = alternate if alternate is not None and x >= 15 else foreground
-            offset = (y * 100 + x) * 3
-            pixels[offset : offset + 3] = bytes(value)
-    return b"P6\n100 100\n255\n" + pixels
-
-
-def contrast_sample(*, minimum: float = 4.5, tolerance: int = 0) -> PdfContrastSample:
-    return PdfContrastSample(
-        "Label/background",
-        PdfRegion("Foreground", 1, 10, 10, 20, 20),
-        PdfRegion("Background", 1, 80, 80, 90, 90),
-        minimum,
-        tolerance,
-    )
-
-
 def colored(space: str | None) -> str:
     attribute = f' colorspace="{space}"' if space is not None else ""
     return f'<fill_path{attribute} color="0" transform="1 0 0 1 0 0"></fill_path>'
-
-
-class ArtworkRunner(ToolRunner):
-    def __init__(self, **values: object):
-        super().__init__()
-        self.geometry = (
-            "Page 1 size: 100 x 100 pts\nPage 1 rot: 0\n"
-            "Page 1 MediaBox: 0 0 100 100\nPage 1 CropBox: 0 0 100 100\n"
-        )
-        self.trace = trace(rectangle())
-        self.objects = type3_objects()
-        self.fonts = (
-            "name type encoding emb sub uni object ID\n---\nFont Type 1 Builtin yes yes no 3 0\n"
-        )
-        self.raster = raster()
-        self.rgb = rgb_raster()
-        self.missing: str | None = None
-        self.failure: str | None = None
-        self.calls: list[tuple[list[str], Path, tuple[Path, ...]]] = []
-        self.expected_budget: ResourceBudget | None = None
-        self.block: asyncio.Event | None = None
-        self.started = asyncio.Event()
-        for key, value in values.items():
-            setattr(self, key, value)
-
-    def _resolve_tool(self, name: str) -> Path:
-        return Path("/fixture-tools") / name
-
-    async def run(
-        self,
-        argv: list[str],
-        cwd: Path,
-        workspace: Path,
-        *,
-        readonly_inputs: tuple[Path, ...] = (),
-        memory_mb: int | None = None,
-    ) -> CommandResult:
-        self._frozen.validate(readonly_inputs)
-        if self.expected_budget is not None and self.expected_budget.current_lease is None:
-            raise AssertionError("Artwork adapter escaped the shared resource lease")
-        self.calls.append((list(argv), workspace, readonly_inputs))
-        if argv[0] == self.missing:
-            raise PreparationError(f"Missing tool: {argv[0]}")
-        if argv[-1] in {"-v", "--version"}:
-            return CommandResult(0, "Fixture tool 1\n", "", resolved_command=argv)
-        self.started.set()
-        if self.block is not None:
-            await self.block.wait()
-        output = self.geometry if argv[0] == "pdfinfo" and "-box" in argv else "Pages: 1\n"
-        if argv[0] == "mutool":
-            output = self.trace
-        elif argv[0] == "qpdf":
-            output = self.objects
-        elif argv[0] == "pdffonts":
-            output = self.fonts
-        elif argv[0] == "pdftoppm":
-            if "-gray" in argv:
-                (workspace / "page.pgm").write_bytes(self.raster)
-            else:
-                (workspace / "page.ppm").write_bytes(self.rgb)
-        return CommandResult(
-            0,
-            output,
-            "",
-            resolved_command=argv,
-            timed_out=self.failure == "timeout",
-            output_limited=self.failure == "output",
-            resource_exceeded="Resource exceeded" if self.failure == "resource" else None,
-        )
 
 
 class PdfArtworkTests(unittest.IsolatedAsyncioTestCase):
@@ -225,9 +97,14 @@ class PdfArtworkTests(unittest.IsolatedAsyncioTestCase):
         self.sequence += 1
         return self.root / f"artwork-{self.sequence}"
 
-    async def check(self, options: PdfArtworkOptions, runner: ArtworkRunner | None = None):
+    async def check(
+        self,
+        options: PdfArtworkOptions,
+        runner: ArtworkRunner | None = None,
+        limits: ArtworkLimits | None = None,
+    ):
         return await inspect_pdf_artwork(
-            self.pdf, self.work(), runner or ArtworkRunner(), options=options
+            self.pdf, self.work(), runner or ArtworkRunner(), options=options, limits=limits
         )
 
     async def status_for(self, options: PdfArtworkOptions, expected: str, runner: ArtworkRunner):
@@ -247,10 +124,20 @@ class PdfArtworkTests(unittest.IsolatedAsyncioTestCase):
             trim_regions=(PdfRegion("Trim", 1, 20, 20, 80, 80),),
             printer_mark_max_length_pt=10,
         )
-        await self.status(options, "passed", trace=trace(stroke()))
+        clean = await self.status(options, "passed", trace=trace(stroke()))
+        self.assertEqual(
+            clean.message,
+            "No short crop or registration strokes were found outside the trim region of "
+            "1 measured page.",
+        )
         marks = stroke(first=(5, 20), second=(15, 20)) + stroke(first=(20, 5), second=(20, 15))
         finding = await self.status(options, "failed", trace=trace(marks))
         self.assertEqual(finding.details["violations"][0]["corner_pt"], (20, 20))
+        self.assertEqual(
+            finding.message,
+            "Possible printer marks outside the trim region on page 1: 1 crop-mark corner and "
+            "0 crossed registration stroke pairs.",
+        )
         await self.status(
             options, "passed", trace=trace(marks.split("</stroke_path>")[0] + "</stroke_path>")
         )
@@ -336,9 +223,17 @@ class PdfArtworkTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_drawing_bounds_transform_images_and_reject_unmeasured_curves(self) -> None:
         options = PdfArtworkOptions(drawing_regions=(PdfRegion("Area", 1, 10, 10, 90, 90),))
-        await self.status(options, "passed", trace=trace(image(matrix="0 70 -70 0 85 15")))
+        inside = await self.status(options, "passed", trace=trace(image(matrix="0 70 -70 0 85 15")))
+        self.assertEqual(
+            inside.message,
+            "All measured images and filled shapes (1) lie inside the allowed drawing regions.",
+        )
         bad = await self.status(options, "failed", trace=trace(image(matrix="80 0 0 80 5 10")))
         self.assertEqual(bad.details["violations"][0]["bounds_pt"], (5, 10, 85, 90))
+        self.assertEqual(
+            bad.message,
+            "Drawings outside the allowed drawing regions: 1; the first is an image on page 1.",
+        )
         curve = (
             '<fill_path transform="1 0 0 1 0 0"><moveto x="10" y="10"/>'
             '<curveto x1="20" y1="5" x2="30" y2="40" x3="50" y3="50"/></fill_path>'
@@ -354,6 +249,11 @@ class PdfArtworkTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(finding.details["violation_count"], 1)
         self.assertEqual(finding.details["measured_operations"], 2)
         self.assertEqual(finding.details["violations"][0]["clip_bounds_pt"], (10, 10, 50, 90))
+        self.assertEqual(
+            finding.message,
+            "Images and shapes extending past a clip rectangle or the page: 1; the first is "
+            "an image on page 1. Check that the cropping is intended.",
+        )
         await self.status(
             options, "inconclusive", trace=trace("<clip_text/>" + image() + "<pop_clip/>")
         )
@@ -625,13 +525,14 @@ class PdfArtworkTests(unittest.IsolatedAsyncioTestCase):
             figure_regions=tuple(region(f"Figure {index}") for index in range(3)),
             max_figure_whitespace_ratio=0.5,
         )
-        with patch("latexprep.pdf_artwork._MAX_PIXEL_VISITS", 20_000):
-            findings = await self.check(options)
+        findings = await self.check(options, limits=ArtworkLimits(max_pixel_visits_per_page=20_000))
         self.assertEqual([item.status for item in findings], ["passed", "passed", "inconclusive"])
         self.assertIn("bounded pixel sampling", findings[-1].message)
         samples = tuple(replace(contrast_sample(), name=f"Sample {index}") for index in range(3))
-        with patch("latexprep.pdf_artwork._MAX_PIXEL_VISITS", 400):
-            findings = await self.check(PdfArtworkOptions(contrast_samples=samples))
+        findings = await self.check(
+            PdfArtworkOptions(contrast_samples=samples),
+            limits=ArtworkLimits(max_pixel_visits_per_page=400),
+        )
         self.assertEqual([item.status for item in findings], ["passed", "passed", "inconclusive"])
         self.assertIn("bounded pixel sampling", findings[-1].message)
 
@@ -674,7 +575,7 @@ class PdfArtworkTests(unittest.IsolatedAsyncioTestCase):
                 owned_cancellation_point()
 
             with (
-                patch("latexprep.pdf_artwork.cancellation_point", side_effect=progress),
+                patch("latexprep.pdf_artwork_rendered.cancellation_point", side_effect=progress),
                 patch("latexprep.raster_pixels.cancellation_point", side_effect=progress),
             ):
                 task = asyncio.create_task(self.check(options, runner))
@@ -691,6 +592,36 @@ class PdfArtworkTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(budget.statistics()["active_cpu"], 0)
             self.assertFalse(any(self.root.rglob("page.pgm")))
             self.assertFalse(any(self.root.rglob("page.ppm")))
+
+    async def test_trace_geometry_runs_off_the_event_loop_and_stops_on_cancellation(self) -> None:
+        regions = tuple(PdfRegion(f"Table {index}", 1, 0, 0, 100, 100) for index in range(300))
+        options = PdfArtworkOptions(raster_regions=regions, min_raster_region_coverage=0.5)
+        budget = ResourceBudget(1, 256)
+        runner = ArtworkRunner(trace=trace(image()))
+        runner.budget = runner.expected_budget = budget
+        started = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        signaled = False
+
+        def progress() -> None:
+            nonlocal signaled
+            if not signaled:
+                signaled = True
+                loop.call_soon_threadsafe(started.set)
+            time.sleep(0.001)
+            owned_cancellation_point()
+
+        with patch("latexprep.pdf_artwork_drawings.cancellation_point", side_effect=progress):
+            task = asyncio.create_task(self.check(options, runner))
+            await asyncio.wait_for(started.wait(), 2)
+            # The timer must run before the 300 regions are measured.
+            await asyncio.sleep(0.01)
+            self.assertFalse(task.done(), "Trace measurements blocked the event loop")
+            self.assertEqual(budget.statistics()["active_cpu"], 1)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await asyncio.wait_for(task, 2)
+        self.assertEqual(budget.statistics()["active_cpu"], 0)
 
     async def test_adapters_use_shared_budget_isolated_commands_and_frozen_inputs(self) -> None:
         budget = ResourceBudget(2, 512)
@@ -750,8 +681,14 @@ class PdfArtworkTests(unittest.IsolatedAsyncioTestCase):
         passed = await self.status(rgb, "passed", trace=mixed)
         self.assertEqual(passed.code, "PDF313")
         self.assertEqual(passed.details["color_spaces"]["DeviceRGB"], 1)
+        self.assertEqual(passed.message, "All traced colour spaces are RGB or grayscale.")
         failed = await self.status(cmyk, "failed", trace=mixed)
         self.assertEqual(failed.severity, "error")
+        self.assertEqual(
+            failed.message,
+            "Painted operations outside the required CMYK family: 2; for example DeviceRGB "
+            "on page 1.",
+        )
         self.assertEqual(
             [item["color_space"] for item in failed.details["violations"]],
             ["DeviceRGB", "ICCBased(RGB)"],
@@ -772,6 +709,71 @@ class PdfArtworkTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(PreparationError):
             PdfArtworkOptions(required_color_space="srgb")
 
+    async def test_trace_is_parsed_once_for_drawing_and_color_space_measurements(self) -> None:
+        options = PdfArtworkOptions(classify_artwork=True, required_color_space="rgb")
+        runner = ArtworkRunner(trace=trace(colored("DeviceRGB")))
+        with patch("latexprep.pdf_artwork.parse_mupdf_trace", wraps=parse_mupdf_trace) as parsed:
+            result = await self.check(options, runner)
+        self.assertEqual([item.status for item in result], ["passed", "passed"])
+        self.assertEqual(parsed.call_count, 1)
+        traces = [argv for argv, _, _ in runner.calls if argv[0] == "mutool"]
+        self.assertEqual(len([argv for argv in traces if argv[-1] not in {"-v", "--version"}]), 1)
+
+    async def test_unreadable_trace_makes_every_trace_rule_unavailable_with_the_cause(self) -> None:
+        options = PdfArtworkOptions(
+            classify_artwork=True,
+            check_clipping=True,
+            artwork_category="photo",
+            category_min_dpi=(("photo", 300),),
+            required_color_space="rgb",
+        )
+        result = await self.check(options, ArtworkRunner(trace="<document><page number='2'/>"))
+        self.assertEqual(
+            [item.rule for item in result],
+            [
+                ArtworkRule.CLIPPING_CANDIDATES,
+                ArtworkRule.ARTWORK_COMPOSITION,
+                ArtworkRule.CATEGORY_RESOLUTION,
+                ArtworkRule.COLOR_SPACE,
+            ],
+        )
+        self.assertTrue(all(item.status == "inconclusive" for item in result))
+        severities = {item.rule: item.severity for item in result}
+        self.assertEqual(severities[ArtworkRule.CATEGORY_RESOLUTION], "error")
+        self.assertEqual(severities[ArtworkRule.CLIPPING_CANDIDATES], "warning")
+
+    async def test_findings_survive_report_redaction_with_plain_report_values(self) -> None:
+        marks = stroke(first=(5, 20), second=(15, 20)) + stroke(first=(20, 5), second=(20, 15))
+        options = PdfArtworkOptions(
+            detect_printer_marks=True,
+            trim_regions=(PdfRegion("Trim", 1, 20, 20, 80, 80),),
+            printer_mark_max_length_pt=10,
+            drawing_regions=(PdfRegion("Area", 1, 10, 10, 90, 90),),
+            check_clipping=True,
+            min_stroke_width_pt=5,
+            raster_regions=(region("T"),),
+            min_raster_region_coverage=0.5,
+        )
+        content = marks + image(matrix="80 0 0 80 5 10") + rectangle(tag="clip_path", right=50)
+        findings = await self.check(options, ArtworkRunner(trace=trace(content + image())))
+        data = redact_data([finding.details for finding in findings])
+        self.assertNotIn("unsupported value", str(data))
+        bounds = next(f for f in findings if f.rule == ArtworkRule.DRAWING_BOUNDS)
+        self.assertIs(type(bounds.details["violations"][0]["bounds_pt"]), tuple)
+        self.assertIs(type(bounds.details["violations"][0]["bounds_pt"][0]), float)
+
+    async def test_input_figures_without_regions_are_measured_whole_but_manuscripts_are_not(
+        self,
+    ) -> None:
+        options = PdfArtworkOptions(max_figure_whitespace_ratio=0.5)
+        manuscript = await self.check(options)
+        self.assertEqual([item.status for item in manuscript], ["inconclusive"])
+        figures = await inspect_artwork_inputs(
+            (self.pdf,), self.work(), ArtworkRunner(), options=options
+        )
+        self.assertEqual([item.status for item in figures], ["passed"])
+        self.assertIn("Input page 1 on page 1", figures[0].message)
+
     async def test_missing_trace_tool_is_inconclusive(self) -> None:
         options = PdfArtworkOptions(required_color_space="rgb")
         finding = await self.status(options, "inconclusive", missing="mutool")
@@ -779,6 +781,136 @@ class PdfArtworkTests(unittest.IsolatedAsyncioTestCase):
         runner = ArtworkRunner()
         self.assertEqual(await self.check(PdfArtworkOptions(), runner), [])
         self.assertFalse(any(call[0][0] == "mutool" for call in runner.calls))
+
+
+class ArtworkRuleCatalogueTests(unittest.TestCase):
+    def test_rule_names_match_the_catalogue_exactly(self) -> None:
+        self.assertEqual({rule.value for rule in ArtworkRule}, {rule.name for rule in RULES})
+
+    def test_configured_rules_follow_the_options_in_report_order(self) -> None:
+        self.assertEqual(configured_artwork_rules(PdfArtworkOptions()), [])
+        options = PdfArtworkOptions(
+            grayscale_preview=True,
+            check_clipping=True,
+            forbid_bitmap_type3_glyphs=True,
+            required_color_space="cmyk",
+        )
+        self.assertEqual(
+            configured_artwork_rules(options),
+            [
+                ArtworkRule.CLIPPING_CANDIDATES,
+                ArtworkRule.TYPE3_GLYPH_PROGRAMS,
+                ArtworkRule.GRAYSCALE_PREVIEW,
+                ArtworkRule.COLOR_SPACE,
+            ],
+        )
+        self.assertEqual(ArtworkRule.COLOR_SPACE, "figure.color_space")
+
+
+class TraceGeometryTests(unittest.TestCase):
+    def parsed(self, content: str, *, box: str = "0 0 100 100"):
+        return parse_drawing_trace(parse_mupdf_trace(trace(content, box=box), 1))
+
+    def test_matrix_and_box_primitives(self) -> None:
+        matrix = Matrix(0, 1, -1, 0, 10, 20)
+        self.assertEqual(matrix.apply(Point(2, 3)), (7, 22))
+        self.assertEqual(matrix.determinant, 1)
+        box = Box.around([Point(1, 2), Point(5, 1)])
+        self.assertEqual(box, (1, 1, 5, 2))
+        self.assertTrue(box.contains((1.5, 1, 5, 2)))
+        self.assertFalse(box.contains((0, 1, 5, 2)))
+        self.assertTrue(box.contains((0.95, 1, 5, 2.05), 0.1))
+        self.assertTrue(Box(0, 0, 10, 10).clipped(Box(20, 0, 30, 10)).is_empty)
+        with self.assertRaises(PreparationError):
+            Box.around([])
+        with self.assertRaises(PreparationError):
+            Matrix(1, 0, 0, 1, 0, 0).apply(Point(math.inf, 0))
+
+    def test_drawings_keep_extent_clip_and_page_uncertainty(self) -> None:
+        trace_ = self.parsed(
+            rectangle(tag="clip_path", right=50) + image() + "<pop_clip/>" + image()
+        )
+        first, second = trace_.drawings
+        self.assertEqual((first.index, second.index), (1, 2))
+        self.assertEqual(first.box, (0, 0, 100, 100))
+        self.assertEqual(first.clip, (10, 10, 50, 90))
+        self.assertEqual(second.clip, (0, 0, 100, 100))
+        self.assertEqual(trace_.trace_uncertain_pages, frozenset())
+        grouped = self.parsed(image() + "<group>" + image() + "</group>" + image())
+        self.assertEqual(grouped.trace_uncertain_pages, frozenset({1}))
+        # Only drawings after the first uncertain element are marked uncertain.
+        self.assertEqual([d.uncertain for d in grouped.drawings], [False, True, True])
+        with self.assertRaises(PreparationError):
+            self.parsed("<pop_clip/>")
+        with self.assertRaises(PreparationError):
+            self.parsed("", box="10 10 5 5")
+
+    def test_misaligned_frames_are_a_pure_function_of_boxes_and_sizes(self) -> None:
+        boxes = [
+            Box(0, 0, 100, 100),
+            Box(0, 0, 100.4, 100),
+            Box(5, 0, 105, 100),
+            Box(0, 0, 90, 100),
+        ]
+        sizes = [(100, 100)] * 4
+        self.assertEqual(misaligned_frame_pages(boxes, sizes, 0.5), frozenset({3, 4}))
+        self.assertEqual(misaligned_frame_pages(boxes, sizes, 0), frozenset({2, 3, 4}))
+        self.assertEqual(misaligned_frame_pages(boxes, sizes, 0.5), frozenset({3, 4}))
+
+
+class DrawingMeasurementTests(unittest.TestCase):
+    def drawings(self, content: str):
+        return parse_drawing_trace(parse_mupdf_trace(trace(content), 1)).drawings
+
+    def test_union_area_counts_overlaps_once_and_clips_to_the_region(self) -> None:
+        region = Box(0, 0, 10, 10)
+        self.assertEqual(union_area([], region), 0)
+        self.assertEqual(union_area([Box(0, 0, 6, 10), Box(4, 0, 10, 10)], region), 100)
+        self.assertEqual(
+            union_area([Box(0, 0, 5, 5), Box(0, 0, 5, 5), Box(20, 20, 30, 30)], region), 25
+        )
+        self.assertEqual(union_area([Box(-5, -5, 5, 5)], region), 25)
+        too_many = [Box(0, 0, 1, 1)] * 1001
+        with self.assertRaises(PreparationError):
+            union_area(too_many, region)
+
+    def test_color_families_cover_device_and_calibrated_names_and_leave_the_rest_unknown(
+        self,
+    ) -> None:
+        for name, family in (
+            ("DeviceRGB", "rgb"),
+            ("CalRGB", "rgb"),
+            ("DeviceCMYK", "cmyk"),
+            ("DeviceGray", "gray"),
+            ("CalGray", "gray"),
+            ("Separation(Spot)", None),
+            ("DeviceN(Cyan,Magenta)", None),
+            ("Indexed(DeviceRGB)", None),
+            ("Lab", None),
+            ("ICCBased(Unknown profile)", None),
+        ):
+            with self.subTest(name=name):
+                self.assertEqual(color_family(name), family)
+
+    def test_stroke_width_is_measured_normal_to_each_segment_after_placement(self) -> None:
+        (plain,) = self.drawings(stroke(width=2))
+        self.assertEqual(effective_stroke_widths(plain), [2])
+        (squeezed,) = self.drawings(stroke(matrix="2 0 0 .5 0 0", width=0.5))
+        self.assertEqual(effective_stroke_widths(squeezed), [0.25])
+        (hairline,) = self.drawings(stroke(width=0))
+        self.assertEqual(effective_stroke_widths(hairline), [])
+        (singular,) = self.drawings(stroke(matrix="1 0 0 0 0 0"))
+        self.assertEqual(effective_stroke_widths(singular), [])
+
+    def test_placement_sampling_reports_axis_and_coarsest_direction_resolution(self) -> None:
+        (sheared,) = self.drawings(image(matrix="100 0 100 100 0 0", width=100, height=100))
+        sampling = placement_sampling(sheared)
+        assert sampling is not None
+        self.assertEqual(sampling.x_dpi, 72)
+        self.assertAlmostEqual(sampling.y_dpi, 72 / math.sqrt(2))
+        self.assertLess(sampling.minimum_direction_dpi, 50)
+        (flat,) = self.drawings(image(matrix="0 0 0 100 0 0"))
+        self.assertIsNone(placement_sampling(flat))
 
 
 class RegionInkTests(unittest.TestCase):
@@ -811,8 +943,8 @@ class RegionInkTests(unittest.TestCase):
                 if abs(pixels[y * width + x] - options.background_gray) >= options.ink_difference
             ]
             image = RasterImage(width, height, 1, bytes(pixels))
-            result = _region_ink(
-                _GrayPage(1, image, width_pt, height_pt),
+            result = region_ink(
+                GrayPage(1, image, width_pt, height_pt),
                 InkMask.from_gray(image, options.background_gray, options.ink_difference),
                 (left, top, right, bottom),
                 options,

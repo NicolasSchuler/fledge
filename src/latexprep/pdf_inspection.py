@@ -1,8 +1,10 @@
 """Bounded single-PDF inspection and explicitly configured acceptance policies.
 
-Each Poppler measurement reports what it observed, then evaluates only the policies
+Every inspection reads the same Poppler inventories (geometry, fonts, text, attachments
+and images) and reports what they show; it then evaluates only the acceptance policies
 the user configured. A failed measurement makes the observation and each of its
-configured policies inconclusive, never a pass.
+configured policies inconclusive, never a pass. The opt-in measurements that run only
+when configured belong to ``pdf_checks``; this module is the always-on inventory.
 """
 
 from __future__ import annotations
@@ -11,46 +13,54 @@ import math
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
-from functools import partial
 from pathlib import Path
 from typing import ClassVar, NamedTuple
 
+from .command_runner import CommandRunner
 from .errors import PreparationError, SettingsError
 from .findings import EvidenceKind, Finding
+from .measurement_findings import TOOL_FAILURE_SUGGESTION, unavailable_finding
 from .option_config import NONNEGATIVE_NUMBER, POSITIVE_NUMBER, Bounds, validate_scalars
-from .pdf_support import (
-    TOOL_FAILURE_SUGGESTION,
-    attachment_list_argv,
+from .pdf_rule_names import PdfRule
+from .pdf_tool_output import (
+    PdfFont,
     evaluate_font_policy,
     font_inventory,
-    font_inventory_argv,
-    gather_measurements,
-    image_list_argv,
     inventory_rows,
-    layout_text_argv,
     normalized_text_pages,
-    page_boxes_argv,
     parse_page_sizes,
+)
+from .pdf_tools import (
+    ToolMeasurement,
+    attachment_list_argv,
+    font_inventory_argv,
+    image_list_argv,
+    layout_text_argv,
+    page_boxes_argv,
     preflight_pdf,
-    unavailable_finding,
+    run_tool_measurements,
 )
 from .resource_budget import ResourceBudget
-from .runtime import CommandResult, CommandRunner
 
 _POINT_UNIT = "PDF points (1/72 inch)"
 # Placement kinds in the pdfimages -list type column: stencil is a one-bit /ImageMask image.
 _IMAGE_TYPES = frozenset({"image", "stencil", "mask", "smask"})
+# Columns of a pdfimages -list row: page num type width height color comp bpc enc interp
+# object ID x-ppi y-ppi size ratio.
+_IMAGE_INVENTORY_COLUMNS = 16
+# Placements below the minimum DPI that the message names; the rest are counted.
+_MAX_LOW_DPI_LISTED = 8
 _POLICY_SUGGESTIONS = {
-    "pdf.page_limit": "Review the total page budget, including references and appendices.",
-    "pdf.page_dimensions": "Check the configured paper size and PDF page boxes.",
-    "pdf.page_size_consistency": "Use a consistent page size, including inserted PDF pages.",
-    "pdf.image_resolution": "Use higher-resolution inputs or reduce the rendered raster size.",
-    "pdf.font_embedding": "Embed the listed font resources when generating the PDF or figures.",
-    "pdf.type3_fonts": "Replace the listed Type 3 font resources with an allowed font type.",
-    "pdf.encryption_policy": "Export an unencrypted PDF when this policy is required.",
-    "pdf.forms_policy": "Remove form fields from a separate submission PDF copy.",
-    "pdf.javascript_policy": "Remove JavaScript from a separate submission PDF copy.",
-    "pdf.attachments_policy": "Remove embedded files from a separate submission PDF copy.",
+    PdfRule.PAGE_LIMIT: "Review the total page budget, including references and appendices.",
+    PdfRule.PAGE_DIMENSIONS: "Check the configured paper size and PDF page boxes.",
+    PdfRule.PAGE_SIZE_CONSISTENCY: "Use a consistent page size, including inserted PDF pages.",
+    PdfRule.IMAGE_RESOLUTION: "Use higher-resolution inputs or reduce the rendered raster size.",
+    PdfRule.FONT_EMBEDDING: "Embed the listed font resources when generating the PDF or figures.",
+    PdfRule.TYPE3_FONTS: "Replace the listed Type 3 font resources with an allowed font type.",
+    PdfRule.ENCRYPTION_POLICY: "Export an unencrypted PDF when this policy is required.",
+    PdfRule.FORMS_POLICY: "Remove form fields from a separate submission PDF copy.",
+    PdfRule.JAVASCRIPT_POLICY: "Remove JavaScript from a separate submission PDF copy.",
+    PdfRule.ATTACHMENTS_POLICY: "Remove embedded files from a separate submission PDF copy.",
 }
 
 
@@ -86,16 +96,16 @@ class PdfInspectionOptions:
 
 def configured_policy_rules(options: PdfInspectionOptions, max_pages: int | None) -> list[str]:
     values = {
-        "pdf.page_limit": max_pages is not None,
-        "pdf.page_dimensions": options.expected_page_width_pt is not None,
-        "pdf.page_size_consistency": options.require_consistent_page_size,
-        "pdf.image_resolution": options.min_image_dpi is not None,
-        "pdf.font_embedding": options.require_embedded_fonts,
-        "pdf.type3_fonts": options.forbid_type3_fonts,
-        "pdf.encryption_policy": options.forbid_encryption,
-        "pdf.forms_policy": options.forbid_forms,
-        "pdf.javascript_policy": options.forbid_javascript,
-        "pdf.attachments_policy": options.forbid_attachments,
+        PdfRule.PAGE_LIMIT: max_pages is not None,
+        PdfRule.PAGE_DIMENSIONS: options.expected_page_width_pt is not None,
+        PdfRule.PAGE_SIZE_CONSISTENCY: options.require_consistent_page_size,
+        PdfRule.IMAGE_RESOLUTION: options.min_image_dpi is not None,
+        PdfRule.FONT_EMBEDDING: options.require_embedded_fonts,
+        PdfRule.TYPE3_FONTS: options.forbid_type3_fonts,
+        PdfRule.ENCRYPTION_POLICY: options.forbid_encryption,
+        PdfRule.FORMS_POLICY: options.forbid_forms,
+        PdfRule.JAVASCRIPT_POLICY: options.forbid_javascript,
+        PdfRule.ATTACHMENTS_POLICY: options.forbid_attachments,
     }
     return [rule for rule, enabled in values.items() if enabled]
 
@@ -134,7 +144,7 @@ class _InspectionContext:
 def _document_findings(pages: int, fields: dict[str, str], max_pages: int | None) -> list[Finding]:
     findings = [
         Finding(
-            "pdf.pages",
+            PdfRule.PAGES,
             f"PDF contains {pages} pages.",
             severity="info",
             status="passed",
@@ -144,7 +154,7 @@ def _document_findings(pages: int, fields: dict[str, str], max_pages: int | None
     if max_pages is not None:
         findings.append(
             _policy_finding(
-                "pdf.page_limit",
+                PdfRule.PAGE_LIMIT,
                 f"PDF has {pages} total pages; configured maximum: {max_pages}.",
                 pages > max_pages,
                 {
@@ -156,7 +166,7 @@ def _document_findings(pages: int, fields: dict[str, str], max_pages: int | None
         )
     findings.append(
         Finding(
-            "pdf.metadata",
+            PdfRule.METADATA,
             "PDF document properties were read.",
             severity="info",
             status="passed",
@@ -171,7 +181,7 @@ def _geometry_findings(output: str, context: _InspectionContext) -> list[Finding
     sizes = parse_page_sizes(output, context.pages)
     findings = [
         Finding(
-            "pdf.page_geometry",
+            PdfRule.PAGE_GEOMETRY,
             "PDF page dimensions and boxes were read for every page.",
             severity="info",
             status="passed",
@@ -190,7 +200,7 @@ def _geometry_findings(output: str, context: _InspectionContext) -> list[Finding
         ]
         findings.append(
             _policy_finding(
-                "pdf.page_dimensions",
+                PdfRule.PAGE_DIMENSIONS,
                 f"Expected {expected[0]:g} × {expected[1]:g} PDF points "
                 f"within {options.page_size_tolerance_pt:g} points; "
                 f"differing pages: {differing or 'none'}.",
@@ -216,7 +226,7 @@ def _geometry_findings(output: str, context: _InspectionContext) -> list[Finding
         )
         findings.append(
             _policy_finding(
-                "pdf.page_size_consistency",
+                PdfRule.PAGE_SIZE_CONSISTENCY,
                 f"Page width/height ranges span {spread[0]:g}/{spread[1]:g} PDF points; "
                 f"maximum permitted spread: {options.page_size_tolerance_pt:g} points.",
                 any(value > options.page_size_tolerance_pt for value in spread),
@@ -231,27 +241,55 @@ def _geometry_findings(output: str, context: _InspectionContext) -> list[Finding
     return findings
 
 
+# pdfinfo prints the Form feature as "none", "AcroForm" or "XFA".
+_FORM_PRESENCE = {"none": False, "acroform": True, "xfa": True}
+
+
 def _feature_presence(name: str, value: str | None) -> bool | None:
+    """Whether pdfinfo reports a document feature present, or None when it is not recognized.
+
+    The other features print "no", or "yes" optionally followed by detail such as the
+    encryption permissions.
+    """
     if value is None:
         return None
     value = value.lower()
     if name == "Form":
-        return False if value == "none" else True if value in {"acroform", "xfa"} else None
-    return False if value == "no" else True if re.match(r"yes(?:\s|$)", value) else None
+        return _FORM_PRESENCE.get(value)
+    if value == "no":
+        return False
+    return True if re.match(r"yes(?:\s|$)", value) else None
+
+
+class _Feature(NamedTuple):
+    """A document feature pdfinfo reports, the rule that observes it and the policy on it."""
+
+    name: str
+    observation: PdfRule
+    policy: PdfRule
+    forbidden: Callable[[PdfInspectionOptions], bool]
+
+
+_FEATURES = (
+    _Feature(
+        "Encrypted", PdfRule.ENCRYPTED, PdfRule.ENCRYPTION_POLICY, lambda o: o.forbid_encryption
+    ),
+    _Feature("Form", PdfRule.FORM, PdfRule.FORMS_POLICY, lambda o: o.forbid_forms),
+    _Feature(
+        "JavaScript", PdfRule.JAVASCRIPT, PdfRule.JAVASCRIPT_POLICY, lambda o: o.forbid_javascript
+    ),
+)
 
 
 def _feature_findings(fields: dict[str, str], options: PdfInspectionOptions) -> list[Finding]:
     findings: list[Finding] = []
-    for name, required, rule in (
-        ("Encrypted", options.forbid_encryption, "pdf.encryption_policy"),
-        ("Form", options.forbid_forms, "pdf.forms_policy"),
-        ("JavaScript", options.forbid_javascript, "pdf.javascript_policy"),
-    ):
+    for feature in _FEATURES:
+        name = feature.name
         value = fields.get(name)
         present = _feature_presence(name, value)
         findings.append(
             Finding(
-                f"pdf.{name.lower()}",
+                feature.observation,
                 f"{name}: {value}."
                 if value is not None
                 else f"{name} was not reported by pdfinfo.",
@@ -260,18 +298,19 @@ def _feature_findings(fields: dict[str, str], options: PdfInspectionOptions) -> 
                 details={"value": value, "scope": "pdfinfo document-level feature reporting"},
             )
         )
-        if not required:
+        if not feature.forbidden(options):
             continue
         if present is None:
             findings.append(
                 _unavailable(
-                    rule, PreparationError(f"pdfinfo did not report a recognized {name} value")
+                    feature.policy,
+                    PreparationError(f"pdfinfo did not report a recognized {name} value"),
                 )
             )
         else:
             findings.append(
                 _policy_finding(
-                    rule,
+                    feature.policy,
                     f"{name}: {value}; the configured policy requires absence.",
                     present,
                     {
@@ -286,6 +325,10 @@ def _feature_findings(fields: dict[str, str], options: PdfInspectionOptions) -> 
     return findings
 
 
+def _font_reports(fonts: list[PdfFont]) -> list[dict[str, object]]:
+    return [font.to_report() for font in fonts]
+
+
 def _font_findings(output: str, context: _InspectionContext) -> list[Finding]:
     options = context.options
     inventory = font_inventory(output)
@@ -294,15 +337,15 @@ def _font_findings(output: str, context: _InspectionContext) -> list[Finding]:
         require_embedded=options.require_embedded_fonts,
         forbid_type3=options.forbid_type3_fonts,
     )
-    missing = [font["name"] for font in fonts.nonembedded]
+    missing = [font.name for font in fonts.nonembedded]
     findings = [
         Finding(
-            "pdf.fonts",
+            PdfRule.FONTS,
             f"Inspected {len(inventory)} font resources; {len(missing)} are not embedded.",
             severity="warning" if missing else "info",
             status="failed" if missing else "passed",
             details={
-                "fonts": inventory,
+                "fonts": _font_reports(inventory),
                 "nonembedded": missing,
                 "scope": (
                     "Font resources reported by pdffonts; "
@@ -315,7 +358,7 @@ def _font_findings(output: str, context: _InspectionContext) -> list[Finding]:
         if not inventory:
             findings.append(
                 _unavailable(
-                    "pdf.font_embedding",
+                    PdfRule.FONT_EMBEDDING,
                     PreparationError(
                         "No font resources were reported; an embedding requirement cannot "
                         "establish text/font coverage for outlined or image-only content"
@@ -325,23 +368,23 @@ def _font_findings(output: str, context: _InspectionContext) -> list[Finding]:
         else:
             findings.append(
                 _policy_finding(
-                    "pdf.font_embedding",
-                    f"Unembedded fonts: {', '.join(str(name) for name in missing) or 'none'}; "
+                    PdfRule.FONT_EMBEDDING,
+                    f"Unembedded fonts: {', '.join(missing) or 'none'}; "
                     "all reported font resources must be embedded.",
                     bool(missing),
-                    {"nonembedded": missing, "fonts": inventory},
+                    {"nonembedded": missing, "fonts": _font_reports(inventory)},
                 )
             )
     if options.forbid_type3_fonts:
         type3 = fonts.type3
         findings.append(
             _policy_finding(
-                "pdf.type3_fonts",
+                PdfRule.TYPE3_FONTS,
                 "Type 3 fonts: "
-                f"{', '.join(str(font['name']) for font in type3) or 'none'}; "
+                f"{', '.join(font.name for font in type3) or 'none'}; "
                 "the configured policy forbids Type 3.",
                 bool(type3),
-                {"type3_fonts": type3, "inspected_fonts": len(inventory)},
+                {"type3_fonts": _font_reports(type3), "inspected_fonts": len(inventory)},
             )
         )
     return findings
@@ -352,7 +395,7 @@ def _text_findings(output: str, context: _InspectionContext) -> list[Finding]:
     empty = [page for page, value in enumerate(text_pages, 1) if not value.strip()]
     return [
         Finding(
-            "pdf.text",
+            PdfRule.TEXT,
             "Extractable text is present on every page."
             if not empty
             else (
@@ -380,7 +423,7 @@ def _attachment_findings(output: str, context: _InspectionContext) -> list[Findi
         raise PreparationError("pdfdetach did not return a complete attachment inventory")
     findings = [
         Finding(
-            "pdf.attachments",
+            PdfRule.ATTACHMENTS,
             f"PDF contains {count} embedded files.",
             severity="info",
             status="passed",
@@ -390,7 +433,7 @@ def _attachment_findings(output: str, context: _InspectionContext) -> list[Findi
     if context.options.forbid_attachments:
         findings.append(
             _policy_finding(
-                "pdf.attachments_policy",
+                PdfRule.ATTACHMENTS_POLICY,
                 f"PDF contains {count} embedded files; configured maximum: 0.",
                 count > 0,
                 {"count": count, "inventory": output},
@@ -399,87 +442,110 @@ def _attachment_findings(output: str, context: _InspectionContext) -> list[Findi
     return findings
 
 
-def _image_inventory(output: str, pages: int) -> list[dict[str, object]]:
-    inventory: list[dict[str, object]] = []
+@dataclass(frozen=True, slots=True)
+class _RasterPlacement:
+    """One row of the pdfimages inventory: a raster placed on a page, with its effective DPI."""
+
+    page: int
+    number: int
+    image_type: str
+    width_px: int
+    height_px: int
+    x_dpi: float
+    y_dpi: float
+
+    @property
+    def dpi_unknown(self) -> bool:
+        """pdfimages reports zero when it cannot compute a resolution."""
+        return self.x_dpi == 0 or self.y_dpi == 0
+
+    @property
+    def lowest_dpi(self) -> float:
+        return min(self.x_dpi, self.y_dpi)
+
+    def to_report(self) -> dict[str, object]:
+        return {
+            "page": self.page,
+            "number": self.number,
+            "type": self.image_type,
+            "width_px": self.width_px,
+            "height_px": self.height_px,
+            "x_dpi": self.x_dpi,
+            "y_dpi": self.y_dpi,
+        }
+
+
+def _placement_reports(placements: list[_RasterPlacement]) -> list[dict[str, object]]:
+    return [placement.to_report() for placement in placements]
+
+
+def _image_inventory(output: str, pages: int) -> list[_RasterPlacement]:
+    inventory: list[_RasterPlacement] = []
     header = (
         "page num type width height color comp bpc enc interp object ID x-ppi y-ppi size ratio"
     ).split()
     for line in inventory_rows(output, header, "pdfimages"):
         values = line.split()
-        if len(values) != 16:
+        if len(values) != _IMAGE_INVENTORY_COLUMNS:
             raise PreparationError("pdfimages returned an unrecognized image inventory row")
         try:
-            page, number, width, height = (
-                int(values[0]),
-                int(values[1]),
-                int(values[3]),
-                int(values[4]),
+            placement = _RasterPlacement(
+                page=int(values[0]),
+                number=int(values[1]),
+                image_type=values[2],
+                width_px=int(values[3]),
+                height_px=int(values[4]),
+                x_dpi=float(values[12]),
+                y_dpi=float(values[13]),
             )
-            x_dpi, y_dpi = float(values[12]), float(values[13])
         except ValueError as error:
             raise PreparationError("pdfimages returned invalid image measurements") from error
         if (
-            page not in range(1, pages + 1)
-            or number < 0
-            or min(width, height) < 1
-            or values[2] not in _IMAGE_TYPES
-            or not all(math.isfinite(dpi) and dpi >= 0 for dpi in (x_dpi, y_dpi))
+            placement.page not in range(1, pages + 1)
+            or placement.number < 0
+            or min(placement.width_px, placement.height_px) < 1
+            or placement.image_type not in _IMAGE_TYPES
+            or not all(
+                math.isfinite(dpi) and dpi >= 0 for dpi in (placement.x_dpi, placement.y_dpi)
+            )
         ):
             raise PreparationError("pdfimages returned invalid image measurements")
-        inventory.append(
-            {
-                "page": page,
-                "number": number,
-                "type": values[2],
-                "width_px": width,
-                "height_px": height,
-                "x_dpi": x_dpi,
-                "y_dpi": y_dpi,
-            }
-        )
+        inventory.append(placement)
     return inventory
 
 
-def _image_resolution_finding(inventory: list[dict[str, object]], minimum_dpi: float) -> Finding:
-    unknown = [item for item in inventory if item["x_dpi"] == 0 or item["y_dpi"] == 0]
-    low = [
-        item
-        for item in inventory
-        if isinstance(item["x_dpi"], float)
-        and isinstance(item["y_dpi"], float)
-        and min(item["x_dpi"], item["y_dpi"]) > 0
-        and min(item["x_dpi"], item["y_dpi"]) < minimum_dpi
-    ]
+def _image_resolution_finding(inventory: list[_RasterPlacement], minimum_dpi: float) -> Finding:
+    unknown = [item for item in inventory if item.dpi_unknown]
+    low = [item for item in inventory if 0 < item.lowest_dpi < minimum_dpi]
     if unknown and not low:
         return Finding(
-            "pdf.image_resolution",
+            PdfRule.IMAGE_RESOLUTION,
             "No usable DPI for raster placements on pages "
-            f"{', '.join(sorted({str(item['page']) for item in unknown}))}; "
+            f"{', '.join(sorted({str(item.page) for item in unknown}))}; "
             f"configured minimum: {minimum_dpi:g} DPI.",
             severity="error",
             status="inconclusive",
             evidence_kind=EvidenceKind.DERIVED,
             suggestion="Inspect the listed raster placements for usable DPI.",
             incomplete=True,
-            details={"minimum_dpi": minimum_dpi, "unmeasured": unknown},
+            details={"minimum_dpi": minimum_dpi, "unmeasured": _placement_reports(unknown)},
         )
+    shown = "; ".join(
+        f"page {item.page} image {item.number}: {item.x_dpi} × {item.y_dpi} DPI"
+        for item in low[:_MAX_LOW_DPI_LISTED]
+    )
+    hidden = len(low) - _MAX_LOW_DPI_LISTED
     return _policy_finding(
-        "pdf.image_resolution",
+        PdfRule.IMAGE_RESOLUTION,
         f"Minimum {minimum_dpi:g} DPI on both axes; "
         f"{len(inventory)} raster placements inspected. Below minimum: "
-        + (
-            "; ".join(
-                f"page {item['page']} image {item['number']}: {item['x_dpi']} × {item['y_dpi']} DPI"
-                for item in low[:8]
-            )
-            or "none"
-        )
-        + (f"; plus {len(low) - 8} more" if len(low) > 8 else ""),
+        + (shown or "none")
+        + (f"; plus {hidden} more" if hidden > 0 else ""),
         bool(low),
         {
             "minimum_dpi": minimum_dpi,
-            "below_minimum": low,
-            "unmeasured": unknown,
+            "below_minimum": _placement_reports(low),
+            "unmeasured": _placement_reports(unknown),
             "inspected_placements": len(inventory),
             "includes_masks": True,
         },
@@ -492,13 +558,13 @@ def _image_findings(output: str, context: _InspectionContext) -> list[Finding]:
     inventory = _image_inventory(output, context.pages)
     findings = [
         Finding(
-            "pdf.images",
+            PdfRule.IMAGES,
             f"Measured {len(inventory)} reported raster placements, including masks.",
             severity="info",
             status="passed",
             evidence_kind=EvidenceKind.DERIVED,
             details={
-                "images": inventory,
+                "images": _placement_reports(inventory),
                 "scope": (
                     "Effective x/y PPI from pdfimages for each reported placement, "
                     "including masks; vector artwork has no raster-DPI test."
@@ -511,50 +577,60 @@ def _image_findings(output: str, context: _InspectionContext) -> list[Finding]:
     return findings
 
 
-class _Measurement(NamedTuple):
-    """One concurrent Poppler command, its observation and the policies it gates."""
+def _inspection_measurements(context: _InspectionContext) -> tuple[ToolMeasurement, ...]:
+    """The inventory commands, in report order; every one runs whatever is configured.
 
-    name: str
-    argv: Callable[[int], list[str]]
-    unavailable_rule: str
-    policy_rules: tuple[str, ...]
-    evaluate: Callable[[str, _InspectionContext], list[Finding]]
+    Each also gates the policies that read it: when its command fails, its own
+    ``*_unavailable`` observation and each configured policy of its are inconclusive.
+    """
 
+    def measurement(
+        name: str,
+        argv: list[str],
+        unavailable: PdfRule,
+        policies: tuple[PdfRule, ...],
+        evaluate: Callable[[str, _InspectionContext], list[Finding]],
+    ) -> ToolMeasurement:
+        configured = (policy for policy in policies if policy in context.configured_rules)
+        return ToolMeasurement(
+            name,
+            argv,
+            (unavailable, *configured),
+            lambda result: evaluate(result.stdout, context),
+            suggestion=TOOL_FAILURE_SUGGESTION,
+        )
 
-_GEOMETRY = _Measurement(
-    "geometry",
-    page_boxes_argv,
-    "pdf.geometry_unavailable",
-    ("pdf.page_dimensions", "pdf.page_size_consistency"),
-    _geometry_findings,
-)
-# Reported after geometry and the document features read during preflight.
-_INVENTORIES = (
-    _Measurement(
-        "fonts",
-        lambda _pages: font_inventory_argv(),
-        "pdf.fonts_unavailable",
-        ("pdf.font_embedding", "pdf.type3_fonts"),
-        _font_findings,
-    ),
-    _Measurement(
-        "text", lambda _pages: layout_text_argv(), "pdf.text_unavailable", (), _text_findings
-    ),
-    _Measurement(
-        "attachments",
-        lambda _pages: attachment_list_argv(),
-        "pdf.attachments_unavailable",
-        ("pdf.attachments_policy",),
-        _attachment_findings,
-    ),
-    _Measurement(
-        "images",
-        lambda _pages: image_list_argv(),
-        "pdf.images_unavailable",
-        ("pdf.image_resolution",),
-        _image_findings,
-    ),
-)
+    return (
+        measurement(
+            "geometry",
+            page_boxes_argv(context.pages),
+            PdfRule.GEOMETRY_UNAVAILABLE,
+            (PdfRule.PAGE_DIMENSIONS, PdfRule.PAGE_SIZE_CONSISTENCY),
+            _geometry_findings,
+        ),
+        measurement(
+            "fonts",
+            font_inventory_argv(),
+            PdfRule.FONTS_UNAVAILABLE,
+            (PdfRule.FONT_EMBEDDING, PdfRule.TYPE3_FONTS),
+            _font_findings,
+        ),
+        measurement("text", layout_text_argv(), PdfRule.TEXT_UNAVAILABLE, (), _text_findings),
+        measurement(
+            "attachments",
+            attachment_list_argv(),
+            PdfRule.ATTACHMENTS_UNAVAILABLE,
+            (PdfRule.ATTACHMENTS_POLICY,),
+            _attachment_findings,
+        ),
+        measurement(
+            "images",
+            image_list_argv(),
+            PdfRule.IMAGES_UNAVAILABLE,
+            (PdfRule.IMAGE_RESOLUTION,),
+            _image_findings,
+        ),
+    )
 
 
 def required_inspection_tools() -> set[str]:
@@ -563,38 +639,13 @@ def required_inspection_tools() -> set[str]:
     Each tool is the command of a measurement's argument list, so the set cannot drift
     from what the inspection runs; pdfinfo also reads the document properties first.
     """
-    return {"pdfinfo", *(item.argv(1)[0] for item in (_GEOMETRY, *_INVENTORIES))}
-
-
-def _evaluate(
-    measurement: _Measurement,
-    outcome: CommandResult | PreparationError,
-    context: _InspectionContext,
-) -> list[Finding]:
-    if isinstance(outcome, PreparationError):
-        return _measurement_unavailable(measurement, outcome, context)
-    try:
-        return measurement.evaluate(outcome.stdout, context)
-    except (PreparationError, OSError) as error:
-        return _measurement_unavailable(measurement, error, context)
-
-
-def _measurement_unavailable(
-    measurement: _Measurement, error: Exception, context: _InspectionContext
-) -> list[Finding]:
-    return [
-        _unavailable(measurement.unavailable_rule, error),
-        *(
-            _unavailable(rule, error)
-            for rule in measurement.policy_rules
-            if rule in context.configured_rules
-        ),
-    ]
+    context = _InspectionContext(1, PdfInspectionOptions(), frozenset())
+    return {"pdfinfo", *(item.argv[0] for item in _inspection_measurements(context))}
 
 
 def _annotation_media_scope_finding() -> Finding:
     return Finding(
-        "pdf.annotation_media_scope",
+        PdfRule.ANNOTATION_MEDIA_SCOPE,
         (
             "Arbitrary annotations and active media are not inspected by this "
             "Poppler adapter; their absence is unverified."
@@ -625,7 +676,7 @@ async def inspect_pdf(
         work,
         runner,
         budget,
-        ["pdf.inspection_unavailable", *configured],
+        [PdfRule.INSPECTION_UNAVAILABLE, *configured],
         default_to_runner_budget=False,
         suggestion=TOOL_FAILURE_SUGGESTION,
     )
@@ -633,14 +684,7 @@ async def inspect_pdf(
         return preflight
     session, fields, pages = preflight.session, preflight.fields, preflight.pages
     context = _InspectionContext(pages, options, frozenset(configured))
-    measurements = (_GEOMETRY, *_INVENTORIES)
-    outcomes = await gather_measurements(
-        [partial(session.run, item.name, item.argv(pages)) for item in measurements], budget
-    )
-    geometry, *inventories = (
-        _evaluate(measurement, outcome, context)
-        for measurement, outcome in zip(measurements, outcomes, strict=True)
-    )
+    geometry, *inventories = await run_tool_measurements(session, _inspection_measurements(context))
     return [
         *_document_findings(pages, fields, max_pages),
         *geometry,
@@ -648,7 +692,7 @@ async def inspect_pdf(
         *(finding for findings in inventories for finding in findings),
         _annotation_media_scope_finding(),
         Finding(
-            "pdf.tools",
+            PdfRule.TOOLS,
             "PDF tool versions were recorded.",
             severity="info",
             status="passed",

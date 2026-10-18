@@ -15,13 +15,11 @@ from unittest.mock import patch
 
 from latexprep.config import Settings, load_settings
 from latexprep.errors import PreparationError
-from latexprep.project import (
-    MAX_FOLDER_DEPTH,
-    ImportLimits,
-    create_archive,
-    import_project,
-    plan_cleanup,
-)
+from latexprep.import_budget import ImportLimits
+from latexprep.limits import MAX_WALKED_FOLDER_LEVELS
+from latexprep.project import import_project
+from latexprep.project_archive import create_archive
+from latexprep.project_cleanup import plan_cleanup
 
 
 class ProjectTests(unittest.TestCase):
@@ -646,7 +644,7 @@ class ProjectTests(unittest.TestCase):
         victim = self.write_file("data.tex", b"inside")
         from latexprep import project
 
-        scan = project._folder_entries
+        scan = project.folder_entries
 
         def scan_then_swap(*args, **kwargs):
             entries = scan(*args, **kwargs)
@@ -654,7 +652,7 @@ class ProjectTests(unittest.TestCase):
             victim.symlink_to(secret)
             return entries
 
-        with patch.object(project, "_folder_entries", scan_then_swap):
+        with patch.object(project, "folder_entries", scan_then_swap):
             with self.assertRaisesRegex(PreparationError, "replaced by a link"):
                 import_project(self.source, self.base / "import")
         self.assertFalse((self.base / "import").exists())
@@ -670,7 +668,7 @@ class ProjectTests(unittest.TestCase):
         )
         for error, expected in cases:
             with self.subTest(error=error):
-                with patch("latexprep.project._source_path", side_effect=error):
+                with patch("latexprep.project.source_path", side_effect=error):
                     with self.assertRaises(PreparationError) as raised:
                         import_project(self.source, self.base / "import")
                 message = str(raised.exception)
@@ -688,8 +686,8 @@ class ProjectTests(unittest.TestCase):
     def test_time_and_metadata_limits_in_messages_come_from_their_constants(self) -> None:
         self.write_file("main.tex")
         with (
-            patch("latexprep.project._IMPORT_TIMEOUT_SECONDS", 0.5),
-            patch("latexprep.project.time.monotonic", return_value=time.monotonic() + 1000),
+            patch("latexprep.import_budget.IMPORT_TIMEOUT_SECONDS", 0.5),
+            patch("latexprep.import_budget.time.monotonic", return_value=time.monotonic() + 1000),
             self.assertRaisesRegex(PreparationError, "0.5-second"),
         ):
             import_project(self.source, self.base / "import")
@@ -699,14 +697,14 @@ class ProjectTests(unittest.TestCase):
         struct.pack_into("<I", data, footer + 12, 3 * 1024 * 1024)
         archive.write_bytes(data)
         with (
-            patch("latexprep.project._MAX_ZIP_DIRECTORY_BYTES", 2 * 1024 * 1024),
+            patch("latexprep.zip_validation.MAX_DIRECTORY_BYTES", 2 * 1024 * 1024),
             self.assertRaisesRegex(PreparationError, r"exceeds the 2 MiB limit"),
         ):
             import_project(archive, self.base / "import-zip")
 
     def test_unbudgeted_walks_stop_at_the_folder_depth_cap(self) -> None:
         deep = self.base / "deep"
-        nested = deep.joinpath(*["d"] * (MAX_FOLDER_DEPTH + 1))
+        nested = deep.joinpath(*["d"] * (MAX_WALKED_FOLDER_LEVELS + 1))
         nested.mkdir(parents=True)
         (nested / "file.tex").write_text("x")
         with self.assertRaisesRegex(PreparationError, "nesting exceeds"):
@@ -715,7 +713,7 @@ class ProjectTests(unittest.TestCase):
         with self.assertRaisesRegex(PreparationError, "nesting exceeds"):
             plan_cleanup(deep, set())
         shallow = self.base / "shallow"
-        shallow.joinpath(*["d"] * (MAX_FOLDER_DEPTH - 1)).mkdir(parents=True)
+        shallow.joinpath(*["d"] * (MAX_WALKED_FOLDER_LEVELS - 1)).mkdir(parents=True)
         create_archive(shallow, self.base / "shallow.zip")
         self.assertTrue((self.base / "shallow.zip").exists())
 

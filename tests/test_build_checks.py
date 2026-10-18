@@ -13,12 +13,13 @@ from latexprep.build_checks import (
     check_local_package_shadows,
     check_tex_distribution,
 )
-from latexprep.build_dependencies import LoadedPackage, read_loaded_package
 from latexprep.build_log import log_findings
+from latexprep.build_result import BuildResult, BuildTools
+from latexprep.command_runner import CommandResult, ToolVersion
 from latexprep.errors import PreparationError
 from latexprep.findings import Finding
-from latexprep.latexmk_build import BuildResult, BuildTools, build_project
-from latexprep.runtime import CommandResult, ToolVersion
+from latexprep.latexmk_build import build_project
+from latexprep.package_headers import LoadedPackage, read_loaded_package
 from tests.test_runtime import FakeBuildRunner
 
 
@@ -231,6 +232,8 @@ class BuildCheckTests(unittest.IsolatedAsyncioTestCase):
                 if status == "failed":
                     self.assertEqual(finding.severity, "warning")
                     self.assertEqual(finding.path, "article.cls")
+                if code == 2:
+                    self.assertIn("kpsewhich failed (2)", finding.message)
                 self.assertEqual(runner.calls[0][0], ["kpsewhich", "--format=tex", "article.cls"])
             # Two local files with one name cannot share a lookup or its workspace.
             duplicated = replace(

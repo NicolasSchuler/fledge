@@ -2,6 +2,12 @@
 
 macOS Seatbelt and Linux Bubblewrap are supported execution boundaries. A refused
 sandbox is an execution failure, never permission to retry without isolation.
+``ToolRunner`` runs every tool command through one path: it validates the working
+directory, grants only frozen read-only inputs, builds the sandboxed argv, starts the
+process in its own group, bounds its output and time, and releases its temporary
+state. The port that callers depend on is ``command_runner``; the sandbox profiles are
+``sandbox``'s, the environment and limit wrapper ``tool_launch``'s and the memory and
+storage accounting ``resource_monitor``'s.
 """
 
 from __future__ import annotations
@@ -11,20 +17,21 @@ import contextlib
 import functools
 import os
 import re
+import shutil
 import stat
 import tempfile
 import time
 from collections.abc import AsyncGenerator
-from dataclasses import KW_ONLY, dataclass, replace
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple, Protocol, Self
+from typing import TYPE_CHECKING, Any, NamedTuple, Self
 
 from .biber_toolchain import BiberPreparation, create_biber_toolchain
 from .cancellation import complete_despite_cancellation
+from .command_runner import CommandResult, RuntimeLimits, ToolVersion
 from .errors import PreparationError, SandboxRefusedError
 from .file_safety import DirectoryIdentity, FileIdentity, regular_file_identity
 from .limits import IO_CHUNK_BYTES, MIB
-from .option_config import POSITIVE_INTEGER, Bounds, validate_scalars
 from .process_control import kill_process_group, start_process
 from .resource_monitor import (
     ActiveCommand,
@@ -32,117 +39,28 @@ from .resource_monitor import (
     ResourceStatistics,
     workspace_violation,
 )
-from .sandbox import (
-    SandboxBackend,
-    sandbox_refusal,
-    select_sandbox_backend,
-    tool_environment,
-    with_ulimits,
-)
+from .sandbox import SandboxBackend, select_sandbox_backend
+from .tool_launch import create_tool_environment, sandbox_refusal, with_ulimits
 from .toolchain import Toolchain, tool_path
 
 if TYPE_CHECKING:
     from .resource_budget import ResourceBudget
 
+# Memory reserved for a tool command whose caller holds no lease and states no need:
+# enough for a TeX run or a Poppler query on an ordinary manuscript, small enough that
+# several such commands can be admitted side by side within the job budget.
 _UNLEASED_MEMORY_MB = 256
+# How much of a refused command's standard error the refusal message quotes.
+_REFUSAL_QUOTE_CHARS = 1000
 _PDFDETACH_VERSION = re.compile(r"^pdfdetach version \S+")
+# pdfdetach -v prints its version and then exits with this status.
+_PDFDETACH_VERSION_EXIT_STATUS = 99
+# Lines of a tool's version output that a report keeps: the banner and what follows it.
+_VERSION_LINES_KEPT = 3
 
 
-@dataclass(frozen=True, slots=True)
-class RuntimeLimits:
-    FIELD_BOUNDS: ClassVar[dict[str, Bounds]] = dict.fromkeys(
-        ("timeout_seconds", "max_output_bytes", "max_memory_mb", "max_file_bytes"),
-        POSITIVE_INTEGER,
-    )
-
-    timeout_seconds: int = 120
-    max_output_bytes: int = 2 * MIB
-    max_memory_mb: int = 2048
-    max_file_bytes: int = 256 * MIB
-
-    def __post_init__(self) -> None:
-        validate_scalars(self)
-
-    def to_report(self) -> dict[str, int]:
-        return {
-            "timeout_seconds": self.timeout_seconds,
-            "max_output_bytes": self.max_output_bytes,
-            # The report keeps its established key for the memory limit.
-            "memory_mb": self.max_memory_mb,
-            "max_file_bytes": self.max_file_bytes,
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class ToolVersion:
-    """The first version lines a tool printed under isolation, and where it ran from."""
-
-    version: tuple[str, ...]
-    executable: str
-    version_arguments: tuple[str, ...]
-
-    def to_report(self) -> dict[str, object]:
-        return {
-            "version": list(self.version),
-            "executable": self.executable,
-            "version_arguments": list(self.version_arguments),
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class CommandResult:
-    returncode: int
-    stdout: str
-    stderr: str
-    _: KW_ONLY
-    resolved_command: list[str]
-    timed_out: bool = False
-    output_limited: bool = False
-    resource_exceeded: str | None = None
-    resource_roots: tuple[str, ...] = ()
-
-    @property
-    def within_limits(self) -> bool:
-        """Whether the tool ran to its own exit inside its time, output and resource limits."""
-        return not (self.timed_out or self.output_limited or self.resource_exceeded)
-
-    @property
-    def completed_normally(self) -> bool:
-        """Whether the tool exited with status 0 inside every limit."""
-        return self.within_limits and not self.returncode
-
-    def failure_reason(self, tool: str) -> str | None:
-        """Why ``tool`` did not complete normally, or ``None`` when it did."""
-        if self.timed_out:
-            return f"{tool} exceeded the configured time limit"
-        if self.output_limited:
-            return f"{tool} exceeded the diagnostic output limit"
-        if self.resource_exceeded:
-            return self.resource_exceeded
-        if self.returncode:
-            return f"{tool} failed ({self.returncode}): {self.stderr[:1000]}"
-        return None
-
-
-class CommandRunner(Protocol):
-    """What tool adapters need from a runner: limits, admission, frozen inputs and commands."""
-
-    limits: RuntimeLimits
-    budget: ResourceBudget | None
-
-    def freeze_input(self, source: Path, storage: Path) -> Path: ...
-
-    async def tool_version(self, argv: list[str], workspace: Path) -> ToolVersion: ...
-
-    async def run(
-        self,
-        argv: list[str],
-        cwd: Path,
-        workspace: Path,
-        *,
-        readonly_inputs: tuple[Path, ...] = (),
-        memory_mb: int | None = None,
-    ) -> CommandResult: ...
+def _remove_directory(path: Path) -> None:
+    shutil.rmtree(path, ignore_errors=True)
 
 
 def _require_arguments(argv: list[str], subject: str) -> None:
@@ -172,16 +90,19 @@ def _unverified_version_message(tool: str, result: CommandResult) -> str:
 
 def _verified_version(argv: list[str], executable: Path, result: CommandResult) -> ToolVersion:
     lines = (result.stdout + result.stderr).splitlines()
-    # pdfdetach -v prints its version and then exits with status 99.
     detach_version = (
         executable.name == "pdfdetach"
         and argv[1:] == ["-v"]
         and any(_PDFDETACH_VERSION.match(line) for line in lines)
     )
-    accepted_exit = result.returncode == 0 or (result.returncode == 99 and detach_version)
+    accepted_exit = result.returncode == 0 or (
+        result.returncode == _PDFDETACH_VERSION_EXIT_STATUS and detach_version
+    )
     if not (result.within_limits and accepted_exit and lines) or "Error:" in result.stderr:
         raise PreparationError(_unverified_version_message(Path(argv[0]).name, result))
-    return ToolVersion(tuple(lines[:3]), result.resolved_command[0], tuple(argv[1:]))
+    return ToolVersion(
+        tuple(lines[:_VERSION_LINES_KEPT]), result.resolved_command[0], tuple(argv[1:])
+    )
 
 
 class _FrozenInputs:
@@ -528,12 +449,6 @@ class ToolRunner:
         command = [str(executable), *argv[1:]]
         context = self.toolchain.context(executable)
         sandboxed = self._sandbox_command(command, workspace, inputs)
-        environment = tool_environment(workspace, context, source_date_epoch=self.source_date_epoch)
-        biber = self._biber.scope(command)
-        if biber is not None:
-            # PAR execs its payload out of this directory; point it at the warmed,
-            # runtime-owned copy instead of the writable per-invocation temporary.
-            environment["PAR_GLOBAL_TEMP"] = str(biber.payload)
         lease = self.budget.current_lease if self.budget is not None else None
         maximum = (
             min(self.limits.max_memory_mb, lease.memory_mb) if lease else self.limits.max_memory_mb
@@ -541,23 +456,40 @@ class ToolRunner:
         if memory_mb is not None and memory_mb > maximum:
             raise ValueError("A command memory cap cannot exceed its lease or runtime limit")
         command_memory_mb = maximum if memory_mb is None else memory_mb
-        invocation = _Invocation(
-            resolved_command=command,
-            sandboxed_command=sandboxed,
-            cwd=cwd,
-            workspace=workspace,
-            environment=environment,
-            memory_mb=command_memory_mb,
-            reserved_memory_mb=lease.memory_mb if lease else command_memory_mb,
-            resource_roots=tuple(str(root) for root in sorted(context.resource_roots)),
+        tool_environment = create_tool_environment(
+            workspace, context, source_date_epoch=self.source_date_epoch
         )
-        self._workspace_claims.add(workspace)
         try:
-            return await self._execute(invocation)
+            environment = tool_environment.variables
+            biber = self._biber.scope(command)
+            if biber is not None:
+                # PAR execs its payload out of this directory; point it at the warmed,
+                # runtime-owned copy instead of the writable per-invocation temporary.
+                environment["PAR_GLOBAL_TEMP"] = str(biber.payload)
+            invocation = _Invocation(
+                resolved_command=command,
+                sandboxed_command=sandboxed,
+                cwd=cwd,
+                workspace=workspace,
+                environment=environment,
+                memory_mb=command_memory_mb,
+                reserved_memory_mb=lease.memory_mb if lease else command_memory_mb,
+                resource_roots=tuple(str(root) for root in sorted(context.resource_roots)),
+            )
+            self._workspace_claims.add(workspace)
+            try:
+                return await self._execute(invocation)
+            finally:
+                self._workspace_claims.discard(workspace)
         finally:
-            self._workspace_claims.discard(workspace)
+            # A later command must not find this one's temporary files, and a job that
+            # runs thousands of commands must not accumulate their state directories.
+            await complete_despite_cancellation(
+                asyncio.to_thread(_remove_directory, tool_environment.state_directory)
+            )
 
     async def _execute(self, invocation: _Invocation) -> CommandResult:
+        started = time.monotonic()
         try:
             process = await start_process(
                 *with_ulimits(
@@ -608,7 +540,9 @@ class ToolRunner:
         stdout = output.stdout.decode("utf-8", errors="replace")
         stderr = output.stderr.decode("utf-8", errors="replace")
         if sandbox_refusal(stderr):
-            raise SandboxRefusedError(f"Restricted execution was refused: {stderr.strip()[:1000]}")
+            raise SandboxRefusedError(
+                f"Restricted execution was refused: {stderr.strip()[:_REFUSAL_QUOTE_CHARS]}"
+            )
         return CommandResult(
             process.returncode or 0,
             stdout,
@@ -620,6 +554,7 @@ class ToolRunner:
                 exit_state.resource_exceeded or final_violation or self._monitor.failure
             ),
             resource_roots=invocation.resource_roots,
+            duration_seconds=time.monotonic() - started,
         )
 
     async def _wait_for_exit(

@@ -30,6 +30,11 @@ MAX_PROJECT_ENTRIES = 10_000
 DEFAULT_MAX_PROJECT_BYTES = 256 * MIB
 DEFAULT_MAX_FOLDER_LEVELS = 32
 
+# Deepest folder nesting walked when the caller sets no depth limit, and the depth a
+# build copy accepts. Each level holds one open descriptor and one stack frame; macOS
+# allows 256 descriptors by default.
+MAX_WALKED_FOLDER_LEVELS = 128
+
 # Files and folders together in one tool workspace. A build copy imports at most this
 # many, and the resource monitor stops a tool whose workspace grows beyond it, so a
 # freshly imported build copy is always within what the monitor accepts.

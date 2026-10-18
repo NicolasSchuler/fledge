@@ -13,6 +13,7 @@ import math
 import re
 import tempfile
 from collections import Counter
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -182,43 +183,64 @@ class _Scan:
                     raise _RedactionLimitExceeded
 
     def inspect(self, text: str, sensitive: bool = False) -> None:
+        """Record every secret found in ``text``; a ``sensitive`` text is one secret itself."""
         self.text_chars += len(text)
         if self.text_chars > MAX_TEXT_CHARS:
             raise _RedactionLimitExceeded
         if sensitive:
             self.add(text)
         for value in _variants(text):
-            for match in _STANDALONE.finditer(value):
-                self.add(match.group())
-            for match in _PRIVATE_BLOCK.finditer(value):
-                self.add(match.group())
-                # PEM body lines may also appear alone in tool output or a diff.
-                for line in match.group("body").splitlines():
-                    self.add(line.strip())
-                    if line.startswith(("+", "-", " ")):
-                        self.add(line[1:].strip())
-            for match in _ASSIGNMENT.finditer(value):
-                if _sensitive_key(match.group("key")):
-                    candidate = match.group("value")
-                    if candidate.startswith(('\\"', "\\'")) and candidate[-2:] == candidate[:2]:
-                        candidate = candidate[2:-2]
-                    elif candidate.startswith(('"', "'")) and candidate[-1:] == candidate[:1]:
-                        if (decoded := _decoded_json_string(candidate)) is not None:
-                            self.add(decoded)
-                        candidate = candidate[1:-1]
-                    elif candidate.startswith(('"', "'")):
-                        raise _RedactionLimitExceeded
-                    self.add(candidate)
-            for match in _BEARER.finditer(value):
+            self._add_standalone_tokens(value)
+            self._add_private_keys(value)
+            self._add_assigned_secrets(value)
+            self._add_authorization_secrets(value)
+            self._add_query_secrets(value)
+
+    def _add_standalone_tokens(self, value: str) -> None:
+        for match in _STANDALONE.finditer(value):
+            self.add(match.group())
+
+    def _add_private_keys(self, value: str) -> None:
+        for match in _PRIVATE_BLOCK.finditer(value):
+            self.add(match.group())
+            # PEM body lines may also appear alone in tool output or a diff.
+            for line in match.group("body").splitlines():
+                self.add(line.strip())
+                if line.startswith(("+", "-", " ")):
+                    self.add(line[1:].strip())
+
+    def _add_assigned_secrets(self, value: str) -> None:
+        """Values assigned to a sensitive name, such as ``password = "..."``."""
+        for match in _ASSIGNMENT.finditer(value):
+            if _sensitive_key(match.group("key")):
+                self._add_assigned_value(match.group("value"))
+
+    def _add_assigned_value(self, candidate: str) -> None:
+        """Record an assigned value without its quotes; a quote never closed is unsafe."""
+        if candidate.startswith(('\\"', "\\'")) and candidate[-2:] == candidate[:2]:
+            candidate = candidate[2:-2]
+        elif candidate.startswith(('"', "'")) and candidate[-1:] == candidate[:1]:
+            if (decoded := _decoded_json_string(candidate)) is not None:
+                self.add(decoded)
+            candidate = candidate[1:-1]
+        elif candidate.startswith(('"', "'")):
+            raise _RedactionLimitExceeded
+        self.add(candidate)
+
+    def _add_authorization_secrets(self, value: str) -> None:
+        """Bearer tokens and the credentials in a URL's user information."""
+        for match in _BEARER.finditer(value):
+            self.add(match.group("value"))
+        for pattern, authority in ((_USERINFO, True), (_BARE_USERINFO, False)):
+            for match in pattern.finditer(value):
+                for secret in _userinfo_secrets(match.group("value"), authority=authority):
+                    self.add(secret)
+
+    def _add_query_secrets(self, value: str) -> None:
+        for match in _QUERY.finditer(value):
+            if _query_sensitive(unquote_plus(match.group("key"))):
                 self.add(match.group("value"))
-            for pattern, authority in ((_USERINFO, True), (_BARE_USERINFO, False)):
-                for match in pattern.finditer(value):
-                    for secret in _userinfo_secrets(match.group("value"), authority=authority):
-                        self.add(secret)
-            for match in _QUERY.finditer(value):
-                if _query_sensitive(unquote_plus(match.group("key"))):
-                    self.add(match.group("value"))
-                    self.add(unquote_plus(match.group("value")))
+                self.add(unquote_plus(match.group("value")))
 
     def collect_secrets_and_copy(self, value: Any, depth: int = 0, sensitive: bool = False) -> Any:
         self.nodes += 1
@@ -255,6 +277,64 @@ class _Scan:
             self.ancestors.remove(identity)
 
 
+def _replacement_patterns(
+    secrets: set[str],
+) -> tuple[re.Pattern[str] | None, re.Pattern[str] | None]:
+    """The patterns that replace ``secrets`` in text and in dictionary keys.
+
+    A short secret such as a password "git" is replaced only as a whole token, so it cannot
+    corrupt unrelated words; keys are matched only by secrets long enough to be unique.
+    """
+    ordered = sorted(secrets, key=len, reverse=True)
+    long_secrets = [secret for secret in ordered if len(secret) >= _MIN_SUBSTRING_SECRET]
+    short_secrets = [secret for secret in ordered if len(secret) < _MIN_SUBSTRING_SECRET]
+    alternatives = []
+    if long_secrets:
+        alternatives.append("|".join(map(re.escape, long_secrets)))
+    if short_secrets:
+        alternatives.append(
+            _TOKEN_BEFORE + "(?:" + "|".join(map(re.escape, short_secrets)) + ")" + _TOKEN_AFTER
+        )
+    pattern = re.compile("|".join(alternatives)) if alternatives else None
+    key_pattern = re.compile("|".join(map(re.escape, long_secrets))) if long_secrets else None
+    return pattern, key_pattern
+
+
+@dataclass(frozen=True)
+class _Replacer:
+    """Replaces every discovered secret in a copied report tree."""
+
+    secrets: frozenset[str]
+    pattern: re.Pattern[str] | None
+    key_pattern: re.Pattern[str] | None
+
+    def text(self, source: str, *, key: bool = False) -> str:
+        matcher = self.key_pattern if key else self.pattern
+        variants = _variants(source)
+        if key and any(variant in self.secrets for variant in variants):
+            return REDACTED
+        if matcher is None:
+            return source
+        result = source
+        for variant in variants:
+            if matcher.search(variant):
+                result = variant
+        return matcher.sub(REDACTED, result)
+
+    def clean(self, item: Any) -> Any:
+        if isinstance(item, str):
+            return self.text(item)
+        if isinstance(item, dict):
+            return {
+                self.text(key, key=True) if isinstance(key, str) else key: self.clean(part)
+                for key, part in item.items()
+            }
+        if isinstance(item, (list, tuple)):
+            values = [self.clean(part) for part in item]
+            return tuple(values) if isinstance(item, tuple) else values
+        return item
+
+
 def redact_data(value: Any) -> Any:
     """Return a sanitized copy, or one fixed marker if complete scanning is unsafe.
 
@@ -270,46 +350,63 @@ def redact_data(value: Any) -> Any:
             raise _RedactionLimitExceeded
     except _RedactionLimitExceeded:
         return LIMIT_REDACTION
-    secrets = sorted(scan.secrets, key=len, reverse=True)
-    long_secrets = [secret for secret in secrets if len(secret) >= _MIN_SUBSTRING_SECRET]
-    short_secrets = [secret for secret in secrets if len(secret) < _MIN_SUBSTRING_SECRET]
-    alternatives = []
-    if long_secrets:
-        alternatives.append("|".join(map(re.escape, long_secrets)))
-    if short_secrets:
-        alternatives.append(
-            _TOKEN_BEFORE + "(?:" + "|".join(map(re.escape, short_secrets)) + ")" + _TOKEN_AFTER
-        )
-    pattern = re.compile("|".join(alternatives)) if alternatives else None
-    key_pattern = re.compile("|".join(map(re.escape, long_secrets))) if long_secrets else None
+    pattern, key_pattern = _replacement_patterns(scan.secrets)
+    return _Replacer(frozenset(scan.secrets), pattern, key_pattern).clean(copied)
 
-    def text(source: str, *, key: bool = False) -> str:
-        matcher = key_pattern if key else pattern
-        variants = _variants(source)
-        if key and any(variant in scan.secrets for variant in variants):
-            return REDACTED
-        if matcher is None:
-            return source
-        result = source
-        for variant in variants:
-            if matcher.search(variant):
-                result = variant
-        return matcher.sub(REDACTED, result)
 
-    def clean(item: Any) -> Any:
-        if isinstance(item, str):
-            return text(item)
-        if isinstance(item, dict):
+def redact_secrets(value: str) -> str:
+    """Replace every secret-shaped substring of one string with ``[REDACTED]``."""
+    for _, pattern in SECRET_PATTERNS:
+        value = pattern.sub(REDACTED, value)
+    return value
+
+
+class _KnownSecretScan:
+    """One bounded pass that replaces known secret values and secret-shaped text."""
+
+    def __init__(self, secrets: Collection[str]) -> None:
+        if len(secrets) > MAX_SECRETS:
+            raise _RedactionLimitExceeded
+        self.secrets = sorted((secret for secret in secrets if secret), key=len, reverse=True)
+        self.nodes = 0
+        self.text_chars = 0
+
+    def clean(self, value: Any, depth: int = 0) -> Any:
+        self.nodes += 1
+        if self.nodes > MAX_NODES or depth > MAX_DEPTH:
+            raise _RedactionLimitExceeded
+        if isinstance(value, str):
+            self.text_chars += len(value)
+            if self.text_chars * max(1, len(self.secrets)) > MAX_REPLACEMENT_WORK:
+                raise _RedactionLimitExceeded
+            for secret in self.secrets:
+                value = value.replace(secret, REDACTED)
+            return redact_secrets(value)
+        if isinstance(value, dict):
             return {
-                text(key, key=True) if isinstance(key, str) else key: clean(part)
-                for key, part in item.items()
+                str(self.clean(key, depth + 1)): self.clean(item, depth + 1)
+                for key, item in value.items()
             }
-        if isinstance(item, (list, tuple)):
-            values = [clean(part) for part in item]
-            return tuple(values) if isinstance(item, tuple) else values
-        return item
+        if isinstance(value, (list, tuple)):
+            values = [self.clean(item, depth + 1) for item in value]
+            return tuple(values) if isinstance(value, tuple) else values
+        return value
 
-    return clean(copied)
+
+def redact_known_secrets(value: Any, secrets: Collection[str]) -> Any:
+    """Return a copy of a JSON-shaped value with ``secrets`` and secret-shaped text replaced.
+
+    ``secrets`` are values already discovered elsewhere, such as credentials found in a
+    project's files; each is replaced wherever it appears, longest first, and
+    ``redact_secrets`` then replaces anything that merely looks like a credential.
+    Like ``redact_data`` this is bounded in nodes, depth and work, and when a bound is
+    exceeded the whole value is withheld as ``LIMIT_REDACTION``, never returned as it was.
+    Values that are not strings, lists, tuples or dictionaries are kept unchanged.
+    """
+    try:
+        return _KnownSecretScan(secrets).clean(value)
+    except _RedactionLimitExceeded:
+        return LIMIT_REDACTION
 
 
 def local_directory_labels() -> dict[str, str]:

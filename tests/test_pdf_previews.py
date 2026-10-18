@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import json
 import shutil
 import tempfile
@@ -9,17 +8,14 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 
+from latexprep.command_runner import CommandResult
 from latexprep.errors import PreparationError
 from latexprep.pdf_comparison import compare_pdfs
-from latexprep.pdf_previews import PdfPreviewStore
+from latexprep.pdf_previews import PdfPreviewStore, PreviewPage, PreviewSide
 from latexprep.resource_budget import ResourceBudget
-from latexprep.runtime import CommandResult
 from latexprep.workflow_options import ComparisonOptions
+from tests.support import PNG
 from tests.test_pdf import FakePdfRunner
-
-PNG = base64.b64decode(
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ap1kAAAAASUVORK5CYII="
-)
 
 
 class PreviewRunner(FakePdfRunner):
@@ -66,6 +62,57 @@ class PreviewRunner(FakePdfRunner):
             text = "Changed" if right and self.text_changed else "Text"
             result = replace(result, stdout=f"{text}\n\f" * pages)
         return result
+
+
+class PreviewDescriptorTests(unittest.TestCase):
+    def test_descriptors_serialize_optional_fields_only_when_they_are_set(self) -> None:
+        captured = PreviewSide(True, (612, 792), "captured", image_id="pdf-preview-0001-left")
+        captured.pixels = (3, 4)
+        self.assertEqual(
+            captured.to_report(),
+            {
+                "present": True,
+                "dimensions_pt": [612, 792],
+                "image_id": "pdf-preview-0001-left",
+                "status": "captured",
+                "pixels": [3, 4],
+            },
+        )
+        absent = PreviewSide(False, None, "missing")
+        self.assertEqual(
+            absent.to_report(),
+            {"present": False, "dimensions_pt": None, "image_id": None, "status": "missing"},
+        )
+        page = PreviewPage(
+            4,
+            text_changed=None,
+            rendering_changed=True,
+            text_only=False,
+            page_dimensions_changed=None,
+            page_count_changed=True,
+            within_render_tolerance=None,
+            left=absent,
+            right=captured,
+        )
+        self.assertEqual(
+            list(page.to_report()),
+            [
+                "page",
+                "text_changed",
+                "rendering_changed",
+                "text_only",
+                "page_dimensions_changed",
+                "page_count_changed",
+                "within_render_tolerance",
+                "status",
+                "left",
+                "right",
+            ],
+        )
+        page.status = "omitted"
+        page.omission_reason = "The shared preview page or byte limit was reached."
+        self.assertEqual(page.to_report()["omission_reason"], page.omission_reason)
+        self.assertEqual([name for name, _ in page.sides()], ["left", "right"])
 
 
 class PdfPreviewTests(unittest.IsolatedAsyncioTestCase):

@@ -6,19 +6,16 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from latexprep.command_runner import CommandResult, RuntimeLimits
 from latexprep.errors import PreparationError
-from latexprep.pdf_comparison import compare_pdfs
+from latexprep.pdf_comparison import ComparisonPolicy, PageDifference, compare_pdfs
+from latexprep.pdf_geometry import COMPARISON_DPI, require_comparison_raster_fit
 from latexprep.pdf_inspection import PdfInspectionOptions, inspect_pdf
-from latexprep.pdf_support import (
-    COMPARISON_DPI,
-    is_type3,
-    page_count,
-    parse_page_sizes,
-    require_comparison_raster_fit,
-)
+from latexprep.pdf_tool_output import is_type3, page_count, parse_page_sizes
 from latexprep.report import Report
 from latexprep.resource_budget import ResourceBudget
-from latexprep.runtime import CommandResult, RuntimeLimits, ToolRunner
+from latexprep.runtime import ToolRunner
+from latexprep.workflow_options import ComparisonOptions
 from tests.support import live_tests_enabled
 
 
@@ -144,7 +141,8 @@ class PdfTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(item.status == "passed" for item in findings))
         rendered = next(item for item in findings if item.rule == "compare.rendering")
         self.assertEqual(rendered.details["dpi"], 144)
-        self.assertEqual(rendered.details["pixel_tolerance"], 0)
+        self.assertEqual(rendered.details["max_changed_pixel_ratio"], 0)
+        self.assertEqual(rendered.details["channel_tolerance"], 0)
         self.assertFalse(rendered.details["semantic_equivalence_proven"])
 
     async def test_rendering_message_states_the_comparison_resolution_in_use(self) -> None:
@@ -156,6 +154,42 @@ class PdfTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rendered.details["dpi"], 96)
         self.assertIn("96 DPI", rendered.message)
         self.assertNotIn("144", rendered.message)
+
+    def test_policy_names_its_tolerances_and_a_difference_reports_only_measured_fields(
+        self,
+    ) -> None:
+        exact = ComparisonPolicy.of(None)
+        self.assertFalse(exact.tolerant)
+        self.assertEqual(
+            exact.to_details(),
+            {
+                "dpi": COMPARISON_DPI,
+                "max_changed_pixel_ratio": 0,
+                "channel_tolerance": 0,
+                "text_normalization": "line endings and trailing horizontal whitespace only",
+                "metadata_compared": False,
+                "semantic_equivalence_proven": False,
+            },
+        )
+        options = ComparisonOptions(channel_tolerance=2, max_changed_pixel_ratio=0.25)
+        tolerant = ComparisonPolicy.of(options)
+        self.assertTrue(tolerant.tolerant)
+        self.assertEqual(tolerant.to_details()["max_changed_pixel_ratio"], 0.25)
+        unmeasured = PageDifference(2, (10, 12), (10, 12), False)
+        self.assertEqual(
+            unmeasured.to_report(),
+            {
+                "page": 2,
+                "left_pixels": (10, 12),
+                "right_pixels": (10, 12),
+                "page_dimensions_changed": False,
+            },
+        )
+        self.assertTrue(unmeasured.counts_as_changed)
+        counted = PageDifference(2, (10, 12), (10, 12), False, 3, 0.025, True)
+        self.assertFalse(counted.counts_as_changed)
+        self.assertEqual(counted.to_report()["changed_pixel_ratio"], 0.025)
+        self.assertIs(counted.to_report()["within_tolerance"], True)
 
     async def test_pdf_inspection_reports_scope_gaps(self) -> None:
         findings = await inspect_pdf(self.left, self.root / "inspect", FakePdfRunner())

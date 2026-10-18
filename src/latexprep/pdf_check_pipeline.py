@@ -1,4 +1,12 @@
-"""Compose optional PDF checks without giving composite tasks resource reservations."""
+"""Run the configured PDF check groups together, for a source project or a lone PDF.
+
+Each group (the opt-in measurements, privacy, included figures, artwork, structure, and
+for a lone PDF the inspection and comparison) opens its own frozen session and runs under
+the shared budget; the groups run concurrently within its CPU slots. This module bridges
+the source project to the PDF checks (expected metadata and included figures) and decides
+which settings a lone PDF cannot honor. Composite groups hold no reservation of their own;
+only the tool commands and file reads inside them do.
+"""
 
 from __future__ import annotations
 
@@ -6,34 +14,26 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import NamedTuple, TypeVar
 
 from .cancellation import bounded_map, run_in_thread
+from .command_runner import CommandRunner
 from .errors import PreparationError, ToolUnavailableError
 from .findings import Finding, has_blockers
-from .manuscript_checks import read_literal_metadata
-from .pdf_artwork import (
-    PdfArtworkOptions,
-    artwork_checks_enabled,
-    inspect_artwork_inputs,
-    inspect_pdf_artwork,
-)
-from .pdf_checks import (
-    PdfCheckOptions,
-    extract_pdf_evidence,
-    figure_font_checks_enabled,
-    inspect_included_pdf_figures,
-    inspect_pdf_details,
-)
+from .manuscript_metadata_checks import read_literal_metadata
+from .pdf_artwork import inspect_artwork_inputs, inspect_pdf_artwork
+from .pdf_artwork_options import PdfArtworkOptions, artwork_checks_enabled
+from .pdf_check_options import MAX_FIGURE_INPUTS, PdfCheckOptions, figure_font_checks_enabled
+from .pdf_checks import extract_pdf_evidence, inspect_included_pdf_figures, inspect_pdf_details
 from .pdf_comparison import compare_pdfs
 from .pdf_inspection import PdfInspectionOptions, inspect_pdf
 from .pdf_previews import PdfPreviewCollector
+from .pdf_rule_names import PdfRule
 from .pdf_structure_checks import StructureOptions, inspect_pdf_structure
-from .pdf_support import MAX_FIGURE_INPUTS
 from .resource_budget import ResourceBudget
-from .runtime import CommandRunner
 from .source_graph import SourceGraph
-from .submission_checks import SubmissionOptions, check_pdf_identity
+from .submission_checks import check_pdf_identity
+from .submission_options import SubmissionOptions
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -62,6 +62,9 @@ class _PdfCheckContext:
     budget: ResourceBudget
 
 
+_T = TypeVar("_T")
+
+
 class _FigureInputs(NamedTuple):
     """Literal PDF figures of the selected source graph, and whether the set is complete."""
 
@@ -69,7 +72,10 @@ class _FigureInputs(NamedTuple):
     complete: bool
 
 
-async def _read(budget: ResourceBudget, name: str, function: Callable[..., Any], *args: Any) -> Any:
+async def _read(
+    budget: ResourceBudget, name: str, function: Callable[..., _T], *args: object
+) -> _T:
+    """Run a blocking source read in a worker thread under a lease of the shared budget."""
     async with budget.lease(name):
         return await run_in_thread(function, *args)
 
@@ -159,11 +165,61 @@ async def _inspect_pdf_structure(context: _PdfCheckContext) -> list[Finding]:
     )
 
 
+async def _inspect_pdf_basics(context: _PdfCheckContext) -> list[Finding]:
+    settings = context.settings
+    return await inspect_pdf(
+        context.pdf,
+        context.work / "basic",
+        context.runner,
+        settings.max_pages,
+        options=settings.inspection,
+        budget=context.budget,
+    )
+
+
+async def _inspect_pdf_details(context: _PdfCheckContext) -> list[Finding]:
+    return await inspect_pdf_details(
+        context.pdf,
+        context.work / "details",
+        context.runner,
+        options=context.settings.details,
+        budget=context.budget,
+    )
+
+
+async def _compare_with_reference(
+    context: _PdfCheckContext, reference: Path | None, previews: PdfPreviewCollector | None
+) -> list[Finding]:
+    if reference is None:
+        return []
+    return await compare_pdfs(
+        reference,
+        context.pdf,
+        context.work / "comparison",
+        context.runner,
+        budget=context.budget,
+        previews=previews,
+    )
+
+
 async def _run_groups(
     groups: Sequence[Callable[[], Awaitable[list[Finding]]]], budget: ResourceBudget
 ) -> list[Finding]:
     results = await bounded_map(groups, lambda function: function(), limit=budget.cpu_slots)
     return [finding for group in results for finding in group]
+
+
+def _source_metadata_finding(name: str, main: str, reasons: object) -> Finding:
+    return Finding(
+        PdfRule.METADATA_AGREEMENT,
+        f"Source {name} cannot be resolved as one literal metadata value.",
+        severity="error",
+        status="inconclusive",
+        path=main,
+        details={"field": name, "interpretation_gaps": reasons},
+        suggestion="Provide one unambiguous literal declaration, or configure "
+        "an explicit expected PDF value instead of source matching.",
+    )
 
 
 async def _inspect_pdf_details_with_source_metadata(
@@ -185,18 +241,7 @@ async def _inspect_pdf_details_with_source_metadata(
         expected = dict(options.expected_metadata)
         for name in settings.match_source_metadata:
             if reasons or name not in metadata:
-                findings.append(
-                    Finding(
-                        "pdf.metadata_agreement",
-                        f"Source {name} cannot be resolved as one literal metadata value.",
-                        severity="error",
-                        status="inconclusive",
-                        path=main,
-                        details={"field": name, "interpretation_gaps": reasons},
-                        suggestion="Provide one unambiguous literal declaration, or configure "
-                        "an explicit expected PDF value instead of source matching.",
-                    )
-                )
+                findings.append(_source_metadata_finding(name, main, reasons))
             else:
                 expected[name.title()] = metadata[name]
         options = replace(options, expected_metadata=tuple(sorted(expected.items())))
@@ -208,6 +253,49 @@ async def _inspect_pdf_details_with_source_metadata(
     return findings
 
 
+def _font_scope_finding(main: str, paths: tuple[Path, ...], exhaustive: bool) -> Finding | None:
+    """What the source graph says about the figure fonts, when it cannot be taken as measured."""
+    if not exhaustive:
+        return Finding(
+            PdfRule.INCLUDED_FIGURE_FONTS,
+            "The complete set of included PDF figures could not be established "
+            f"within the supported source and {MAX_FIGURE_INPUTS}-figure limits.",
+            severity="error",
+            status="inconclusive",
+            path=main,
+        )
+    if not paths:
+        return Finding(
+            PdfRule.INCLUDED_FIGURE_FONTS,
+            "No literal PDF figure inputs in the selected source graph.",
+            severity="info",
+            status="passed",
+            path=main,
+        )
+    return None
+
+
+def _artwork_scope_finding(main: str) -> Finding:
+    return Finding(
+        PdfRule.ARTWORK_INPUT_SCOPE,
+        "The full set of PDF artwork inputs could not be established; "
+        "measured inputs are not an exhaustive inventory.",
+        severity="error",
+        status="inconclusive",
+        path=main,
+    )
+
+
+def _relative_to_source(findings: list[Finding], root: Path) -> list[Finding]:
+    """Keep locations actionable after temporary workspaces have been removed."""
+    return [
+        replace(finding, path=Path(finding.path).relative_to(root).as_posix())
+        if finding.path and Path(finding.path).is_relative_to(root)
+        else finding
+        for finding in findings
+    ]
+
+
 async def _inspect_included_figures(
     context: _PdfCheckContext, root: Path, main: str
 ) -> list[Finding]:
@@ -217,67 +305,28 @@ async def _inspect_included_figures(
     figure_artwork = artwork_checks_enabled(settings.figure_artwork)
     if not (figure_fonts or figure_artwork):
         return []
-    inputs = await _read(budget, "included PDF graph", _figure_inputs, root, main)
-    paths, complete = inputs
+    paths, complete = await _read(budget, "included PDF graph", _figure_inputs, root, main)
     exhaustive = complete and len(paths) <= MAX_FIGURE_INPUTS
+    inspected = paths[:MAX_FIGURE_INPUTS]
     findings = []
-    if not exhaustive and figure_fonts:
-        findings.append(
-            Finding(
-                "pdf.included_figure_fonts",
-                "The complete set of included PDF figures could not be established "
-                f"within the supported source and {MAX_FIGURE_INPUTS}-figure limits.",
-                severity="error",
-                status="inconclusive",
-                path=main,
-            )
-        )
-    elif not paths and figure_fonts:
-        findings.append(
-            Finding(
-                "pdf.included_figure_fonts",
-                "No literal PDF figure inputs in the selected source graph.",
-                severity="info",
-                status="passed",
-                path=main,
-            )
-        )
+    if figure_fonts and (scope := _font_scope_finding(main, paths, exhaustive)) is not None:
+        findings.append(scope)
     measured = await inspect_included_pdf_figures(
-        paths[:MAX_FIGURE_INPUTS],
-        work / "figures",
-        runner,
-        options=settings.details,
-        budget=budget,
+        inspected, work / "figures", runner, options=settings.details, budget=budget
     )
     if figure_artwork:
         if not exhaustive:
-            findings.append(
-                Finding(
-                    "pdf.artwork_input_scope",
-                    "The full set of PDF artwork inputs could not be established; "
-                    "measured inputs are not an exhaustive inventory.",
-                    severity="error",
-                    status="inconclusive",
-                    path=main,
-                )
-            )
+            findings.append(_artwork_scope_finding(main))
         measured.extend(
             await inspect_artwork_inputs(
-                paths[:MAX_FIGURE_INPUTS],
+                inspected,
                 work / "artwork-inputs",
                 runner,
                 options=settings.figure_artwork,
                 budget=budget,
             )
         )
-    # Keep locations actionable after temporary workspaces have been removed.
-    findings.extend(
-        replace(finding, path=Path(finding.path).relative_to(root).as_posix())
-        if finding.path and Path(finding.path).is_relative_to(root)
-        else finding
-        for finding in measured
-    )
-    return findings
+    return [*findings, *_relative_to_source(measured, root)]
 
 
 async def inspect_configured_pdf_checks(
@@ -303,6 +352,26 @@ async def inspect_configured_pdf_checks(
     )
 
 
+def _source_only_findings(settings: PdfCheckSettings) -> list[Finding]:
+    """Settings that need a source project: not failures, and no evidence for a lone PDF."""
+    source_only = []
+    if settings.match_source_metadata:
+        source_only.append((PdfRule.METADATA_AGREEMENT, "Source-to-PDF metadata comparison"))
+    if figure_font_checks_enabled(settings.details):
+        source_only.append((PdfRule.INCLUDED_FIGURE_FONTS, "Input-figure font inspection"))
+    if artwork_checks_enabled(settings.figure_artwork):
+        source_only.append((PdfRule.ARTWORK_INPUT_SCOPE, "Input-figure artwork inspection"))
+    return [
+        Finding(
+            rule,
+            f"{subject} requires a source project; not run for a standalone PDF.",
+            severity="info",
+            status="skipped",
+        )
+        for rule, subject in source_only
+    ]
+
+
 async def inspect_standalone_pdf(
     pdf: Path,
     work: Path,
@@ -315,55 +384,15 @@ async def inspect_standalone_pdf(
 ) -> list[Finding]:
     """Run PDF-only constraints without implying that a source bundle was checked."""
     context = _PdfCheckContext(pdf, work, runner, settings, budget)
-
-    async def basic() -> list[Finding]:
-        return await inspect_pdf(
-            pdf,
-            work / "basic",
-            runner,
-            settings.max_pages,
-            options=settings.inspection,
-            budget=budget,
-        )
-
-    async def detailed() -> list[Finding]:
-        return await inspect_pdf_details(
-            pdf, work / "details", runner, options=settings.details, budget=budget
-        )
-
-    async def comparison() -> list[Finding]:
-        if reference is None:
-            return []
-        return await compare_pdfs(
-            reference, pdf, work / "comparison", runner, budget=budget, previews=previews
-        )
-
     findings = await _run_groups(
         [
-            basic,
-            detailed,
+            partial(_inspect_pdf_basics, context),
+            partial(_inspect_pdf_details, context),
             partial(_inspect_pdf_privacy, context),
-            comparison,
+            partial(_compare_with_reference, context, reference, previews),
             partial(_inspect_pdf_artwork, context),
             partial(_inspect_pdf_structure, context),
         ],
         budget,
     )
-    # Source-only settings are neither failures nor evidence for a standalone PDF.
-    source_only = []
-    if settings.match_source_metadata:
-        source_only.append(("pdf.metadata_agreement", "Source-to-PDF metadata comparison"))
-    if figure_font_checks_enabled(settings.details):
-        source_only.append(("pdf.included_figure_fonts", "Input-figure font inspection"))
-    if artwork_checks_enabled(settings.figure_artwork):
-        source_only.append(("pdf.artwork_input_scope", "Input-figure artwork inspection"))
-    findings.extend(
-        Finding(
-            rule,
-            f"{subject} requires a source project; not run for a standalone PDF.",
-            severity="info",
-            status="skipped",
-        )
-        for rule, subject in source_only
-    )
-    return findings
+    return [*findings, *_source_only_findings(settings)]

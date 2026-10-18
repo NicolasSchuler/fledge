@@ -509,45 +509,73 @@ def _scalar_error(location: str, check: Callable[[], None]) -> None:
 
 
 def _convert(annotation: Any, value: object, location: str, bounds: Bounds | None = None) -> object:
+    """Convert the TOML ``value`` at ``location`` to what ``annotation`` declares."""
     origin, args = get_origin(annotation), get_args(annotation)
     if origin in {Union, types.UnionType}:
-        if value is None and type(None) in args:
-            return None
-        variants = [item for item in args if item is not type(None)]
-        if len(variants) == 1:
-            # An optional value keeps its variant's message, such as the allowed choices.
-            return _convert(variants[0], value, location, bounds)
-        for variant in variants:
-            try:
-                return _convert(variant, value, location)
-            except PreparationError:
-                pass
-        raise _settings_error(location, f"{location} has an invalid value type")
+        return _convert_union(args, value, location, bounds)
     if origin is Literal:
         _scalar_error(location, lambda: require_choice(location, value, args))
         return value
     if isinstance(annotation, type) and is_dataclass(annotation):
         return read_options(annotation, value, location)
     if origin is tuple:
-        if isinstance(value, dict) and len(args) == 2 and args[-1] is Ellipsis:
-            # Named policy pairs such as required_fields.article=["title","author"].
-            inner = get_args(args[0])
-            if get_origin(args[0]) is tuple and len(inner) == 2 and inner[0] is str:
-                if any(not isinstance(key, str) for key in value):
-                    raise _settings_error(location, f"{location} requires string keys")
-                value = tuple(sorted(value.items()))
-        if not isinstance(value, (list, tuple)):
-            raise _settings_error(location, f"{location} must be a list")
-        if len(args) == 2 and args[-1] is Ellipsis:
-            return tuple(
-                _convert(args[0], item, f"{location}[{index}]") for index, item in enumerate(value)
-            )
-        if len(args) != len(value):
-            raise _settings_error(location, f"{location} requires {len(args)} list items")
+        return _convert_tuple(args, value, location)
+    return _convert_scalar(annotation, value, location, bounds)
+
+
+def _convert_union(
+    variants: tuple[Any, ...], value: object, location: str, bounds: Bounds | None
+) -> object:
+    """Convert to ``X | None`` (``None`` stays ``None``) or to the first variant that fits."""
+    if value is None and type(None) in variants:
+        return None
+    candidates = [item for item in variants if item is not type(None)]
+    if len(candidates) == 1:
+        # An optional value keeps its variant's message, such as the allowed choices.
+        return _convert(candidates[0], value, location, bounds)
+    for variant in candidates:
+        try:
+            return _convert(variant, value, location)
+        except PreparationError:
+            pass
+    raise _settings_error(location, f"{location} has an invalid value type")
+
+
+def _named_pairs(args: tuple[Any, ...], value: object, location: str) -> object:
+    """A TOML table as sorted (name, value) pairs where the annotation asks for pairs.
+
+    That is named policy pairs such as ``required_fields.article = ["title", "author"]``;
+    any other value is returned as it is.
+    """
+    if not isinstance(value, dict) or len(args) != 2 or args[-1] is not Ellipsis:
+        return value
+    inner = get_args(args[0])
+    if get_origin(args[0]) is tuple and len(inner) == 2 and inner[0] is str:
+        if any(not isinstance(key, str) for key in value):
+            raise _settings_error(location, f"{location} requires string keys")
+        return tuple(sorted(value.items()))
+    return value
+
+
+def _convert_tuple(args: tuple[Any, ...], value: object, location: str) -> object:
+    """Convert a TOML list (or table of pairs) to the tuple form ``args`` describes."""
+    value = _named_pairs(args, value, location)
+    if not isinstance(value, (list, tuple)):
+        raise _settings_error(location, f"{location} must be a list")
+    if len(args) == 2 and args[-1] is Ellipsis:
         return tuple(
-            _convert(kind, item, f"{location}[{index}]")
-            for index, (kind, item) in enumerate(zip(args, value, strict=True))
+            _convert(args[0], item, f"{location}[{index}]") for index, item in enumerate(value)
         )
+    if len(args) != len(value):
+        raise _settings_error(location, f"{location} requires {len(args)} list items")
+    return tuple(
+        _convert(kind, item, f"{location}[{index}]")
+        for index, (kind, item) in enumerate(zip(args, value, strict=True))
+    )
+
+
+def _convert_scalar(annotation: Any, value: object, location: str, bounds: Bounds | None) -> object:
+    """Check a bool, int, float or str against its annotation; other types pass unchanged."""
     if annotation is bool and type(value) is not bool:
         raise _settings_error(location, f"{location} must be a boolean")
     if annotation is int:

@@ -19,7 +19,7 @@ from latexprep.findings import Finding
 from latexprep.job_context import JobRequest, pdf_check_settings
 from latexprep.job_execution import JobDeadlineExceeded
 from latexprep.online_checks import OnlineOptions
-from latexprep.pdf_artwork import PdfArtworkOptions
+from latexprep.pdf_artwork_options import PdfArtworkOptions
 from latexprep.pdf_check_pipeline import inspect_configured_pdf_checks
 from latexprep.redaction import scrub_local_paths
 from latexprep.resource_budget import ResourceBudget
@@ -251,7 +251,7 @@ class WorkflowExtensionTests(unittest.IsolatedAsyncioTestCase):
         pdf.write_bytes(b"%PDF-fixture")
         with (
             patch(
-                "latexprep.document_run.import_project", side_effect=AssertionError("source import")
+                "latexprep.job_context.import_project", side_effect=AssertionError("source import")
             ),
             patch("latexprep.document_tasks.build_project", side_effect=AssertionError("build")),
             patch(

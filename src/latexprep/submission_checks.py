@@ -4,639 +4,116 @@ Identity checks are literal whole-word (or, on request, substring) scans, not an
 anonymity guarantee. Privacy checks cover the whole supplied bundle; unused-asset
 hints alone use one selected literal dependency graph. No publisher policy or
 template registry is embedded.
+
+This module owns the bundle-level policies: file names, deliverables, template
+references, unused assets, the compressed archive and the PDF identity scan, and it
+orchestrates the content scan. The options are in ``submission_options``, the single
+pass over file contents in ``submission_content_scan``, and the shared finding
+wording in ``submission_scan_findings``.
 """
 
 from __future__ import annotations
 
 import re
 import stat
-import unicodedata
-from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import KW_ONLY, dataclass, field, fields, replace
-from functools import lru_cache, partial
-from itertools import islice
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import ClassVar, Literal
-from urllib.parse import unquote
 
 from .cancellation import cancellation_point
-from .comment_markers import MarkerCategory, marker_pattern
-from .errors import SettingsError
-from .file_scan import (
-    MAX_SCAN_MATCHES,
-    ByteBudget,
-    check_status,
-    inventory_files,
-    more_suffix,
-    redact_findings,
-    redact_secrets,
-    tex_comments,
+from .file_scan import ByteBudget, inventory_files
+from .finding_text import more_suffix, redact_findings
+from .findings import Finding
+from .redaction import redact_secrets
+from .source_analysis import analyze_sources
+from .submission_content_scan import (
+    ContentScan,
+    find_secrets,
+    term_matches,
+    term_rule_description,
 )
-from .findings import EvidenceKind, Finding
-from .option_config import (
-    POSITIVE_INTEGER,
-    Bounds,
-    TextFormat,
-    require_choice,
-    require_pairs,
-    require_text,
-    require_unique_strings,
-    validate_scalars,
+from .submission_options import SubmissionOptions
+from .submission_scan_findings import (
+    DEFAULT_SCAN_LIMITS,
+    MAX_LISTED,
+    Describe,
+    ScanLimits,
+    ScanRule,
+    listed,
+    scan_finding,
+    short_name,
 )
-from .path_safety import is_relative_posix_path
-from .redaction import SECRET_PATTERNS
-from .source import analyze_sources
-from .tex_commands import TEX_SOURCE_SUFFIXES
-from .tex_lexer import (
-    MAX_SOURCE_BYTES,
-    MAX_TOTAL_SOURCE_BYTES,
-    blank_regions,
-    mask_literals,
-    source_regions,
-)
+from .tex_lexer import MAX_SOURCE_BYTES, mask_literals
 
-IdentityTermMatching = Literal["word", "substring"]
-DELIVERABLE_KINDS = ("file", "pdf", "zip", "text")
-# Bounds on configured values, so a settings file cannot make the scan unbounded.
-_MAX_LISTED_ENTRIES = 256  # entries in one list setting
-_MAX_TERM_CHARACTERS = 1024  # characters in one identity term or extension
-_MAX_CHARACTER_SET_CHARACTERS = 4096  # characters in filename_allowed_characters
-_MAX_PAIR_CHARACTERS = 4096  # characters in a deliverable or template path or value
-_BBL_FORMAT_VERSION = re.compile(r"[0-9]{1,4}(?:\.[0-9]{1,4}){0,3}")
-_FINAL_EXTENSION = TextFormat(
-    re.compile(r"\.[A-Za-z0-9_+-]+"), "a dot-prefixed final extension such as .tex"
-)
-# Matches named in a message; the details list every match up to MAX_SCAN_MATCHES.
-_MAX_LISTED = 3
-# Longer file names are shortened in messages; the details keep them whole.
-_MAX_LABEL_CHARS = 120
-# PDF information-dictionary entries compared with the identity terms.
-_MAX_PDF_METADATA_ENTRIES = 10_000
-_TEXT_EXTENSIONS = {
-    ".tex",
-    ".ltx",
-    ".latex",
-    ".sty",
-    ".cls",
-    ".def",
-    ".cfg",
-    ".bib",
-    ".bbl",
-    ".bst",
-    ".txt",
-    ".md",
-    ".rst",
-    ".csv",
-    ".json",
-    ".yaml",
-    ".yml",
-    ".toml",
-    ".ini",
-    ".sh",
-    ".py",
-    ".lua",
-    ".pl",
-    ".xml",
-    ".html",
-    ".svg",
-    ".dtx",
-    ".ins",
-    ".tikz",
-    ".pgf",
-    ".url",
-    ".pdf_tex",
-    ".log",
-}
-_TEX_EXTENSIONS = TEX_SOURCE_SUFFIXES | {".dtx"}
 _ASSET_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg", ".eps", ".ps", ".svg", ".csv", ".dat"}
-_PLACEHOLDERS = {"your_api_key_here", "your_password_here", "example_password", "changemechangeme"}
-_HINT = re.compile(
-    r"(?i)\\(?:acknowledg(?:e)?ments?|thanks)\b|"
-    r"\\(?:section\*?|begin)\s*\{acknowledg(?:e)?ments?\}|"
-    r"\b(?:at our (?:university|institution|laboratory)|in our previous work|"
-    r"our (?:institution|laboratory|university)|the authors are (?:at|from))\b"
-)
-# Unfinished-work markers and private-note or distribution-restriction phrases; review
-# correspondence is left to the default private-note advisory.
-_PRIVATE_COMMENT_MARKER = marker_pattern(
-    MarkerCategory.EDIT_MARKER,
-    MarkerCategory.UNCERTAINTY_MARK,
-    MarkerCategory.PRIVATE_NOTE,
-    MarkerCategory.DISTRIBUTION_RESTRICTION,
-)
-_SHELL = re.compile(
-    r"\\write\s*18\b|\\(?:ShellEscape|ShellEscapeAsync)\b|\\sys_shell_now:[A-Za-z]+\b"
-)
 _VERSION = re.compile(
     r"\\Provides(?:Class|Package|File)\s*\{([^{}]+)\}\s*\["
     r"\s*(\d{4}[-/]\d{2}[-/]\d{2})(?:\s+(v[\w.+-]+))?"
 )
-
-
-def _require_project_path(name: str, value: object) -> None:
-    require_text(name, value, expected="a relative project path", max_length=_MAX_PAIR_CHARACTERS)
-    if not isinstance(value, str) or not is_relative_posix_path(value):
-        raise SettingsError(
-            f"{name} must be a safe path relative to the project, without '..'", (name,)
-        )
-
-
-@dataclass(frozen=True)
-class SubmissionOptions:
-    FIELD_BOUNDS: ClassVar[dict[str, Bounds]] = {
-        "filename_max_length": POSITIVE_INTEGER,
-        "max_archive_bytes": POSITIVE_INTEGER,
-    }
-
-    identity_terms: tuple[str, ...] = ()
-    scan_identity_hints: bool = False
-    scan_secrets: bool = False
-    scan_private_comments: bool = False
-    check_shell_escape: bool = False
-    filename_max_length: int | None = None
-    filename_allowed_characters: str | None = None
-    allowed_extensions: tuple[str, ...] = ()
-    required_deliverables: tuple[tuple[str, str], ...] = ()
-    max_archive_bytes: int | None = None
-    report_unused_assets: bool = False
-    template_references: tuple[tuple[str, str], ...] = ()
-    identity_term_matching: IdentityTermMatching = "word"
-    check_bbl_coverage: bool = False
-    require_bbl: bool = False
-    biblatex_bbl_format_version: str | None = None
-
-    def __post_init__(self) -> None:
-        validate_scalars(self)
-        require_text(
-            "biblatex_bbl_format_version",
-            self.biblatex_bbl_format_version,
-            expected='a version such as "3.3", as written on the second line of a biblatex '
-            ".bbl file",
-            pattern=_BBL_FORMAT_VERSION,
-            allow_none=True,
-        )
-        require_unique_strings(
-            "identity_terms",
-            self.identity_terms,
-            max_items=_MAX_LISTED_ENTRIES,
-            max_length=_MAX_TERM_CHARACTERS,
-            allow_surrounding_whitespace=True,
-        )
-        require_unique_strings(
-            "allowed_extensions",
-            self.allowed_extensions,
-            max_items=_MAX_LISTED_ENTRIES,
-            max_length=_MAX_TERM_CHARACTERS,
-            allow_surrounding_whitespace=True,
-            item_format=_FINAL_EXTENSION,
-        )
-        require_text(
-            "filename_allowed_characters",
-            self.filename_allowed_characters,
-            expected="a nonempty set of literal characters",
-            max_length=_MAX_CHARACTER_SET_CHARACTERS,
-            allow_none=True,
-        )
-        require_pairs(
-            "required_deliverables",
-            self.required_deliverables,
-            first=_require_project_path,
-            second=partial(require_choice, choices=DELIVERABLE_KINDS),
-            max_items=_MAX_LISTED_ENTRIES,
-        )
-        require_pairs(
-            "template_references",
-            self.template_references,
-            first=_require_project_path,
-            second=partial(
-                require_text, expected="a nonempty path", max_length=_MAX_PAIR_CHARACTERS
-            ),
-            max_items=_MAX_LISTED_ENTRIES,
-        )
-
-
+# PDF information-dictionary entries compared with the identity terms.
+_MAX_PDF_METADATA_ENTRIES = 10_000
+# Leading bytes read to tell a PDF ("%PDF-") or ZIP archive ("PK\x03\x04") from other files.
+_SIGNATURE_PREFIX_BYTES = 8
 _DEFAULT_OPTIONS = SubmissionOptions()
-# Options that do not make check_submission inspect the bundle: a matching mode that
-# only refines identity terms, the compressed archive (check_submission_archive) and
-# the shipped bibliography (check_bbl in the readiness checks).
-_OPTIONS_OUTSIDE_BUNDLE_SCAN = frozenset(
-    {
-        "identity_term_matching",
-        "max_archive_bytes",
-        "check_bbl_coverage",
-        "require_bbl",
-        "biblatex_bbl_format_version",
-    }
-)
 
 
-def _inspects_bundle(options: SubmissionOptions) -> bool:
-    """Whether any option other than those handled elsewhere differs from its default.
-
-    A newly added option therefore enables the bundle scan unless it is listed above.
-    """
-    return any(
-        getattr(options, option.name) != option.default
-        for option in fields(options)
-        if option.name not in _OPTIONS_OUTSIDE_BUNDLE_SCAN
-    )
-
-
-def _fold(value: str) -> str:
-    return unicodedata.normalize("NFKC", unquote(value)).casefold()
-
-
-def _secrets(text: str) -> list[tuple[int, str, str]]:
-    result = []
-    for kind, pattern in SECRET_PATTERNS:
-        cancellation_point()
-        for match in pattern.finditer(text):
-            value = match.groupdict().get("secret") or match.group()
-            if value.lower() in _PLACEHOLDERS:
-                continue
-            result.append((match.start(), kind, value))
-            if len(result) >= MAX_SCAN_MATCHES:
-                return result
-    return result
-
-
-def _short(value: str) -> str:
-    """Shorten an over-long file name; it is the finding itself and the details keep it whole."""
-    return value if len(value) <= _MAX_LABEL_CHARS else value[: _MAX_LABEL_CHARS - 1] + "…"
-
-
-def _listed(items: Sequence[str]) -> str:
-    """The first few distinct items; the suffix counts hidden items, repeats included."""
-    shown = list(dict.fromkeys(items))[:_MAX_LISTED]
-    return ", ".join(shown) + more_suffix(sum(item not in shown for item in items))
-
-
-def _match_count(matches: Sequence[Mapping[str, object]]) -> str:
-    # Scans stop collecting at the limit, so a full list means "at least" this many.
-    return f"{len(matches)}{'+' if len(matches) == MAX_SCAN_MATCHES else ''}"
-
-
-# Renders the matches of one rule for its message; rules without one use ``_message``'s
-# generic "N matches: location" wording, which never repeats matched text.
-_Describe = Callable[[Sequence[Mapping[str, object]]], str]
-
-
-def _match_label(match: Mapping[str, object]) -> str:
-    # Matches hold only locations and generated reasons, never matched text or terms.
-    path, line, reason = match.get("path"), match.get("line"), match.get("reason")
-    label = path if isinstance(path, str) else match.get("channel")
-    label = label if isinstance(label, str) else ""
-    if label and type(line) is int:
-        label += f":{line}"
-    label = _short(label)
-    if isinstance(reason, str):
-        label = f"{label} ({reason})" if label else reason
-    return label or "unspecified location"
-
-
-def _message(
-    matches: Sequence[Mapping[str, object]], issues: list[str], describe: _Describe | None = None
-) -> str:
-    if not matches:
-        if not issues:
-            return "No matches in the stated scope."
-        return f"The configured scan is incomplete: {issues[0]}{more_suffix(len(issues) - 1)}"
-    if describe is not None:
-        message = describe(matches)
-    else:
-        count = _match_count(matches)
-        labels = [_match_label(match) for match in matches]
-        message = f"{count} match{'es' if len(matches) != 1 else ''}: {_listed(labels)}"
-    if issues:
-        message += f"; the scan was also incomplete: {issues[0]}"
-    return message
-
-
-def _scan_finding(
-    rule: str,
-    matches: Sequence[Mapping[str, object]],
-    issues: list[str],
-    scope: str,
-    *,
-    advisory: bool = False,
-    details: dict[str, object] | None = None,
-    describe: _Describe | None = None,
-) -> Finding:
-    status = check_status(failed=bool(matches), incomplete=bool(issues))
-    # Scans stop collecting at the reporting limit, so further matches may be unlisted.
-    limited = len(matches) >= MAX_SCAN_MATCHES
-    return Finding(
-        rule,
-        _message(matches, issues, describe),
-        severity="info" if status == "passed" else "warning" if advisory else "error",
-        status=status,
-        evidence_kind=EvidenceKind.HEURISTIC if advisory else EvidenceKind.DIRECT,
-        incomplete=bool(issues) or limited,
-        details={
-            "scope": scope,
-            "matches": [dict(item) for item in matches[:MAX_SCAN_MATCHES]],
-            "match_output_limited": limited,
-            "issues": issues[:MAX_SCAN_MATCHES],
-            **(details or {}),
-        },
-    )
-
-
-@lru_cache(maxsize=16)
-def _term_patterns(terms: tuple[str, ...], matching: str) -> tuple[re.Pattern[str], ...]:
-    """Compile folded terms once; word mode requires non-alphanumeric (or no) neighbours."""
-    patterns = []
-    for term in terms:
-        folded = _fold(term)
-        if matching == "word":
-            # Underscores and punctuation separate words (jane_smith.tex); letters/digits do not.
-            before = r"(?<![^\W_])" if folded[:1].isalnum() else ""
-            after = r"(?![^\W_])" if folded[-1:].isalnum() else ""
-            patterns.append(re.compile(before + re.escape(folded) + after))
-        else:
-            patterns.append(re.compile(re.escape(folded)))
-    return tuple(patterns)
-
-
-def _term_matches(text: str, options: SubmissionOptions) -> list[int]:
-    folded = _fold(text)
-    patterns = _term_patterns(options.identity_terms, options.identity_term_matching)
-    return [index for index, pattern in enumerate(patterns, 1) if pattern.search(folded)]
-
-
-def _term_rule(options: SubmissionOptions) -> str:
-    if options.identity_term_matching == "word":
-        return "case-insensitive whole-word terms bounded by non-alphanumeric characters"
-    return "case-insensitive literal substrings"
-
-
-def _line_channel(value: str, line: int, comment_lines: set[int]) -> str:
-    if re.search(r"https?://", value):
-        return "url"
-    return "comment" if line in comment_lines else "text"
-
-
-@dataclass(slots=True)
-class _Matches:
-    """Matches of one scan rule; scans stop adding once the reported limit is reached."""
-
-    items: list[dict[str, object]] = field(default_factory=list)
-
-    @property
-    def room(self) -> int:
-        return MAX_SCAN_MATCHES - len(self.items)
-
-    @property
-    def has_room(self) -> bool:
-        return self.room > 0
-
-    def extend_until_full(self, items: Iterable[dict[str, object]]) -> None:
-        """Add items until the limit is reached; lazy ``items`` are not read further."""
-        for item in items:
-            self.items.append(item)
-            if not self.has_room:
-                break
-
-
-@dataclass(slots=True)
-class _ContentRule:
-    """One filename and text-content scan rule of ``check_submission``."""
-
-    rule: str
-    enabled: bool
-    _: KW_ONLY
-    advisory: bool
-    # Whether an unclosed TeX literal region leaves this rule's scan incomplete.
-    lexical: bool
-    matches: _Matches = field(default_factory=_Matches)
-
-
-class _ContentScan:
-    """One pass over every supplied file shared by the identity, secret and note scans."""
-
-    def __init__(self, options: SubmissionOptions, inventory_issues: list[str]) -> None:
-        self.options = options
-        self.issues = list(inventory_issues)
-        self.lexical_issues: list[str] = []
-        self.budget = ByteBudget()
-        # Values to redact from every finding, including those of other rules.
-        self.secret_values: set[str] = set()
-        self.identity_terms = _ContentRule(
-            "submission.identity_terms", bool(options.identity_terms), advisory=False, lexical=False
-        )
-        self.identity_hints = _ContentRule(
-            "submission.identity_hints", options.scan_identity_hints, advisory=True, lexical=True
-        )
-        self.secrets = _ContentRule(
-            "submission.secrets", options.scan_secrets, advisory=True, lexical=False
-        )
-        self.private_comments = _ContentRule(
-            "submission.private_comments",
-            options.scan_private_comments,
-            advisory=True,
-            lexical=True,
-        )
-        self.shell_escape = _ContentRule(
-            "submission.shell_escape", options.check_shell_escape, advisory=True, lexical=True
-        )
-        self.rules = (
-            self.identity_terms,
-            self.identity_hints,
-            self.secrets,
-            self.private_comments,
-            self.shell_escape,
-        )
-
-    def scan(self, name: str, path: Path) -> None:
-        if self.identity_terms.enabled and self.identity_terms.matches.has_room:
-            # Every term in one filename is kept, so the list may pass the limit slightly.
-            self.identity_terms.matches.items.extend(
-                {"path": name, "channel": "filename", "term_index": index}
-                for index in _term_matches(name, self.options)
-            )
-        self._filename_secrets(name)
-        if not any(rule.enabled for rule in self.rules):
-            return
-        if path.suffix.lower() not in _TEXT_EXTENSIONS and path.name != ".env":
-            return
-        try:
-            text = self.budget.read(path).decode("utf-8-sig")
-        except (OSError, UnicodeDecodeError):
-            self.issues.append(
-                "Text file was unreadable, non-UTF-8 or over the scan budget: "
-                + redact_secrets(name)
-            )
-            return
-        self._text_secrets(name, text)
-        tex = path.suffix.lower() in _TEX_EXTENSIONS
-        comments = tex_comments(text) if tex else []
-        if self.identity_terms.enabled and self.identity_terms.matches.has_room:
-            comment_lines = {comment.line for comment in comments}
-            self.identity_terms.matches.extend_until_full(
-                self._identity_lines(name, text, comment_lines)
-            )
-        notes = self.private_comments.matches
-        if self.private_comments.enabled and notes.has_room:
-            marked = (c for c in comments if _PRIVATE_COMMENT_MARKER.search(c.text))
-            notes.items.extend(
-                {"path": name, "line": comment.line} for comment in islice(marked, notes.room)
-            )
-        if tex and any(rule.enabled for rule in self.rules if rule.lexical):
-            self._active_source(name, text)
-
-    def _filename_secrets(self, name: str) -> None:
-        for _, kind, value in _secrets(name):
-            if len(self.secret_values) < MAX_SCAN_MATCHES:
-                self.secret_values.add(value)
-            if self.secrets.enabled and self.secrets.matches.has_room:
-                self.secrets.matches.items.append(
-                    {"path": name, "channel": "filename", "kind": kind}
-                )
-
-    def _text_secrets(self, name: str, text: str) -> None:
-        secrets = _secrets(text) if len(self.secret_values) < MAX_SCAN_MATCHES else []
-        self.secret_values.update(
-            value for _, _, value in secrets[: MAX_SCAN_MATCHES - len(self.secret_values)]
-        )
-        if self.secrets.enabled and self.secrets.matches.has_room:
-            self.secrets.matches.extend_until_full(
-                {"path": name, "line": text.count("\n", 0, offset) + 1, "kind": kind}
-                for offset, kind, _ in secrets
-            )
-
-    def _identity_lines(
-        self, name: str, text: str, comment_lines: set[int]
-    ) -> Iterable[dict[str, object]]:
-        for line, value in enumerate(text.splitlines(), 1):
-            if line % 256 == 0:
-                cancellation_point()
-            for index in _term_matches(value, self.options):
-                yield {
-                    "path": name,
-                    "line": line,
-                    "channel": _line_channel(value, line, comment_lines),
-                    "term_index": index,
-                }
-
-    def _active_source(self, name: str, text: str) -> None:
-        """Hints and shell-escape preflight read active TeX outside literal regions."""
-        regions, unclosed = source_regions(text)
-        masked = blank_regions(text, regions)
-        if unclosed:
-            self.lexical_issues.append(
-                "A TeX literal region is unclosed; active-source scan is incomplete."
-            )
-        for rule, pattern in ((self.identity_hints, _HINT), (self.shell_escape, _SHELL)):
-            if rule.enabled and rule.matches.has_room:
-                rule.matches.extend_until_full(
-                    {"path": name, "line": masked.count("\n", 0, match.start()) + 1}
-                    for match in pattern.finditer(masked)
-                )
-
-    def findings(self) -> list[Finding]:
-        scope = (
-            "All supplied filenames and supported UTF-8 text files, "
-            "including other document roots; "
-            "PDF contents require the separate extracted-text/metadata scan. "
-            f"Identity terms are Unicode-normalized, {_term_rule(self.options)}; "
-            "hints and shell preflight use active TeX; "
-            "private-note checks use TeX comments."
-        )
-        return [
-            _scan_finding(
-                rule.rule,
-                rule.matches.items,
-                self.issues + (self.lexical_issues if rule.lexical else []),
-                scope,
-                advisory=rule.advisory,
-                details={"reported_match_limit": MAX_SCAN_MATCHES, "bytes_read": self.budget.used},
-            )
-            for rule in self.rules
-            if rule.enabled
-        ]
-
-
-def _long_file_names(limit: int) -> _Describe:
-    def describe(matches: Sequence[Mapping[str, object]]) -> str:
+def _long_file_names(limit: int) -> Describe:
+    def describe(matches: Sequence[Mapping[str, object]], count: str) -> str:
         names = [
-            f"{_short(str(match['path']))} ({len(Path(str(match['path'])).name)} characters)"
+            f"{short_name(str(match['path']))} ({len(Path(str(match['path'])).name)} characters)"
             for match in matches
         ]
-        return (
-            f"File names longer than {limit} characters ({_match_count(matches)}): {_listed(names)}"
-        )
+        return f"File names longer than {limit} characters ({count}): {listed(names)}"
 
     return describe
 
 
-def _disallowed_characters(allowed: set[str]) -> _Describe:
-    def describe(matches: Sequence[Mapping[str, object]]) -> str:
+def _disallowed_characters(allowed: set[str]) -> Describe:
+    def describe(matches: Sequence[Mapping[str, object]], count: str) -> str:
         names = []
         for match in matches:
             path = str(match["path"])
             unexpected = sorted(set(Path(path).name) - allowed)
-            shown = ", ".join(map(repr, unexpected[:_MAX_LISTED]))
-            names.append(
-                f"{_short(path)} (not allowed: {shown}{more_suffix(len(unexpected) - _MAX_LISTED)})"
-            )
-        return (
-            f"File names with characters outside the allowed set ({_match_count(matches)}): "
-            f"{_listed(names)}"
-        )
+            shown = ", ".join(map(repr, unexpected[:MAX_LISTED]))
+            hidden = more_suffix(len(unexpected) - MAX_LISTED)
+            names.append(f"{short_name(path)} (not allowed: {shown}{hidden})")
+        return f"File names with characters outside the allowed set ({count}): {listed(names)}"
 
     return describe
 
 
-def _other_extensions(matches: Sequence[Mapping[str, object]]) -> str:
+def _other_extensions(matches: Sequence[Mapping[str, object]], count: str) -> str:
     names = []
     for match in matches:
         path = str(match["path"])
-        names.append(f"{_short(path)} ({Path(path).suffix.lower() or 'no extension'})")
-    return f"Files with extensions that are not allowed ({_match_count(matches)}): {_listed(names)}"
+        names.append(f"{short_name(path)} ({Path(path).suffix.lower() or 'no extension'})")
+    return f"Files with extensions that are not allowed ({count}): {listed(names)}"
 
 
 def _filename_findings(
-    files: Mapping[str, Path], issues: list[str], options: SubmissionOptions
+    files: Mapping[str, Path], issues: list[str], options: SubmissionOptions, limits: ScanLimits
 ) -> list[Finding]:
     scope = "All supplied regular-file basenames."
     findings = []
     if options.filename_max_length is not None:
         limit = options.filename_max_length
-        findings.append(
-            _scan_finding(
-                "submission.filename_length",
-                [{"path": name} for name in files if len(Path(name).name) > limit],
-                issues,
-                scope,
-                describe=_long_file_names(limit),
-            )
-        )
+        rule = ScanRule("submission.filename_length", scope, describe=_long_file_names(limit))
+        matches = [{"path": name} for name in files if len(Path(name).name) > limit]
+        findings.append(scan_finding(rule, matches, issues, limits))
     if options.filename_allowed_characters is not None:
         allowed = set(options.filename_allowed_characters)
-        findings.append(
-            _scan_finding(
-                "submission.filename_characters",
-                [{"path": name} for name in files if set(Path(name).name) - allowed],
-                issues,
-                scope,
-                describe=_disallowed_characters(allowed),
-            )
+        rule = ScanRule(
+            "submission.filename_characters", scope, describe=_disallowed_characters(allowed)
         )
+        matches = [{"path": name} for name in files if set(Path(name).name) - allowed]
+        findings.append(scan_finding(rule, matches, issues, limits))
     if options.allowed_extensions:
         allowed_extensions = {extension.lower() for extension in options.allowed_extensions}
-        findings.append(
-            _scan_finding(
-                "submission.file_extensions",
-                [
-                    {"path": name}
-                    for name in files
-                    if Path(name).suffix.lower() not in allowed_extensions
-                ],
-                issues,
-                scope,
-                describe=_other_extensions,
-            )
-        )
+        rule = ScanRule("submission.file_extensions", scope, describe=_other_extensions)
+        matches = [
+            {"path": name} for name in files if Path(name).suffix.lower() not in allowed_extensions
+        ]
+        findings.append(scan_finding(rule, matches, issues, limits))
     return findings
 
 
@@ -644,23 +121,25 @@ def check_submission(
     root: Path,
     main: str | None = None,
     options: SubmissionOptions = _DEFAULT_OPTIONS,
+    *,
+    limits: ScanLimits = DEFAULT_SCAN_LIMITS,
 ) -> list[Finding]:
     """Inspect local files without modifying or excluding any bundle contents."""
-    if not _inspects_bundle(options):
+    if not options.inspects_bundle():
         return []
     files, inventory_issues = inventory_files(root)
-    findings = _filename_findings(files, inventory_issues, options)
-    content = _ContentScan(options, inventory_issues)
+    findings = _filename_findings(files, inventory_issues, options, limits)
+    content = ContentScan(options, inventory_issues, limits)
     for name, path in files.items():
         cancellation_point()
         content.scan(name, path)
     findings.extend(content.findings())
     if options.required_deliverables:
-        findings.append(_deliverables(files, inventory_issues, options))
+        findings.append(_deliverables(files, inventory_issues, options, limits))
     if options.template_references:
-        findings.extend(_templates(files, inventory_issues, options))
+        findings.extend(_templates(files, inventory_issues, options, limits))
     if options.report_unused_assets:
-        findings.append(_unused(root, main, files, inventory_issues))
+        findings.append(_unused(root, main, files, inventory_issues, limits))
     return redact_findings(findings, content.secret_values)
 
 
@@ -672,20 +151,33 @@ _DELIVERABLE_PROBLEMS = {
 }
 
 
-def _unmet_deliverables(matches: Sequence[Mapping[str, object]]) -> str:
+def _unmet_deliverables(matches: Sequence[Mapping[str, object]], count: str) -> str:
     problems = []
     for match in matches:
-        path = _short(str(match["path"]))
+        path = short_name(str(match["path"]))
         if match.get("reason") == "missing regular file":
             problems.append(f"{path} is missing")
         else:
-            problems.append(
-                f"{path} {_DELIVERABLE_PROBLEMS.get(str(match.get('kind')), 'does not match')}"
-            )
-    return f"Required deliverables not satisfied ({_match_count(matches)}): {_listed(problems)}"
+            problem = _DELIVERABLE_PROBLEMS.get(str(match.get("kind")), "does not match")
+            problems.append(f"{path} {problem}")
+    return f"Required deliverables not satisfied ({count}): {listed(problems)}"
 
 
-def _deliverables(files: dict[str, Path], issues: list[str], options: SubmissionOptions) -> Finding:
+def _has_kind_evidence(kind: str, data: bytes) -> bool:
+    """Whether the leading bytes (PDF, ZIP) or the whole content (text) fit the declared kind."""
+    if kind == "pdf":
+        return data.startswith(b"%PDF-")
+    if kind == "zip":
+        return data.startswith((b"PK\x03\x04", b"PK\x05\x06"))
+    try:
+        return bool(data) and "\x00" not in data.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return False
+
+
+def _deliverables(
+    files: dict[str, Path], issues: list[str], options: SubmissionOptions, limits: ScanLimits
+) -> Finding:
     matches = []
     incomplete = list(issues)
     budget = ByteBudget()
@@ -699,91 +191,93 @@ def _deliverables(files: dict[str, Path], issues: list[str], options: Submission
         if kind == "file":
             continue
         try:
-            data = budget.read_prefix(path, 8) if kind in {"pdf", "zip"} else budget.read(path)
+            if kind in {"pdf", "zip"}:
+                data = budget.read_prefix(path, _SIGNATURE_PREFIX_BYTES)
+            else:
+                data = budget.read(path)
         except OSError:
             incomplete.append(
                 f"Required deliverable could not be inspected: {redact_secrets(name)}"
             )
             continue
-        valid = (kind == "pdf" and data.startswith(b"%PDF-")) or (
-            kind == "zip" and data.startswith((b"PK\x03\x04", b"PK\x05\x06"))
-        )
-        if kind == "text":
-            try:
-                valid = bool(data) and "\x00" not in data.decode("utf-8-sig")
-            except UnicodeDecodeError:
-                valid = False
-        if not valid:
+        if not _has_kind_evidence(kind, data):
             matches.append({"path": name, "kind": kind, "reason": "format evidence does not match"})
-    return _scan_finding(
+    rule = ScanRule(
         "submission.deliverables",
-        matches,
-        incomplete,
         "Explicit project-relative paths; PDF/ZIP signatures and bounded UTF-8 text only, "
         "not format validation or verification of separately transmitted deliverables.",
         describe=_unmet_deliverables,
     )
+    return scan_finding(rule, matches, incomplete, limits)
+
+
+def _declared_version(raw: bytes) -> tuple[str, ...] | None:
+    """The ``\\ProvidesClass``-style name, date and version declared in a file, if any."""
+    try:
+        match = _VERSION.search(mask_literals(raw.decode("utf-8-sig")))
+    except UnicodeDecodeError:
+        return None
+    return match.groups() if match else None
+
+
+def _template_comparison(
+    name: str, reference: str, files: Mapping[str, Path], budget: ByteBudget
+) -> tuple[list[dict[str, object]], dict[str, object]]:
+    """The matches and details of comparing a project template with its reference file."""
+    details: dict[str, object] = {"project_path": name, "reference_path": reference}
+    actual = budget.read(files[name])
+    expected = budget.read(Path(reference).expanduser())
+    details["byte_equal"] = actual == expected
+    versions = [_declared_version(actual), _declared_version(expected)]
+    details["declared_version_comparison"] = (
+        ("equal" if versions[0] == versions[1] else "different") if all(versions) else "unavailable"
+    )
+    matches: list[dict[str, object]] = []
+    if actual != expected:
+        matches.append({"path": name, "reason": "bytes differ from explicit reference"})
+    return matches, details
 
 
 def _templates(
-    files: dict[str, Path], issues: list[str], options: SubmissionOptions
+    files: dict[str, Path], issues: list[str], options: SubmissionOptions, limits: ScanLimits
 ) -> list[Finding]:
     results = []
     budget = ByteBudget()
+    rule = ScanRule(
+        "submission.template_reference",
+        "Explicit local author-provided reference pairs; equal bytes establish equality only. "
+        "Version comparisons use supported literal Provides declarations and do not infer age, "
+        "official status or semantic compatibility.",
+    )
     for name, reference in options.template_references:
         cancellation_point()
         incomplete = list(issues)
-        matches = []
+        matches: list[dict[str, object]] = []
         details: dict[str, object] = {"project_path": name, "reference_path": reference}
         if name not in files:
             if not issues:
                 matches.append({"path": name, "reason": "missing project template"})
         else:
             try:
-                actual = budget.read(files[name])
-                expected = budget.read(Path(reference).expanduser())
-                details["byte_equal"] = actual == expected
-                versions = []
-                for raw in (actual, expected):
-                    try:
-                        match = _VERSION.search(mask_literals(raw.decode("utf-8-sig")))
-                        versions.append(match.groups() if match else None)
-                    except UnicodeDecodeError:
-                        versions.append(None)
-                details["declared_version_comparison"] = (
-                    ("equal" if versions[0] == versions[1] else "different")
-                    if all(versions)
-                    else "unavailable"
-                )
-                if actual != expected:
-                    matches.append({"path": name, "reason": "bytes differ from explicit reference"})
+                matches, details = _template_comparison(name, reference, files, budget)
             except (OSError, RuntimeError):
+                # RuntimeError: ``Path.expanduser`` cannot find a home directory.
                 incomplete.append(
                     "Project template or supplied reference is unreadable, linked "
                     "or over the byte limit."
                 )
-        result = _scan_finding(
-            "submission.template_reference",
-            matches,
-            incomplete,
-            "Explicit local author-provided reference pairs; equal bytes establish equality only. "
-            "Version comparisons use supported literal Provides declarations and do not infer age, "
-            "official status or semantic compatibility.",
-            details=details,
-        )
-        results.append(result)
+        results.append(scan_finding(rule, matches, incomplete, limits, details=details))
     return results
 
 
-def _unused_assets(matches: Sequence[Mapping[str, object]]) -> str:
-    names = [_short(str(match["path"])) for match in matches]
-    return (
-        f"Asset files not referenced by the selected document ({_match_count(matches)}): "
-        f"{_listed(names)}"
-    )
+def _unused_assets(matches: Sequence[Mapping[str, object]], count: str) -> str:
+    names = [short_name(str(match["path"])) for match in matches]
+    return f"Asset files not referenced by the selected document ({count}): {listed(names)}"
 
 
-def _unused(root: Path, main: str | None, files: dict[str, Path], issues: list[str]) -> Finding:
+def _unused(
+    root: Path, main: str | None, files: dict[str, Path], issues: list[str], limits: ScanLimits
+) -> Finding:
     incomplete = list(issues)
     candidates = []
     if not incomplete:
@@ -805,10 +299,8 @@ def _unused(root: Path, main: str | None, files: dict[str, Path], issues: list[s
             ]
         except OSError:
             incomplete.append("The selected source dependency graph could not be inspected.")
-    result = _scan_finding(
+    rule = ScanRule(
         "submission.unused_assets",
-        candidates,
-        incomplete,
         "Supported asset extensions outside one selected literal source/dependency graph; "
         "other document roots, generated/dynamic dependencies "
         "and toolchain inputs may need these files. "
@@ -816,117 +308,132 @@ def _unused(root: Path, main: str | None, files: dict[str, Path], issues: list[s
         advisory=True,
         describe=_unused_assets,
     )
+    result = scan_finding(rule, candidates, incomplete, limits)
     return replace(result, status="inconclusive") if incomplete else result
 
 
 def check_submission_archive(
     archive: Path,
     options: SubmissionOptions = _DEFAULT_OPTIONS,
+    *,
+    limits: ScanLimits = DEFAULT_SCAN_LIMITS,
 ) -> list[Finding]:
     """Check the actual compressed archive length independently of import limits."""
-    if options.max_archive_bytes is None:
+    maximum = options.max_archive_bytes
+    if maximum is None:
         return []
     cancellation_point()
     issues = []
     matches = []
-    details: dict[str, object] = {"maximum_bytes": options.max_archive_bytes}
+    details: dict[str, object] = {"maximum_bytes": maximum}
     try:
         metadata = archive.lstat()
         if not stat.S_ISREG(metadata.st_mode):
             raise OSError("Archive is not a regular file.")
         details["compressed_bytes"] = metadata.st_size
-        if metadata.st_size > options.max_archive_bytes:
+        if metadata.st_size > maximum:
             matches.append({"reason": "compressed archive exceeds configured byte limit"})
     except OSError:
         issues.append("The final archive is missing or is not an accessible regular file.")
-    limit = options.max_archive_bytes
-    return [
-        _scan_finding(
-            "submission.archive_size",
-            matches,
-            issues,
-            "Actual compressed archive bytes.",
-            details=details,
-            describe=lambda _: (
-                f"The compressed archive is {details['compressed_bytes']:,} bytes, "
-                f"over the configured limit of {limit:,} bytes"
-            ),
+
+    def describe(_matches: Sequence[Mapping[str, object]], _count: str) -> str:
+        return (
+            f"The compressed archive is {details['compressed_bytes']:,} bytes, "
+            f"over the configured limit of {maximum:,} bytes"
         )
-    ]
+
+    rule = ScanRule(
+        "submission.archive_size", "Actual compressed archive bytes.", describe=describe
+    )
+    return [scan_finding(rule, matches, issues, limits, details=details)]
 
 
-def check_pdf_identity(
-    text: str,
-    metadata: dict,
-    options: SubmissionOptions = _DEFAULT_OPTIONS,
-) -> list[Finding]:
-    """Scan supplied extracted evidence; empty text/metadata mark extraction incomplete."""
-    if not options.identity_terms and not options.scan_secrets:
-        return []
-    cancellation_point()
-    issues = []
-    values = []
-    evidence_bytes = 0
-    if not isinstance(text, str) or not text.strip():
-        issues.append("Extracted PDF text is unavailable or empty.")
-    elif len(text.encode("utf-8")) > MAX_TOTAL_SOURCE_BYTES:
-        issues.append("Extracted PDF text exceeds the scan limit.")
-    else:
-        values.append(("text", text))
-        evidence_bytes = len(text.encode("utf-8"))
-    if not isinstance(metadata, dict) or not metadata:
-        issues.append("PDF metadata evidence is unavailable or empty.")
-    else:
+@dataclass(slots=True)
+class _PdfEvidence:
+    """The extracted PDF text and metadata to scan, and why that evidence is incomplete."""
+
+    # Each value is a channel ("text" or "metadata") and the text found there.
+    values: list[tuple[str, str]] = field(default_factory=list)
+    issues: list[str] = field(default_factory=list)
+    used_bytes: int = 0
+
+    def add_text(self, text: str, limits: ScanLimits) -> None:
+        if not isinstance(text, str) or not text.strip():
+            self.issues.append("Extracted PDF text is unavailable or empty.")
+            return
+        size = len(text.encode("utf-8"))
+        if size > limits.max_pdf_evidence_bytes:
+            self.issues.append("Extracted PDF text exceeds the scan limit.")
+            return
+        self.values.append(("text", text))
+        self.used_bytes = size
+
+    def add_metadata(self, metadata: Mapping[str, object], limits: ScanLimits) -> None:
+        if not isinstance(metadata, Mapping) or not metadata:
+            self.issues.append("PDF metadata evidence is unavailable or empty.")
+            return
         for index, (key, value) in enumerate(metadata.items(), 1):
             cancellation_point()
             if index > _MAX_PDF_METADATA_ENTRIES:
-                issues.append("PDF metadata exceeds the entry limit.")
-                break
+                self.issues.append("PDF metadata exceeds the entry limit.")
+                return
             if (
                 not isinstance(key, str)
                 or len(key) > MAX_SOURCE_BYTES
                 or not isinstance(value, (str, int, float, bool))
                 or len(str(value)) > MAX_SOURCE_BYTES
             ):
-                issues.append("A PDF metadata value could not be scanned within the text budget.")
+                self.issues.append(
+                    "A PDF metadata value could not be scanned within the text budget."
+                )
                 continue
             joined = key + " " + str(value)
-            evidence_bytes += len(joined.encode("utf-8"))
-            if evidence_bytes > MAX_TOTAL_SOURCE_BYTES:
-                issues.append("Combined PDF evidence exceeds the scan budget.")
-                break
-            values.append(("metadata", joined))
+            self.used_bytes += len(joined.encode("utf-8"))
+            if self.used_bytes > limits.max_pdf_evidence_bytes:
+                self.issues.append("Combined PDF evidence exceeds the scan budget.")
+                return
+            self.values.append(("metadata", joined))
+
+
+def check_pdf_identity(
+    text: str,
+    metadata: Mapping[str, object],
+    options: SubmissionOptions = _DEFAULT_OPTIONS,
+    *,
+    limits: ScanLimits = DEFAULT_SCAN_LIMITS,
+) -> list[Finding]:
+    """Scan supplied extracted evidence; empty text/metadata mark extraction incomplete."""
+    if not options.identity_terms and not options.scan_secrets:
+        return []
+    cancellation_point()
+    evidence = _PdfEvidence()
+    evidence.add_text(text, limits)
+    evidence.add_metadata(metadata, limits)
     identity_matches = []
     secret_matches = []
     secret_values = set()
-    for channel, value in values:
+    for channel, value in evidence.values:
         cancellation_point()
-        if len(identity_matches) < MAX_SCAN_MATCHES:
-            for index in _term_matches(value, options):
+        if len(identity_matches) < limits.max_matches:
+            for index in term_matches(value, options):
                 identity_matches.append({"channel": channel, "term_index": index})
-        if len(secret_matches) < MAX_SCAN_MATCHES:
-            for _, kind, candidate in _secrets(value):
-                secret_values.add(candidate)
-                secret_matches.append({"channel": channel, "kind": kind})
+        if len(secret_matches) < limits.max_matches:
+            for secret in find_secrets(value, limits.max_matches):
+                secret_values.add(secret.value)
+                secret_matches.append({"channel": channel, "kind": secret.kind})
     results = []
     if options.identity_terms:
-        results.append(
-            _scan_finding(
-                "submission.pdf_identity_terms",
-                identity_matches,
-                issues,
-                "Supplied extracted PDF text and metadata; Unicode-normalized "
-                f"{_term_rule(options)} only.",
-            )
+        rule = ScanRule(
+            "submission.pdf_identity_terms",
+            "Supplied extracted PDF text and metadata; Unicode-normalized "
+            f"{term_rule_description(options)} only.",
         )
+        results.append(scan_finding(rule, identity_matches, evidence.issues, limits))
     if options.scan_secrets:
-        results.append(
-            _scan_finding(
-                "submission.secrets",
-                secret_matches,
-                issues,
-                "Supplied extracted PDF text and metadata; values are redacted.",
-                advisory=True,
-            )
+        rule = ScanRule(
+            "submission.secrets",
+            "Supplied extracted PDF text and metadata; values are redacted.",
+            advisory=True,
         )
+        results.append(scan_finding(rule, secret_matches, evidence.issues, limits))
     return redact_findings(results, secret_values)

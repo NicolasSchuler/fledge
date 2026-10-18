@@ -11,7 +11,10 @@ from pathlib import Path
 from click.testing import CliRunner
 
 from latexprep.submission_text import convert_text, read_submission_text
-from latexprep.submission_text_command import submission_text_command
+from latexprep.submission_text_command import (
+    SUBMISSION_TEXT_SCHEMA_VERSION,
+    submission_text_command,
+)
 
 
 class SubmissionTextTests(unittest.TestCase):
@@ -94,7 +97,9 @@ class SubmissionTextTests(unittest.TestCase):
         (self.root / "fledge.toml").write_text('main = "a.tex"\n', encoding="utf-8")
         output = CliRunner().invoke(submission_text_command, [str(archive), "--json"])
         self.assertEqual(output.exit_code, 0, output.output)
-        self.assertEqual(json.loads(output.stdout)["fields"]["title"]["draft"], "Selected")
+        payload = json.loads(output.stdout)
+        self.assertEqual(payload["schema_version"], SUBMISSION_TEXT_SCHEMA_VERSION)
+        self.assertEqual(payload["fields"]["title"]["draft"], "Selected")
 
     def test_definitions_and_unclosed_environments_are_not_ready(self) -> None:
         self.write(
@@ -303,6 +308,6 @@ class SubmissionTextTests(unittest.TestCase):
     def test_a_command_name_cannot_belong_to_two_text_handlers(self) -> None:
         from latexprep import submission_text
 
-        handler = submission_text._COMMAND_HANDLERS["emph"]
+        handler = submission_text._Converter._HANDLERS["emph"]
         with self.assertRaisesRegex(RuntimeError, "emph"):
             submission_text._handler_table((["emph"], handler), (["emph"], handler))

@@ -11,19 +11,12 @@ from .defects import REPORT_DEFECT_SUGGESTION, is_expected_failure, summarize_tr
 from .document_run import run_project
 from .errors import PreparationError
 from .findings import Finding
-from .job_context import (
-    DOCUMENT_COMMANDS,
-    JobCommand,
-    JobContext,
-    is_blocked,
-    job_outcome,
-    select_and_review,
-)
-from .project import ImportLimits, import_project
+from .job_context import DOCUMENT_COMMANDS, JobCommand, JobContext, import_input
+from .job_report import is_blocked, job_outcome, select_and_review
 from .publication import DocumentResult
 from .report import Outcome, Report
 from .review_policy import ReportingOptions, ReviewRule
-from .source_staging import stage_document
+from .staging import stage_document
 from .workflow_options import DocumentOptions
 
 
@@ -157,22 +150,16 @@ async def run_documents(context: JobContext, report: Report) -> list[DocumentRes
     if request.command not in DOCUMENT_COMMANDS:
         # ``run_job`` routes only these commands here; the others ignore workflow.documents.
         raise PreparationError("workflow.documents is supported by inspect, check and prepare")
-    imported = await context.thread_operation(
-        "import shared document snapshot",
-        import_project,
-        request.source,
-        context.work / "shared-import",
-        ImportLimits.from_settings(settings),
+    imported = await import_input(
+        context, report, operation="import shared document snapshot", directory="shared-import"
     )
-    report.findings.extend(imported.findings)
-    report.changes.extend(imported.changes)
     if is_blocked(report, settings):
         report.outcome = Outcome.BLOCKED
         return []
     documents = await bounded_map(
         settings.workflow.documents,
         lambda document: _run_document(context, imported.root, document),
-        limit=1 if request.pdf_previews is not None else settings.jobs,
+        limit=1 if context.preview_serial else settings.jobs,
     )
     for document in documents:
         _merge_document(report, document)

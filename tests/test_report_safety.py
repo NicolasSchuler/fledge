@@ -14,6 +14,7 @@ from click.testing import CliRunner
 
 from latexprep.ci_annotations import render_ci_annotations
 from latexprep.cli import cli
+from latexprep.compact_report import render_compact
 from latexprep.config import Settings
 from latexprep.core import run_job
 from latexprep.diagnostic_bundle import export_diagnostic_bundle
@@ -22,9 +23,9 @@ from latexprep.findings import Finding
 from latexprep.html_report import render_html
 from latexprep.job_context import JobRequest
 from latexprep.online_checks import OnlineOptions
-from latexprep.pdf_artwork import PdfArtworkOptions
+from latexprep.pdf_artwork_options import PdfArtworkOptions
 from latexprep.report import Change, ChangeKind, Outcome, Report
-from latexprep.terminal_report import render_compact, render_terminal
+from latexprep.terminal_report import render_terminal
 from tests.test_workflow_checks import controlled_build, source_project
 
 

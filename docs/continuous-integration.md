@@ -60,7 +60,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/fledge"
           status=0
           fledge check . --main main.tex --output-format ci --quiet \
-            --report "$RUNNER_TEMP/fledge/check.json" \
+            --json-report "$RUNNER_TEMP/fledge/check.json" \
             --html-report "$RUNNER_TEMP/fledge/check.html" || status=$?
           [ "$status" -le 2 ] || exit "$status"
       - name: Prepare the submission

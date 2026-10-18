@@ -8,8 +8,8 @@ from pathlib import Path
 
 from latexprep.errors import PreparationError
 from latexprep.formatting import FormattingOptions
-from latexprep.job_context import names_project_file
 from latexprep.latexmk_build import BuildRequest
+from latexprep.main_selection import names_project_file
 from latexprep.metadata_privacy import MetadataEdit
 from latexprep.path_safety import (
     contained_relative_name,
@@ -22,7 +22,7 @@ from latexprep.path_safety import (
 )
 from latexprep.review_policy import ReviewRule
 from latexprep.source_transform import SourceTransformOptions
-from latexprep.submission_checks import SubmissionOptions
+from latexprep.submission_options import SubmissionOptions
 from latexprep.workflow_options import DocumentOptions, PackageOptions
 
 

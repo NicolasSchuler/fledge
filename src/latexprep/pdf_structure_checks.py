@@ -1,8 +1,11 @@
 """Bounded tagged-PDF structure observations and the structure option schema.
 
-The options also configure the literal author-record contract that
-``author_records`` checks. These checks do not infer heading semantics or establish
-PDF/UA conformance, meaningful reading order, or description quality.
+The tagged-structure checks read the structure tree through qpdf's object data: tables,
+links, figure alternative text and the parent links that tie marked content to its
+elements. Expected-heading checks read the extracted text. None of them infer heading
+semantics or establish PDF/UA conformance, meaningful reading order, or description
+quality. The options also configure the literal author-record contract that
+``author_records`` checks, which is not a PDF check.
 """
 
 from __future__ import annotations
@@ -10,12 +13,12 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import ClassVar
+from typing import ClassVar, NamedTuple
 
-from .cancellation import cancellation_point
+from .command_runner import CommandRunner
 from .errors import PreparationError, SettingsError
 from .findings import Finding
-from .limits import MAX_PDF_NESTING_LEVELS
+from .measurement_findings import MAX_SAMPLES, measurement_finding, unavailable_finding
 from .option_config import (
     Bounds,
     TextFormat,
@@ -24,21 +27,15 @@ from .option_config import (
     require_unique_strings,
     validate_scalars,
 )
-from .pdf_support import (
-    MAX_INSPECTION_PAGES,
-    QpdfObjectGraph,
-    is_object_reference,
-    layout_text_argv,
-    measurement_finding,
-    preflight_pdf,
-    qpdf_objects_argv,
-    split_text_pages,
-    unavailable_finding,
-)
+from .pdf_qpdf_graph import QpdfObjectGraph, is_object_reference
+from .pdf_rule_names import PdfRule
+from .pdf_structure_tree import MAX_STRUCTURE_ITEMS, StructureElement, StructureTree
+from .pdf_tool_output import MAX_INSPECTION_PAGES, split_text_pages
+from .pdf_tools import ToolMeasurement, layout_text_argv, preflight_pdf, qpdf_objects_argv
 from .resource_budget import ResourceBudget
-from .runtime import CommandRunner
 
-_LIMIT = 10000
+# Lines of a page that end with an expected title, shown as candidates when none matches.
+_MAX_HEADING_CANDIDATES = 10
 # Configuration bound on explicit heading expectations (not on the page they may name).
 _MAX_HEADING_EXPECTATIONS = 300
 _MAX_HEADING_TITLE_CHARACTERS = 256
@@ -46,15 +43,6 @@ _MAX_HEADING_NUMBER_CHARACTERS = 64
 # Associated author-block commands, such as affiliation or email, that must follow each author.
 _MAX_AUTHOR_FIELDS = 32
 _COMMAND = re.compile(r"[A-Za-z][A-Za-z@]{0,63}")
-_STANDARD_ROLES = frozenset(
-    "/" + role
-    for role in (
-        "Document Part Art Sect Div BlockQuote Caption TOC TOCI Index NonStruct Private "
-        "P H H1 H2 H3 H4 H5 H6 L LI Lbl LBody Table TR TH TD THead TBody TFoot Span "
-        "Quote Note Reference BibEntry Code Link Annot Ruby RB RT RP Warichu WT WP "
-        "Figure Formula Form"
-    ).split()
-)
 
 
 def _require_single_line(name: str, value: object, max_length: int) -> None:
@@ -144,7 +132,7 @@ def _heading_findings(text: str, pages: int, options: StructureOptions) -> list[
         candidates = [line for line in lines if line == title or line.endswith(" " + title)]
         results.append(
             measurement_finding(
-                "pdf.expected_headings",
+                PdfRule.EXPECTED_HEADINGS,
                 f"Checked configured heading text on page {expectation.page}.",
                 ["Expected numbered heading line was not extracted"]
                 if not count and not uncertain
@@ -154,7 +142,7 @@ def _heading_findings(text: str, pages: int, options: StructureOptions) -> list[
                 expected_title=expectation.title,
                 expected_number=expectation.number,
                 matching_line_count=count,
-                candidates=candidates[:10],
+                candidates=candidates[:_MAX_HEADING_CANDIDATES],
                 scope="Exact line after whitespace normalization; heading meaning and "
                 "numbering are supplied, not inferred.",
             )
@@ -162,169 +150,11 @@ def _heading_findings(text: str, pages: int, options: StructureOptions) -> list[
     return results
 
 
-@dataclass
-class _Element:
-    reference: str | None
-    role: str
-    data: dict[str, object]
-    parent: int | None
-    page: str | None
-    children: list[int] = field(default_factory=list)
-
-
-class _Structure:
-    def __init__(self, objects: QpdfObjectGraph):
-        self.objects = objects
-        root_value = objects.root.get("/StructTreeRoot")
-        self.root_reference = root_value if isinstance(root_value, str) else None
-        self.root = objects.dictionary(root_value)
-        if self.root.get("/Type") != "/StructTreeRoot":
-            raise PreparationError("The PDF structure root has an unsupported object type")
-        self.pages: dict[str, int] = {}
-        for number, page in enumerate(objects.pages, 1):
-            if not isinstance(page, dict) or not isinstance(page.get("object"), str):
-                raise PreparationError("qpdf page inventory has no valid object reference")
-            reference = page["object"]
-            if reference in self.pages or objects.dictionary(reference).get("/Type") != "/Page":
-                raise PreparationError("qpdf page inventory is duplicated or malformed")
-            self.pages[reference] = number
-        self.roles = objects.dictionary(self.root.get("/RoleMap", {}))
-        self.elements: list[_Element] = []
-        self.content: list[tuple[int, str | None, str | None, int]] = []
-        self.object_references: list[tuple[int, str | None, object]] = []
-        self.problems: list[object] = []
-        self.uncertainty: set[str] = set()
-        self.visited: set[str] = set()
-        self.steps = 0
-        self._visit(self.root.get("/K", []), None, None, 0)
-        self.parents = self._parent_tree(self.root.get("/ParentTree"))
-
-    def _role(self, value: object) -> str:
-        role = self.objects.resolve(value)
-        seen = set()
-        while isinstance(role, str) and role in self.roles:
-            if role in seen or len(seen) > MAX_PDF_NESTING_LEVELS:
-                raise PreparationError("PDF structure role mapping is cyclic or excessively deep")
-            seen.add(role)
-            role = self.objects.resolve(self.roles[role])
-        if not isinstance(role, str) or not role.startswith("/"):
-            raise PreparationError("PDF structure element has no supported role name")
-        if role not in _STANDARD_ROLES:
-            self.uncertainty.add("unmapped or unsupported PDF structure role")
-        return role
-
-    def _visit(self, raw: object, parent: int | None, page: str | None, depth: int) -> None:
-        cancellation_point()
-        self.steps += 1
-        if self.steps > _LIMIT or depth > MAX_PDF_NESTING_LEVELS:
-            raise PreparationError("PDF structure tree exceeds bounded traversal limits")
-        reference = raw if is_object_reference(raw) else None
-        if reference:
-            if reference in self.visited:
-                raise PreparationError("PDF structure tree has a cycle or repeated object child")
-            self.visited.add(reference)
-        value = self.objects.resolve(raw)
-        if isinstance(value, list):
-            for child in value:
-                self._visit(child, parent, page, depth + 1)
-            return
-        if type(value) is int:
-            if parent is None or value < 0:
-                self.problems.append({"reason": "MCID has no structural owner or is negative"})
-            else:
-                self.content.append((parent, page, None, value))
-            return
-        if not isinstance(value, dict):
-            raise PreparationError("PDF structure child is not a supported element or content item")
-        declared_page = value.get("/Pg", page)
-        page = declared_page if isinstance(declared_page, str) else None
-        kind = value.get("/Type")
-        if kind == "/MCR":
-            mcid = self.objects.resolve(value.get("/MCID"))
-            stream = value.get("/Stm")
-            if parent is None or type(mcid) is not int or mcid < 0:
-                self.problems.append({"reason": "MCR is missing a valid nonnegative MCID or owner"})
-            elif stream is not None and not is_object_reference(stream):
-                self.uncertainty.add("non-reference marked-content stream")
-            else:
-                self.content.append((parent, page, stream, mcid))
-            return
-        if kind == "/OBJR":
-            if parent is None:
-                self.problems.append({"reason": "Object reference has no structural owner"})
-            else:
-                self.object_references.append((parent, page, value.get("/Obj")))
-            return
-        role = self._role(value.get("/S"))
-        if "/NS" in value:
-            self.uncertainty.add("PDF namespace-specific structure roles are not interpreted")
-        expected_parent = self.root_reference if parent is None else self.elements[parent].reference
-        if expected_parent is None:
-            self.uncertainty.add("direct structure dictionaries lack verifiable parent identities")
-        elif value.get("/P") != expected_parent:
-            self.problems.append(
-                {"object": reference, "reason": "missing or incorrect structure parent"}
-            )
-        index = len(self.elements)
-        self.elements.append(_Element(reference, role, value, parent, page))
-        if parent is not None:
-            self.elements[parent].children.append(index)
-        self._visit(value.get("/K", []), index, page, depth + 1)
-
-    def _parent_tree(self, raw: object) -> dict[int, object]:
-        if raw is None:
-            return {}
-        result: dict[int, object] = {}
-        pending = [(raw, 0)]
-        seen: set[str] = set()
-        steps = 0
-        while pending:
-            value, depth = pending.pop()
-            steps += 1
-            if steps > _LIMIT or depth > MAX_PDF_NESTING_LEVELS:
-                raise PreparationError("Structure parent number tree exceeds traversal limits")
-            if isinstance(value, str):
-                if value in seen:
-                    raise PreparationError("Structure parent number tree is cyclic")
-                seen.add(value)
-            node = self.objects.dictionary(value)
-            numbers = self.objects.resolve(node.get("/Nums", []))
-            children = self.objects.resolve(node.get("/Kids", []))
-            if not isinstance(numbers, list) or len(numbers) % 2 or not isinstance(children, list):
-                raise PreparationError("Structure parent number tree is malformed")
-            if len(result) + len(numbers) // 2 > _LIMIT or len(pending) + len(children) > _LIMIT:
-                raise PreparationError("Structure parent number tree exceeds entry limits")
-            for index in range(0, len(numbers), 2):
-                key = numbers[index]
-                if type(key) is not int or key < 0 or key in result:
-                    raise PreparationError(
-                        "Structure parent number tree has invalid or duplicate keys"
-                    )
-                result[key] = numbers[index + 1]
-            pending.extend((child, depth + 1) for child in children)
-        return result
-
-    def parent_entry(self, container: dict[str, object], name: str) -> object:
-        key = self.objects.resolve(container.get(name))
-        if type(key) is not int or key < 0 or key not in self.parents:
-            return None
-        return self.objects.resolve(self.parents[key])
-
-    def location(self, index: int) -> dict[str, object]:
-        element = self.elements[index]
-        return {
-            "object": element.reference,
-            "role": element.role,
-            "page": self.pages.get(element.page or ""),
-        }
-
-
-def _structure_references(tree: _Structure, required: bool) -> Finding:
-    problems = list(tree.problems)
-    if required and not tree.elements:
-        problems.append({"reason": "Required structure tree has no structure elements"})
+def _marked_content_problems(tree: StructureTree) -> tuple[list[object], list[object]]:
+    """Problems with each marked-content item's page and parent-tree entry, and the items."""
+    problems: list[object] = []
+    sequence: list[object] = []
     seen: set[tuple[str | None, str | None, int]] = set()
-    sequence = []
     for owner, page, stream, mcid in tree.content:
         item = {
             **tree.location(owner),
@@ -346,6 +176,11 @@ def _structure_references(tree: _Structure, required: bool) -> Finding:
             problems.append({**item, "reason": "missing marked-content parent-tree entry"})
         elif tree.objects.resolve(parents[mcid]) is not tree.elements[owner].data:
             problems.append({**item, "reason": "marked-content parent-tree owner does not match"})
+    return problems, sequence
+
+
+def _object_reference_problems(tree: StructureTree) -> list[object]:
+    problems: list[object] = []
     for owner, page, target in tree.object_references:
         item = {**tree.location(owner), "target": target}
         if not is_object_reference(target):
@@ -359,13 +194,23 @@ def _structure_references(tree: _Structure, required: bool) -> Finding:
             problems.append({**item, "reason": "missing object parent-tree entry"})
         elif parent is not tree.elements[owner].data:
             problems.append({**item, "reason": "object parent-tree owner does not match"})
+    return problems
+
+
+def _structure_references(tree: StructureTree, required: bool) -> Finding:
+    problems = list(tree.problems)
+    if required and not tree.elements:
+        problems.append({"reason": "Required structure tree has no structure elements"})
+    content_problems, sequence = _marked_content_problems(tree)
+    problems.extend(content_problems)
+    problems.extend(_object_reference_problems(tree))
     return measurement_finding(
-        "pdf.structure_references",
+        PdfRule.STRUCTURE_REFERENCES,
         "Checked structure-tree parent links and marked-content references.",
         problems,
         incomplete=bool(tree.uncertainty),
         uncertainty=sorted(tree.uncertainty),
-        structural_sequence=sequence[:100],
+        structural_sequence=sequence[:MAX_SAMPLES],
         element_count=len(tree.elements),
         marked_content_count=len(tree.content),
         scope="Declared references only; stream completeness and intended reading order "
@@ -373,46 +218,59 @@ def _structure_references(tree: _Structure, required: bool) -> Finding:
     )
 
 
-def _table_structure(tree: _Structure) -> Finding:
-    violations: list[object] = []
-    tables = []
-    for index, element in enumerate(tree.elements):
-        if element.role != "/Table":
-            continue
-        rows: list[int] = []
-        pending = list(reversed(element.children))
-        while pending:
-            child = pending.pop()
+_TABLE_SECTIONS = frozenset({"/THead", "/TBody", "/TFoot"})
+_TABLE_CELLS = frozenset({"/TH", "/TD"})
+
+
+def _table_rows(
+    tree: StructureTree, table: StructureElement, violations: list[object]
+) -> list[int]:
+    """The rows of a table, looking through its header, body and footer groups."""
+    rows: list[int] = []
+    pending = list(reversed(table.children))
+    while pending:
+        child = pending.pop()
+        role = tree.elements[child].role
+        if role in _TABLE_SECTIONS:
+            pending.extend(reversed(tree.elements[child].children))
+        elif role == "/TR":
+            rows.append(child)
+        elif role != "/Caption":
+            violations.append({**tree.location(child), "reason": "unsupported child inside Table"})
+    return rows
+
+
+def _table_summary(tree: StructureTree, index: int, violations: list[object]) -> dict[str, object]:
+    """Check one table's rows and cells; its location with its row and cell counts."""
+    rows = _table_rows(tree, tree.elements[index], violations)
+    headers = cells = 0
+    if not rows:
+        violations.append({**tree.location(index), "reason": "table has no tagged rows"})
+    for row in rows:
+        children = tree.elements[row].children
+        if not children:
+            violations.append({**tree.location(row), "reason": "table row has no tagged cells"})
+        for child in children:
             role = tree.elements[child].role
-            if role in {"/THead", "/TBody", "/TFoot"}:
-                pending.extend(reversed(tree.elements[child].children))
-            elif role == "/TR":
-                rows.append(child)
-            elif role != "/Caption":
+            if role not in _TABLE_CELLS:
                 violations.append(
-                    {**tree.location(child), "reason": "unsupported child inside Table"}
+                    {**tree.location(child), "reason": "table row child is not TH or TD"}
                 )
-        headers = cells = 0
-        if not rows:
-            violations.append({**tree.location(index), "reason": "table has no tagged rows"})
-        for row in rows:
-            children = tree.elements[row].children
-            if not children:
-                violations.append({**tree.location(row), "reason": "table row has no tagged cells"})
-            for child in children:
-                role = tree.elements[child].role
-                if role not in {"/TH", "/TD"}:
-                    violations.append(
-                        {**tree.location(child), "reason": "table row child is not TH or TD"}
-                    )
-                else:
-                    cells += 1
-                    headers += role == "/TH"
-        tables.append(
-            {**tree.location(index), "rows": len(rows), "cells": cells, "header_cells": headers}
-        )
+            else:
+                cells += 1
+                headers += role == "/TH"
+    return {**tree.location(index), "rows": len(rows), "cells": cells, "header_cells": headers}
+
+
+def _table_structure(tree: StructureTree) -> Finding:
+    violations: list[object] = []
+    tables = [
+        _table_summary(tree, index, violations)
+        for index, element in enumerate(tree.elements)
+        if element.role == "/Table"
+    ]
     result = measurement_finding(
-        "pdf.table_structure",
+        PdfRule.TABLE_STRUCTURE,
         "Checked tagged table, row and cell relationships.",
         violations,
         incomplete=bool(tree.uncertainty),
@@ -430,7 +288,7 @@ def _unicode_string(value: object) -> str | None:
     return value[2:] if isinstance(value, str) and value.startswith("u:") else None
 
 
-def _figure_alt(tree: _Structure) -> Finding:
+def _figure_alt(tree: StructureTree) -> Finding:
     violations: list[object] = []
     uncertain = bool(tree.uncertainty)
     figures = 0
@@ -445,7 +303,7 @@ def _figure_alt(tree: _Structure) -> Finding:
         elif text is None:
             uncertain = True
     result = measurement_finding(
-        "pdf.figure_alternative_text",
+        PdfRule.FIGURE_ALTERNATIVE_TEXT,
         "Checked nonempty Alt strings on tagged Figures.",
         violations,
         incomplete=uncertain,
@@ -458,101 +316,163 @@ def _figure_alt(tree: _Structure) -> Finding:
     return result
 
 
-def _link_structure(tree: _Structure) -> Finding:
-    violations: list[object] = []
-    uncertainty = set(tree.uncertainty)
-    associated: dict[str, list[tuple[int, str | None]]] = {}
-    for owner, page, target in tree.object_references:
+class _LinkOwner(NamedTuple):
+    """A Link element that owns an object reference, and the page that reference is on."""
+
+    index: int
+    page: str | None
+
+
+class _Problem(NamedTuple):
+    """What is wrong with a link target: a violation, or something the check cannot resolve."""
+
+    reason: str
+    unresolved: bool = False
+
+
+@dataclass(slots=True)
+class _LinkAudit:
+    """What the link check has found so far, across every page's annotations."""
+
+    tree: StructureTree
+    associated: dict[str, list[_LinkOwner]]
+    uncertainty: set[str]
+    violations: list[object] = field(default_factory=list)
+    annotations: list[object] = field(default_factory=list)
+    encountered: set[str] = field(default_factory=set)
+
+    def violate(self, item: dict[str, object], reason: str) -> None:
+        self.violations.append({**item, "reason": reason})
+
+    def record(self, item: dict[str, object], problem: _Problem | None) -> None:
+        if problem is None:
+            return
+        if problem.unresolved:
+            self.uncertainty.add(problem.reason)
+        else:
+            self.violate(item, problem.reason)
+
+
+def _link_tag_associations(tree: StructureTree) -> dict[str, list[_LinkOwner]]:
+    """For each annotation an element references, the Link elements that own the reference."""
+    associated: dict[str, list[_LinkOwner]] = {}
+    for reference in tree.object_references:
+        target = reference.target
         if not is_object_reference(target):
             continue
-        index: int | None = owner
+        index: int | None = reference.owner
         while index is not None and tree.elements[index].role != "/Link":
             index = tree.elements[index].parent
         if index is not None:
-            associated.setdefault(target, []).append((index, page))
+            associated.setdefault(target, []).append(_LinkOwner(index, reference.page))
+    return associated
 
-    def check_destination(raw: object, item: dict[str, object]) -> None:
-        destination = tree.objects.resolve(raw)
-        if destination is None or destination == [] or destination in ("u:", "b:", "/"):
-            violations.append({**item, "reason": "link destination is empty"})
-        elif isinstance(destination, list):
-            if (
-                len(destination) < 2
-                or not isinstance(destination[0], str)
-                or destination[0] not in tree.pages
-            ):
-                violations.append({**item, "reason": "local link destination lacks a valid page"})
-        else:
-            uncertainty.add("named or unsupported link destination is not resolved")
 
-    annotations: list[object] = []
-    encountered: set[str] = set()
+def _destination_problem(tree: StructureTree, raw: object) -> _Problem | None:
+    destination = tree.objects.resolve(raw)
+    if destination is None or destination == [] or destination in ("u:", "b:", "/"):
+        return _Problem("link destination is empty")
+    if not isinstance(destination, list):
+        return _Problem("named or unsupported link destination is not resolved", unresolved=True)
+    first = destination[0] if destination else None
+    if len(destination) < 2 or not isinstance(first, str) or first not in tree.pages:
+        return _Problem("local link destination lacks a valid page")
+    return None
+
+
+def _check_link_action(audit: _LinkAudit, raw: object, item: dict[str, object]) -> None:
+    tree = audit.tree
+    action = tree.objects.dictionary(raw)
+    kind = action.get("/S")
+    if kind == "/URI":
+        target = _unicode_string(tree.objects.resolve(action.get("/URI")))
+        if target is None:
+            audit.uncertainty.add("link URI is not a supported Unicode string")
+        elif not target.strip():
+            audit.violate(item, "link URI is empty")
+    elif kind != "/GoTo":
+        audit.uncertainty.add("link action is outside supported URI/GoTo inspection")
+    elif "/D" not in action:
+        audit.violate(item, "GoTo link action has no destination")
+    else:
+        audit.record(item, _destination_problem(tree, action["/D"]))
+
+
+def _check_link_annotation(
+    audit: _LinkAudit, page: str, number: int, reference: str, annotation: dict[str, object]
+) -> None:
+    item: dict[str, object] = {"page": number, "annotation": reference}
+    audit.annotations.append(item)
+    if reference in audit.encountered:
+        audit.violate(item, "Link annotation is repeated in page arrays")
+    audit.encountered.add(reference)
+    owners = audit.associated.get(reference, [])
+    if len(owners) != 1:
+        audit.violate(item, "link annotation needs exactly one Link tag association")
+    elif owners[0].page != page:
+        audit.violate(item, "Link object reference has the wrong page")
+    if "/Dest" not in annotation and "/A" not in annotation:
+        audit.violate(item, "link annotation has no destination or action")
+    if "/Dest" in annotation:
+        audit.record(item, _destination_problem(audit.tree, annotation["/Dest"]))
+    if "/A" in annotation:
+        _check_link_action(audit, annotation["/A"], item)
+
+
+def _audit_page_link_annotations(audit: _LinkAudit) -> None:
+    tree = audit.tree
     for page, number in tree.pages.items():
         page_object = tree.objects.dictionary(page)
         raw = tree.objects.resolve(page_object.get("/Annots", []))
-        if not isinstance(raw, list) or len(raw) > _LIMIT:
+        if not isinstance(raw, list) or len(raw) > MAX_STRUCTURE_ITEMS:
             raise PreparationError("PDF page annotation array is malformed or exceeds bounds")
         for reference in raw:
             annotation = tree.objects.dictionary(reference)
             if annotation.get("/Subtype") != "/Link":
                 continue
             if not is_object_reference(reference):
-                uncertainty.add("direct link annotation lacks an indirect identity")
+                audit.uncertainty.add("direct link annotation lacks an indirect identity")
                 continue
-            item: dict[str, object] = {"page": number, "annotation": reference}
-            annotations.append(item)
-            if reference in encountered:
-                violations.append({**item, "reason": "Link annotation is repeated in page arrays"})
-            encountered.add(reference)
-            owners = associated.get(reference, [])
-            if len(owners) != 1:
-                violations.append(
-                    {**item, "reason": "link annotation needs exactly one Link tag association"}
-                )
-            elif owners[0][1] != page:
-                violations.append({**item, "reason": "Link object reference has the wrong page"})
-            if "/Dest" not in annotation and "/A" not in annotation:
-                violations.append(
-                    {**item, "reason": "link annotation has no destination or action"}
-                )
-            if "/Dest" in annotation:
-                check_destination(annotation["/Dest"], item)
-            if "/A" in annotation:
-                action = tree.objects.dictionary(annotation["/A"])
-                if action.get("/S") == "/URI":
-                    target = _unicode_string(tree.objects.resolve(action.get("/URI")))
-                    if target is None:
-                        uncertainty.add("link URI is not a supported Unicode string")
-                    elif not target.strip():
-                        violations.append({**item, "reason": "link URI is empty"})
-                elif action.get("/S") != "/GoTo":
-                    uncertainty.add("link action is outside supported URI/GoTo inspection")
-                elif "/D" not in action:
-                    violations.append({**item, "reason": "GoTo link action has no destination"})
-                else:
-                    check_destination(action["/D"], item)
+            _check_link_annotation(audit, page, number, reference, annotation)
+
+
+def _orphan_link_findings(audit: _LinkAudit) -> set[int]:
+    """Report Link tags without an annotation and references without a page annotation.
+
+    Returns the Link elements that own an annotation reference.
+    """
+    associated = audit.associated
     for reference in associated:
-        if reference not in encountered:
-            violations.append(
+        if reference not in audit.encountered:
+            audit.violations.append(
                 {"target": reference, "reason": "Link tag references no page Link annotation"}
             )
-    linked_owners = {owner for owners in associated.values() for owner, _ in owners}
-    for index, element in enumerate(tree.elements):
+    linked_owners = {owner.index for owners in associated.values() for owner in owners}
+    for index, element in enumerate(audit.tree.elements):
         if element.role == "/Link" and index not in linked_owners:
-            violations.append(
-                {**tree.location(index), "reason": "Link tag has no associated annotation"}
+            audit.violations.append(
+                {**audit.tree.location(index), "reason": "Link tag has no associated annotation"}
             )
+    return linked_owners
+
+
+def _link_structure(tree: StructureTree) -> Finding:
+    audit = _LinkAudit(
+        tree, associated=_link_tag_associations(tree), uncertainty=set(tree.uncertainty)
+    )
+    _audit_page_link_annotations(audit)
+    linked_owners = _orphan_link_findings(audit)
     result = measurement_finding(
-        "pdf.link_structure",
+        PdfRule.LINK_STRUCTURE,
         "Checked Link tags against page Link annotations.",
-        violations,
-        incomplete=bool(uncertainty),
-        annotations=annotations[:100],
-        uncertainty=sorted(uncertainty),
+        audit.violations,
+        incomplete=bool(audit.uncertainty),
+        annotations=audit.annotations[:MAX_SAMPLES],
+        uncertainty=sorted(audit.uncertainty),
         scope="Object associations and supported target presence only; name adequacy, "
         "navigation and target availability are unverified.",
     )
-    if not annotations and not linked_owners and not violations and not uncertainty:
+    if not (audit.annotations or linked_owners or audit.violations or audit.uncertainty):
         result = replace(result, status="not_applicable")
     return result
 
@@ -561,11 +481,11 @@ def _object_rules(options: StructureOptions) -> list[str]:
     return [
         rule
         for rule, selected in (
-            ("pdf.table_structure", options.check_table_structure),
-            ("pdf.link_structure", options.check_link_structure),
-            ("pdf.figure_alternative_text", options.require_figure_alt),
+            (PdfRule.TABLE_STRUCTURE, options.check_table_structure),
+            (PdfRule.LINK_STRUCTURE, options.check_link_structure),
+            (PdfRule.FIGURE_ALTERNATIVE_TEXT, options.require_figure_alt),
             (
-                "pdf.structure_references",
+                PdfRule.STRUCTURE_REFERENCES,
                 options.require_structure_tree or options.check_structure_references,
             ),
         )
@@ -588,32 +508,31 @@ def _object_findings(output: str, pages: int, options: StructureOptions) -> list
     rules = _object_rules(options)
     objects = QpdfObjectGraph(output, pages)
     if objects.root.get("/StructTreeRoot") is None:
+        required = options.require_structure_tree
         return [
             measurement_finding(
                 rule,
                 "The PDF catalog has no structure tree.",
                 ["A structure tree is explicitly required"]
-                if rule == "pdf.structure_references" and options.require_structure_tree
+                if rule == PdfRule.STRUCTURE_REFERENCES and required
                 else [],
-                incomplete=not (
-                    rule == "pdf.structure_references" and options.require_structure_tree
-                ),
+                incomplete=not (rule == PdfRule.STRUCTURE_REFERENCES and required),
             )
             for rule in rules
         ]
-    tree = _Structure(objects)
+    tree = StructureTree.read(objects)
     checks = {
-        "pdf.table_structure": lambda: _table_structure(tree),
-        "pdf.link_structure": lambda: _link_structure(tree),
-        "pdf.figure_alternative_text": lambda: _figure_alt(tree),
-        "pdf.structure_references": lambda: _structure_references(
+        PdfRule.TABLE_STRUCTURE: lambda: _table_structure(tree),
+        PdfRule.LINK_STRUCTURE: lambda: _link_structure(tree),
+        PdfRule.FIGURE_ALTERNATIVE_TEXT: lambda: _figure_alt(tree),
+        PdfRule.STRUCTURE_REFERENCES: lambda: _structure_references(
             tree, options.require_structure_tree
         ),
     }
     findings = []
     for rule in rules:
         try:
-            findings.append(checks[rule]())
+            findings.append(checks[PdfRule(rule)]())
         except PreparationError as error:
             findings.append(unavailable_finding(rule, error))
     return findings
@@ -628,34 +547,35 @@ async def inspect_pdf_structure(
 ) -> list[Finding]:
     """Inspect only selected line expectations and tagged PDF object structures."""
     object_rules = _object_rules(options)
-    configured = (["pdf.expected_headings"] if options.heading_expectations else []) + object_rules
+    configured = (
+        [PdfRule.EXPECTED_HEADINGS] if options.heading_expectations else []
+    ) + object_rules
     if not configured:
         return []
     preflight = await preflight_pdf(pdf, work, runner, budget, configured)
     if isinstance(preflight, list):
         return preflight
     session, pages = preflight.session, preflight.pages
-    findings = []
+    measurements: list[ToolMeasurement] = []
     if options.heading_expectations:
-        try:
-            findings.extend(
-                await session.measure(
-                    "headings",
-                    layout_text_argv(),
-                    lambda result: _heading_findings(result.stdout, pages, options),
-                )
+        measurements.append(
+            ToolMeasurement(
+                "headings",
+                layout_text_argv(),
+                (PdfRule.EXPECTED_HEADINGS,),
+                lambda result: _heading_findings(result.stdout, pages, options),
             )
-        except (PreparationError, OSError) as error:
-            findings.append(unavailable_finding("pdf.expected_headings", error))
+        )
     if object_rules:
-        try:
-            findings.extend(
-                await session.measure(
-                    "structure",
-                    qpdf_objects_argv(),
-                    lambda result: _object_findings(result.stdout, pages, options),
-                )
+        measurements.append(
+            ToolMeasurement(
+                "structure",
+                qpdf_objects_argv(),
+                tuple(object_rules),
+                lambda result: _object_findings(result.stdout, pages, options),
             )
-        except (PreparationError, OSError) as error:
-            findings.extend(unavailable_finding(rule, error) for rule in object_rules)
+        )
+    findings: list[Finding] = []
+    for measurement in measurements:
+        findings.extend(await measurement.run(session))
     return findings

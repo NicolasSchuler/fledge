@@ -11,7 +11,7 @@ from dataclasses import asdict, dataclass, replace
 from typing import ClassVar
 
 from .errors import SettingsError
-from .findings import Finding
+from .findings import DetailKey, Finding
 from .option_config import POSITIVE_INTEGER, Bounds, require_records, require_text, validate_scalars
 from .path_safety import is_relative_posix_path
 from .report import Outcome, Report
@@ -194,23 +194,23 @@ class ReportingOptions:
 
 def _affected_pages(finding: Finding) -> set[int] | None:
     details = finding.details
-    direct = details.get("page")
+    direct = details.get(DetailKey.PAGE)
     if type(direct) is int and direct > 0:
         return {direct}
-    changed = details.get("changed_pages")
+    changed = details.get(DetailKey.CHANGED_PAGES)
     if isinstance(changed, (tuple, list)) and changed:
         if all(type(value) is int and value > 0 for value in changed):
             return set(changed)
         return None
-    violations = details.get("violations")
+    violations = details.get(DetailKey.VIOLATIONS)
     if isinstance(violations, (tuple, list)) and violations:
         # A bounded sample cannot authorize the unlisted violations.
-        count = details.get("violation_count")
+        count = details.get(DetailKey.VIOLATION_COUNT)
         if type(count) is not int or count != len(violations):
             return None
         pages: set[int] = set()
         for item in violations:
-            value = item.get("page") if isinstance(item, dict) else None
+            value = item.get(DetailKey.PAGE) if isinstance(item, dict) else None
             if type(value) is not int or value < 1:
                 return None
             pages.add(value)
@@ -221,8 +221,8 @@ def _affected_pages(finding: Finding) -> set[int] | None:
 def _matches(finding: Finding, review: ReviewRule) -> bool:
     if finding.code != review.code:
         return False
-    for key in ("stage", "document"):
-        value = getattr(review, key)
+    for key in (DetailKey.STAGE, DetailKey.DOCUMENT):
+        value = getattr(review, key.value)
         if value is not None and finding.details.get(key) != value:
             return False
     if review.path is not None and finding.path != review.path:
@@ -284,7 +284,7 @@ def reviewed_findings(findings: Sequence[Finding], options: ReportingOptions) ->
         if finding.rule in _REVIEW_DIAGNOSTICS:
             continue
         details = dict(finding.details)
-        details.pop("review", None)
+        details.pop(DetailKey.REVIEW, None)
         clean = replace(finding, details=details)
         applied = []
         for index, (action, decision) in enumerate(decisions):
@@ -298,7 +298,7 @@ def reviewed_findings(findings: Sequence[Finding], options: ReportingOptions) ->
             else:
                 ineligible[index] = True
         if applied:
-            details["review"] = applied
+            details[DetailKey.REVIEW.value] = applied
         result.append(replace(clean, details=details))
     for index, (action, decision) in enumerate(decisions):
         if matched[index] and not ineligible[index]:
@@ -345,7 +345,7 @@ def apply_reviews(report: Report, options: ReportingOptions) -> Report:
 
 def review_marker(finding: Finding) -> str:
     """A display-only marker; never use it for acceptance or execution decisions."""
-    entries = finding.details.get("review")
+    entries = finding.details.get(DetailKey.REVIEW)
     if not isinstance(entries, (list, tuple)):
         return ""
     labels = {"suppressed": "Suppressed advisory", "accepted_exception": "Accepted exception"}

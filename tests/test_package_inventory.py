@@ -7,9 +7,14 @@ import unittest
 import zipfile
 from pathlib import Path
 
-from latexprep.package_inputs import select_package_inputs
-from latexprep.package_inventory import assemble_package_inventory
-from latexprep.project import create_archive
+from latexprep.package_inputs import InputEvidence, select_package_inputs
+from latexprep.package_inventory import (
+    UNUSED_REASON,
+    InventoryRow,
+    PackageObservation,
+    assemble_package_inventory,
+)
+from latexprep.project_archive import create_archive
 from latexprep.report import Change, ChangeKind
 
 
@@ -27,16 +32,14 @@ class PackageInventoryTests(unittest.TestCase):
         path.write_bytes(data.encode() if isinstance(data, str) else data)
 
     def select(self, observed: set[str], explicit: set[str] | None = None, generated=()):
-        changes, findings = select_package_inputs(
+        result = select_package_inputs(
             self.source,
             self.base / "selected",
             "main.tex",
-            observed,
-            explicit or set(),
-            set(generated),
+            InputEvidence(observed, explicit or set(), set(generated)),
         )
-        finding = next(item for item in findings if item.status == "passed")
-        return changes, finding.details["inventory"]
+        self.assertTrue(any(item.status == "passed" for item in result.findings))
+        return result.changes, result.inventory
 
     def test_nested_selection_distinguishes_literal_recorded_explicit_generated_and_debris(self):
         self.write(
@@ -53,33 +56,33 @@ class PackageInventoryTests(unittest.TestCase):
         self.write("unused.csv", "a,b\n")
         observed = {"main.tex", "parts/body.tex", "fonts/runtime.enc"}
         changes, selection = self.select(observed, {"deliverables/cover.pdf"}, {"main.bbl"})
-        rows = {item["source"]: item for item in selection}
+        rows = {item.source: item for item in selection}
         self.assertEqual(
-            rows["parts/body.tex"]["reasons"],
+            rows["parts/body.tex"].reasons,
             ["Supported literal dependency.", "Recorded build input."],
         )
-        self.assertEqual(rows["fonts/runtime.enc"]["reasons"], ["Recorded build input."])
-        self.assertEqual(rows["deliverables/cover.pdf"]["reasons"], ["Explicitly retained file."])
+        self.assertEqual(rows["fonts/runtime.enc"].reasons, ["Recorded build input."])
+        self.assertEqual(rows["deliverables/cover.pdf"].reasons, ["Explicitly retained file."])
         self.assertEqual(
-            rows["main.bbl"]["reasons"], ["Generated bibliography consumed by the build."]
+            rows["main.bbl"].reasons, ["Generated bibliography consumed by the build."]
         )
-        self.assertIn("auxiliary", rows["main.aux"]["reasons"][0])
-        self.assertEqual(rows["draft.tex.bak"]["reasons"], ["Editor backup or swap file."])
-        self.assertIn("Not needed", rows["unused.csv"]["reasons"][0])
+        self.assertIn("auxiliary", rows["main.aux"].reasons[0])
+        self.assertEqual(rows["draft.tex.bak"].reasons, ["Editor backup or swap file."])
+        self.assertIn("Not needed", rows["unused.csv"].reasons[0])
         self.assertEqual(
             {change.path for change in changes}, {"main.aux", "draft.tex.bak", "unused.csv"}
         )
         for name, row in rows.items():
-            self.assertEqual(row["path"], name)
-            self.assertEqual(row["size_bytes"], (self.source / name).stat().st_size)
-            self.assertIsNone(row["compressed_bytes"])
+            self.assertEqual(row.path, name)
+            self.assertEqual(row.size_bytes, (self.source / name).stat().st_size)
+            self.assertIsNone(row.compressed_bytes)
 
     def test_ambiguous_literal_graph_does_not_invent_literal_dependency_reason(self):
         self.write("main.tex", "\\newcommand{\\chosen}{body}\n\\input{\\chosen}\n")
         self.write("body.tex", "Observed dynamically.\n")
         _, selection = self.select({"main.tex", "body.tex"})
-        rows = {item["source"]: item for item in selection}
-        self.assertEqual(rows["body.tex"]["reasons"], ["Recorded build input."])
+        rows = {item.source: item for item in selection}
+        self.assertEqual(rows["body.tex"].reasons, ["Recorded build input."])
 
     def test_inventory_preserves_selection_handling_of_unselected_links(self):
         self.write("main.tex", "Body.\n")
@@ -87,18 +90,63 @@ class PackageInventoryTests(unittest.TestCase):
         outside.write_bytes(b"Not a source input.")
         (self.source / "unused.txt").symlink_to(outside)
         _, selection = self.select({"main.tex"})
-        row = next(item for item in selection if item["source"] == "unused.txt")
-        self.assertEqual(row["status"], "excluded")
-        self.assertIsNone(row["size_bytes"])
+        row = next(item for item in selection if item.source == "unused.txt")
+        self.assertEqual(row.status, "excluded")
+        self.assertIsNone(row.size_bytes)
         self.assertFalse((self.base / "selected" / "unused.txt").exists())
 
     def test_failed_selection_has_no_inventory_or_partial_selected_tree(self):
         self.write("main.tex", "Body.\n")
         destination = self.base / "selected"
-        changes, findings = select_package_inputs(self.source, destination, "main.tex", None, set())
-        self.assertEqual(changes, [])
+        result = select_package_inputs(
+            self.source, destination, "main.tex", InputEvidence(None, set())
+        )
+        self.assertEqual(result.changes, [])
+        self.assertEqual(result.inventory, [])
         self.assertFalse(destination.exists())
-        self.assertTrue(all("inventory" not in item.details for item in findings))
+        self.assertTrue(all("inventory" not in item.details for item in result.findings))
+
+    def test_unusable_inputs_are_told_apart_and_nothing_is_copied(self):
+        self.write("main.tex", "Body.\n")
+        outside = self.base / "outside.pdf"
+        outside.write_bytes(b"%PDF")
+        (self.source / "linked.pdf").symlink_to(outside)
+        (self.source / "folder").mkdir()
+        for name, problem in (
+            ("absent.pdf", "does not exist in the project"),
+            ("linked.pdf", "is a symbolic link"),
+            ("folder", "is not a regular file inside the project"),
+            ("../escape.pdf", "not a plain project-relative path"),
+        ):
+            with self.subTest(name=name):
+                destination = self.base / "selected"
+                result = select_package_inputs(
+                    self.source,
+                    destination,
+                    "main.tex",
+                    InputEvidence({"main.tex"}, {name}),
+                )
+                (finding,) = [item for item in result.findings if item.is_blocking]
+                self.assertEqual(finding.path, name)
+                self.assertIn(problem, finding.message)
+                self.assertEqual((result.changes, result.inventory), ([], []))
+                self.assertFalse(destination.exists())
+
+    def test_the_selection_result_carries_the_inventory_apart_from_the_findings(self):
+        self.write("main.tex", "Body.\n")
+        self.write("unused.csv", "a,b\n")
+        result = select_package_inputs(
+            self.source,
+            self.base / "selected",
+            "main.tex",
+            InputEvidence({"main.tex"}, set()),
+        )
+        self.assertEqual({row.source for row in result.inventory}, {"main.tex", "unused.csv"})
+        (finding,) = result.findings
+        self.assertNotIn("inventory", finding.details)
+        omitted = next(row for row in result.inventory if row.source == "unused.csv")
+        self.assertEqual(omitted.reasons, [UNUSED_REASON])
+        self.assertEqual(result.changes[0].reason, UNUSED_REASON)
 
     def test_flat_mapping_keeps_collision_renames_and_excluded_original_identity(self):
         self.write("main.tex", "\\input{first/body}\n\\input{second/body}\n")
@@ -118,10 +166,9 @@ class PackageInventoryTests(unittest.TestCase):
         package = assemble_package_inventory(
             selections=[selection],
             changes=changes,
-            final_root=final,
-            path_mapping=mapping,
+            observation=PackageObservation(final_root=final, path_mapping=mapping),
             status="prepared",
-        )
+        ).to_report()
         rows = {item["source"]: item for item in package["files"]}
         self.assertEqual(rows["first/body.tex"]["path"], "first_body.tex")
         self.assertEqual(rows["second/body.tex"]["path"], "second_body.tex")
@@ -140,7 +187,7 @@ class PackageInventoryTests(unittest.TestCase):
         package = assemble_package_inventory(
             selections=[selection],
             source_root=self.source,
-            final_root=final,
+            observation=PackageObservation(final_root=final),
             changes=[
                 Change(
                     "parts/body.tex",
@@ -154,7 +201,7 @@ class PackageInventoryTests(unittest.TestCase):
                 ),
             ],
             status="incomplete",
-        )
+        ).to_report()
         rows = {item["source"]: item for item in package["files"]}
         self.assertEqual(package["status"], "incomplete")
         self.assertEqual(rows["parts/body.tex"]["status"], "excluded")
@@ -176,10 +223,10 @@ class PackageInventoryTests(unittest.TestCase):
         package = assemble_package_inventory(
             selections=[selection],
             changes=changes,
-            archive=archive,
+            observation=PackageObservation(archive=archive),
             document="paper",
             status="verified",
-        )
+        ).to_report()
         self.assertEqual(package["document"], "paper")
         self.assertEqual(package["status"], "verified")
         self.assertEqual(package["archive_bytes"], archive.stat().st_size)
@@ -203,7 +250,7 @@ class PackageInventoryTests(unittest.TestCase):
         package = assemble_package_inventory(
             selections=[selection],
             changes=[Change("body.tex", kind=ChangeKind.REMOVE, reason="Merged into main source.")],
-        )
+        ).to_report()
         row = next(item for item in package["files"] if item["source"] == "body.tex")
         self.assertEqual(package["status"], "proposed")
         self.assertEqual(row["status"], "included")
@@ -216,22 +263,23 @@ class PackageInventoryTests(unittest.TestCase):
         self.write("main.tex", "Body.\n")
         _, initial = self.select({"main.tex"})
         transformed = [
-            {
-                "source": "main.bbl",
-                "path": "main.bbl",
-                "status": "included",
-                "reasons": ["Generated bibliography consumed by the build."],
-                "size_bytes": 3,
-                "compressed_bytes": None,
-            }
+            InventoryRow(
+                "main.bbl",
+                "main.bbl",
+                "included",
+                ["Generated bibliography consumed by the build."],
+                size_bytes=3,
+            )
         ]
         final = self.base / "final"
         self.write("main.tex", "Body.\n", root=final)
         self.write("main.bbl", "bbl", root=final)
         self.write("unexpected.dat", "extra", root=final)
         package = assemble_package_inventory(
-            selections=[initial, transformed], final_root=final, status="incomplete"
-        )
+            selections=[initial, transformed],
+            observation=PackageObservation(final_root=final),
+            status="incomplete",
+        ).to_report()
         rows = {item["source"]: item for item in package["files"]}
         self.assertEqual(
             rows["main.bbl"]["reasons"], ["Generated bibliography consumed by the build."]
@@ -247,7 +295,7 @@ class PackageInventoryTests(unittest.TestCase):
                 Change("excluded.log", kind=ChangeKind.EXCLUDE, reason="Rebuildable diagnostic.")
             ],
             status="incomplete",
-        )
+        ).to_report()
         self.assertIsNone(package["files"][0]["size_bytes"])
         self.assertIsNone(package["files"][0]["compressed_bytes"])
         for status in ("prepared", "verified"):

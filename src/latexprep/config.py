@@ -1,4 +1,9 @@
-"""Validated TOML settings and bounded project configuration discovery."""
+"""Validated settings: the ``Settings`` schema, and layering preset, file and command line.
+
+Owns what the settings are called, how they are validated, and the precedence presets <
+settings file < command-line overrides. Finding and reading the settings file is in
+``config_discovery``.
+"""
 
 from __future__ import annotations
 
@@ -8,18 +13,19 @@ from dataclasses import asdict, dataclass, field, fields, is_dataclass, replace
 from pathlib import Path
 from typing import Any, ClassVar, get_type_hints
 
-from .bibliography_checks import BibliographyOptions
+from .bibliography_options import BibliographyOptions
 from .bibliography_transform import BibliographyTransformOptions
 from .build_checks import BuildCheckOptions
 from .check_policy import unselected_policy_updates
 from .check_selection import CheckSelection
+from .config_discovery import read_settings_file
 from .errors import PreparationError, RequestError, SettingsError
 from .formatting import FormattingOptions
 from .limits import DEFAULT_MAX_FOLDER_LEVELS, DEFAULT_MAX_PROJECT_BYTES, MAX_PROJECT_ENTRIES
 from .manuscript import ManuscriptOptions
-from .manuscript_checks import ManuscriptCheckOptions
+from .manuscript_check_options import ManuscriptCheckOptions
 from .metadata_privacy import MetadataPrivacyOptions
-from .online_checks import OnlineOptions
+from .online_options import OnlineOptions
 from .option_config import (
     POSITIVE_INTEGER,
     Bounds,
@@ -31,15 +37,15 @@ from .option_config import (
     validate_scalars,
     with_suggestions,
 )
-from .pdf_artwork import PdfArtworkOptions
-from .pdf_checks import PdfCheckOptions
+from .pdf_artwork_options import PdfArtworkOptions
+from .pdf_check_options import PdfCheckOptions
 from .pdf_inspection import PdfInspectionOptions
 from .pdf_structure_checks import StructureOptions
 from .presets import preset_values
 from .review_policy import ReportingOptions
 from .setting_choices import BibliographyBackend, Engine, Layout
 from .source_transform import SourceTransformOptions
-from .submission_checks import SubmissionOptions
+from .submission_options import SubmissionOptions
 from .workflow_options import PackageOptions, WorkflowOptions
 
 # Memory reserved for the coordinating process beside every build reservation.
@@ -263,56 +269,6 @@ def effective_settings(settings: Settings) -> Settings:
     return settings.with_top_level_values(updates) if updates else settings
 
 
-# Discovered per directory in this order; the latex-prep names remain supported.
-CONFIG_FILENAMES = (".fledge.toml", "fledge.toml", ".latex-prep.toml", "latex-prep.toml")
-PYPROJECT_TABLES = ("fledge", "latex-prep")
-
-
-def _load_toml(path: Path) -> dict[str, object]:
-    try:
-        with path.open("rb") as stream:
-            return tomllib.load(stream)
-    except FileNotFoundError as error:
-        raise RequestError(
-            f"Settings file {path} does not exist",
-            "Check the spelling of the --config path, or run fledge init to write a starter "
-            "fledge.toml.",
-        ) from error
-    except OSError as error:
-        # strerror is the plain reason ("Permission denied"); str(error) adds an errno code.
-        raise PreparationError(f"Cannot read settings {path}: {error.strerror or error}") from error
-    except tomllib.TOMLDecodeError as error:
-        raise PreparationError(f"Cannot read settings {path}: {error}") from error
-
-
-def _pyproject_settings(path: Path, values: dict[str, object]) -> dict[str, object] | None:
-    """The [tool.fledge] or [tool.latex-prep] table, or None when neither exists."""
-    tool = values.get("tool", {})
-    if not isinstance(tool, dict):
-        return None
-    tables = [name for name in PYPROJECT_TABLES if name in tool]
-    if not tables:
-        return None
-    if len(tables) > 1:
-        raise PreparationError(
-            f"{path} contains both [tool.fledge] and [tool.latex-prep]; keep only one"
-        )
-    settings = tool[tables[0]]
-    if not isinstance(settings, dict):
-        raise PreparationError(f"[tool.{tables[0]}] in {path} must be a settings table")
-    return settings
-
-
-def _read_settings_file(path: Path) -> dict[str, object]:
-    values = _load_toml(path)
-    if path.name != "pyproject.toml":
-        return values
-    settings = _pyproject_settings(path, values)
-    if settings is None:
-        raise PreparationError(f"Settings {path} has no [tool.fledge] or [tool.latex-prep] table")
-    return settings
-
-
 def _unknown_settings_error(
     unknown: list[str], known: frozenset[str], path: Path | None
 ) -> RequestError:
@@ -323,43 +279,6 @@ def _unknown_settings_error(
     if len(guesses) < len(unknown):
         fix += f" Valid top-level settings: {', '.join(sorted(known))}."
     return RequestError(message, fix)
-
-
-def resolve_config_path(
-    source: Path, explicit: Path | None = None, *, isolated: bool = False
-) -> Path | None:
-    """Choose one config beside the original input; never inspect extracted ZIPs.
-
-    Stop after a repository root, before the home/filesystem-root ancestor, or
-    after the starting directory when the input itself is at either boundary.
-    """
-    if explicit is not None:
-        if isolated:
-            raise PreparationError("--isolated cannot be combined with --config")
-        return explicit.expanduser().resolve()
-    if isolated:
-        return None
-    source = source.expanduser().resolve()
-    start = source if source.is_dir() else source.parent
-    home = Path.home().resolve()
-    for directory in (start, *start.parents):
-        if directory != start and (directory == home or directory == directory.parent):
-            break
-        for name in (*CONFIG_FILENAMES, "pyproject.toml"):
-            candidate = directory / name
-            if candidate.is_file() and (
-                name != "pyproject.toml"
-                or _pyproject_settings(candidate, _load_toml(candidate)) is not None
-            ):
-                return candidate
-        if (
-            directory == home
-            or directory == directory.parent
-            or (directory / ".git").exists()
-            or (directory / ".hg").exists()
-        ):
-            break
-    return None
 
 
 def _layer_preset(preset: dict[str, object], selected: dict[str, object]) -> dict[str, object]:
@@ -395,13 +314,17 @@ def _line_format(values: dict[str, Any], table: object) -> dict[str, Any]:
     return {name: values.pop(name) for name in _FORMATTING_KEYS if name in values}
 
 
-def _build_settings(values: dict[str, Any], path: Path | None) -> Settings:
-    """Construct Settings from TOML-layout values that use only current names."""
-    line_format = _line_format(values, values.get("formatting_options"))
+def _build_settings(values: Mapping[str, Any], path: Path | None) -> Settings:
+    """Construct Settings from TOML-layout values that use only current names.
+
+    ``values`` is left unchanged; the keys are consumed from a copy.
+    """
+    remaining = dict(values)
+    line_format = _line_format(remaining, remaining.get("formatting_options"))
     tables: dict[str, Any] = {}
     for name, kind in _OPTION_TABLES.items():
-        if name in values:
-            value = values.pop(name)
+        if name in remaining:
+            value = remaining.pop(name)
             if name == "bibliography_transform":
                 value = _bibliography_edit_tables(value)
             tables[name] = read_options(kind, value, name)
@@ -410,12 +333,12 @@ def _build_settings(values: dict[str, Any], path: Path | None) -> Settings:
         formatting = tables.get("formatting_options", FormattingOptions())
         tables["formatting_options"] = replace(formatting, **line_format)
     grouped: dict[str, dict[str, Any]] = {group: {} for group in _FLATTENED_GROUPS}
-    for name in [name for name in values if _TOP_LEVEL_FIELDS.get(name) in grouped]:
-        grouped[_TOP_LEVEL_FIELDS[name]][name] = values.pop(name)
-    if isinstance(metadata := values.get("match_source_pdf_metadata"), list):
-        values["match_source_pdf_metadata"] = tuple(metadata)
+    for name in [name for name in remaining if _TOP_LEVEL_FIELDS.get(name) in grouped]:
+        grouped[_TOP_LEVEL_FIELDS[name]][name] = remaining.pop(name)
+    if isinstance(metadata := remaining.get("match_source_pdf_metadata"), list):
+        remaining["match_source_pdf_metadata"] = tuple(metadata)
     settings = Settings(
-        **values,
+        **remaining,
         **tables,
         manuscript=read_top_level_options(ManuscriptOptions, grouped["manuscript"]),
         pdf=read_top_level_options(PdfInspectionOptions, grouped["pdf"]),
@@ -477,7 +400,7 @@ def load_settings(
     path: Path | None, overrides: Mapping[str, object], *, preset: str | None = None
 ) -> Settings:
     """Layer an optional preset, then one selected file, then non-None CLI/API overrides."""
-    values = _read_settings_file(path) if path is not None else {}
+    values = read_settings_file(path) if path is not None else {}
     return _settings_from_values(values, overrides, path=path, preset=preset)
 
 

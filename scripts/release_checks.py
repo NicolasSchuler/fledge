@@ -28,6 +28,8 @@ ROOT = Path(__file__).resolve().parents[1]
 DISTRIBUTION = "fledge-latex"
 COMMANDS = ("fledge", "latex-prep")
 VERSION_ATTRIBUTE = "latexprep.__version__"
+# Package data besides the presets, which are compared with the source directory.
+PACKAGED_RESOURCES = ("loaded_options_hook.tex", "report.css")
 
 
 def declared_version(root: Path = ROOT) -> str:
@@ -143,6 +145,12 @@ def check_installed(expected_version: str) -> int:
     )
     if not source or shipped != source:
         print(f"latexprep/presets/*.toml in the wheel {shipped} differ from the source {source}")
+        return 1
+    missing = [
+        name for name in PACKAGED_RESOURCES if not (resources.files("latexprep") / name).is_file()
+    ]
+    if missing:
+        print(f"The wheel does not ship {', '.join(missing)}")
         return 1
     print(f"{DISTRIBUTION} {distribution.version} ships presets: {', '.join(shipped)}")
     return 0

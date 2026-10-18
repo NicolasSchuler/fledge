@@ -3,33 +3,44 @@
 Every build copies the project into a new workspace, runs latexmk with a static
 trusted configuration under the runner's sandbox, and judges the result only
 from evidence that build produced: its final log, recorder trace, rule database,
-bibliography control files and PDF.
+bibliography control files and PDF. This module orchestrates one build and turns its
+evidence into findings; the workspace, the command line, the recorder, the
+bibliography backends and the result types are the sibling modules ``build_workspace``,
+``latexmk_command``, ``build_recorder``, ``build_bibliography`` and ``build_result``.
 """
 
 from __future__ import annotations
 
-import os
 import re
 import shutil
-from dataclasses import KW_ONLY, dataclass, field
+from dataclasses import KW_ONLY, dataclass, replace
 from pathlib import Path, PurePosixPath
-from typing import NamedTuple
 
+from .bibliography_controls import read_bibliography_evidence
+from .build_bibliography import (
+    BIBER_PREPARED_AFTER_DEFERRAL,
+    BiberRequired,
+    BiberSetup,
+    backends_to_verify,
+    bibliography_policy,
+    plan_biber,
+    prepare_biber,
+    verify_backend_tools,
+)
 from .build_dependencies import (
-    BibliographyEvidence,
-    LoadedPackage,
-    RecorderTrace,
+    DependencyRequest,
+    SubmissionDependencies,
     collect_submission_dependencies,
-    read_bibliography_evidence,
-    read_loaded_package,
-    read_recorder_trace,
 )
 from .build_log import log_findings, log_tail, read_bounded
+from .build_recorder import RecorderEvidence, read_recorder
+from .build_result import BibliographyRecord, BuildResult, ExecutionPolicy
+from .build_workspace import BuildLayout, prepare_layout
 from .cancellation import run_in_thread
+from .command_runner import CommandFailure, CommandResult, RuntimeLimits, ToolVersion
 from .errors import PreparationError, ToolUnavailableError
-from .file_safety import byte_count_text, read_regular_file
 from .findings import Finding
-from .limits import MAX_WORKSPACE_ENTRIES, MIB
+from .latexmk_command import BiberPlan, controlled_rules, latexmk_command
 from .loaded_options import (
     LoadedOptionsEvidence,
     LoadedOptionsProbe,
@@ -39,111 +50,22 @@ from .loaded_options import (
 )
 from .option_config import require_unique_strings, validate_scalars
 from .path_safety import is_relative_posix_path
-from .project import MAX_FOLDER_DEPTH, ImportLimits, import_project
-from .runtime import CommandResult, RuntimeLimits, ToolRunner, ToolVersion
+from .runtime import ToolRunner
 from .setting_choices import BibliographyBackend, Engine
 
 # Only these policy-level log errors may be deselected. Tool failures, incomplete
 # output/recorder evidence, TeX errors and unresolved reruns remain build failures.
 SELECTABLE_BUILD_ERRORS = frozenset({"BLD001", "BLD002"})
-_ENGINE_MODES: dict[Engine, str] = {
-    "pdflatex": "-pdf",
-    "xelatex": "-xelatex",
-    "lualatex": "-lualatex",
-}
 _MAIN_COMPONENT = re.compile(r"[A-Za-z0-9_.-]+")
-_MAX_LOADED_PACKAGES = 2048
 _PDF_HEADER = b"%PDF-"
-_BIBER_HINT_SUFFIXES = frozenset(
-    {".tex", ".ltx", ".latex", ".sty", ".cls", ".cfg", ".bbx", ".cbx", ".dbx"}
-)
-_MAX_BIBER_HINT_BYTES = 64 * MIB
-_BIBER_NOT_PREPARED = "not prepared: no source mentions biblatex and the build wrote no .bcf"
-_BIBER_PREPARED_AFTER_DEFERRAL = (
-    "prepared after a build without Biber wrote a .bcf; that build was discarded"
-)
-
-
-@dataclass(frozen=True, slots=True)
-class ExecutionPolicy:
-    """The isolation and limits a build ran under."""
-
-    backend: str
-    limits: RuntimeLimits
-    source_date_epoch: str
-
-    def to_report(self) -> dict[str, object]:
-        return {
-            "backend": self.backend,
-            "limits": self.limits.to_report(),
-            "network": "denied",
-            "shell_escape": "disabled",
-            "imported_configuration": "disabled",
-            "source_date_epoch": self.source_date_epoch,
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class BibliographyRecord:
-    """The requested backend, the fresh control-file evidence and how Biber was prepared."""
-
-    requested_backend: BibliographyBackend
-    evidence: BibliographyEvidence
-    biber_preparation: str | None = None
-
-    def to_report(self) -> dict[str, object]:
-        report: dict[str, object] = {
-            "requested_backend": self.requested_backend,
-            **self.evidence.to_details(),
-        }
-        if self.biber_preparation is not None:
-            report["biber_preparation"] = self.biber_preparation
-        return report
-
-
-@dataclass(slots=True)
-class BuildTools:
-    """What one build records about its toolchain; ``to_report`` gives the report entries."""
-
-    execution: ExecutionPolicy | None = None
-    versions: dict[str, ToolVersion] = field(default_factory=dict)
-    resource_roots: tuple[str, ...] | None = None
-    submission_dependencies: dict[str, object] | None = None
-    bibliography: BibliographyRecord | None = None
-    loaded_options: LoadedOptionsEvidence | None = None
-
-    def to_report(self) -> dict[str, object]:
-        report: dict[str, object] = {}
-        if self.execution is not None:
-            report["execution"] = self.execution.to_report()
-        report.update({name: version.to_report() for name, version in self.versions.items()})
-        if self.resource_roots is not None:
-            report["resource_roots"] = list(self.resource_roots)
-        if self.submission_dependencies is not None:
-            report["submission_dependencies"] = self.submission_dependencies
-        if self.bibliography is not None:
-            report["bibliography"] = self.bibliography.to_report()
-        if self.loaded_options is not None:
-            report["loaded_options"] = self.loaded_options.details()
-        return report
-
-
-@dataclass(slots=True)
-class BuildResult:
-    success: bool
-    _: KW_ONLY
-    pdf: Path | None = None
-    findings: list[Finding] = field(default_factory=list)
-    # Project files the TeX recorder shows the build read.
-    recorder_project_inputs: set[str] = field(default_factory=set)
-    tools: BuildTools = field(default_factory=BuildTools)
-    command: list[str] = field(default_factory=list)
-    log: str = ""
-    loaded_packages: list[LoadedPackage] = field(default_factory=list)
-    recorder_complete: bool = False
-    submission_inputs: set[str] | None = None
-    # Generated files read by the build (output- or project-relative), e.g. main.bbl.
-    generated_reads: frozenset[str] = frozenset()
+# The part of latexmk's standard error a build finding keeps in its details.
+_STDERR_TAIL_CHARS = 4000
+_FAILURE_RULES = {
+    CommandFailure.TIMEOUT: "build.timeout",
+    CommandFailure.OUTPUT_LIMIT: "build.output_limit",
+    CommandFailure.RESOURCE_LIMIT: "build.resource_limit",
+    CommandFailure.EXIT_STATUS: "build.failed",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -178,67 +100,20 @@ class BuildRequest:
 
 
 @dataclass(frozen=True, slots=True)
-class _BuildTree:
-    """The resolved source and the new workspace of one build."""
+class _BibliographyOutcome:
+    """The bibliography record of a build, its findings and the backend versions verified."""
 
-    source: Path
-    work: Path
-    project: Path
-    output: Path
-    cwd: Path
+    record: BibliographyRecord
+    findings: list[Finding]
+    versions: dict[str, ToolVersion]
 
 
 @dataclass(frozen=True, slots=True)
-class _BiberPlan:
-    """Whether this build defers Biber, and the preparation note it reports."""
+class _LogEvidence:
+    """The bounded final-pass log and the findings read from it."""
 
-    deferred: bool
-    note: str | None
-
-
-class _BiberSetup(NamedTuple):
-    executable: str
-    error: str | None
-
-
-@dataclass(frozen=True, slots=True)
-class _RecorderEvidence:
-    """What the recorder shows this build read, interpreted for build checks."""
-
-    trace: RecorderTrace | None
-    inputs: frozenset[Path]
-    project_inputs: frozenset[str]
-    loaded_packages: tuple[LoadedPackage, ...]
-    complete: bool
-    findings: tuple[Finding, ...]
-
-
-class _BiberRequired(Exception):
-    """A build that deferred Biber wrote a fresh .bcf, so Biber is needed after all."""
-
-
-def _sources_may_use_biber(source: Path, max_bytes: int = _MAX_BIBER_HINT_BYTES) -> bool:
-    """Whether any TeX source mentions biblatex; unreadable or oversized input answers yes.
-
-    A literal hint, so mentions in comments count. A miss is safe because a
-    deferred build that writes a fresh .bcf is rebuilt with Biber prepared.
-    """
-    total = 0
-    try:
-        for path in source.rglob("*"):
-            if (
-                path.suffix.lower() not in _BIBER_HINT_SUFFIXES
-                or path.is_symlink()
-                or not path.is_file()
-            ):
-                continue
-            data = read_regular_file(path, max_bytes - total)
-            total += len(data)
-            if b"biblatex" in data:
-                return True
-    except OSError:
-        return True
-    return False
+    text: str
+    findings: list[Finding]
 
 
 async def build_project(
@@ -254,8 +129,8 @@ async def build_project(
 ) -> BuildResult:
     """Build ``main`` in isolation, preparing Biber for an automatic strategy only when needed.
 
-    On macOS, preparing Biber copies and unpacks an 84 MB binary, which costs
-    seconds per job. Unless the sources mention biblatex, an automatic build
+    On macOS, preparing Biber copies and unpacks a large universal binary, which
+    costs seconds per job. Unless the sources mention biblatex, an automatic build
     first runs with Biber blocked. Only if that build writes a fresh .bcf is it
     discarded and rebuilt in the same, emptied workspace with Biber prepared.
     """
@@ -268,52 +143,46 @@ async def build_project(
         inventory_loaded_options=inventory_loaded_options,
         ignored_log_checks=ignored_log_checks,
     )
-    defer_biber = (
-        bibliography_backend == "auto"
-        and runner.biber_needs_preparation
-        and not await run_in_thread(_sources_may_use_biber, source)
-    )
-    if not defer_biber:
-        return await _build_once(request, runner, _BiberPlan(deferred=False, note=None))
+    plan = await plan_biber(runner, bibliography_backend, source)
+    if not plan.deferred:
+        return await _build_once(request, runner, plan)
     try:
-        return await _build_once(
-            request, runner, _BiberPlan(deferred=True, note=_BIBER_NOT_PREPARED)
-        )
-    except _BiberRequired:
+        return await _build_once(request, runner, plan)
+    except BiberRequired:
         await run_in_thread(shutil.rmtree, work)
     return await _build_once(
-        request, runner, _BiberPlan(deferred=False, note=_BIBER_PREPARED_AFTER_DEFERRAL)
+        request, runner, BiberPlan(deferred=False, note=BIBER_PREPARED_AFTER_DEFERRAL)
     )
 
 
-async def _build_once(request: BuildRequest, runner: ToolRunner, biber: _BiberPlan) -> BuildResult:
-    """Run one isolated build; raise ``_BiberRequired`` if a deferred build needs Biber."""
-    tree = await run_in_thread(_prepare_tree, request, runner.limits.max_file_bytes)
-    staged = _stage_loaded_options(request, tree)
-    biber_setup = await _prepare_biber(request, runner, biber, tree.work.parent)
+async def _build_once(request: BuildRequest, runner: ToolRunner, biber: BiberPlan) -> BuildResult:
+    """Run one isolated build; raise ``BiberRequired`` if a deferred build needs Biber."""
+    layout = await run_in_thread(
+        prepare_layout, request.source, request.main, request.work, runner.limits.max_file_bytes
+    )
+    staged = _stage_loaded_options(request, layout)
+    biber_setup = await prepare_biber(
+        request.bibliography_backend, runner, biber, layout.work.parent
+    )
+    rules = controlled_rules(request.bibliography_backend, biber, biber_setup.executable)
     result = BuildResult(
-        success=False, command=_latexmk_command(request, tree, biber, biber_setup.executable)
+        success=False, command=latexmk_command(request.engine, request.main, layout, rules)
     )
-    result.tools.execution = ExecutionPolicy(
-        runner.sandbox.description, runner.limits, runner.source_date_epoch
-    )
+    policy = ExecutionPolicy(runner.sandbox.description, runner.limits, runner.source_date_epoch)
+    result.tools.execution = policy
     try:
-        execution = await _run_latexmk(request, runner, tree, result)
-    except PreparationError as error:
-        result.findings.append(
-            Finding(
-                "build.execution_unavailable",
-                str(error),
-                severity="error",
-                status="inconclusive",
-                details={"tool": error.tool} if isinstance(error, ToolUnavailableError) else {},
-            )
+        result.tools.versions["latexmk"] = await runner.tool_version(
+            ["latexmk", "-norc", "-v"], workspace=layout.work
         )
-        if request.inventory_loaded_options:
-            result.findings.append(
-                loaded_options_unavailable("Build execution was unavailable", request.main)
-            )
+        result.tools.versions[request.engine] = await runner.tool_version(
+            [request.engine, "--version"], workspace=layout.work
+        )
+        execution = await runner.run(result.command, cwd=layout.cwd, workspace=layout.work)
+    except PreparationError as error:
+        result.findings.extend(_unavailable_findings(error, request))
         return result
+    result.command = execution.resolved_command
+    result.tools.execution = replace(policy, duration_seconds=execution.duration_seconds)
     declared_roots = (
         tuple(Path(root) for root in execution.resource_roots)
         if execution.resource_roots
@@ -321,32 +190,36 @@ async def _build_once(request: BuildRequest, runner: ToolRunner, biber: _BiberPl
     )
     result.tools.resource_roots = tuple(sorted(str(root) for root in declared_roots))
     max_output_bytes = runner.limits.max_output_bytes
-    result.findings.extend(_log_evidence(request, tree, max_output_bytes, result))
-    result.findings.extend(_execution_findings(execution, request.main, result.log, runner.limits))
-    recorder = _read_recorder(request, tree, declared_roots, max_output_bytes)
+    log = _read_log(request, layout, max_output_bytes)
+    result.log = log.text
+    result.findings.extend(log.findings)
+    result.findings.extend(_execution_findings(execution, request.main, log.text, runner.limits))
+    recorder = read_recorder(request.main, layout, declared_roots, max_output_bytes)
     result.findings.extend(recorder.findings)
     result.recorder_complete = recorder.complete
     result.recorder_project_inputs = set(recorder.project_inputs)
     result.loaded_packages = list(recorder.loaded_packages)
-    owned_inputs = (staged.hook,) if isinstance(staged, LoadedOptionsProbe) else ()
-    result.findings.extend(
-        _submission_evidence(
-            request, tree, recorder, declared_roots, owned_inputs, max_output_bytes, result
+    submission = collect_submission_dependencies(
+        DependencyRequest(
+            layout=layout,
+            main=request.main,
+            engine=request.engine,
+            recorder=recorder.trace,
+            recorder_complete=recorder.complete,
+            resource_roots=declared_roots,
+            max_bytes=max_output_bytes,
+            owned_inputs=(staged.hook,) if isinstance(staged, LoadedOptionsProbe) else (),
         )
     )
-    evidence = read_bibliography_evidence(tree.output, max_output_bytes)
-    if biber.deferred and "biber" in evidence.observed_backends:
-        raise _BiberRequired
-    result.tools.bibliography = BibliographyRecord(
-        request.bibliography_backend, evidence, biber.note
-    )
-    result.findings.append(_bibliography_policy(evidence, request))
-    result.findings.extend(
-        await _bibliography_tools(
-            request, runner, tree.work, evidence, biber_setup.error, result.tools.versions
-        )
-    )
-    pdf = tree.output / f"{request.stem}.pdf"
+    result.submission_inputs = submission.inputs
+    result.generated_reads = submission.generated_reads
+    result.tools.submission_dependencies = submission
+    result.findings.extend(_submission_findings(submission, request.main))
+    bibliography = await _judge_bibliography(request, runner, layout, biber, biber_setup)
+    result.tools.bibliography = bibliography.record
+    result.findings.extend(bibliography.findings)
+    result.tools.versions.update(bibliography.versions)
+    pdf = layout.output / f"{request.stem}.pdf"
     complete_pdf = _is_complete_pdf(pdf, runner.limits.max_file_bytes)
     if not complete_pdf:
         result.findings.append(
@@ -385,40 +258,69 @@ async def _build_once(request: BuildRequest, runner: ToolRunner, biber: _BiberPl
     return result
 
 
+async def _judge_bibliography(
+    request: BuildRequest,
+    runner: ToolRunner,
+    layout: BuildLayout,
+    biber: BiberPlan,
+    biber_setup: BiberSetup,
+) -> _BibliographyOutcome:
+    """Compare the fresh control files with the strategy and verify the backends they need.
+
+    Raises ``BiberRequired`` when a build that deferred Biber wrote a Biber control file.
+    """
+    evidence = read_bibliography_evidence(layout.output, runner.limits.max_output_bytes)
+    if biber.deferred and "biber" in evidence.observed_backends:
+        raise BiberRequired
+    verification = await verify_backend_tools(
+        runner,
+        layout.work,
+        request.main,
+        backends_to_verify(request.bibliography_backend, evidence),
+        biber_setup.error,
+    )
+    return _BibliographyOutcome(
+        BibliographyRecord(request.bibliography_backend, evidence, biber.note),
+        [
+            bibliography_policy(evidence, request.bibliography_backend, request.main),
+            *verification.findings,
+        ],
+        verification.versions,
+    )
+
+
 def _stage_loaded_options(
-    request: BuildRequest, tree: _BuildTree
+    request: BuildRequest, layout: BuildLayout
 ) -> LoadedOptionsProbe | LoadedOptionsEvidence | None:
     """Instrument the build copy, or say why the option inventory is unavailable."""
     if not request.inventory_loaded_options:
         return None
     try:
-        return stage_loaded_options(tree.project, request.main, tree.work)
+        return stage_loaded_options(layout.project, request.main, layout.work)
     except (OSError, PreparationError) as error:
         return LoadedOptionsEvidence(uncertainty=str(error) or "Instrumentation was unavailable")
 
 
-async def _run_latexmk(
-    request: BuildRequest, runner: ToolRunner, tree: _BuildTree, result: BuildResult
-) -> CommandResult:
-    """Verify latexmk and the engine under isolation, then run the build itself."""
-    result.tools.versions["latexmk"] = await runner.tool_version(
-        ["latexmk", "-norc", "-v"], workspace=tree.work
-    )
-    result.tools.versions[request.engine] = await runner.tool_version(
-        [request.engine, "--version"], workspace=tree.work
-    )
-    execution = await runner.run(result.command, cwd=tree.cwd, workspace=tree.work)
-    result.command = execution.resolved_command
-    return execution
+def _unavailable_findings(error: PreparationError, request: BuildRequest) -> list[Finding]:
+    """The findings for a build whose tools could not be verified or started."""
+    findings = [
+        Finding(
+            "build.execution_unavailable",
+            str(error),
+            severity="error",
+            status="inconclusive",
+            details={"tool": error.tool} if isinstance(error, ToolUnavailableError) else {},
+        )
+    ]
+    if request.inventory_loaded_options:
+        findings.append(loaded_options_unavailable("Build execution was unavailable", request.main))
+    return findings
 
 
-def _log_evidence(
-    request: BuildRequest, tree: _BuildTree, max_bytes: int, result: BuildResult
-) -> list[Finding]:
-    """Read the bounded final-pass log into ``result`` and return its findings."""
-    log_path = tree.output / f"{request.stem}.log"
-    result.log, complete = read_bounded(log_path, max_bytes)
-    findings = log_findings(result.log, request.main, tree.project, tree.cwd)
+def _read_log(request: BuildRequest, layout: BuildLayout, max_bytes: int) -> _LogEvidence:
+    """Read the bounded final-pass log and the findings it holds."""
+    text, complete = read_bounded(layout.output / f"{request.stem}.log", max_bytes)
+    findings = log_findings(text, request.main, layout.project, layout.cwd)
     if not complete:
         findings.append(
             Finding(
@@ -429,35 +331,11 @@ def _log_evidence(
                 path=request.main,
             )
         )
-    return findings
+    return _LogEvidence(text, findings)
 
 
-def _submission_evidence(
-    request: BuildRequest,
-    tree: _BuildTree,
-    recorder: _RecorderEvidence,
-    declared_roots: tuple[Path, ...],
-    owned_inputs: tuple[Path, ...],
-    max_bytes: int,
-    result: BuildResult,
-) -> list[Finding]:
-    """Record the original inputs a submission needs, or why they are uncertain."""
-    submission = collect_submission_dependencies(
-        source=tree.source,
-        project=tree.project,
-        cwd=tree.cwd,
-        output=tree.output,
-        main=request.main,
-        engine=request.engine,
-        recorder=recorder.trace,
-        recorder_complete=recorder.complete,
-        resource_roots=declared_roots,
-        owned_inputs=owned_inputs,
-        max_bytes=max_bytes,
-    )
-    result.submission_inputs = submission.inputs
-    result.generated_reads = submission.generated_reads
-    result.tools.submission_dependencies = submission.details
+def _submission_findings(submission: SubmissionDependencies, main: str) -> list[Finding]:
+    """A finding when the original inputs a submission needs could not be established."""
     if submission.inputs is not None:
         return []
     return [
@@ -466,8 +344,8 @@ def _submission_evidence(
             "Build dependency evidence is incomplete for submission packaging.",
             severity="warning",
             status="inconclusive",
-            path=request.main,
-            details=submission.details,
+            path=main,
+            details=submission.to_details(),
         )
     ]
 
@@ -475,7 +353,7 @@ def _submission_evidence(
 def _loaded_options(
     request: BuildRequest,
     staged: LoadedOptionsProbe | LoadedOptionsEvidence,
-    recorder: _RecorderEvidence,
+    recorder: RecorderEvidence,
     built: bool,
     max_bytes: int,
 ) -> LoadedOptionsEvidence:
@@ -492,105 +370,27 @@ def _loaded_options(
     )
 
 
-def _prepare_tree(request: BuildRequest, max_total_bytes: int) -> _BuildTree:
-    source = request.source.resolve(strict=True)
-    if not (source / request.main).is_file():
-        raise PreparationError(f"Build main file does not exist: {request.main}")
-    work = request.work.absolute()
-    if work.exists() or work.resolve().is_relative_to(source):
-        raise PreparationError("Each build requires a new workspace outside its source tree")
-    work.mkdir(parents=True)
-    work = work.resolve()
-    project, output = work / "project", work / "output"
-    _copy_source(source, project, max_total_bytes=max_total_bytes)
-    output.mkdir()
-    return _BuildTree(source, work, project, output, project / PurePosixPath(request.main).parent)
-
-
-def _copy_source(source: Path, destination: Path, max_total_bytes: int) -> None:
-    """Import a bounded project snapshot into a disposable writable build copy.
-
-    The copy is made by ``import_project``, which opens every entry without
-    following links, so a link that appears during the copy is refused rather
-    than followed. ``max_total_bytes`` is the per-job import budget: it caps the
-    combined size of every imported file rather than the size of any single one.
-    Callers pass ``RuntimeLimits.max_file_bytes``, which therefore acts as the
-    whole-tree limit here, not as a per-file limit.
-    """
-    limits = ImportLimits(
-        max_files=MAX_WORKSPACE_ENTRIES, max_bytes=max_total_bytes, max_depth=MAX_FOLDER_DEPTH
-    )
-    import_project(source, destination, limits, unwrap=False, exclude_metadata=False)
-    # Imported snapshots may be read-only; writable disposable build copies are distinct.
-    destination.chmod(0o700)
-    for item in destination.rglob("*"):
-        item.chmod(0o700 if item.is_dir() else 0o600)
-
-
-async def _prepare_biber(
-    request: BuildRequest, runner: ToolRunner, biber: _BiberPlan, root: Path
-) -> _BiberSetup:
-    if request.bibliography_backend == "bibtex" or biber.deferred:
-        return _BiberSetup("biber", None)
-    # Prepared once per runner and reused by every later build of the job.
-    # A failure is reported through the bibliography-tool check below rather
-    # than raised, because an auto build may never need Biber at all.
-    try:
-        prepared = await runner.prepare_biber(root)
-    except PreparationError as error:
-        return _BiberSetup("biber", str(error))
-    return _BiberSetup("biber" if prepared is None else str(prepared), None)
-
-
-def _latexmk_command(
-    request: BuildRequest, tree: _BuildTree, biber: _BiberPlan, biber_executable: str
-) -> list[str]:
-    return [
-        "latexmk",
-        "-norc",
-        "-e",
-        _controlled_rules(request.bibliography_backend, biber, biber_executable),
-        "-use-make-",
-        "-view=none",
-        "-interaction=nonstopmode",
-        "-halt-on-error",
-        "-file-line-error",
-        "-no-shell-escape",
-        "-recorder",
-        _ENGINE_MODES[request.engine],
-        f"-outdir={os.path.relpath(tree.output, tree.cwd)}",
-        "./" + PurePosixPath(request.main).name,
-    ]
-
-
-def _controlled_rules(
-    backend: BibliographyBackend, biber: _BiberPlan, biber_executable: str
-) -> str:
-    # Static trusted configuration overrides no imported rc, rules, or environment.
-    rules = "$max_repeat=5; $bibtex_use=1; $use_make_for_missing_files=0; @cus_dep_list=();"
-    if backend != "auto":
-        # Latexmk's documented internal-command adapter returns failure without
-        # launching the unselected backend. All code is application-owned; no
-        # filename or user-provided string is interpolated into Perl or a shell.
-        disabled = "$biber" if backend == "bibtex" else "$bibtex"
-        rules += (
-            " sub latexprep_backend_blocked { "
-            "warn 'Bibliography backend is disabled by the selected strategy'; return 1; } "
-            f"{disabled}='internal latexprep_backend_blocked';"
-        )
-    if biber.deferred:
-        # Fails like a blocked backend; the fresh .bcf left behind makes
-        # build_project discard this build and rebuild with Biber prepared.
-        rules += (
-            " sub latexprep_biber_deferred { "
-            "warn 'Biber is deferred until a build shows that it is needed'; return 1; } "
-            "$biber='internal latexprep_biber_deferred';"
-        )
-    elif backend != "bibtex":
-        # Only an application-generated path reaches this Perl literal, and
-        # prepare_biber rejects any path that is not inert in Perl and the shell.
-        rules += f" $biber='{biber_executable} --noconf %O %B';"
-    return rules
+def _failure_suggestion(failure: CommandFailure, limits: RuntimeLimits) -> str | None:
+    """What a researcher can do about a build that a limit stopped; none for a plain failure."""
+    match failure:
+        case CommandFailure.TIMEOUT:
+            return (
+                "Check the end of the log for a loop or a very slow step. If the document "
+                f"needs longer, raise timeout_seconds (now {limits.timeout_seconds}) in your "
+                "configuration or pass --timeout-seconds."
+            )
+        case CommandFailure.OUTPUT_LIMIT:
+            return (
+                "Look for a repeating error or warning at the end of the log and fix its "
+                "source. This output limit is not configurable."
+            )
+        case CommandFailure.RESOURCE_LIMIT:
+            return (
+                "Check for a runaway document. If it legitimately needs more, raise "
+                "build_memory_mb (memory), max_bytes (size of generated files) or "
+                "max_temporary_bytes (temporary disk) in your configuration."
+            )
+    return None
 
 
 def _execution_findings(
@@ -602,186 +402,32 @@ def _execution_findings(
     status, so the limit is reported alone: that status adds nothing the researcher
     can act on.
     """
-    details: dict[str, object] = {"stderr": execution.stderr[-4000:]}
-    if execution.timed_out:
-        rule = "build.timeout"
-        message = f"The build was stopped after {limits.timeout_seconds} s: it ran too long."
-        suggestion = (
-            "Check the end of the log for a loop or a very slow step. If the document "
-            f"needs longer, raise timeout_seconds (now {limits.timeout_seconds}) in your "
-            "configuration or pass --timeout-seconds."
-        )
-    elif execution.output_limited:
-        rule = "build.output_limit"
-        message = (
-            f"The build was stopped after printing more than "
-            f"{byte_count_text(limits.max_output_bytes)} of terminal output."
-        )
-        suggestion = (
-            "Look for a repeating error or warning at the end of the log and fix its "
-            "source. This output limit is not configurable."
-        )
-    elif execution.resource_exceeded:
-        rule = "build.resource_limit"
-        message = f"The build was stopped: {execution.resource_exceeded.rstrip('.')}."
-        suggestion = (
-            "Check for a runaway document. If it legitimately needs more, raise "
-            "build_memory_mb (memory), max_bytes (size of generated files) or "
-            "max_temporary_bytes (temporary disk) in your configuration."
-        )
-    elif execution.returncode:
-        rule = "build.failed"
+    failure = execution.failure
+    if failure is None:
+        return []
+    details: dict[str, object] = {"stderr": execution.stderr[-_STDERR_TAIL_CHARS:]}
+    if failure is CommandFailure.EXIT_STATUS:
         message = f"Build tool exited with status {execution.returncode}."
-        suggestion = None
         # TeX reports the actual cause only in the log: latexmk's own
         # stderr names the failed rule, not the offending input.
         details["log_tail"] = log_tail(log)
     else:
-        return []
+        reason = execution.failure_reason("The build", limits) or ""
+        message = (
+            f"The build was stopped: {reason.rstrip('.')}."
+            if failure is CommandFailure.RESOURCE_LIMIT
+            else reason + "."
+        )
     return [
-        Finding(rule, message, severity="error", path=main, suggestion=suggestion, details=details)
-    ]
-
-
-def _read_recorder(
-    request: BuildRequest, tree: _BuildTree, declared_roots: tuple[Path, ...], max_bytes: int
-) -> _RecorderEvidence:
-    try:
-        trace = read_recorder_trace(
-            tree.output / f"{request.stem}.fls", tree.output, tree.cwd, max_bytes
-        )
-    except (OSError, PreparationError):
-        missing = Finding(
-            "build.dependency_trace",
-            "A complete, bounded recorder trace was not produced.",
+        Finding(
+            _FAILURE_RULES[failure],
+            message,
             severity="error",
-            status="inconclusive",
-            path=request.main,
+            path=main,
+            suggestion=_failure_suggestion(failure, limits),
+            details=details,
         )
-        return _RecorderEvidence(None, frozenset(), frozenset(), (), False, (missing,))
-    inputs: set[Path] = set()
-    project_inputs: set[str] = set()
-    packages: dict[Path, LoadedPackage] = {}
-    findings: list[Finding] = []
-    too_many_packages = False
-    for recorded in trace.inputs:
-        path = recorded.absolute.resolve()
-        inputs.add(path)
-        in_project = path.is_relative_to(tree.project)
-        declared = (
-            in_project
-            or path.is_relative_to(tree.work)
-            or any(path.is_relative_to(root) for root in declared_roots)
-        )
-        if declared and path.suffix.lower() in {".cls", ".sty"} and path not in packages:
-            if len(packages) >= _MAX_LOADED_PACKAGES:
-                too_many_packages = True
-            else:
-                packages[path] = read_loaded_package(path, tree.project)
-        if in_project:
-            project_inputs.add(path.relative_to(tree.project).as_posix())
-        elif not declared:
-            findings.append(
-                Finding(
-                    "build.external_dependency",
-                    f"Recorder contains an undeclared external input: {Path(recorded.recorded)}",
-                    severity="error",
-                    path=request.main,
-                )
-            )
-    read_main = (tree.project / request.main).resolve() in inputs
-    if not read_main:
-        findings.append(
-            Finding(
-                "build.dependency_trace",
-                "Recorder trace does not establish that the selected main file was read.",
-                severity="error",
-                status="inconclusive",
-                path=request.main,
-            )
-        )
-    return _RecorderEvidence(
-        trace,
-        frozenset(inputs),
-        frozenset(project_inputs),
-        tuple(packages.values()),
-        read_main and not too_many_packages,
-        tuple(findings),
-    )
-
-
-def _bibliography_policy(evidence: BibliographyEvidence, request: BuildRequest) -> Finding:
-    requested = request.bibliography_backend
-    mismatch = requested != "auto" and any(
-        backend != requested for backend in evidence.observed_backends
-    )
-    uncertain = bool(evidence.uncertainty)
-    if mismatch:
-        status = "failed"
-    elif uncertain:
-        status = "inconclusive"
-    else:
-        status = "passed" if evidence.observed_backends else "not_applicable"
-    return Finding(
-        "build.bibliography_backend",
-        (
-            "Fresh bibliography controls require a backend outside the selected strategy."
-            if mismatch
-            else "Checked the bibliography backend against fresh build control files."
-        ),
-        severity="error" if mismatch or uncertain else "info",
-        status=status,
-        path=request.main,
-        details={"requested_backend": requested, **evidence.to_details()},
-    )
-
-
-async def _bibliography_tools(
-    request: BuildRequest,
-    runner: ToolRunner,
-    work: Path,
-    evidence: BibliographyEvidence,
-    biber_error: str | None,
-    versions: dict[str, ToolVersion],
-) -> list[Finding]:
-    """Verify each required backend under isolation and record its version."""
-    findings = []
-    for name in evidence.observed_backends:
-        if request.bibliography_backend not in {"auto", name}:
-            continue
-        version_command = (
-            ["biber", "--noconf", "--version"] if name == "biber" else ["bibtex", "--version"]
-        )
-        try:
-            if name == "biber" and biber_error is not None:
-                raise PreparationError(
-                    f"Cannot run biber under restricted execution: {biber_error}"
-                )
-            version = await runner.tool_version(version_command, workspace=work)
-        except PreparationError as error:
-            findings.append(
-                Finding(
-                    "build.bibliography_tool",
-                    str(error),
-                    severity="error",
-                    status="inconclusive",
-                    path=request.main,
-                    details={"backend": name},
-                )
-            )
-            continue
-        versions[name] = version
-        findings.append(
-            Finding(
-                "build.bibliography_tool",
-                f"Verified the locally available {name} version in isolation.",
-                severity="info",
-                status="passed",
-                path=request.main,
-                details={"backend": name, "version": version.to_report()},
-            )
-        )
-    return findings
+    ]
 
 
 def _is_complete_pdf(pdf: Path, max_bytes: int) -> bool:

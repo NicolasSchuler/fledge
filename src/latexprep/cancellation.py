@@ -13,10 +13,11 @@ import contextlib
 import contextvars
 import threading
 from collections.abc import Awaitable, Callable, Iterable, Sequence
-from typing import Any, TypeVar, cast
+from typing import Any, ParamSpec, TypeVar, cast
 
 from .errors import PreparationError
 
+P = ParamSpec("P")
 T = TypeVar("T")
 R = TypeVar("R")
 _thread_stop: contextvars.ContextVar[threading.Event | None] = contextvars.ContextVar(
@@ -111,7 +112,7 @@ async def bounded_map(
     return [results[index] for index in range(len(items))]
 
 
-async def run_in_thread(function: Callable[..., R], *args: Any, **kwargs: Any) -> R:
+async def run_in_thread(function: Callable[P, R], /, *args: P.args, **kwargs: P.kwargs) -> R:
     """Do not release the snapshot/lease until a cancelled reader has stopped."""
     stop = threading.Event()
 

@@ -8,18 +8,21 @@ import unittest
 import zlib
 from dataclasses import FrozenInstanceError
 from pathlib import Path
+from typing import get_args
 from unittest.mock import patch
 
 from latexprep.errors import PreparationError
 from latexprep.finding_view import evidence_excerpt
 from latexprep.findings import Finding, has_blockers
+from latexprep.image_metadata import ImageScanLimits, check_image_metadata
 from latexprep.metadata_privacy import (
+    FIELD_TARGETS,
     MetadataEdit,
+    MetadataField,
     MetadataPrivacyOptions,
-    check_image_metadata,
-    check_sanitized_pdf_metadata,
-    plan_metadata_sanitization,
+    normalize_for_matching,
 )
+from latexprep.metadata_source_edits import check_sanitized_pdf_metadata, plan_metadata_sanitization
 from latexprep.option_config import read_options
 from latexprep.report import Report
 
@@ -63,6 +66,50 @@ class MetadataPrivacyTests(unittest.TestCase):
             "metadata_privacy",
         )
         self.assertEqual(loaded.edits, (edit,))
+
+    def test_every_field_names_its_target_in_the_source_and_the_pdf(self):
+        self.assertEqual(set(get_args(MetadataField)), set(FIELD_TARGETS))
+        expected = {
+            "title": ("title", None, None, "\\title"),
+            "hypersetup.pdfauthor": (None, "pdfauthor", "Author", "hyperref key pdfauthor"),
+            "hypersetup.pdfkeywords": (None, "pdfkeywords", "Keywords", "hyperref key pdfkeywords"),
+        }
+        for field, (command, key, pdf_property, label) in expected.items():
+            with self.subTest(field=field):
+                edit = MetadataEdit("main.tex", field, "a", "b")
+                self.assertEqual(
+                    (edit.command, edit.hyperref_key, edit.pdf_property, edit.label),
+                    (command, key, pdf_property, label),
+                )
+        for target in FIELD_TARGETS.values():
+            self.assertNotEqual(target.command is None, target.hyperref_key is None)
+        with self.assertRaises(PreparationError):
+            MetadataEdit("main.tex", "hypersetup.pdfcreator", "a", "b")
+
+    def test_normalization_folds_case_width_and_whitespace(self):
+        self.assertEqual(normalize_for_matching("  ÉCOLE\n\tNormale ＡＢ "), "école normale ab")
+
+    def test_plan_keeps_each_file_original_edit_and_change_together(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "main.tex").write_text("\\author{Alice}\n")
+            (root / "other.tex").write_text("\\title{Study}\n")
+            options = MetadataPrivacyOptions(
+                edits=(
+                    MetadataEdit("main.tex", "author", "Alice", "Anonymous"),
+                    MetadataEdit("other.tex", "title", "Study", "Study"),
+                )
+            )
+            plan = plan_metadata_sanitization(root, options)
+        self.assertEqual(list(plan.planned), ["main.tex"])
+        planned = plan.planned["main.tex"]
+        self.assertEqual(planned.original, b"\\author{Alice}\n")
+        self.assertEqual(planned.content, b"\\author{Anonymous}\n")
+        self.assertEqual(plan.contents, {"main.tex": planned.content})
+        self.assertEqual(plan.originals, {"main.tex": planned.original})
+        self.assertEqual(plan.changes, [planned.change])
+        # An edit that leaves the file unchanged still reports that its precondition held.
+        self.assertEqual([finding.path for finding in plan.findings], ["main.tex", "other.tex"])
 
     def test_literal_replacements_preserve_originals_and_other_metadata(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -385,11 +432,12 @@ def jpeg(*segments):
 
 
 class ImageMetadataTests(unittest.TestCase):
-    def scan(self, data, suffix=".png", terms=("Alice Researcher",)):
+    def scan(self, data, suffix=".png", terms=("Alice Researcher",), limits=None):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / ("figure" + suffix)).write_bytes(data)
-            return check_image_metadata(root, MetadataPrivacyOptions(image_identity_terms=terms))[0]
+            options = MetadataPrivacyOptions(image_identity_terms=terms)
+            return check_image_metadata(root, options, limits)[0]
 
     def test_png_text_compressed_text_and_exif_match_without_echoing_values(self):
         value = b"Alice Researcher"
@@ -440,15 +488,17 @@ class ImageMetadataTests(unittest.TestCase):
                 result = self.scan(data, suffix)
                 self.assertEqual(result.status, "inconclusive")
                 self.assertTrue(result.details["incomplete"])
-        with patch("latexprep.metadata_privacy._MAX_METADATA_BYTES", 64):
-            bomb = png((b"zTXt", b"Author\0\0" + zlib.compress(b"A" * 10000)))
-            self.assertEqual(self.scan(bomb).status, "inconclusive")
-        with patch("latexprep.metadata_privacy._MAX_METADATA_TOTAL", 60):
-            repeated = png(
-                (b"zTXt", b"a\0\0" + zlib.compress(b"A" * 40)),
-                (b"zTXt", b"b\0\0" + zlib.compress(b"B" * 40)),
-            )
-            self.assertEqual(self.scan(repeated).status, "inconclusive")
+        bomb = png((b"zTXt", b"Author\0\0" + zlib.compress(b"A" * 10000)))
+        self.assertEqual(
+            self.scan(bomb, limits=ImageScanLimits(max_block_bytes=64)).status, "inconclusive"
+        )
+        repeated = png(
+            (b"zTXt", b"a\0\0" + zlib.compress(b"A" * 40)),
+            (b"zTXt", b"b\0\0" + zlib.compress(b"B" * 40)),
+        )
+        small = ImageScanLimits(max_image_metadata_bytes=60)
+        self.assertEqual(self.scan(repeated, limits=small).status, "inconclusive")
+        self.assertEqual(self.scan(repeated).status, "passed")
 
     def test_vendor_blocks_are_limitations_rather_than_an_unusable_scan(self):
         text = b"Alice Researcher"
@@ -497,7 +547,7 @@ class ImageMetadataTests(unittest.TestCase):
         self.assertEqual(result.status, "failed")
         self.assertEqual(
             result.details["matches"],
-            [{"path": "figure.jpg", "channel": "JPEG IPTC 2:080", "term_index": 1}],
+            [{"path": "figure.jpg", "channel": "JPEG IPTC 2:080 (By-line)", "term_index": 1}],
         )
         self.assertNotIn(text.decode(), str(result))
         extended = jpeg(
@@ -570,12 +620,12 @@ class ImageMetadataTests(unittest.TestCase):
         def many(count):
             return png(*((b"tEXt", b"Author\0Alice Researcher"),) * count)
 
-        with patch("latexprep.metadata_privacy._MAX_MATCHES", 3):
-            for count, limited in ((3, False), (4, True)):
-                with self.subTest(count=count):
-                    result = self.scan(many(count))
-                    self.assertEqual(len(result.details["matches"]), 3)
-                    self.assertIs(result.details["match_output_limited"], limited)
+        limits = ImageScanLimits(max_matches=3)
+        for count, limited in ((3, False), (4, True)):
+            with self.subTest(count=count):
+                result = self.scan(many(count), limits=limits)
+                self.assertEqual(len(result.details["matches"]), 3)
+                self.assertIs(result.details["match_output_limited"], limited)
 
     def test_messages_name_the_image_and_cause_of_an_incomplete_scan(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -624,6 +674,48 @@ class ImageMetadataTests(unittest.TestCase):
             )
         self.assertEqual(finding.status, "passed")
         self.assertIn("none was found", finding.message)
+
+    def test_exif_and_iptc_matches_name_the_field_a_researcher_knows(self):
+        artist = jpeg((0xE1, b"Exif\0\0" + exif("Alice Researcher", tag=0x013B)))
+        self.assertEqual(
+            self.scan(artist, ".jpg").details["matches"],
+            [{"path": "figure.jpg", "channel": "EXIF Artist (0x013b)", "term_index": 1}],
+        )
+        unnamed = jpeg((0xE1, b"Exif\0\0" + exif("Alice Researcher", tag=0x5555)))
+        self.assertEqual(
+            self.scan(unnamed, ".jpg").details["matches"][0]["channel"], "EXIF tag 0x5555"
+        )
+        copyright_notice = jpeg((0xED, photoshop(iptc(116, b"Alice Researcher"))))
+        self.assertEqual(
+            self.scan(copyright_notice, ".jpg").details["matches"][0]["channel"],
+            "JPEG IPTC 2:116 (CopyrightNotice)",
+        )
+
+    def test_per_image_and_project_wide_caps_are_separate_limits(self):
+        def project(limits):
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                for name in ("a.png", "b.png"):
+                    (root / name).write_bytes(png((b"tEXt", b"Comment\0" + b"x" * 40)))
+                options = MetadataPrivacyOptions(image_identity_terms=("Alice",))
+                return check_image_metadata(root, options, limits)[0]
+
+        self.assertEqual(project(ImageScanLimits()).status, "passed")
+        # Each image alone fits the per-image cap; both together exceed the project cap.
+        together = project(ImageScanLimits(max_total_metadata_bytes=60))
+        self.assertEqual(together.status, "inconclusive")
+        self.assertIn("Decoded metadata exceeded the scan limit", together.message)
+        self.assertEqual(together.details["images_scanned"], 1)
+        # An image over its own cap is a problem of that image alone; it stays out of the scan.
+        alone = project(ImageScanLimits(max_image_metadata_bytes=30))
+        self.assertEqual(alone.status, "inconclusive")
+        self.assertEqual(alone.details["images_scanned"], 0)
+        self.assertEqual([issue["path"] for issue in alone.details["issues"]], ["a.png", "b.png"])
+        sizes = project(ImageScanLimits(max_total_image_bytes=150))
+        self.assertIn("Total image bytes exceeded the scan limit", sizes.message)
+        counted = project(ImageScanLimits(max_images=1))
+        self.assertIn("Image count exceeded the scan limit", counted.message)
+        self.assertEqual(counted.details["images_selected"], 1)
 
     def test_default_no_scan_and_symlinks_never_prove_absence(self):
         with tempfile.TemporaryDirectory() as directory:

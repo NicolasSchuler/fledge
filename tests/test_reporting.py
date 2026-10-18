@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import tempfile
 import unittest
 import zipfile
@@ -13,15 +12,18 @@ from pathlib import Path
 from unittest.mock import patch
 
 from latexprep.ci_annotations import render_ci_annotations
-from latexprep.diagnostic_bundle import export_diagnostic_bundle
+from latexprep.diagnostic_bundle import (
+    export_diagnostic_bundle,
+    export_redacted_diagnostic_bundle,
+)
 from latexprep.errors import PreparationError
 from latexprep.file_safety import read_regular_file
-from latexprep.finding_view import RenderOptions, evidence_excerpt, is_scope_disclaimer
+from latexprep.finding_view import RenderOptions, evidence_excerpt
 from latexprep.findings import Finding
 from latexprep.html_report import render_html
+from latexprep.measurement_findings import heuristic_finding, measurement_finding
 from latexprep.option_config import read_options
-from latexprep.pdf_support import heuristic_finding, measurement_finding
-from latexprep.report import Change, ChangeKind, Outcome, Report
+from latexprep.report import Change, ChangeKind, Outcome, Report, redact_report
 from latexprep.review_policy import (
     ReportingOptions,
     ReviewRule,
@@ -30,7 +32,9 @@ from latexprep.review_policy import (
     review_marker,
     reviewed_findings,
 )
-from latexprep.submission_checks import SubmissionOptions, check_pdf_identity, check_submission
+from latexprep.submission_checks import check_pdf_identity, check_submission
+from latexprep.submission_options import SubmissionOptions
+from latexprep.submission_scan_findings import ScanLimits
 
 
 class ReviewTests(unittest.TestCase):
@@ -219,8 +223,9 @@ class ReviewTests(unittest.TestCase):
                 self.assertEqual(annotated[-1].rule, "report.review_ineligible")
         complete = check_pdf_identity("Alice", {"Author": "Anonymous"}, scan)[0]
         self.assertFalse(has_unaccepted_blockers([complete], review))
-        with patch("latexprep.submission_checks.MAX_SCAN_MATCHES", 1):
-            limited = check_pdf_identity("Alice", {"Author": "Alice"}, scan)[0]
+        limited = check_pdf_identity(
+            "Alice", {"Author": "Alice"}, scan, limits=ScanLimits(max_matches=1)
+        )[0]
         self.assertTrue(limited.details["match_output_limited"])
         self.assertTrue(has_unaccepted_blockers([limited], review))
 
@@ -457,9 +462,9 @@ class RenderTests(unittest.TestCase):
         everything = render_ci_annotations(report, options=RenderOptions(show_passed=True))
         self.assertEqual(len(everything.splitlines()), 5)
         self.assertIn("info/not applicable: No backend.", everything)
-        self.assertTrue(is_scope_disclaimer(report.findings[0]))
-        self.assertFalse(is_scope_disclaimer(report.findings[3]))
-        self.assertFalse(is_scope_disclaimer(replace(report.findings[0], status="failed")))
+        self.assertTrue(report.findings[0].is_scope_disclaimer)
+        self.assertFalse(report.findings[3].is_scope_disclaimer)
+        self.assertFalse(replace(report.findings[0], status="failed").is_scope_disclaimer)
 
     def test_evidence_excerpt_uses_known_lists_in_order_and_counts_hidden_items(self):
         def excerpt(**details):
@@ -650,37 +655,128 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(render_html(report).count("Citation"), 2)
 
 
+class _Structure(HTMLParser):
+    """The landmark, title, heading and table structure of a rendered page."""
+
+    def __init__(self):
+        super().__init__()
+        self.title = ""
+        self.mains = 0
+        self.captions = 0
+        self.table_headers: list[dict[str, str | None]] = []
+        self.tables = 0
+        self._in_title = False
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "title":
+            self._in_title = True
+        elif tag == "main":
+            self.mains += 1
+        elif tag == "table":
+            self.tables += 1
+        elif tag == "caption":
+            self.captions += 1
+        elif tag == "th":
+            self.table_headers.append(dict(attrs))
+
+    def handle_endtag(self, tag):
+        if tag == "title":
+            self._in_title = False
+
+    def handle_data(self, data):
+        if self._in_title:
+            self.title += data
+
+
+class HtmlPageStructureTests(unittest.TestCase):
+    def report(self, **fields):
+        return Report(
+            "prepare",
+            outcome=Outcome.PASSED_WITH_ADVISORIES,
+            scope="selected checks",
+            changes=[
+                Change(
+                    "sections/intro.tex",
+                    kind=ChangeKind.REWRITE,
+                    reason="Removed comments",
+                    diff="--- a\n+++ b\n@@ -1 +1 @@\n-old\n+new\n",
+                )
+            ],
+            **fields,
+        )
+
+    def structure(self, report):
+        parser = _Structure()
+        parser.feed(render_html(report))
+        return parser
+
+    def test_page_has_one_main_landmark_and_a_title_naming_command_and_document(self):
+        page = self.structure(self.report(main="paper/main.tex"))
+        self.assertEqual(page.mains, 1)
+        self.assertEqual(page.title, "Fledge prepare report: paper/main.tex")
+        self.assertEqual(self.structure(self.report()).title, "Fledge prepare report")
+
+    def test_title_escapes_the_document_name(self):
+        rendered = render_html(self.report(main="</title><script>alert(1)</script>"))
+        self.assertNotIn("<script>", rendered)
+        self.assertIn("&lt;/title&gt;", rendered.split("</title>")[0])
+
+    def test_every_table_has_a_caption_and_scoped_column_headers(self):
+        page = self.structure(
+            self.report(
+                package_contents=[
+                    {
+                        "document": "main",
+                        "status": "verified",
+                        "files": [{"source": "a.tex", "path": "a.tex", "status": "included"}],
+                    }
+                ]
+            )
+        )
+        self.assertEqual(page.tables, 2)
+        self.assertEqual(page.captions, page.tables)
+        self.assertTrue(page.table_headers)
+        self.assertTrue(all(header.get("scope") == "col" for header in page.table_headers))
+
+    def test_diff_caption_names_the_changed_file(self):
+        self.assertIn(
+            "<caption>Changes to sections/intro.tex</caption>", render_html(self.report())
+        )
+
+    def test_stylesheet_ships_as_package_data_with_dark_mode_and_print_rules(self):
+        from importlib import resources
+
+        css = resources.files("latexprep").joinpath("report.css").read_text(encoding="utf-8")
+        self.assertIn("@media(prefers-color-scheme:dark)", css)
+        self.assertIn("@media print", css)
+        self.assertNotIn("</style", css)
+        self.assertIn(css, render_html(self.report()))
+        manifest = (Path(__file__).resolve().parents[1] / "MANIFEST.in").read_text()
+        self.assertIn("include src/latexprep/report.css", manifest.splitlines())
+
+
 class DiagnosticBundleTests(unittest.TestCase):
     def test_bundle_is_unverified_and_cross_redacted(self):
+        secret = "CrossFieldSecret"
+        report = Report(
+            "prepare",
+            outcome=Outcome.PASSED,
+            scope="Verified workflow scope",
+            settings={"password": secret},
+            findings=[Finding("source.edit_marker", f"found {secret}")],
+            changes=[
+                Change(
+                    "main.tex",
+                    kind=ChangeKind.REWRITE,
+                    reason="Reason",
+                    diff=f"-{secret}\n+value",
+                )
+            ],
+            stages=[{"name": "baseline", "status": "succeeded", "log": secret}],
+        )
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            (root / "tool.log").write_text("password=CrossFileSecret\n", encoding="utf-8")
-            report = Report(
-                "prepare",
-                outcome=Outcome.PASSED,
-                scope="Verified workflow scope",
-                findings=[Finding("source.edit_marker", "CrossFileSecret")],
-                changes=[
-                    Change(
-                        "main.tex",
-                        kind=ChangeKind.REWRITE,
-                        reason="Reason",
-                        diff="-CrossFileSecret\n+value",
-                    )
-                ],
-                stages=[{"name": "baseline", "log": "CrossFileSecret"}],
-            )
-            destination = root / "diagnostics.zip"
-            self.assertEqual(
-                export_diagnostic_bundle(
-                    report,
-                    destination,
-                    scratch_root=root,
-                    artifacts=("tool.log",),
-                    logs={"tool": "CrossFileSecret"},
-                ),
-                destination,
-            )
+            destination = Path(directory) / "diagnostics.zip"
+            self.assertEqual(export_diagnostic_bundle(report, destination), destination)
             with zipfile.ZipFile(destination) as archive:
                 self.assertEqual(
                     set(archive.namelist()),
@@ -689,81 +785,42 @@ class DiagnosticBundleTests(unittest.TestCase):
                         "report.json",
                         "report.html",
                         "logs/stages.json",
-                        "logs/explicit.json",
                         "diffs/0001.diff",
-                        "scratch/0001.log",
                     },
                 )
                 for name in archive.namelist():
-                    self.assertNotIn(b"CrossFileSecret", archive.read(name))
+                    self.assertNotIn(secret.encode(), archive.read(name))
                 values = json.loads(archive.read("report.json"))
                 self.assertEqual(values["outcome"], "blocked")
                 self.assertIn("not a submission package", values["scope"])
                 self.assertEqual(
                     values["execution"]["diagnostic_export"]["source_outcome"], "passed"
                 )
+                self.assertIn("report.diagnostic_bundle", {f["rule"] for f in values["findings"]})
                 self.assertIn(b"UNVERIFIED DIAGNOSTIC BUNDLE", archive.read("README.txt"))
-            self.assertEqual(report.outcome, "passed")
-            self.assertNotIn("diagnostic_export", report.execution)
+        self.assertEqual(report.outcome, "passed")
+        self.assertNotIn("diagnostic_export", report.execution)
 
-    def test_unsafe_scratch_inputs_are_rejected(self):
+    def test_a_redacted_report_is_exported_without_being_redacted_again(self):
+        report = Report("check", outcome=Outcome.PASSED)
+        public = redact_report(report)
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            scratch = root / "scratch"
-            scratch.mkdir()
-            (root / "outside.log").write_text("outside")
-            (scratch / "linked.log").symlink_to(root / "outside.log")
-            (scratch / "linked-dir").symlink_to(root, target_is_directory=True)
-            (scratch / "binary.log").write_bytes(b"binary\0content")
-            (scratch / "source.pdf").write_bytes(b"%PDF-1.4")
-            (scratch / "invalid.log").write_bytes(b"\xff")
-            os.mkfifo(scratch / "pipe.log")
-            for path in (
-                "../outside.log",
-                "linked.log",
-                "linked-dir/outside.log",
-                "binary.log",
-                "source.pdf",
-                "invalid.log",
-                "pipe.log",
-                "/outside.log",
-                "a\\b.log",
-            ):
-                with self.subTest(path=path), self.assertRaises(PreparationError):
-                    export_diagnostic_bundle(
-                        Report("check"), root / "bad.zip", scratch_root=scratch, artifacts=(path,)
-                    )
-                self.assertFalse((root / "bad.zip").exists())
+            with patch("latexprep.report.redact_data") as redact:
+                export_redacted_diagnostic_bundle(public, Path(directory) / "bundle.zip")
+        redact.assert_not_called()
 
-    def test_export_refuses_overwrite_and_artifact_limits(self):
+    def test_export_refuses_to_overwrite_an_existing_file(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            destination = root / "existing.zip"
+            destination = Path(directory) / "existing.zip"
             destination.write_bytes(b"user data")
             with self.assertRaises(PreparationError):
                 export_diagnostic_bundle(Report("check"), destination)
             self.assertEqual(destination.read_bytes(), b"user data")
-            (root / "big.log").write_text("oversized")
-            with patch("latexprep.diagnostic_bundle._MAX_ARTIFACT_BYTES", 2):
-                with self.assertRaises(PreparationError):
-                    export_diagnostic_bundle(
-                        Report("check"), root / "new.zip", scratch_root=root, artifacts=("big.log",)
-                    )
-            self.assertFalse((root / "new.zip").exists())
 
-    def test_artifact_names_never_disclose_source_credentials_or_paths(self):
+    def test_unwritable_destination_is_reported_not_raised_as_oserror(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            secret_name = "ghp_" + "a" * 25 + ".log"
-            (root / secret_name).write_text("tool output")
-            export_diagnostic_bundle(
-                Report("check"), root / "bundle.zip", scratch_root=root, artifacts=(secret_name,)
-            )
-            with zipfile.ZipFile(root / "bundle.zip") as archive:
-                self.assertIn("scratch/0001.log", archive.namelist())
-                for name in archive.namelist():
-                    self.assertNotIn(secret_name.encode(), archive.read(name))
-                    self.assertNotIn(secret_name, name)
+            with self.assertRaises(PreparationError):
+                export_diagnostic_bundle(Report("check"), Path(directory) / "missing" / "b.zip")
 
 
 if __name__ == "__main__":

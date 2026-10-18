@@ -5,8 +5,18 @@ import json
 import unittest
 
 from latexprep.errors import PreparationError
+from latexprep.findings import Finding
 from latexprep.resource_budget import ResourceBudget
-from latexprep.scheduler import Scheduler, Task, TaskStatus
+from latexprep.scheduler import Scheduler, Task, TaskResult, TaskStatus
+from latexprep.task_findings import (
+    BLOCKED_BY_DETAIL,
+    TASK_DETAIL,
+    TASK_RULE,
+    TRACEBACK_DETAIL,
+    blocked_prerequisites,
+    blocked_task_finding,
+    failed_task_finding,
+)
 
 
 class SchedulerTests(unittest.IsolatedAsyncioTestCase):
@@ -176,6 +186,18 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(results["input"].defect_frames, ())
         self.assertEqual(results["disk"].defect_frames, ())
 
+    async def test_a_cycle_is_rejected_with_the_tasks_that_form_it(self):
+        async def nothing():
+            return None
+
+        with self.assertRaisesRegex(PreparationError, r"Cyclic task dependency: \w -> \w -> \w"):
+            await Scheduler(ResourceBudget(1, 128)).execute(
+                [
+                    Task("a", nothing, needs_success_of=("b",)),
+                    Task("b", nothing, needs_success_of=("a",)),
+                ]
+            )
+
     async def test_invalid_graphs_and_unsatisfiable_resources_rejected(self):
         async def nothing():
             return None
@@ -219,6 +241,38 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
             await execution
         self.assertTrue(stopped.is_set())
         self.assertFalse(queued_started)
+
+
+class TaskFindingTests(unittest.TestCase):
+    def test_skipped_task_names_its_failed_prerequisites_for_report_renderers(self):
+        result = TaskResult(
+            "pdf", TaskStatus.BLOCKED, error="Prerequisite failed: build", blocked_by=("build",)
+        )
+        finding = blocked_task_finding(result)
+        self.assertEqual(
+            (finding.rule, finding.status, finding.severity), (TASK_RULE, "skipped", "info")
+        )
+        self.assertEqual(finding.details[TASK_DETAIL], "pdf")
+        self.assertEqual(finding.details[BLOCKED_BY_DETAIL], ["build"])
+        self.assertEqual(blocked_prerequisites(finding), ("build",))
+
+    def test_only_a_skipped_task_finding_lists_prerequisites(self):
+        failed = failed_task_finding(TaskResult("pdf", TaskStatus.FAILED, error="OSError: gone"))
+        other = Finding("source.edit_marker", "TODO", details={BLOCKED_BY_DETAIL: ["build"]})
+        self.assertEqual(blocked_prerequisites(failed), ())
+        self.assertEqual(blocked_prerequisites(other), ())
+
+    def test_a_failed_task_always_names_itself_and_a_defect_adds_its_frames(self):
+        expected = failed_task_finding(TaskResult("pdf", TaskStatus.FAILED, error="OSError: gone"))
+        self.assertEqual(expected.details, {TASK_DETAIL: "pdf"})
+        self.assertIsNone(expected.suggestion)
+        defect = failed_task_finding(
+            TaskResult(
+                "pdf", TaskStatus.FAILED, error="KeyError: 'x'", defect_frames=("scan.py:3 in run",)
+            )
+        )
+        self.assertEqual(defect.details[TRACEBACK_DETAIL], ["scan.py:3 in run"])
+        self.assertIn("defect in Fledge", defect.suggestion or "")
 
 
 if __name__ == "__main__":

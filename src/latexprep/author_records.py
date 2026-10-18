@@ -7,16 +7,19 @@ affiliation indices.
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
+from enum import StrEnum
 from pathlib import Path
 
 from .cancellation import cancellation_point
-from .expanded_document import command_end, expand_document
-from .file_scan import check_status, location_label, more_suffix
-from .findings import EvidenceKind, Finding
+from .expanded_document import ExpandedDocument, expand_document
+from .finding_text import check_status, location_label, more_suffix
+from .finding_weight import POLICY
+from .findings import Finding
 from .literal_text import is_placeholder_text, plain_argument_text
 from .pdf_structure_checks import StructureOptions
 from .tex_commands import COMMAND_DEFINITION_COMMANDS, PRIMITIVE_DEFINITION_COMMANDS
-from .tex_lexer import in_conditional
+from .tex_lexer import Command, command_end, in_conditional
 
 _RULE = "manuscript.author_records"
 _MAX_REPORTED_RECORDS = 100
@@ -39,25 +42,107 @@ def _problem(item: dict[str, object]) -> str:
     return f"{where} ({'; '.join(problems)})"
 
 
-def _close_record(
-    record: dict[str, object],
-    fields: dict[str, int],
-    empty_values: set[object],
-    required: tuple[str, ...],
-    violations: list[dict[str, object]],
-) -> None:
-    """Note which required fields one author lacks; a single violation covers all its problems."""
-    missing = [name for name in required if not fields.get(name)]
-    record["present_fields"] = sorted(name for name, count in fields.items() if count)
-    record["missing_fields"] = missing
-    empty = record["author_index"] in empty_values
-    problems = []
-    if empty:
-        problems.append("empty or placeholder author value")
-    if missing:
-        problems.append("missing or empty associated author fields")
-    if problems:
-        violations.append({**record, "empty_value": empty, "reason": "; ".join(problems)})
+class _Step(StrEnum):
+    """What the scan does with one command of the preamble."""
+
+    DEFINITION = "definition"  # the command being defined is not an author record
+    STOP = "stop"  # the title or the body starts: no record can follow
+    READ = "read"
+
+
+def _classify(command: Command) -> _Step:
+    if command.name in COMMAND_DEFINITION_COMMANDS:
+        return _Step.DEFINITION
+    if not command.depth and (command.name == "maketitle" or command.begins("document")):
+        return _Step.STOP
+    return _Step.READ
+
+
+def _syntax_problem(document: ExpandedDocument, command: Command, where: str) -> str | None:
+    """Why ``command`` cannot be read as a plain one-argument record, or ``None``."""
+    # A \if… token only matters where it encloses a record: a \newif-defined
+    # name or a branch-taking package conditional executes nothing by itself.
+    if in_conditional(document.conditionals, command.start):
+        return f"{where}: author record inside conditional control flow"
+    if command.depth or command.options or len(command.arguments) != 1:
+        return f"{where}: grouped, optional or ambiguous author-record syntax"
+    return None
+
+
+@dataclass
+class _AuthorScan:
+    """Author records in preamble order: each opener starts a record, fields join the open one."""
+
+    author_command: str
+    required_fields: tuple[str, ...]
+    uncertainty: list[str]
+    records: list[dict[str, object]] = field(default_factory=list)
+    violations: list[dict[str, object]] = field(default_factory=list)
+    # Indexes of the records whose author name is empty or a placeholder.
+    empty_names: set[object] = field(default_factory=set)
+    # How many times each required field was given for the open record.
+    fields: dict[str, int] = field(default_factory=dict)
+
+    def read(self, document: ExpandedDocument) -> None:
+        """Read the preamble up to the title or the document body."""
+        ignored_until = -1
+        for command in document.commands:
+            cancellation_point()
+            if command.start < ignored_until:
+                continue
+            step = _classify(command)
+            if step is _Step.DEFINITION:
+                ignored_until = command_end(command)
+            elif step is _Step.STOP:
+                break
+            else:
+                self._read_command(document, command)
+        self._close_record()
+        if not self.records:
+            self.violations.append({"reason": "no supported literal author records"})
+
+    def _read_command(self, document: ExpandedDocument, command: Command) -> None:
+        if command.name in _DYNAMIC_COMMANDS:
+            self.uncertainty.append("dynamically redefined preamble commands")
+        if command.name != self.author_command and command.name not in self.required_fields:
+            return
+        location = document.location(command.start).as_dict()
+        problem = _syntax_problem(document, command, location_label(location))
+        if problem is not None:
+            self.uncertainty.append(problem)
+            return
+        value, reasons = plain_argument_text(command)
+        self.uncertainty.extend(reasons)
+        nonempty = bool(value and not is_placeholder_text(value))
+        if command.name == self.author_command:
+            self._close_record()
+            self.fields = {}
+            self.records.append({"author_index": len(self.records) + 1, **location})
+            if not nonempty and not reasons:
+                self.empty_names.add(self.records[-1]["author_index"])
+        elif not self.records:
+            self.violations.append(
+                {**location, "field": command.name, "reason": "field before author"}
+            )
+        elif nonempty and not reasons:
+            self.fields[command.name] = self.fields.get(command.name, 0) + 1
+
+    def _close_record(self) -> None:
+        """Note which required fields the open record lacks; one violation covers its problems."""
+        if not self.records:
+            return
+        record = self.records[-1]
+        missing = [name for name in self.required_fields if not self.fields.get(name)]
+        record["present_fields"] = sorted(name for name, count in self.fields.items() if count)
+        record["missing_fields"] = missing
+        empty = record["author_index"] in self.empty_names
+        problems = []
+        if empty:
+            problems.append("empty or placeholder author value")
+        if missing:
+            problems.append("missing or empty associated author fields")
+        if problems:
+            self.violations.append({**record, "empty_value": empty, "reason": "; ".join(problems)})
 
 
 def _failure_message(violations: list[dict[str, object]], records: int, author_command: str) -> str:
@@ -82,6 +167,40 @@ def _failure_message(violations: list[dict[str, object]], records: int, author_c
     return "; ".join(sections) + "."
 
 
+def _author_finding(scan: _AuthorScan, main: str | None) -> Finding:
+    """The finding for a scanned preamble: violations are withheld while anything is unclear."""
+    reasons = sorted(set(scan.uncertainty))
+    # Any interpretation gap withholds every violation, unlike the manuscript policies.
+    confirmed = scan.violations if not reasons else []
+    message = "Checked each configured sequential literal author record."
+    if confirmed:
+        message = _failure_message(confirmed, len(scan.records), scan.author_command)
+    elif reasons:
+        message += " Inconclusive: " + reasons[0].rstrip(".") + "."
+    incomplete = bool(scan.uncertainty)
+    status = check_status(failed=bool(confirmed), incomplete=incomplete)
+    return Finding(
+        _RULE,
+        message,
+        severity=POLICY.severity(status),
+        status=status,
+        path=main,
+        evidence_kind=POLICY.evidence_kind,
+        details={
+            "records": scan.records[:_MAX_REPORTED_RECORDS],
+            "observed_violations": scan.violations[:_MAX_REPORTED_RECORDS],
+            "uncertainty": reasons,
+            "author_command": scan.author_command,
+            "required_fields": list(scan.required_fields),
+            "scope": "User-selected preamble record grammar; no template, identity or "
+            "shared-field inference.",
+            "violations": confirmed[:_MAX_REPORTED_RECORDS],
+            "violation_count": len(confirmed),
+            "incomplete": incomplete,
+        },
+    )
+
+
 def check_author_records(root: Path, main: str | None, options: StructureOptions) -> list[Finding]:
     """Check sequential top-level literal records before begin{document}/maketitle.
 
@@ -90,92 +209,8 @@ def check_author_records(root: Path, main: str | None, options: StructureOptions
     if not options.required_author_fields:
         return []
     document = expand_document(root, main)
-    uncertainty = list(document.graph_uncertainty)
-    records: list[dict[str, object]] = []
-    fields: dict[str, int] = {}
-    violations: list[dict[str, object]] = []
-    empty_values: set[object] = set()
-    ignored_until = -1
-    configured = {options.author_command, *options.required_author_fields}
-
-    def finish() -> None:
-        if records:
-            _close_record(
-                records[-1], fields, empty_values, options.required_author_fields, violations
-            )
-
-    for command in document.commands:
-        cancellation_point()
-        if command.start < ignored_until:
-            continue
-        if command.name in COMMAND_DEFINITION_COMMANDS:
-            # The declaration's literal command token is not an author record.
-            ignored_until = command_end(command)
-            continue
-        if not command.depth and (command.name == "maketitle" or command.begins("document")):
-            break
-        if command.name in _DYNAMIC_COMMANDS:
-            uncertainty.append("dynamically redefined preamble commands")
-        if command.name not in configured:
-            continue
-        location = document.location(command.start).as_dict()
-        # A \if… token only matters where it encloses a record: a \newif-defined
-        # name or a branch-taking package conditional executes nothing by itself.
-        if in_conditional(document.conditionals, command.start):
-            uncertainty.append(
-                f"{location_label(location)}: author record inside conditional control flow"
-            )
-            continue
-        if command.depth or command.options or len(command.arguments) != 1:
-            uncertainty.append(
-                f"{location_label(location)}: grouped, optional or ambiguous author-record syntax"
-            )
-            continue
-        value, reasons = plain_argument_text(command)
-        uncertainty.extend(reasons)
-        nonempty = bool(value and not is_placeholder_text(value))
-        if command.name == options.author_command:
-            finish()
-            fields = {}
-            records.append({"author_index": len(records) + 1, **location})
-            if not nonempty and not reasons:
-                empty_values.add(records[-1]["author_index"])
-        elif not records:
-            violations.append({**location, "field": command.name, "reason": "field before author"})
-        elif nonempty and not reasons:
-            fields[command.name] = fields.get(command.name, 0) + 1
-    finish()
-    if not records:
-        violations.append({"reason": "no supported literal author records"})
-    reasons = sorted(set(uncertainty))
-    # Any interpretation gap withholds every violation, unlike the manuscript policies.
-    confirmed = violations if not reasons else []
-    message = "Checked each configured sequential literal author record."
-    if confirmed:
-        message = _failure_message(confirmed, len(records), options.author_command)
-    elif reasons:
-        message += " Inconclusive: " + reasons[0].rstrip(".") + "."
-    incomplete = bool(uncertainty)
-    status = check_status(failed=bool(confirmed), incomplete=incomplete)
-    return [
-        Finding(
-            _RULE,
-            message,
-            severity="error" if confirmed or incomplete else "info",
-            status=status,
-            path=main,
-            evidence_kind=EvidenceKind.DERIVED,
-            details={
-                "records": records[:_MAX_REPORTED_RECORDS],
-                "observed_violations": violations[:_MAX_REPORTED_RECORDS],
-                "uncertainty": reasons,
-                "author_command": options.author_command,
-                "required_fields": list(options.required_author_fields),
-                "scope": "User-selected preamble record grammar; no template, identity or "
-                "shared-field inference.",
-                "violations": confirmed[:_MAX_REPORTED_RECORDS],
-                "violation_count": len(confirmed),
-                "incomplete": incomplete,
-            },
-        )
-    ]
+    scan = _AuthorScan(
+        options.author_command, options.required_author_fields, list(document.graph_uncertainty)
+    )
+    scan.read(document)
+    return [_author_finding(scan, main)]

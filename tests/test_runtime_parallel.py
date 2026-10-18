@@ -13,19 +13,23 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from latexprep.command_runner import CommandResult
 from latexprep.defects import is_expected_failure
 from latexprep.errors import PreparationError
 from latexprep.process_control import kill_process_group
+from latexprep.process_table import ProcessSample
 from latexprep.resource_budget import ResourceBudget
 from latexprep.resource_monitor import (
     JobScope,
-    ProcessSample,
+    MemoryAccounting,
     ResourceMonitor,
     ResourceStatistics,
     _sample_interval,
+    workspace_violation,
 )
-from latexprep.runtime import CommandResult, ToolRunner
-from latexprep.sandbox import SeatbeltSandbox, tool_environment
+from latexprep.runtime import ToolRunner
+from latexprep.sandbox import SeatbeltSandbox
+from latexprep.tool_launch import create_tool_environment
 from latexprep.toolchain import ToolContext
 from tests.support import live_tests_enabled
 from tests.test_runtime import never_reports
@@ -222,12 +226,12 @@ class VersionAndInputTests(unittest.IsolatedAsyncioTestCase):
         perl = Path("/usr/bin/perl")
         context = runner.toolchain.context(perl)
         epoch = runner.source_date_epoch
-        first = tool_environment(self.root, context, source_date_epoch=epoch)
+        first = create_tool_environment(self.root, context, source_date_epoch=epoch).variables
         with patch("latexprep.toolchain.shutil.which", return_value="/untrusted/new-tool"):
             self.assertIs(runner.toolchain.context(perl), context)
-            second = tool_environment(
+            second = create_tool_environment(
                 self.root, runner.toolchain.context(perl), source_date_epoch=epoch
-            )
+            ).variables
         self.assertEqual(first["SOURCE_DATE_EPOCH"], "17")
         self.assertEqual(first["SOURCE_DATE_EPOCH"], second["SOURCE_DATE_EPOCH"])
         self.assertEqual(first["PATH"], second["PATH"])
@@ -337,6 +341,43 @@ class VersionAndInputTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse((sibling / "marker").exists())
 
 
+class StorageWalkTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name).resolve()
+
+    def test_one_walk_measures_the_tree_and_checks_every_workspace(self) -> None:
+        quiet, noisy = self.root / "quiet", self.root / "noisy"
+        (quiet / "nested").mkdir(parents=True)
+        noisy.mkdir()
+        (quiet / "nested" / "small.bin").write_bytes(b"x" * 10)
+        (noisy / "huge.bin").write_bytes(b"y" * 200)
+        (self.root / "outside.bin").write_bytes(b"z" * 5)
+        monitor = ResourceMonitor(SeatbeltSandbox(), ResourceStatistics(1024, None))
+        scope = JobScope(self.root, max_temp_bytes=10_000, max_file_bytes=100)
+        with patch("latexprep.resource_monitor.os.walk", wraps=os.walk) as walk:
+            violations, tree_bytes = monitor._job_storage(scope, (quiet, noisy))
+        self.assertEqual(walk.call_count, 1)
+        self.assertEqual(tree_bytes, 215)
+        self.assertEqual(violations, (None, "A generated file exceeded the file size limit"))
+
+    def test_workspace_limits_are_counted_per_workspace(self) -> None:
+        workspace = self.root / "work"
+        workspace.mkdir()
+        for index in range(5):
+            (workspace / f"part{index}.bin").write_bytes(b"x" * 30)
+        self.assertIsNone(workspace_violation(workspace, 100))
+        # Five files of 30 bytes exceed four times a 30-byte file ceiling in total.
+        self.assertEqual(
+            workspace_violation(workspace, 30), "Workspace exceeded the total disk limit"
+        )
+        with patch("latexprep.resource_monitor.MAX_WORKSPACE_ENTRIES", 3):
+            self.assertEqual(
+                workspace_violation(workspace, 100), "Workspace entry count exceeded 3"
+            )
+
+
 class ProcessListingTests(unittest.IsolatedAsyncioTestCase):
     def monitor(self) -> ResourceMonitor:
         return ResourceMonitor(SeatbeltSandbox(), ResourceStatistics(1024, None))
@@ -433,7 +474,8 @@ class SharedMonitorTests(unittest.IsolatedAsyncioTestCase):
         assert isinstance(parent_rss, float) and isinstance(tool_rss, float)
         self.assertGreater(parent_rss, 0)
         self.assertGreater(tool_rss, 0)
-        self.assertEqual(stats.memory_accounting, "sampled parent and registered process groups")
+        self.assertIs(stats.memory_accounting, MemoryAccounting.SAMPLED)
+        self.assertIsNone(stats.memory_accounting_problem)
 
     async def test_shared_job_memory_includes_parent_and_stops_all_groups(self) -> None:
         runner = SampledRunner(ResourceBudget(2, 75, coordinator_memory_mb=5))
@@ -555,7 +597,11 @@ class SharedMonitorTests(unittest.IsolatedAsyncioTestCase):
         async with runner.job_scope(self.root, max_temp_bytes=1_000_000):
             pass
         self.assertIsNone(runner.statistics().resource_exceeded)
-        self.assertIn("unavailable", str(runner.statistics().memory_accounting))
+        self.assertIs(runner.statistics().memory_accounting, MemoryAccounting.UNAVAILABLE)
+        self.assertEqual(
+            runner.statistics().memory_accounting_problem,
+            "synthetic process accounting unavailable",
+        )
         runner.allow_sample.clear()
         async with runner.job_scope(self.root, max_temp_bytes=1_000_000):
             task = asyncio.create_task(self.sleeping_command(runner, "command", 64))

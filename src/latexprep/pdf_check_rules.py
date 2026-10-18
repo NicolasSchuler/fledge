@@ -1,11 +1,12 @@
 """Data-only catalogue for optional PDF measurements and object policies."""
 
+from .pdf_rule_names import PdfRule
 from .rule_definition import Rule
 
 RULES = (
     Rule(
         code="PDF201",
-        name="pdf.section_page_budget",
+        name=PdfRule.SECTION_PAGE_BUDGET,
         title="Section page budgets",
         description="Compare explicitly supplied inclusive page ranges with user-supplied "
         "section budgets; ranges outside the actual document are inconclusive.",
@@ -16,7 +17,7 @@ RULES = (
     ),
     Rule(
         code="PDF202",
-        name="pdf.rendered_text_size",
+        name=PdfRule.RENDERED_TEXT_SIZE,
         title="Reported rendered text size",
         description="Compare Poppler text sizes with global or explicitly located regional "
         "minima. Integer rounding, absent text, unsupported rotation/crop and partial regions "
@@ -29,7 +30,7 @@ RULES = (
     ),
     Rule(
         code="PDF203",
-        name="pdf.printable_text_bounds",
+        name=PdfRule.PRINTABLE_TEXT_BOUNDS,
         title="Printable text bounds",
         description="Compare extractable text boxes with supplied margins or allowed regions. "
         "Advisory; image bounds, clipping paths, rotated/cropped pages and semantic object "
@@ -41,7 +42,7 @@ RULES = (
     ),
     Rule(
         code="PDF204",
-        name="pdf.text_overlap",
+        name=PdfRule.TEXT_OVERLAP,
         title="Text overlap candidates",
         description="Measure pairwise extractable-text rectangle intersections against an "
         "explicit area ratio; legitimate mathematical overlays may be reported. Advisory.",
@@ -52,7 +53,7 @@ RULES = (
     ),
     Rule(
         code="PDF205",
-        name="pdf.sparse_pages",
+        name=PdfRule.SPARSE_PAGES,
         title="Sparse rendered page candidates",
         description="Compare bounded grayscale pixel coverage with an explicit minimum and "
         "background assumption. Exempt pages are supplied explicitly; intended blank pages "
@@ -64,7 +65,7 @@ RULES = (
     ),
     Rule(
         code="PDF206",
-        name="pdf.required_metadata",
+        name=PdfRule.REQUIRED_METADATA,
         title="Required PDF metadata",
         description="Require nonempty user-selected pdfinfo text properties. Presence does "
         "not establish rights, identity or semantic correctness.",
@@ -75,7 +76,7 @@ RULES = (
     ),
     Rule(
         code="PDF207",
-        name="pdf.metadata_agreement",
+        name=PdfRule.METADATA_AGREEMENT,
         title="Expected PDF metadata agreement",
         description="Compare properties with supplied expected values using whitespace-only "
         "normalization. Source expansion, identity and author order equivalence are not inferred.",
@@ -86,7 +87,7 @@ RULES = (
     ),
     Rule(
         code="PDF208",
-        name="pdf.tagging_presence",
+        name=PdfRule.TAGGING_PRESENCE,
         title="PDF tagging presence",
         description="Require pdfinfo to report tagging present; this is not a reading-order, "
         "table/link structure, PDF/UA or general accessibility validation.",
@@ -97,7 +98,7 @@ RULES = (
     ),
     Rule(
         code="PDF209",
-        name="pdf.document_language",
+        name=PdfRule.DOCUMENT_LANGUAGE,
         title="PDF language declaration",
         description="Inspect qpdf's resolved catalog language for required presence or an "
         "explicit expected language tag; unsupported encoding or missing qpdf is inconclusive.",
@@ -108,7 +109,7 @@ RULES = (
     ),
     Rule(
         code="PDF210",
-        name="pdf.annotation_policy",
+        name=PdfRule.ANNOTATION_POLICY,
         title="PDF annotation type policy",
         description="Inspect resolved page annotation objects for explicitly forbidden "
         "subtypes, including indirect objects. Missing/incomplete qpdf evidence is inconclusive.",
@@ -119,7 +120,7 @@ RULES = (
     ),
     Rule(
         code="PDF211",
-        name="pdf.action_policy",
+        name=PdfRule.ACTION_POLICY,
         title="PDF action-name candidates",
         description="Scan resolved reachable dictionaries for explicitly forbidden /S names. "
         "Advisory action candidates; opaque streams and orphan objects are excluded, and no "
@@ -131,7 +132,7 @@ RULES = (
     ),
     Rule(
         code="PDF212",
-        name="pdf.included_figure_fonts",
+        name=PdfRule.INCLUDED_FIGURE_FONTS,
         title="Included PDF figure fonts",
         description="Inspect explicitly supplied input PDFs for configured embedding and "
         "Type 3 policies. A figure with no font resources has nothing to embed and passes; "
@@ -143,7 +144,7 @@ RULES = (
     ),
     Rule(
         code="PDF213",
-        name="pdf.stroke_width",
+        name=PdfRule.STROKE_WIDTH,
         title="Transformed PDF stroke width",
         description="Compare MuPDF trace stroke widths after uniform placement transforms "
         "with an explicit minimum. Hairlines/nonuniform transforms, raster lines and filled "
@@ -155,7 +156,7 @@ RULES = (
     ),
     Rule(
         code="PDF214",
-        name="pdf.color_space_policy",
+        name=PdfRule.COLOR_SPACE_POLICY,
         title="Rendering color-space policy",
         description="Compare MuPDF trace rendering color-space names with an explicit allowed "
         "list. Source encoding, color-only meaning and perceptual accessibility are not inferred.",
@@ -166,7 +167,7 @@ RULES = (
     ),
     Rule(
         code="PDF215",
-        name="pdf.assumed_text_contrast",
+        name=PdfRule.ASSUMED_TEXT_CONTRAST,
         title="Text contrast against supplied background",
         description="Compare opaque trace text colors against an explicitly supplied uniform "
         "background, treating DeviceRGB/Gray as sRGB. Actual backgrounds, raster text and "
@@ -178,7 +179,7 @@ RULES = (
     ),
     Rule(
         code="PDF216",
-        name="pdf.grayscale_separation",
+        name=PdfRule.GRAYSCALE_SEPARATION,
         title="Grayscale color separation candidates",
         description="Compare nominal sRGB luminance for distinct opaque DeviceRGB/Gray colors "
         "on each page against a supplied difference. Advisory; color-only meaning, proximity, "

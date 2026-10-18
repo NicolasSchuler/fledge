@@ -10,10 +10,11 @@ directory is, and both live outside every tool workspace.
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import platform
 import re
 import stat
+import struct
+import tempfile
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -24,8 +25,13 @@ from .file_safety import DirectoryIdentity, FileIdentity, regular_file_identity
 # uses fat_arch records and the 64-bit form fat_arch_64 records.
 _FAT_MAGIC_32 = 0xCAFEBABE
 _FAT_MAGIC_64 = 0xCAFEBABF
+_FAT_HEADER = struct.Struct(">II")  # magic, architecture count
+_FAT_ARCH_32 = struct.Struct(">IIIII")  # cpu type, cpu subtype, offset, size, alignment
+_FAT_ARCH_64 = struct.Struct(">IIQQII")  # as above, 64-bit offset and size, then reserved
 _FAT_CPU_TYPES = {"arm64": 0x0100000C, "x86_64": 0x01000007}
 _MAX_FAT_ARCHITECTURES = 64
+# The smallest image that can hold a Mach-O header.
+_MIN_MACHO_IMAGE_BYTES = 8
 # A runtime-owned toolchain copy is interpolated into latexmk's Perl configuration
 # and into the command line latexmk builds for it, so its path must be inert in
 # both. Application-generated temporary paths satisfy this; nothing else is used.
@@ -40,29 +46,25 @@ def _host_macho_slice(data: bytes) -> bytes:
     a universal Biber wrapper would shell out to it inside the sandbox. A
     single-architecture image is already the slice and is returned unchanged.
     """
-    if len(data) < 8:
+    if len(data) < _MIN_MACHO_IMAGE_BYTES:
         raise PreparationError("The tool executable is too small to inspect")
-    magic = int.from_bytes(data[:4], "big")
+    magic, count = _FAT_HEADER.unpack_from(data)
     if magic not in {_FAT_MAGIC_32, _FAT_MAGIC_64}:
         return data
-    wide = magic == _FAT_MAGIC_64
-    width = 32 if wide else 20
-    count = int.from_bytes(data[4:8], "big")
-    if not 1 <= count <= _MAX_FAT_ARCHITECTURES or 8 + count * width > len(data):
+    record = _FAT_ARCH_64 if magic == _FAT_MAGIC_64 else _FAT_ARCH_32
+    table_end = _FAT_HEADER.size + count * record.size
+    if not 1 <= count <= _MAX_FAT_ARCHITECTURES or table_end > len(data):
         raise PreparationError("The universal executable header is truncated or unusable")
     machine = platform.machine()
     if machine not in _FAT_CPU_TYPES:
         raise PreparationError(f"Unsupported host architecture for tool isolation: {machine}")
     for index in range(count):
-        record = data[8 + index * width : 8 + (index + 1) * width]
-        if int.from_bytes(record[:4], "big") != _FAT_CPU_TYPES[machine]:
-            continue
-        offset, size = (
-            (int.from_bytes(record[8:16], "big"), int.from_bytes(record[16:24], "big"))
-            if wide
-            else (int.from_bytes(record[8:12], "big"), int.from_bytes(record[12:16], "big"))
+        cpu_type, _, offset, size, *_ = record.unpack_from(
+            data, _FAT_HEADER.size + index * record.size
         )
-        if size < 8 or offset < 8 + count * width or offset + size > len(data):
+        if cpu_type != _FAT_CPU_TYPES[machine]:
+            continue
+        if size < _MIN_MACHO_IMAGE_BYTES or offset < table_end or offset + size > len(data):
             raise PreparationError("The universal executable slice lies outside its container")
         return data[offset : offset + size]
     raise PreparationError(f"The universal executable has no {machine} slice")
@@ -121,19 +123,16 @@ def create_biber_toolchain(source: Path, directory: Path, *, max_file_bytes: int
     if source.stat().st_size > max_file_bytes:
         raise PreparationError("The installed biber exceeds the tool file size limit")
     image = _host_macho_slice(source.read_bytes())
-    base = directory / f"biber-{hashlib.sha256(image).hexdigest()[:16]}"
-    executable, payload = base / "biber", base / "payload"
-    if not _INERT_PATH.fullmatch(str(executable)):
+    # The names below it are fixed or random letters and digits, so only the parent
+    # directory can make the path unfit.
+    if not _INERT_PATH.fullmatch(str(directory)):
         raise PreparationError(
             "An isolated bibliography tool needs a path of letters, digits, underscores, "
-            f"dots, slashes or hyphens: {executable}"
+            f"dots, slashes or hyphens: {directory}"
         )
-    try:
-        base.mkdir(mode=0o700, parents=True, exist_ok=False)
-    except FileExistsError as error:
-        raise PreparationError(
-            "An isolated bibliography tool requires a new runtime-owned directory"
-        ) from error
+    directory.mkdir(parents=True, exist_ok=True)
+    base = Path(tempfile.mkdtemp(prefix="biber-", dir=directory))
+    executable, payload = base / "biber", base / "payload"
     with executable.open("xb") as outgoing:
         outgoing.write(image)
     executable.chmod(0o500)

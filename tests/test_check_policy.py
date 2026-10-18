@@ -7,13 +7,11 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from latexprep.author_records import check_author_records
-from latexprep.bibliography_checks import (
-    BibliographyOptions,
-    check_bibliography_coverage_and_fields,
-)
+from latexprep.bibliography_checks import check_bibliography_coverage_and_fields
+from latexprep.bibliography_options import BibliographyOptions
 from latexprep.bibliography_transform import BibliographyTransformOptions
 from latexprep.build_checks import BuildCheckOptions, check_build_details
-from latexprep.build_dependencies import LoadedPackage
+from latexprep.build_result import BuildResult
 from latexprep.check_policy import (
     _GROUP_CHECKS,
     _ROOT_CHECKS,
@@ -25,42 +23,37 @@ from latexprep.check_selection import CheckSelection
 from latexprep.config import Settings, effective_settings
 from latexprep.findings import Finding
 from latexprep.formatting import FormattingOptions
-from latexprep.latexmk_build import BuildResult
+from latexprep.image_metadata import check_image_metadata
 from latexprep.manuscript import ManuscriptOptions, check_manuscript
-from latexprep.manuscript_checks import ManuscriptCheckOptions, check_manuscript_policies
-from latexprep.metadata_privacy import (
-    MetadataEdit,
-    MetadataPrivacyOptions,
-    check_image_metadata,
-    check_sanitized_pdf_metadata,
-    plan_metadata_sanitization,
-)
-from latexprep.online_checks import OnlineOptions, Response, check_online_references
-from latexprep.pdf_artwork import PdfArtworkOptions, inspect_artwork_inputs, inspect_pdf_artwork
-from latexprep.pdf_checks import (
-    PdfCheckOptions,
-    PdfSectionBudget,
-    inspect_included_pdf_figures,
-    inspect_pdf_details,
-)
+from latexprep.manuscript_check_options import ManuscriptCheckOptions
+from latexprep.manuscript_checks import check_manuscript_policies
+from latexprep.metadata_privacy import MetadataEdit, MetadataPrivacyOptions
+from latexprep.metadata_source_edits import check_sanitized_pdf_metadata, plan_metadata_sanitization
+from latexprep.online_checks import check_online_references
+from latexprep.online_http_wire import Response
+from latexprep.online_options import OnlineOptions
+from latexprep.package_headers import LoadedPackage
+from latexprep.pdf_artwork import inspect_artwork_inputs, inspect_pdf_artwork
+from latexprep.pdf_artwork_options import PdfArtworkOptions
+from latexprep.pdf_check_options import PdfCheckOptions, PdfRegion, PdfSectionBudget
+from latexprep.pdf_checks import inspect_included_pdf_figures, inspect_pdf_details
 from latexprep.pdf_inspection import PdfInspectionOptions, configured_policy_rules
 from latexprep.pdf_structure_checks import (
     HeadingExpectation,
     StructureOptions,
     inspect_pdf_structure,
 )
-from latexprep.pdf_support import PdfRegion
 from latexprep.rules import BY_CODE, BY_NAME, RULES, code_for
-from latexprep.source import analyze_sources
+from latexprep.source_analysis import analyze_sources
 from latexprep.source_transform import SourceTransformOptions
 from latexprep.submission_checks import (
-    SubmissionOptions,
     check_pdf_identity,
     check_submission,
     check_submission_archive,
 )
+from latexprep.submission_options import SubmissionOptions
 from latexprep.workflow_options import DocumentOptions, WorkflowOptions
-from tests.test_pdf_artwork import ArtworkRunner, contrast_sample
+from tests.support import ArtworkRunner, contrast_sample
 from tests.test_pdf_checks import DetailRunner
 
 
@@ -351,7 +344,7 @@ class CheckPolicyTests(unittest.TestCase):
         )
         effective = effective_settings(original)
         with patch(
-            "latexprep.metadata_privacy.inventory_files", side_effect=AssertionError("image scan")
+            "latexprep.image_metadata.inventory_files", side_effect=AssertionError("image scan")
         ):
             self.assertEqual(check_image_metadata(self.root, effective.metadata_privacy), [])
         before = self.main.read_bytes()
@@ -614,7 +607,8 @@ class CheckPolicyAdapterTests(unittest.IsolatedAsyncioTestCase):
                     Settings(checks=selection(code), online_checks=options)
                 )
                 with patch(
-                    "latexprep.online_checks._collect", side_effect=AssertionError("offline scan")
+                    "latexprep.online_checks.collect_inputs",
+                    side_effect=AssertionError("offline scan"),
                 ):
                     findings = await check_online_references(
                         self.root, options=effective.online_checks
@@ -631,22 +625,22 @@ class CheckPolicyAdapterTests(unittest.IsolatedAsyncioTestCase):
         original = Settings(online_checks=OnlineOptions(online=True, online_doi_resolution=True))
         dns = AsyncMock(return_value=("93.184.216.34",))
         http = AsyncMock(return_value=Response(200))
-        with (
-            patch("latexprep.online_checks._resolve", dns),
-            patch("latexprep.online_checks._exchange", http),
-        ):
-            findings = await check_online_references(self.root, options=original.online_checks)
+        findings = await check_online_references(
+            self.root, options=original.online_checks, resolver=dns, transport=http
+        )
         self.assertEqual(codes(findings), {"NET001"})
         self.assertGreater(dns.await_count, 0)
         self.assertGreater(http.await_count, 0)
         effective = effective_settings(replace(original, checks=CheckSelection(ignore=("NET",))))
-        with (
-            patch("latexprep.online_checks._collect", side_effect=AssertionError("scan")),
-            patch("latexprep.online_checks._resolve", side_effect=AssertionError("DNS")),
-            patch("latexprep.online_checks._exchange", side_effect=AssertionError("HTTP")),
-        ):
+        with patch("latexprep.online_checks.collect_inputs", side_effect=AssertionError("scan")):
             self.assertEqual(
-                await check_online_references(self.root, options=effective.online_checks), []
+                await check_online_references(
+                    self.root,
+                    options=effective.online_checks,
+                    resolver=AsyncMock(side_effect=AssertionError("DNS")),
+                    transport=AsyncMock(side_effect=AssertionError("HTTP")),
+                ),
+                [],
             )
 
     async def test_each_pdf_detail_disables_other_adapters_and_keeps_paired_arguments_valid(
@@ -857,6 +851,24 @@ class CheckPolicyMapTests(unittest.TestCase):
         # Callers receive copies, so they cannot change the policy tables.
         activation["TEX101"][0][1]["expected_document_class"] = "changed"
         self.assertIsNone(_ROOT_CHECKS["TEX101"]["expected_document_class"])
+
+    def test_disabled_values_equal_the_defaults_except_for_checks_that_run_by_default(self) -> None:
+        """Each table row clears a field to the value its option class defaults to."""
+        from latexprep import check_policy
+
+        defaults = Settings().top_level_values()
+        on_by_default = set()
+        for code, rows in check_policy.opt_in_activation().items():
+            for group, fields in rows:
+                for name, disabled in fields.items():
+                    current = defaults[name] if group is None else getattr(defaults[group], name)
+                    if current == disabled:
+                        continue
+                    on_by_default.add(code)
+                    # A check that runs by default is switched off by a different value of the
+                    # same kind, never by a value of another type.
+                    self.assertIs(type(current), type(disabled), (code, group, name))
+        self.assertEqual(on_by_default, {"BIB101", "BIB102", "BIB105", "BIB106"})
 
 
 if __name__ == "__main__":

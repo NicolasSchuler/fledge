@@ -10,14 +10,16 @@ import zipfile
 from pathlib import Path
 
 from latexprep.build_checks import BuildCheckOptions
+from latexprep.command_runner import RuntimeLimits
 from latexprep.config import Settings
 from latexprep.core import run_job
 from latexprep.job_context import JobRequest
-from latexprep.manuscript_checks import ManuscriptCheckOptions
-from latexprep.pdf_checks import PdfCheckOptions, PdfSectionBudget, inspect_pdf_details
+from latexprep.manuscript_check_options import ManuscriptCheckOptions
+from latexprep.pdf_check_options import PdfCheckOptions, PdfSectionBudget
+from latexprep.pdf_checks import inspect_pdf_details
 from latexprep.resource_budget import ResourceBudget
-from latexprep.runtime import RuntimeLimits, ToolRunner
-from latexprep.submission_checks import SubmissionOptions
+from latexprep.runtime import ToolRunner
+from latexprep.submission_options import SubmissionOptions
 from tests.support import live_tests_enabled
 
 

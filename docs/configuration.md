@@ -130,8 +130,9 @@ The two `latex-prep` file names are the older spellings; see
 above `pyproject.toml`, so a leftover `latex-prep.toml` shadows a `[tool.fledge]`
 table beside it. An unrelated `pyproject.toml` is skipped. Discovery stops at a
 repository root (a directory containing `.git` or `.hg`) and never climbs into
-your home directory or the filesystem root, so there is no user-wide
-configuration. Only one file is used; files from different directories are not
+your home directory, the system temporary directory or the filesystem root, so
+there is no user-wide configuration and no file another user left in `/tmp` can
+configure your job. Only one file is used; files from different directories are not
 merged.
 
 Precedence, from highest to lowest: command-line options, the selected settings

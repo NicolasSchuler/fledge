@@ -13,22 +13,22 @@ from unittest.mock import AsyncMock, patch
 from click.testing import CliRunner
 
 from latexprep.build_checks import BuildCheckOptions
-from latexprep.build_dependencies import LoadedPackage
+from latexprep.build_result import BuildResult
 from latexprep.cli import cli
 from latexprep.config import Settings
 from latexprep.core import run_job
 from latexprep.findings import Finding
 from latexprep.job_context import JobRequest, pdf_check_settings
-from latexprep.latexmk_build import BuildResult
 from latexprep.manuscript import ManuscriptOptions
-from latexprep.manuscript_checks import ManuscriptCheckOptions
+from latexprep.manuscript_check_options import ManuscriptCheckOptions
 from latexprep.online_checks import OnlineOptions
+from latexprep.package_headers import LoadedPackage
+from latexprep.pdf_check_options import PdfCheckOptions
 from latexprep.pdf_check_pipeline import inspect_configured_pdf_checks
-from latexprep.pdf_checks import PdfCheckOptions
 from latexprep.report import Outcome, Report
 from latexprep.resource_budget import ResourceBudget
 from latexprep.runtime import ToolRunner
-from latexprep.submission_checks import SubmissionOptions
+from latexprep.submission_options import SubmissionOptions
 
 
 def source_project(root: Path, body: str = "Body.", preamble: str = "") -> None:
@@ -113,7 +113,8 @@ class WorkflowCheckTests(unittest.IsolatedAsyncioTestCase):
         (self.source / "refs.bib").write_text("@article{one,doi={10.1234/example}}\n")
         with (
             patch(
-                "latexprep.online_checks._resolve", new=AsyncMock(side_effect=AssertionError("DNS"))
+                "latexprep.pinned_dns.start_process",
+                new=AsyncMock(side_effect=AssertionError("DNS")),
             ) as dns,
             patch(
                 "asyncio.open_connection", new=AsyncMock(side_effect=AssertionError("network"))

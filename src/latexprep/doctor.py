@@ -1,4 +1,10 @@
-"""Bounded setup diagnostics using application-owned sources and normal isolation."""
+"""Bounded setup diagnostics using application-owned sources and normal isolation.
+
+Owns the ``fledge doctor`` job: it checks which tools are installed, starts a command in
+the sandbox, and builds and inspects a tiny built-in document with each selected engine
+and bibliography backend. It never reads or compiles a researcher's manuscript, and a
+pass says nothing about the manuscript. The command-line adapter is ``doctor_command``.
+"""
 
 from __future__ import annotations
 
@@ -6,22 +12,25 @@ import asyncio
 import shutil
 import sys
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
+from typing import NotRequired, TypedDict
 
+from .build_result import BuildResult
+from .command_runner import ToolVersion
 from .config import Settings
 from .errors import PreparationError
-from .finding_view import is_scope_disclaimer
 from .findings import Finding, has_blockers
 from .formatting import FormattingOptions, format_project
 from .job_execution import JobDeadlineExceeded, JobExecution
 from .latexmk_build import build_project
-from .pdf_artwork import required_artwork_tools
-from .pdf_checks import required_pdf_check_tools
+from .pdf_artwork_options import required_artwork_tools
+from .pdf_check_options import required_pdf_check_tools
 from .pdf_comparison import COMPARISON_TOOLS, compare_pdfs
 from .pdf_inspection import inspect_pdf, required_inspection_tools
 from .pdf_structure_checks import required_structure_tools
-from .pdf_support import PDF_TOOLS, pdf_tool_version_argv
-from .report import Outcome, Report, outcome_from_findings
+from .pdf_tools import PDF_TOOLS, pdf_tool_version_argv
+from .report import Outcome, Report, StageStatus, outcome_from_findings
 from .resource_budget import ResourceBudget
 from .runtime import ToolRunner
 from .setting_choices import BibliographyBackend, Engine
@@ -31,6 +40,91 @@ _PDF_PIPELINE_TOOLS = frozenset(required_inspection_tools() | COMPARISON_TOOLS)
 _BIBLIOGRAPHY_BACKENDS: tuple[BibliographyBackend, ...] = ("bibtex", "biber")
 _DOCUMENT = "\\documentclass{article}\n\\begin{document}\nFledge setup test.\n"
 _REFERENCE = "@article{doctor,author={Example, Alice},title={Setup test},year={2026}}\n"
+_SANDBOX_BACKENDS = {"darwin": "macOS sandbox-exec", "linux": "Linux Bubblewrap"}
+# The PDF findings that show the built-in PDF was inspected, extracted and rendered.
+_PDF_EVIDENCE_RULES = frozenset({"pdf.pages", "pdf.text", "compare.text", "compare.rendering"})
+
+
+class ToolInventory(TypedDict):
+    """What doctor learned about one tool; this is the entry of ``Report.tools``."""
+
+    installed: bool
+    executable: str | None
+    required: bool
+    version_verified: bool
+    exercised: bool
+    version: NotRequired[list[str]]
+    version_arguments: NotRequired[list[str]]
+
+
+@dataclass
+class _DoctorRun:
+    """Everything one diagnostic run shares: where it writes, what it runs with, what it saw."""
+
+    report: Report
+    root: Path
+    settings: Settings
+    runner: ToolRunner
+    budget: ResourceBudget
+    emit: Callable[[str], None]
+    required: frozenset[str]
+    tools: dict[str, ToolInventory]
+
+    def ready(self, names: set[str]) -> bool:
+        """Whether every tool is installed and, apart from biber, has a verified version."""
+        return all(
+            self.tools[name]["installed"]
+            and (name == "biber" or self.tools[name]["version_verified"])
+            for name in names
+        )
+
+    def mark_exercised(self, names: set[str]) -> None:
+        for name in names:
+            self.tools[name]["exercised"] = True
+
+    def add_stage(self, name: str, status: StageStatus) -> None:
+        self.report.stages.append({"name": name, "status": status})
+
+    def skip_stage(self, name: str) -> None:
+        self.add_stage(name, "skipped")
+
+    def record_stage(self, name: str, findings: list[Finding], *, required: bool = True) -> bool:
+        """Treat absent setup evidence as a blocker, or as an advisory for optional stages."""
+        bad = [
+            item
+            for item in findings
+            if item.status in {"failed", "inconclusive", "skipped"} and not item.is_scope_disclaimer
+        ]
+        self.add_stage(name, "failed" if bad else "passed")
+        if bad:
+            self.report.findings.extend(
+                _failed_fixture_finding(name, item, required) for item in bad
+            )
+            return False
+        self.report.findings.append(
+            Finding(
+                "doctor.fixture_passed",
+                f"Built-in setup fixture: {name} passed.",
+                severity="info",
+                status="passed",
+                details={"stage": name},
+            )
+        )
+        return True
+
+
+def _failed_fixture_finding(stage: str, item: Finding, required: bool) -> Finding:
+    """The doctor finding for a failing result of a built-in fixture stage."""
+    advisory = "" if required else " Only papers that need this stage's tools are affected."
+    return Finding(
+        "doctor.fixture_failed",
+        f"Built-in setup fixture, {stage}: {item.message}",
+        severity="error" if required else "warning",
+        status=item.status,
+        suggestion="Repair the local toolchain or execution limits and rerun "
+        "fledge doctor. This result does not diagnose your manuscript." + advisory,
+        details={"stage": stage, "diagnostic_rule": item.rule, **item.details},
+    )
 
 
 def diagnostic_engines(settings: Settings) -> tuple[Engine, ...]:
@@ -43,10 +137,20 @@ def diagnostic_engines(settings: Settings) -> tuple[Engine, ...]:
     )
 
 
+def _build_tool_names(engine: Engine, backend: str | None = None) -> set[str]:
+    """The tools one build with ``engine`` runs, and the bibliography ``backend`` if any."""
+    names = {"latexmk", engine}
+    if engine == "xelatex":
+        names.add("xdvipdfmx")
+    if backend is not None:
+        names.add(backend)
+    return names
+
+
 def _selected_tools(settings: Settings) -> tuple[set[str], set[str]]:
-    required = {"latexmk", *diagnostic_engines(settings), *_PDF_PIPELINE_TOOLS}
-    if "xelatex" in required:
-        required.add("xdvipdfmx")
+    required = set(_PDF_PIPELINE_TOOLS)
+    for engine in diagnostic_engines(settings):
+        required |= _build_tool_names(engine)
     # Optional measurement adapters are advisory here; a version probe cannot
     # establish that a configured manuscript measurement is supported.
     optional: set[str] = set()
@@ -95,78 +199,33 @@ def _fixture(source: Path, backend: str) -> None:
         (source / "references.bib").write_text(_REFERENCE, encoding="utf-8")
 
 
-def _record_stage(
-    report: Report, name: str, findings: list[Finding], *, required: bool = True
-) -> bool:
-    """Treat absent setup evidence as a blocker, or as an advisory for optional stages."""
-    bad = [
-        item
-        for item in findings
-        if item.status in {"failed", "inconclusive", "skipped"} and not is_scope_disclaimer(item)
-    ]
-    report.stages.append({"name": name, "status": "failed" if bad else "passed"})
-    if bad:
-        for item in bad:
-            report.findings.append(
-                Finding(
-                    "doctor.fixture_failed",
-                    f"Built-in setup fixture, {name}: {item.message}",
-                    severity="error" if required else "warning",
-                    status=item.status,
-                    suggestion="Repair the local toolchain or execution limits and rerun "
-                    "fledge doctor. This result does not diagnose your manuscript."
-                    + (
-                        ""
-                        if required
-                        else " Only papers that need this stage's tools are affected."
-                    ),
-                    details={"stage": name, "diagnostic_rule": item.rule, **item.details},
-                )
-            )
-        return False
-    report.findings.append(
-        Finding(
-            "doctor.fixture_passed",
-            f"Built-in setup fixture: {name} passed.",
-            severity="info",
-            status="passed",
-            details={"stage": name},
-        )
-    )
-    return True
+def _execution_metadata(settings: Settings) -> dict[str, object]:
+    """What this run is, for ``Report.execution``; the run adds its statistics at the end."""
+    return {
+        "engines": list(diagnostic_engines(settings)),
+        "manuscript_compiled": False,
+        "bibliography_backend": settings.bibliography_backend,
+        "bibliography_exercised": False,
+        "optional_adapters": "installation/version only; configured measurements not exercised",
+        "sandbox_backend": _SANDBOX_BACKENDS.get(sys.platform, "unavailable"),
+    }
 
 
-async def run_doctor(
-    settings: Settings | None = None, *, progress: Callable[[str], None] | None = None
-) -> Report:
-    """Diagnose selected setup; never read or compile a user's manuscript."""
-    settings = settings or Settings()
-    report = Report("doctor", scope="setup diagnostics with a built-in fixture")
-    report.settings = settings.to_dict()
-    required, optional = _selected_tools(settings)
-    engines = diagnostic_engines(settings)
-    report.execution.update(
-        {
-            "engines": list(engines),
-            "manuscript_compiled": False,
-            "bibliography_backend": settings.bibliography_backend,
-            "bibliography_exercised": False,
-            "optional_adapters": "installation/version only; configured measurements not exercised",
-            "sandbox_backend": {"darwin": "macOS sandbox-exec", "linux": "Linux Bubblewrap"}.get(
-                sys.platform, "unavailable"
-            ),
-        }
-    )
-    emit = progress or (lambda _message: None)
+def _survey_tools(
+    report: Report, required: set[str], optional: set[str]
+) -> dict[str, ToolInventory]:
+    """Which tools are installed, with a finding for each missing one."""
+    tools: dict[str, ToolInventory] = {}
     for name in sorted(required | optional):
         executable = shutil.which(name)
-        report.tools[name] = {
+        tools[name] = {
             "installed": executable is not None,
             "executable": executable,
             "required": name in required,
             "version_verified": False,
             "exercised": False,
         }
+        report.tools[name] = tools[name]
         if executable is None:
             report.findings.append(
                 Finding(
@@ -180,92 +239,106 @@ async def run_doctor(
                     details={"tool": name, "required": name in required},
                 )
             )
+    return tools
+
+
+def _record_version(inventory: ToolInventory, version: ToolVersion) -> None:
+    """Add the version a tool printed under restricted execution to its inventory."""
+    inventory["version"] = list(version.version)
+    inventory["executable"] = version.executable
+    inventory["version_arguments"] = list(version.version_arguments)
+    inventory["version_verified"] = True
+
+
+def _deadline_finding(settings: Settings) -> Finding:
+    return Finding(
+        "execution.deadline",
+        f"Setup diagnostics exceeded the {settings.job_timeout_seconds}-second job deadline.",
+        severity="error",
+        status="inconclusive",
+        suggestion="Adjust job_timeout_seconds in your config and rerun fledge doctor.",
+    )
+
+
+def _execution_unavailable_finding(error: Exception) -> Finding:
+    return Finding(
+        "doctor.execution_unavailable",
+        f"Setup diagnostics could not complete: {error}",
+        severity="error",
+        status="inconclusive",
+        suggestion="Resolve the local execution failure and rerun "
+        "fledge doctor. No manuscript was compiled.",
+    )
+
+
+def _resource_failure_finding(failure: str) -> Finding:
+    return Finding(
+        "execution.resources",
+        f"Setup diagnostics could not satisfy the runtime resource checks: {failure}",
+        severity="error",
+        status="inconclusive",
+        suggestion="Resolve the stated resource or accounting failure, adjust "
+        "the relevant memory or temporary-space limit if needed, and rerun "
+        "fledge doctor.",
+    )
+
+
+async def run_doctor(
+    settings: Settings | None = None, *, progress: Callable[[str], None] | None = None
+) -> Report:
+    """Diagnose selected setup; never read or compile a user's manuscript."""
+    settings = settings or Settings()
+    report = Report("doctor", scope="setup diagnostics with a built-in fixture")
+    report.settings = settings.to_dict()
+    report.execution.update(_execution_metadata(settings))
+    required, optional = _selected_tools(settings)
+    tools = _survey_tools(report, required, optional)
     execution = JobExecution(settings)
     try:
         with execution.workspace("fledge-doctor-") as root:
             async with execution.bounded(root):
-                await _diagnose(
-                    report,
-                    root,
-                    settings,
-                    execution.runner,
-                    execution.budget,
-                    required,
-                    optional,
-                    emit,
+                run = _DoctorRun(
+                    report=report,
+                    root=root,
+                    settings=settings,
+                    runner=execution.runner,
+                    budget=execution.budget,
+                    emit=progress or (lambda _message: None),
+                    required=frozenset(required),
+                    tools=tools,
                 )
+                await _diagnose(run)
     except JobDeadlineExceeded:
-        report.findings.append(
-            Finding(
-                "execution.deadline",
-                f"Setup diagnostics exceeded the "
-                f"{settings.job_timeout_seconds}-second job deadline.",
-                severity="error",
-                status="inconclusive",
-                suggestion="Adjust job_timeout_seconds in your config and rerun fledge doctor.",
-            )
-        )
+        report.findings.append(_deadline_finding(settings))
     except asyncio.CancelledError:
         report.outcome = Outcome.CANCELLED
         raise
     except (PreparationError, OSError) as error:
-        report.findings.append(
-            Finding(
-                "doctor.execution_unavailable",
-                f"Setup diagnostics could not complete: {error}",
-                severity="error",
-                status="inconclusive",
-                suggestion="Resolve the local execution failure and rerun "
-                "fledge doctor. No manuscript was compiled.",
-            )
-        )
+        report.findings.append(_execution_unavailable_finding(error))
     finally:
         for name, version in execution.runner.tool_versions.items():
-            if name in report.tools:
-                inventory = report.tools[name]
-                assert isinstance(inventory, dict)
-                inventory.update(version.to_report())
-                inventory["version_verified"] = True
+            if name in tools:
+                _record_version(tools[name], version)
         report.execution.update(execution.statistics())
         # job_scope takes a final sample on exit. A late limit or accounting
         # failure invalidates setup evidence even if every fixture operation passed.
-        resource_failure = execution.runner.statistics().resource_exceeded
-        if resource_failure:
-            report.findings.append(
-                Finding(
-                    "execution.resources",
-                    f"Setup diagnostics could not satisfy the runtime resource checks: "
-                    f"{resource_failure}",
-                    severity="error",
-                    status="inconclusive",
-                    suggestion="Resolve the stated resource or accounting failure, adjust "
-                    "the relevant memory or temporary-space limit if needed, and rerun "
-                    "fledge doctor.",
-                )
-            )
+        if resource_failure := execution.runner.statistics().resource_exceeded:
+            report.findings.append(_resource_failure_finding(resource_failure))
     report.outcome = outcome_from_findings(report.findings, blocked=has_blockers(report.findings))
     return report.redacted_copy()
 
 
-async def _diagnose(
-    report: Report,
-    root: Path,
-    settings: Settings,
-    runner: ToolRunner,
-    budget: ResourceBudget,
-    required: set[str],
-    optional: set[str],
-    emit: Callable[[str], None],
-) -> None:
-    emit("Testing restricted execution with a built-in command")
-    sandbox_work = root / "sandbox"
-    sandbox_work.mkdir()
+async def _probe_sandbox(run: _DoctorRun) -> bool:
+    """Start a built-in command under restricted execution; False if the sandbox refuses."""
+    run.emit("Testing restricted execution with a built-in command")
+    work = run.root / "sandbox"
+    work.mkdir()
     try:
-        result = await runner.run(["true"], cwd=sandbox_work, workspace=sandbox_work)
+        result = await run.runner.run(["true"], cwd=work, workspace=work)
         if (reason := result.failure_reason("the sandbox probe")) is not None:
             raise PreparationError(reason)
     except PreparationError as error:
-        report.findings.append(
+        run.report.findings.append(
             Finding(
                 "doctor.sandbox_unavailable",
                 f"Restricted execution is unavailable: {error}",
@@ -275,10 +348,10 @@ async def _diagnose(
                 "namespaces can start. Fledge never falls back to unrestricted execution.",
             )
         )
-        report.stages.append({"name": "sandbox", "status": "inconclusive"})
-        return
-    report.stages.append({"name": "sandbox", "status": "passed"})
-    report.findings.append(
+        run.add_stage("sandbox", "inconclusive")
+        return False
+    run.add_stage("sandbox", "passed")
+    run.report.findings.append(
         Finding(
             "doctor.sandbox",
             "Restricted execution started successfully.",
@@ -286,190 +359,176 @@ async def _diagnose(
             status="passed",
         )
     )
-    for name in sorted(required | optional):
-        inventory = report.tools[name]
-        assert isinstance(inventory, dict)
+    return True
+
+
+async def _verify_tool_versions(run: _DoctorRun) -> None:
+    """Ask each installed tool for its version under restricted execution."""
+    for name, inventory in run.tools.items():
         if not inventory["installed"] or name == "biber":
             # Biber needs the runtime's sealed toolchain preparation during build.
             continue
-        work = root / f"version-{name}"
+        work = run.root / f"version-{name}"
         work.mkdir()
         try:
-            inventory.update((await runner.tool_version(_version_command(name), work)).to_report())
-            inventory["version_verified"] = True
+            _record_version(inventory, await run.runner.tool_version(_version_command(name), work))
         except PreparationError as error:
-            report.findings.append(
+            run.report.findings.append(
                 Finding(
                     "doctor.tool_unavailable",
                     f"Installed tool {name} could not report its "
                     f"version under restricted execution: {error}",
-                    severity="error" if name in required else "warning",
+                    severity="error" if name in run.required else "warning",
                     status="inconclusive",
                     suggestion=f"Repair {name} or its sandbox-accessible resources and rerun "
                     "fledge doctor.",
-                    details={"tool": name, "required": name in required},
+                    details={"tool": name, "required": name in run.required},
                 )
             )
-    source = root / "source"
-    _fixture(source, settings.bibliography_backend)
-    if settings.apply_formatting and _ready(report, {"tex-fmt"}):
-        emit("Testing formatting on the built-in source")
-        # The configured line format, without project exclusions or blank-line policy.
-        formatted = await format_project(
+
+
+async def _diagnose_formatting(run: _DoctorRun, source: Path) -> None:
+    """Format the built-in source with tex-fmt, when formatting is configured and available."""
+    if not (run.settings.apply_formatting and run.ready({"tex-fmt"})):
+        return
+    run.emit("Testing formatting on the built-in source")
+    # The configured line format, without project exclusions or blank-line policy.
+    formatted = await format_project(
+        source,
+        run.root / "format",
+        run.runner,
+        FormattingOptions(
+            wrap_length=run.settings.formatting_options.wrap_length,
+            tab_size=run.settings.formatting_options.tab_size,
+        ),
+        budget=run.budget,
+    )
+    if not formatted.contents and not has_blockers(formatted.findings):
+        formatted.findings.append(
+            Finding(
+                "doctor.format_evidence",
+                "Formatter produced no source output.",
+                severity="error",
+                status="inconclusive",
+            )
+        )
+    if run.record_stage("formatting", formatted.findings):
+        run.mark_exercised({"tex-fmt"})
+
+
+async def _build_fixture(
+    run: _DoctorRun, source: Path, engine: Engine, backend: BibliographyBackend, label: str
+) -> tuple[BuildResult, list[Finding]]:
+    """Build the fixture in ``source`` under a build lease; returns the result and its findings.
+
+    A build that produced no PDF always carries a blocking finding, even if the build
+    reported none.
+    """
+    async with run.budget.lease(
+        f"doctor {label}", memory_mb=run.settings.build_memory_mb, kind="build"
+    ):
+        built = await build_project(
             source,
-            root / "format",
-            runner,
-            FormattingOptions(
-                wrap_length=settings.formatting_options.wrap_length,
-                tab_size=settings.formatting_options.tab_size,
+            "main.tex",
+            run.root / f"build-{label}",
+            engine,
+            run.runner,
+            bibliography_backend=backend,
+        )
+    findings = built.findings
+    if (not built.success or built.pdf is None) and not has_blockers(findings):
+        findings = [
+            *findings,
+            Finding(
+                "doctor.build_failed",
+                "Build did not produce a successful PDF result.",
+                severity="error",
             ),
-            budget=budget,
-        )
-        if not formatted.contents and not has_blockers(formatted.findings):
-            formatted.findings.append(
-                Finding(
-                    "doctor.format_evidence",
-                    "Formatter produced no source output.",
-                    severity="error",
-                    status="inconclusive",
-                )
-            )
-        if _record_stage(report, "formatting", formatted.findings):
-            _exercised(report, {"tex-fmt"})
-    for engine in diagnostic_engines(settings):
-        build_tools = {"latexmk", engine}
-        if engine == "xelatex":
-            build_tools.add("xdvipdfmx")
-        if settings.bibliography_backend != "auto":
-            build_tools.add(settings.bibliography_backend)
-        if not _ready(report, build_tools):
-            report.stages.append({"name": f"{engine}: compilation", "status": "skipped"})
-            continue
-        emit(f"Compiling the built-in setup fixture with {engine}")
-        async with budget.lease(
-            f"doctor {engine}", memory_mb=settings.build_memory_mb, kind="build"
-        ):
-            built = await build_project(
-                source,
-                "main.tex",
-                root / f"build-{engine}",
-                engine,
-                runner,
-                # No bibliography in auto's fixture. Select BibTeX isolation so
-                # the normal builder does not warm up an unused installed Biber.
-                bibliography_backend=(
-                    "bibtex"
-                    if settings.bibliography_backend == "auto"
-                    else settings.bibliography_backend
-                ),
-            )
-        findings = built.findings
-        if (not built.success or built.pdf is None) and not has_blockers(findings):
-            findings = [
-                *findings,
-                Finding(
-                    "doctor.build_failed",
-                    "Build did not produce a successful PDF result.",
-                    severity="error",
-                ),
-            ]
-        passed = _record_stage(report, f"{engine}: compilation", findings)
-        if not built.success or not passed or built.pdf is None:
-            continue
-        _exercised(report, build_tools)
-        report.execution["bibliography_exercised"] = settings.bibliography_backend != "auto"
-        if not _ready(report, set(_PDF_PIPELINE_TOOLS)):
-            report.stages.append({"name": f"{engine}: PDF pipeline", "status": "skipped"})
-            continue
-        emit(f"Inspecting, extracting text and rendering the built-in {engine} PDF")
-        inspected = await inspect_pdf(built.pdf, root / f"inspect-{engine}", runner, budget=budget)
-        compared = await compare_pdfs(
-            built.pdf,
-            built.pdf,
-            root / f"compare-{engine}",
-            runner,
-            budget=budget,
-        )
-        expected = {"pdf.pages", "pdf.text", "compare.text", "compare.rendering"}
-        if not expected <= {
-            item.rule for item in [*inspected, *compared] if item.status == "passed"
-        }:
-            compared.append(
-                Finding(
-                    "doctor.pdf_evidence",
-                    "Required page, text or rendered evidence is incomplete.",
-                    severity="error",
-                    status="inconclusive",
-                )
-            )
-        if _record_stage(report, f"{engine}: PDF pipeline", [*inspected, *compared]):
-            _exercised(report, set(_PDF_PIPELINE_TOOLS))
-    if settings.bibliography_backend == "auto":
-        await _diagnose_bibliographies(report, root, settings, runner, budget, emit)
+        ]
+    return built, findings
 
 
-async def _diagnose_bibliographies(
-    report: Report,
-    root: Path,
-    settings: Settings,
-    runner: ToolRunner,
-    budget: ResourceBudget,
-    emit: Callable[[str], None],
-) -> None:
+async def _compile_stage(run: _DoctorRun, source: Path, engine: Engine) -> Path | None:
+    """Compile the fixture with ``engine``; returns the PDF if the stage passed."""
+    backend = run.settings.bibliography_backend
+    tools = _build_tool_names(engine, None if backend == "auto" else backend)
+    stage = f"{engine}: compilation"
+    if not run.ready(tools):
+        run.skip_stage(stage)
+        return None
+    run.emit(f"Compiling the built-in setup fixture with {engine}")
+    # No bibliography in auto's fixture. Select BibTeX isolation so the normal builder
+    # does not warm up an unused installed Biber.
+    built, findings = await _build_fixture(
+        run, source, engine, "bibtex" if backend == "auto" else backend, engine
+    )
+    passed = run.record_stage(stage, findings)
+    if not built.success or not passed or built.pdf is None:
+        return None
+    run.mark_exercised(tools)
+    run.report.execution["bibliography_exercised"] = backend != "auto"
+    return built.pdf
+
+
+async def _pdf_pipeline_stage(run: _DoctorRun, engine: Engine, pdf: Path) -> None:
+    """Inspect, extract text from and render the built PDF, and compare it with itself."""
+    stage = f"{engine}: PDF pipeline"
+    if not run.ready(set(_PDF_PIPELINE_TOOLS)):
+        run.skip_stage(stage)
+        return
+    run.emit(f"Inspecting, extracting text and rendering the built-in {engine} PDF")
+    inspected = await inspect_pdf(
+        pdf, run.root / f"inspect-{engine}", run.runner, budget=run.budget
+    )
+    compared = await compare_pdfs(
+        pdf, pdf, run.root / f"compare-{engine}", run.runner, budget=run.budget
+    )
+    seen = {item.rule for item in [*inspected, *compared] if item.status == "passed"}
+    if not _PDF_EVIDENCE_RULES <= seen:
+        compared.append(
+            Finding(
+                "doctor.pdf_evidence",
+                "Required page, text or rendered evidence is incomplete.",
+                severity="error",
+                status="inconclusive",
+            )
+        )
+    if run.record_stage(stage, [*inspected, *compared]):
+        run.mark_exercised(set(_PDF_PIPELINE_TOOLS))
+
+
+async def _diagnose_bibliographies(run: _DoctorRun) -> None:
     """Compile a tiny cited document through each installed backend as an optional stage.
 
     Biber on macOS runs from a prepared toolchain copy, the most host-specific
     part of a build, so this is where a broken installation shows up first.
     """
-    engine = diagnostic_engines(settings)[0]
+    engine = diagnostic_engines(run.settings)[0]
     for backend in _BIBLIOGRAPHY_BACKENDS:
         stage = f"{engine}: {backend} bibliography"
-        tools = {"latexmk", engine, backend}
-        if engine == "xelatex":
-            tools.add("xdvipdfmx")
-        if not _ready(report, tools):
-            report.stages.append({"name": stage, "status": "skipped"})
+        tools = _build_tool_names(engine, backend)
+        if not run.ready(tools):
+            run.skip_stage(stage)
             continue
-        source = root / f"source-{backend}"
+        source = run.root / f"source-{backend}"
         _fixture(source, backend)
-        emit(f"Compiling the built-in {backend} bibliography fixture with {engine}")
-        async with budget.lease(
-            f"doctor {backend}", memory_mb=settings.build_memory_mb, kind="build"
-        ):
-            built = await build_project(
-                source,
-                "main.tex",
-                root / f"build-{backend}",
-                engine,
-                runner,
-                bibliography_backend=backend,
-            )
-        findings = built.findings
-        if (not built.success or built.pdf is None) and not has_blockers(findings):
-            findings = [
-                *findings,
-                Finding(
-                    "doctor.build_failed",
-                    "Build did not produce a successful PDF result.",
-                    severity="error",
-                ),
-            ]
-        if _record_stage(report, stage, findings, required=False) and built.success:
-            _exercised(report, tools)
-            report.execution["bibliography_exercised"] = True
+        run.emit(f"Compiling the built-in {backend} bibliography fixture with {engine}")
+        built, findings = await _build_fixture(run, source, engine, backend, backend)
+        if run.record_stage(stage, findings, required=False) and built.success:
+            run.mark_exercised(tools)
+            run.report.execution["bibliography_exercised"] = True
 
 
-def _ready(report: Report, names: set[str]) -> bool:
-    for name in names:
-        item = report.tools[name]
-        assert isinstance(item, dict)
-        if not item["installed"] or (name != "biber" and not item["version_verified"]):
-            return False
-    return True
-
-
-def _exercised(report: Report, names: set[str]) -> None:
-    for name in names:
-        item = report.tools[name]
-        assert isinstance(item, dict)
-        item["exercised"] = True
+async def _diagnose(run: _DoctorRun) -> None:
+    """Run every diagnostic stage; without a working sandbox nothing else can be tried."""
+    if not await _probe_sandbox(run):
+        return
+    await _verify_tool_versions(run)
+    source = run.root / "source"
+    _fixture(source, run.settings.bibliography_backend)
+    await _diagnose_formatting(run, source)
+    for engine in diagnostic_engines(run.settings):
+        if (pdf := await _compile_stage(run, source, engine)) is not None:
+            await _pdf_pipeline_stage(run, engine, pdf)
+    if run.settings.bibliography_backend == "auto":
+        await _diagnose_bibliographies(run)

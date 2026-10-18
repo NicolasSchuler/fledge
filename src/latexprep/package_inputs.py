@@ -1,27 +1,63 @@
-"""Select project inputs for one observed build, without modifying the source tree."""
+"""Select project inputs for one observed build, without modifying the source tree.
+
+The files a package needs are the union of three kinds of evidence: the literal
+dependencies of the source graph, the inputs the build recorded, and the files the user
+asks to keep. ``select_package_inputs`` takes that union, checks that every file is a
+plain, regular, contained file, and copies it into a new destination. It owns the
+choice and the copy; the reasons behind each file are recorded as inventory rows
+(``package_inventory``), and recorded inputs come from the build, not from here.
+"""
 
 from __future__ import annotations
 
 import shutil
-from dataclasses import replace
+from collections.abc import Set
+from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
+from typing import NamedTuple
 
 from .cancellation import cancellation_point
 from .findings import Finding
-from .package_inventory import selection_inventory
+from .package_inventory import UNUSED_REASON, InventoryRow, selection_inventory
 from .path_safety import is_contained, is_relative_posix_path
 from .report import Change, ChangeKind
-from .source import analyze_selected_sources
+from .source_analysis import SourceAnalysis, analyze_selected_sources
 
 # Generated bibliography files that the TeX run reads: the .bbl, which services
 # compiling without BibTeX or Biber (arXiv among them) use instead of the .bib,
 # and biblatex's .run.xml control file, which biblatex reads back on later passes.
 GENERATED_BIBLIOGRAPHY_SUFFIXES = (".bbl", ".run.xml")
+_RULE = "package.dependencies"
 
 
-def generated_bibliography_inputs(
-    root: Path, main: str, generated_reads: frozenset[str] | set[str]
-) -> set[str]:
+@dataclass(frozen=True, slots=True)
+class InputEvidence:
+    """What is known about the files one build needs.
+
+    ``observed`` are the inputs the build recorded; ``None`` means no complete trace
+    exists, which is different from an empty set. ``explicit`` are files the settings ask
+    to keep. ``generated_reads`` are the names of generated bibliography files the build
+    read, which decide whether a supplied copy is kept.
+    """
+
+    observed: Set[str] | None
+    explicit: Set[str]
+    generated_reads: Set[str] = frozenset()
+
+
+class InputSelectionResult(NamedTuple):
+    """The outcome of selecting inputs: what was left out, what was found, and why.
+
+    ``inventory`` has a row for every project file, with the reasons it was selected or
+    left out. It is empty when nothing was selected.
+    """
+
+    changes: list[Change]
+    findings: list[Finding]
+    inventory: list[InventoryRow]
+
+
+def generated_bibliography_inputs(root: Path, main: str, generated_reads: Set[str]) -> set[str]:
     """Supplied <main>.bbl and <main>.run.xml beside the main file that the build consumed.
 
     The build regenerates these files in its output directory, so the recorder
@@ -41,18 +77,127 @@ def generated_bibliography_inputs(
     return retained
 
 
+def _missing_trace() -> InputSelectionResult:
+    return InputSelectionResult(
+        [],
+        [
+            Finding(
+                _RULE,
+                "Complete build dependency evidence is unavailable; no input set was selected.",
+                severity="error",
+                status="inconclusive",
+                suggestion="Resolve the build's submission dependency diagnostic and retry.",
+            )
+        ],
+        [],
+    )
+
+
+def _graph_advisories(analysis: SourceAnalysis) -> list[Finding]:
+    """Findings that say the literal graph is incomplete, as advice rather than errors.
+
+    Recorded inputs are direct evidence of what this build read, so an incomplete literal
+    graph only widens the selection; the exact archive rebuild still verifies the result.
+    """
+    if analysis.complete:
+        return []
+    findings = [
+        replace(item, severity="warning")
+        for item in analysis.findings
+        if item.status == "inconclusive"
+    ]
+    findings.append(
+        Finding(
+            _RULE,
+            "The literal source dependency graph is incomplete or ambiguous; "
+            "the recorded build inputs were used to select this document's files.",
+            severity="warning",
+            status="inconclusive",
+            suggestion="Review the source diagnostics above; "
+            "the rebuilt archive verifies the selected input set.",
+        )
+    )
+    return findings
+
+
+def _input_problem(root: Path, name: str) -> str | None:
+    """Why ``name`` cannot be copied as an input, or ``None`` when it can."""
+    if not is_relative_posix_path(name):
+        return "has a name that is not a plain project-relative path"
+    path = root / name
+    if path.is_symlink():
+        return "is a symbolic link, and links are not shipped"
+    if not path.exists():
+        return "does not exist in the project"
+    if not is_contained(root, path, regular_file=True):
+        return "is not a regular file inside the project"
+    return None
+
+
+def _unusable_inputs(root: Path, included: Set[str]) -> list[Finding]:
+    """An error for every input that is missing, not a plain name, linked or not a file."""
+    findings = []
+    for name in sorted(included):
+        cancellation_point()
+        problem = _input_problem(root, name)
+        if problem is not None:
+            findings.append(
+                Finding(
+                    _RULE,
+                    f"A required input or explicit retained file {problem}.",
+                    severity="error",
+                    status="inconclusive",
+                    path=name,
+                    suggestion="Supply the project-relative file and repeat preparation.",
+                )
+            )
+    return findings
+
+
+def _copy_inputs(root: Path, destination: Path, included: Set[str]) -> None:
+    destination.mkdir()
+    for name in sorted(included):
+        cancellation_point()
+        target = destination / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(root / name, target)
+
+
+def _selection_finding(
+    included: Set[str],
+    omitted: int,
+    evidence: InputEvidence,
+    bibliography: Set[str],
+) -> Finding:
+    retained_bibliography = (
+        f" Retained the generated bibliography {', '.join(sorted(bibliography))} for services "
+        "that compile without BibTeX or Biber."
+        if bibliography
+        else ""
+    )
+    return Finding(
+        _RULE,
+        f"Selected {len(included)} project inputs; omitted {omitted} unrelated files."
+        + retained_bibliography,
+        severity="info",
+        status="passed",
+        details={
+            "included": sorted(included),
+            "explicit": sorted(evidence.explicit),
+            "generated_bibliography": sorted(bibliography),
+            "scope": "Supported literal dependencies and recorded inputs for the selected "
+            "build configuration; not minimality across other TeX executions.",
+        },
+    )
+
+
 def select_package_inputs(
-    root: Path,
-    destination: Path,
-    main: str,
-    observed: set[str] | None,
-    explicit: set[str],
-    generated_reads: frozenset[str] | set[str] = frozenset(),
-) -> tuple[list[Change], list[Finding]]:
+    root: Path, destination: Path, main: str, evidence: InputEvidence
+) -> InputSelectionResult:
     """Copy supported literal and observed inputs plus explicit retained files.
 
     A supplied generated bibliography beside the main file is retained when the
-    build consumed a regenerated file of the same name (generated_reads).
+    build consumed a regenerated file of the same name (``evidence.generated_reads``).
 
     A missing trace is different from an empty dependency set. An incomplete
     literal graph is advisory once the trace is complete, because the recorded
@@ -60,102 +205,30 @@ def select_package_inputs(
     partially selected destination is made on failure. The subsequent exact
     archive rebuild remains required.
     """
-    findings: list[Finding] = []
+    observed = evidence.observed
     if observed is None or main not in observed:
-        return [], [
-            Finding(
-                "package.dependencies",
-                "Complete build dependency evidence is unavailable; no input set was selected.",
-                severity="error",
-                status="inconclusive",
-                suggestion="Resolve the build's submission dependency diagnostic and retry.",
-            )
-        ]
+        return _missing_trace()
     analysis = analyze_selected_sources(root, main)
-    if not analysis.complete:
-        # Recorded inputs are direct evidence of what this build read, so an
-        # incomplete literal graph only widens the selection; the exact archive
-        # rebuild still verifies the result.
-        findings.extend(
-            replace(item, severity="warning")
-            for item in analysis.findings
-            if item.status == "inconclusive"
-        )
-        findings.append(
-            Finding(
-                "package.dependencies",
-                "The literal source dependency graph is incomplete or ambiguous; "
-                "the recorded build inputs were used to select this document's files.",
-                severity="warning",
-                status="inconclusive",
-                suggestion="Review the source diagnostics above; "
-                "the rebuilt archive verifies the selected input set.",
-            )
-        )
-    generated = generated_bibliography_inputs(root, main, generated_reads)
-    bibliography = generated - observed - explicit
-    included = analysis.dependencies | observed | explicit | bibliography
-    unusable: list[Finding] = []
-    for name in sorted(included):
-        cancellation_point()
-        if not is_relative_posix_path(name) or not is_contained(
-            root, root / name, regular_file=True
-        ):
-            unusable.append(
-                Finding(
-                    "package.dependencies",
-                    "A required input or explicit retained file is missing or unsafe.",
-                    severity="error",
-                    status="inconclusive",
-                    path=name,
-                    suggestion="Supply the project-relative file and repeat preparation.",
-                )
-            )
+    findings = _graph_advisories(analysis)
+    generated = generated_bibliography_inputs(root, main, evidence.generated_reads)
+    bibliography = generated - observed - evidence.explicit
+    included = analysis.dependencies | observed | evidence.explicit | bibliography
+    unusable = _unusable_inputs(root, included)
     if unusable:
-        return [], [*findings, *unusable]
+        return InputSelectionResult([], [*findings, *unusable], [])
     files = {path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file()}
     changes = [
-        Change(
-            name,
-            kind=ChangeKind.EXCLUDE,
-            reason="Not needed by the selected document or explicitly retained.",
-        )
+        Change(name, kind=ChangeKind.EXCLUDE, reason=UNUSED_REASON)
         for name in sorted(files - included)
     ]
-    destination.mkdir()
-    for name in sorted(included):
-        cancellation_point()
-        target = destination / name
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(root / name, target)
-    retained_bibliography = (
-        f" Retained the generated bibliography {', '.join(sorted(bibliography))} for services "
-        "that compile without BibTeX or Biber."
-        if bibliography
-        else ""
+    _copy_inputs(root, destination, included)
+    inventory = selection_inventory(
+        root,
+        files=files,
+        literal=analysis.dependencies,
+        observed=set(observed),
+        explicit=set(evidence.explicit),
+        generated=generated,
     )
-    findings.append(
-        Finding(
-            "package.dependencies",
-            f"Selected {len(included)} project inputs; omitted {len(changes)} unrelated files."
-            + retained_bibliography,
-            severity="info",
-            status="passed",
-            details={
-                "included": sorted(included),
-                "explicit": sorted(explicit),
-                "generated_bibliography": sorted(bibliography),
-                "inventory": selection_inventory(
-                    root,
-                    files=files,
-                    literal=analysis.dependencies,
-                    observed=observed,
-                    explicit=explicit,
-                    generated=generated,
-                ),
-                "scope": "Supported literal dependencies and recorded inputs for the selected "
-                "build configuration; not minimality across other TeX executions.",
-            },
-        )
-    )
-    return changes, findings
+    findings.append(_selection_finding(included, len(changes), evidence, bibliography))
+    return InputSelectionResult(changes, findings, inventory)

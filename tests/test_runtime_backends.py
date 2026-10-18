@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import stat
 import struct
 import sys
 import tempfile
@@ -9,18 +10,22 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-from latexprep.biber_toolchain import BiberToolchain, _host_macho_slice, _seal_toolchain
+from latexprep.biber_toolchain import (
+    BiberToolchain,
+    _host_macho_slice,
+    _seal_toolchain,
+    create_biber_toolchain,
+)
+from latexprep.build_bibliography import sources_may_use_biber
+from latexprep.command_runner import CommandResult
 from latexprep.errors import PreparationError, SandboxRefusedError, ToolUnavailableError
 from latexprep.file_safety import DirectoryIdentity, regular_file_identity
-from latexprep.latexmk_build import _sources_may_use_biber, build_project
+from latexprep.latexmk_build import build_project
+from latexprep.process_table import ProcessSample, parse_ancestry_rows, parse_group_rows
 from latexprep.resource_monitor import _group_usage
-from latexprep.runtime import CommandResult, ToolRunner
-from latexprep.sandbox import (
-    BubblewrapSandbox,
-    UnavailableSandbox,
-    _linux_process_groups,
-    tool_environment,
-)
+from latexprep.runtime import ToolRunner
+from latexprep.sandbox import BubblewrapSandbox, SeatbeltSandbox, UnavailableSandbox
+from latexprep.tool_launch import create_tool_environment
 from latexprep.toolchain import ToolContext, distribution_roots
 from tests.support import live_tests_enabled
 from tests.test_runtime import FakeBuildRunner
@@ -50,7 +55,9 @@ class TeXLiveRuntimeTests(unittest.TestCase):
                     context = ToolContext(
                         engine, frozenset({engine}), frozenset(roots), (str(engine.parent),)
                     )
-                    environment = tool_environment(workspace, context, source_date_epoch="0")
+                    environment = create_tool_environment(
+                        workspace, context, source_date_epoch="0"
+                    ).variables
                     self.assertEqual(
                         environment["TEXMFCNF"], str(distribution / "texmf-dist/web2c")
                     )
@@ -74,8 +81,26 @@ class TeXLiveRuntimeTests(unittest.TestCase):
                     context = ToolContext(
                         executable, frozenset({executable}), frozenset({distribution}), ()
                     )
-                    environment = tool_environment(workspace, context, source_date_epoch="0")
+                    environment = create_tool_environment(
+                        workspace, context, source_date_epoch="0"
+                    ).variables
                     self.assertNotIn("TEXMFCNF", environment)
+
+
+class ProcessTableTests(unittest.TestCase):
+    def test_group_rows_are_read_as_listed_and_malformed_listings_are_refused(self) -> None:
+        samples = parse_group_rows(b"  10  10  2048\n  11  10   512\ntoo few\n")
+        self.assertEqual(samples, [ProcessSample(10, 10, 2048), ProcessSample(11, 10, 512)])
+        for malformed in (b"", b"1 2\n", b"1 two 3\n"):
+            with self.subTest(malformed=malformed), self.assertRaises(PreparationError):
+                parse_group_rows(malformed)
+
+    def test_each_backend_asks_for_the_columns_its_isolation_needs(self) -> None:
+        self.assertEqual(SeatbeltSandbox().process_columns, "pid=,pgid=,rss=")
+        self.assertEqual(BubblewrapSandbox().process_columns, "pid=,ppid=,pgid=,rss=")
+        self.assertEqual(UnavailableSandbox().process_columns, SeatbeltSandbox().process_columns)
+        self.assertTrue(UnavailableSandbox().declares_tool(Path("/anywhere"), Path("/anywhere")))
+        self.assertTrue(SeatbeltSandbox().declares_tool(Path("/anywhere"), Path("/anywhere")))
 
 
 class HomebrewRuntimeTests(unittest.TestCase):
@@ -243,7 +268,7 @@ class LinuxSandboxTests(unittest.IsolatedAsyncioTestCase):
         execute.assert_not_awaited()
 
     def test_linux_descendants_keep_memory_accounting_after_new_session(self) -> None:
-        rows = _linux_process_groups(
+        rows = parse_ancestry_rows(
             b"90 1 90 100\n100 90 100 10\n101 100 101 600\n"
             b"102 101 101 500\n103 102 777 100\n200 90 200 40\n",
             {100},
@@ -256,7 +281,7 @@ class LinuxSandboxTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("exceeded 1 MiB", failure or "")
         for malformed in (b"", b"1 2 3\n", b"1 invalid 1 1\n", b"1 0 1 -2\n"):
             with self.subTest(malformed=malformed), self.assertRaises(PreparationError):
-                _linux_process_groups(malformed, {1})
+                parse_ancestry_rows(malformed, {1})
 
     @unittest.skipUnless(
         sys.platform == "linux" and live_tests_enabled("LATEXPREP_RUN_SANDBOX_TESTS"),
@@ -334,6 +359,25 @@ class ToolIsolationTests(unittest.IsolatedAsyncioTestCase):
         ):
             _host_macho_slice(self.universal(((0x0100000C, b"arm64 slice image"),)))
 
+    def test_each_preparation_gets_its_own_private_inert_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            source = root / "installed-biber"
+            source.write_bytes(b"\xcf\xfa\xed\xfe single architecture executable")
+            first = create_biber_toolchain(source, root / ".toolchain", max_file_bytes=1024)
+            second = create_biber_toolchain(source, root / ".toolchain", max_file_bytes=1024)
+            self.assertNotEqual(first.executable.parent, second.executable.parent)
+            for toolchain in (first, second):
+                self.assertEqual(toolchain.executable.read_bytes(), source.read_bytes())
+                self.assertEqual(stat.S_IMODE(toolchain.executable.stat().st_mode), 0o500)
+                self.assertEqual(stat.S_IMODE(toolchain.payload.stat().st_mode), 0o700)
+                self.assertRegex(toolchain.executable.parent.name, r"^biber-[a-z0-9_]+$")
+            with self.assertRaisesRegex(PreparationError, "file size limit"):
+                create_biber_toolchain(source, root / ".toolchain", max_file_bytes=8)
+            (root / "odd name").mkdir()
+            with self.assertRaisesRegex(PreparationError, "letters, digits"):
+                create_biber_toolchain(source, root / "odd name", max_file_bytes=1024)
+
     def test_sealing_leaves_no_writable_entry(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory).resolve() / "biber-0"
@@ -380,7 +424,7 @@ class ToolIsolationTests(unittest.IsolatedAsyncioTestCase):
                     profile,
                 )
             blocked = runner._sandbox_command(
-                ["/bin/sh", "-e", "$biber='internal latexprep_backend_blocked';"], workspace
+                ["/bin/sh", "-e", "$biber='internal fledge_backend_blocked';"], workspace
             )[2]
             self.assertNotIn(str(payload), blocked)
             self.assertNotIn(str(executable), blocked)
@@ -460,7 +504,7 @@ class DeferredBiberTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.success, result.findings)
         self.assertEqual(runner.biber_preparations, 0)
         [rules] = self.build_rules(runner)
-        self.assertIn("$biber='internal latexprep_biber_deferred'", rules)
+        self.assertIn("$biber='internal fledge_biber_deferred'", rules)
         self.assertNotIn("--noconf", rules)
         bibliography = result.tools.bibliography
         assert bibliography is not None
@@ -473,9 +517,9 @@ class DeferredBiberTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.success, result.findings)
         self.assertEqual(runner.biber_preparations, 1)
         deferred, prepared = self.build_rules(runner)
-        self.assertIn("latexprep_biber_deferred", deferred)
+        self.assertIn("fledge_biber_deferred", deferred)
         self.assertIn("$biber='biber --noconf %O %B'", prepared)
-        self.assertNotIn("latexprep_biber_deferred", prepared)
+        self.assertNotIn("fledge_biber_deferred", prepared)
         self.assertEqual(result.pdf, work.resolve() / "output" / "main.pdf")
         bibliography = result.tools.bibliography
         assert bibliography is not None
@@ -502,19 +546,19 @@ class DeferredBiberTests(unittest.IsolatedAsyncioTestCase):
         runner.commands.clear()
         await build_project(self.source, "main.tex", self.root / "second", "pdflatex", runner)
         [rules] = self.build_rules(runner)
-        self.assertNotIn("latexprep_biber_deferred", rules)
+        self.assertNotIn("fledge_biber_deferred", rules)
 
     def test_biblatex_hint_reads_only_tex_sources_and_answers_yes_when_uncertain(self) -> None:
-        self.assertFalse(_sources_may_use_biber(self.source))
+        self.assertFalse(sources_may_use_biber(self.source))
         (self.source / "references.bib").write_text("% generated for biblatex\n")
         (self.source / "notes.md").write_text("biblatex")
-        self.assertFalse(_sources_may_use_biber(self.source))
+        self.assertFalse(sources_may_use_biber(self.source))
         (self.source / "linked.sty").symlink_to(self.source / "notes.md")
-        self.assertFalse(_sources_may_use_biber(self.source))
-        self.assertTrue(_sources_may_use_biber(self.source, max_bytes=4))
+        self.assertFalse(sources_may_use_biber(self.source))
+        self.assertTrue(sources_may_use_biber(self.source, max_bytes=4))
         (self.source / "style").mkdir()
         (self.source / "style" / "paper.cls").write_text("\\RequirePackage{biblatex}\n")
-        self.assertTrue(_sources_may_use_biber(self.source))
+        self.assertTrue(sources_may_use_biber(self.source))
 
 
 class BibliographyBackendTests(unittest.IsolatedAsyncioTestCase):
@@ -561,10 +605,10 @@ class BibliographyBackendTests(unittest.IsolatedAsyncioTestCase):
                 rules = build[build.index("-e") + 1]
                 if backend != "auto":
                     other = "biber" if backend == "bibtex" else "bibtex"
-                    self.assertIn(f"${other}='internal latexprep_backend_blocked'", rules)
+                    self.assertIn(f"${other}='internal fledge_backend_blocked'", rules)
                     self.assertIn("return 1", rules)
                 else:
-                    self.assertNotIn("latexprep_backend_blocked", rules)
+                    self.assertNotIn("fledge_backend_blocked", rules)
         result, _ = await self.build("bibtex", {"main.aux": "\\relax\n"})
         finding = next(
             item for item in result.findings if item.rule == "build.bibliography_backend"
@@ -581,7 +625,7 @@ class BibliographyBackendTests(unittest.IsolatedAsyncioTestCase):
                 rules = build[build.index("-e") + 1]
                 self.assertEqual("$biber='biber --noconf %O %B'" in rules, backend != "bibtex")
                 if backend == "bibtex":
-                    self.assertIn("$biber='internal latexprep_backend_blocked'", rules)
+                    self.assertIn("$biber='internal fledge_backend_blocked'", rules)
                     self.assertNotIn("--noconf", rules)
 
     async def test_unpreparable_biber_is_reported_instead_of_raising(self) -> None:

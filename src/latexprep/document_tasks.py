@@ -7,32 +7,33 @@ are only known once a prerequisite finished are read when the task starts.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
-from dataclasses import replace
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from pathlib import Path
 
 from .author_records import check_author_records
-from .bibliography_checks import (
-    check_bibliography_coverage_and_fields,
-    check_bibliography_integrity,
-)
+from .bibliography_checks import check_bibliography_coverage_and_fields
+from .bibliography_integrity import check_bibliography_integrity
 from .build_checks import check_local_package_shadows
+from .build_result import BuildResult
 from .cancellation import run_in_thread
 from .config import Settings
+from .errors import PreparationError
 from .findings import Finding
+from .image_metadata import check_image_metadata
 from .job_context import JobCommand, JobContext, pdf_check_settings
-from .latexmk_build import SELECTABLE_BUILD_ERRORS, BuildResult, build_project
+from .latexmk_build import SELECTABLE_BUILD_ERRORS, build_project
 from .manuscript import check_manuscript
 from .manuscript_checks import check_manuscript_policies
-from .metadata_privacy import check_image_metadata
 from .online_checks import check_online_references
 from .pdf_check_pipeline import inspect_configured_pdf_checks
 from .pdf_comparison import compare_pdfs
 from .pdf_inspection import inspect_pdf
 from .scheduler import Task
-from .source import analyze_sources
-from .submission_checks import SubmissionOptions, check_submission
+from .source_analysis import analyze_sources
+from .submission_checks import check_submission
+from .submission_options import SubmissionOptions
 from .submission_readiness_checks import check_submission_readiness
 from .workflow_options import ComparisonOptions
 
@@ -63,6 +64,11 @@ class TaskName(StrEnum):
     FINAL_CONFIGURED_PDF_CHECKS = "final configured PDF checks"
     FINAL_SUBMISSION_CHECKS = "final submission checks"
     REFERENCE_VERSUS_ARCHIVE = "supplied PDF versus archive rebuild"
+
+
+# The stage name of the baseline build in reports, whether the build finished or crashed,
+# so that reports and review decisions see one name for it.
+BASELINE_STAGE = "baseline"
 
 
 async def build_document(context: JobContext, tree: Path, main: str, directory: str) -> BuildResult:
@@ -110,7 +116,7 @@ def source_submission_options(settings: Settings) -> SubmissionOptions:
 
 
 def prepared_submission_options(
-    settings: Settings, path_mapping: dict[str, str]
+    settings: Settings, path_mapping: Mapping[str, str]
 ) -> SubmissionOptions:
     """Submission options for the shipped sources, with paths in their flattened names."""
     return replace(
@@ -126,7 +132,8 @@ def prepared_submission_options(
     )
 
 
-def _submission_readiness(root: Path, main: str, settings: Settings) -> list[Finding]:
+def source_readiness_findings(root: Path, main: str | None, settings: Settings) -> list[Finding]:
+    """The submission-readiness advisories of the sources under ``root``."""
     return check_submission_readiness(
         root,
         main,
@@ -135,18 +142,83 @@ def _submission_readiness(root: Path, main: str, settings: Settings) -> list[Fin
     )
 
 
-def _source_policies(root: Path, main: str, settings: Settings) -> list[Finding]:
+def _selected_main(main: str | None) -> str:
+    """The main file for a check that is scheduled only once a main file was selected."""
+    if main is None:
+        raise PreparationError("This check needs a selected main file")
+    return main
+
+
+@dataclass(frozen=True, slots=True)
+class SourceCheck:
+    """One check of a document's sources, run on the original and again on the final copy."""
+
+    task: TaskName
+    run: Callable[[Path, str | None, Settings], list[Finding]]
+    # Scheduled on the original sources only after a main file was selected.
+    needs_main: bool = False
+
+
+# The checks of the document's sources apart from the source analysis itself and the
+# submission policy, which take other inputs on the original and the final copy. The
+# initial tasks and the final verification both run exactly these checks, so a new
+# source check is added here and to ``TaskName`` only.
+_SOURCE_CHECKS = (
+    SourceCheck(
+        TaskName.BIBLIOGRAPHY_CHECKS, lambda root, main, _: check_bibliography_integrity(root, main)
+    ),
+    SourceCheck(
+        TaskName.BIBLIOGRAPHY_COVERAGE,
+        lambda root, main, settings: check_bibliography_coverage_and_fields(
+            root, main, settings.bibliography_checks
+        ),
+    ),
+    SourceCheck(
+        TaskName.MANUSCRIPT_DETAILS,
+        lambda root, main, settings: check_manuscript_policies(
+            root, main, settings.manuscript_checks
+        ),
+    ),
+    SourceCheck(
+        TaskName.IMAGE_METADATA_PRIVACY,
+        lambda root, _, settings: check_image_metadata(root, settings.metadata_privacy),
+    ),
+    SourceCheck(
+        TaskName.AUTHOR_FIELDS,
+        lambda root, main, settings: check_author_records(root, main, settings.structure_checks),
+    ),
+    SourceCheck(
+        TaskName.MANUSCRIPT_CHECKS,
+        lambda root, main, settings: check_manuscript(
+            root, _selected_main(main), settings.manuscript
+        ),
+        needs_main=True,
+    ),
+    SourceCheck(TaskName.SUBMISSION_READINESS, source_readiness_findings, needs_main=True),
+)
+
+
+def _final_source_findings(root: Path, main: str, settings: Settings) -> list[Finding]:
     """Re-evaluate the actual shipped sources after all transformations."""
-    return [
-        *analyze_sources(root, main).findings,
-        *check_bibliography_integrity(root, main),
-        *check_bibliography_coverage_and_fields(root, main, settings.bibliography_checks),
-        *check_manuscript(root, main, settings.manuscript),
-        *check_manuscript_policies(root, main, settings.manuscript_checks),
-        *check_image_metadata(root, settings.metadata_privacy),
-        *check_author_records(root, main, settings.structure_checks),
-        *_submission_readiness(root, main, settings),
-    ]
+    findings = list(analyze_sources(root, main).findings)
+    for check in _SOURCE_CHECKS:
+        findings.extend(check.run(root, main, settings))
+    return findings
+
+
+def _original_submission_options(settings: Settings, command: JobCommand) -> SubmissionOptions:
+    """The submission policy for the original sources of ``command``."""
+    submission = source_submission_options(settings)
+    if command is JobCommand.PREPARE:
+        # These constraints target the transformed output, which may rename or remove files.
+        submission = replace(
+            submission,
+            filename_max_length=None,
+            filename_allowed_characters=None,
+            allowed_extensions=(),
+            required_deliverables=(),
+        )
+    return submission
 
 
 def source_analysis_tasks(
@@ -156,46 +228,16 @@ def source_analysis_tasks(
     request, settings = context.request, context.settings
     tasks = [
         Task(TaskName.SOURCE_CHECKS, lambda: run_in_thread(analyze_sources, snapshot(), main)),
-        Task(
-            TaskName.BIBLIOGRAPHY_CHECKS,
-            lambda: run_in_thread(check_bibliography_integrity, snapshot(), main),
-        ),
-        Task(
-            TaskName.BIBLIOGRAPHY_COVERAGE,
-            lambda: run_in_thread(
-                check_bibliography_coverage_and_fields,
-                snapshot(),
-                main,
-                settings.bibliography_checks,
-            ),
-        ),
-        Task(
-            TaskName.MANUSCRIPT_DETAILS,
-            lambda: run_in_thread(
-                check_manuscript_policies, snapshot(), main, settings.manuscript_checks
-            ),
-        ),
-        Task(
-            TaskName.IMAGE_METADATA_PRIVACY,
-            lambda: run_in_thread(check_image_metadata, snapshot(), settings.metadata_privacy),
-        ),
-        Task(
-            TaskName.AUTHOR_FIELDS,
-            lambda: run_in_thread(
-                check_author_records, snapshot(), main, settings.structure_checks
-            ),
+        *(
+            Task(
+                check.task,
+                lambda check=check: run_in_thread(check.run, snapshot(), main, settings),
+            )
+            for check in _SOURCE_CHECKS
+            if main is not None or not check.needs_main
         ),
     ]
-    submission = source_submission_options(settings)
-    if request.command is JobCommand.PREPARE:
-        # These constraints target the transformed output, which may rename or remove files.
-        submission = replace(
-            submission,
-            filename_max_length=None,
-            filename_allowed_characters=None,
-            allowed_extensions=(),
-            required_deliverables=(),
-        )
+    submission = _original_submission_options(settings, request.command)
     tasks.append(
         Task(
             TaskName.SOURCE_SUBMISSION_CHECKS,
@@ -214,20 +256,6 @@ def source_analysis_tasks(
                 ),
             )
         )
-    if main is None:
-        return tasks
-    tasks.append(
-        Task(
-            TaskName.MANUSCRIPT_CHECKS,
-            lambda: run_in_thread(check_manuscript, snapshot(), main, settings.manuscript),
-        )
-    )
-    tasks.append(
-        Task(
-            TaskName.SUBMISSION_READINESS,
-            lambda: run_in_thread(_submission_readiness, snapshot(), main, settings),
-        )
-    )
     return tasks
 
 
@@ -307,34 +335,55 @@ def baseline_pdf_tasks(
     return tasks
 
 
-def final_verification_tasks(
-    context: JobContext,
-    root: Path,
-    main: str,
-    *,
-    staged_pdf: Path,
-    final_pdf: Path,
-    submission: SubmissionOptions,
-    reference: Path | None,
-) -> list[Task]:
-    """Checks of the fresh archive extraction ``root`` and its rebuilt ``final_pdf``."""
-    settings, work, runner, budget = context.settings, context.work, context.runner, context.budget
-    tasks = [
+@dataclass(frozen=True, slots=True)
+class FinalExtraction:
+    """The fresh extraction of the archive, and the PDFs its verification compares."""
+
+    root: Path
+    main: str
+    # The PDF of the prepared sources, and the PDF rebuilt from the extraction.
+    staged_pdf: Path
+    final_pdf: Path
+    submission: SubmissionOptions
+    reference: Path | None
+
+
+def final_verification_tasks(context: JobContext, extraction: FinalExtraction) -> list[Task]:
+    """Checks of the fresh archive extraction and its rebuilt PDF."""
+    return [*_final_source_tasks(context, extraction), *_final_pdf_tasks(context, extraction)]
+
+
+def _final_source_tasks(context: JobContext, extraction: FinalExtraction) -> list[Task]:
+    """Checks of the extracted sources."""
+    root, main, settings = extraction.root, extraction.main, context.settings
+    return [
         Task(
             TaskName.FINAL_SOURCE_CHECKS,
-            lambda: run_in_thread(_source_policies, root, main, settings),
+            lambda: run_in_thread(_final_source_findings, root, main, settings),
         ),
         Task.composite(
             TaskName.FINAL_ONLINE_REFERENCES,
             lambda: check_online_references(
-                root, main, options=settings.online_checks, budget=budget
+                root, main, options=settings.online_checks, budget=context.budget
             ),
         ),
+        Task(
+            TaskName.FINAL_SUBMISSION_CHECKS,
+            lambda: run_in_thread(check_submission, root, main, extraction.submission),
+        ),
+    ]
+
+
+def _final_pdf_tasks(context: JobContext, extraction: FinalExtraction) -> list[Task]:
+    """Checks of the rebuilt PDF, and its comparison with the prepared and reference PDFs."""
+    settings, work, runner, budget = context.settings, context.work, context.runner, context.budget
+    root, main, final_pdf = extraction.root, extraction.main, extraction.final_pdf
+    tasks = [
         Task.composite(
             TaskName.PREPARED_VERSUS_ARCHIVE,
             lambda: compare_documents(
                 context,
-                staged_pdf,
+                extraction.staged_pdf,
                 final_pdf,
                 "compare-archive",
                 TaskName.PREPARED_VERSUS_ARCHIVE.value,
@@ -363,12 +412,9 @@ def final_verification_tasks(
                 budget,
             ),
         ),
-        Task(
-            TaskName.FINAL_SUBMISSION_CHECKS,
-            lambda: run_in_thread(check_submission, root, main, submission),
-        ),
     ]
-    if reference is not None:
+    if extraction.reference is not None:
+        reference = extraction.reference
         tasks.append(
             Task.composite(
                 TaskName.REFERENCE_VERSUS_ARCHIVE,
@@ -380,9 +426,7 @@ def final_verification_tasks(
                     TaskName.REFERENCE_VERSUS_ARCHIVE.value,
                 ),
                 # Comparisons that collect previews share one store; run them one at a time.
-                waits_for=(TaskName.PREPARED_VERSUS_ARCHIVE,)
-                if context.request.pdf_previews is not None
-                else (),
+                waits_for=(TaskName.PREPARED_VERSUS_ARCHIVE,) if context.preview_serial else (),
             )
         )
     return tasks

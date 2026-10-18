@@ -6,10 +6,10 @@ import shutil
 import sys
 from dataclasses import replace
 
+from .documentation_links import INSTALLATION_GUIDE
 from .findings import Finding
 from .setting_choices import ENGINES, Engine
 
-INSTALLATION_GUIDE = "https://nicolasschuler.github.io/fledge/installation.html"
 _TEX_TOOLS = frozenset({"latexmk", *ENGINES})
 
 

@@ -10,17 +10,19 @@ from unittest.mock import patch
 
 from latexprep.bibliography_checks import check_bibliography_coverage_and_fields
 from latexprep.build_checks import qualify_citation_findings
+from latexprep.build_result import BuildResult
 from latexprep.check_policy import configured_opt_in_codes
+from latexprep.compact_report import render_compact
 from latexprep.config import Settings
 from latexprep.core import run_job
 from latexprep.coverage_hints import not_checked_areas, not_checked_summary
+from latexprep.execution_records import read_not_checked
 from latexprep.finding_view import RenderOptions
 from latexprep.findings import Finding
 from latexprep.job_context import JobRequest
-from latexprep.latexmk_build import BuildResult
 from latexprep.report import Outcome, Report
-from latexprep.submission_checks import SubmissionOptions
-from latexprep.terminal_report import render_compact, render_terminal
+from latexprep.submission_options import SubmissionOptions
+from latexprep.terminal_report import render_terminal
 
 from .support import write_project
 
@@ -388,7 +390,7 @@ class NotCheckedFooterTests(unittest.TestCase):
         report.execution["not_checked"] = not_checked_areas(
             configured_opt_in_codes(Settings().top_level_values())
         )
-        summary = not_checked_summary(report.execution["not_checked"])
+        summary = not_checked_summary(read_not_checked(report.execution["not_checked"]))
         assert summary is not None
         self.assertTrue(
             summary.startswith(
@@ -396,7 +398,7 @@ class NotCheckedFooterTests(unittest.TestCase):
                 "forbidden packages, strict font embedding, image resolution, "
             )
         )
-        self.assertIn("fledge init --preset arxiv|anonymous-review|camera-ready", summary)
+        self.assertIn("fledge init --preset anonymous-review|arxiv|camera-ready", summary)
         self.assertIn("configuration.html", summary)
         terminal = render_terminal(report)
         self.assertIn(summary, terminal.splitlines())
@@ -409,7 +411,7 @@ class NotCheckedFooterTests(unittest.TestCase):
         )
         report.execution["config_path"] = "/work/paper/fledge.toml"
         summary = not_checked_summary(
-            report.execution["not_checked"], report.execution["config_path"]
+            read_not_checked(report.execution["not_checked"]), report.execution["config_path"]
         )
         assert summary is not None
         self.assertIn("Add them to /work/paper/fledge.toml; see ", summary)
@@ -417,7 +419,9 @@ class NotCheckedFooterTests(unittest.TestCase):
         self.assertIn(summary, render_terminal(report).splitlines())
         for missing in (None, ""):
             with self.subTest(config_path=missing):
-                fallback = not_checked_summary(report.execution["not_checked"], missing)
+                fallback = not_checked_summary(
+                    read_not_checked(report.execution["not_checked"]), missing
+                )
                 assert fallback is not None
                 self.assertIn("fledge init --preset", fallback)
 
@@ -433,8 +437,8 @@ class NotCheckedFooterTests(unittest.TestCase):
 
     def test_reports_without_the_field_have_no_footer(self):
         self.assertNotIn("Not checked", render_terminal(Report("pdf", outcome=Outcome.PASSED)))
-        self.assertIsNone(not_checked_summary([]))
-        self.assertIsNone(not_checked_summary(None))
+        self.assertIsNone(not_checked_summary(()))
+        self.assertIsNone(not_checked_summary(read_not_checked(None)))
 
 
 if __name__ == "__main__":

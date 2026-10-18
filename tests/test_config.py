@@ -121,6 +121,29 @@ class ConfigTests(unittest.TestCase):
                 load_settings(None, overrides)
 
 
+class BuildSettingsTests(unittest.TestCase):
+    def test_building_settings_leaves_the_given_values_unchanged(self) -> None:
+        from copy import deepcopy
+
+        from latexprep.config import _build_settings
+
+        values = {
+            "jobs": 3,
+            "wrap_length": 90,
+            "abstract_min_words": 50,
+            "formatting_options": {},
+            "match_source_pdf_metadata": ["title"],
+            "checks": {"select": ["TEX"]},
+        }
+        original = deepcopy(values)
+        settings = _build_settings(values, None)
+        self.assertEqual(values, original)
+        self.assertEqual(settings.jobs, 3)
+        self.assertEqual(settings.formatting_options.wrap_length, 90)
+        self.assertEqual(settings.manuscript.abstract_min_words, 50)
+        self.assertEqual(settings.match_source_pdf_metadata, ("title",))
+
+
 class SettingsErrorTests(unittest.TestCase):
     """An invalid value names the top-level settings at fault, in the order its message does."""
 

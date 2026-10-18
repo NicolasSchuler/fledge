@@ -8,10 +8,8 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
-from latexprep.bibliography_checks import (
-    BibliographyOptions,
-    check_bibliography_coverage_and_fields,
-)
+from latexprep.bibliography_checks import check_bibliography_coverage_and_fields
+from latexprep.bibliography_options import BibliographyOptions
 from latexprep.cancellation import AnalysisCancelled
 from latexprep.errors import PreparationError
 from latexprep.findings import Finding, has_blockers
@@ -513,7 +511,7 @@ class BibliographyCheckTests(unittest.TestCase):
             "@misc{a,title={First},author={A. Author},year=2026}\n"
             "@misc{b,title={Second},author={A. Author},year=2026}",
         )
-        with patch("latexprep.bibliography_checks._MAX_FUZZY_PAIRS", 0):
+        with patch("latexprep.bibliography_duplicates._MAX_FUZZY_PAIRS", 0):
             rows = self.rows("fuzzy_duplicates", check_fuzzy_duplicates=True)
         self.assertEqual([row.status for row in rows], ["inconclusive"])
         self.assertIn("comparison count", rows[0].message)

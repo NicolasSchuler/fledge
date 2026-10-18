@@ -17,33 +17,40 @@ from latexprep.core import run_job
 from latexprep.findings import Finding
 from latexprep.html_report import render_html
 from latexprep.job_context import JobRequest
-from latexprep.pdf_previews import PdfPreviewStore
+from latexprep.pdf_previews import PdfPreviewStore, PreviewPage, PreviewSide
 from latexprep.report import Change, ChangeKind, Outcome, Report
 from latexprep.workflow_options import DocumentOptions, WorkflowOptions
+from tests.support import PNG
 from tests.test_dependency_packaging import RecordedBuild, contents
-from tests.test_pdf_previews import PNG
 
 
 def captured_difference(store, stage="baseline versus prepared", document=None, *, collector=None):
     collector = collector or store.for_comparison(stage, document)
     slot = collector.store.reserve_page()
     assert slot is not None
+    sides = {
+        side: PreviewSide(
+            True,
+            (612, 792),
+            "captured",
+            image_id=collector.store.add_image(slot, side, PNG),
+            pixels=(1, 1),
+        )
+        for side in ("left", "right")
+    }
     collector.pages.append(
-        {
-            "page": 1,
-            "status": "captured",
-            "text_only": True,
-            "left": {
-                "present": True,
-                "status": "captured",
-                "image_id": collector.store.add_image(slot, "left", PNG),
-            },
-            "right": {
-                "present": True,
-                "status": "captured",
-                "image_id": collector.store.add_image(slot, "right", PNG),
-            },
-        }
+        PreviewPage(
+            1,
+            text_changed=True,
+            rendering_changed=False,
+            text_only=True,
+            page_dimensions_changed=False,
+            page_count_changed=False,
+            within_render_tolerance=None,
+            left=sides["left"],
+            right=sides["right"],
+            status="captured",
+        )
     )
     collector.finished = True
     return collector
@@ -223,8 +230,8 @@ class ReportOutputTests(unittest.TestCase):
         self.assertNotIn("<img ", render_html(report))
         invalid = {name: b"<svg onload='bad()'>" for name in store.images}
         self.assertNotIn("<img ", render_html(report, preview_images=invalid))
-        collector.pages[0]["left"] = {"present": False}
-        collector.pages[0]["page_dimensions_changed"] = True
+        collector.pages[0].left = PreviewSide(False, None, "missing")
+        collector.pages[0].page_dimensions_changed = True
         report.execution["pdf_previews"] = store.summary()
         html = render_html(report, preview_images=store.images)
         self.assertIn("This page does not exist", html)

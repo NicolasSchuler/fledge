@@ -30,7 +30,7 @@ archive: /private/tmp/submission-advisory-final/submission.zip
 pdf: /private/tmp/submission-advisory-final/manuscript.pdf
 report: /private/tmp/submission-advisory-final/report.json
 
-Not checked (needs your settings): anonymity, page limit, ZIP size limit, forbidden packages, strict font embedding, image resolution, 93 other opt-in checks. Set them in fledge.toml (start with fledge init --preset arxiv|anonymous-review|camera-ready); see https://nicolasschuler.github.io/fledge/configuration.html
+Not checked (needs your settings): anonymity, page limit, ZIP size limit, forbidden packages, strict font embedding, image resolution, 93 other opt-in checks. Set them in fledge.toml (start with fledge init --preset anonymous-review|arxiv|camera-ready); see https://nicolasschuler.github.io/fledge/configuration.html
 
 Explain a check: fledge rule CODE
 ```
@@ -122,8 +122,8 @@ from the JSON report. An internal error still writes the report, as an
 
 ## The JSON report
 
-`prepare` writes `report.json` with a successful output; `--report FILE` saves
-the same JSON for any run, including a blocked one. This excerpt is from the
+`prepare` writes `report.json` with a successful output; `--json-report FILE` (also
+spelled `--report`) saves the same JSON for any run, including a blocked one. This excerpt is from the
 blocked run in the [quick start](quickstart.md#3-read-the-result), with most
 findings, settings and tool details removed:
 
@@ -223,6 +223,11 @@ commands, outcomes, severities and statuses. The contents of `settings`,
 `tools`, `execution`, `stages`, `package_contents` and finding `details` are
 descriptive and may grow.
 
+The JSON of `fledge rules`, `fledge rule CODE` and `fledge submission-text` has
+its own `schema_version`, currently `1`, with the same rule: it increases only when
+a field is removed, renamed or changes meaning. `fledge rules --json` lists the
+checks under `rules`.
+
 Version 2 renamed the finding fields `evidence` to `evidence_kind` and
 `suggestion` to `next_step`, and added `incomplete`. Hyphenated rule names such
 as `source-edit-marker` became dotted names such as `source.edit_marker`, and
@@ -236,13 +241,14 @@ internal error `execution.internal`; they were `configuration.invalid` and
 
 ```sh
 fledge rule TEX001
-fledge check /path/to/paper --report report.json
+fledge check /path/to/paper --json-report report.json
 fledge check /path/to/paper --html-report report.html
 fledge check /path/to/paper --output-format compact --quiet
 ```
 
 HTML is a self-contained offline page with source diffs and, when PDF
-comparisons find differences, page previews. Compact output writes
+comparisons find differences, page previews. It follows the light or dark setting of
+the reader's browser, prints cleanly, and its title names the command and document. Compact output writes
 one line per finding, which suits pasting into an AI agent; checks that did not
 run after a failed step appear on lines starting with `not run:`. HTML and CI
 output also show a finding repeated in several stages once, but have no Not

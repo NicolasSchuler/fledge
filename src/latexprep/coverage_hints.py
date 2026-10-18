@@ -1,17 +1,19 @@
 """Opt-in checks that a run did not perform because its settings left them off.
 
-The job records the areas in ``execution.not_checked``; the terminal report
-names them in a one-line hint with where to enable them.
+The job records the areas in ``execution.not_checked`` (``not_checked_areas`` builds
+them); the terminal report names them in a one-line hint (``not_checked_summary``) with
+where to enable them. ``execution_records`` reads the recorded areas back.
 """
 
 from __future__ import annotations
 
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Collection, Sequence
 
 from .check_policy import opt_in_activation
+from .documentation_links import CONFIGURATION_GUIDE
+from .execution_records import OTHER_OPT_IN_AREA, NotCheckedArea
+from .presets import preset_names
 
-CONFIGURATION_GUIDE = "https://nicolasschuler.github.io/fledge/configuration.html"
-PRESET_COMMAND = "fledge init --preset arxiv|anonymous-review|camera-ready"
 # Opt-in areas named individually when they are not configured; every other
 # unconfigured opt-in check is counted together. Codes and settings come from
 # the check policy's activation tables, so a renamed setting cannot go stale here.
@@ -64,7 +66,7 @@ def not_checked_areas(configured_codes: Collection[str]) -> list[dict[str, objec
     if others:
         entries.append(
             {
-                "area": "other_opt_in_checks",
+                "area": OTHER_OPT_IN_AREA,
                 "label": "other opt-in checks",
                 "codes": others,
                 "settings": setting_names(others),
@@ -73,36 +75,25 @@ def not_checked_areas(configured_codes: Collection[str]) -> list[dict[str, objec
     return entries
 
 
-def not_checked_summary(entries: object, config_path: object = None) -> str | None:
+def not_checked_summary(
+    areas: Sequence[NotCheckedArea], config_path: str | None = None
+) -> str | None:
     """One line naming unconfigured opt-in areas and how to enable them.
 
     ``config_path`` is the settings file this run loaded, if any (the report's
     ``execution.config_path``). The ``fledge init`` hint is only offered when no
     settings file was used.
     """
-    if not isinstance(entries, list) or not entries:
-        return None
-    labels = [
-        str(item["label"])
-        for item in entries
-        if isinstance(item, Mapping) and item.get("area") != "other_opt_in_checks"
-    ]
-    others = next(
-        (
-            item.get("codes")
-            for item in entries
-            if isinstance(item, Mapping) and item.get("area") == "other_opt_in_checks"
-        ),
-        None,
-    )
-    if isinstance(others, list) and others:
+    labels = [area.label for area in areas if area.area != OTHER_OPT_IN_AREA]
+    others = next((area.codes for area in areas if area.area == OTHER_OPT_IN_AREA), ())
+    if others:
         labels.append(f"{len(others)} other opt-in check{'s' if len(others) != 1 else ''}")
     if not labels:
         return None
     where = (
         f"Add them to {config_path}"
-        if isinstance(config_path, str) and config_path
-        else f"Set them in fledge.toml (start with {PRESET_COMMAND})"
+        if config_path
+        else f"Set them in fledge.toml (start with fledge init --preset {'|'.join(preset_names())})"
     )
     return (
         f"Not checked (needs your settings): {', '.join(labels)}. "

@@ -274,16 +274,25 @@ default, opt-in or always enforced) and its enabling settings from
 `docs/checks.md` is stale; the generated tables are never edited by hand.
 
 The job workflow starts at `run_job` in
-{download}`core.py <../src/latexprep/core.py>`, which validates the request and
-publishes the result.
+{download}`core.py <../src/latexprep/core.py>`, which validates the request,
+dispatches the command and publishes the result.
 {download}`document_run.py <../src/latexprep/document_run.py>` carries one
 document through analysis, baseline, staged transformations and verification;
 {download}`document_tasks.py <../src/latexprep/document_tasks.py>` builds its
 scheduled tasks; {download}`documents.py <../src/latexprep/documents.py>` runs
 configured `workflow.documents`; and
 {download}`publication.py <../src/latexprep/publication.py>` writes verified
-outputs. A new scheduled check needs a task in `document_tasks.py`, named in
-`TaskName` there.
+outputs. Around them,
+{download}`task_reporting.py <../src/latexprep/task_reporting.py>` writes task
+results, builds and selections into the report,
+{download}`document_builds.py <../src/latexprep/document_builds.py>` runs the
+staged rebuilds and repeat baselines,
+{download}`package_verification.py <../src/latexprep/package_verification.py>`
+archives, re-extracts and re-checks the package, and
+{download}`main_selection.py <../src/latexprep/main_selection.py>` chooses the
+main file. A new check of the document's sources is one entry in `_SOURCE_CHECKS`
+and one in `TaskName`, both in `document_tasks.py`; it then runs on the original
+sources and again on the final extraction.
 
 Small modules under the job workflow each own one concern and import nothing
 above them. {download}`errors.py <../src/latexprep/errors.py>` defines the
@@ -292,7 +301,13 @@ on, `ToolUnavailableError` (the missing `tool`), `SettingsError` (the `settings`
 at fault) and `SandboxRefusedError`. Branch on these types and attributes, never
 on the wording of a message. Raise them only for problems a researcher can fix;
 a violated internal contract raises `ValueError` or `RuntimeError`, which
-`defects.is_expected_failure` reports as a defect.
+`defects.is_expected_failure` reports as a defect. Per-item failures are
+findings; only `PreparationError` aborts a job. A check that cannot examine one
+file, URL or entry reports a finding (or a gap in its evidence) and the run
+continues. An exception that a module uses to stop its own work, such as the
+BibTeX parser's, the transport's `NetworkFailure` or a bibliography proposal's
+`ProposalBlocked`, is not a `PreparationError`: it never leaves its feature's
+modules and is turned into a finding at their boundary.
 {download}`findings.py <../src/latexprep/findings.py>` defines `Finding`,
 {download}`report.py <../src/latexprep/report.py>` the `Report` with its
 `Outcome` and exit codes, and
@@ -332,7 +347,13 @@ that read TeX source share two public modules:
 lexical subset (commands and their argument groups, comment and verbatim
 masking, conditional spans), and
 {download}`source_graph.py <../src/latexprep/source_graph.py>` builds the literal
-dependency graph of one selected main file with `SourceGraph.build`.
+dependency graph of one selected main file with `SourceGraph.build`. The graph
+is split by concern: `source_loading.py` reads and lexes a file within the byte and
+command budgets, `source_command_checks.py` judges its commands,
+`source_resolution.py` turns a file name into a project file, and
+`source_file_commands.py` holds the command tables they share. Reports about a graph
+are in `source_analysis.py` (roots, dependencies, lint) and `flat_layout.py` (flat-layout
+plans).
 {download}`expanded_document.py <../src/latexprep/expanded_document.py>` splices
 that graph into one document whose offsets map back to file and line
 (`expand_document`), and
@@ -346,9 +367,11 @@ unfinished-work and private-note markers is in
 or phrase there, not as a private list in a check.
 {download}`text_safety.py <../src/latexprep/text_safety.py>` escapes untrusted text
 for the terminal, HTML reports, CI annotations and one-line messages. Checks that
-scan every supplied file use the bounded inventory, per-scan byte budget, comment
-extraction and redaction in
-{download}`file_scan.py <../src/latexprep/file_scan.py>`. Every read of a
+scan every supplied file use the bounded inventory and per-scan byte budget in
+{download}`file_scan.py <../src/latexprep/file_scan.py>`, comment extraction in
+{download}`tex_comments.py <../src/latexprep/tex_comments.py>`, and bounded redaction
+in {download}`redaction.py <../src/latexprep/redaction.py>` and
+{download}`finding_text.py <../src/latexprep/finding_text.py>`. Every read of a
 project, build or bibliography file goes through `read_regular_file` or
 `read_file_prefix` in {download}`file_safety.py <../src/latexprep/file_safety.py>`,
 which opens the file without following a final link, checks the opened
@@ -362,21 +385,42 @@ containment. The byte units and the few limits that several modules share are in
 {download}`limits.py <../src/latexprep/limits.py>`; a limit that one module uses
 stays beside its code. Bibliography checks,
 transformations and online lookups share the bounded BibTeX reader in
-{download}`bibtex_syntax.py <../src/latexprep/bibtex_syntax.py>` and the literal
-citation graph of the selected main file in
+{download}`bibtex_syntax.py <../src/latexprep/bibtex_syntax.py>`, the one loader
+of declared .bib files (`read_declared_bibliographies`, with typed problems and
+byte budgets) in
+{download}`bibliography_files.py <../src/latexprep/bibliography_files.py>`, the
+index of entries and their reach in
+{download}`bibliography_index.py <../src/latexprep/bibliography_index.py>` and the
+literal citation graph of the selected main file in
 {download}`citation_graph.py <../src/latexprep/citation_graph.py>`
-(`build_citation_graph`).
-PDF checkers share
-{download}`pdf_support.py <../src/latexprep/pdf_support.py>`: a tool session that
-freezes the inputs and runs each Poppler, qpdf or MuPDF command in its own
-directory, the one argument builder for each tool command, the parsers for their
-output, the preflight (document, properties and page count) that marks every configured
-rule unavailable when it fails, and the builders for measurement and
-unavailable-evidence findings. A session remembers each completed read-only
-measurement by its arguments, so two checks that need the same output run the tool
-once. Each PDF adapter module states the external tools of its configured checks
-(`required_pdf_check_tools`, `required_artwork_tools`, `required_structure_tools`,
-`required_inspection_tools`, `COMPARISON_TOOLS`), and `fledge doctor` unions them.
+(`build_citation_graph`). The online checks are layered, each module importing
+only those before it: `online_options` (settings and outcomes), `public_url`
+(which addresses may be requested), `pinned_dns` (resolution in a disposable
+child), `online_http_wire` (the HTTP/1.1 bytes, testable on a `StreamReader`),
+`online_http_session` (the client, with `resolver` and `transport` seams that
+tests replace), `crossref` (typed replies), `online_inputs` and `online_checks`
+(the findings). No test needs a network.
+PDF checkers share a few modules. {download}`pdf_tools.py <../src/latexprep/pdf_tools.py>`
+holds the tool session that freezes the inputs and runs each Poppler, qpdf or MuPDF
+command in its own directory, the one argument builder for each tool command, the
+preflight (document, properties and page count) that marks every configured rule
+unavailable when it fails, and `ToolMeasurement`, the one way a command's output becomes
+findings or, when it cannot be read, inconclusive ones. The parsers for Poppler and
+MuPDF output are in {download}`pdf_tool_output.py <../src/latexprep/pdf_tool_output.py>`,
+the qpdf object graph is {download}`pdf_qpdf_graph.py <../src/latexprep/pdf_qpdf_graph.py>`,
+page, color and render-size arithmetic is
+{download}`pdf_geometry.py <../src/latexprep/pdf_geometry.py>`, and the builders for
+measurement and unavailable-evidence findings are
+{download}`measurement_findings.py <../src/latexprep/measurement_findings.py>`. The
+option schema of the configured measurements is
+{download}`pdf_check_options.py <../src/latexprep/pdf_check_options.py>`, and the
+`pdf.*` rule names are the `PdfRule` enum in
+{download}`pdf_rule_names.py <../src/latexprep/pdf_rule_names.py>`. A session remembers
+each completed read-only measurement by its arguments, so two checks that need the same
+output run the tool once. Each PDF adapter module states the external tools of its
+configured checks (`required_pdf_check_tools`, `required_artwork_tools`,
+`required_structure_tools`, `required_inspection_tools`, `COMPARISON_TOOLS`), and
+`fledge doctor` unions them.
 Binary image handling sits in two leaf modules that import no tool, runtime or
 scheduler code:
 {download}`png_support.py <../src/latexprep/png_support.py>` (the PNG encoder,

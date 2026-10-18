@@ -19,6 +19,8 @@ F = TypeVar("F", bound=Callable[..., object])
 
 DEBUG_ENVIRONMENT_VARIABLE = "FLEDGE_DEBUG"
 _DEBUG_CONTEXT_KEY = "fledge.debug"
+# One wording for the option that every command with progress offers.
+QUIET_HELP = "Suppress progress messages on stderr; the final report is still printed."
 
 
 def compose_options(*decorators: Callable[[F], F]) -> Callable[[F], F]:
@@ -42,6 +44,15 @@ settings_file_options = compose_options(
     click.option(
         "--isolated", is_flag=True, help="Ignore discovered configuration and use defaults."
     ),
+)
+
+
+# The document a command works on, for inputs that hold several.
+main_option = click.option(
+    "--main",
+    metavar="FILE",
+    help="Main .tex file of the document, relative to the input; needed when the input "
+    "holds several documents.",
 )
 
 

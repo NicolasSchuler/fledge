@@ -7,10 +7,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from latexprep.bibliography_checks import (
-    check_bibliography_coverage_and_fields,
-    check_bibliography_integrity,
-)
+from latexprep.bibliography_checks import check_bibliography_coverage_and_fields
+from latexprep.bibliography_integrity import check_bibliography_integrity
 from latexprep.bibliography_transform import (
     BibliographyTransformOptions,
     normalize_dois,
@@ -291,11 +289,12 @@ class BibliographyTests(unittest.TestCase):
 
     def test_oversize_bibliography_states_the_limit_in_mebibytes(self) -> None:
         self.write("@misc{k}", "big.bib")
-        with patch("latexprep.bibliography_checks.MAX_BIB_FILE_BYTES", 4 * 1024 * 1024):
-            with patch.object(BibFileReader, "read", return_value=None):
-                (finding,) = check_bibliography_integrity(self.root)
-        self.assertIn("exceeds the 4 MiB parser limit", finding.message)
-        self.assertNotIn("4194304", finding.message)
+        with patch.object(BibFileReader, "read", return_value=None):
+            (finding,) = check_bibliography_integrity(self.root)
+        self.assertIn(
+            "big.bib exceeds the bibliography byte budget (16 MiB per file)", finding.message
+        )
+        self.assertNotIn("16777216", finding.message)
 
     def macro_findings(self, body: str) -> list[Finding]:
         self.write(

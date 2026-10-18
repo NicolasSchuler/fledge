@@ -1,9 +1,14 @@
 """Bounded BibTeX syntax reader shared by bibliography checks, transformations and lookups.
 
-This is a lexical reader, not a bibliography backend. It does not infer required
-fields, expand string macros, apply inheritance, or interpret field contents.
-Offsets index the decoded text after any UTF-8 byte-order mark, so callers can
-splice edits into ``BibDocument.text`` and restore the mark when writing.
+This is the one parser of .bib files. It is a lexical reader, not a bibliography
+backend: it does not infer required fields, expand string macros, apply inheritance,
+or interpret field contents. Offsets index the decoded text after any UTF-8
+byte-order mark, so callers can splice edits into ``BibDocument.text`` and restore
+the mark when writing.
+
+A syntax error does not escape: it is recorded as ``BibDocument.syntax_error`` with a
+message and an offset, and the caller decides how to report it. Choosing rule names,
+severities and suggestions is the callers' job; this module builds no findings.
 """
 
 from __future__ import annotations
@@ -16,7 +21,6 @@ from typing import Literal
 
 from .cancellation import cancellation_point
 from .file_safety import FileTooLargeError, read_regular_file
-from .findings import Finding, Severity, Status
 from .limits import CANCELLATION_STRIDE_CHARS, KIB, MIB
 from .text_edits import with_bom
 
@@ -36,7 +40,9 @@ ENTRY_TYPE = re.compile(r"[A-Za-z][A-Za-z0-9_-]*")
 # Lowercase entry-type and field names accepted in option tables.
 LOWERCASE_NAME = re.compile(r"[a-z][a-z0-9_-]*")
 _DOI_PREFIX = re.compile(r"(?:https?://(?:dx\.)?doi\.org/|doi:\s*)", re.IGNORECASE)
-_DOI = re.compile(r"10\.\d{4,9}/[!-~]+")
+# The one DOI shape every module recognises: a registrant prefix and a suffix of
+# printable characters without white space, angle brackets, quotes, braces or backslash.
+DOI_PATTERN = re.compile(r"10\.\d{4,9}/[^\s<>\"{}\\]{1,2048}", re.IGNORECASE)
 
 AtomKind = Literal["literal", "number", "macro"]
 DeclarationKind = Literal["string", "preamble"]
@@ -80,6 +86,10 @@ class Entry:
     start: int
     fields: tuple[Field, ...]
 
+    def fields_named(self, name: str) -> list[Field]:
+        """The fields called ``name`` (lowercase), in source order."""
+        return [item for item in self.fields if item.name == name]
+
 
 @dataclass(frozen=True, slots=True)
 class Declaration:
@@ -88,6 +98,14 @@ class Declaration:
     kind: DeclarationKind
     start: int
     fields: tuple[Field, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class SyntaxProblem:
+    """Where and why parsing stopped; ``offset`` indexes ``BibDocument.text``."""
+
+    message: str
+    offset: int
 
 
 @dataclass(slots=True)
@@ -99,14 +117,13 @@ class BibDocument:
     bom: bool = False
     # Entries and declarations in source order; @comment blocks are skipped.
     records: list[Entry | Declaration] = field(default_factory=list)
-    syntax_error: Finding | None = None
-    _newlines: list[int] = field(init=False, repr=False, compare=False)
-
-    def __post_init__(self) -> None:
-        self._newlines = [index for index, char in enumerate(self.text) if char == "\n"]
+    syntax_error: SyntaxProblem | None = None
+    # Offsets of the line breaks, found when the first line number is asked for.
+    _newlines: list[int] | None = field(default=None, init=False, repr=False, compare=False)
 
     @property
     def valid(self) -> bool:
+        """Whether the whole file parsed without a syntax error."""
         return self.syntax_error is None
 
     @property
@@ -120,32 +137,24 @@ class BibDocument:
         return with_bom(self.text, self.bom)
 
     def line(self, offset: int) -> int:
+        """The 1-based line that holds the character at ``offset``."""
+        if self._newlines is None:
+            self._newlines = _line_break_offsets(self.text)
         return bisect_right(self._newlines, offset) + 1
 
-    def finding(
-        self,
-        rule: str,
-        message: str,
-        offset: int,
-        *,
-        severity: Severity = "warning",
-        status: Status = "failed",
-        suggestion: str | None = None,
-        details: dict[str, object] | None = None,
-    ) -> Finding:
-        return Finding(
-            rule,
-            message,
-            severity=severity,
-            status=status,
-            path=self.path,
-            line=self.line(offset),
-            suggestion=suggestion,
-            details=details or {},
-        )
+
+def _line_break_offsets(text: str) -> list[int]:
+    offsets: list[int] = []
+    position = text.find("\n")
+    while position >= 0:
+        offsets.append(position)
+        position = text.find("\n", position + 1)
+    return offsets
 
 
-class BibtexSyntaxError(Exception):
+class _SyntaxFailure(Exception):
+    """Stops the parser at the first error; ``parse_bibtex`` records it, nothing else sees it."""
+
     def __init__(self, message: str, position: int) -> None:
         super().__init__(message)
         self.position = position
@@ -178,7 +187,7 @@ class _Parser:
     def expect(self, character: str) -> None:
         self.skip_space()
         if self.position >= len(self.text) or self.text[self.position] != character:
-            raise BibtexSyntaxError(f"Expected {character!r}.", self.position)
+            raise _SyntaxFailure(f"Expected {character!r}.", self.position)
         self.position += 1
 
     def identifier(self) -> tuple[str, int]:
@@ -186,7 +195,7 @@ class _Parser:
         start = self.position
         match = IDENTIFIER.match(self.text, start)
         if match is None or match[0][0].isdigit():
-            raise BibtexSyntaxError("Expected a field or string-macro name.", start)
+            raise _SyntaxFailure("Expected a field or string-macro name.", start)
         self.position = match.end()
         return match[0], start
 
@@ -205,12 +214,12 @@ class _Parser:
             if char == "{":
                 depth += 1
                 if depth > _MAX_NESTING:
-                    raise BibtexSyntaxError(
+                    raise _SyntaxFailure(
                         "Brace nesting exceeds the supported limit.", self.position
                     )
             elif char == "}":
                 if depth == 0:
-                    raise BibtexSyntaxError("Unmatched brace inside a quoted value.", self.position)
+                    raise _SyntaxFailure("Unmatched brace inside a quoted value.", self.position)
                 depth -= 1
                 if opening == "{" and depth == 0:
                     end = self.position
@@ -221,25 +230,25 @@ class _Parser:
                 self.position += 1
                 return Atom("literal", self.text[start:end], start, end)
             self.position += 1
-        raise BibtexSyntaxError("Unterminated braced or quoted value.", start - 1)
+        raise _SyntaxFailure("Unterminated braced or quoted value.", start - 1)
 
     def expression(self) -> tuple[Atom, ...]:
         atoms: list[Atom] = []
         while True:
             self.skip_space()
             if self.position >= len(self.text):
-                raise BibtexSyntaxError("Missing field value.", self.position)
+                raise _SyntaxFailure("Missing field value.", self.position)
             if self.text[self.position] in '{"':
                 atoms.append(self.literal())
             else:
                 start = self.position
                 match = IDENTIFIER.match(self.text, start)
                 if match is None:
-                    raise BibtexSyntaxError("Expected a literal, number, or string macro.", start)
+                    raise _SyntaxFailure("Expected a literal, number, or string macro.", start)
                 self.position = match.end()
                 token = match[0]
                 if token[0].isdigit() and not token.isdigit():
-                    raise BibtexSyntaxError(
+                    raise _SyntaxFailure(
                         "A value starting with a number must be quoted or braced.", start
                     )
                 kind: AtomKind = "number" if token.isdigit() else "macro"
@@ -277,7 +286,7 @@ class _Parser:
             if char == opening:
                 depth += 1
                 if depth > _MAX_NESTING:
-                    raise BibtexSyntaxError(
+                    raise _SyntaxFailure(
                         "Comment nesting exceeds the supported limit.", self.position
                     )
             elif char == closing:
@@ -286,7 +295,7 @@ class _Parser:
                     self.position += 1
                     return
             self.position += 1
-        raise BibtexSyntaxError("Unterminated @comment block.", self.position)
+        raise _SyntaxFailure("Unterminated @comment block.", self.position)
 
     def entry(self, entry_type: str, closing: str, start: int) -> Entry:
         self.skip_space()
@@ -299,7 +308,7 @@ class _Parser:
             self.position += 1
         key = self.text[key_start : self.position]
         if not key or any(char in '{#="' for char in key):
-            raise BibtexSyntaxError("Missing or unsupported citation key.", key_start)
+            raise _SyntaxFailure("Missing or unsupported citation key.", key_start)
         self.skip_space()
         if self.position < len(self.text) and self.text[self.position] == closing:
             self.position += 1
@@ -307,65 +316,63 @@ class _Parser:
         self.expect(",")
         return Entry(entry_type, key, start, self.fields(closing))
 
+    def record(self) -> None:
+        """Read the record that starts at the ``@`` under the cursor."""
+        start = self.position
+        self.position += 1
+        match = ENTRY_TYPE.match(self.text, self.position)
+        if match is None:
+            raise _SyntaxFailure("Expected an entry type after '@'.", start)
+        kind = match[0].lower()
+        self.position = match.end()
+        self.skip_space()
+        if self.position >= len(self.text) or self.text[self.position] not in "{(":
+            raise _SyntaxFailure("Expected '{' or '(' after the entry type.", self.position)
+        opening = self.text[self.position]
+        closing = "}" if opening == "{" else ")"
+        self.position += 1
+        if kind == "comment":
+            self.comment(opening)
+            return
+        if len(self.records) >= MAX_BIB_ENTRIES:
+            raise _SyntaxFailure("Entry count exceeds the supported limit.", start)
+        if kind == "preamble":
+            fields = (Field("preamble", self.position, self.expression()),)
+            if self.position < len(self.text) and self.text[self.position] == ",":
+                self.position += 1
+            self.expect(closing)
+            self.records.append(Declaration("preamble", start, fields))
+        elif kind == "string":
+            fields = self.fields(closing)
+            if len(fields) != 1:
+                raise _SyntaxFailure("An @string declaration must define one macro.", start)
+            self.records.append(Declaration("string", start, fields))
+        else:
+            self.records.append(self.entry(kind, closing, start))
+
     def parse(self) -> None:
         while self.position < len(self.text):
             cancellation_point()
             self.skip_space()
             if self.position >= len(self.text):
                 break
-            if self.text[self.position] != "@":
+            if self.text[self.position] == "@":
+                self.record()
+            else:
                 # BibTeX permits free text outside entries.
                 self.position += 1
-                continue
-            start = self.position
-            self.position += 1
-            match = ENTRY_TYPE.match(self.text, self.position)
-            if match is None:
-                raise BibtexSyntaxError("Expected an entry type after '@'.", start)
-            kind = match[0].lower()
-            self.position = match.end()
-            self.skip_space()
-            if self.position >= len(self.text) or self.text[self.position] not in "{(":
-                raise BibtexSyntaxError("Expected '{' or '(' after the entry type.", self.position)
-            opening = self.text[self.position]
-            closing = "}" if opening == "{" else ")"
-            self.position += 1
-            if kind == "comment":
-                self.comment(opening)
-                continue
-            if len(self.records) >= MAX_BIB_ENTRIES:
-                raise BibtexSyntaxError("Entry count exceeds the supported limit.", start)
-            if kind == "preamble":
-                fields = (Field("preamble", self.position, self.expression()),)
-                if self.position < len(self.text) and self.text[self.position] == ",":
-                    self.position += 1
-                self.expect(closing)
-                self.records.append(Declaration("preamble", start, fields))
-            elif kind == "string":
-                fields = self.fields(closing)
-                if len(fields) != 1:
-                    raise BibtexSyntaxError("An @string declaration must define one macro.", start)
-                self.records.append(Declaration("string", start, fields))
-            else:
-                self.records.append(self.entry(kind, closing, start))
 
 
 def parse_bibtex(path: str, text: str, *, bom: bool = False) -> BibDocument:
-    """Parse ``text`` up to its first syntax error, which becomes ``syntax_error``.
+    """Parse ``text`` up to its first syntax error, which is kept as ``syntax_error``.
 
     ``bom`` records that the reader removed a byte-order mark before ``text``.
     """
     document = BibDocument(path, text, bom=bom)
     try:
         _Parser(text, document.records).parse()
-    except BibtexSyntaxError as error:
-        document.syntax_error = document.finding(
-            "bibliography.syntax",
-            str(error),
-            min(error.position, len(text)),
-            severity="error",
-            suggestion="Repair this entry; the remaining file was not parsed or normalized.",
-        )
+    except _SyntaxFailure as error:
+        document.syntax_error = SyntaxProblem(str(error), min(error.position, len(text)))
     return document
 
 
@@ -427,27 +434,29 @@ def describe_read_failure(error: Exception) -> str:
     return str(error)
 
 
-def field_literal(
-    bib_field: Field,
-    *,
-    numbers: bool = True,
-    braces: bool = True,
-    max_chars: int | None = _MAX_FIELD_CHARS,
-) -> str | None:
+def field_literal(bib_field: Field, *, max_chars: int | None = _MAX_FIELD_CHARS) -> str | None:
     """The stripped value of a field holding one literal (or number) without escapes.
 
-    None for macros, concatenations, backslashes, values over ``max_chars``, numbers
-    unless ``numbers`` is set, and any brace unless ``braces`` is set.
+    None for macros, concatenations, backslashes and values over ``max_chars``.
     """
-    accepted = ("literal", "number") if numbers else ("literal",)
-    if len(bib_field.atoms) != 1 or bib_field.atoms[0].kind not in accepted:
+    if len(bib_field.atoms) != 1 or bib_field.atoms[0].kind == "macro":
         return None
     value = bib_field.atoms[0].value.strip()
     if max_chars is not None and len(value) > max_chars:
         return None
-    if "\\" in value or (not braces and any(char in value for char in "{}")):
+    return None if "\\" in value else value
+
+
+def plain_literal(bib_field: Field) -> str | None:
+    """The stripped value of a field holding one brace-free literal, whatever its length.
+
+    The shape that relationship and alias fields must have: no number, macro,
+    concatenation, backslash or brace.
+    """
+    if len(bib_field.atoms) != 1 or bib_field.atoms[0].kind != "literal":
         return None
-    return value
+    value = bib_field.atoms[0].value.strip()
+    return None if any(char in value for char in "\\{}") else value
 
 
 @dataclass(frozen=True, slots=True)
@@ -465,6 +474,7 @@ class DoiReading:
 
 
 def read_doi(bib_field: Field) -> DoiReading:
+    """Read what a DOI field literally states; ambiguous markup is reported, never guessed."""
     if len(bib_field.atoms) != 1 or bib_field.atoms[0].kind != "literal":
         return DoiReading(
             uncertainty="A macro, number, or concatenated value cannot be normalized safely."
@@ -492,7 +502,7 @@ def read_doi(bib_field: Field) -> DoiReading:
         return DoiReading(
             uncertainty="A DOI URL with a query or fragment has an ambiguous identifier."
         )
-    if _DOI.fullmatch(identifier) is None or any(char in identifier for char in '<>"'):
+    if DOI_PATTERN.fullmatch(identifier) is None:
         return DoiReading()
     span = (atom.start + left, atom.start + left + prefix.end()) if prefix else None
     return DoiReading(identifier, span)

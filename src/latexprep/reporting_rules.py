@@ -30,11 +30,11 @@ RULES = (
         code="RPT103",
         name="report.diagnostic_bundle",
         title="Unverified diagnostic export",
-        description="Label sanitized diagnostic reports, diffs, logs and explicitly "
-        "allowlisted text artifacts as unverified material, never a submission package.",
+        description="Label sanitized diagnostic reports and diffs as unverified material, "
+        "never a submission package.",
         tests=(
             "tests.test_reporting.DiagnosticBundleTests.test_bundle_is_unverified_and_cross_redacted",
-            "tests.test_reporting.DiagnosticBundleTests.test_unsafe_scratch_inputs_are_rejected",
+            "tests.test_reporting.DiagnosticBundleTests.test_export_refuses_to_overwrite_an_existing_file",
         ),
         fix="Use this bundle for diagnosis; run preparation separately for a verified output.",
     ),

@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 import tempfile
+import threading
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
 from latexprep.author_records import check_author_records
 from latexprep.errors import PreparationError
@@ -14,7 +16,7 @@ from latexprep.pdf_structure_checks import (
     StructureOptions,
     inspect_pdf_structure,
 )
-from latexprep.pdf_support import MAX_INSPECTION_PAGES
+from latexprep.pdf_tool_output import MAX_INSPECTION_PAGES
 from latexprep.resource_budget import ResourceBudget
 from tests.test_pdf_checks import DetailRunner
 
@@ -387,6 +389,20 @@ class PdfStructureTests(unittest.IsolatedAsyncioTestCase):
                     finding.details["uncertainty"],
                     ["unmapped or unsupported PDF structure role"],
                 )
+
+    async def test_the_structure_tree_is_read_in_a_worker_thread_that_sees_cancellation(
+        self,
+    ) -> None:
+        seen: list[int] = []
+        with patch(
+            "latexprep.pdf_structure_tree.cancellation_point",
+            side_effect=lambda: seen.append(threading.get_ident()),
+        ):
+            result = await self.check(StructureOptions(check_table_structure=True))
+        self.assertEqual(result[0].status, "passed")
+        self.assertTrue(seen)
+        # Off the event loop's thread, where a cancellation request can reach the traversal.
+        self.assertNotIn(threading.get_ident(), seen)
 
     async def test_link_violations_carry_a_readable_reason(self) -> None:
         document = structured_pdf_objects()

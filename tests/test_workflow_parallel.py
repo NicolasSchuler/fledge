@@ -12,6 +12,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+from latexprep.build_result import BuildTools
 from latexprep.check_selection import CheckSelection
 from latexprep.config import Settings
 from latexprep.core import run_job
@@ -20,10 +21,9 @@ from latexprep.errors import PreparationError
 from latexprep.findings import Finding
 from latexprep.job_context import JobRequest
 from latexprep.job_execution import JobDeadlineExceeded
-from latexprep.latexmk_build import BuildTools
 from latexprep.publication import VerifiedPackage
 from latexprep.report import Outcome, Report
-from latexprep.source_staging import apply_contents
+from latexprep.staging import apply_contents
 
 
 def project(root: Path) -> None:
@@ -287,7 +287,7 @@ class ParallelWorkflowTests(unittest.IsolatedAsyncioTestCase):
             project(source)
             with (
                 patch(
-                    "latexprep.document_run.import_project", side_effect=TimeoutError("timed out")
+                    "latexprep.job_context.import_project", side_effect=TimeoutError("timed out")
                 ),
                 self.assertRaises(TimeoutError) as raised,
             ):

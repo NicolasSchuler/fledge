@@ -5,10 +5,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from latexprep.command_runner import CommandResult, CommandRunner, ToolVersion
 from latexprep.config import Settings
 from latexprep.findings import has_blockers
 from latexprep.formatting import FormattingOptions, FormattingResult, format_project
-from latexprep.runtime import CommandResult, CommandRunner, ToolRunner, ToolVersion
+from latexprep.runtime import ToolRunner
 
 
 async def format_with(
@@ -201,6 +202,21 @@ class FormattingTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(finding.message, expected)
                 self.assertNotIn("second line", finding.message)
                 self.assertNotIn(str(base), finding.message)
+
+    async def test_a_failed_second_pass_is_named_with_its_exit_status(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            (base / "source").mkdir()
+            (base / "source" / "main.tex").write_text("text\n")
+            first = CommandResult(0, "text\n", "", resolved_command=[])
+            second = CommandResult(3, "", "", resolved_command=[])
+            with patch("latexprep.formatting.shutil.which", return_value="/fake/tex-fmt"):
+                result = await format_with(
+                    base / "source", base / "work", FakeFormatter([first, second]), Settings()
+                )
+        (finding,) = [f for f in result.findings if f.rule == "source.format_execution"]
+        self.assertEqual(finding.message, "tex-fmt's second pass failed with exit status 3")
+        self.assertEqual((result.contents, result.changes), ({}, []))
 
     async def test_operating_system_errors_are_reported_by_cause_without_the_workspace(self):
         with tempfile.TemporaryDirectory() as directory:

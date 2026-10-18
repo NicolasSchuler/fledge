@@ -10,13 +10,16 @@ from io import StringIO
 from unittest.mock import patch
 
 from rich.console import Console
+from rich.padding import Padding
 from rich.text import Text
 
+from latexprep.compact_report import render_compact
 from latexprep.finding_view import RenderOptions
 from latexprep.findings import Finding
 from latexprep.report import Outcome, Report
+from latexprep.terminal_console import stderr_console, stdout_console
 from latexprep.terminal_progress import TerminalProgress
-from latexprep.terminal_report import print_report, render_compact, render_terminal
+from latexprep.terminal_report import print_report, render_terminal
 from latexprep.text_safety import sanitize_terminal_text
 
 
@@ -252,6 +255,42 @@ class OnlineDisclosureTests(unittest.TestCase):
         shown = render_terminal(self.report(), options=RenderOptions(show_passed=True))
         self.assertIn("Metadata inventory", shown)
         self.assertNotIn("No issues found", shown)
+
+
+class ConsoleFactoryTests(unittest.TestCase):
+    PADDED = "Next: a long action that wraps \n  onto a second line\n"
+
+    def test_redirected_report_carries_no_trailing_blanks(self):
+        sink = StringIO()
+        with patch("sys.stdout", sink):
+            console = stdout_console()
+            console.print(Padding(Text("x" * 30 + " " + "y" * 30), (0, 0, 0, 2), expand=False))
+            console.print(Text("done   "))
+        lines = sink.getvalue().splitlines()
+        self.assertGreaterEqual(len(lines), 2)
+        for line in lines:
+            self.assertEqual(line, line.rstrip(), repr(line))
+
+    def test_blanks_split_across_writes_are_still_dropped_before_a_line_break(self):
+        sink = StringIO()
+        with patch("sys.stdout", sink):
+            console = stdout_console()
+            console.file.write("abc   ")
+            console.file.write("\nnext  text")
+            console.file.write("  \n")
+        self.assertEqual(sink.getvalue(), "abc\nnext  text\n")
+
+    def test_a_terminal_is_written_to_directly(self):
+        terminal = TerminalBuffer()
+        with patch("sys.stdout", terminal):
+            self.assertIs(stdout_console().file, terminal)
+
+    def test_consoles_print_text_literally_and_progress_goes_to_stderr(self):
+        buffer = StringIO()
+        with patch("sys.stdout", buffer):
+            stdout_console().print("[bold]literal[/bold]")
+        self.assertEqual(buffer.getvalue().strip(), "[bold]literal[/bold]")
+        self.assertTrue(stderr_console().stderr)
 
 
 class TerminalProgressTests(unittest.TestCase):

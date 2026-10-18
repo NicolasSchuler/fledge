@@ -5,24 +5,34 @@ from __future__ import annotations
 import asyncio
 import json
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 
+from latexprep.cancellation import cancellation_point
+from latexprep.command_runner import CommandResult
 from latexprep.errors import PreparationError
-from latexprep.pdf_checks import PdfCheckOptions, inspect_pdf_details
-from latexprep.pdf_support import (
-    DOCUMENT,
-    EVIDENCE_LIMITATION_SUGGESTION,
-    TOOL_FAILURE_SUGGESTION,
-    PdfPreflight,
-    PdfToolSession,
+from latexprep.findings import Finding
+from latexprep.measurement_findings import EVIDENCE_LIMITATION_SUGGESTION, TOOL_FAILURE_SUGGESTION
+from latexprep.pdf_check_options import PdfCheckOptions
+from latexprep.pdf_checks import inspect_pdf_details
+from latexprep.pdf_geometry import relative_luminance, wcag_contrast_ratio
+from latexprep.pdf_qpdf_graph import parse_qpdf_json_v2
+from latexprep.pdf_tool_output import (
     evaluate_font_policy,
     font_inventory,
+    normalized_text_pages,
+    split_text_pages,
+)
+from latexprep.pdf_tools import (
+    DOCUMENT,
+    PdfPreflight,
+    PdfToolSession,
+    ToolMeasurement,
     font_inventory_argv,
     layout_text_argv,
-    normalized_text_pages,
     open_pdf_session,
-    parse_qpdf_json_v2,
     pdf_tool_version_argv,
     pdfinfo_argv,
     preflight_pdf,
@@ -30,10 +40,10 @@ from latexprep.pdf_support import (
     qpdf_objects_argv,
     raster_filename,
     render_page_argv,
-    split_text_pages,
+    run_tool_measurements,
 )
 from latexprep.resource_budget import ResourceBudget
-from latexprep.runtime import CommandResult, ToolRunner
+from latexprep.runtime import ToolRunner
 from tests.test_pdf_checks import DetailRunner
 
 FONTS = (
@@ -149,7 +159,7 @@ class FontPolicyTests(unittest.TestCase):
         inventory = font_inventory(FONTS)
         names = {
             (require, forbid): [
-                font["name"]
+                font.name
                 for font in evaluate_font_policy(
                     inventory, require_embedded=require, forbid_type3=forbid
                 ).violations
@@ -162,8 +172,8 @@ class FontPolicyTests(unittest.TestCase):
         self.assertEqual(names[False, True], ["Glyphs", "Bare"])
         self.assertEqual(names[True, True], ["Loose", "Glyphs", "Bare"])
         outcome = evaluate_font_policy(inventory, require_embedded=False, forbid_type3=False)
-        self.assertEqual([font["name"] for font in outcome.nonembedded], ["Loose", "Bare"])
-        self.assertEqual([font["name"] for font in outcome.type3], ["Glyphs", "Bare"])
+        self.assertEqual([font.name for font in outcome.nonembedded], ["Loose", "Bare"])
+        self.assertEqual([font.name for font in outcome.type3], ["Glyphs", "Bare"])
 
     def test_an_empty_inventory_violates_nothing(self) -> None:
         outcome = evaluate_font_policy([], require_embedded=True, forbid_type3=True)
@@ -354,6 +364,135 @@ class PreflightTests(SessionTestCase):
             await PdfPreflight.open(self.pdf, self.work(), RecordingRunner(fail="pdfinfo"), None)
         opened = await PdfPreflight.open(self.pdf, self.work(), RecordingRunner(), None)
         self.assertEqual(opened.pages, 2)
+
+
+class TypedFontTests(unittest.TestCase):
+    def test_inventory_rows_are_typed_fonts_that_report_under_the_established_keys(self) -> None:
+        loose, glyphs = font_inventory(FONTS)[1:3]
+        self.assertEqual(
+            (loose.name, loose.font_type, loose.embedded), ("Loose", "TrueType", False)
+        )
+        self.assertEqual((loose.is_type3, glyphs.is_type3), (False, True))
+        self.assertEqual(
+            glyphs.to_report(),
+            {
+                "name": "Glyphs",
+                "type": "Type 3",
+                "encoding": "Custom",
+                "embedded": True,
+                "subset": False,
+                "unicode_map": False,
+                "object": 5,
+                "generation": 0,
+            },
+        )
+
+
+class ColorContrastTests(unittest.TestCase):
+    def test_wcag_ratio_runs_from_one_to_twenty_one_in_either_order(self) -> None:
+        black, white = relative_luminance((0, 0, 0)), relative_luminance((1, 1, 1))
+        self.assertAlmostEqual(wcag_contrast_ratio(black, white), 21.0)
+        self.assertAlmostEqual(wcag_contrast_ratio(white, black), 21.0)
+        self.assertEqual(wcag_contrast_ratio(0.3, 0.3), 1.0)
+        # WCAG's published example: #777 on white is 4.48:1.
+        gray = relative_luminance((0x77 / 255,) * 3)
+        self.assertAlmostEqual(wcag_contrast_ratio(gray, white), 4.48, places=2)
+
+
+class ToolMeasurementTests(SessionTestCase):
+    async def session(self, runner: RecordingRunner) -> PdfToolSession:
+        return await PdfToolSession.open(self.work(), {"document": self.pdf}, runner, None)
+
+    @staticmethod
+    def finding(rule: str, message: str) -> Finding:
+        return Finding(rule, message, severity="info", status="passed")
+
+    async def test_the_findings_of_a_readable_command_are_returned(self) -> None:
+        session = await self.session(RecordingRunner())
+        measurement = ToolMeasurement(
+            "fonts",
+            font_inventory_argv(),
+            ("pdf.one",),
+            lambda result: [self.finding("pdf.one", f"{len(font_inventory(result.stdout))} fonts")],
+        )
+        [finding] = await measurement.run(session)
+        self.assertEqual((finding.rule, finding.message), ("pdf.one", "4 fonts"))
+
+    async def test_a_failing_command_or_unreadable_output_leaves_each_rule_inconclusive(
+        self,
+    ) -> None:
+        def unreadable(_result: CommandResult) -> list[Finding]:
+            raise PreparationError("Output could not be read")
+
+        for label, runner, evaluate, message in (
+            ("command", RecordingRunner(fail="pdffonts"), lambda _r: [], "pdffonts failed"),
+            ("output", RecordingRunner(), unreadable, "Output could not be read"),
+        ):
+            with self.subTest(label):
+                session = await self.session(runner)
+                measurement = ToolMeasurement(
+                    "fonts",
+                    font_inventory_argv(),
+                    ("pdf.one", "pdf.two"),
+                    evaluate,
+                    suggestion=TOOL_FAILURE_SUGGESTION,
+                )
+                findings = await measurement.run(session)
+                self.assertEqual([item.rule for item in findings], ["pdf.one", "pdf.two"])
+                for finding in findings:
+                    self.assertEqual(
+                        (finding.status, finding.incomplete, finding.suggestion),
+                        ("inconclusive", True, TOOL_FAILURE_SUGGESTION),
+                    )
+                    self.assertIn(message, finding.message)
+
+    async def test_evaluation_runs_in_a_worker_thread_that_observes_cancellation(self) -> None:
+        session = await self.session(RecordingRunner())
+        threads: list[int] = []
+        entered, stopped = threading.Event(), threading.Event()
+
+        def evaluate(_result: CommandResult) -> list[Finding]:
+            threads.append(threading.get_ident())
+            entered.set()
+            try:
+                while True:
+                    cancellation_point()
+                    time.sleep(0.001)
+            finally:
+                stopped.set()
+
+        measurement = ToolMeasurement("fonts", font_inventory_argv(), ("pdf.one",), evaluate)
+        task = asyncio.create_task(measurement.run(session))
+        while not entered.is_set():
+            await asyncio.sleep(0.001)
+        self.assertNotEqual(threads, [threading.get_ident()])
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 5)
+        # The worker stopped before the cancellation reached the caller.
+        self.assertTrue(stopped.is_set())
+
+    async def test_measurements_run_concurrently_and_report_in_the_given_order(self) -> None:
+        runner = RecordingRunner(delay=0.01)
+        session = await self.session(runner)
+        measurements = [
+            ToolMeasurement(
+                name,
+                [tool, DOCUMENT],
+                (f"pdf.{name}",),
+                lambda result, name=name: [self.finding(f"pdf.{name}", result.stdout.strip())],
+            )
+            for name, tool in (
+                ("first", "pdftotext"),
+                ("second", "pdffonts"),
+                ("third", "pdfimages"),
+            )
+        ]
+        groups = await run_tool_measurements(session, measurements)
+        self.assertEqual(
+            [group[0].rule for group in groups], ["pdf.first", "pdf.second", "pdf.third"]
+        )
+        self.assertEqual(len(runner.commands), 3)
 
 
 if __name__ == "__main__":
