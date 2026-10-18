@@ -6,18 +6,23 @@ Report bookkeeping lives in ``job_report`` and choosing the main file in
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from pathlib import Path
 from typing import ParamSpec, TypeVar
 
 from .analysed_source import AnalysedSourceCache
+from .build_result import BuildResult
 from .cancellation import run_in_thread
 from .config import Settings
 from .errors import PreparationError
+from .findings import Finding
 from .import_budget import ImportLimits
+from .latexmk_build import build_project
 from .pdf_check_pipeline import PdfCheckSettings
+from .pdf_comparison import compare_pdfs
+from .pdf_inspection import inspect_pdf
 from .pdf_previews import PdfPreviewCollector, PdfPreviewStore
 from .project import ImportedProject, import_project
 from .report import Report
@@ -67,12 +72,28 @@ class JobRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class DocumentBackends:
+    """The tool-driven operations a document's tasks call; the defaults run the real tools.
+
+    This is the injection point for the three slow operations of a document job: building
+    a document, inspecting a PDF and comparing two PDFs. Each takes and returns what the
+    function it defaults to does, so a controlled replacement needs no patching of module
+    globals. ``run_job`` accepts one and hands it to every stage and document of the job.
+    """
+
+    build: Callable[..., Awaitable[BuildResult]] = build_project
+    inspect_pdf: Callable[..., Awaitable[list[Finding]]] = inspect_pdf
+    compare_pdfs: Callable[..., Awaitable[list[Finding]]] = compare_pdfs
+
+
+@dataclass(frozen=True, slots=True)
 class JobContext:
     """What every stage of one job reads; ``settings`` are the effective settings.
 
     ``sources`` holds the source analysis of each project root the job's checks read, so
     that checks of the same sources share one graph. A document of a multi-document job
-    has its own context and so its own analyses.
+    has its own context and so its own analyses. ``backends`` are the operations that
+    drive real tools.
     """
 
     request: JobRequest
@@ -82,6 +103,7 @@ class JobContext:
     budget: ResourceBudget
     emit: Callable[[str], None]
     sources: AnalysedSourceCache = field(default_factory=AnalysedSourceCache)
+    backends: DocumentBackends = field(default_factory=DocumentBackends)
 
     async def thread_operation(
         self, name: str, function: Callable[P, R], /, *args: P.args, **kwargs: P.kwargs

@@ -63,6 +63,9 @@ latexprep = ["presets/*.toml", "loaded_options_hook.tex", "report.css"]
 minversion = "9.0"
 testpaths = ["tests"]
 addopts = ["-ra", "--strict-config", "--strict-markers"]
+markers = [
+    "live: drives real TeX, Poppler, Biber or sandbox tools; opt in with FLEDGE_RUN_INTEGRATION=1",
+]
 xfail_strict = true
 # Dump every thread's traceback when a single test runs this long, so a hung test
 # names itself in CI logs instead of silently consuming the job timeout.
@@ -73,19 +76,55 @@ target-version = "py311"
 line-length = 100
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "C901", "PLR0912", "PLR0913", "PLR0915"]
+select = [
+    "E", "F", "I", "UP", "B",
+    # Style and simplification rules with real signal.
+    "C4", "PIE", "PERF", "PTH", "SIM", "RUF", "PGH", "T20",
+    # Every blind `except Exception` must be a justified boundary that reports its cause.
+    "BLE",
+    # Boolean flags are keyword-only. FBT003 (a positional True or False in a call) is left
+    # out: its 16 hits fill positional fields of private NamedTuples and dataclasses, and
+    # one stdlib call (`setblocking`), where the value is the data.
+    "FBT001", "FBT002",
+    # Unused arguments, apart from interface implementations (see the ignores below).
+    "ARG",
+    # Logging: lazy %-formatting, `getLogger(__name__)` and no stray root-logger calls.
+    "G", "LOG",
+    # Complexity ceilings that keep functions small.
+    "C901", "PLR0912", "PLR0913", "PLR0915",
+]
+ignore = [
+    # The ambiguous characters in strings are intentional: typographic dashes, quotes, the
+    # multiplication sign and Greek letters that the text checks recognise or produce for
+    # the user. RUF002 and RUF003 (docstrings and comments) stay enabled.
+    "RUF001",
+    # `"a b c".split()` keeps the long word and name tables readable.
+    "SIM905",
+]
 
-# Ceilings that keep functions small. The few per-file ignores below name the test files
-# that still exceed them; decompose a function rather than adding an ignore.
+# Decompose a function rather than raising a ceiling or adding an ignore.
 [tool.ruff.lint.mccabe]
-max-complexity = 20
+max-complexity = 10
 
 [tool.ruff.lint.pylint]
 max-args = 8
-max-branches = 20
-max-statements = 60
+max-branches = 12
+max-statements = 50
 
 [tool.ruff.lint.per-file-ignores]
-# A fixture builder with a keyword for every build field, and one long live scenario.
+# Implementations of the sandbox backend and process table interfaces take every argument
+# of the interface even when one backend ignores some of them.
+"src/latexprep/sandbox.py" = ["ARG002"]
+"src/latexprep/process_table.py" = ["ARG002"]
+# Command-line scripts report through print.
+"scripts/*" = ["T201"]
+# Test doubles mirror the signatures they replace, so their unused arguments are intended.
+# `with` blocks nest in unittest (`subTest` inside `assertRaises`), and a few tests catch
+# BaseException on purpose to record what escaped a thread or a cancelled task.
+"tests/*" = ["ARG", "SIM117", "C408", "BLE001"]
+# A fixture builder with a keyword for every build field.
 "tests/support.py" = ["PLR0913"]
-"tests/test_integration_checks.py" = ["PLR0915"]
+# Long live scenarios and a harness that mimics a whole build.
+"tests/test_integration_checks.py" = ["C901", "PLR0915"]
+"tests/test_loaded_options.py" = ["C901", "PLR0912"]
+"tests/test_scheduler_resources.py" = ["PLR0915"]

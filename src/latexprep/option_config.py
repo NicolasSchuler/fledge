@@ -122,7 +122,7 @@ def _number_requirement(bounds: Bounds) -> str:
     return "a finite number"
 
 
-def _check_integer(name: str, value: object, bounds: Bounds, allow_none: bool) -> None:
+def _check_integer(name: str, value: object, bounds: Bounds, *, allow_none: bool) -> None:
     if value is None and allow_none:
         return
     if (
@@ -133,7 +133,7 @@ def _check_integer(name: str, value: object, bounds: Bounds, allow_none: bool) -
         _reject(name, _integer_requirement(bounds))
 
 
-def _check_number(name: str, value: object, bounds: Bounds, allow_none: bool) -> None:
+def _check_number(name: str, value: object, bounds: Bounds, *, allow_none: bool) -> None:
     if value is None and allow_none:
         return
     if (
@@ -156,7 +156,7 @@ def require_int(
     allow_none: bool = False,
 ) -> None:
     """Reject anything but an integer within the limits; ``True`` is not an integer."""
-    _check_integer(name, value, Bounds(minimum, maximum), allow_none)
+    _check_integer(name, value, Bounds(minimum, maximum), allow_none=allow_none)
 
 
 def require_number(
@@ -169,7 +169,7 @@ def require_number(
     allow_none: bool = False,
 ) -> None:
     """Reject anything but a finite integer or float within the limits; not ``True`` or NaN."""
-    _check_number(name, value, Bounds(minimum, maximum, exclusive_minimum), allow_none)
+    _check_number(name, value, Bounds(minimum, maximum, exclusive_minimum), allow_none=allow_none)
 
 
 def require_choice(
@@ -422,9 +422,9 @@ def validate_scalars(options: DataclassInstance) -> None:
             if type(value) is not bool and not (optional and value is None):
                 _reject(name, "a boolean (true or false)")
         elif tag == "integer":
-            _check_integer(name, value, limits.get(name, Bounds()), optional)
+            _check_integer(name, value, limits.get(name, Bounds()), allow_none=optional)
         elif tag == "number":
-            _check_number(name, value, limits.get(name, Bounds()), optional)
+            _check_number(name, value, limits.get(name, Bounds()), allow_none=optional)
         else:
             require_choice(name, value, choices, allow_none=optional)
 

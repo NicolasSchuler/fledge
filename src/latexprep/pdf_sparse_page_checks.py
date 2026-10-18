@@ -187,7 +187,7 @@ async def measure_sparse_pages(
     session: PdfToolSession,
     pages: int,
     options: PdfCheckOptions,
-    rules: Collection[str] = (),
+    rules: Collection[str] = (),  # noqa: ARG001 - the signature every measurement family shares
 ) -> list[Finding]:
     """One finding per measured page, plus unavailable findings for pages that failed.
 
@@ -212,9 +212,11 @@ async def measure_sparse_pages(
                 severity="warning",
             )
         )
-    for page in range(1, pages + 1):
-        if page not in options.sparse_page_exemptions:
-            result.append(
-                await _sparse_page_finding(session, page, pages, sizes[page - 1], options)
-            )
+    result.extend(
+        [
+            await _sparse_page_finding(session, page, pages, sizes[page - 1], options)
+            for page in range(1, pages + 1)
+            if page not in options.sparse_page_exemptions
+        ]
+    )
     return _merge_page_unavailability(result)

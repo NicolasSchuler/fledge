@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import tempfile
 import unittest
 from dataclasses import replace
-from pathlib import Path
 from unittest.mock import patch
 
 from latexprep.bibliography_checks import check_bibliography_coverage_and_fields
@@ -13,6 +11,7 @@ from latexprep.bibliography_options import BibliographyOptions
 from latexprep.cancellation import AnalysisCancelled
 from latexprep.errors import PreparationError
 from latexprep.findings import Finding, has_blockers
+from tests.support import ProjectTestCase
 
 
 def listed(finding: Finding, key: str) -> list:
@@ -22,18 +21,10 @@ def listed(finding: Finding, key: str) -> list:
     return value
 
 
-class BibliographyCheckTests(unittest.TestCase):
+class BibliographyCheckTests(ProjectTestCase):
     def setUp(self) -> None:
-        self.directory = tempfile.TemporaryDirectory()
-        self.addCleanup(self.directory.cleanup)
-        self.root = Path(self.directory.name)
+        super().setUp()
         self.options = BibliographyOptions()
-
-    def write(self, name: str, source: str | bytes) -> Path:
-        path = self.root / name
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(source.encode("utf-8") if isinstance(source, str) else source)
-        return path
 
     def manuscript(self, body: str = "", *, resources: str = "references") -> None:
         self.write(

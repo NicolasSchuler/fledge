@@ -428,6 +428,7 @@ async def _compare_prepared(
     pair: _SidePair,
     errors: list[str],
     policy: ComparisonPolicy,
+    *,
     count_changes: bool,
 ) -> _Comparison:
     comparison = _Comparison([_page_count_finding(pair, policy)], errors)
@@ -481,7 +482,9 @@ async def compare_pdfs(
     pair, errors = await _prepare_sides(session)
     comparison = _Comparison([], errors)
     if pair is not None:
-        comparison = await _compare_prepared(session, pair, errors, policy, options is not None)
+        comparison = await _compare_prepared(
+            session, pair, errors, policy, count_changes=options is not None
+        )
     findings, errors = comparison.findings, comparison.errors
     if errors:
         findings.append(

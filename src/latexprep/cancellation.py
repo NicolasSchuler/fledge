@@ -96,7 +96,7 @@ async def bounded_map(
         # when the owner subsequently retrieves them while draining workers.
         try:
             await asyncio.gather(*tasks)
-        except BaseException as error:
+        except BaseException as error:  # noqa: BLE001 - carried as data and re-raised by the owner
             return error
         return None
 
@@ -122,7 +122,7 @@ async def run_in_thread(function: Callable[P, R], /, *args: P.args, **kwargs: P.
         # when the owner subsequently drains and retrieves it.
         try:
             return function(*args, **kwargs), None
-        except BaseException as error:
+        except BaseException as error:  # noqa: BLE001 - carried as data and re-raised by the owner
             return None, error
 
     token = _thread_stop.set(stop)

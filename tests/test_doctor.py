@@ -23,27 +23,32 @@ from latexprep.report import Outcome
 from latexprep.resource_monitor import ResourceMonitor
 from latexprep.runtime import ToolRunner
 from latexprep.workflow_options import DocumentOptions, WorkflowOptions
+from tests.fakes import FixtureToolchain
+from tests.pdf_fakes import FakePdfRunner
 from tests.support import fake_build_result, write_project
-from tests.test_pdf import FakePdfRunner
 
 
-class DoctorRunner(FakePdfRunner):
-    """Reuse controlled Poppler output, with no external commands or monitor."""
+class DoctorRunner(ToolRunner):
+    """A runner with controlled PDF tool output: no commands run and no monitor samples."""
 
-    def __init__(self, *args, budget=None, source_date_epoch=None):
-        super().__init__()
-        self.budget = budget
-        self.limits = args[0]
-        self.cancelled = False
+    def __init__(self, limits, *, budget=None, source_date_epoch=None):
+        super().__init__(
+            limits,
+            budget=budget,
+            source_date_epoch=source_date_epoch,
+            toolchain=FixtureToolchain(),
+        )
+        self.tools = FakePdfRunner()
 
     @asynccontextmanager
     async def job_scope(self, root, *, max_temp_bytes):
         yield self
 
+    def freeze_input(self, source, storage):
+        return self.tools.freeze_input(source, storage)
+
     async def run(self, argv, cwd, workspace, **options):
-        if argv[-1] == "--version":
-            return CommandResult(0, f"{argv[0]} version test\n", "", resolved_command=argv)
-        return await super().run(argv, cwd, workspace, **options)
+        return await self.tools.run(argv, cwd, workspace, **options)
 
 
 class DoctorTests(unittest.IsolatedAsyncioTestCase):
@@ -92,7 +97,7 @@ class DoctorTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("qpdf", report.tools)
         self.assertNotIn("tex-fmt", report.tools)
         self.assertFalse(self.builds[0][1].exists(), "Owned fixture is cleaned up")
-        self.assertTrue(any(argv[0] == "pdftoppm" for argv in self.runner.commands))
+        self.assertTrue(any(argv[0] == "pdftoppm" for argv in self.runner.tools.commands))
 
     async def test_final_resource_sample_failure_blocks_successful_fixture(self):
         for failure in (
@@ -110,7 +115,7 @@ class DoctorTests(unittest.IsolatedAsyncioTestCase):
                 with (
                     patch.object(DoctorRunner, "job_scope", ToolRunner.job_scope),
                     patch.object(ResourceMonitor, "_monitor_job", AsyncMock()),
-                    patch.object(ResourceMonitor, "_sample_job", final_sample),
+                    patch.object(ResourceMonitor, "sample_job", final_sample),
                 ):
                     report = await run_doctor()
                 self.assertEqual(report.outcome, "blocked")
@@ -384,17 +389,17 @@ class DoctorTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("pdftohtml", report.tools)
 
     def test_configured_checks_select_the_tools_their_adapters_name(self):
-        from latexprep.doctor import _selected_tools
+        from latexprep.doctor import selected_tools
         from latexprep.pdf_artwork_options import PdfArtworkOptions
         from latexprep.pdf_check_options import PdfCheckOptions
         from latexprep.pdf_structure_checks import StructureOptions
 
-        required, optional = _selected_tools(Settings())
+        required, optional = selected_tools(Settings())
         self.assertLessEqual(
             {"pdfinfo", "pdftotext", "pdftoppm", "pdffonts", "pdfdetach", "pdfimages"}, required
         )
         self.assertFalse({"qpdf", "mutool", "pdftohtml"} & (required | optional))
-        required, optional = _selected_tools(
+        required, optional = selected_tools(
             Settings(
                 pdf_checks=PdfCheckOptions(
                     require_language=True, min_stroke_width_pt=0.1, overlap_min_area_ratio=0.5

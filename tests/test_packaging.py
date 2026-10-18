@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import fnmatch
 import importlib.util
+import os
 import re
 import tempfile
 import tomllib
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOWS = ROOT / ".github" / "workflows"
@@ -93,6 +95,14 @@ class SourceArchiveTests(unittest.TestCase):
             with self.subTest(script=name):
                 self.assertTrue(any(fnmatch.fnmatch(name, pattern) for pattern in patterns))
 
+    def test_the_source_archive_ships_the_golden_files_the_tests_compare(self) -> None:
+        patterns = self.manifest_patterns("recursive-include", "tests/golden")
+        goldens = sorted(path for path in (ROOT / "tests" / "golden").rglob("*") if path.is_file())
+        self.assertGreater(len(goldens), 10)
+        for path in goldens:
+            with self.subTest(golden=path.name):
+                self.assertTrue(any(fnmatch.fnmatch(path.name, pattern) for pattern in patterns))
+
     def test_the_source_archive_ships_the_changelog(self) -> None:
         manifest = (ROOT / "MANIFEST.in").read_text(encoding="utf-8")
         self.assertRegex(manifest, r"(?m)^include .*\bCHANGELOG\.md\b")
@@ -125,7 +135,7 @@ class WorkflowTests(unittest.TestCase):
             path.name
             for path in (ROOT / "tests").glob("test_*.py")
             if path != Path(__file__).resolve()
-            and "live_tests_enabled(" in path.read_text(encoding="utf-8")
+            and "@live_test(" in path.read_text(encoding="utf-8")
         )
         self.assertGreater(len(live_files), 5)
         for name in live_files:
@@ -141,6 +151,47 @@ class WorkflowTests(unittest.TestCase):
     def test_the_linux_live_job_runs_the_linux_isolation_test(self) -> None:
         linux = self.workflow("tests.yml").split("\n  live-linux:", 1)[1]
         self.assertIn("tests/test_runtime_backends.py", linux)
+
+
+class LiveTestMarkerTests(unittest.TestCase):
+    """Live tests are opt-in, selectable with ``-m live`` and gated in one place."""
+
+    def test_the_live_marker_is_registered(self) -> None:
+        configuration = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+        markers = configuration["tool"]["pytest"]["ini_options"]["markers"]
+        self.assertTrue(any(marker.startswith("live:") for marker in markers), markers)
+
+    def test_only_the_support_module_reads_the_opt_in_variable(self) -> None:
+        offenders = [
+            path.name
+            for path in sorted((ROOT / "tests").glob("test_*.py"))
+            if path != Path(__file__).resolve()
+            and "live_tests_enabled(" in path.read_text(encoding="utf-8")
+        ]
+        self.assertEqual(offenders, [], "Gate live tests with @live_test from tests/support.py.")
+
+    def test_the_decorator_skips_unless_enabled_and_applies_the_marker(self) -> None:
+        if importlib.util.find_spec("pytest") is None:
+            self.skipTest("the live marker belongs to pytest")
+        from tests.support import live_test
+
+        def declare() -> type[unittest.TestCase]:
+            @live_test("opt-in")
+            class Live(unittest.TestCase):
+                pass
+
+            return Live
+
+        disabled = {"FLEDGE_RUN_INTEGRATION": "0", "LATEX_PREP_RUN_INTEGRATION": "0"}
+        with patch.dict(os.environ, disabled):
+            skipped = declare()
+        with patch.dict(os.environ, {"FLEDGE_RUN_INTEGRATION": "1"}):
+            enabled = declare()
+        self.assertTrue(skipped.__unittest_skip__)
+        self.assertEqual(skipped.__unittest_skip_why__, "opt-in")
+        self.assertFalse(getattr(enabled, "__unittest_skip__", False))
+        for declared in (skipped, enabled):
+            self.assertEqual([mark.name for mark in declared.pytestmark], ["live"])
 
 
 if __name__ == "__main__":

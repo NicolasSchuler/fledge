@@ -20,13 +20,10 @@ from latexprep.pdf_checks import inspect_pdf_details
 from latexprep.resource_budget import ResourceBudget
 from latexprep.runtime import ToolRunner
 from latexprep.submission_options import SubmissionOptions
-from tests.support import live_tests_enabled
+from tests.support import live_test
 
 
-@unittest.skipUnless(
-    live_tests_enabled(),
-    "Set FLEDGE_RUN_INTEGRATION=1 for the live configured-check preparation workflow",
-)
+@live_test("Set FLEDGE_RUN_INTEGRATION=1 for the live configured-check preparation workflow")
 class LiveConfiguredChecksTests(unittest.IsolatedAsyncioTestCase):
     async def test_configured_checks_survive_flattening_and_exact_archive_rebuild(self) -> None:
         with tempfile.TemporaryDirectory(prefix="latex-prep-configured-live-") as directory:

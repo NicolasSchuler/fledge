@@ -1,10 +1,10 @@
+"""Check selection and opt-in policy: what each switch disables, and the policy maps themselves."""
+
 from __future__ import annotations
 
-import tempfile
 import unittest
 from dataclasses import asdict, replace
-from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 from latexprep.author_records import AuthorRecordOptions, check_author_records
 from latexprep.bbl_checks import BblOptions
@@ -13,7 +13,7 @@ from latexprep.bibliography_options import BibliographyOptions
 from latexprep.bibliography_transform import BibliographyTransformOptions
 from latexprep.build_checks import BuildCheckOptions, check_build_details
 from latexprep.build_result import BuildResult
-from latexprep.check_policy import _GROUP_CHECKS, _ROOT_CHECKS, selected_findings
+from latexprep.check_policy import GROUP_CHECKS, ROOT_CHECKS, selected_findings
 from latexprep.check_selection import CheckSelection
 from latexprep.config import Settings, effective_settings
 from latexprep.findings import Finding
@@ -24,21 +24,11 @@ from latexprep.manuscript_check_options import ManuscriptCheckOptions
 from latexprep.manuscript_checks import check_manuscript_policies
 from latexprep.metadata_privacy import MetadataEdit, MetadataPrivacyOptions
 from latexprep.metadata_source_edits import check_sanitized_pdf_metadata, plan_metadata_sanitization
-from latexprep.online_checks import check_online_references
-from latexprep.online_http_wire import Response
 from latexprep.online_options import OnlineOptions
 from latexprep.package_headers import LoadedPackage
-from latexprep.pdf_artwork import inspect_artwork_inputs, inspect_pdf_artwork
 from latexprep.pdf_artwork_options import PdfArtworkOptions
 from latexprep.pdf_check_options import PdfCheckOptions, PdfRegion, PdfSectionBudget
-from latexprep.pdf_checks import inspect_included_pdf_figures, inspect_pdf_details
-from latexprep.pdf_inspection import PdfInspectionOptions, configured_policy_rules
-from latexprep.pdf_structure_checks import (
-    HeadingExpectation,
-    StructureOptions,
-    inspect_pdf_structure,
-)
-from latexprep.rules import BY_CODE, BY_NAME, MANDATORY_CODES, RULES, code_for
+from latexprep.rules import BY_CODE, BY_NAME, MANDATORY_CODES, RULES
 from latexprep.source_analysis import analyze_sources
 from latexprep.source_transform import SourceTransformOptions
 from latexprep.submission_checks import (
@@ -48,8 +38,8 @@ from latexprep.submission_checks import (
 )
 from latexprep.submission_options import SubmissionOptions
 from latexprep.workflow_options import DocumentOptions, WorkflowOptions
-from tests.support import ArtworkRunner, contrast_sample
-from tests.test_pdf_checks import DetailRunner
+from tests.pdf_fakes import contrast_sample
+from tests.support import ProjectTestCase
 
 
 def selection(*codes: str) -> CheckSelection:
@@ -150,11 +140,9 @@ def configured_pdf_details() -> PdfCheckOptions:
     )
 
 
-class CheckPolicyTests(unittest.TestCase):
+class CheckPolicyTests(ProjectTestCase):
     def setUp(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
+        super().setUp()
         self.main = self.root / "main.tex"
         self.main.write_text(
             "\\documentclass{article}\n\\title{Paper}\\author{Ada}\\email{ada@example.org}\n"
@@ -568,7 +556,7 @@ class CheckPolicyTests(unittest.TestCase):
             self.assertEqual(selected_findings([finding], selection()), [])
 
     def test_every_current_code_has_an_execution_category(self) -> None:
-        gated = set(_ROOT_CHECKS).union(*(set(group) for group in _GROUP_CHECKS.values()))
+        gated = set(ROOT_CHECKS).union(*(set(group) for group in GROUP_CHECKS.values()))
         shared = {"PRV001", "PRV002"}
         # These are observations emitted by mandatory parsing/building or by
         # explicitly requested formatting. Selection filters their findings after
@@ -608,239 +596,6 @@ class CheckPolicyTests(unittest.TestCase):
         )
 
 
-class CheckPolicyAdapterTests(unittest.IsolatedAsyncioTestCase):
-    async def asyncSetUp(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
-        self.pdf = self.root / "paper.pdf"
-        self.pdf.write_bytes(b"%PDF-fixture")
-
-    async def test_all_seven_online_switches_project_without_granting_network(self) -> None:
-        toggles = {
-            "NET001": "online_doi_resolution",
-            "NET002": "online_metadata",
-            "NET003": "online_missing_doi",
-            "NET004": "online_published_versions",
-            "NET005": "online_notices",
-            "NET006": "online_reference_links",
-            "NET007": "online_replication_links",
-        }
-        options = OnlineOptions(
-            **dict.fromkeys(toggles.values(), True),
-            online_replication_urls=("https://example.org/code",),
-        )
-        self.assertEqual(
-            codes(await check_online_references(self.root, options=options)), set(toggles)
-        )
-        for code in toggles:
-            with self.subTest(code=code):
-                effective = effective_settings(
-                    Settings(checks=selection(code), online_checks=options)
-                )
-                with patch(
-                    "latexprep.online_checks.collect_inputs",
-                    side_effect=AssertionError("offline scan"),
-                ):
-                    findings = await check_online_references(
-                        self.root, options=effective.online_checks
-                    )
-                self.assertEqual(codes(findings), {code})
-                self.assertEqual(findings[0].status, "skipped")
-                self.assertFalse(effective.online_checks.online)
-                self.assertEqual(
-                    effective.online_checks.online_replication_urls, options.online_replication_urls
-                )
-
-    async def test_ignored_online_check_performs_no_scan_dns_or_http(self) -> None:
-        (self.root / "references.bib").write_text("@article{key, doi={10.1234/example}}\n")
-        original = Settings(online_checks=OnlineOptions(online=True, online_doi_resolution=True))
-        dns = AsyncMock(return_value=("93.184.216.34",))
-        http = AsyncMock(return_value=Response(200))
-        findings = await check_online_references(
-            self.root, options=original.online_checks, resolver=dns, transport=http
-        )
-        # The check and the notice of what the requests shared (NET008).
-        self.assertEqual(codes(findings), {"NET001", "NET008"})
-        self.assertGreater(dns.await_count, 0)
-        self.assertGreater(http.await_count, 0)
-        effective = effective_settings(replace(original, checks=CheckSelection(ignore=("NET",))))
-        with patch("latexprep.online_checks.collect_inputs", side_effect=AssertionError("scan")):
-            self.assertEqual(
-                await check_online_references(
-                    self.root,
-                    options=effective.online_checks,
-                    resolver=AsyncMock(side_effect=AssertionError("DNS")),
-                    transport=AsyncMock(side_effect=AssertionError("HTTP")),
-                ),
-                [],
-            )
-
-    async def test_each_pdf_detail_disables_other_adapters_and_keeps_paired_arguments_valid(
-        self,
-    ) -> None:
-        original = Settings(
-            pdf_checks=configured_pdf_details(), match_source_pdf_metadata=("author",)
-        )
-        expected = {f"PDF{number}" for number in range(201, 217)}
-        before = await inspect_pdf_details(
-            self.pdf, self.root / "details-all", DetailRunner(), options=original.pdf_checks
-        )
-        self.assertEqual(codes(before), expected - {"PDF212"})
-        for code in expected - {"PDF212"}:
-            with self.subTest(code=code):
-                effective = effective_settings(replace(original, checks=selection(code)))
-                runner = DetailRunner()
-                findings = await inspect_pdf_details(
-                    self.pdf, self.root / code, runner, options=effective.pdf_checks
-                )
-                self.assertEqual(codes(findings), {code})
-                self.assertTrue(runner.calls)
-                self.assertEqual(
-                    effective.match_source_pdf_metadata,
-                    original.match_source_pdf_metadata if code == "PDF207" else (),
-                )
-        disabled = effective_settings(replace(original, checks=selection()))
-        runner = DetailRunner()
-        self.assertEqual(
-            await inspect_pdf_details(
-                self.pdf, self.root / "details-off", runner, options=disabled.pdf_checks
-            ),
-            [],
-        )
-        self.assertEqual(
-            await inspect_included_pdf_figures(
-                (self.pdf,), self.root / "figures-off", runner, options=disabled.pdf_checks
-            ),
-            [],
-        )
-        self.assertEqual(runner.calls, [])
-        fonts = effective_settings(replace(original, checks=selection("PDF212")))
-        findings = await inspect_included_pdf_figures(
-            (self.pdf,), self.root / "figures-on", runner, options=fonts.pdf_checks
-        )
-        self.assertEqual(codes(findings), {"PDF212"})
-        self.assertIn("pdffonts", {call[0][0] for call in runner.calls})
-
-    async def test_base_pdf_policy_constraints_are_removed_together(self) -> None:
-        original = Settings(
-            max_pages=10,
-            pdf=PdfInspectionOptions(
-                expected_page_width_pt=612,
-                expected_page_height_pt=792,
-                require_consistent_page_size=True,
-                min_image_dpi=300,
-                require_embedded_fonts=True,
-                forbid_type3_fonts=True,
-                forbid_encryption=True,
-                forbid_forms=True,
-                forbid_javascript=True,
-                forbid_attachments=True,
-            ),
-        )
-        expected = {"PDF001", *(f"PDF{number}" for number in range(101, 110))}
-        self.assertEqual(
-            {code_for(name) for name in configured_policy_rules(original.pdf, original.max_pages)},
-            expected,
-        )
-        for code in expected:
-            effective = effective_settings(replace(original, checks=selection(code)))
-            self.assertEqual(
-                {
-                    code_for(name)
-                    for name in configured_policy_rules(effective.pdf, effective.max_pages)
-                },
-                {code},
-            )
-        disabled = effective_settings(replace(original, checks=selection()))
-        self.assertEqual(configured_policy_rules(disabled.pdf, disabled.max_pages), [])
-
-    async def test_artwork_regions_and_rendering_stay_only_when_their_check_is_selected(
-        self,
-    ) -> None:
-        original = Settings(
-            rendered_pdf_artwork=configured_artwork(), included_figure_artwork=configured_artwork()
-        )
-        expected = {f"PDF{number}" for number in range(301, 313)}
-        before = await inspect_pdf_artwork(
-            self.pdf,
-            self.root / "artwork-all",
-            ArtworkRunner(),
-            options=original.rendered_pdf_artwork,
-        )
-        self.assertEqual(codes(before), expected)
-        for code in expected:
-            with self.subTest(code=code):
-                effective = effective_settings(replace(original, checks=selection(code)))
-                self.assertEqual(effective.included_figure_artwork, effective.rendered_pdf_artwork)
-                runner = ArtworkRunner()
-                findings = await inspect_pdf_artwork(
-                    self.pdf, self.root / code, runner, options=effective.rendered_pdf_artwork
-                )
-                self.assertEqual(codes(findings), {code})
-                if code in {"PDF302", "PDF303"}:
-                    self.assertEqual(
-                        effective.rendered_pdf_artwork.figure_regions,
-                        original.rendered_pdf_artwork.figure_regions,
-                    )
-                else:
-                    self.assertEqual(effective.rendered_pdf_artwork.figure_regions, ())
-                if code == "PDF308":
-                    self.assertNotIn("pdftoppm", {call[0][0] for call in runner.calls})
-        disabled = effective_settings(replace(original, checks=CheckSelection(ignore=("PDF3",))))
-        runner = ArtworkRunner()
-        self.assertEqual(
-            await inspect_pdf_artwork(
-                self.pdf, self.root / "artwork-off", runner, options=disabled.rendered_pdf_artwork
-            ),
-            [],
-        )
-        self.assertEqual(
-            await inspect_artwork_inputs(
-                (self.pdf,),
-                self.root / "inputs-off",
-                runner,
-                options=disabled.included_figure_artwork,
-            ),
-            [],
-        )
-        self.assertEqual(runner.calls, [])
-
-    async def test_structure_inspection_stops_before_tools_and_retains_other_structure_checks(
-        self,
-    ) -> None:
-        original = Settings(
-            structure_checks=StructureOptions(
-                heading_expectations=(HeadingExpectation(1, "Introduction", "1"),),
-                require_structure_tree=True,
-                check_table_structure=True,
-                check_link_structure=True,
-                require_figure_alt=True,
-                check_structure_references=True,
-            )
-        )
-        expected = {f"PDF{number}" for number in range(401, 406)}
-        before = await inspect_pdf_structure(
-            self.pdf, self.root / "structure-all", DetailRunner(), original.structure_checks
-        )
-        self.assertEqual(codes(before), expected)
-        for code in expected:
-            effective = effective_settings(replace(original, checks=selection(code)))
-            findings = await inspect_pdf_structure(
-                self.pdf, self.root / code, DetailRunner(), effective.structure_checks
-            )
-            self.assertEqual(codes(findings), {code})
-        disabled = effective_settings(replace(original, checks=selection()))
-        runner = DetailRunner()
-        self.assertEqual(
-            await inspect_pdf_structure(
-                self.pdf, self.root / "structure-off", runner, disabled.structure_checks
-            ),
-            [],
-        )
-        self.assertEqual(runner.calls, [])
-
-
 class CheckPolicyMapTests(unittest.TestCase):
     """The hand-maintained activation maps must name real codes and option fields."""
 
@@ -849,11 +604,11 @@ class CheckPolicyMapTests(unittest.TestCase):
         from latexprep.config import Settings
 
         values = Settings().top_level_values()
-        for code, fields in check_policy._ROOT_CHECKS.items():
+        for code, fields in check_policy.ROOT_CHECKS.items():
             self.assertIn(code, BY_CODE)
             for name in fields:
                 self.assertIn(name, values, (code, name))
-        for group, policies in check_policy._GROUP_CHECKS.items():
+        for group, policies in check_policy.GROUP_CHECKS.items():
             options = values[group]
             for code, fields in policies.items():
                 self.assertIn(code, BY_CODE)
@@ -866,7 +621,7 @@ class CheckPolicyMapTests(unittest.TestCase):
 
         values = Settings().top_level_values()
         activation = check_policy.opt_in_activation()
-        gated = set(_ROOT_CHECKS).union(*(set(group) for group in _GROUP_CHECKS.values()))
+        gated = set(ROOT_CHECKS).union(*(set(group) for group in GROUP_CHECKS.values()))
         self.assertEqual(set(activation), gated | {"PRV001", "PRV002"})
         self.assertEqual(activation["PRV001"], [("submission_checks", {"identity_terms": ()})])
         self.assertEqual(
@@ -882,7 +637,7 @@ class CheckPolicyMapTests(unittest.TestCase):
                         self.assertTrue(hasattr(values[group], name), (code, group, name))
         # Callers receive copies, so they cannot change the policy tables.
         activation["TEX101"][0][1]["expected_document_class"] = "changed"
-        self.assertIsNone(_ROOT_CHECKS["TEX101"]["expected_document_class"])
+        self.assertIsNone(ROOT_CHECKS["TEX101"]["expected_document_class"])
 
     def test_disabled_values_equal_the_defaults_except_for_checks_that_run_by_default(self) -> None:
         """Each table row clears a field to the value its option class defaults to."""

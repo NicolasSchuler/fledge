@@ -1,0 +1,26 @@
+Usage: fledge [OPTIONS] COMMAND [ARGS]...
+
+  Fledge checks and prepares a separate LaTeX submission copy.
+
+  INPUT is a source folder or ZIP. Originals are never edited. Each check has a stable code such as
+  TEX001; 'fledge rules' lists the checks and 'fledge rule CODE' explains one. Reports list
+  findings, the results of the checks, each with its code and a suggested next step. Choose checks
+  with [checks] in project TOML configuration or with --select and --ignore; --config selects an
+  explicit file.
+
+Options:
+  --version   Show the version and exit.
+  -h, --help  Show this message and exit.
+
+Commands:
+  bib              Bibliography checks (offline unless you allow online).
+  check            Build the PDF and check the sources and the PDF.
+  doctor           Test that your TeX setup works.
+  fmt              Check tex-fmt formatting without changing any file.
+  init             Write a starter fledge.toml settings file.
+  inspect          Check sources and bibliography without running TeX.
+  pdf              Check a PDF without its source project.
+  prepare          Create a verified submission copy of the paper.
+  rule             Explain one check by its code.
+  rules            List every check with its code and title.
+  submission-text  Preview title, abstract and keywords for a submission form.

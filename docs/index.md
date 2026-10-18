@@ -46,6 +46,7 @@ glossary
 :caption: Developer notes
 
 development
+modules
 check-backlog
 parallelization-benchmark
 ```

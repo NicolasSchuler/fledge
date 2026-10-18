@@ -276,7 +276,7 @@ class ManuscriptScan:
         for command in commands_before_end(source):
             conditional = in_conditional(conditionals, command.start)
             if command.name == "endinput":
-                self._end_of_input(name, source, command, conditional)
+                self._end_of_input(name, source, command, conditional=conditional)
             if command.name == "documentclass" or command.name in PACKAGE_COMMANDS:
                 self._declaration(name, command, conditionals)
             if content:
@@ -286,7 +286,7 @@ class ManuscriptScan:
             self.keywords.extend(_BlockReader(name, source, "keywords", conditionals).read())
 
     def _end_of_input(
-        self, name: str, source: ParsedSource, command: Command, conditional: bool
+        self, name: str, source: ParsedSource, command: Command, *, conditional: bool
     ) -> None:
         if command.depth or conditional:
             self.graph_reasons.append(

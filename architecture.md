@@ -1,6 +1,6 @@
 # Fledge architecture
 
-Architecture based on [the requirements](requirements.md). The application uses Python with a CLI, a shared application core, and isolated tool execution. A later web interface calls the same job API; its deployment model remains open. The [README](README.md) describes the implemented subset and current limitations.
+Architecture based on [the requirements](requirements.md). The application uses Python with a CLI, a shared application core, and isolated tool execution. A later web interface calls the same job API; its deployment model remains open. The [README](README.md) describes the implemented subset and current limitations. The [module map](docs/modules.md) assigns every module of the flat `latexprep` package to one of five layers and states its responsibility; [Code layout](#code-layout) below relates those layers to the components described here.
 
 ## Component diagram
 
@@ -74,6 +74,20 @@ The job runner supplies each module with the selected roots, effective settings,
 | Tool adapters and process runner | Translate structured operations into bounded local tool invocations; capture diagnostics; enforce restricted file access and no network |
 
 Build orchestration may use `latexmk` with the selected TeX engine and BibTeX/Biber. `tex-fmt` and bibliography tools sit behind adapters. PDF inspection and rendering use the Poppler command-line tools (`pdfinfo`, `pdftotext`, `pdftoppm`, `pdffonts` and related), with optional qpdf and MuPDF (`mutool`) adapters for object-level and drawing evidence. Internal path rewriting owns dependency-aware flattening. Third-party cleanup tools operate only within the selected change plan.
+
+## Code layout
+
+The `latexprep` package is flat, but its modules form five layers, and a module imports only from its own layer and the layers below it. A test reads every import statement and fails on an upward import, on a cycle, and on `click` or `rich` outside the presentation layer.
+
+| Layer | Components | Examples |
+| --- | --- | --- |
+| Presentation | CLI; terminal, compact, JSON, HTML and CI reports | `cli`, `terminal_report`, `html_report`, `ci_annotations` |
+| Orchestration | Job runner: scheduling, budgets, progress, cancellation; packaging and verification gate | `core`, `scheduler`, `document_run`, `staging`, `package_verification`, `publication` |
+| Checks, transforms and policies | Source, bibliography and PDF checks; change planning and transformations | `bibliography_checks`, `pdf_checks`, `source_transform`, `flat_layout`, `check_policy` |
+| Infrastructure adapters | Tool adapters and process runner; project import; metadata lookup client | `runtime`, `sandbox`, `pdf_tools`, `latexmk_build`, `online_http_session`, `project` |
+| Domain and support | Findings and reports as data; rules, options and the bounded readers | `findings`, `report`, `rules`, `tex_lexer`, `source_graph`, `option_config` |
+
+The layers refine the component diagram: checkers return findings and transformations return changes, so neither depends on the job runner, and the renderers depend on the report data but never the other way around. The adapters sit below the checks because a check asks for a tool run through the `CommandRunner` port and never starts a process itself.
 
 ## Preparation lifecycle
 

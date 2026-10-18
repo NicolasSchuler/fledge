@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import tempfile
 import unittest
 from collections import Counter
 from dataclasses import asdict
@@ -36,7 +35,8 @@ from latexprep.pdf_tools import (
 from latexprep.resource_budget import ResourceBudget
 from latexprep.submission_checks import check_pdf_identity
 from latexprep.submission_options import SubmissionOptions
-from tests.test_pdf_checks import DetailRunner
+from tests.pdf_fakes import DetailRunner
+from tests.support import AsyncProjectTestCase
 
 _VERSION_FLAGS = {"-v", "--version"}
 _FROZEN = "@pdf@"
@@ -122,11 +122,8 @@ class SharedRunner(DetailRunner):
         return Counter(argv[0] for argv, _, _ in self.calls if argv[-1] in _VERSION_FLAGS)
 
 
-class SharedSessionCase(unittest.IsolatedAsyncioTestCase):
+class SharedSessionCase(AsyncProjectTestCase):
     async def asyncSetUp(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
         self.pdf = self.root / "document.pdf"
         self.pdf.write_bytes(b"%PDF-fixture")
         self.counter = 0

@@ -118,10 +118,47 @@ no external tools and still works meanwhile.
 | Flattening or source edit blocked | Review the unsupported path or syntax finding; use `--layout preserve` if flattening is unnecessary. |
 | PDF comparison fails | Review the differences and the [preservation rules](preparation-options.md#preservation-and-explicit-exceptions). |
 | Online check skipped | The note is listed only with `--show-passed`. Enable the individual check and pass `--online`; selecting `NET` alone is not enough. |
+| An unexplained wait, skip or tool failure | Rerun with `--debug` (or `FLEDGE_DEBUG=1`) and read the [diagnostic log](#diagnostic-log) on stderr. |
 | Online checks cannot connect | Online checks connect directly and ignore proxy settings such as `HTTPS_PROXY`, so a network that allows only proxied access blocks them. Run them from a network with direct access, or leave them off. |
+
+## Diagnostic log
+
+`--debug`, or `FLEDGE_DEBUG=1` in the environment, makes any command print log lines
+to stderr while it runs. The option is hidden from `--help` because it is meant for
+investigating a problem or reporting one; it also prints the traceback of an internal
+error. Standard output is unchanged, so `--output-format json` still prints only the
+report and can be piped while you watch stderr.
+
+```text
++0.412s runtime: tool start: pdflatex -halt-on-error +1 more argument
++3.870s runtime: tool end: pdflatex -halt-on-error +1 more argument (exit 0, 3.45 s)
++0.415s scheduler: task bibliography checks: blocked by failed source checks
+```
+
+Each line shows the time since the process started, the module that wrote it and a
+message. The log covers:
+
+- every tool command: the tool, the names of its options (no values and no paths),
+  its exit status and how long it ran. A limit (time, output or resources) that
+  stopped the tool is marked `[info]`;
+- online requests: the host, method, status and duration, and the outcome of a fetch.
+  URLs, query strings and the contact address are never logged;
+- scheduled tasks: when each started and ended, how long it waited for resources and
+  which failed prerequisite blocked it;
+- PDF measurements that ran a tool or reused an earlier output;
+- which settings file was discovered (its name, not its directory) and whether the name
+  is a legacy `latex-prep` one;
+- when the shared source analysis was built or reused.
+
+Lines show this machine's home directory as `~` and its temporary directory as
+`<tmp>`, but read the log before sharing it. Without the option Fledge prints no log
+lines at all. When you embed Fledge as a library, the `latexprep` logger has only a
+`NullHandler`; attach your own handler to receive the records.
 
 ## Getting help
 
 Keep the exact command, the Fledge and tool versions (recorded in the JSON
-report's `tools`), the effective settings and the relevant findings. Read
-diagnostics before sharing them; Fledge sends nothing automatically.
+report's `tools`), the effective settings and the relevant findings. Add the
+[diagnostic log](#diagnostic-log) of a rerun with `--debug` when the problem is a
+wait, a skipped check or a tool failure. Read diagnostics before sharing them;
+Fledge sends nothing automatically.

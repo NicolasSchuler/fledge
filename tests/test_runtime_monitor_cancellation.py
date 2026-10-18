@@ -7,16 +7,21 @@ from pathlib import Path
 
 from latexprep.resource_monitor import JobScope
 from latexprep.runtime import ToolRunner
+from tests.fakes import ScriptedJobMonitor
 
 
 class SwallowingSampleRunner(ToolRunner):
     """Swallow the monitor's cancellation once, as asyncio.wait_for can on Python 3.11."""
 
     def __init__(self) -> None:
-        super().__init__(source_date_epoch=0)
         self.monitor_sampling = asyncio.Event()
         self.swallowed_cancellations = 0
-        self._monitor._sample_job = self.sample_job
+        super().__init__(
+            source_date_epoch=0,
+            monitor_factory=lambda processes, statistics: ScriptedJobMonitor(
+                processes, statistics, self.sample_job
+            ),
+        )
 
     async def sample_job(self, scope: JobScope) -> None:
         if asyncio.current_task() is not scope.monitor or self.swallowed_cancellations:
@@ -42,7 +47,7 @@ class JobMonitorCancellationTests(unittest.IsolatedAsyncioTestCase):
 
             scope = asyncio.create_task(use_scope())
             done, _ = await asyncio.wait({scope}, timeout=5)
-            job_scope = runner._monitor.scope
+            job_scope = runner.monitor.scope
             if not done and job_scope is not None:
                 monitor = job_scope.monitor
                 # Unblock the hung scope so a regression fails instead of hanging.
@@ -52,7 +57,7 @@ class JobMonitorCancellationTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn(scope, done, "job_scope did not close after the monitor was cancelled")
             await scope
         self.assertEqual(runner.swallowed_cancellations, 1)
-        self.assertIsNone(runner._monitor.scope)
+        self.assertIsNone(runner.monitor.scope)
 
 
 if __name__ == "__main__":

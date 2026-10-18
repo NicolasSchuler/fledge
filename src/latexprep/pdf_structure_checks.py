@@ -184,7 +184,7 @@ def _object_reference_problems(tree: StructureTree) -> list[object]:
     return problems
 
 
-def _structure_references(tree: StructureTree, required: bool) -> Finding:
+def _structure_references(tree: StructureTree, *, required: bool) -> Finding:
     problems = list(tree.problems)
     if required and not tree.elements:
         problems.append({"reason": "Required structure tree has no structure elements"})
@@ -289,7 +289,7 @@ def _figure_alt(tree: StructureTree) -> Finding:
         figures += 1
         raw = tree.objects.resolve(element.data.get("/Alt"))
         text = _unicode_string(raw)
-        if raw is None or text is not None and not text.strip():
+        if raw is None or (text is not None and not text.strip()):
             violations.append({**tree.location(index), "reason": "missing or empty Figure Alt"})
         elif text is None:
             uncertain = True
@@ -521,7 +521,7 @@ def _object_findings(output: str, pages: int, options: StructureOptions) -> list
         PdfRule.LINK_STRUCTURE: lambda: _link_structure(tree),
         PdfRule.FIGURE_ALTERNATIVE_TEXT: lambda: _figure_alt(tree),
         PdfRule.STRUCTURE_REFERENCES: lambda: _structure_references(
-            tree, options.require_structure_tree
+            tree, required=options.require_structure_tree
         ),
     }
     findings = []

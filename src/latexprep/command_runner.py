@@ -9,6 +9,8 @@ toolchain code.
 
 from __future__ import annotations
 
+import re
+from collections.abc import Sequence
 from dataclasses import KW_ONLY, dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -32,6 +34,30 @@ _STDERR_QUOTE_CHARS = 1000
 # Standard output and error that one command may print before it is stopped. It is not a
 # setting: a tool that prints more is looping.
 _MAX_OUTPUT_BYTES = 2 * MIB
+
+
+# A command-line option that names no value and no path, such as ``-pdf`` or ``--version``.
+_PLAIN_OPTION = re.compile(r"--?[A-Za-z][\w-]*")
+# Options a log line lists for one command; the rest are counted.
+_SUMMARY_OPTIONS = 8
+
+
+def argv_summary(argv: Sequence[str]) -> str:
+    """The tool and its plain options with the other arguments counted, for log lines.
+
+    ``pdftoppm -r 300 -png /home/ann/p.pdf out`` is summarised as
+    ``pdftoppm -r -png +3 more arguments``: file names, directories and option values are
+    what a log line must not carry, so only the tool's name and its option names are kept.
+    """
+    if not argv:
+        return "(no command)"
+    options = [argument for argument in argv[1:] if _PLAIN_OPTION.fullmatch(argument)]
+    shown = options[:_SUMMARY_OPTIONS]
+    others = len(argv) - 1 - len(shown)
+    parts = [Path(argv[0]).name, *shown]
+    if others:
+        parts.append(f"+{others} more argument{'' if others == 1 else 's'}")
+    return " ".join(parts)
 
 
 class ToolLimitSettings(Protocol):

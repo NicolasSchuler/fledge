@@ -98,7 +98,7 @@ class _DoctorRun:
         self.add_stage(name, "failed" if bad else "passed")
         if bad:
             self.report.findings.extend(
-                _failed_fixture_finding(name, item, required) for item in bad
+                _failed_fixture_finding(name, item, required=required) for item in bad
             )
             return False
         self.report.findings.append(
@@ -113,7 +113,7 @@ class _DoctorRun:
         return True
 
 
-def _failed_fixture_finding(stage: str, item: Finding, required: bool) -> Finding:
+def _failed_fixture_finding(stage: str, item: Finding, *, required: bool) -> Finding:
     """The doctor finding for a failing result of a built-in fixture stage."""
     advisory = "" if required else " Only papers that need this stage's tools are affected."
     return Finding(
@@ -147,7 +147,8 @@ def _build_tool_names(engine: Engine, backend: str | None = None) -> set[str]:
     return names
 
 
-def _selected_tools(settings: Settings) -> tuple[set[str], set[str]]:
+def selected_tools(settings: Settings) -> tuple[set[str], set[str]]:
+    """The tools a diagnostic run must find, and the optional ones the settings select."""
     required = set(_PDF_PIPELINE_TOOLS)
     for engine in diagnostic_engines(settings):
         required |= _build_tool_names(engine)
@@ -291,7 +292,7 @@ async def run_doctor(
     report = Report("doctor", scope="setup diagnostics with a built-in fixture")
     report.settings = settings.to_dict()
     report.execution.update(_execution_metadata(settings))
-    required, optional = _selected_tools(settings)
+    required, optional = selected_tools(settings)
     tools = _survey_tools(report, required, optional)
     execution = JobExecution(settings)
     try:
@@ -484,7 +485,7 @@ async def _pdf_pipeline_stage(run: _DoctorRun, engine: Engine, pdf: Path) -> Non
         pdf, pdf, run.root / f"compare-{engine}", run.runner, budget=run.budget
     )
     seen = {item.rule for item in [*inspected, *compared] if item.status == "passed"}
-    if not _PDF_EVIDENCE_RULES <= seen:
+    if not _PDF_EVIDENCE_RULES.issubset(seen):
         compared.append(
             Finding(
                 "doctor.pdf_evidence",

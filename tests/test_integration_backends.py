@@ -10,7 +10,7 @@ from pathlib import Path
 
 from latexprep.latexmk_build import build_project
 from latexprep.runtime import ToolRunner
-from tests.support import live_tests_enabled
+from tests.support import live_test
 
 
 class DiagnosticRunner(ToolRunner):
@@ -35,10 +35,7 @@ class DiagnosticRunner(ToolRunner):
         return result
 
 
-@unittest.skipUnless(
-    live_tests_enabled(),
-    "Enable FLEDGE_RUN_INTEGRATION for real restricted TeX/Biber tools",
-)
+@live_test("Enable FLEDGE_RUN_INTEGRATION for real restricted TeX/Biber tools")
 class LiveBackendIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="latex-prep-backends-")

@@ -152,7 +152,7 @@ def _print_package_files(files: list[dict], console: Console) -> None:
             _detail(console, "Reason", str(reason))
 
 
-def _print_package(package: dict[str, object], console: Console, show_files: bool) -> None:
+def _print_package(package: dict[str, object], console: Console, *, show_files: bool) -> None:
     files = _package_files(package)
     status = str(package.get("status", "incomplete"))
     style = "green" if status == "verified" else "yellow" if status == "incomplete" else "cyan"
@@ -163,9 +163,9 @@ def _print_package(package: dict[str, object], console: Console, show_files: boo
         console.print(Text("  Use --show-files for every file and inclusion reason.", style="dim"))
 
 
-def _print_package_contents(report: RedactedReport, console: Console, show_files: bool) -> None:
+def _print_package_contents(report: RedactedReport, console: Console, *, show_files: bool) -> None:
     for package in report.package_contents:
-        _print_package(package, console, show_files)
+        _print_package(package, console, show_files=show_files)
 
 
 def _print_summary(report: RedactedReport, records: ExecutionRecords, console: Console) -> None:
@@ -271,7 +271,7 @@ def print_redacted_report(
     _print_summary(report, records, console)
     _print_findings(report, views, console)
     _print_changes(report, options, console)
-    _print_package_contents(report, console, options.show_files)
+    _print_package_contents(report, console, show_files=options.show_files)
     _print_artifacts_and_hints(report, records, views, console)
 
 

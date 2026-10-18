@@ -65,7 +65,7 @@ def _next_steps(directory: Path) -> list[str]:
     ]
 
 
-def _check_target(target: Path, force: bool) -> None:
+def _check_target(target: Path, *, force: bool) -> None:
     """Refuse to write through a link or special file, or over a file without ``--force``."""
     if target.is_symlink() or (target.exists() and not target.is_file()):
         raise InitError(f"{target} is not a regular file; refusing to write through it")
@@ -73,7 +73,7 @@ def _check_target(target: Path, force: bool) -> None:
         raise InitError(f"{target} already exists; pass --force to overwrite it")
 
 
-def _write_settings(target: Path, text: str, force: bool) -> None:
+def _write_settings(target: Path, text: str, *, force: bool) -> None:
     """Validate ``text`` as settings, then write it; an invalid file is never written."""
     # Validate before writing, so --force never replaces a file with an invalid one.
     try:
@@ -115,7 +115,7 @@ def _announce_precedence(target: Path, previous: Path | None, current: Path | No
 @click.option("--force", is_flag=True, help="Overwrite an existing fledge.toml.")
 @click.option("--list", "list_presets", is_flag=True, help="List the presets and exit.")
 @debug_option
-def init_command(directory: Path, preset: str | None, force: bool, list_presets: bool) -> int:
+def init_command(directory: Path, preset: str | None, *, force: bool, list_presets: bool) -> int:
     """Write fledge.toml into DIRECTORY (default: the current directory).
 
     Presets switch on generic checks and leave venue values, such as page
@@ -129,12 +129,12 @@ def init_command(directory: Path, preset: str | None, force: bool, list_presets:
         _print_presets()
         return 0
     target = directory / CONFIG_NAME
-    _check_target(target, force)
+    _check_target(target, force=force)
     text = STARTER
     if preset is not None:
         text = f"# Written by `fledge init --preset {preset}`.\n" + preset_text(preset)
     previous = _nearest_config(directory)
-    _write_settings(target, text, force)
+    _write_settings(target, text, force=force)
     origin = f" from the {preset} preset" if preset is not None else ""
     click.echo(f"Wrote {target}{origin}.")
     _announce_precedence(target, previous, _nearest_config(directory))

@@ -9,11 +9,9 @@ than a check saw, and no message names a path.
 from __future__ import annotations
 
 import os
-import tempfile
 import threading
 import unittest
 from collections.abc import Callable
-from pathlib import Path
 from typing import TypeVar
 from unittest.mock import patch
 
@@ -22,6 +20,7 @@ from latexprep.bibtex_syntax import BibFileReader, describe_read_failure
 from latexprep.build_log import read_bounded
 from latexprep.source_analysis import discover_roots
 from latexprep.source_graph import SourceGraph
+from tests.support import ProjectTestCase
 
 T = TypeVar("T")
 ROOT_DOCUMENT = "\\documentclass{article}\n\\begin{document}Hi\\end{document}\n"
@@ -48,20 +47,7 @@ def returns_promptly(action: Callable[[], T]) -> T:
     return outcome[0]
 
 
-class ReadersTestCase(unittest.TestCase):
-    def setUp(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name).resolve()
-
-    def write(self, name: str, content: bytes | str) -> Path:
-        path = self.root / name
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(content.encode() if isinstance(content, str) else content)
-        return path
-
-
-class BibFileReaderTests(ReadersTestCase):
+class BibFileReaderTests(ProjectTestCase):
     def test_a_file_within_the_allowance_is_parsed_and_counted(self) -> None:
         path = self.write("refs.bib", "@article{a, title={T}}\n")
         reader = BibFileReader(max_file_bytes=1024, max_total_bytes=1024)
@@ -92,7 +78,7 @@ class BibFileReaderTests(ReadersTestCase):
             returns_promptly(lambda: BibFileReader().read(self.root / "pipe.bib", "pipe.bib"))
 
 
-class BoundedLogTests(ReadersTestCase):
+class BoundedLogTests(ProjectTestCase):
     def test_a_log_within_the_limit_is_complete(self) -> None:
         path = self.write("main.log", "! Undefined control sequence.\n")
         self.assertEqual(read_bounded(path, 1024), ("! Undefined control sequence.\n", True))
@@ -120,7 +106,7 @@ class BoundedLogTests(ReadersTestCase):
                 )
 
 
-class SourceDiscoveryTests(ReadersTestCase):
+class SourceDiscoveryTests(ProjectTestCase):
     def test_unreadable_linked_special_and_oversized_sources_are_skipped(self) -> None:
         self.write("main.tex", ROOT_DOCUMENT)
         target = self.write("elsewhere.txt", ROOT_DOCUMENT)
@@ -131,7 +117,7 @@ class SourceDiscoveryTests(ReadersTestCase):
         self.assertEqual(roots, ["main.tex"])
 
 
-class SourceGraphLoadTests(ReadersTestCase):
+class SourceGraphLoadTests(ProjectTestCase):
     def build(self, extra: str) -> SourceGraph:
         self.write(
             "main.tex", f"\\documentclass{{article}}\n\\begin{{document}}{extra}\\end{{document}}\n"
@@ -164,7 +150,7 @@ class SourceGraphLoadTests(ReadersTestCase):
         self.assertIn("source.size_limit", {finding.rule for finding in graph.findings})
 
 
-class ControlFileEvidenceTests(ReadersTestCase):
+class ControlFileEvidenceTests(ProjectTestCase):
     BCF = '<?xml version="1.0"?><bcf:controlfile xmlns:bcf="https://sourceforge.net/projects/biblatex"/>'
 
     def test_control_files_are_read_within_the_combined_limit(self) -> None:

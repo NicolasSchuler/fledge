@@ -1,9 +1,8 @@
-"""Exercise Click commands and the human/agent reports against source fixtures."""
+"""The command-line interface: commands, request errors, unexpected failures and redaction."""
 
 from __future__ import annotations
 
 import asyncio
-import dataclasses
 import io
 import json
 import os
@@ -14,34 +13,27 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-import click
 from click.testing import CliRunner
 
 from latexprep.build_result import BuildResult
 from latexprep.cli import (
-    ADVANCED_OPTIONS,
     USAGE_EXIT_CODE,
-    CommandOptions,
-    _settings_suggestion,
     cli,
     main,
+    settings_suggestion,
 )
-from latexprep.compact_report import render_compact
-from latexprep.config import Settings
-from latexprep.finding_view import RenderOptions
+from latexprep.core import run_job
 from latexprep.findings import Finding
 from latexprep.redaction import scrub_local_paths
-from latexprep.report import Change, ChangeKind, Outcome, Report
+from latexprep.report import Outcome, Report
 from latexprep.rule_definition import RULE_SCHEMA_VERSION
 from latexprep.rules import RULES
-from latexprep.terminal_report import render_terminal
+from tests.support import ProjectTestCase, controlled_backends
 
 
-class CommandTests(unittest.TestCase):
+class CommandTests(ProjectTestCase):
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
+        super().setUp()
         self.source = self.root / "project"
         self.source.mkdir()
         self.original = (
@@ -171,8 +163,15 @@ class CommandTests(unittest.TestCase):
         ):
             result = self.runner.invoke(
                 cli,
-                ["inspect", str(self.source), "--quiet", "--html-report", str(html)]
-                + ["--report", str(saved)],
+                [
+                    "inspect",
+                    str(self.source),
+                    "--quiet",
+                    "--html-report",
+                    str(html),
+                    "--report",
+                    str(saved),
+                ],
             )
         self.assertEqual(result.exit_code, 4, result.output)
         report = json.loads(saved.read_text())
@@ -187,13 +186,11 @@ class CommandTests(unittest.TestCase):
         self.assertIn("conflicts", result.output)
 
 
-class RequestErrorTests(unittest.TestCase):
+class RequestErrorTests(ProjectTestCase):
     """Rejected requests name the option or file at fault and a concrete next step."""
 
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name).resolve()
+        super().setUp()
         self.source = self.root / "project"
         self.source.mkdir()
         (self.source / "main.tex").write_text(
@@ -325,27 +322,27 @@ class SettingsSuggestionTests(unittest.TestCase):
         overrides = {"jobs": 0, "apply_formatting": True}
         config = Path("/project/fledge.toml")
         self.assertEqual(
-            _settings_suggestion(names, overrides, config, "journal"),
+            settings_suggestion(names, overrides, config, "journal"),
             "Change --jobs on the command line; --format on the command line; "
             "engine in /project/fledge.toml or the journal preset; "
             "layout in /project/fledge.toml or the journal preset, then rerun the command.",
         )
         self.assertEqual(
-            _settings_suggestion(("engine",), {}, config, None),
+            settings_suggestion(("engine",), {}, config, None),
             "Change engine in /project/fledge.toml, then rerun the command.",
         )
         self.assertEqual(
-            _settings_suggestion(("engine",), {}, None, "journal"),
+            settings_suggestion(("engine",), {}, None, "journal"),
             "Change engine in the journal preset, then rerun the command.",
         )
 
     def test_no_named_setting_gives_the_general_advice(self):
         self.assertEqual(
-            _settings_suggestion((), {}, Path("/project/fledge.toml"), None),
+            settings_suggestion((), {}, Path("/project/fledge.toml"), None),
             "Correct the settings in /project/fledge.toml, then rerun the command.",
         )
         self.assertEqual(
-            _settings_suggestion((), {}, None, None),
+            settings_suggestion((), {}, None, None),
             "Correct the options named above, then rerun the command.",
         )
 
@@ -370,11 +367,14 @@ class MissingToolchainTests(unittest.TestCase):
                     )
                 ],
             )
+
+            async def job_without_toolchain(request, progress=None, report=None):
+                return await run_job(
+                    request, progress, report, backends=controlled_backends(build=unavailable)
+                )
+
             with (
-                patch(
-                    "latexprep.document_tasks.build_project",
-                    new=AsyncMock(return_value=unavailable),
-                ),
+                patch("latexprep.cli.run_job", new=job_without_toolchain),
                 patch("latexprep.toolchain_help.shutil.which", return_value=None),
             ):
                 result = CliRunner().invoke(cli, ["check", str(source), "--json", "--quiet"])
@@ -392,392 +392,6 @@ class MissingToolchainTests(unittest.TestCase):
         self.assertIn("nicolasschuler.github.io/fledge/installation.html", finding["next_step"])
         self.assertIn("fledge inspect", finding["next_step"])
         self.assertIn("basictex" if sys.platform == "darwin" else "TeX Live", finding["next_step"])
-
-
-class HelpTests(unittest.TestCase):
-    def help_text(self, *command: str) -> str:
-        result = CliRunner().invoke(cli, [*command, "--help"], terminal_width=200)
-        self.assertEqual(result.exit_code, 0, result.output)
-        return result.output
-
-    def test_prepare_help_separates_common_and_advanced_options(self):
-        text = self.help_text("prepare")
-        common, advanced = text.split("Advanced options:")
-        self.assertIn("Common options:", common)
-        for option in ("--output", "--main", "--select", "--ignore", "--dry-run", "--json"):
-            self.assertIn(option, common)
-        for option in (
-            "--jobs",
-            "--build-jobs",
-            "--render-jobs",
-            "--job-timeout-seconds",
-            "--timeout-seconds",
-            "--preview-output",
-            "--diagnostics",
-            "--html-report",
-            "--json-report",
-            "--report",
-        ):
-            self.assertIn(option, advanced)
-            self.assertNotIn(f"{option} ", common)
-
-    def test_formatting_check_flag_stays_accepted_as_documented_no_op(self):
-        with tempfile.TemporaryDirectory() as directory:
-            result = CliRunner().invoke(cli, ["fmt", directory, "--check", "--quiet", "--json"])
-        self.assertNotEqual(result.exit_code, USAGE_EXIT_CODE, result.output)
-
-    def test_removed_non_interactive_flag_is_a_usage_error(self):
-        result = CliRunner().invoke(cli, ["inspect", ".", "--non-interactive"])
-        self.assertEqual(result.exit_code, USAGE_EXIT_CODE, result.output)
-
-    def test_every_parameter_of_a_job_command_is_a_command_options_field(self):
-        fields_ = {item.name for item in dataclasses.fields(CommandOptions)}
-        seen = set()
-        for path in (
-            ("inspect",),
-            ("check",),
-            ("prepare",),
-            ("bib", "check"),
-            ("fmt",),
-            ("pdf", "check"),
-        ):
-            command: click.Command = cli
-            for name in path:
-                assert isinstance(command, click.Group)
-                command = command.commands[name]
-            for parameter in command.params:
-                if parameter.expose_value:
-                    self.assertIn(parameter.name, fields_, (path, parameter.name))
-                    seen.add(parameter.name)
-        self.assertEqual(ADVANCED_OPTIONS - seen, set(), "ADVANCED_OPTIONS names a missing option")
-
-    def test_help_quotes_defaults_from_the_settings(self):
-        settings = Settings()
-        text = self.help_text("prepare")
-        for expected in (
-            f"(default {settings.jobs})",
-            f"(default {settings.build_jobs})",
-            f"(default {settings.render_jobs})",
-            f"(default {settings.timeout_seconds})",
-            f"(default {settings.job_timeout_seconds})",
-            f"(default {settings.engine})",
-            f"default {settings.layout}.",
-        ):
-            self.assertIn(expected, text)
-
-    def test_main_option_has_one_help_everywhere(self):
-        helps = set()
-        for path in (("inspect",), ("check",), ("prepare",), ("bib", "check")):
-            command: click.Command = cli
-            for name in path:
-                assert isinstance(command, click.Group)
-                command = command.commands[name]
-            [main_parameter] = [item for item in command.params if item.name == "main"]
-            helps.add((main_parameter.help, main_parameter.metavar))
-        submission = cli.commands["submission-text"]
-        [main_parameter] = [item for item in submission.params if item.name == "main"]
-        helps.add((main_parameter.help, main_parameter.metavar))
-        self.assertEqual(len(helps), 1, helps)
-
-    def test_quiet_option_has_one_help_everywhere(self):
-        helps = set()
-        for command in (cli.commands["inspect"], cli.commands["doctor"]):
-            [quiet] = [item for item in command.params if item.name == "quiet"]
-            helps.add(quiet.help)
-        self.assertEqual(len(helps), 1, helps)
-
-    def test_options_without_obvious_meaning_have_help(self):
-        for command, option in (("doctor", "--engine"), ("submission-text", "--field")):
-            with self.subTest(option=option):
-                self.assertRegex(self.help_text(command), rf"{option}[^\n]*\n?\s+\S")
-                [parameter] = [item for item in cli.commands[command].params if option in item.opts]
-                self.assertTrue(parameter.help)
-
-    def test_command_list_is_not_truncated(self):
-        overview = CliRunner().invoke(cli, ["--help"], terminal_width=80).output
-        self.assertNotIn("...", overview.split("Commands:")[1])
-        self.assertIn("Build the PDF and check the sources and the PDF.", overview)
-
-    def test_help_avoids_internal_jargon(self):
-        everything = " ".join(
-            self.help_text(*path)
-            for path in (("check",), ("prepare",), ("pdf", "check"), ("doctor",), ("rule",))
-        )
-        for jargon in ("CPU slots", "page-pair", "isolated build", "in isolation"):
-            self.assertNotIn(jargon, everything)
-
-    def test_json_report_and_its_former_name_both_save_the_report(self):
-        for flag in ("--json-report", "--report"):
-            with self.subTest(flag=flag), tempfile.TemporaryDirectory() as directory:
-                saved = Path(directory) / "report.json"
-                project = Path(directory) / "project"
-                project.mkdir()
-                (project / "main.tex").write_text("\\documentclass{article}\n")
-                result = CliRunner().invoke(
-                    cli, ["inspect", str(project), flag, str(saved), "--quiet", "--isolated"]
-                )
-                self.assertNotEqual(result.exit_code, USAGE_EXIT_CODE, result.output)
-                self.assertEqual(json.loads(saved.read_text())["command"], "inspect")
-
-    def test_rule_explanation_leaves_test_ids_to_the_json_form(self):
-        result = CliRunner().invoke(cli, ["rule", "TEX001"])
-        self.assertEqual(result.exit_code, 0, result.output)
-        self.assertNotIn("tests.", result.output)
-        self.assertNotIn("Behavioral tests", result.output)
-        self.assertNotIn("tests.", CliRunner().invoke(cli, ["rules"]).output)
-
-    def test_commands_without_advanced_options_keep_one_options_section(self):
-        text = self.help_text("rules")
-        self.assertIn("Options:", text)
-        self.assertNotIn("Advanced options:", text)
-
-    def test_help_uses_checks_codes_and_findings_consistently(self):
-        overview = self.help_text()
-        self.assertIn("'fledge rules' lists the checks", overview)
-        self.assertIn("Reports list findings", overview)
-        self.assertIn("List every check with its code and title", overview)
-        self.assertIn("Explain the check with code CODE", self.help_text("rule"))
-
-
-class PresentationTests(unittest.TestCase):
-    def test_terminal_prioritizes_failures_with_locations_and_clear_incomplete_status(self):
-        report = Report(
-            "check",
-            outcome=Outcome.BLOCKED,
-            findings=[
-                Finding(
-                    "source.edit_marker", "TODO: [bold]literal[/bold]", path="main.tex", line=7
-                ),
-                Finding(
-                    "pdf.font_embedding",
-                    "Font inventory unavailable",
-                    severity="error",
-                    status="inconclusive",
-                ),
-                Finding(
-                    "manuscript.abstract_words",
-                    "120 words; maximum 100",
-                    severity="error",
-                    path="intro.tex",
-                    line=3,
-                ),
-                Finding("pdf.pages", "1 page", severity="info", status="passed"),
-            ],
-        )
-        text = render_terminal(report)
-        self.assertLess(text.index("TEX105"), text.index("PDF104"))
-        self.assertLess(text.index("PDF104"), text.index("TEX001"))
-        self.assertIn("Where: intro.tex:3", text)
-        self.assertIn("Next:", text)
-        self.assertIn("ERROR / inconclusive", text)
-        self.assertIn("[bold]literal[/bold]", text)
-        self.assertNotIn("pdf / pages", text)
-        self.assertIn(
-            "pdf / pages", render_terminal(report, options=RenderOptions(show_passed=True))
-        )
-        self.assertNotIn("\x1b", text)
-
-    def test_compact_preserves_complete_messages_on_one_line_and_no_terminal_escapes(self):
-        message = "Unexpected [red]literal[/red]\nsecond line " + "long " * 100 + "THE END"
-        report = Report(
-            "inspect",
-            outcome=Outcome.BLOCKED,
-            findings=[
-                Finding(
-                    "source.missing_dependency",
-                    "\x1b[31m" + message,
-                    severity="error",
-                    path="chapter.tex",
-                    line=19,
-                )
-            ],
-        )
-        text = render_compact(report)
-        self.assertEqual(len(text.splitlines()), 2)
-        self.assertIn("TEX005 error/failed chapter.tex:19", text)
-        self.assertIn("[red]literal[/red]\\nsecond line", text)
-        self.assertIn("THE END", text)
-        self.assertNotIn("\x1b", text)
-
-    def test_evidence_excerpt_is_shown_for_unresolved_findings_only(self):
-        report = Report(
-            "check",
-            outcome=Outcome.BLOCKED,
-            findings=[
-                Finding(
-                    "manuscript.forbidden_packages",
-                    "Forbidden package declarations: 5.",
-                    severity="error",
-                    details={
-                        "matches": [
-                            {"path": "a.tex", "line": 3},
-                            {"path": "b.tex", "line": 9},
-                            {"path": "c.\x1b[31mtex", "line": 1},
-                            {"path": "d.tex", "line": 2},
-                            {"path": "e.tex"},
-                        ],
-                        "violations": [{"page": 9}],
-                    },
-                ),
-                Finding(
-                    "pdf.fonts",
-                    "Inspected 9 font resources.",
-                    severity="warning",
-                    details={"nonembedded": ["Helv\nSecond", "Times"]},
-                ),
-                Finding(
-                    "pdf.page_dimensions",
-                    "Unexpected page size.",
-                    severity="error",
-                    details={"differing_pages": [2, 7]},
-                ),
-                Finding(
-                    "pdf.text_overlap",
-                    "Overlaps.",
-                    severity="error",
-                    details={
-                        "violations": [{"page": 4, "bounds_pt": [1, 2, 3, 4]}],
-                        "violation_count": 40,
-                    },
-                ),
-                Finding(
-                    "pdf.metadata",
-                    "Metadata inventory",
-                    severity="info",
-                    status="passed",
-                    details={"matches": [{"path": "never-shown.tex"}]},
-                ),
-            ],
-        )
-        text = render_terminal(report, options=RenderOptions(show_passed=True))
-        self.assertIn("  Evidence: a.tex:3, b.tex:9, c.tex:1 (+2 more)", text)
-        self.assertIn("  Evidence: Helv\\nSecond, Times", text)
-        self.assertIn("  Evidence: page 2, page 7", text)
-        self.assertIn("  Evidence: page 4 (+39 more)", text)
-        self.assertNotIn("never-shown.tex", text)
-        self.assertNotIn("\x1b", text)
-        self.assertIn("(+2 more)\n  Next: ", text)
-        compact = render_compact(report, options=RenderOptions(show_passed=True))
-        self.assertNotIn("never-shown.tex", compact)
-        self.assertNotIn("\x1b", compact)
-        self.assertEqual(len(compact.splitlines()), 1 + len(report.findings))
-        line = next(row for row in compact.splitlines() if row.startswith("TEX"))
-        self.assertIn(" | evidence: a.tex:3, b.tex:9, c.tex:1 (+2 more) | ", line)
-        self.assertLess(line.index("evidence:"), line.index("next:"))
-        self.assertIn("evidence: Helv\\nSecond, Times", compact)
-
-    def test_evidence_excerpt_is_redacted_with_the_rest_of_the_report(self):
-        report = Report(
-            "check",
-            outcome=Outcome.BLOCKED,
-            settings={"password": "SyntheticCredential_1234"},
-            findings=[
-                Finding(
-                    "manuscript.forbidden_packages",
-                    "Forbidden.",
-                    severity="error",
-                    details={"matches": [{"path": "SyntheticCredential_1234.tex", "line": 4}]},
-                )
-            ],
-        )
-        for rendered in (render_terminal(report), render_compact(report)):
-            self.assertNotIn("SyntheticCredential_1234", rendered)
-            self.assertIn("REDACTED", rendered)
-
-    def test_scope_disclaimers_are_hidden_unless_passed_results_are_requested(self):
-        report = Report(
-            "check",
-            outcome=Outcome.PASSED_WITH_ADVISORIES,
-            findings=[
-                Finding(
-                    "online.metadata",
-                    "Online checks were not requested.",
-                    severity="info",
-                    status="skipped",
-                ),
-                Finding(
-                    "build.bibliography_backend",
-                    "No bibliography backend is used.",
-                    severity="info",
-                    status="not_applicable",
-                ),
-                Finding("pdf.pages", "1 page", severity="info", status="passed"),
-                Finding("pdf.fonts", "Fonts unavailable", severity="error", status="skipped"),
-            ],
-        )
-        text = render_terminal(report)
-        self.assertNotIn("Online checks were not requested", text)
-        self.assertNotIn("No bibliography backend", text)
-        self.assertIn("Fonts unavailable", text)
-        self.assertIn("1 incomplete, 2 not applicable, 1 passed result", text)
-        self.assertEqual(
-            render_compact(report).splitlines()[0].split(" | ")[1],
-            "1 error, 0 warnings, 1 incomplete, 2 not applicable, 1 passed result",
-        )
-        shown = render_terminal(report, options=RenderOptions(show_passed=True))
-        self.assertIn("Online checks were not requested", shown)
-        self.assertIn("INFO / not checked", shown)
-        self.assertIn("INFO / not applicable", shown)
-        self.assertIn(
-            "No bibliography backend",
-            render_compact(report, options=RenderOptions(show_passed=True)),
-        )
-        only_notes = Report("check", outcome=Outcome.PASSED, findings=report.findings[:2])
-        quiet = render_terminal(only_notes)
-        self.assertIn("No issues found", quiet)
-        self.assertNotIn("fledge rule", quiet)
-        self.assertEqual(len(render_compact(only_notes).splitlines()), 1)
-        self.assertIn("0 incomplete, 2 not applicable", render_compact(only_notes))
-
-    def test_many_changes_are_summarized_by_kind_unless_diffs_are_requested(self):
-        changes = (
-            [
-                Change(f"extra{i}.txt", kind=ChangeKind.EXCLUDE, reason="Unused", diff="-x\n+y\n")
-                for i in range(37)
-            ]
-            + [Change(f"img{i}.png", kind=ChangeKind.MOVE, reason="Flatten") for i in range(12)]
-            + [Change("main.tex", kind=ChangeKind.REWRITE, reason="Paths")]
-        )
-        report = Report("prepare", outcome=Outcome.PLANNED, changes=changes)
-        text = render_terminal(report)
-        self.assertIn(
-            "50 proposed/applied changes (original input unchanged): "
-            "exclude: 37, move: 12, rewrite: 1",
-            text,
-        )
-        self.assertNotIn("extra0.txt", text)
-        self.assertIn("use --json", text)
-        full = render_terminal(report, options=RenderOptions(show_diff=True))
-        self.assertIn("extra36.txt", full)
-        self.assertIn("img11.png", full)
-        self.assertIn("-x", full)
-        small = render_terminal(Report("prepare", outcome=Outcome.PLANNED, changes=changes[:20]))
-        self.assertIn("extra19.txt", small)
-        self.assertIn("exclude: 20", small)
-        self.assertNotIn("use --json", small)
-        self.assertNotIn(
-            "extra19.txt",
-            render_terminal(Report("p", outcome=Outcome.PLANNED, changes=changes[:21])),
-        )
-        compact = render_compact(report)
-        self.assertIn("changes: 50 (exclude: 37, move: 12, rewrite: 1; use --json", compact)
-        self.assertEqual(len(compact.splitlines()), 2)
-
-    def test_formatting_diff_is_shown_only_when_requested(self):
-        report = Report(
-            "fmt",
-            outcome=Outcome.PASSED_WITH_ADVISORIES,
-            changes=[
-                Change(
-                    "main.tex",
-                    kind=ChangeKind.FORMAT,
-                    reason="Formatting",
-                    diff="--- main.tex\n+++ main.tex\n-a\n+b\n",
-                )
-            ],
-        )
-        self.assertNotIn("-a", render_terminal(report))
-        self.assertIn("-a", render_terminal(report, options=RenderOptions(show_diff=True)))
 
 
 class RedactionOncePerRunTests(unittest.TestCase):
@@ -809,13 +423,11 @@ class RedactionOncePerRunTests(unittest.TestCase):
                 self.assertEqual(redaction.call_count, 1)
 
 
-class UnexpectedFailureTests(unittest.TestCase):
+class UnexpectedFailureTests(ProjectTestCase):
     """A defect ends with the error exit code, never with a pass or an advisory code."""
 
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name).resolve()
+        super().setUp()
         self.source = self.root / "project"
         self.source.mkdir()
         (self.source / "main.tex").write_text(

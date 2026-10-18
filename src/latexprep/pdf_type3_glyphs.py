@@ -226,7 +226,9 @@ def _type3_finding(objects: QpdfObjectGraph, *, forbid_bitmap: bool) -> Finding:
                 violations.append(row)
     return measurement_finding(
         ArtworkRule.TYPE3_GLYPH_PROGRAMS,
-        _type3_message(violations, count, len(fonts), uncertain, forbid_bitmap),
+        _type3_message(
+            violations, count, len(fonts), uncertain=uncertain, forbid_bitmap=forbid_bitmap
+        ),
         violations,
         incomplete=uncertain,
         details={
@@ -242,7 +244,7 @@ def _type3_finding(objects: QpdfObjectGraph, *, forbid_bitmap: bool) -> Finding:
 
 
 def _type3_message(
-    violations: list[object], glyphs: int, fonts: int, uncertain: bool, forbid_bitmap: bool
+    violations: list[object], glyphs: int, fonts: int, *, uncertain: bool, forbid_bitmap: bool
 ) -> str:
     """The outcome of the Type 3 inspection in the researcher's terms."""
     if violations:

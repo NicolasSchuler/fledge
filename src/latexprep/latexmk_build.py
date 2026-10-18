@@ -237,7 +237,7 @@ async def _build_once(request: BuildRequest, runner: ToolRunner, biber: BiberPla
         for item in result.findings
     )
     options = (
-        _loaded_options(request, staged, recorder, built, max_output_bytes)
+        _loaded_options(request, staged, recorder, built=built, max_bytes=max_output_bytes)
         if staged is not None
         else None
     )
@@ -355,6 +355,7 @@ def _loaded_options(
     request: BuildRequest,
     staged: LoadedOptionsProbe | LoadedOptionsEvidence,
     recorder: RecorderEvidence,
+    *,
     built: bool,
     max_bytes: int,
 ) -> LoadedOptionsEvidence:

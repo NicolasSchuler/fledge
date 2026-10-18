@@ -1,0 +1,17 @@
+Usage: fledge submission-text [OPTIONS] INPUT
+
+  Preview title, abstract and keywords, or export one ready field as a single line.
+
+  INPUT is a project folder or ZIP. No TeX compilation or network access is used.
+
+Options:
+  --main FILE                     Main .tex file of the document, relative to the input; needed when
+                                  the input holds several documents.
+  --field [title|abstract|keywords]
+                                  Print only this field as one line of text ready to paste; the exit
+                                  code is 3 when it is not ready.
+  --json                          Return all fields and readiness details.
+  --config PATH                   Use this TOML settings file instead of discovering project
+                                  configuration.
+  --isolated                      Ignore discovered configuration and use defaults.
+  -h, --help                      Show this message and exit.

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import fnmatch
 import json
-import tempfile
 import tomllib
 import unittest
 from importlib import resources
@@ -16,6 +15,7 @@ from latexprep.cli import cli
 from latexprep.config import load_settings
 from latexprep.errors import PreparationError
 from latexprep.presets import PRESETS, preset_names, preset_text, preset_values
+from tests.support import ProjectTestCase
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -122,12 +122,7 @@ class PresetContentTests(unittest.TestCase):
             preset_values("../arxiv")
 
 
-class PresetPrecedenceTests(unittest.TestCase):
-    def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
-
+class PresetPrecedenceTests(ProjectTestCase):
     def config(self, text: str) -> Path:
         path = self.root / "fledge.toml"
         path.write_text(text)
@@ -172,8 +167,16 @@ class PresetPrecedenceTests(unittest.TestCase):
         runner = CliRunner()
         result = runner.invoke(
             cli,
-            ["inspect", str(project), "--preset", "arxiv", "--config", str(config)]
-            + ["--json", "--quiet"],
+            [
+                "inspect",
+                str(project),
+                "--preset",
+                "arxiv",
+                "--config",
+                str(config),
+                "--json",
+                "--quiet",
+            ],
         )
         self.assertEqual(result.exit_code, 1, result.output)
         report = json.loads(result.stdout)

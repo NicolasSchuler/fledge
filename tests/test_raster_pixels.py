@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import random
-import tempfile
 import unittest
 from pathlib import Path
 
@@ -15,6 +14,7 @@ from latexprep.raster_pixels import (
     count_changed_pixels,
     read_pnm_raster,
 )
+from tests.support import ProjectTestCase
 
 PixelBox = tuple[int, int, int, int]
 
@@ -40,7 +40,7 @@ def random_box(rng: random.Random, width: int, height: int) -> PixelBox:
     return left, top, right, bottom
 
 
-def random_gray(rng: random.Random, width: int, height: int, sparse: bool) -> RasterImage:
+def random_gray(rng: random.Random, width: int, height: int, *, sparse: bool) -> RasterImage:
     if sparse:
         # Mostly background with a few ink pixels, including whole blank rows and columns.
         data = bytearray([255]) * (width * height)
@@ -206,12 +206,7 @@ class ChangedPixelTests(unittest.TestCase):
                 count_changed_pixels(small, small, tolerance)
 
 
-class PnmReaderTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
-
+class PnmReaderTests(ProjectTestCase):
     def write(self, name: str, data: bytes) -> Path:
         path = self.root / name
         path.write_bytes(data)

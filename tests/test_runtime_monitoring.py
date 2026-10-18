@@ -1,14 +1,14 @@
+"""Resource accounting: storage walks, process listing and the shared job monitor."""
+
 from __future__ import annotations
 
 import asyncio
 import os
 import shutil
-import sys
 import tempfile
 import threading
 import time
 import unittest
-from dataclasses import FrozenInstanceError
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -24,73 +24,35 @@ from latexprep.resource_monitor import (
     MemoryAccounting,
     ResourceMonitor,
     ResourceStatistics,
-    _sample_interval,
+    sample_interval,
     workspace_violation,
 )
 from latexprep.runtime import ToolRunner
 from latexprep.sandbox import SeatbeltSandbox
-from latexprep.tool_launch import create_tool_environment
-from latexprep.toolchain import ToolContext
-from tests.support import live_tests_enabled
-from tests.test_runtime import never_reports
+from tests.fakes import (
+    LifecycleRunner,
+    ScriptedJobMonitor,
+    ScriptedProcessMonitor,
+)
+from tests.support import ProjectTestCase, live_test
 
 
-class ProbeRunner(ToolRunner):
-    def __init__(self) -> None:
-        super().__init__(source_date_epoch=123)
-        self.calls = 0
-        self.entered = asyncio.Event()
-        self.release = asyncio.Event()
-        self.response = CommandResult(
-            0, "pdfinfo version test\n", "", resolved_command=["/tools/pdfinfo"]
-        )
-        self.owner: asyncio.Task[object] | None = None
+class SampledRunner(LifecycleRunner):
+    """A runner whose process table, and so its memory accounting, the test scripts."""
 
-    def _resolve_tool(self, name: str) -> Path:
-        return Path("/tools") / Path(name).name
-
-    async def run(
-        self,
-        argv: list[str],
-        cwd: Path,
-        workspace: Path,
-        *,
-        readonly_inputs: tuple[Path, ...] = (),
-        memory_mb: int | None = None,
-    ) -> CommandResult:
-        self.calls += 1
-        self.owner = asyncio.current_task()
-        self.entered.set()
-        await self.release.wait()
-        return self.response
-
-
-class UnrestrictedLifecycleRunner(ToolRunner):
-    """Exercise owned real child processes; no production sandbox bypass exists."""
-
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
-        self._monitor.watch_command = never_reports
-
-    def _sandbox_command(
-        self,
-        command: list[str],
-        workspace: Path,
-        readonly_inputs: tuple[Path, ...] = (),
-    ) -> list[str]:
-        return command
-
-
-class SampledRunner(UnrestrictedLifecycleRunner):
     def __init__(self, budget: ResourceBudget) -> None:
-        super().__init__(budget=budget)
         self.allow_sample = asyncio.Event()
         self.parent_rss_mb = 20
         self.group_rss_mb = 30
         self.group_processes = 1
         self.sample_owners: set[asyncio.Task[object] | None] = set()
         self.unavailable = False
-        self._monitor._sample_processes = self.sample_processes
+        super().__init__(
+            budget=budget,
+            monitor_factory=lambda processes, statistics: ScriptedProcessMonitor(
+                processes, statistics, self.sample_processes
+            ),
+        )
 
     async def sample_processes(self) -> list[ProcessSample]:
         await self.allow_sample.wait()
@@ -98,7 +60,7 @@ class SampledRunner(UnrestrictedLifecycleRunner):
         if self.unavailable:
             raise PreparationError("synthetic process accounting unavailable")
         rows = [ProcessSample(os.getpid(), -1, self.parent_rss_mb * 1024)]
-        for pid in self._monitor.active_commands:
+        for pid in self.monitor.active_commands:
             rows.append(ProcessSample(pid, pid, self.group_rss_mb * 1024))
             rows.extend(
                 ProcessSample(pid + offset, pid, 0) for offset in range(1, self.group_processes)
@@ -106,247 +68,7 @@ class SampledRunner(UnrestrictedLifecycleRunner):
         return rows
 
 
-class VersionAndInputTests(unittest.IsolatedAsyncioTestCase):
-    async def asyncSetUp(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory()
-        self.root = Path(self.temporary.name).resolve()
-
-    async def asyncTearDown(self) -> None:
-        self.temporary.cleanup()
-
-    async def test_concurrent_version_probe_runs_once_and_returns_detached_metadata(self) -> None:
-        runner = ProbeRunner()
-        first = asyncio.create_task(runner.tool_version(["pdfinfo", "-v"], self.root))
-        await runner.entered.wait()
-        second = asyncio.create_task(runner.tool_version(["pdfinfo", "-v"], self.root))
-        await asyncio.sleep(0)
-        self.assertEqual(runner.calls, 1)
-        self.assertIs(runner.owner, first)
-        runner.release.set()
-        left, right = await asyncio.gather(first, second)
-        self.assertEqual(left, right)
-        with self.assertRaises(FrozenInstanceError):
-            left.version = ("changed",)  # type: ignore[misc]
-        tools = runner.tool_versions
-        tools.pop("pdfinfo")
-        report = left.to_report()
-        report["version"].append("changed")
-        current = await runner.tool_version(["pdfinfo", "-v"], self.root)
-        self.assertEqual(current.version, ("pdfinfo version test",))
-        self.assertEqual(current.to_report()["version"], ["pdfinfo version test"])
-        self.assertEqual(runner.calls, 1)
-        self.assertEqual(runner.statistics().version_probes, 1)
-
-    async def test_unleased_probe_does_not_hold_lock_while_waiting_for_admission(self) -> None:
-        runner = ProbeRunner()
-        runner.budget = ResourceBudget(1, 100)
-        start = asyncio.Event()
-
-        async def unleased_probe() -> dict[str, object]:
-            await start.wait()
-            return await runner.tool_version(["pdfinfo", "-v"], self.root)
-
-        waiting = asyncio.create_task(unleased_probe())
-        async with runner.budget.lease("existing leaf", memory_mb=64):
-            start.set()
-            await asyncio.sleep(0)
-            runner.release.set()
-            async with asyncio.timeout(3):
-                owned = await runner.tool_version(["pdfinfo", "-v"], self.root)
-        async with asyncio.timeout(3):
-            self.assertEqual(await waiting, owned)
-        self.assertEqual(runner.calls, 1)
-
-    async def test_cancelled_version_probe_can_retry_without_publishing_success(self) -> None:
-        runner = ProbeRunner()
-        first = asyncio.create_task(runner.tool_version(["pdfinfo", "-v"], self.root))
-        await runner.entered.wait()
-        first.cancel()
-        with self.assertRaises(asyncio.CancelledError):
-            await first
-        self.assertEqual(runner.tool_versions, {})
-        runner.release.set()
-        version = await runner.tool_version(["pdfinfo", "-v"], self.root)
-        self.assertEqual(version.version, ("pdfinfo version test",))
-        self.assertEqual(runner.calls, 2)
-
-    async def test_failed_limited_and_empty_version_probes_do_not_enter_cache(self) -> None:
-        runner = ProbeRunner()
-        runner.release.set()
-        cases = (
-            CommandResult(1, "partial", "error", resolved_command=["/tools/pdfinfo"]),
-            CommandResult(0, "version", "", resolved_command=["/tools/pdfinfo"], timed_out=True),
-            CommandResult(
-                0, "version", "", resolved_command=["/tools/pdfinfo"], output_limited=True
-            ),
-            CommandResult(
-                0, "version", "", resolved_command=["/tools/pdfinfo"], resource_exceeded="memory"
-            ),
-            CommandResult(0, "", "", resolved_command=["/tools/pdfinfo"]),
-            CommandResult(
-                0, "version", "Syntax Error: invalid", resolved_command=["/tools/pdfinfo"]
-            ),
-        )
-        for response in cases:
-            runner.response = response
-            with self.assertRaises(PreparationError):
-                await runner.tool_version(["pdfinfo", "-v"], self.root)
-            self.assertEqual(runner.tool_versions, {})
-        runner.response = CommandResult(0, "valid", "", resolved_command=["/tools/pdfinfo"])
-        self.assertEqual(
-            (await runner.tool_version(["pdfinfo", "-v"], self.root)).version, ("valid",)
-        )
-        self.assertEqual(runner.calls, len(cases) + 1)
-
-    async def test_version_cache_keys_include_flags_and_detach_99_needs_its_prefix(self) -> None:
-        runner = ProbeRunner()
-        runner.release.set()
-        runner.response = CommandResult(
-            99, "", "other tool version 1", resolved_command=["/tools/pdfdetach"]
-        )
-        with self.assertRaises(PreparationError):
-            await runner.tool_version(["pdfdetach", "-v"], self.root)
-        runner.response = CommandResult(
-            99, "", "pdfdetach version 25.1\n", resolved_command=["/tools/pdfdetach"]
-        )
-        value = await runner.tool_version(["pdfdetach", "-v"], self.root)
-        self.assertEqual(value.version, ("pdfdetach version 25.1",))
-        with self.assertRaises(PreparationError):
-            await runner.tool_version(["pdfdetach", "--version"], self.root)
-        with self.assertRaises(PreparationError):
-            await runner.tool_version(["pdfinfo", "-v"], self.root)
-        self.assertEqual(runner.calls, 4)
-
-    def test_epoch_context_resolution_and_invocation_state_are_stable(self) -> None:
-        runner = ToolRunner(source_date_epoch=17)
-        with patch("latexprep.toolchain.tool_path", return_value=Path("/usr/bin/perl")) as resolve:
-            self.assertEqual(runner._resolve_tool("perl"), Path("/usr/bin/perl"))
-            self.assertEqual(runner._resolve_tool("perl"), Path("/usr/bin/perl"))
-            resolve.assert_called_once()
-        perl = Path("/usr/bin/perl")
-        context = runner.toolchain.context(perl)
-        epoch = runner.source_date_epoch
-        first = create_tool_environment(self.root, context, source_date_epoch=epoch).variables
-        with patch("latexprep.toolchain.shutil.which", return_value="/untrusted/new-tool"):
-            self.assertIs(runner.toolchain.context(perl), context)
-            second = create_tool_environment(
-                self.root, runner.toolchain.context(perl), source_date_epoch=epoch
-            ).variables
-        self.assertEqual(first["SOURCE_DATE_EPOCH"], "17")
-        self.assertEqual(first["SOURCE_DATE_EPOCH"], second["SOURCE_DATE_EPOCH"])
-        self.assertEqual(first["PATH"], second["PATH"])
-        self.assertNotEqual(first["TMPDIR"], second["TMPDIR"])
-        self.assertIsInstance(context.resource_roots, frozenset)
-        with self.assertRaises(AttributeError):
-            attribute = "source_date_epoch"
-            setattr(runner, attribute, "changed")
-        for bad in (-1, "1.5", "１２３", True):
-            with self.assertRaises(PreparationError):
-                ToolRunner(source_date_epoch=bad)
-
-    def test_freeze_reuses_snapshot_and_handles_same_names(self) -> None:
-        runner = ToolRunner()
-        left, right = self.root / "left", self.root / "right"
-        left.mkdir()
-        right.mkdir()
-        first, second = left / "main.pdf", right / "main.pdf"
-        first.write_bytes(b"%PDF-first")
-        second.write_bytes(b"%PDF-second")
-        frozen_first = runner.freeze_input(first, self.root / "artifacts")
-        frozen_second = runner.freeze_input(second, self.root / "artifacts")
-        self.assertNotEqual(frozen_first, frozen_second)
-        self.assertEqual(frozen_first.read_bytes(), b"%PDF-first")
-        self.assertEqual(frozen_second.read_bytes(), b"%PDF-second")
-        first.unlink()
-        self.assertEqual(runner.freeze_input(first, self.root / "other"), frozen_first)
-        self.assertEqual(runner.freeze_input(frozen_first, self.root / "other"), frozen_first)
-        self.assertFalse((self.root / "other").exists())
-        self.assertEqual(len(runner._frozen._identities), 2)
-
-    def test_readonly_grants_reject_arbitrary_paths_directories_and_changed_snapshots(self) -> None:
-        runner = ToolRunner()
-        source = self.root / "source.pdf"
-        source.write_bytes(b"%PDF-input")
-        frozen = runner.freeze_input(source, self.root / "artifacts")
-        linked = self.root / "linked.pdf"
-        linked.symlink_to(frozen)
-        for invalid in (source, frozen.parent, linked):
-            with self.assertRaises(PreparationError):
-                runner._frozen.validate((invalid,))
-        self.assertEqual(runner._frozen.validate((frozen,)), (frozen,))
-        frozen.chmod(0o600)
-        frozen.write_bytes(b"modified")
-        with self.assertRaises(PreparationError):
-            runner._frozen.validate((frozen,))
-        with self.assertRaises(PreparationError):
-            runner.freeze_input(linked, self.root / "another")
-        existing = self.root / "existing"
-        existing.mkdir()
-        with self.assertRaises(PreparationError):
-            ToolRunner().freeze_input(source, existing)
-
-    def test_sandbox_grants_literal_input_reads_and_only_leaf_writes(self) -> None:
-        runner = ToolRunner()
-        source = self.root / "input.pdf"
-        source.write_bytes(b"%PDF-input")
-        frozen = runner.freeze_input(source, self.root / "artifacts")
-        workspace = self.root / "leaf"
-        workspace.mkdir()
-        # Generate the Seatbelt profile on any host without requiring macOS tools.
-        context = ToolContext(
-            Path("/usr/bin/perl"), frozenset({Path("/usr/bin/perl")}), frozenset(), ("/usr/bin",)
-        )
-        runner.sandbox = SeatbeltSandbox()
-        with (
-            patch("latexprep.sandbox.shutil.which", return_value="/usr/bin/sandbox-exec"),
-            patch.object(runner.toolchain, "context", return_value=context),
-        ):
-            command = runner._sandbox_command(["/usr/bin/perl", "-v"], workspace, (frozen,))
-        self.assertEqual(command[0], "/usr/bin/sandbox-exec")
-        profile = command[2]
-        self.assertIn(f'(literal "{frozen}")', profile)
-        self.assertNotIn(f'(subpath "{frozen.parent}")', profile)
-        self.assertIn(f'(allow file-write* (subpath "{workspace}"))', profile)
-        self.assertNotIn(f'(subpath "{self.root}")', profile)
-
-    @unittest.skipUnless(
-        live_tests_enabled("LATEXPREP_RUN_SANDBOX_TESTS") and sys.platform == "darwin",
-        "opt-in live Seatbelt test (FLEDGE_RUN_INTEGRATION=1)",
-    )
-    async def test_live_sandbox_denies_sibling_writes_and_undeclared_reads(self) -> None:
-        runner = ToolRunner()
-        source = self.root / "source.pdf"
-        source.write_bytes(b"%PDF-input")
-        frozen = runner.freeze_input(source, self.root / "artifacts")
-        workspace, sibling = self.root / "leaf", self.root / "sibling"
-        workspace.mkdir()
-        sibling.mkdir()
-        program = (
-            'my $f; print(open($f,"<",$ARGV[0]) ? "READ" : "FAIL"); '
-            'print(open($f,"<",$ARGV[1]) ? " LEAK" : " DENIED"); '
-            'print(open($f,">",$ARGV[2]) ? " SIBLING" : " BLOCKED"); '
-            'print(open($f,">",$ARGV[0]) ? " MODIFIED" : " READONLY");'
-        )
-        try:
-            result = await runner.run(
-                ["perl", "-e", program, str(frozen), str(source), str(sibling / "marker")],
-                workspace,
-                workspace,
-                readonly_inputs=(frozen,),
-            )
-        except PreparationError as error:
-            self.skipTest(str(error))
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout, "READ DENIED BLOCKED READONLY", result.stderr)
-        self.assertFalse((sibling / "marker").exists())
-
-
-class StorageWalkTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name).resolve()
-
+class StorageWalkTests(ProjectTestCase):
     def test_one_walk_measures_the_tree_and_checks_every_workspace(self) -> None:
         quiet, noisy = self.root / "quiet", self.root / "noisy"
         (quiet / "nested").mkdir(parents=True)
@@ -388,7 +110,7 @@ class ProcessListingTests(unittest.IsolatedAsyncioTestCase):
         listing.wait = AsyncMock(return_value=0)
         start = AsyncMock(return_value=listing)
         with patch("latexprep.process_control.asyncio.create_subprocess_exec", start):
-            samples = await self.monitor()._sample_processes()
+            samples = await self.monitor().sample_processes()
         self.assertEqual(samples, [ProcessSample(1, 1, 10)])
         options = start.call_args.kwargs
         self.assertEqual(options["stdin"], asyncio.subprocess.DEVNULL)
@@ -398,18 +120,21 @@ class ProcessListingTests(unittest.IsolatedAsyncioTestCase):
         missing = AsyncMock(side_effect=FileNotFoundError(2, "No such file", "/bin/ps"))
         with patch("latexprep.process_control.asyncio.create_subprocess_exec", missing):
             with self.assertRaises(PreparationError) as raised:
-                await self.monitor()._sample_processes()
+                await self.monitor().sample_processes()
         self.assertIn("/bin/ps", str(raised.exception))
         self.assertIn("procps", str(raised.exception))
 
     async def test_unexpected_monitor_failure_names_the_exception_type(self) -> None:
-        runner = SampledRunner(ResourceBudget(1, 1024))
-
         async def broken(scope: JobScope) -> None:
             if asyncio.current_task() is scope.monitor:
                 raise KeyError("scope")
 
-        runner._monitor._sample_job = broken
+        runner = LifecycleRunner(
+            budget=ResourceBudget(1, 1024),
+            monitor_factory=lambda processes, statistics: ScriptedJobMonitor(
+                processes, statistics, broken
+            ),
+        )
         with tempfile.TemporaryDirectory() as directory:
             async with runner.job_scope(Path(directory), max_temp_bytes=1_000_000):
                 async with asyncio.timeout(3):
@@ -435,7 +160,7 @@ class SharedMonitorTests(unittest.IsolatedAsyncioTestCase):
 
     async def wait_groups(self, runner: ToolRunner, count: int) -> None:
         async with asyncio.timeout(3):
-            while len(runner._monitor.active_commands) != count:
+            while len(runner.monitor.active_commands) != count:
                 await asyncio.sleep(0.005)
 
     async def sleeping_command(
@@ -452,9 +177,10 @@ class SharedMonitorTests(unittest.IsolatedAsyncioTestCase):
                 memory_mb=command_memory_mb,
             )
 
-    @unittest.skipUnless(
-        live_tests_enabled("LATEXPREP_RUN_SANDBOX_TESTS") and sys.platform == "darwin",
+    @live_test(
         "opt-in live job-monitor test (FLEDGE_RUN_INTEGRATION=1)",
+        "LATEXPREP_RUN_SANDBOX_TESTS",
+        platform="darwin",
     )
     async def test_live_job_monitor_samples_parent_and_real_tool_group(self) -> None:
         runner = ToolRunner(budget=ResourceBudget(1, 1024, coordinator_memory_mb=64))
@@ -483,8 +209,8 @@ class SharedMonitorTests(unittest.IsolatedAsyncioTestCase):
             first = asyncio.create_task(self.sleeping_command(runner, "left", 30))
             second = asyncio.create_task(self.sleeping_command(runner, "right", 30))
             await self.wait_groups(runner, 2)
-            assert runner._monitor.scope is not None
-            monitor = runner._monitor.scope.monitor
+            assert runner.monitor.scope is not None
+            monitor = runner.monitor.scope.monitor
             runner.allow_sample.set()
             async with asyncio.timeout(3):
                 results = await asyncio.gather(first, second)
@@ -500,8 +226,8 @@ class SharedMonitorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stats.peak_total_rss_mb, 80)
         self.assertEqual(stats.peak_command_memory_reservation_mb, 60)
         self.assertEqual(stats.peak_active_commands, 2)
-        self.assertEqual(runner._monitor.active_commands, {})
-        self.assertIsNone(runner._monitor.scope)
+        self.assertEqual(runner.monitor.active_commands, {})
+        self.assertIsNone(runner.monitor.scope)
 
     async def test_command_memory_cap_never_exceeds_its_leaf_lease(self) -> None:
         runner = SampledRunner(ResourceBudget(1, 1024))
@@ -532,7 +258,7 @@ class SharedMonitorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(stats.resource_exceeded)
 
     async def test_command_memory_cap_must_fit_lease_and_runtime_limits(self) -> None:
-        runner = UnrestrictedLifecycleRunner(budget=ResourceBudget(1, 1024))
+        runner = LifecycleRunner(budget=ResourceBudget(1, 1024))
         assert runner.budget is not None
         async with runner.budget.lease("page", memory_mb=128):
             with self.assertRaisesRegex(ValueError, "cannot exceed"):
@@ -570,14 +296,14 @@ class SharedMonitorTests(unittest.IsolatedAsyncioTestCase):
                 task = asyncio.create_task(self.sleeping_command(runner, "command", 64))
                 await self.wait_groups(runner, 1)
                 await asyncio.sleep(0.25)
-                kill_process_group(next(iter(runner._monitor.active_commands)))
+                kill_process_group(next(iter(runner.monitor.active_commands)))
                 async with asyncio.timeout(3):
                     await task
         self.assertTrue(threads)
         self.assertNotIn(threading.get_ident(), threads)
         self.assertEqual(runner.statistics().sample_interval_seconds, 0.1)
-        self.assertEqual(_sample_interval(time.monotonic() - 10), 0.5)
-        self.assertEqual(_sample_interval(time.monotonic()), 0.1)
+        self.assertEqual(sample_interval(time.monotonic() - 10), 0.5)
+        self.assertEqual(sample_interval(time.monotonic()), 0.1)
 
     async def test_job_disk_ceiling_applies_even_without_active_tools(self) -> None:
         runner = SampledRunner(ResourceBudget(1, 1024))
@@ -613,7 +339,7 @@ class SharedMonitorTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_unleased_command_is_admitted_and_held_lease_is_reused(self) -> None:
         budget = ResourceBudget(1, 100, coordinator_memory_mb=20)
-        runner = UnrestrictedLifecycleRunner(budget=budget)
+        runner = LifecycleRunner(budget=budget)
         result = await runner.run([self.perl, "-e", 'print "first";'], self.root, self.root)
         self.assertEqual(result.stdout, "first")
         self.assertEqual(runner.statistics().peak_command_memory_reservation_mb, 80)
@@ -626,7 +352,7 @@ class SharedMonitorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(budget.current_lease)
 
     async def test_writable_workspace_cannot_include_frozen_inputs(self) -> None:
-        runner = UnrestrictedLifecycleRunner()
+        runner = LifecycleRunner()
         source = self.root / "source.pdf"
         source.write_bytes(b"%PDF-input")
         runner.freeze_input(source, self.root / "artifacts")
@@ -634,7 +360,7 @@ class SharedMonitorTests(unittest.IsolatedAsyncioTestCase):
             await runner.run([self.perl, "-e", "exit 0"], self.root, self.root)
 
     async def test_contract_violations_are_defects_not_expected_failures(self) -> None:
-        runner = UnrestrictedLifecycleRunner()
+        runner = LifecycleRunner()
         other = self.root / "other"
         other.mkdir()
         command = [self.perl, "-e", "exit 0"]
@@ -658,15 +384,15 @@ class SharedMonitorTests(unittest.IsolatedAsyncioTestCase):
         async with runner.job_scope(self.root, max_temp_bytes=1_000_000):
             task = asyncio.create_task(self.sleeping_command(runner, "command", 64))
             await self.wait_groups(runner, 1)
-            process = next(iter(runner._monitor.active_commands.values())).process
+            process = next(iter(runner.monitor.active_commands.values())).process
         result = await task
         self.assertEqual(result.resource_exceeded, "Job scope closed while a command was active")
         self.assertIsNotNone(process.returncode)
-        self.assertEqual(runner._monitor.active_commands, {})
-        self.assertIsNone(runner._monitor.scope)
+        self.assertEqual(runner.monitor.active_commands, {})
+        self.assertIsNone(runner.monitor.scope)
 
     async def test_repeated_cancellation_during_launch_still_reaps_new_child(self) -> None:
-        runner = UnrestrictedLifecycleRunner()
+        runner = LifecycleRunner()
         original = asyncio.create_subprocess_exec
         launched, release = asyncio.Event(), asyncio.Event()
         children: list[asyncio.subprocess.Process] = []
@@ -696,7 +422,7 @@ class SharedMonitorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(runner._workspace_claims, set())
 
     async def test_repeated_cancellation_waits_for_monitor_cleanup_and_child_reaping(self) -> None:
-        runner = UnrestrictedLifecycleRunner(budget=ResourceBudget(1, 1024))
+        runner = LifecycleRunner(budget=ResourceBudget(1, 1024))
         cleanup_started, cleanup_release, cleanup_done = (
             asyncio.Event(),
             asyncio.Event(),
@@ -712,12 +438,12 @@ class SharedMonitorTests(unittest.IsolatedAsyncioTestCase):
                 cleanup_done.set()
             raise AssertionError("unreachable")
 
-        with patch.object(runner._monitor, "watch_command", monitor):
+        with patch.object(runner.monitor, "watch_command", monitor):
             task = asyncio.create_task(
                 runner.run([self.perl, "-e", "sleep 30"], self.root, self.root)
             )
             await self.wait_groups(runner, 1)
-            process = next(iter(runner._monitor.active_commands.values())).process
+            process = next(iter(runner.monitor.active_commands.values())).process
             task.cancel()
             await cleanup_started.wait()
             task.cancel()
@@ -729,7 +455,7 @@ class SharedMonitorTests(unittest.IsolatedAsyncioTestCase):
                 await task
         self.assertTrue(cleanup_done.is_set())
         self.assertIsNotNone(process.returncode)
-        self.assertEqual(runner._monitor.active_commands, {})
+        self.assertEqual(runner.monitor.active_commands, {})
         self.assertEqual(runner._workspace_claims, set())
 
 

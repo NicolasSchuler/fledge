@@ -204,8 +204,8 @@ violating and unavailable/ambiguous evidence. The implementation/test pairs are:
 | Metadata edits and image metadata | {download}`metadata_privacy.py <../src/latexprep/metadata_privacy.py>`, {download}`metadata_source_edits.py <../src/latexprep/metadata_source_edits.py>`, {download}`image_metadata.py <../src/latexprep/image_metadata.py>` | {download}`test_metadata_privacy.py <../tests/test_metadata_privacy.py>` |
 | Author records | {download}`author_records.py <../src/latexprep/author_records.py>` | {download}`test_structure_checks.py <../tests/test_structure_checks.py>` |
 | PDF structure | {download}`pdf_structure_checks.py <../src/latexprep/pdf_structure_checks.py>` | {download}`test_structure_checks.py <../tests/test_structure_checks.py>` |
-| Review decisions and offline outputs | {download}`review_policy.py <../src/latexprep/review_policy.py>`, {download}`html_report.py <../src/latexprep/html_report.py>`, {download}`ci_annotations.py <../src/latexprep/ci_annotations.py>`, {download}`diagnostic_bundle.py <../src/latexprep/diagnostic_bundle.py>` | {download}`test_reporting.py <../tests/test_reporting.py>` |
-| Independent packages and repeated baselines | {download}`documents.py <../src/latexprep/documents.py>`, {download}`document_run.py <../src/latexprep/document_run.py>`, {download}`workflow_options.py <../src/latexprep/workflow_options.py>` | {download}`test_workflow_extensions.py <../tests/test_workflow_extensions.py>` |
+| Review decisions and offline outputs | {download}`review_policy.py <../src/latexprep/review_policy.py>`, {download}`html_report.py <../src/latexprep/html_report.py>`, {download}`ci_annotations.py <../src/latexprep/ci_annotations.py>`, {download}`diagnostic_bundle.py <../src/latexprep/diagnostic_bundle.py>` | {download}`test_review_policy.py <../tests/test_review_policy.py>`, {download}`test_reporting.py <../tests/test_reporting.py>`, {download}`test_diagnostic_bundle.py <../tests/test_diagnostic_bundle.py>` |
+| Independent packages and repeated baselines | {download}`documents.py <../src/latexprep/documents.py>`, {download}`document_run.py <../src/latexprep/document_run.py>`, {download}`workflow_options.py <../src/latexprep/workflow_options.py>` | {download}`test_multi_document.py <../tests/test_multi_document.py>`, {download}`test_workflow_review.py <../tests/test_workflow_review.py>` |
 | Linux command construction and bibliography backend | {download}`sandbox.py <../src/latexprep/sandbox.py>`, {download}`latexmk_build.py <../src/latexprep/latexmk_build.py>` | {download}`test_runtime_backends.py <../tests/test_runtime_backends.py>` |
 
 Online tests use fake transports, not live provider requests. Tool-output fixtures
@@ -245,7 +245,10 @@ pass on macOS with the sealed Biber copy; they run only with
 
 {download}`SourceGraph <../src/latexprep/source_graph.py>` and
 {download}`plan_flatten <../src/latexprep/flat_layout.py>` are exercised by
-{download}`SourceTests <../tests/test_source.py>`:
+the source tests ({download}`test_source_analysis.py <../tests/test_source_analysis.py>`,
+{download}`test_source_search_paths.py <../tests/test_source_search_paths.py>`,
+{download}`test_flat_layout.py <../tests/test_flat_layout.py>` and
+{download}`test_source_commands.py <../tests/test_source_commands.py>`):
 `test_markers_labels_and_refs_are_heuristics_not_blockers`,
 `test_nested_paths_and_collisions_are_rewritten_not_globally_replaced`,
 `test_dynamic_and_unsupported_commands_are_flat_blockers`,

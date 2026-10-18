@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import tempfile
 import threading
 import time
 import unittest
@@ -46,8 +45,9 @@ from latexprep.pdf_tools import (
     run_tool_measurements,
 )
 from latexprep.resource_budget import ResourceBudget
-from latexprep.runtime import ToolRunner
-from tests.test_pdf_checks import DetailRunner
+from tests.fakes import FakeCommandRunner, Reply, Script
+from tests.pdf_fakes import DetailRunner
+from tests.support import AsyncProjectTestCase
 
 FONTS = (
     "name type encoding emb sub uni object ID\n"
@@ -59,38 +59,15 @@ FONTS = (
 )
 
 
-class RecordingRunner(ToolRunner):
-    """Answers pdfinfo and pdffonts; counts the commands and optionally fails them."""
-
-    def __init__(
-        self, *, info: str = "Pages: 2\n", fail: str | None = None, delay: float = 0
-    ) -> None:
-        super().__init__()
-        self.info = info
-        self.fail = fail
-        self.delay = delay
-        self.commands: list[list[str]] = []
-
-    def _resolve_tool(self, name: str) -> Path:
-        return Path("/test-tools") / name
-
-    async def run(
-        self,
-        argv: list[str],
-        cwd: Path,
-        workspace: Path,
-        *,
-        readonly_inputs: tuple[Path, ...] = (),
-        memory_mb: int | None = None,
-    ) -> CommandResult:
-        if argv[-1] in {"-v", "--version"}:
-            return CommandResult(0, f"{argv[0]} version fixture\n", "", resolved_command=argv)
-        self.commands.append(list(argv))
-        await asyncio.sleep(self.delay)
-        if argv[0] == self.fail:
-            return CommandResult(1, "", "tool failed", resolved_command=argv)
-        output = {"pdfinfo": self.info, "pdffonts": FONTS}.get(argv[0], f"{argv[0]} output\n")
-        return CommandResult(0, output, "", resolved_command=argv)
+def recording_runner(
+    *, info: str = "Pages: 2\n", fail: str | None = None, delay: float = 0
+) -> FakeCommandRunner:
+    """Answers pdfinfo and pdffonts; counts the commands and optionally fails one tool."""
+    failed = Reply("", "tool failed", 1)
+    replies: dict[str, Script] = {"pdfinfo": info, "pdffonts": FONTS}
+    if fail is not None:
+        replies[fail] = failed
+    return FakeCommandRunner(replies, default=lambda call: f"{call.tool} output\n", delay=delay)
 
 
 class ArgumentBuilderTests(unittest.TestCase):
@@ -280,11 +257,8 @@ class QpdfEnvelopeTests(unittest.TestCase):
                 parse_qpdf_json_v2(output, "the message", pages=2)
 
 
-class SessionTestCase(unittest.IsolatedAsyncioTestCase):
+class SessionTestCase(AsyncProjectTestCase):
     async def asyncSetUp(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
         self.pdf = self.root / "document.pdf"
         self.pdf.write_bytes(b"%PDF-fixture")
         self.counter = 0
@@ -296,7 +270,7 @@ class SessionTestCase(unittest.IsolatedAsyncioTestCase):
 
 class MeasurementMemoTests(SessionTestCase):
     async def test_an_identical_measurement_runs_its_tool_once(self) -> None:
-        runner = RecordingRunner()
+        runner = recording_runner()
         session = await PdfToolSession.open(self.work(), {"document": self.pdf}, runner, None)
         parsed: list[str] = []
         for name in ("page-boxes", "raster-sizes"):
@@ -307,14 +281,14 @@ class MeasurementMemoTests(SessionTestCase):
         self.assertEqual(sorted(session.tool_versions()), ["pdffonts"])
 
     async def test_different_arguments_and_failures_are_not_shared(self) -> None:
-        runner = RecordingRunner(fail="pdfinfo")
+        runner = recording_runner(fail="pdfinfo")
         session = await PdfToolSession.open(self.work(), {"document": self.pdf}, runner, None)
         # Each run needs its own command name: a name owns one new directory.
         for attempt in ("first", "second"):
             with self.assertRaises(PreparationError):
                 await session.measure(attempt, pdfinfo_argv(), lambda r: r.stdout)
         self.assertEqual(len(runner.commands), 2)
-        runner.fail = None
+        runner.replies["pdfinfo"] = "Pages: 2\n"
         self.assertEqual(
             await session.measure("third", pdfinfo_argv(), lambda r: r.stdout), "Pages: 2\n"
         )
@@ -332,7 +306,7 @@ class MeasurementMemoTests(SessionTestCase):
         self.assertEqual(len(boxes), 1)
 
     async def test_concurrent_identical_measurements_run_the_tool_once(self) -> None:
-        runner = RecordingRunner(delay=0.01)
+        runner = recording_runner(delay=0.01)
         session = await PdfToolSession.open(self.work(), {"document": self.pdf}, runner, None)
         results = await asyncio.gather(
             *(session.measure(f"copy-{n}", pdfinfo_argv(), lambda r: r.stdout) for n in range(3))
@@ -341,7 +315,7 @@ class MeasurementMemoTests(SessionTestCase):
         self.assertEqual(len(runner.commands), 1)
 
     async def test_a_cancelled_request_lets_the_waiting_one_run_the_tool(self) -> None:
-        runner = RecordingRunner(delay=0.05)
+        runner = recording_runner(delay=0.05)
         session = await PdfToolSession.open(self.work(), {"document": self.pdf}, runner, None)
         first = asyncio.create_task(session.measure("first", pdfinfo_argv(), lambda r: r.stdout))
         await asyncio.sleep(0.01)
@@ -354,7 +328,7 @@ class MeasurementMemoTests(SessionTestCase):
         self.assertEqual(len(runner.commands), 2)
 
     async def test_separate_sessions_do_not_share_results(self) -> None:
-        runner = RecordingRunner()
+        runner = recording_runner()
         for _ in range(2):
             session = await PdfToolSession.open(self.work(), {"document": self.pdf}, runner, None)
             await session.measure("properties", pdfinfo_argv(), lambda r: r.stdout)
@@ -363,7 +337,7 @@ class MeasurementMemoTests(SessionTestCase):
 
 class SessionOpeningTests(SessionTestCase):
     async def test_measurements_default_to_the_runner_budget_unless_told_otherwise(self) -> None:
-        runner = RecordingRunner()
+        runner = recording_runner()
         runner.budget = ResourceBudget(1, 256)
         explicit = ResourceBudget(2, 512)
         defaulted = await open_pdf_session(self.pdf, self.work(), runner, None)
@@ -381,7 +355,7 @@ class SessionOpeningTests(SessionTestCase):
 
 class PreflightTests(SessionTestCase):
     async def test_a_readable_document_yields_its_session_properties_and_page_count(self) -> None:
-        runner = RecordingRunner(info="Pages: 3\nTitle: Paper\n")
+        runner = recording_runner(info="Pages: 3\nTitle: Paper\n")
         preflight = await preflight_pdf(self.pdf, self.work(), runner, None, ["pdf.any"])
         assert isinstance(preflight, PdfPreflight)
         self.assertEqual((preflight.pages, preflight.fields["Title"]), (3, "Paper"))
@@ -395,10 +369,10 @@ class PreflightTests(SessionTestCase):
         pdf_not_a_pdf = self.root / "notes.txt"
         pdf_not_a_pdf.write_bytes(b"not a pdf")
         failures = {
-            "tool": (self.pdf, RecordingRunner(fail="pdfinfo")),
-            "pages": (self.pdf, RecordingRunner(info="Title: none\n")),
-            "ambiguous": (self.pdf, RecordingRunner(info="Pages: 2\nTitle: a\nTitle: b\n")),
-            "input": (pdf_not_a_pdf, RecordingRunner()),
+            "tool": (self.pdf, recording_runner(fail="pdfinfo")),
+            "pages": (self.pdf, recording_runner(info="Title: none\n")),
+            "ambiguous": (self.pdf, recording_runner(info="Pages: 2\nTitle: a\nTitle: b\n")),
+            "input": (pdf_not_a_pdf, recording_runner()),
         }
         for label, (pdf, runner) in failures.items():
             for suggestion in (EVIDENCE_LIMITATION_SUGGESTION, TOOL_FAILURE_SUGGESTION):
@@ -421,8 +395,8 @@ class PreflightTests(SessionTestCase):
 
     async def test_the_raising_form_propagates_the_failure(self) -> None:
         with self.assertRaises(PreparationError):
-            await PdfPreflight.open(self.pdf, self.work(), RecordingRunner(fail="pdfinfo"), None)
-        opened = await PdfPreflight.open(self.pdf, self.work(), RecordingRunner(), None)
+            await PdfPreflight.open(self.pdf, self.work(), recording_runner(fail="pdfinfo"), None)
+        opened = await PdfPreflight.open(self.pdf, self.work(), recording_runner(), None)
         self.assertEqual(opened.pages, 2)
 
 
@@ -460,7 +434,7 @@ class ColorContrastTests(unittest.TestCase):
 
 
 class ToolMeasurementTests(SessionTestCase):
-    async def session(self, runner: RecordingRunner) -> PdfToolSession:
+    async def session(self, runner: FakeCommandRunner) -> PdfToolSession:
         return await PdfToolSession.open(self.work(), {"document": self.pdf}, runner, None)
 
     @staticmethod
@@ -468,7 +442,7 @@ class ToolMeasurementTests(SessionTestCase):
         return Finding(rule, message, severity="info", status="passed")
 
     async def test_the_findings_of_a_readable_command_are_returned(self) -> None:
-        session = await self.session(RecordingRunner())
+        session = await self.session(recording_runner())
         measurement = ToolMeasurement(
             "fonts",
             font_inventory_argv(),
@@ -485,8 +459,8 @@ class ToolMeasurementTests(SessionTestCase):
             raise PreparationError("Output could not be read")
 
         for label, runner, evaluate, message in (
-            ("command", RecordingRunner(fail="pdffonts"), lambda _r: [], "pdffonts failed"),
-            ("output", RecordingRunner(), unreadable, "Output could not be read"),
+            ("command", recording_runner(fail="pdffonts"), lambda _r: [], "pdffonts failed"),
+            ("output", recording_runner(), unreadable, "Output could not be read"),
         ):
             with self.subTest(label):
                 session = await self.session(runner)
@@ -507,7 +481,7 @@ class ToolMeasurementTests(SessionTestCase):
                     self.assertIn(message, finding.message)
 
     async def test_evaluation_runs_in_a_worker_thread_that_observes_cancellation(self) -> None:
-        session = await self.session(RecordingRunner())
+        session = await self.session(recording_runner())
         threads: list[int] = []
         entered, stopped = threading.Event(), threading.Event()
 
@@ -533,7 +507,7 @@ class ToolMeasurementTests(SessionTestCase):
         self.assertTrue(stopped.is_set())
 
     async def test_measurements_run_concurrently_and_report_in_the_given_order(self) -> None:
-        runner = RecordingRunner(delay=0.01)
+        runner = recording_runner(delay=0.01)
         session = await self.session(runner)
         measurements = [
             ToolMeasurement(

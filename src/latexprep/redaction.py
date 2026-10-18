@@ -182,7 +182,7 @@ class _Scan:
                 if len(self.secrets) > MAX_SECRETS or self.secret_chars > MAX_SECRET_CHARS:
                     raise _RedactionLimitExceeded
 
-    def inspect(self, text: str, sensitive: bool = False) -> None:
+    def inspect(self, text: str, *, sensitive: bool = False) -> None:
         """Record every secret found in ``text``; a ``sensitive`` text is one secret itself."""
         self.text_chars += len(text)
         if self.text_chars > MAX_TEXT_CHARS:
@@ -242,12 +242,14 @@ class _Scan:
                 self.add(match.group("value"))
                 self.add(unquote_plus(match.group("value")))
 
-    def collect_secrets_and_copy(self, value: Any, depth: int = 0, sensitive: bool = False) -> Any:
+    def collect_secrets_and_copy(
+        self, value: Any, depth: int = 0, *, sensitive: bool = False
+    ) -> Any:
         self.nodes += 1
         if self.nodes > MAX_NODES or depth > MAX_DEPTH:
             raise _RedactionLimitExceeded
         if isinstance(value, str):
-            self.inspect(value, sensitive)
+            self.inspect(value, sensitive=sensitive)
             return value
         if value is None or type(value) in {bool, int, float}:
             return value
@@ -269,9 +271,14 @@ class _Scan:
                     else:
                         key = "[REDACTED: unsupported key]"
                         child_sensitive = True
-                    copied[key] = self.collect_secrets_and_copy(item, depth + 1, child_sensitive)
+                    copied[key] = self.collect_secrets_and_copy(
+                        item, depth + 1, sensitive=child_sensitive
+                    )
                 return copied
-            items = [self.collect_secrets_and_copy(item, depth + 1, sensitive) for item in value]
+            items = [
+                self.collect_secrets_and_copy(item, depth + 1, sensitive=sensitive)
+                for item in value
+            ]
             return tuple(items) if isinstance(value, tuple) else items
         finally:
             self.ancestors.remove(identity)

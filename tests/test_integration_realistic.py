@@ -16,7 +16,7 @@ from latexprep.config import Settings
 from latexprep.core import run_job
 from latexprep.job_context import JobRequest
 from latexprep.report import Report
-from tests.support import live_tests_enabled, write_project
+from tests.support import live_test, write_project
 
 EPOCH = 1_700_000_000
 
@@ -100,7 +100,7 @@ BIBLIOGRAPHY = """@book{knuth1984,
 """
 
 
-@unittest.skipUnless(live_tests_enabled(), "Set FLEDGE_RUN_INTEGRATION=1 for live TeX checks")
+@live_test("Set FLEDGE_RUN_INTEGRATION=1 for live TeX checks")
 class RealisticProjectTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         temporary = tempfile.TemporaryDirectory(prefix="fledge-realistic-")

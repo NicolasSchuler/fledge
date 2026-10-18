@@ -1,0 +1,9 @@
+Usage: fledge bib [OPTIONS] COMMAND [ARGS]...
+
+  Bibliography checks, offline unless explicitly enabled.
+
+Options:
+  -h, --help  Show this message and exit.
+
+Commands:
+  check  Check syntax, citation use and configured fields; online evidence is opt-in.

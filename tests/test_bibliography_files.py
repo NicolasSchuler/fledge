@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import tempfile
 import unittest
 from pathlib import Path
 
@@ -12,19 +11,12 @@ from latexprep.bibliography_files import (
     discover_bibliographies,
     read_declared_bibliographies,
 )
+from tests.support import ProjectTestCase
 
 
-class BibliographyFilesTests(unittest.TestCase):
-    def setUp(self):
-        directory = tempfile.TemporaryDirectory()
-        self.addCleanup(directory.cleanup)
-        self.root = Path(directory.name)
-
-    def write(self, name: str, text: str | bytes = "@misc{k}\n") -> Path:
-        path = self.root / name
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(text.encode() if isinstance(text, str) else text)
-        return path
+class BibliographyFilesTests(ProjectTestCase):
+    def write(self, name: str, content: str | bytes = "@misc{k}\n") -> Path:
+        return super().write(name, content)
 
     def read(self, *names: str, **budget):
         return read_declared_bibliographies(self.root, names, BibliographyBudget(**budget))

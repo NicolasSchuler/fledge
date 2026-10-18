@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import tempfile
 import unittest
-from pathlib import Path
 
 from latexprep.build_dependencies import (
     DependencyRequest,
@@ -11,6 +9,7 @@ from latexprep.build_dependencies import (
 )
 from latexprep.build_workspace import BuildLayout
 from latexprep.errors import PreparationError
+from tests.support import ProjectTestCase
 
 
 def rule(
@@ -32,11 +31,9 @@ def rule(
     )
 
 
-class SubmissionDependenciesTests(unittest.TestCase):
+class SubmissionDependenciesTests(ProjectTestCase):
     def setUp(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name).resolve()
+        super().setUp()
         self.source = self.root / "source"
         self.project = self.root / "work/project"
         self.cwd = self.project / "article"

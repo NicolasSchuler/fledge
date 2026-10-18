@@ -14,8 +14,9 @@ from latexprep.pdf_comparison import compare_pdfs
 from latexprep.pdf_previews import PdfPreviewStore, PreviewPage, PreviewSide
 from latexprep.resource_budget import ResourceBudget
 from latexprep.workflow_options import ComparisonOptions
+from tests.fakes import ToolCall
+from tests.pdf_fakes import FakePdfRunner
 from tests.support import PNG
-from tests.test_pdf import FakePdfRunner
 
 
 class PreviewRunner(FakePdfRunner):
@@ -31,8 +32,8 @@ class PreviewRunner(FakePdfRunner):
         self, argv, cwd, workspace, *, readonly_inputs=(), memory_mb=None
     ) -> CommandResult:
         if argv[0] == "pdftoppm" and "-png" in argv:
-            self._frozen.validate(readonly_inputs)
-            self.commands.append(argv)
+            self.require_frozen(readonly_inputs)
+            self.calls.append(ToolCall(list(argv), workspace, readonly_inputs))
             (workspace / "page.png").write_bytes(self.png)
             if self.png_hook:
                 await self.png_hook()

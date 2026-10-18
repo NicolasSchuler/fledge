@@ -177,7 +177,7 @@ def printer_mark_finding(artwork: TracedArtwork, options: PdfArtworkOptions) -> 
             violations.extend(registration)
     return heuristic_finding(
         ArtworkRule.PRINTER_MARKS,
-        _mark_message(violations, measured, uncertain),
+        _mark_message(violations, measured, uncertain=uncertain),
         violations,
         incomplete=uncertain or measured == 0,
         details={
@@ -189,7 +189,7 @@ def printer_mark_finding(artwork: TracedArtwork, options: PdfArtworkOptions) -> 
     )
 
 
-def _mark_message(violations: Sequence[object], measured: int, uncertain: bool) -> str:
+def _mark_message(violations: Sequence[object], measured: int, *, uncertain: bool) -> str:
     rows = [row for row in violations if isinstance(row, dict)]
     if rows:
         corners = sum("corner_pt" in row for row in rows)

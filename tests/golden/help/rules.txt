@@ -1,0 +1,7 @@
+Usage: fledge rules [OPTIONS]
+
+  List every check with its stable code and title.
+
+Options:
+  --json      Print every check as JSON.
+  -h, --help  Show this message and exit.

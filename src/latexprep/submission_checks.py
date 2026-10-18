@@ -426,8 +426,9 @@ def check_pdf_identity(
     for channel, value in evidence.values:
         cancellation_point()
         if len(identity_matches) < limits.max_matches:
-            for index in term_matches(value, options):
-                identity_matches.append({"channel": channel, "term_index": index})
+            identity_matches.extend(
+                {"channel": channel, "term_index": index} for index in term_matches(value, options)
+            )
         if len(secret_matches) < limits.max_matches:
             for secret in find_secrets(value, limits.max_matches):
                 secret_values.add(secret.value)

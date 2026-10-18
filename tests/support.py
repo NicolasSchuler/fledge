@@ -1,27 +1,85 @@
-"""Shared test helpers: project fixtures, controlled build results and PDF artwork fixtures.
+"""Shared test helpers: project fixtures, controlled document backends and golden outputs.
 
-New tests should import from here instead of redefining ``write``/``build`` helpers.
+New tests import from here (and from ``tests.fakes`` and ``tests.pdf_fakes``) instead of
+redefining ``write``/``build`` helpers or importing one test module from another.
 """
 
 from __future__ import annotations
 
-import asyncio
 import base64
-import json
-from collections.abc import Iterable, Mapping
+import os
+import sys
+import tempfile
+import unittest
+from collections import Counter
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from pathlib import Path
+from typing import Any, TypeVar
 
 from latexprep.build_result import BuildResult, BuildTools
-from latexprep.command_runner import CommandResult
-from latexprep.errors import PreparationError
+from latexprep.command_runner import CommandRunner
+from latexprep.config import Settings
 from latexprep.findings import Finding
-from latexprep.pdf_artwork_options import PdfContrastSample
-from latexprep.pdf_check_options import PdfRegion
-from latexprep.resource_budget import ResourceBudget
-from latexprep.runtime import ToolRunner
+from latexprep.formatting import FormattingResult, format_project
+from latexprep.job_context import DocumentBackends
+from latexprep.package_headers import LoadedPackage
+
+try:
+    import pytest
+
+    _LIVE_MARKER = pytest.mark.live
+except ImportError:  # the suite also runs under `python -m unittest`
+
+    def _LIVE_MARKER(target):
+        return target
+
+
+_T = TypeVar("_T")
 
 MINIMAL_PDF = b"%PDF-controlled-test\n"
 MINIMAL_DOCUMENT = "\\documentclass{article}\n\\begin{document}Hello.\\end{document}\n"
+
+
+def write_file(root: Path, name: str, content: str | bytes = "") -> Path:
+    """Write ``content`` (UTF-8 for text) to ``root / name``, creating parents; return the path."""
+    path = root / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(content.encode("utf-8") if isinstance(content, str) else content)
+    return path
+
+
+class TemporaryRoot(unittest.TestCase):
+    """A private temporary directory ``self.root`` for each test, removed afterwards.
+
+    The base of ``ProjectTestCase`` and ``AsyncProjectTestCase``: ``setUp`` runs for
+    ``TestCase`` and ``IsolatedAsyncioTestCase`` alike, and cleanup is registered with
+    ``addCleanup`` so it runs even when ``setUp`` of a subclass fails afterwards. The root is
+    resolved, so that paths compare equal to the real locations the code under test reports.
+    """
+
+    root: Path
+
+    def setUp(self) -> None:
+        super().setUp()
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve()
+
+    def write(self, name: str, content: str | bytes = "") -> Path:
+        """Write a file below ``root``; the same helper every test module used to define."""
+        return write_file(self.root, name, content)
+
+    def write_project(self, files: Mapping[str, str | bytes], name: str = "project") -> Path:
+        """Create the directory ``root / name`` holding ``files``; return it."""
+        return write_project(self.root / name, files)
+
+
+class ProjectTestCase(TemporaryRoot):
+    """A test case with a temporary ``root`` and ``write`` / ``write_project`` helpers."""
+
+
+class AsyncProjectTestCase(TemporaryRoot, unittest.IsolatedAsyncioTestCase):
+    """The asynchronous counterpart of ``ProjectTestCase``."""
 
 
 def write_project(root: Path, files: Mapping[str, str | bytes]) -> Path:
@@ -76,18 +134,194 @@ def fake_build_result(
 
 
 async def fake_build(tree, main, work, engine, runner, **_options) -> BuildResult:
-    """Drop-in for ``patch("latexprep.document_tasks.build_project", side_effect=fake_build)``."""
+    """A controlled build backend: succeeds with ``main`` as the only dependency."""
     return fake_build_result(work, main)
+
+
+def _backend(behaviour: object) -> Callable[..., Awaitable[object]]:
+    """An async backend that does what ``behaviour`` says.
+
+    A callable is the backend itself (an async function or an ``AsyncMock``), an exception
+    instance is raised on every call, and any other value is returned on every call; lists
+    are copied so one job cannot change what the next receives.
+    """
+    if callable(behaviour):
+        return behaviour
+
+    async def backend(*_arguments: object, **_options: object) -> object:
+        if isinstance(behaviour, BaseException):
+            raise behaviour
+        return list(behaviour) if isinstance(behaviour, list | tuple) else behaviour
+
+    return backend
+
+
+def controlled_backends(
+    *,
+    build: object = fake_build,
+    inspect_pdf: object = (),
+    compare_pdfs: object = (),
+) -> DocumentBackends:
+    """Document backends that never start a tool, to pass to ``run_job(..., backends=...)``.
+
+    By default a build succeeds with ``main`` as its only dependency, and a PDF inspection
+    and comparison find nothing. Each argument replaces one backend: pass an async callable
+    (it receives the arguments the real function would), a ``BuildResult`` or a list of
+    findings to return every time, or an exception to raise.
+    """
+    return DocumentBackends(
+        build=_backend(build),
+        inspect_pdf=_backend(inspect_pdf),
+        compare_pdfs=_backend(compare_pdfs),
+    )
+
+
+def sectioned_project(root: Path) -> None:
+    (root / "sections").mkdir(parents=True)
+    (root / "appendix").mkdir()
+    (root / "main.tex").write_text(
+        "\\documentclass{article}\n\\begin{document}\n"
+        "\\input{sections/results}\n\\input{appendix/results}\n\\end{document}\n"
+    )
+    (root / "sections/results.tex").write_text("Main results.\n")
+    (root / "appendix/results.tex").write_text("Additional results.\n")
+
+
+def minimal_project(root: Path, main: str = "main.tex") -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    (root / main).write_text("\\documentclass{article}\n\\begin{document}Hello.\\end{document}\n")
+
+
+def single_file_project(root: Path, body: str = "Body.", preamble: str = "") -> None:
+    root.mkdir()
+    (root / "main.tex").write_text(
+        "\\documentclass{article}\n"
+        + preamble
+        + "\n\\begin{document}\n"
+        + body
+        + "\n\\end{document}\n"
+    )
+
+
+async def build_with_loaded_class(tree, main, work, engine, runner, **_options):
+    """Orchestration double only; live TeX evidence belongs to opt-in integration tests."""
+    work.mkdir()
+    pdf = work / "paper.pdf"
+    pdf.write_bytes(b"%PDF-1.7\ncontrolled build result\n")
+    return BuildResult(
+        success=True,
+        pdf=pdf,
+        recorder_project_inputs={main},
+        submission_inputs={main},
+        command=["controlled-build"],
+        recorder_complete=True,
+        loaded_packages=[
+            LoadedPackage(
+                "article.cls",
+                "/toolchain/article.cls",
+                "toolchain",
+                declared_date="2025/01/01",
+                declared_version="fixture",
+            )
+        ],
+    )
+
+
+# Rules the graph emits that do not leave it incomplete: how a reference was written, which
+# directories are searched, and the choice of the main file, which callers report themselves.
+SOURCE_GRAPH_ADVISORY_RULES = frozenset(
+    {
+        "source.path_option",
+        "source.path_identity",
+        "source.dynamic_search_path",
+        "source.scoped_search_path",
+        "source.search_path_syntax",
+        "source.main_invalid",
+        "source.root_ambiguous",
+        "source.root_missing",
+    }
+)
+
+
+def directory_contents(root: Path) -> dict[str, bytes]:
+    return {
+        path.relative_to(root).as_posix(): path.read_bytes()
+        for path in root.rglob("*")
+        if path.is_file()
+    }
+
+
+class RecordedBuild:
+    """Supply fixed per-document traces; fake PDFs validate orchestration only."""
+
+    def __init__(
+        self,
+        traces: dict[str, tuple[set[str] | None, ...]],
+        *,
+        fail_archive_main: str | None = None,
+        generated_reads: frozenset[str] = frozenset(),
+    ) -> None:
+        self.traces = traces
+        self.generated_reads = generated_reads
+        self.fail_archive_main = fail_archive_main
+        self.counts: Counter[str] = Counter()
+        self.visits: list[tuple[str, str, dict[str, bytes]]] = []
+
+    async def __call__(self, tree, main, work, _engine, _runner, **_kwargs):
+        index = self.counts[main]
+        self.counts[main] += 1
+        self.visits.append((main, work.name, directory_contents(tree)))
+        trace = self.traces[main][index]
+        work.mkdir(parents=True)
+        pdf = work / "built.pdf"
+        pdf.write_bytes(b"%PDF-controlled dependency packaging fixture\n")
+        success = not (work.name == "archive-build" and main == self.fail_archive_main)
+        result = BuildResult(
+            success=success,
+            pdf=pdf if success else None,
+            findings=[]
+            if success
+            else [Finding("build.fixture", "Controlled archive rebuild failure", severity="error")],
+            recorder_project_inputs=set(trace or ()),
+            submission_inputs=None if trace is None else set(trace),
+            generated_reads=self.generated_reads,
+        )
+        return result
+
+
+async def format_with(
+    source: Path,
+    work: Path,
+    runner: CommandRunner,
+    settings: Settings | None = None,
+    **options: object,
+) -> FormattingResult:
+    """Format with the formatting settings of ``settings``, as the job core passes them."""
+    settings = settings or Settings()
+    return await format_project(source, work, runner, settings.formatting_options, **options)
 
 
 def live_tests_enabled(*legacy: str) -> bool:
     """Whether opt-in live tool tests run: ``FLEDGE_RUN_INTEGRATION=1`` or a legacy variable."""
-    import os
-
     return any(
         os.environ.get(name) == "1"
         for name in ("FLEDGE_RUN_INTEGRATION", "LATEX_PREP_RUN_INTEGRATION", *legacy)
     )
+
+
+def live_test(reason: str, *legacy: str, platform: str | None = None) -> Callable[[_T], _T]:
+    """Mark a test, or a test class, as live: it drives real tools and is opt-in.
+
+    It is skipped unless ``FLEDGE_RUN_INTEGRATION=1`` (or a ``legacy`` variable) is set, and
+    on any platform other than ``platform`` when one is given. Under pytest the ``live``
+    marker also selects it with ``-m live``. ``reason`` is the skip message.
+    """
+    enabled = live_tests_enabled(*legacy) and (platform is None or sys.platform == platform)
+
+    def decorate(target: _T) -> _T:
+        return _LIVE_MARKER(unittest.skipUnless(enabled, reason)(target))
+
+    return decorate
 
 
 # A valid 1 x 1 PNG, for tests that capture or embed preview images.
@@ -96,153 +330,202 @@ PNG = base64.b64decode(
 )
 
 
-def trace(content: str = "", *, box: str = "0 0 100 100") -> str:
-    return f'<document><page number="1" mediabox="{box}">{content}</page></document>'
+# Golden files: expected outputs kept under tests/golden and compared as text.
+GOLDEN_DIRECTORY = Path(__file__).resolve().parent / "golden"
+UPDATE_GOLDEN_VARIABLE = "FLEDGE_UPDATE_GOLDEN"
 
 
-def rectangle(
-    *, tag: str = "fill_path", left: int = 10, top: int = 10, right: int = 90, bottom: int = 90
-) -> str:
-    return (
-        f'<{tag} transform="1 0 0 1 0 0"><moveto x="{left}" y="{top}"/>'
-        f'<lineto x="{right}" y="{top}"/><lineto x="{right}" y="{bottom}"/>'
-        f'<lineto x="{left}" y="{bottom}"/><closepath/></{tag}>'
+def assert_matches_golden(case: unittest.TestCase, name: str, actual: str) -> None:
+    """Assert that ``actual`` equals the golden file ``tests/golden/<name>``.
+
+    With ``FLEDGE_UPDATE_GOLDEN=1`` the file is written instead, so a deliberate change of an
+    output is reviewed as a diff of the golden file rather than edited by hand.
+    """
+    path = GOLDEN_DIRECTORY / name
+    if os.environ.get(UPDATE_GOLDEN_VARIABLE) == "1":
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(actual, encoding="utf-8")
+        return
+    if not path.is_file():
+        case.fail(f"Missing golden file {path}; create it with {UPDATE_GOLDEN_VARIABLE}=1")
+    case.assertEqual(
+        actual,
+        path.read_text(encoding="utf-8"),
+        f"{name} differs from its golden file; if the change is intended, "
+        f"regenerate it with {UPDATE_GOLDEN_VARIABLE}=1 and review the diff",
     )
 
 
-def raster(*, box: tuple[int, int, int, int] = (10, 10, 90, 90), background: int = 255) -> bytes:
-    pixels = bytearray([background] * 10_000)
-    for y in range(box[1], box[3]):
-        for x in range(box[0], box[2]):
-            pixels[y * 100 + x] = 255 - background
-    return b"P5\n100 100\n255\n" + bytes(pixels)
+# The report keys that hold a measured duration.
+TIMING_KEYS = frozenset({"elapsed_seconds", "queue_seconds", "duration_seconds"})
 
 
-def type3_objects(
-    program: bytes = b"500 0 d0 0 0 20 20 re f", *, filtered: bool = False, nested: bool = False
-) -> str:
-    objects: dict[str, object] = {
-        "trailer": {"value": {"/Root": "1 0 R"}},
-        "obj:1 0 R": {"value": {"/Type": "/Catalog", "/Pages": "2 0 R"}},
-        "obj:2 0 R": {"value": {"/Kids": ["3 0 R"]}},
-        "obj:3 0 R": {"value": {"/Resources": {"/Font": {"/F1": "4 0 R"}}}},
-        "obj:4 0 R": {
-            "value": {
-                "/Subtype": "/Type3",
-                "/CharProcs": {"/A": "5 0 R"},
-                "/Resources": {"/XObject": {"/Picture": "6 0 R"}},
-            }
-        },
-        "obj:5 0 R": {
-            "stream": {
-                "dict": {"/Filter": "/FlateDecode"} if filtered else {},
-                "data": base64.b64encode(program).decode(),
-            }
-        },
-        "obj:6 0 R": {"value": {"/Subtype": "/Image"}},
-    }
-    if nested:
-        objects["obj:6 0 R"] = {
-            "stream": {
-                "dict": {"/Subtype": "/Form", "/Resources": {"/XObject": {"/Picture": "7 0 R"}}},
-                "data": base64.b64encode(b"/Picture Do").decode(),
-            }
-        }
-        objects["obj:7 0 R"] = {"value": {"/Subtype": "/Image"}}
-    return json.dumps(
-        {"version": 2, "pages": [{"object": "3 0 R"}], "qpdf": [{"jsonversion": 2}, objects]}
-    )
-
-
-def rgb_raster(
+def normalise_report_data(
+    value: object,
+    replacements: Mapping[str, str],
     *,
-    foreground: tuple[int, int, int] = (0, 0, 0),
-    background: tuple[int, int, int] = (255, 255, 255),
-    alternate: tuple[int, int, int] | None = None,
-) -> bytes:
-    pixels = bytearray(bytes(background) * 10_000)
-    for y in range(10, 20):
-        for x in range(10, 20):
-            value = alternate if alternate is not None and x >= 15 else foreground
-            offset = (y * 100 + x) * 3
-            pixels[offset : offset + 3] = bytes(value)
-    return b"P6\n100 100\n255\n" + pixels
+    measured: frozenset[str] = frozenset(),
+    in_measured: bool = False,
+) -> object:
+    """A report with what varies between runs replaced by a placeholder.
 
-
-def contrast_sample(*, minimum: float = 4.5, tolerance: int = 0) -> PdfContrastSample:
-    return PdfContrastSample(
-        "Label/background",
-        PdfRegion("Foreground", 1, 10, 10, 20, 20),
-        PdfRegion("Background", 1, 80, 80, 90, 90),
-        minimum,
-        tolerance,
-    )
-
-
-class ArtworkRunner(ToolRunner):
-    def __init__(self, **values: object):
-        super().__init__()
-        self.geometry = (
-            "Page 1 size: 100 x 100 pts\nPage 1 rot: 0\n"
-            "Page 1 MediaBox: 0 0 100 100\nPage 1 CropBox: 0 0 100 100\n"
-        )
-        self.trace = trace(rectangle())
-        self.objects = type3_objects()
-        self.fonts = (
-            "name type encoding emb sub uni object ID\n---\nFont Type 1 Builtin yes yes no 3 0\n"
-        )
-        self.raster = raster()
-        self.rgb = rgb_raster()
-        self.missing: str | None = None
-        self.failure: str | None = None
-        self.calls: list[tuple[list[str], Path, tuple[Path, ...]]] = []
-        self.expected_budget: ResourceBudget | None = None
-        self.block: asyncio.Event | None = None
-        self.started = asyncio.Event()
-        for key, value in values.items():
-            setattr(self, key, value)
-
-    def _resolve_tool(self, name: str) -> Path:
-        return Path("/fixture-tools") / name
-
-    async def run(
-        self,
-        argv: list[str],
-        cwd: Path,
-        workspace: Path,
-        *,
-        readonly_inputs: tuple[Path, ...] = (),
-        memory_mb: int | None = None,
-    ) -> CommandResult:
-        self._frozen.validate(readonly_inputs)
-        if self.expected_budget is not None and self.expected_budget.current_lease is None:
-            raise AssertionError("Artwork adapter escaped the shared resource lease")
-        self.calls.append((list(argv), workspace, readonly_inputs))
-        if argv[0] == self.missing:
-            raise PreparationError(f"Missing tool: {argv[0]}")
-        if argv[-1] in {"-v", "--version"}:
-            return CommandResult(0, "Fixture tool 1\n", "", resolved_command=argv)
-        self.started.set()
-        if self.block is not None:
-            await self.block.wait()
-        output = self.geometry if argv[0] == "pdfinfo" and "-box" in argv else "Pages: 1\n"
-        if argv[0] == "mutool":
-            output = self.trace
-        elif argv[0] == "qpdf":
-            output = self.objects
-        elif argv[0] == "pdffonts":
-            output = self.fonts
-        elif argv[0] == "pdftoppm":
-            if "-gray" in argv:
-                (workspace / "page.pgm").write_bytes(self.raster)
+    Each text in ``replacements`` (a path, a version) is replaced inside every string, longest
+    first. Numbers under a timing key (``elapsed_seconds``, ``queue_seconds``), and every number
+    inside a section named in ``measured`` (resource accounting, which depends on timing and the
+    host), become ``"<seconds>"`` and ``"<measured>"``. Keys, structure and all other values,
+    including configured limits such as ``timeout_seconds``, are kept.
+    """
+    if isinstance(value, str):
+        for old in sorted(replacements, key=len, reverse=True):
+            value = value.replace(old, replacements[old])
+        return value
+    if isinstance(value, list):
+        return [
+            normalise_report_data(item, replacements, measured=measured, in_measured=in_measured)
+            for item in value
+        ]
+    if isinstance(value, dict):
+        result: dict[str, object] = {}
+        for key, item in value.items():
+            is_number = isinstance(item, int | float) and not isinstance(item, bool)
+            if is_number and key in TIMING_KEYS:
+                result[key] = "<seconds>"
+            elif is_number and in_measured:
+                result[key] = "<measured>"
             else:
-                (workspace / "page.ppm").write_bytes(self.rgb)
-        return CommandResult(
-            0,
-            output,
-            "",
-            resolved_command=argv,
-            timed_out=self.failure == "timeout",
-            output_limited=self.failure == "output",
-            resource_exceeded="Resource exceeded" if self.failure == "resource" else None,
+                result[key] = normalise_report_data(
+                    item,
+                    replacements,
+                    measured=measured,
+                    in_measured=in_measured or key in measured,
+                )
+        return result
+    return value
+
+
+# The JSON Schema keywords that validate (the subset the published schemas use, with local
+# references) and the ones that only annotate; any other keyword is refused.
+_VALIDATING_KEYWORDS = frozenset(
+    {"type", "required", "properties", "additionalProperties", "enum", "items", "const", "$ref"}
+)
+_ANNOTATION_KEYWORDS = frozenset({"$schema", "$id", "$defs", "title", "description"})
+_SCHEMA_TYPES: dict[str, Callable[[object], bool]] = {
+    "object": lambda value: isinstance(value, dict),
+    "array": lambda value: isinstance(value, list),
+    "string": lambda value: isinstance(value, str),
+    "integer": lambda value: isinstance(value, int) and not isinstance(value, bool),
+    "number": lambda value: isinstance(value, int | float) and not isinstance(value, bool),
+    "boolean": lambda value: isinstance(value, bool),
+    "null": lambda value: value is None,
+}
+
+
+def schema_keyword_problems(schema: Mapping[str, Any], where: str = "#") -> list[str]:
+    """The places where ``schema`` uses a keyword that ``schema_violations`` cannot check."""
+    problems = [
+        f"{where}: unsupported keyword {key!r}"
+        for key in schema
+        if key not in _VALIDATING_KEYWORDS | _ANNOTATION_KEYWORDS
+    ]
+    subschemas: list[tuple[str, object]] = []
+    for key in ("properties", "$defs"):
+        named = schema.get(key)
+        if isinstance(named, Mapping):
+            subschemas.extend((f"{where}/{key}/{name}", item) for name, item in named.items())
+    subschemas.extend(
+        (f"{where}/{key}", schema.get(key)) for key in ("items", "additionalProperties")
+    )
+    for place, item in subschemas:
+        if isinstance(item, Mapping):
+            problems.extend(schema_keyword_problems(item, place))
+    return problems
+
+
+def schema_violations(
+    instance: object, schema: Mapping[str, Any], root: Mapping[str, Any] | None = None
+) -> list[str]:
+    """How ``instance`` breaks ``schema``, as readable lines; empty when it conforms.
+
+    A small validator for the subset of JSON Schema that the published report schema uses:
+    ``type`` (one name or a list), ``required``, ``properties``, ``additionalProperties`` (a
+    boolean or a schema), ``enum``, ``items``, ``const`` and local ``$ref`` pointers such as
+    ``#/$defs/finding``. Annotation keywords are ignored. A schema that uses any other keyword
+    raises ``ValueError``, so a schema that outgrows this validator fails loudly instead of
+    being checked only in part.
+    """
+    root = schema if root is None else root
+    if problems := schema_keyword_problems(schema):
+        raise ValueError(
+            "The schema uses keywords this validator does not check: " + "; ".join(problems)
         )
+    return _violations(instance, schema, root, "$")
+
+
+def _referenced(schema: Mapping[str, Any], root: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    """The schema a local ``$ref`` points at, or ``None`` when the pointer does not resolve."""
+    target: object = root
+    for step in str(schema["$ref"]).removeprefix("#/").split("/"):
+        target = target[step] if isinstance(target, Mapping) else {}
+    return target if isinstance(target, Mapping) else None
+
+
+def _type_violations(instance: object, schema: Mapping[str, Any], where: str) -> list[str]:
+    if "type" not in schema:
+        return []
+    names = schema["type"] if isinstance(schema["type"], list) else [schema["type"]]
+    if any(_SCHEMA_TYPES[str(name)](instance) for name in names):
+        return []
+    return [f"{where}: expected {' or '.join(map(str, names))}, got {instance!r}"]
+
+
+def _value_violations(instance: object, schema: Mapping[str, Any], where: str) -> list[str]:
+    """The ``const`` and ``enum`` keywords."""
+    problems = []
+    if "const" in schema and instance != schema["const"]:
+        problems.append(f"{where}: expected {schema['const']!r}, got {instance!r}")
+    if "enum" in schema and instance not in schema["enum"]:
+        problems.append(f"{where}: {instance!r} is not one of {schema['enum']!r}")
+    return problems
+
+
+def _violations(
+    instance: object, schema: Mapping[str, Any], root: Mapping[str, Any], where: str
+) -> list[str]:
+    if "$ref" in schema:
+        target = _referenced(schema, root)
+        if target is None:
+            return [f"{where}: unresolved reference {schema['$ref']!r}"]
+        return _violations(instance, target, root, where)
+    # A value of the wrong type is reported alone: its members would only add noise.
+    if wrong_type := _type_violations(instance, schema, where):
+        return wrong_type
+    problems = _value_violations(instance, schema, where)
+    if isinstance(instance, dict):
+        problems.extend(_object_violations(instance, schema, root, where))
+    if isinstance(instance, list) and isinstance(schema.get("items"), Mapping):
+        for index, item in enumerate(instance):
+            problems.extend(_violations(item, schema["items"], root, f"{where}[{index}]"))
+    return problems
+
+
+def _object_violations(
+    instance: dict[str, object],
+    schema: Mapping[str, Any],
+    root: Mapping[str, Any],
+    where: str,
+) -> list[str]:
+    problems = [
+        f"{where}: missing required property {name!r}"
+        for name in schema.get("required", ())
+        if name not in instance
+    ]
+    declared = schema.get("properties", {})
+    extra = schema.get("additionalProperties", True)
+    for name, item in instance.items():
+        if name in declared:
+            problems.extend(_violations(item, declared[name], root, f"{where}.{name}"))
+        elif extra is False:
+            problems.append(f"{where}: unexpected property {name!r}")
+        elif isinstance(extra, Mapping):
+            problems.extend(_violations(item, extra, root, f"{where}.{name}"))
+    return problems

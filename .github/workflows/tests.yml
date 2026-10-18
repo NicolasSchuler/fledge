@@ -193,12 +193,13 @@ jobs:
           python -m pytest
           tests/test_integration.py
           tests/test_integration_checks.py
-          tests/test_integration_remaining.py
+          tests/test_integration_packages.py
           tests/test_integration_backends.py
           tests/test_loaded_options.py
           tests/test_pdf.py
           tests/test_pdf_checks.py
-          tests/test_runtime_parallel.py
+          tests/test_runtime_inputs.py
+          tests/test_runtime_monitoring.py
           -v -ra -p no:cacheprovider
 
   # UNVALIDATED: the Linux Bubblewrap sandbox has only been exercised with
@@ -294,7 +295,8 @@ jobs:
       - name: Install package and test tools
         run: python -m pip install -e '.[dev]'
       # Serial on purpose, as in live-macos. The live tests in
-      # test_runtime_parallel.py run only on macOS, so that file is left out.
+      # test_runtime_inputs.py and test_runtime_monitoring.py run only on macOS, so those
+      # files are left out.
       # test_integration_realistic.py is added here because it covers
       # ordinary-paper constructs and Biber, and test_runtime_backends.py because
       # it holds the live Bubblewrap isolation test. A packaging test fails when a
@@ -306,7 +308,7 @@ jobs:
           python -m pytest
           tests/test_integration.py
           tests/test_integration_checks.py
-          tests/test_integration_remaining.py
+          tests/test_integration_packages.py
           tests/test_integration_backends.py
           tests/test_integration_realistic.py
           tests/test_loaded_options.py

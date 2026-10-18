@@ -10,11 +10,11 @@ from unittest.mock import patch
 from latexprep.command_runner import CommandResult, ToolVersion
 from latexprep.findings import has_blockers
 from latexprep.resource_budget import ResourceBudget
-from latexprep.runtime import ToolRunner
-from tests.test_formatting import format_with
+from tests.fakes import FakeCommandRunner
+from tests.support import format_with
 
 
-class ControlledFormatter(ToolRunner):
+class ControlledFormatter(FakeCommandRunner):
     def __init__(self, work, outputs, *, budget=None, blocked=(), cleanup_gate=None):
         super().__init__(budget=budget)
         self.work = work
@@ -25,7 +25,7 @@ class ControlledFormatter(ToolRunner):
         self.cleanup_gate = cleanup_gate
         self.cancelled = asyncio.Event()
         self.cleaned = asyncio.Event()
-        self.calls = []
+        self.passes = []
         self.leases = {path: [] for path in outputs}
         self.workspaces = {}
         self.active = 0
@@ -42,7 +42,7 @@ class ControlledFormatter(ToolRunner):
         assert cwd == workspace
         assert memory_mb == 128
         assert argv[-1] == f"./{Path(relative).name}"
-        pass_number = sum(path == relative for path, _pass in self.calls)
+        pass_number = sum(path == relative for path, _pass in self.passes)
         target = workspace / argv[-1]
         if pass_number:
             previous = self.outputs[relative][pass_number - 1]
@@ -59,7 +59,7 @@ class ControlledFormatter(ToolRunner):
             assert lease is not None
             assert lease.memory_mb > memory_mb
             self.leases[relative].append(lease)
-        self.calls.append((relative, pass_number + 1))
+        self.passes.append((relative, pass_number + 1))
         self.entered[relative].set()
         self.active += 1
         self.max_active = max(self.active, self.max_active)
@@ -153,7 +153,7 @@ class ParallelFormattingTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(result.originals[relative], b"original\n")
                 self.assertEqual((source / relative).read_bytes(), b"original\n")
                 self.assertEqual(
-                    [number for path, number in runner.calls if path == relative], [1, 2]
+                    [number for path, number in runner.passes if path == relative], [1, 2]
                 )
                 self.assertIs(runner.leases[relative][0], runner.leases[relative][1])
                 self.assertIs(runner.leases[relative][0], diff_leases[relative])
@@ -192,7 +192,7 @@ class ParallelFormattingTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(has_blockers(result.findings))
                 self.assertEqual(runner.max_active, 1)
                 self.assertEqual(
-                    runner.calls, [("a.tex", 1), ("a.tex", 2), ("b.tex", 1), ("b.tex", 2)]
+                    runner.passes, [("a.tex", 1), ("a.tex", 2), ("b.tex", 1), ("b.tex", 2)]
                 )
 
     async def test_serial_and_parallel_results_are_identical(self):
@@ -309,7 +309,7 @@ class ParallelFormattingTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(runner.active, 0)
             self.assertEqual(budget.statistics()["active_memory_mb"], 0)
             self.assertEqual(budget.statistics()["queued"], 0)
-            self.assertEqual(runner.calls, [("a.tex", 1)])
+            self.assertEqual(runner.passes, [("a.tex", 1)])
             for relative in paths[1:]:
                 self.assertFalse((work / "files" / relative).exists())
             for relative in paths:
@@ -330,7 +330,7 @@ class ParallelFormattingTests(unittest.IsolatedAsyncioTestCase):
             with patch("latexprep.formatting.shutil.which", return_value="/fake/tex-fmt"):
                 result = await format_with(source, work, runner, budget=budget)
             self.assertTrue(has_blockers(result.findings))
-            self.assertEqual(runner.calls, [])
+            self.assertEqual(runner.passes, [])
             self.assertEqual(result.contents, {})
             self.assertEqual(result.originals, {})
             self.assertEqual(result.changes, [])

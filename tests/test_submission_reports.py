@@ -20,8 +20,13 @@ from latexprep.job_context import JobRequest
 from latexprep.pdf_previews import PdfPreviewStore, PreviewPage, PreviewSide
 from latexprep.report import Change, ChangeKind, Outcome, Report
 from latexprep.workflow_options import DocumentOptions, WorkflowOptions
-from tests.support import PNG
-from tests.test_dependency_packaging import RecordedBuild, contents
+from tests.support import (
+    PNG,
+    AsyncProjectTestCase,
+    RecordedBuild,
+    controlled_backends,
+    directory_contents,
+)
 
 
 def captured_difference(store, stage="baseline versus prepared", document=None, *, collector=None):
@@ -56,11 +61,8 @@ def captured_difference(store, stage="baseline versus prepared", document=None, 
     return collector
 
 
-class PreparationInventoryTests(unittest.IsolatedAsyncioTestCase):
+class PreparationInventoryTests(AsyncProjectTestCase):
     async def asyncSetUp(self):
-        self.temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
         self.source = self.root / "paper"
         (self.source / "sections").mkdir(parents=True)
         (self.source / "main.tex").write_text(
@@ -68,32 +70,28 @@ class PreparationInventoryTests(unittest.IsolatedAsyncioTestCase):
         )
         (self.source / "sections/body.tex").write_text("A short paper.\n")
         (self.source / "notes.txt").write_text("Private unused notes.\n")
-        self.original = contents(self.source)
+        self.original = directory_contents(self.source)
 
     async def prepare(
         self, *, settings=None, dry_run=False, trace=True, previews=None, compare=None
     ):
         selected = {"main.tex", "sections/body.tex"} if trace else None
         build = RecordedBuild({"main.tex": (selected,) * 4})
-        with (
-            patch("latexprep.document_tasks.build_project", side_effect=build.__call__),
-            patch("latexprep.document_tasks.inspect_pdf", new=AsyncMock(return_value=[])),
-            patch(
-                "latexprep.document_tasks.compare_pdfs",
-                new=AsyncMock(side_effect=compare, return_value=[]),
+        backends = controlled_backends(
+            build=build.__call__, compare_pdfs=AsyncMock(side_effect=compare, return_value=[])
+        )
+        report = await run_job(
+            JobRequest(
+                "prepare",
+                self.source,
+                settings or Settings(main="main.tex"),
+                None if dry_run else self.root / "out",
+                dry_run=dry_run,
+                pdf_previews=previews,
             ),
-        ):
-            report = await run_job(
-                JobRequest(
-                    "prepare",
-                    self.source,
-                    settings or Settings(main="main.tex"),
-                    None if dry_run else self.root / "out",
-                    dry_run=dry_run,
-                    pdf_previews=previews,
-                )
-            )
-        self.assertEqual(contents(self.source), self.original)
+            backends=backends,
+        )
+        self.assertEqual(directory_contents(self.source), self.original)
         return report
 
     async def test_verified_inventory_uses_exact_zip_sizes_and_flat_names(self):
@@ -149,12 +147,10 @@ class PreparationInventoryTests(unittest.IsolatedAsyncioTestCase):
         # Six builds share this recorder, one initial/transformed/archive build per document.
         selected = {"main.tex", "sections/body.tex"}
         build = RecordedBuild({"main.tex": (selected,) * 6})
-        with (
-            patch("latexprep.document_tasks.build_project", side_effect=build.__call__),
-            patch("latexprep.document_tasks.inspect_pdf", new=AsyncMock(return_value=[])),
-            patch("latexprep.document_tasks.compare_pdfs", new=AsyncMock(return_value=[])),
-        ):
-            report = await run_job(JobRequest("prepare", self.source, settings, self.root / "out"))
+        backends = controlled_backends(build=build.__call__)
+        report = await run_job(
+            JobRequest("prepare", self.source, settings, self.root / "out"), backends=backends
+        )
         self.assertEqual({row["document"] for row in report.package_contents}, {"paper", "copy"})
         for package in report.package_contents:
             self.assertEqual(package["status"], "verified")
@@ -162,7 +158,7 @@ class PreparationInventoryTests(unittest.IsolatedAsyncioTestCase):
                 (self.root / "out" / package["document"] / "report.json").read_text()
             )
             self.assertEqual(saved["package_contents"], [package])
-        self.assertEqual(contents(self.source), self.original)
+        self.assertEqual(directory_contents(self.source), self.original)
 
     async def test_blocked_comparison_keeps_images_after_scratch_cleanup_without_releasing_zip(
         self,
@@ -228,7 +224,7 @@ class ReportOutputTests(unittest.TestCase):
         self.assertIn("img-src data:", html)
         self.assertIn('aria-label="Changed pages"', html)
         self.assertNotIn("<img ", render_html(report))
-        invalid = {name: b"<svg onload='bad()'>" for name in store.images}
+        invalid = dict.fromkeys(store.images, b"<svg onload='bad()'>")
         self.assertNotIn("<img ", render_html(report, preview_images=invalid))
         collector.pages[0].left = PreviewSide(False, None, "missing")
         collector.pages[0].page_dimensions_changed = True

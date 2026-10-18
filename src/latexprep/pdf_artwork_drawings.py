@@ -17,6 +17,7 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping, Sequence
 from functools import partial
+from itertools import pairwise
 from typing import Final, NamedTuple
 
 from .cancellation import cancellation_point, run_in_thread
@@ -106,7 +107,7 @@ def _kind_label(row: Mapping[str, object]) -> str:
     return _KIND_LABELS.get(str(row.get("kind")), "a drawing")
 
 
-def _uncertain_suffix(uncertain: bool) -> str:
+def _uncertain_suffix(*, uncertain: bool) -> str:
     return " Some drawings could not be measured." if uncertain else ""
 
 
@@ -127,7 +128,9 @@ class Composition(NamedTuple):
     fonts: FontEvidence
 
     @classmethod
-    def of(cls, drawings: Sequence[Drawing], uncertain: bool, fonts: FontEvidence) -> Composition:
+    def of(
+        cls, drawings: Sequence[Drawing], *, uncertain: bool, fonts: FontEvidence
+    ) -> Composition:
         raster = [d for d in drawings if d.kind in IMAGE_OPERATIONS]
         text = [d for d in drawings if d.kind in TEXT_OPERATIONS]
         vector = [d for d in drawings if d.kind in {"fill_path", "stroke_path"}]
@@ -379,7 +382,7 @@ def _drawing_bounds_finding(artwork: TracedArtwork, options: PdfArtworkOptions) 
             violations.append(drawing_report(drawing, visible_bounds_pt=_tuple(visible)))
     return heuristic_finding(
         ArtworkRule.DRAWING_BOUNDS,
-        _bounds_message(violations, measured, uncertain),
+        _bounds_message(violations, measured, uncertain=uncertain),
         violations,
         incomplete=uncertain or measured == 0,
         details={
@@ -390,7 +393,7 @@ def _drawing_bounds_finding(artwork: TracedArtwork, options: PdfArtworkOptions) 
     )
 
 
-def _bounds_message(violations: Sequence[object], measured: int, uncertain: bool) -> str:
+def _bounds_message(violations: Sequence[object], measured: int, *, uncertain: bool) -> str:
     rows = [row for row in violations if isinstance(row, dict)]
     if rows:
         first = rows[0]
@@ -402,7 +405,7 @@ def _bounds_message(violations: Sequence[object], measured: int, uncertain: bool
         return "No image or filled shape could be compared with the allowed drawing regions."
     return (
         f"All measured images and filled shapes ({measured}) lie inside the allowed drawing "
-        f"regions.{_uncertain_suffix(uncertain)}"
+        f"regions.{_uncertain_suffix(uncertain=uncertain)}"
     )
 
 
@@ -423,7 +426,7 @@ def _clipping_finding(artwork: TracedArtwork, options: PdfArtworkOptions) -> Fin
             violations.append(drawing_report(drawing, clip_bounds_pt=_tuple(drawing.clip)))
     return heuristic_finding(
         ArtworkRule.CLIPPING_CANDIDATES,
-        _clipping_message(violations, measured, uncertain),
+        _clipping_message(violations, measured, uncertain=uncertain),
         violations,
         incomplete=uncertain or measured == 0,
         details={
@@ -434,7 +437,7 @@ def _clipping_finding(artwork: TracedArtwork, options: PdfArtworkOptions) -> Fin
     )
 
 
-def _clipping_message(violations: Sequence[object], measured: int, uncertain: bool) -> str:
+def _clipping_message(violations: Sequence[object], measured: int, *, uncertain: bool) -> str:
     rows = [row for row in violations if isinstance(row, dict)]
     if rows:
         first = rows[0]
@@ -447,7 +450,7 @@ def _clipping_message(violations: Sequence[object], measured: int, uncertain: bo
         return "No image or filled shape could be compared with its clip rectangle."
     return (
         f"None of the {measured} measured images and filled shapes crosses a clip "
-        f"boundary.{_uncertain_suffix(uncertain)}"
+        f"boundary.{_uncertain_suffix(uncertain=uncertain)}"
     )
 
 
@@ -458,7 +461,7 @@ def union_area(boxes: Sequence[Box], region: Box) -> float:
         raise PreparationError("Raster region exceeds the bounded image-union limit")
     xs = sorted({x for box in clipped for x in (box.left, box.right)})
     area = 0.0
-    for left, right in zip(xs, xs[1:], strict=False):
+    for left, right in pairwise(xs):
         cancellation_point()
         intervals = sorted((b.top, b.bottom) for b in clipped if b.left < right and b.right > left)
         length, end = 0.0, -math.inf
@@ -555,7 +558,9 @@ def _measure_drawings(
     options: PdfArtworkOptions,
 ) -> list[Finding]:
     """Every configured drawing finding, in report order (pure; runs in a worker thread)."""
-    composition = Composition.of(trace.drawings, bool(trace.trace_uncertain_pages), fonts)
+    composition = Composition.of(
+        trace.drawings, uncertain=bool(trace.trace_uncertain_pages), fonts=fonts
+    )
     result = []
     if options.classify_artwork:
         result.append(_composition_finding(composition))

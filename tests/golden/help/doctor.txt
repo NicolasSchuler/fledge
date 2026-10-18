@@ -1,0 +1,19 @@
+Usage: fledge doctor [OPTIONS] [PROJECT]
+
+  Test the local setup with a tiny built-in document.
+
+  PROJECT selects nearby settings. With no PROJECT, defaults apply unless --config is supplied.
+  Every configured document engine is exercised. Your manuscript is never compiled or changed. A
+  pass covers the built-in fixture, not project packages, custom classes, or venue compliance.
+
+Options:
+  --engine [pdflatex|xelatex|lualatex]
+                                  TeX engine to test instead of the configured one (default pdflatex
+                                  unless a settings file chooses another).
+  --config PATH                   Use this TOML settings file instead of discovering project
+                                  configuration.
+  --isolated                      Ignore discovered configuration and use defaults.
+  --json                          Print the structured setup report.
+  --quiet                         Suppress progress messages on stderr; the final report is still
+                                  printed.
+  -h, --help                      Show this message and exit.

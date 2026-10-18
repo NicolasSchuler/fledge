@@ -1,0 +1,67 @@
+Usage: fledge prepare [OPTIONS] INPUT
+
+  Package the selected paper's needed inputs and explicit deliverables.
+
+  Unrelated files are omitted from the copy; originals stay unchanged. Complete dependency evidence
+  and an exact archive rebuild are required. Ship extra files with [package] include = [...] in
+  project configuration.
+
+Common options:
+  --config PATH                   Use this TOML settings file instead of discovering project
+                                  configuration.
+  --json                          Alias for --output-format json.
+  --output-format [terminal|compact|json|html|ci]
+                                  Terminal, agent-friendly compact, JSON, offline HTML or CI
+                                  annotations.
+  --quiet                         Suppress progress messages on stderr; the final report is still
+                                  printed.
+  --show-passed                   Also list passed findings and inventories.
+  --show-files                    List every included and excluded submission file.
+  --select CODE_OR_PREFIX         Run only these checks: a check code (TEX001), a code prefix (TEX,
+                                  BIB1) or ALL. Repeatable; replaces checks.select from
+                                  configuration.
+  --ignore CODE_OR_PREFIX         Skip these checks; same syntax as --select. Repeatable; adds to
+                                  checks.ignore from configuration.
+  --preset [anonymous-review|arxiv|camera-ready]
+                                  Apply an example preset beneath the settings file and command-line
+                                  options; a starting point, not a compliance certification (fledge
+                                  init --list).
+  --online / --offline            Allow configured DOI/URL checks to send public queries; offline by
+                                  default.
+  --main FILE                     Main .tex file of the document, relative to the input; needed when
+                                  the input holds several documents.
+  --engine [pdflatex|xelatex|lualatex]
+                                  TeX engine that builds the PDF (default pdflatex).
+  --reference-pdf PATH            PDF that the build must match page by page, for example the
+                                  version you already submitted.
+  --max-pages INTEGER             Total page limit, including references.
+  --output PATH                   New directory outside the input.
+  --layout [preserve|flat]        Keep the folder structure (preserve) or move every file to the top
+                                  level (flat); default preserve.
+  --format / --no-format          Apply tex-fmt to the separate copy.
+  --dry-run                       Build the baseline and preview edits; no final bundle.
+  -h, --help                      Show this message and exit.
+
+Advanced options:
+  --isolated                      Ignore discovered configuration and use defaults.
+  --html-report PATH              Save an escaped offline HTML report to a new file outside the
+                                  input.
+  --preview-output PATH           New directory for explicitly selected grayscale page previews.
+  --diagnostics PATH              Export an explicitly unverified diagnostic ZIP of sanitized
+                                  reports and diffs.
+  --json-report, --report PATH    Also save the JSON report to a new file outside the input.
+  --jobs INTEGER                  Most operations that may run at once on this computer; 1 runs them
+                                  one after another (default 2).
+  --build-jobs INTEGER            Most TeX builds that may run at once (default 1).
+  --render-jobs INTEGER           Most PDF pages that may be rendered at once (default 1).
+  --job-timeout-seconds INTEGER   Longest the whole run may take, in seconds, including time spent
+                                  waiting (default 600).
+  --timeout-seconds INTEGER       Longest one external tool, such as latexmk, may run, in seconds
+                                  (default 120).
+  --bibliography-backend [auto|bibtex|biber]
+                                  Bibliography tool: bibtex, biber, or auto to detect it from the
+                                  sources (default auto).
+  --normalize-doi / --no-normalize-doi
+                                  Normalize literal DOI prefixes.
+  --cleanup / --no-cleanup        Remove known build debris from the copy before editing; files the
+                                  paper needs are always kept (default on).

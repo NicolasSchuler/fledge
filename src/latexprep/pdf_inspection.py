@@ -114,9 +114,9 @@ def configured_policy_rules(options: PdfInspectionOptions, max_pages: int | None
 def _policy_finding(
     rule: str,
     message: str,
+    *,
     violated: bool,
     details: dict[str, object],
-    *,
     incomplete: bool = False,
 ) -> Finding:
     return Finding(
@@ -157,8 +157,8 @@ def _document_findings(pages: int, fields: dict[str, str], max_pages: int | None
             _policy_finding(
                 PdfRule.PAGE_LIMIT,
                 f"PDF has {pages} total pages; configured maximum: {max_pages}.",
-                pages > max_pages,
-                {
+                violated=pages > max_pages,
+                details={
                     "pages": pages,
                     "maximum": max_pages,
                     "scope": "All pages, including references and appendices.",
@@ -205,8 +205,8 @@ def _geometry_findings(output: str, context: _InspectionContext) -> list[Finding
                 f"Expected {expected[0]:g} × {expected[1]:g} PDF points "
                 f"within {options.page_size_tolerance_pt:g} points; "
                 f"differing pages: {differing or 'none'}.",
-                bool(differing),
-                {
+                violated=bool(differing),
+                details={
                     "expected_pt": expected,
                     "tolerance_pt": options.page_size_tolerance_pt,
                     "dimensions_pt": sizes,
@@ -230,8 +230,8 @@ def _geometry_findings(output: str, context: _InspectionContext) -> list[Finding
                 PdfRule.PAGE_SIZE_CONSISTENCY,
                 f"Page width/height ranges span {spread[0]:g}/{spread[1]:g} PDF points; "
                 f"maximum permitted spread: {options.page_size_tolerance_pt:g} points.",
-                any(value > options.page_size_tolerance_pt for value in spread),
-                {
+                violated=any(value > options.page_size_tolerance_pt for value in spread),
+                details={
                     "dimensions_pt": sizes,
                     "range_pt": spread,
                     "tolerance_pt": options.page_size_tolerance_pt,
@@ -313,8 +313,8 @@ def _feature_findings(fields: dict[str, str], options: PdfInspectionOptions) -> 
                 _policy_finding(
                     feature.policy,
                     f"{name}: {value}; the configured policy requires absence.",
-                    present,
-                    {
+                    violated=present,
+                    details={
                         "value": value,
                         "scope": (
                             "pdfinfo document-level feature reporting; "
@@ -372,8 +372,8 @@ def _font_findings(output: str, context: _InspectionContext) -> list[Finding]:
                     PdfRule.FONT_EMBEDDING,
                     f"Unembedded fonts: {', '.join(missing) or 'none'}; "
                     "all reported font resources must be embedded.",
-                    bool(missing),
-                    {"nonembedded": missing, "fonts": _font_reports(inventory)},
+                    violated=bool(missing),
+                    details={"nonembedded": missing, "fonts": _font_reports(inventory)},
                 )
             )
     if options.forbid_type3_fonts:
@@ -384,8 +384,8 @@ def _font_findings(output: str, context: _InspectionContext) -> list[Finding]:
                 "Type 3 fonts: "
                 f"{', '.join(font.name for font in type3) or 'none'}; "
                 "the configured policy forbids Type 3.",
-                bool(type3),
-                {"type3_fonts": _font_reports(type3), "inspected_fonts": len(inventory)},
+                violated=bool(type3),
+                details={"type3_fonts": _font_reports(type3), "inspected_fonts": len(inventory)},
             )
         )
     return findings
@@ -436,8 +436,8 @@ def _attachment_findings(output: str, context: _InspectionContext) -> list[Findi
             _policy_finding(
                 PdfRule.ATTACHMENTS_POLICY,
                 f"PDF contains {count} embedded files; configured maximum: 0.",
-                count > 0,
-                {"count": count, "inventory": output},
+                violated=count > 0,
+                details={"count": count, "inventory": output},
             )
         )
     return findings
@@ -542,8 +542,8 @@ def _image_resolution_finding(inventory: list[_RasterPlacement], minimum_dpi: fl
         f"{len(inventory)} raster placements inspected. Below minimum: "
         + (shown or "none")
         + (f"; plus {hidden} more" if hidden > 0 else ""),
-        bool(low),
-        {
+        violated=bool(low),
+        details={
             "minimum_dpi": minimum_dpi,
             "below_minimum": _placement_reports(low),
             "unmeasured": _placement_reports(unknown),

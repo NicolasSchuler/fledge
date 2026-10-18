@@ -1,0 +1,9 @@
+Usage: fledge pdf [OPTIONS] COMMAND [ARGS]...
+
+  Inspect a PDF independently of a source project.
+
+Options:
+  -h, --help  Show this message and exit.
+
+Commands:
+  check  Check PDF constraints; --reference-pdf adds an exact comparison.

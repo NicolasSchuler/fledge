@@ -24,6 +24,7 @@ from latexprep.job_execution import JobDeadlineExceeded
 from latexprep.publication import VerifiedPackage
 from latexprep.report import Outcome, Report
 from latexprep.staging import apply_contents
+from tests.support import controlled_backends
 
 
 def project(root: Path) -> None:
@@ -118,16 +119,13 @@ class ParallelWorkflowTests(unittest.IsolatedAsyncioTestCase):
             source = Path(directory) / "input"
             project(source)
             try:
-                with (
-                    patch(
-                        "latexprep.document_tasks.check_bibliography_integrity",
-                        side_effect=bibliography,
-                    ),
-                    patch("latexprep.document_tasks.build_project", side_effect=baseline),
-                    patch("latexprep.document_tasks.inspect_pdf", side_effect=inspect),
+                backends = controlled_backends(build=baseline, inspect_pdf=inspect)
+                with patch(
+                    "latexprep.document_tasks.check_bibliography_integrity",
+                    side_effect=bibliography,
                 ):
                     report = await asyncio.wait_for(
-                        run_job(JobRequest("check", source, Settings(jobs=3))), 8
+                        run_job(JobRequest("check", source, Settings(jobs=3)), backends=backends), 8
                     )
             finally:
                 release.set()
@@ -167,34 +165,31 @@ class ParallelWorkflowTests(unittest.IsolatedAsyncioTestCase):
                     await release.wait()
                 return []
 
-            with (
-                patch("latexprep.document_tasks.build_project", side_effect=build),
-                patch("latexprep.document_tasks.inspect_pdf", side_effect=inspect),
-                patch("latexprep.document_tasks.compare_pdfs", side_effect=compare),
-            ):
-                task = asyncio.create_task(
-                    run_job(
-                        JobRequest(
-                            "prepare", source, Settings(jobs=4), output, reference_pdf=reference
-                        )
-                    )
+            backends = controlled_backends(build=build, inspect_pdf=inspect, compare_pdfs=compare)
+            task = asyncio.create_task(
+                run_job(
+                    JobRequest(
+                        "prepare", source, Settings(jobs=4), output, reference_pdf=reference
+                    ),
+                    backends=backends,
                 )
-                try:
-                    await asyncio.wait_for(
-                        asyncio.gather(
-                            final_inspect.wait(), archive_compare.wait(), reference_compare.wait()
-                        ),
-                        5,
-                    )
-                    self.assertFalse(output.exists())
-                    self.assertFalse(task.done())
-                    release.set()
-                    report = await task
-                finally:
-                    release.set()
-                    if not task.done():
-                        task.cancel()
-                        await asyncio.gather(task, return_exceptions=True)
+            )
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(
+                        final_inspect.wait(), archive_compare.wait(), reference_compare.wait()
+                    ),
+                    5,
+                )
+                self.assertFalse(output.exists())
+                self.assertFalse(task.done())
+                release.set()
+                report = await task
+            finally:
+                release.set()
+                if not task.done():
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
             self.assertEqual(report.outcome, "passed")
             self.assertTrue((output / "submission.zip").is_file())
             self.assertEqual(len(reference_paths), 2)
@@ -214,11 +209,9 @@ class ParallelWorkflowTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "input"
             project(source)
-            with (
-                patch("latexprep.document_tasks.build_project", new=AsyncMock(return_value=failed)),
-                patch("latexprep.document_tasks.inspect_pdf", new=AsyncMock()) as inspect,
-            ):
-                report = await run_job(JobRequest("check", source, Settings()))
+            inspect = AsyncMock()
+            backends = controlled_backends(build=failed, inspect_pdf=inspect)
+            report = await run_job(JobRequest("check", source, Settings()), backends=backends)
         inspect.assert_not_called()
         self.assertEqual(report.outcome, "blocked")
         self.assertTrue(any(f.rule == "build.test" for f in report.findings))
@@ -248,10 +241,11 @@ class ParallelWorkflowTests(unittest.IsolatedAsyncioTestCase):
             (source / "main.tex").write_text(
                 (source / "main.tex").read_text().replace("Hello.", "TODO finish.")
             )
-            with patch("latexprep.document_tasks.build_project", side_effect=hang):
-                report = await run_job(
-                    JobRequest("prepare", source, Settings(job_timeout_seconds=1), output)
-                )
+            backends = controlled_backends(build=hang)
+            report = await run_job(
+                JobRequest("prepare", source, Settings(job_timeout_seconds=1), output),
+                backends=backends,
+            )
             self.assertFalse(output.exists())
         self.assertTrue(stopped.is_set())
         self.assertEqual(report.outcome, "blocked")
@@ -274,8 +268,8 @@ class ParallelWorkflowTests(unittest.IsolatedAsyncioTestCase):
             settings = Settings(
                 jobs=3, job_timeout_seconds=1, checks=CheckSelection(ignore=("TEX001",))
             )
-            with patch("latexprep.document_tasks.build_project", side_effect=hang):
-                report = await run_job(JobRequest("check", source, settings))
+            backends = controlled_backends(build=hang)
+            report = await run_job(JobRequest("check", source, settings), backends=backends)
         self.assertTrue(any(f.rule == "execution.deadline" for f in report.findings))
         stages = {stage["name"]: stage["status"] for stage in report.stages}
         self.assertEqual(stages["source checks"], "succeeded")
@@ -335,18 +329,22 @@ class ParallelWorkflowTests(unittest.IsolatedAsyncioTestCase):
             base = Path(directory)
             source, output = base / "input", base / "output"
             project(source)
-            with patch("latexprep.document_tasks.build_project", side_effect=delayed_build):
-                task = asyncio.create_task(
-                    run_job(JobRequest("prepare", source, Settings(), output), report=report)
+            backends = controlled_backends(build=delayed_build)
+            task = asyncio.create_task(
+                run_job(
+                    JobRequest("prepare", source, Settings(), output),
+                    report=report,
+                    backends=backends,
                 )
-                await asyncio.wait_for(started.wait(), 5)
-                task.cancel()
-                await asyncio.wait_for(cleaning.wait(), 5)
-                task.cancel()
-                self.assertTrue(observed_work[0].is_dir())
-                release.set()
-                with self.assertRaises(asyncio.CancelledError):
-                    await task
+            )
+            await asyncio.wait_for(started.wait(), 5)
+            task.cancel()
+            await asyncio.wait_for(cleaning.wait(), 5)
+            task.cancel()
+            self.assertTrue(observed_work[0].is_dir())
+            release.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
             self.assertFalse(output.exists())
         self.assertTrue(cleaned.is_set())
         self.assertFalse(observed_work[0].exists())
@@ -358,14 +356,11 @@ class ParallelWorkflowTests(unittest.IsolatedAsyncioTestCase):
             base = Path(directory)
             source, output = base / "input", base / "output"
             project(source)
-            with (
-                patch("latexprep.document_tasks.build_project", side_effect=build),
-                patch("latexprep.document_tasks.inspect_pdf", new=AsyncMock(return_value=[])),
-                patch("latexprep.document_tasks.compare_pdfs", new=AsyncMock(return_value=[])),
-            ):
-                report = await run_job(
-                    JobRequest("prepare", source, Settings(max_temporary_bytes=1), output)
-                )
+            backends = controlled_backends(build=build)
+            report = await run_job(
+                JobRequest("prepare", source, Settings(max_temporary_bytes=1), output),
+                backends=backends,
+            )
             self.assertFalse(output.exists())
         self.assertEqual(report.outcome, "blocked")
         self.assertTrue(any(f.rule == "execution.resources" for f in report.findings))

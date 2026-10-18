@@ -43,7 +43,7 @@ def create_archive(root: Path, archive: Path) -> None:
         source = source_path(root)
         if not source.is_dir:
             raise PreparationError("Archive input must be a directory.")
-        target = new_destination(source.path, archive, True)
+        target = new_destination(source.path, archive, source_is_dir=True)
         directory_fd = os.open(source.path, DIRECTORY_FLAGS)
         try:
             entries = folder_entries(directory_fd)
@@ -67,7 +67,7 @@ def _entry_info(entry: ProjectEntry) -> zipfile.ZipInfo:
     if hasattr(zipfile.ZipInfo, "compress_level"):  # Python 3.13+
         info.compress_level = _COMPRESSION_LEVEL
     else:  # No public per-entry level setter before Python 3.13.
-        info._compresslevel = _COMPRESSION_LEVEL  # type: ignore
+        info._compresslevel = _COMPRESSION_LEVEL  # ty: ignore[unresolved-attribute]
     info.file_size = entry.size
     mode = stat.S_IFDIR | _DIRECTORY_MODE if entry.is_dir else stat.S_IFREG | _FILE_MODE
     info.external_attr = mode << 16 | (DOS_DIRECTORY_ATTRIBUTE if entry.is_dir else 0)

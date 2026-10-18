@@ -111,9 +111,10 @@ async def _run_document(
             context.runner,
             context.budget,
             lambda message: context.emit(f"{document.name}: {message}"),
+            backends=context.backends,
         )
         package = await run_project(child_context, child)
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001 - one failed document becomes a finding; the rest run
         child.findings.append(_failed_document_finding(error, document))
         child.outcome = Outcome.BLOCKED
         package = None

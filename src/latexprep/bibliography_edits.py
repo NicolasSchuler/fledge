@@ -14,6 +14,7 @@ import re
 from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from itertools import pairwise
 from typing import NamedTuple
 
 from .bibliography_index import LocatedEntry
@@ -249,7 +250,7 @@ def edit_fields(
 
 
 def _require_plain_boundaries(document: BibDocument, spans: list[EntrySpan]) -> None:
-    for first, second in zip(spans, spans[1:], strict=False):
+    for first, second in pairwise(spans):
         if document.text[first.end : second.entry.start].strip():
             raise ProposalBlocked(
                 "Ordering would move entries across comments, free text or macro declarations; "

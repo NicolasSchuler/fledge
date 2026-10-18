@@ -20,90 +20,16 @@ from latexprep.command_runner import (
 )
 from latexprep.errors import PreparationError, SandboxRefusedError
 from latexprep.latexmk_build import build_project
+from latexprep.resource_monitor import ResourceMonitor
 from latexprep.runtime import ToolRunner
 from latexprep.tool_launch import create_tool_environment, sandbox_refusal, with_ulimits
-
-
-async def never_reports(pid: int, workspace: Path, *, max_file_bytes: int) -> str:
-    """A standalone command watcher that never finds a resource failure."""
-    await asyncio.Future()
-    raise AssertionError("unreachable")
-
-
-class LifecycleRunner(ToolRunner):
-    """Test process lifetimes without Seatbelt or host process accounting.
-
-    The enclosing sandbox blocks both sandbox-exec and ps. Production has no
-    bypass option. Isolation and accounting failures have independent tests.
-    """
-
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        self._monitor.watch_command = never_reports
-
-    def _sandbox_command(
-        self,
-        command: list[str],
-        workspace: Path,
-        readonly_inputs: tuple[Path, ...] = (),
-    ) -> list[str]:
-        return command
-
-
-class FakeBuildRunner(ToolRunner):
-    # Fakes never run Biber, so automatic builds behave alike on every host.
-    biber_needs_preparation = False
-
-    def __init__(self, returncode: int = 0, log: str = "", trace: str | None = None) -> None:
-        super().__init__()
-        self._test_resource_roots: set[Path] = set()
-        self.returncode = returncode
-        self.log = log
-        self.trace = trace
-        self.commands: list[list[str]] = []
-        self.biber_preparations = 0
-
-    @property
-    def resource_roots(self) -> frozenset[Path]:
-        return frozenset(self._test_resource_roots)
-
-    def _resolve_tool(self, name: str) -> Path:
-        return Path("/tools") / Path(name).name
-
-    async def prepare_biber(self, root: Path) -> Path | None:
-        """Fake builds never launch a real tool, so no toolchain copy is prepared."""
-        self.biber_preparations += 1
-        return None
-
-    async def run(
-        self,
-        argv: list[str],
-        cwd: Path,
-        workspace: Path,
-        *,
-        readonly_inputs: tuple[Path, ...] = (),
-        memory_mb: int | None = None,
-    ) -> CommandResult:
-        self.commands.append(argv)
-        if argv[-1] in {"-v", "--version"}:
-            return CommandResult(0, "test tool version\n", "", resolved_command=argv)
-        name = Path(argv[-1]).stem
-        output = workspace / "output"
-        (output / f"{name}.pdf").write_bytes(b"%PDF-1.7\npartial or successful")
-        (output / f"{name}.log").write_text(self.log)
-        engine = (
-            "xelatex" if "-xelatex" in argv else "lualatex" if "-lualatex" in argv else "pdflatex"
-        )
-        primary = output / (name + (".xdv" if engine == "xelatex" else ".pdf"))
-        (output / f"{name}.fls").write_text(
-            self.trace if self.trace is not None else f"INPUT {cwd / argv[-1]}\nOUTPUT {primary}\n"
-        )
-        (output / f"{name}.fdb_latexmk").write_text(
-            f'# Fdb version 4\n["{engine}"] 1 "{cwd / argv[-1]}" "{primary}" "{name}" 1 0\n'
-            f'  "{cwd / argv[-1]}" 1 1 {"0" * 32} ""\n'
-            f'  (generated)\n  "{primary}"\n  (rewritten before read)\n'
-        )
-        return CommandResult(self.returncode, "", "", resolved_command=argv)
+from tests.fakes import (
+    FakeBuildRunner,
+    FixtureToolchain,
+    LifecycleRunner,
+    UnconfinedSandbox,
+    UnwatchedMonitor,
+)
 
 
 class BuildTests(unittest.IsolatedAsyncioTestCase):
@@ -307,8 +233,9 @@ class BuildTests(unittest.IsolatedAsyncioTestCase):
                 result = await super().run(argv, cwd, workspace)
                 return replace(result, resource_roots=(str(declared),))
 
-        runner = ContextRunner(trace=f"INPUT {self.source / 'main.tex'}\n")
-        runner._test_resource_roots.add(self.source)
+        runner = ContextRunner(
+            trace=f"INPUT {self.source / 'main.tex'}\n", resource_roots=[self.source]
+        )
         result = await build_project(
             self.source, "main.tex", self.root / "build", "pdflatex", runner
         )
@@ -649,7 +576,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         async def unavailable(pid: int, workspace: Path, *, max_file_bytes: int) -> str:
             return "accounting unavailable"
 
-        with patch.object(runner._monitor, "watch_command", unavailable):
+        with patch.object(runner.monitor, "watch_command", unavailable):
             result = await runner.run([self.perl, "-e", "sleep 30"], self.work, self.work)
         self.assertEqual(result.resource_exceeded, "accounting unavailable")
         self.assertNotEqual(result.returncode, 0)
@@ -660,7 +587,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         async def broken(pid: int, workspace: Path, *, max_file_bytes: int) -> str:
             raise ValueError("bad row")
 
-        with patch.object(runner._monitor, "watch_command", broken):
+        with patch.object(runner.monitor, "watch_command", broken):
             result = await runner.run([self.perl, "-e", "sleep 30"], self.work, self.work)
         self.assertEqual(
             result.resource_exceeded, "Resource accounting failed: ValueError: bad row"
@@ -749,7 +676,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         # Dash counts 512-byte blocks and would halve the limit, so bash wins
         # wherever it exists; macOS /bin/sh is bash and agrees either way.
         self.assertEqual(wrapped[0], "/bin/bash" if Path("/bin/bash").is_file() else "/bin/sh")
-        with patch("latexprep.tool_launch.os.path.isfile", return_value=False):
+        with patch.object(Path, "is_file", return_value=False):
             limited = with_ulimits(["/usr/bin/true"], max_file_bytes=4096, timeout_seconds=120)
             self.assertEqual(limited[0], "/bin/sh")
 
@@ -794,6 +721,49 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             server.close()
             await server.wait_closed()
             outside.unlink()
+
+
+class RunnerCompositionTests(unittest.IsolatedAsyncioTestCase):
+    """What a runner is built from can be supplied, so tests need not reach into it."""
+
+    def test_the_sandbox_the_toolchain_and_the_monitor_come_from_the_constructor(self) -> None:
+        sandbox, toolchain = UnconfinedSandbox(), FixtureToolchain(Path("/fixture"))
+        monitors = []
+
+        def monitor_factory(processes, statistics):
+            monitors.append((processes, statistics))
+            return UnwatchedMonitor(processes, statistics)
+
+        runner = ToolRunner(
+            RuntimeLimits(max_memory_mb=256),
+            sandbox=sandbox,
+            toolchain=toolchain,
+            monitor_factory=monitor_factory,
+        )
+        self.assertIs(runner.sandbox, sandbox)
+        self.assertIs(runner.toolchain, toolchain)
+        self.assertIsInstance(runner.monitor, UnwatchedMonitor)
+        [(processes, statistics)] = monitors
+        self.assertIs(processes, sandbox)
+        self.assertEqual(statistics.memory_limit_mb, 256)
+        self.assertEqual(runner.resource_roots, toolchain.resource_roots)
+
+    def test_without_arguments_the_host_sandbox_is_selected_and_tools_are_found_lazily(
+        self,
+    ) -> None:
+        with patch("latexprep.runtime.Toolchain.discover") as discover:
+            runner = ToolRunner()
+            discover.assert_not_called()
+            self.assertIs(runner.toolchain, discover.return_value)
+            self.assertIs(runner.toolchain, discover.return_value)
+        discover.assert_called_once_with(runner.sandbox)
+        self.assertIsInstance(runner.monitor, ResourceMonitor)
+
+    async def test_commands_run_unwrapped_under_an_unconfined_sandbox(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory).resolve()
+            result = await LifecycleRunner().run(["/bin/echo", "hello"], work, work)
+        self.assertEqual((result.returncode, result.stdout), (0, "hello\n"))
 
 
 if __name__ == "__main__":

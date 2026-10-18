@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 from latexprep.build_result import BuildTools
 from latexprep.config import Settings
@@ -15,8 +15,8 @@ from latexprep.findings import Finding
 from latexprep.formatting import MAX_SOURCE_BYTES
 from latexprep.job_context import JobRequest
 from latexprep.rules import MANDATORY_CODES
-from tests.test_formatting import FakeFormatter, format_with
-from tests.test_workflow import project
+from tests.fakes import fake_formatter
+from tests.support import controlled_backends, format_with, sectioned_project
 
 
 class FormatterLimitTests(unittest.IsolatedAsyncioTestCase):
@@ -33,7 +33,7 @@ class FormatterLimitTests(unittest.IsolatedAsyncioTestCase):
                 patch("latexprep.formatting.MAX_SOURCE_BYTES", limit),
             ):
                 result = await format_with(
-                    base / "source", base / "work", FakeFormatter([]), Settings()
+                    base / "source", base / "work", fake_formatter([]), Settings()
                 )
             self.assertEqual((base / "source" / "main.tex").read_bytes(), content)
         (finding,) = [item for item in result.findings if item.rule == rule]
@@ -74,21 +74,17 @@ class ArchiveLimitTests(unittest.IsolatedAsyncioTestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
-            project(base / "input")
-            with (
-                patch("latexprep.document_tasks.build_project", side_effect=build),
-                patch("latexprep.document_tasks.inspect_pdf", new=AsyncMock(return_value=[])),
-                patch("latexprep.document_tasks.compare_pdfs", new=AsyncMock(return_value=[])),
-            ):
-                # The three small sources fit within the limit; their ZIP does not.
-                result = await run_job(
-                    JobRequest(
-                        "prepare",
-                        base / "input",
-                        Settings(layout="flat", max_bytes=300),
-                        base / "output",
-                    )
-                )
+            sectioned_project(base / "input")
+            backends = controlled_backends(build=build)
+            result = await run_job(
+                JobRequest(
+                    "prepare",
+                    base / "input",
+                    Settings(layout="flat", max_bytes=300),
+                    base / "output",
+                ),
+                backends=backends,
+            )
             self.assertFalse((base / "output").exists())
         (finding,) = [item for item in result.findings if item.rule == "package.archive_limit"]
         self.assertEqual(

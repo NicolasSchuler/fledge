@@ -450,7 +450,7 @@ def _sample_unavailable(sample: PdfContrastSample, page: int, error: Exception) 
 
 
 def _contrast_message(
-    sample: PdfContrastSample, page: int, bounds: ContrastBounds, spread: int, uniform: bool
+    sample: PdfContrastSample, page: int, bounds: ContrastBounds, spread: int, *, uniform: bool
 ) -> str:
     required = f"{sample.minimum_ratio:g}:1"
     where = f"Sample '{sample.name}' on page {page}"
@@ -504,7 +504,7 @@ def _sample_contrast_finding(
     }
     return heuristic_finding(
         ArtworkRule.RENDERED_SAMPLE_CONTRAST,
-        _contrast_message(sample, page, bounds, max(spreads), uniform),
+        _contrast_message(sample, page, bounds, max(spreads), uniform=uniform),
         [details] if uniform and bounds.maximum < sample.minimum_ratio else [],
         incomplete=not uniform or bounds.minimum < sample.minimum_ratio <= bounds.maximum,
         details={

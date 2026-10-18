@@ -10,7 +10,6 @@ from __future__ import annotations
 import ast
 import json
 import re
-import tempfile
 import unittest
 from pathlib import Path
 
@@ -30,6 +29,7 @@ from latexprep.rules import BY_NAME
 from tests import test_pdf as pdf_tests
 from tests import test_pdf_checks as check_tests
 from tests import test_structure_checks as structure_tests
+from tests.support import AsyncProjectTestCase
 
 PACKAGE = Path(__file__).resolve().parents[1] / "src" / "latexprep"
 # Modules that report or build findings for the manuscript PDF; they name rules only
@@ -83,11 +83,8 @@ class RuleNameTests(unittest.TestCase):
         self.assertEqual(literals, [])
 
 
-class EmittedRuleTests(unittest.IsolatedAsyncioTestCase):
+class EmittedRuleTests(AsyncProjectTestCase):
     async def asyncSetUp(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
         self.pdf = self.root / "document.pdf"
         self.pdf.write_bytes(b"%PDF-fixture")
         self.counter = 0

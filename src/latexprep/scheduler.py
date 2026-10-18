@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import graphlib
+import logging
 import time
 from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import KW_ONLY, dataclass, field
@@ -15,6 +16,8 @@ from .defects import is_expected_failure, summarize_traceback
 from .errors import PreparationError
 from .limits import DEFAULT_LEASE_MEMORY_MB
 from .resource_budget import ResourceBudget, ResourceClass
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,6 +135,7 @@ class Scheduler:
         return by_name
 
     async def _invoke(self, task: Task) -> TaskResult:
+        logger.debug("task %s: start", task.name)
         self.progress(f"Starting {task.name}")
         value = await task.run()
         succeeded = task.is_success is None or task.is_success(value)
@@ -158,11 +162,13 @@ class Scheduler:
                     started = time.monotonic()
                     result = await self._invoke(task)
         except asyncio.CancelledError:
+            logger.debug("task %s: cancelled", task.name)
             self.progress(f"Cancelled {task.name}")
             raise
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 - a task failure becomes a failed result
             # Keep the exception type: a bare message such as an empty string
             # or a lone path says nothing about what went wrong.
+            logger.debug("task %s: raised %s", task.name, type(error).__name__)
             result = TaskResult(
                 task.name,
                 TaskStatus.FAILED,
@@ -171,6 +177,13 @@ class Scheduler:
             )
         result.elapsed_seconds = round(time.monotonic() - started, 6)
         result.queue_seconds = round(queue_seconds, 6)
+        logger.debug(
+            "task %s: %s in %.2f s (waited %.2f s for resources)",
+            task.name,
+            result.status,
+            result.elapsed_seconds,
+            result.queue_seconds,
+        )
         self.progress(f"{task.name}: {result.status} ({result.elapsed_seconds:.1f}s)")
         return result
 
@@ -227,6 +240,7 @@ class _Execution:
             ]
             del self.pending[name]
             if failed:
+                logger.debug("task %s: blocked by failed %s", name, ", ".join(failed))
                 self._record(
                     TaskResult(
                         name,

@@ -71,6 +71,15 @@ ruff format --check src tests docs/conf.py scripts
 ty check src/latexprep
 ```
 
+Ruff enforces, besides formatting and import order, the rule families `B`, `UP`, `C4`,
+`PIE`, `PERF`, `PTH`, `SIM`, `RUF`, `PGH`, `T20`, `BLE`, `ARG`, `G` and `LOG`, the
+keyword-only rule for boolean parameters (`FBT001`, `FBT002`) and ceilings on complexity
+(10), branches (12), statements (50) and arguments (8); `[tool.ruff.lint]` in
+`pyproject.toml` names the few deliberate exceptions and says why. Split a function
+instead of raising a ceiling. A blind `except Exception` is allowed only at a boundary
+that reports the cause, with `# noqa: BLE001 - <reason>`, and a type-checker suppression
+names its code and says why (`# ty: ignore[code]`).
+
 `tests/__init__.py` puts `src/` first on the import path, so no `PYTHONPATH` is
 needed, and it fails loudly if a stale installed `latexprep` would shadow the
 checkout. Remove it with `python -m pip uninstall fledge-latex fledge latex-preparation`
@@ -82,10 +91,14 @@ where application isolation and the relevant tools can actually start:
 
 ```sh
 FLEDGE_RUN_INTEGRATION=1 python -m pytest tests/test_integration.py \
-  tests/test_integration_checks.py tests/test_integration_remaining.py \
+  tests/test_integration_checks.py tests/test_integration_packages.py \
   tests/test_integration_backends.py tests/test_integration_realistic.py \
-  tests/test_runtime_parallel.py -v
+  tests/test_runtime_inputs.py tests/test_runtime_monitoring.py -v
 ```
+
+Every live test carries the `@live_test(...)` decorator from `tests/support.py`,
+which skips it unless the variable is set and applies the registered `live` marker.
+Select them with `-m live`, or leave them out of a run with `-m 'not live'`.
 
 `tests.test_integration_realistic` builds, checks and prepares projects with
 constructs found in ordinary papers and journal templates (template classes,
@@ -103,6 +116,56 @@ fake transports, so they verify request handling, not provider availability.
 Optional `qpdf`/`mutool` adapters must remain inconclusive when their tools or
 evidence are absent. The [limitations](limitations.md) page lists what has not
 been validated live.
+
+## Test structure and seams
+
+Tests are `unittest.TestCase` classes, run by pytest. Shared fixtures live in three
+support modules, never in a test module: a rule in
+`tests/test_module_boundaries.py` rejects `from tests.test_x import ...`.
+
+- `tests/support.py` holds project builders (`write_project`, `minimal_project`),
+  the `ProjectTestCase` and `AsyncProjectTestCase` bases (a temporary `self.root`
+  with `write` and `write_project`), the `@live_test` decorator, the controlled
+  document backends below, the golden-file helpers and a small JSON Schema
+  validator for the subset of keywords the report schema uses.
+- `tests/fakes.py` holds `FakeCommandRunner`, a scripted implementation of the
+  `CommandRunner` protocol that the PDF, formatting and comparison adapters
+  depend on: outputs per tool, missing tools, a failure mode, events that hold a
+  command, and a log of every call. `FakeBuildRunner` and `LifecycleRunner` are
+  `ToolRunner` doubles for builds and process lifetimes; they use the `sandbox`,
+  `toolchain` and `monitor_factory` parameters of `ToolRunner` instead of
+  reaching into its private state.
+- `tests/pdf_fakes.py` holds the PDF tool output fixtures and the runners built on
+  `FakeCommandRunner` (`DetailRunner`, `ArtworkRunner`, `FakePdfRunner`).
+
+A job that would run TeX or the PDF tools takes its tool-driven operations from a
+`DocumentBackends` value (`run_job(..., backends=...)`): the build, the PDF
+inspection and the PDF comparison. The defaults run the real tools. Tests pass
+`controlled_backends(build=..., inspect_pdf=..., compare_pdfs=...)` from
+`tests/support.py` instead of patching module globals; each argument is an async
+function, a value to return, or an exception to raise. Patch a module global only
+to test genuinely global behaviour, such as the lookup of the host's tools or a
+module-wide limit.
+
+## Golden outputs
+
+`tests/test_golden_outputs.py` compares three outputs with files in `tests/golden/`:
+the `--help` text of every command (at width 100, without colour), the JSON report
+of a `check` run with controlled backends, and its terminal summary. The JSON
+report is normalised first: paths, the version and measured times and resource
+figures become placeholders, so the golden changes only when the report does. The
+same report is validated against `docs/_static/report.schema.json`.
+
+After an intended change of an option, a message or the report, regenerate the
+files and review the diff before committing:
+
+```sh
+FLEDGE_UPDATE_GOLDEN=1 python -m pytest tests/test_golden_outputs.py
+git diff tests/golden
+```
+
+The help goldens follow the installed Click and Rich versions; regenerate them after
+a dependency update that changes the layout.
 
 ## Continuous integration
 
@@ -128,7 +191,8 @@ is missing from both lists:
   macOS sandbox tests.
 - `live-linux` installs TeX Live, Biber, Poppler and Bubblewrap from apt plus a
   pinned `tex-fmt` release, and runs the integration tests under Bubblewrap. It
-  leaves out `test_runtime_parallel.py`, whose live tests run only on macOS, and
+  leaves out `test_runtime_inputs.py` and `test_runtime_monitoring.py`, whose live tests
+  run only on macOS, and
   adds `test_runtime_backends.py` for the live Bubblewrap isolation test.
   **This job is unvalidated until a maintainer has run it from the Actions tab
   and it passes**; until then the documentation must keep saying that Linux has
@@ -278,6 +342,13 @@ default, opt-in or always enforced) and its enabling settings from
 `check_policy.py`, and shows the rule's fix text. A test fails while
 `docs/checks.md` is stale; the generated tables are never edited by hand.
 
+The package is flat but layered, and [the module map](modules.md) assigns each of its
+modules to one layer with a one-line responsibility. A module imports from its own layer and
+the layers below it, and only the presentation layer imports `click` or `rich`;
+`tests/test_module_boundaries.py` reads every import and fails on an upward import, on a
+cycle, and when `tests/module_layers.py` and the tables of the module map disagree. Add a
+new module to both.
+
 The job workflow starts at `run_job` in
 {download}`core.py <../src/latexprep/core.py>`, which validates the request,
 dispatches the command and publishes the result.
@@ -327,6 +398,20 @@ CPU, memory and tool-class reservations,
 scheduling of tasks, and
 {download}`process_control.py <../src/latexprep/process_control.py>` the start
 and kill helpers for child processes.
+
+Diagnostic output goes through `logging`, never `print`. A module that reports its progress
+declares `logger = logging.getLogger(__name__)` and logs with lazy `%` arguments
+(`logger.debug("task %s: start", name)`; Ruff's `G` rules reject f-strings). Log at DEBUG,
+and at INFO only what an investigator should notice, such as a limit that stopped a tool.
+A message names tools, hosts, task names and counts, never a path, a URL, a query string
+or a contact address, and never an exception's text when that may contain one. The
+library configures nothing: `latexprep/__init__.py` gives the package logger a
+`NullHandler`, and the command line attaches one stderr handler for the length of a
+command when `--debug` or `FLEDGE_DEBUG=1` asks for it
+({download}`diagnostic_logging.py <../src/latexprep/diagnostic_logging.py>`). That handler
+prints the time since start, the module name and the message, replaces the home and
+temporary directories as reports do, and leaves stdout to the report. See the
+[diagnostic log](troubleshooting.md#diagnostic-log) for the user's side.
 
 Option dataclasses validate in `__post_init__` with the kit in
 {download}`option_config.py <../src/latexprep/option_config.py>`, which also

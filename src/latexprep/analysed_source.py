@@ -19,11 +19,15 @@ built separately. Checks are written to work stand-alone: they accept an optiona
 
 from __future__ import annotations
 
+import logging
 import threading
+import time
 from pathlib import Path
 
 from .expanded_document import ExpandedDocument, expand_document
 from .source_graph import SourceGraph
+
+logger = logging.getLogger(__name__)
 
 
 class AnalysedSource:
@@ -54,7 +58,13 @@ class AnalysedSource:
             with self._graph_lock:
                 graph = self._graph
                 if graph is None:
+                    started = time.monotonic()
                     graph = self._graph = SourceGraph.build(self.root, self.main)
+                    logger.debug(
+                        "source graph built: %d files in %.2f s",
+                        len(graph.sources),
+                        time.monotonic() - started,
+                    )
         return graph
 
     @property
@@ -66,7 +76,13 @@ class AnalysedSource:
             with self._expansion_lock:
                 document = self._expanded
                 if document is None:
+                    started = time.monotonic()
                     document = self._expanded = expand_document(self.root, self.main, graph)
+                    logger.debug(
+                        "expanded document built: %d characters in %.2f s",
+                        len(document.text),
+                        time.monotonic() - started,
+                    )
         return document
 
     def covers(self, root: Path, main: str | None) -> bool:
@@ -108,6 +124,13 @@ class AnalysedSourceCache:
             analysis = self._analyses.get((root, main))
             if analysis is None:
                 analysis = self._analyses[root, main] = AnalysedSource(root, main)
+                logger.debug(
+                    "source analysis cache miss for main %s (%d analyses held)",
+                    main or "(the only root)",
+                    len(self._analyses),
+                )
+            else:
+                logger.debug("source analysis cache hit for main %s", main or "(the only root)")
             return analysis
 
     def clear(self) -> None:

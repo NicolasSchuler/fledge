@@ -89,7 +89,7 @@ def _clipped(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
-def _evidence_label(item: object, pages: bool) -> str | None:
+def _evidence_label(item: object, *, pages: bool) -> str | None:
     label: object = None
     if isinstance(item, bool):
         return None
@@ -138,7 +138,7 @@ def evidence_excerpt(finding: Finding) -> str:
         count = finding.details.get(DetailKey.VIOLATION_COUNT)
         if key == DetailKey.VIOLATIONS and type(count) is int and count > len(items):
             hidden = count - len(items)
-        labels = [_evidence_label(item, key in _EVIDENCE_PAGE_KEYS) for item in items]
+        labels = [_evidence_label(item, pages=key in _EVIDENCE_PAGE_KEYS) for item in items]
         shown = list(dict.fromkeys(label for label in labels if label is not None))[
             :_EVIDENCE_ITEMS
         ]

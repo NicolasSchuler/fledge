@@ -119,7 +119,7 @@ class _Trace(NamedTuple):
     failure: PreparationError | OSError | None
 
 
-async def _read_optional_trace(session: PdfToolSession, pages: int, wanted: bool) -> _Trace:
+async def _read_optional_trace(session: PdfToolSession, pages: int, *, wanted: bool) -> _Trace:
     if not wanted:
         return _Trace(None, None)
     try:
@@ -183,7 +183,9 @@ async def _inspect_artwork(
         return [unavailable_finding(rule, error) for rule in configured]
     trace_rules = [rule for rule in configured if rule in DRAWING_TRACE_RULES]
     color_space = options.required_color_space
-    trace = await _read_optional_trace(session, pages, bool(trace_rules) or color_space is not None)
+    trace = await _read_optional_trace(
+        session, pages, wanted=bool(trace_rules) or color_space is not None
+    )
     misaligned = frozenset(frames.unsupported_pages)
     result: list[Finding] = []
     if trace_rules and trace.document is not None:

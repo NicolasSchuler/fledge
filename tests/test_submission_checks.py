@@ -17,22 +17,13 @@ from latexprep.submission_checks import (
 )
 from latexprep.submission_options import SubmissionOptions
 from latexprep.submission_scan_findings import DEFAULT_SCAN_LIMITS, ScanLimits
+from tests.support import ProjectTestCase
 
 
-class SubmissionTests(unittest.TestCase):
+class SubmissionTests(ProjectTestCase):
     def setUp(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory()
-        self.root = Path(self.temporary.name)
+        super().setUp()
         self.write("main.tex", r"\documentclass{article}\begin{document}Results.\end{document}")
-
-    def tearDown(self) -> None:
-        self.temporary.cleanup()
-
-    def write(self, name: str, value: str | bytes) -> Path:
-        path = self.root / name
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(value.encode() if isinstance(value, str) else value)
-        return path
 
     def result(
         self, rule: str, options: SubmissionOptions, limits: ScanLimits = DEFAULT_SCAN_LIMITS

@@ -38,7 +38,7 @@ _MIN_MACHO_IMAGE_BYTES = 8
 _INERT_PATH = re.compile(r"[A-Za-z0-9_./-]+")
 
 
-def _host_macho_slice(data: bytes) -> bytes:
+def host_macho_slice(data: bytes) -> bytes:
     """Return the host-architecture slice of a Mach-O executable image.
 
     Universal binaries are split here rather than with ``lipo``: the Xcode
@@ -70,7 +70,7 @@ def _host_macho_slice(data: bytes) -> bytes:
     raise PreparationError(f"The universal executable has no {machine} slice")
 
 
-def _seal_toolchain(root: Path) -> None:
+def seal_toolchain(root: Path) -> None:
     """Drop every write bit so granted execution cannot be redirected later."""
     for path in sorted(root.rglob("*"), reverse=True):
         info = path.lstat()
@@ -110,7 +110,7 @@ class BiberToolchain:
 
     def seal(self) -> BiberToolchain:
         """Make the warmed copy read-only; it is ready to grant from then on."""
-        _seal_toolchain(self.executable.parent)
+        seal_toolchain(self.executable.parent)
         return replace(self, identity=regular_file_identity(self.executable), sealed=True)
 
 
@@ -122,7 +122,7 @@ def create_biber_toolchain(source: Path, directory: Path, *, max_file_bytes: int
     """
     if source.stat().st_size > max_file_bytes:
         raise PreparationError("The installed biber exceeds the tool file size limit")
-    image = _host_macho_slice(source.read_bytes())
+    image = host_macho_slice(source.read_bytes())
     # The names below it are fixed or random letters and digits, so only the parent
     # directory can make the path unfit.
     if not _INERT_PATH.fullmatch(str(directory)):

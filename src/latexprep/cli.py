@@ -403,7 +403,7 @@ cli.add_command(submission_text_command)
 @cli.command("rules", short_help="List every check with its code and title.")
 @click.option("--json", "json_output", is_flag=True, help="Print every check as JSON.")
 @debug_option
-def rules_command(json_output: bool) -> int:
+def rules_command(*, json_output: bool) -> int:
     """List every check with its stable code and title."""
     if json_output:
         payload = {
@@ -425,7 +425,7 @@ def rules_command(json_output: bool) -> int:
     help="Print the explanation as JSON, including the tests that demonstrate the check.",
 )
 @debug_option
-def rule_command(code: str, json_output: bool) -> int:
+def rule_command(code: str, *, json_output: bool) -> int:
     """Explain the check with code CODE: its scope, limits and suggested fix."""
     try:
         definition = get_rule(code)
@@ -519,7 +519,7 @@ def _check_input_and_outputs(options: CommandOptions, files: ReportFiles) -> Non
         raise PreparationError("Output, JSON, HTML and diagnostics destinations must be distinct")
 
 
-def _settings_suggestion(
+def settings_suggestion(
     names: tuple[str, ...],
     overrides: dict[str, object],
     config_path: Path | None,
@@ -560,7 +560,7 @@ def _load_command_settings(options: CommandOptions, report: Report) -> Settings:
     except PreparationError as error:
         names = error.settings if isinstance(error, SettingsError) else ()
         raise RequestError(
-            str(error), _settings_suggestion(names, overrides, config_path, options.preset)
+            str(error), settings_suggestion(names, overrides, config_path, options.preset)
         ) from error
     if options.select_checks or options.ignore_checks:
         try:
@@ -627,7 +627,7 @@ def _deliver_report(
     except BrokenPipeError:
         # The reader of stdout stopped early, for example `| head`; the verdict is known.
         discard_closed_stdout()
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001 - a rendering defect ends in the error exit code
         # A defect while rendering must still end in the error exit code, never in a pass.
         failure = _internal_failure(error, " while writing the report")
         failure.show()
@@ -637,7 +637,7 @@ def _deliver_report(
 
 def _execute(command: JobCommand, arguments: dict[str, Any]) -> int:
     options = CommandOptions(command=command, **arguments)
-    reject_config_with_isolated(options.config, options.isolated)
+    reject_config_with_isolated(options.config, isolated=options.isolated)
     output_format = options.output_choice()
     report = Report(command.value, scope=UNFINISHED_SCOPE)
     files = ReportFiles()
@@ -659,7 +659,7 @@ def _execute(command: JobCommand, arguments: dict[str, Any]) -> int:
         record_cancellation(
             report, cancelled_finding("Cancelled; no verified output was published")
         )
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001 - recorded as a job failure with its cause
         record_job_failure(
             report,
             error,
@@ -686,7 +686,7 @@ def main(argv: list[str] | None = None) -> int:
         # Output the reader no longer wants; the command itself had finished.
         discard_closed_stdout()
         return 0
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001 - last boundary: a defect becomes exit code 4
         failure = _internal_failure(error)
         failure.show()
         return failure.exit_code

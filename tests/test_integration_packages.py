@@ -13,13 +13,10 @@ from latexprep.core import run_job
 from latexprep.job_context import JobRequest
 from latexprep.source_transform import SourceTransformOptions
 from latexprep.workflow_options import DocumentOptions, WorkflowOptions
-from tests.support import live_tests_enabled
+from tests.support import live_test
 
 
-@unittest.skipUnless(
-    live_tests_enabled(),
-    "Enable FLEDGE_RUN_INTEGRATION for real restricted TeX tools",
-)
+@live_test("Enable FLEDGE_RUN_INTEGRATION for real restricted TeX tools")
 class LiveRemainingWorkflowTests(unittest.IsolatedAsyncioTestCase):
     async def test_two_independent_flat_packages_with_bibliography_and_source_cleanup(self):
         with tempfile.TemporaryDirectory(prefix="latex-prep-remaining-") as directory:

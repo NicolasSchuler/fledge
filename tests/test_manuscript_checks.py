@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import tempfile
 import unittest
 from dataclasses import FrozenInstanceError, replace
-from pathlib import Path
 from unittest.mock import patch
 
 from latexprep.errors import PreparationError
@@ -11,19 +9,10 @@ from latexprep.findings import Finding
 from latexprep.manuscript_check_options import ManuscriptCheckOptions
 from latexprep.manuscript_checks import check_manuscript_policies
 from latexprep.manuscript_metadata_checks import read_literal_metadata
+from tests.support import ProjectTestCase
 
 
-class ManuscriptDetailTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
-
-    def write(self, name: str, text: str) -> None:
-        path = self.root / name
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text)
-
+class ManuscriptDetailTests(ProjectTestCase):
     def results(self, body: str, options: ManuscriptCheckOptions) -> list[Finding]:
         self.write("main.tex", "\\documentclass{article}\n" + body)
         return check_manuscript_policies(self.root, "main.tex", options)

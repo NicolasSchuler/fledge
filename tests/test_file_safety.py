@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import os
-import tempfile
 import unittest
-from pathlib import Path
 
 from latexprep.file_safety import (
     FileTooLargeError,
@@ -12,6 +10,7 @@ from latexprep.file_safety import (
     read_regular_file,
 )
 from latexprep.limits import MIB
+from tests.support import ProjectTestCase
 
 
 class ByteCountTextTests(unittest.TestCase):
@@ -23,12 +22,7 @@ class ByteCountTextTests(unittest.TestCase):
         self.assertEqual(byte_count_text(1500), "1500 bytes")
 
 
-class BoundedReadTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
-
+class BoundedReadTests(ProjectTestCase):
     def test_a_file_at_the_limit_is_read_whole_and_one_byte_more_is_refused(self) -> None:
         large = self.root / "large.tex"
         large.write_bytes(b"x" * 2048)

@@ -14,21 +14,27 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import functools
+import logging
 import os
 import re
 import shutil
 import stat
 import tempfile
 import time
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple, Self
 
 from .biber_toolchain import BiberPreparation, create_biber_toolchain
 from .cancellation import complete_despite_cancellation
-from .command_runner import CommandResult, RuntimeLimits, ToolVersion
+from .command_runner import (
+    CommandFailure,
+    CommandResult,
+    RuntimeLimits,
+    ToolVersion,
+    argv_summary,
+)
 from .errors import PreparationError, SandboxRefusedError
 from .file_safety import DirectoryIdentity, FileIdentity, regular_file_identity
 from .limits import IO_CHUNK_BYTES, MIB
@@ -46,6 +52,8 @@ from .toolchain import Toolchain, tool_path
 if TYPE_CHECKING:
     from .resource_budget import ResourceBudget
 
+logger = logging.getLogger(__name__)
+
 # Memory reserved for a tool command whose caller holds no lease and states no need:
 # enough for a TeX run or a Poppler query on an ordinary manuscript, small enough that
 # several such commands can be admitted side by side within the job budget.
@@ -58,6 +66,9 @@ _PDFDETACH_VERSION_EXIT_STATUS = 99
 # Lines of a tool's version output that a report keeps: the banner and what follows it.
 _VERSION_LINES_KEPT = 3
 
+# Builds the monitor of a runner from its sandbox backend and its statistics.
+MonitorFactory = Callable[[SandboxBackend, ResourceStatistics], ResourceMonitor]
+
 
 def _remove_directory(path: Path) -> None:
     shutil.rmtree(path, ignore_errors=True)
@@ -66,6 +77,26 @@ def _remove_directory(path: Path) -> None:
 def _require_arguments(argv: list[str], subject: str) -> None:
     if not argv or any(not isinstance(arg, str) or "\0" in arg for arg in argv):
         raise PreparationError(f"{subject} must contain non-NUL string arguments")
+
+
+_STOPPED_BY_LIMIT = frozenset(
+    {CommandFailure.TIMEOUT, CommandFailure.OUTPUT_LIMIT, CommandFailure.RESOURCE_LIMIT}
+)
+
+
+def _log_tool_end(summary: str, result: CommandResult, seconds: float) -> None:
+    """Log how a command ended; a limit that stopped the tool is worth more than debugging."""
+    failure = result.failure
+    if failure in _STOPPED_BY_LIMIT:
+        logger.info("tool stopped by its %s: %s (after %.2f s)", failure, summary, seconds)
+    else:
+        logger.debug(
+            "tool end: %s (exit %d, %.2f s%s)",
+            summary,
+            result.returncode,
+            seconds,
+            f", {failure}" if failure else "",
+        )
 
 
 def _unverified_version_message(tool: str, result: CommandResult) -> str:
@@ -252,21 +283,34 @@ class ToolRunner:
         *,
         budget: ResourceBudget | None = None,
         source_date_epoch: int | str | None = None,
+        sandbox: SandboxBackend | None = None,
+        toolchain: Toolchain | None = None,
+        monitor_factory: MonitorFactory = ResourceMonitor,
     ) -> None:
+        """Create a runner; the last three replace what is otherwise chosen from the host.
+
+        ``sandbox`` is the isolation backend of the platform, ``toolchain`` the installed
+        tools and their resource roots (discovered on first use), and ``monitor_factory``
+        builds the ``ResourceMonitor`` from the backend and the runner's statistics.
+        Tests of process lifetimes and resource accounting supply these instead of
+        reaching into the runner afterwards; production passes none.
+        """
         self.limits = limits or RuntimeLimits()
         self.budget = budget
         epoch = str(int(time.time()) if source_date_epoch is None else source_date_epoch)
         if not epoch.isascii() or not epoch.isdecimal():
             raise PreparationError("The source-date epoch must be a non-negative integer")
         self._source_date_epoch = epoch
-        self.sandbox: SandboxBackend = select_sandbox_backend()
+        self.sandbox: SandboxBackend = sandbox if sandbox is not None else select_sandbox_backend()
+        self._toolchain = toolchain
         self._versions: dict[tuple[str, ...], ToolVersion] = {}
         self._version_names: dict[tuple[str, ...], str] = {}
         self._version_locks: dict[tuple[str, ...], asyncio.Lock] = {}
         self._frozen = _FrozenInputs()
         self._workspace_claims: set[Path] = set()
         self._biber = BiberPreparation()
-        self._monitor = ResourceMonitor(
+        # Public so that diagnostics and tests can read the active commands and the job scope.
+        self.monitor = monitor_factory(
             self.sandbox,
             ResourceStatistics(
                 memory_limit_mb=budget.memory_mb if budget else self.limits.max_memory_mb,
@@ -278,9 +322,11 @@ class ToolRunner:
     def source_date_epoch(self) -> str:
         return self._source_date_epoch
 
-    @functools.cached_property
+    @property
     def toolchain(self) -> Toolchain:
-        return Toolchain.discover(self.sandbox)
+        if self._toolchain is None:
+            self._toolchain = Toolchain.discover(self.sandbox)
+        return self._toolchain
 
     @property
     def biber_needs_preparation(self) -> bool:
@@ -304,7 +350,7 @@ class ToolRunner:
 
     def statistics(self) -> ResourceStatistics:
         """A snapshot of the observed resource use and any job-wide failure."""
-        return replace(self._monitor.statistics)
+        return replace(self.monitor.statistics)
 
     def _resolve_tool(self, name: str) -> Path:
         return self.toolchain.resolve(name)
@@ -341,7 +387,7 @@ class ToolRunner:
         source = tool_path("biber")
         # The payload is counted against the job temporary budget: it is created
         # under the monitored job root whenever a job scope is active.
-        scope = self._monitor.scope
+        scope = self.monitor.scope
         base = (scope.root if scope is not None else root.resolve(strict=True)) / ".toolchain"
         toolchain = create_biber_toolchain(source, base, max_file_bytes=self.limits.max_file_bytes)
         self.toolchain.substitute("biber", toolchain.executable)
@@ -376,7 +422,7 @@ class ToolRunner:
             self._version_locks.setdefault(key, asyncio.Lock()),
         ):
             if key not in self._versions:
-                self._monitor.statistics.version_probes += 1
+                self.monitor.statistics.version_probes += 1
                 result = await self.run(argv, cwd=workspace, workspace=workspace)
                 self._versions[key] = _verified_version(argv, executable, result)
                 self._version_names[key] = Path(argv[0]).name
@@ -398,7 +444,7 @@ class ToolRunner:
 
     @contextlib.asynccontextmanager
     async def job_scope(self, root: Path, *, max_temp_bytes: int) -> AsyncGenerator[Self]:
-        async with self._monitor.job_scope(
+        async with self.monitor.job_scope(
             root, max_temp_bytes=max_temp_bytes, max_file_bytes=self.limits.max_file_bytes
         ):
             yield self
@@ -415,8 +461,22 @@ class ToolRunner:
         _require_arguments(argv, "A tool command")
         if memory_mb is not None and (type(memory_mb) is not int or memory_mb < 1):
             raise ValueError("A command memory cap must be a positive integer")
-        async with self._admission("tool " + argv[0], memory_mb):
-            return await self._run_command(argv, cwd, workspace, readonly_inputs, memory_mb)
+        summary = argv_summary(argv)
+        logger.debug("tool start: %s", summary)
+        started = time.monotonic()
+        try:
+            async with self._admission("tool " + argv[0], memory_mb):
+                result = await self._run_command(argv, cwd, workspace, readonly_inputs, memory_mb)
+        except (Exception, asyncio.CancelledError) as error:
+            logger.debug(
+                "tool did not finish: %s (%s after %.2f s)",
+                summary,
+                type(error).__name__,
+                time.monotonic() - started,
+            )
+            raise
+        _log_tool_end(summary, result, time.monotonic() - started)
+        return result
 
     async def _run_command(
         self,
@@ -430,7 +490,7 @@ class ToolRunner:
         cwd = cwd.resolve(strict=True)
         if not workspace.is_dir() or not cwd.is_dir() or not cwd.is_relative_to(workspace):
             raise ValueError("Tool working directory must be inside its own workspace")
-        scope = self._monitor.scope
+        scope = self.monitor.scope
         if scope is not None and not workspace.is_relative_to(scope.root):
             raise ValueError("Tool workspaces must be inside the monitored job directory")
         if self._frozen.overlap(workspace):
@@ -440,8 +500,8 @@ class ToolRunner:
             for path in self._workspace_claims
         ):
             raise RuntimeError("Concurrent tools need separate non-overlapping writable workspaces")
-        if self._monitor.failure:
-            raise PreparationError(self._monitor.failure)
+        if self.monitor.failure:
+            raise PreparationError(self.monitor.failure)
         inputs = self._frozen.validate(readonly_inputs)
         executable = self._resolve_tool(argv[0])
         if executable.resolve().is_relative_to(workspace):
@@ -508,7 +568,7 @@ class ToolRunner:
             )
         except (OSError, ValueError) as error:
             raise PreparationError(f"Restricted tool startup failed: {error}") from error
-        command = self._monitor.register(
+        command = self.monitor.register(
             process,
             invocation.workspace,
             memory_mb=invocation.memory_mb,
@@ -523,9 +583,9 @@ class ToolRunner:
         completion = asyncio.create_task(process.wait())
         watcher = (
             None
-            if self._monitor.scope is not None
+            if self.monitor.scope is not None
             else asyncio.create_task(
-                self._monitor.watch_command(
+                self.monitor.watch_command(
                     process.pid, invocation.workspace, max_file_bytes=self.limits.max_file_bytes
                 )
             )
@@ -551,7 +611,7 @@ class ToolRunner:
             timed_out=exit_state.timed_out,
             output_limited=output.limited,
             resource_exceeded=(
-                exit_state.resource_exceeded or final_violation or self._monitor.failure
+                exit_state.resource_exceeded or final_violation or self.monitor.failure
             ),
             resource_roots=invocation.resource_roots,
             duration_seconds=time.monotonic() - started,
@@ -567,8 +627,8 @@ class ToolRunner:
         watched: list[asyncio.Future[Any]] = [completion, command.failure]
         if watcher is not None:
             watched.append(watcher)
-        if self._monitor.failure:
-            command.fail(self._monitor.failure)
+        if self.monitor.failure:
+            command.fail(self.monitor.failure)
         done, _ = await asyncio.wait(
             watched, timeout=self.limits.timeout_seconds, return_when=asyncio.FIRST_COMPLETED
         )
@@ -579,7 +639,7 @@ class ToolRunner:
         if watcher is not None and watcher in done:
             try:
                 return _Exit(timed_out=False, resource_exceeded=watcher.result())
-            except Exception as error:
+            except Exception as error:  # noqa: BLE001 - accounting failure is reported
                 return _Exit(
                     timed_out=False,
                     resource_exceeded=(
@@ -603,4 +663,4 @@ class ToolRunner:
             await command.process.wait()
             await asyncio.gather(completion, *readers, return_exceptions=True)
         finally:
-            self._monitor.release(command)
+            self.monitor.release(command)

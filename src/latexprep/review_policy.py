@@ -137,11 +137,11 @@ def _matches(finding: Finding, review: ReviewRule) -> bool:
             return False
     if review.path is not None and finding.path != review.path:
         return False
-    if review.line_start is not None:
-        if type(finding.line) is not int or not (
-            review.line_start <= finding.line <= (review.line_end or review.line_start)
-        ):
-            return False
+    if review.line_start is not None and (
+        type(finding.line) is not int
+        or not (review.line_start <= finding.line <= (review.line_end or review.line_start))
+    ):
+        return False
     if review.page_start is not None:
         pages = _affected_pages(finding)
         if pages is None or not all(

@@ -1,27 +1,16 @@
 from __future__ import annotations
 
-import tempfile
 import unittest
-from pathlib import Path
 from unittest.mock import patch
 
 from latexprep.errors import PreparationError
 from latexprep.findings import has_blockers
 from latexprep.source_transform import SourceTransformOptions, plan_source_transforms
 from latexprep.tex_lexer import ParseLimitExceeded
+from tests.support import ProjectTestCase
 
 
-class SourceTransformTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
-
-    def write(self, path: str, text: str | bytes) -> None:
-        target = self.root / path
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(text.encode("utf-8") if isinstance(text, str) else text)
-
+class SourceTransformTests(ProjectTestCase):
     def plan(self, **options):
         return plan_source_transforms(self.root, "main.tex", SourceTransformOptions(**options))
 

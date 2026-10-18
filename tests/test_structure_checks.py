@@ -18,7 +18,7 @@ from latexprep.pdf_structure_checks import (
 )
 from latexprep.pdf_tool_output import MAX_INSPECTION_PAGES
 from latexprep.resource_budget import ResourceBudget
-from tests.test_pdf_checks import DetailRunner
+from tests.pdf_fakes import DetailRunner
 
 
 def structured_pdf_objects() -> dict[str, object]:

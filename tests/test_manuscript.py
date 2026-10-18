@@ -1,27 +1,14 @@
 from __future__ import annotations
 
-import tempfile
 import unittest
-from pathlib import Path
 
 from latexprep.errors import PreparationError
 from latexprep.findings import Finding
 from latexprep.manuscript import ManuscriptOptions, check_manuscript
+from tests.support import ProjectTestCase
 
 
-class ManuscriptTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory()
-        self.root = Path(self.temporary.name)
-
-    def tearDown(self) -> None:
-        self.temporary.cleanup()
-
-    def write(self, name: str, text: str) -> None:
-        path = self.root / name
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text)
-
+class ManuscriptTests(ProjectTestCase):
     def finding(self, text: str, options: ManuscriptOptions, rule: str) -> Finding:
         self.write("main.tex", text)
         findings = check_manuscript(self.root, "main.tex", options)

@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from latexprep.command_runner import RuntimeLimits
-from tests.test_runtime import LifecycleRunner
+from tests.fakes import LifecycleRunner
 
 
 class OutputLimitDrainTests(unittest.TestCase):

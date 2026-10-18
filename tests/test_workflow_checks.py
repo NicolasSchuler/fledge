@@ -13,7 +13,6 @@ from unittest.mock import AsyncMock, patch
 from click.testing import CliRunner
 
 from latexprep.build_checks import BuildCheckOptions
-from latexprep.build_result import BuildResult
 from latexprep.cli import cli
 from latexprep.config import Settings
 from latexprep.core import run_job
@@ -22,59 +21,26 @@ from latexprep.job_context import JobRequest, pdf_check_settings
 from latexprep.manuscript import ManuscriptOptions
 from latexprep.manuscript_check_options import ManuscriptCheckOptions
 from latexprep.online_checks import OnlineOptions
-from latexprep.package_headers import LoadedPackage
 from latexprep.pdf_check_options import PdfCheckOptions
 from latexprep.pdf_check_pipeline import inspect_configured_pdf_checks
 from latexprep.report import Outcome, Report
 from latexprep.resource_budget import ResourceBudget
 from latexprep.runtime import ToolRunner
 from latexprep.submission_options import SubmissionOptions
+from tests.support import (
+    AsyncProjectTestCase,
+    build_with_loaded_class,
+    controlled_backends,
+    single_file_project,
+)
 
 
-def source_project(root: Path, body: str = "Body.", preamble: str = "") -> None:
-    root.mkdir()
-    (root / "main.tex").write_text(
-        "\\documentclass{article}\n"
-        + preamble
-        + "\n\\begin{document}\n"
-        + body
-        + "\n\\end{document}\n"
-    )
-
-
-async def controlled_build(tree, main, work, engine, runner, **_options):
-    """Orchestration double only; live TeX evidence belongs to opt-in integration tests."""
-    work.mkdir()
-    pdf = work / "paper.pdf"
-    pdf.write_bytes(b"%PDF-1.7\ncontrolled build result\n")
-    return BuildResult(
-        success=True,
-        pdf=pdf,
-        recorder_project_inputs={main},
-        submission_inputs={main},
-        command=["controlled-build"],
-        recorder_complete=True,
-        loaded_packages=[
-            LoadedPackage(
-                "article.cls",
-                "/toolchain/article.cls",
-                "toolchain",
-                declared_date="2025/01/01",
-                declared_version="fixture",
-            )
-        ],
-    )
-
-
-class WorkflowCheckTests(unittest.IsolatedAsyncioTestCase):
+class WorkflowCheckTests(AsyncProjectTestCase):
     async def asyncSetUp(self):
-        self.temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name).resolve()
         self.source = self.root / "input"
 
     async def test_inspect_runs_new_source_checks_with_deterministic_parallel_results(self):
-        source_project(
+        single_file_project(
             self.source,
             "Named Institution \\cite{missing}\\bibliography{refs}",
             "\\title{Paper}",
@@ -85,12 +51,15 @@ class WorkflowCheckTests(unittest.IsolatedAsyncioTestCase):
             manuscript_checks=ManuscriptCheckOptions(required_metadata=("author",)),
             submission_checks=SubmissionOptions(identity_terms=("Named Institution",)),
         )
-        reports = []
-        with patch("latexprep.document_tasks.build_project", new=AsyncMock()) as build:
-            for jobs in (1, 4):
-                reports.append(
-                    await run_job(JobRequest("inspect", self.source, replace(settings, jobs=jobs)))
-                )
+        build = AsyncMock()
+        backends = controlled_backends(build=build)
+        reports = [
+            await run_job(
+                JobRequest("inspect", self.source, replace(settings, jobs=jobs)),
+                backends=backends,
+            )
+            for jobs in (1, 4)
+        ]
         build.assert_not_called()
         self.assertEqual(reports[0].to_dict()["findings"], reports[1].to_dict()["findings"])
         for report in reports:
@@ -101,7 +70,7 @@ class WorkflowCheckTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(original, {p.name: p.read_bytes() for p in self.source.iterdir()})
 
     async def test_bibliography_command_uses_selected_citation_scope(self):
-        source_project(self.source, "\\cite{missing}\\bibliography{refs}")
+        single_file_project(self.source, "\\cite{missing}\\bibliography{refs}")
         (self.source / "refs.bib").write_text("@article{unused,title={A study}}\n")
         report = await run_job(JobRequest("bib", self.source, Settings()))
         self.assertEqual(report.main, "main.tex")
@@ -109,7 +78,7 @@ class WorkflowCheckTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("BIB101", {item.code for item in report.findings})
 
     async def test_offline_configured_checks_never_resolve_or_connect(self):
-        source_project(self.source, "\\cite{one}\\bibliography{refs}")
+        single_file_project(self.source, "\\cite{one}\\bibliography{refs}")
         (self.source / "refs.bib").write_text("@article{one,doi={10.1234/example}}\n")
         with (
             patch(
@@ -134,7 +103,7 @@ class WorkflowCheckTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(finding.details["requests"], 0)
 
     async def test_output_policies_apply_after_cleanup_and_flattening(self):
-        source_project(self.source)
+        single_file_project(self.source)
         (self.source / "extra notes.txt").write_text("Additional note.\n")
         (self.source / "main.aux").write_text("Generated artifact.\n")
         options = SubmissionOptions(
@@ -144,12 +113,10 @@ class WorkflowCheckTests(unittest.IsolatedAsyncioTestCase):
             max_archive_bytes=10_000,
         )
         settings = Settings(layout="flat", submission_checks=options)
-        with (
-            patch("latexprep.document_tasks.build_project", side_effect=controlled_build),
-            patch("latexprep.document_tasks.inspect_pdf", new=AsyncMock(return_value=[])),
-            patch("latexprep.document_tasks.compare_pdfs", new=AsyncMock(return_value=[])),
-        ):
-            report = await run_job(JobRequest("prepare", self.source, settings, self.root / "out"))
+        backends = controlled_backends(build=build_with_loaded_class)
+        report = await run_job(
+            JobRequest("prepare", self.source, settings, self.root / "out"), backends=backends
+        )
         self.assertIn(report.outcome, {"passed", "passed_with_advisories"}, report.to_dict())
         self.assertTrue((self.root / "out/submission.zip").is_file())
         self.assertTrue((self.source / "extra notes.txt").is_file())
@@ -165,7 +132,7 @@ class WorkflowCheckTests(unittest.IsolatedAsyncioTestCase):
             )
 
     async def test_archive_and_build_constraints_block_publication(self):
-        source_project(self.source)
+        single_file_project(self.source)
         for name, settings, code in (
             (
                 "archive",
@@ -180,14 +147,11 @@ class WorkflowCheckTests(unittest.IsolatedAsyncioTestCase):
                 "BLD102",
             ),
         ):
-            with (
-                self.subTest(policy=name),
-                patch("latexprep.document_tasks.build_project", side_effect=controlled_build),
-                patch("latexprep.document_tasks.inspect_pdf", new=AsyncMock(return_value=[])),
-                patch("latexprep.document_tasks.compare_pdfs", new=AsyncMock(return_value=[])),
-            ):
+            backends = controlled_backends(build=build_with_loaded_class)
+            with self.subTest(policy=name):
                 report = await run_job(
-                    JobRequest("prepare", self.source, settings, self.root / name)
+                    JobRequest("prepare", self.source, settings, self.root / name),
+                    backends=backends,
                 )
             self.assertEqual(report.outcome, "blocked", report.to_dict())
             self.assertFalse((self.root / name).exists())
@@ -197,7 +161,7 @@ class WorkflowCheckTests(unittest.IsolatedAsyncioTestCase):
             )
 
     async def test_failed_final_configured_pdf_check_prevents_publication(self):
-        source_project(self.source)
+        single_file_project(self.source)
         stages = []
 
         async def configured(_pdf, root, _main, work, _runner, _settings, _budget, *, analysed):
@@ -213,14 +177,12 @@ class WorkflowCheckTests(unittest.IsolatedAsyncioTestCase):
                 )
             ]
 
-        with (
-            patch("latexprep.document_tasks.build_project", side_effect=controlled_build),
-            patch("latexprep.document_tasks.inspect_pdf", new=AsyncMock(return_value=[])),
-            patch("latexprep.document_tasks.compare_pdfs", new=AsyncMock(return_value=[])),
-            patch("latexprep.document_tasks.inspect_configured_pdf_checks", side_effect=configured),
+        backends = controlled_backends(build=build_with_loaded_class)
+        with patch(
+            "latexprep.document_tasks.inspect_configured_pdf_checks", side_effect=configured
         ):
             report = await run_job(
-                JobRequest("prepare", self.source, Settings(), self.root / "out")
+                JobRequest("prepare", self.source, Settings(), self.root / "out"), backends=backends
             )
         self.assertEqual(report.outcome, "blocked")
         self.assertFalse((self.root / "out").exists())
@@ -228,24 +190,21 @@ class WorkflowCheckTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(stages[0][0], stages[1][0])
 
     async def test_final_source_policy_catches_package_name_changed_by_flattening(self):
-        source_project(self.source, preamble="\\usepackage{styles/helper}")
+        single_file_project(self.source, preamble="\\usepackage{styles/helper}")
         (self.source / "styles").mkdir()
         (self.source / "styles/helper.sty").write_text("\\ProvidesPackage{helper}\n")
-        with (
-            patch("latexprep.document_tasks.build_project", side_effect=controlled_build),
-            patch("latexprep.document_tasks.inspect_pdf", new=AsyncMock(return_value=[])),
-            patch("latexprep.document_tasks.compare_pdfs", new=AsyncMock(return_value=[])),
-        ):
-            report = await run_job(
-                JobRequest(
-                    "prepare",
-                    self.source,
-                    Settings(
-                        layout="flat", manuscript=ManuscriptOptions(forbidden_packages=("helper",))
-                    ),
-                    self.root / "out",
-                )
-            )
+        backends = controlled_backends(build=build_with_loaded_class)
+        report = await run_job(
+            JobRequest(
+                "prepare",
+                self.source,
+                Settings(
+                    layout="flat", manuscript=ManuscriptOptions(forbidden_packages=("helper",))
+                ),
+                self.root / "out",
+            ),
+            backends=backends,
+        )
         violation = next(
             item for item in report.findings if item.code == "TEX103" and item.status == "failed"
         )
@@ -254,30 +213,27 @@ class WorkflowCheckTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse((self.root / "out").exists())
 
     async def test_template_reference_follows_the_flattened_file(self):
-        source_project(self.source, preamble="\\usepackage{styles/helper}")
+        single_file_project(self.source, preamble="\\usepackage{styles/helper}")
         (self.source / "styles").mkdir()
         content = b"\\ProvidesPackage{helper}[2025/01/01 v1]\n"
         (self.source / "styles/helper.sty").write_bytes(content)
         reference = self.root / "reference.sty"
         reference.write_bytes(content)
-        with (
-            patch("latexprep.document_tasks.build_project", side_effect=controlled_build),
-            patch("latexprep.document_tasks.inspect_pdf", new=AsyncMock(return_value=[])),
-            patch("latexprep.document_tasks.compare_pdfs", new=AsyncMock(return_value=[])),
-        ):
-            report = await run_job(
-                JobRequest(
-                    "prepare",
-                    self.source,
-                    Settings(
-                        layout="flat",
-                        submission_checks=SubmissionOptions(
-                            template_references=(("styles/helper.sty", str(reference)),),
-                        ),
+        backends = controlled_backends(build=build_with_loaded_class)
+        report = await run_job(
+            JobRequest(
+                "prepare",
+                self.source,
+                Settings(
+                    layout="flat",
+                    submission_checks=SubmissionOptions(
+                        template_references=(("styles/helper.sty", str(reference)),),
                     ),
-                    self.root / "out",
-                )
-            )
+                ),
+                self.root / "out",
+            ),
+            backends=backends,
+        )
         matches = [item for item in report.findings if item.code == "PKG107"]
         self.assertEqual(len(matches), 3, report.to_dict())
         self.assertTrue(all(item.status == "passed" for item in matches), matches)
@@ -290,7 +246,7 @@ class PdfCheckCompositionTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
             source = root / "input"
-            source_project(source, preamble="\\title{A paper}\\author{Alice}\\author{Bob}")
+            single_file_project(source, preamble="\\title{A paper}\\author{Alice}\\author{Bob}")
             details = AsyncMock(return_value=[])
             with patch("latexprep.pdf_check_pipeline.inspect_pdf_details", new=details):
                 findings = await inspect_configured_pdf_checks(
@@ -311,7 +267,7 @@ class PdfCheckCompositionTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
             source = root / "input"
-            source_project(source, preamble="\\title{Example Paper}\\author{Example Author}")
+            single_file_project(source, preamble="\\title{Example Paper}\\author{Example Author}")
             budget = ResourceBudget(2, 1024)
             settings = Settings(
                 match_source_pdf_metadata=("title", "author"),
@@ -345,7 +301,7 @@ class PdfCheckCompositionTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
             source = root / "input"
-            source_project(source, preamble="\\author{One}\\author{Two}")
+            single_file_project(source, preamble="\\author{One}\\author{Two}")
             details = AsyncMock(return_value=[])
             with (
                 patch("latexprep.pdf_check_pipeline.inspect_pdf_details", new=details),
@@ -377,7 +333,7 @@ class PdfCheckCompositionTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
             source = root / "input"
-            source_project(source, "\\includegraphics{figure.pdf}")
+            single_file_project(source, "\\includegraphics{figure.pdf}")
             (source / "figure.pdf").write_bytes(b"%PDF-fixture")
             (source / "unused.pdf").write_bytes(b"%PDF-fixture")
 

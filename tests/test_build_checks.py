@@ -20,7 +20,7 @@ from latexprep.errors import PreparationError
 from latexprep.findings import Finding
 from latexprep.latexmk_build import build_project
 from latexprep.package_headers import LoadedPackage, read_loaded_package
-from tests.test_runtime import FakeBuildRunner
+from tests.fakes import FakeBuildRunner
 
 
 class LookupRunner:
@@ -62,8 +62,7 @@ class BuildCheckTests(unittest.IsolatedAsyncioTestCase):
                         )
                     return result
 
-            runner = RecorderRunner()
-            runner._test_resource_roots.add(toolchain)
+            runner = RecorderRunner(resource_roots=[toolchain])
             result = await build_project(source, "main.tex", root / "build", "pdflatex", runner)
             self.assertTrue(result.success, result.findings)
             self.assertTrue(result.recorder_complete)

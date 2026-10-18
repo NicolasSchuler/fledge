@@ -42,7 +42,7 @@ from latexprep.source_graph import SourceGraph
 from latexprep.submission_checks import check_submission
 from latexprep.submission_options import SubmissionOptions
 from latexprep.submission_readiness_checks import check_submission_readiness
-from tests.support import fake_build_result, write_project
+from tests.support import controlled_backends, fake_build_result, write_project
 
 PAPER = {
     "main.tex": (
@@ -363,13 +363,9 @@ class JobSharingTests(unittest.IsolatedAsyncioTestCase):
             }
             return fake_build_result(work, main, dependencies=inputs, submission_inputs=inputs)
 
-        with (
-            patch("latexprep.document_tasks.build_project", side_effect=build),
-            patch("latexprep.document_tasks.inspect_pdf", new=passed),
-            patch("latexprep.document_tasks.compare_pdfs", new=passed),
-            patch("latexprep.pdf_check_pipeline.inspect_pdf", new=passed),
-        ):
-            return await run_job(request)
+        backends = controlled_backends(build=build, inspect_pdf=passed, compare_pdfs=passed)
+        with patch("latexprep.pdf_check_pipeline.inspect_pdf", new=passed):
+            return await run_job(request, backends=backends)
 
     def comparable(self, report):
         return sorted(repr(finding) for finding in report.findings)

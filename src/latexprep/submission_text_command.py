@@ -37,7 +37,7 @@ SUBMISSION_TEXT_SCHEMA_VERSION = 1
 
 
 def _read_fields(
-    source: Path, main: str | None, config: Path | None, isolated: bool
+    source: Path, main: str | None, config: Path | None, *, isolated: bool
 ) -> dict[str, SubmissionField]:
     """Import the project into a temporary folder and read its submission fields."""
     settings = load_settings(resolve_config_path(source, config, isolated=isolated), {"main": main})
@@ -91,6 +91,7 @@ def submission_text_command(
     source: Path,
     main: str | None,
     field: str | None,
+    *,
     json_output: bool,
     config: Path | None,
     isolated: bool,
@@ -101,9 +102,9 @@ def submission_text_command(
     """
     if json_output and field is not None:
         raise click.UsageError("--json returns all fields; do not combine it with --field")
-    reject_config_with_isolated(config, isolated)
+    reject_config_with_isolated(config, isolated=isolated)
     try:
-        fields = _read_fields(source, main, config, isolated)
+        fields = _read_fields(source, main, config, isolated=isolated)
     except (PreparationError, OSError) as error:
         click.echo(escape_single_line_text(f"Cannot export submission text: {error}"), err=True)
         raise click.exceptions.Exit(Outcome.ERROR.exit_code) from error

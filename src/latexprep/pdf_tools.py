@@ -13,6 +13,7 @@ shared measurement memo, so a read-only measurement runs once however many group
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 import shutil
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
@@ -36,6 +37,8 @@ from .pdf_tool_output import page_count, pdfinfo_properties
 from .resource_budget import ResourceBudget
 
 _T = TypeVar("_T")
+
+logger = logging.getLogger(__name__)
 
 MEASUREMENT_RENDER_MEMORY_MB = 128
 # Every external tool the PDF adapters can run; qpdf alone reports its version with --version.
@@ -372,10 +375,12 @@ class PdfToolSession:
         async with memo.locks.setdefault(key, asyncio.Lock()), self.lease(name):
             measured = memo.results.get(key)
             if measured is None:
+                logger.debug("PDF measurement %s: not remembered, running %s", name, key[0])
                 result = await self.run_without_lease(name, argv, memory_mb=DEFAULT_LEASE_MEMORY_MB)
                 self._require_bounded_output(result)
                 measured = memo.results[key] = _Measured(result, self.versions[key[0]])
             else:
+                logger.debug("PDF measurement %s: reused the remembered %s output", name, key[0])
                 self.versions[key[0]] = measured.version
             result = measured.result
             return await run_in_thread(parse, result) if in_thread else parse(result)

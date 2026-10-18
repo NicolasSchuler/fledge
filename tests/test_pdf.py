@@ -16,75 +16,8 @@ from latexprep.report import Report
 from latexprep.resource_budget import ResourceBudget
 from latexprep.runtime import ToolRunner
 from latexprep.workflow_options import ComparisonOptions
-from tests.support import live_tests_enabled
-
-
-class FakePdfRunner(ToolRunner):
-    def __init__(
-        self,
-        *,
-        text_changed: bool = False,
-        raster_changed: bool = False,
-        pages_right: int = 1,
-        missing: str | None = None,
-    ) -> None:
-        super().__init__()
-        self.text_changed = text_changed
-        self.raster_changed = raster_changed
-        self.pages_right = pages_right
-        self.missing = missing
-        self.commands: list[list[str]] = []
-
-    def _resolve_tool(self, name: str) -> Path:
-        return Path("/test-tools") / name
-
-    async def run(
-        self,
-        argv: list[str],
-        cwd: Path,
-        workspace: Path,
-        *,
-        readonly_inputs: tuple[Path, ...] = (),
-        memory_mb: int | None = None,
-    ) -> CommandResult:
-        self._frozen.validate(readonly_inputs)
-        self.commands.append(argv)
-        if argv[0] == self.missing:
-            raise PreparationError(f"Missing tool: {argv[0]}")
-        if argv[-1] == "-v":
-            return CommandResult(
-                99 if argv[0] == "pdfdetach" else 0,
-                f"{argv[0]} version test\n",
-                "",
-                resolved_command=argv,
-            )
-        right = any(b"right" in path.read_bytes() for path in readonly_inputs)
-        pages = self.pages_right if right else 1
-        output = ""
-        if argv[0] == "pdfinfo":
-            output = f"Pages: {pages}\nEncrypted: no\nForm: none\nJavaScript: no\n"
-            if "-box" in argv:
-                output += "".join(
-                    f"Page {page} size: 612 x 792 pts\n" for page in range(1, pages + 1)
-                )
-        elif argv[0] == "pdftotext":
-            output = (("Changed\n" if right and self.text_changed else "Text\n") + "\f") * pages
-        elif argv[0] == "pdftoppm":
-            pixel = b"\0\0\0" if right and self.raster_changed else b"\xff\xff\xff"
-            (workspace / (argv[-1] + ".ppm")).write_bytes(b"P6\n1 1\n255\n" + pixel)
-        elif argv[0] == "pdffonts":
-            output = (
-                "name type encoding emb sub uni object ID\n---\n"
-                "Test Type 1 Builtin yes yes no 3 0\n"
-            )
-        elif argv[0] == "pdfdetach":
-            output = "0 embedded files\n"
-        elif argv[0] == "pdfimages":
-            output = (
-                "page num type width height color comp bpc enc interp object ID "
-                "x-ppi y-ppi size ratio\n---\n"
-            )
-        return CommandResult(0, output, "", resolved_command=argv)
+from tests.pdf_fakes import FakePdfRunner
+from tests.support import live_test
 
 
 class PdfTests(unittest.IsolatedAsyncioTestCase):
@@ -510,7 +443,7 @@ class PdfConstraintTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(low.status, "failed")
         self.assertEqual(low.details["below_minimum"][0]["type"], "stencil")
 
-    @unittest.skipUnless(live_tests_enabled(), "Opt-in live PDF tools")
+    @live_test("Opt-in live PDF tools")
     async def test_live_pdfimages_inventory_accepts_a_real_stencil_mask(self) -> None:
         self.pdf.write_bytes(stencil_mask_pdf())
         findings = await inspect_pdf(

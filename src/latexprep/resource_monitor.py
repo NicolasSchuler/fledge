@@ -107,7 +107,7 @@ class JobScope:
     monitor: asyncio.Task[None] = field(init=False)
 
 
-def _sample_interval(start: float) -> float:
+def sample_interval(start: float) -> float:
     """Sample tightly while a job ramps up, then relax to keep tree walks cheap.
 
     Runaway allocation and output growth almost always appear in the first
@@ -122,7 +122,8 @@ def _peak(current: float | None, value: float) -> float:
     return max(current or 0, value)
 
 
-def _group_usage(samples: list[ProcessSample], pid: int, memory_mb: int) -> GroupUsage:
+def group_usage(samples: list[ProcessSample], pid: int, memory_mb: int) -> GroupUsage:
+    """The memory of the process group ``pid`` leads, and the limit it exceeds, if any."""
     sizes = [sample.rss_kb for sample in samples if sample.group == pid]
     resident_kb = sum(sizes)
     if resident_kb > memory_mb * 1024:
@@ -251,16 +252,17 @@ class ResourceMonitor:
         """Standalone-run fallback; jobs use the shared monitor below."""
         start = time.monotonic()
         while True:
-            await asyncio.sleep(_sample_interval(start))
-            samples = await self._sample_processes()
-            failure = _group_usage(samples, pid, self.active_commands[pid].memory_mb).failure
+            await asyncio.sleep(sample_interval(start))
+            samples = await self.sample_processes()
+            failure = group_usage(samples, pid, self.active_commands[pid].memory_mb).failure
             if failure:
                 return failure
             failure = await asyncio.to_thread(workspace_violation, workspace, max_file_bytes)
             if failure:
                 return failure
 
-    async def _sample_processes(self) -> list[ProcessSample]:
+    async def sample_processes(self) -> list[ProcessSample]:
+        """List the processes with their memory; a monitor subclass may replace this."""
         try:
             probe = await start_process(
                 _PROCESS_LISTING_PROGRAM,
@@ -325,19 +327,20 @@ class ResourceMonitor:
         if parent_kb + tool_kb > limit * 1024:
             self.fail_job(f"Aggregate job memory including the parent exceeded {limit} MiB")
         for pid, command in commands.items():
-            usage = _group_usage(samples, pid, command.memory_mb)
+            usage = group_usage(samples, pid, command.memory_mb)
             statistics.peak_command_rss_mb = _peak(
                 statistics.peak_command_rss_mb, usage.resident_kb / 1024
             )
             if usage.failure:
                 command.fail(usage.failure)
 
-    async def _sample_job(self, scope: JobScope) -> None:
+    async def sample_job(self, scope: JobScope) -> None:
+        """Take one sample of the whole job; a monitor subclass may replace this."""
         start = time.monotonic()
         try:
             commands = dict(self.active_commands)
             try:
-                samples = await self._sample_processes()
+                samples = await self.sample_processes()
             # OSError includes the TimeoutError of a process table that never answered.
             except (OSError, ValueError, PreparationError) as error:
                 problem = str(error) or type(error).__name__
@@ -368,16 +371,16 @@ class ResourceMonitor:
         start = time.monotonic()
         try:
             while True:
-                await self._sample_job(scope)
+                await self.sample_job(scope)
                 # A sample that swallowed this task's cancellation must not keep the
                 # monitor alive, or job_scope would wait for it indefinitely.
                 current = asyncio.current_task()
                 if current is not None and current.cancelling():
                     raise asyncio.CancelledError
-                interval = _sample_interval(start)
+                interval = sample_interval(start)
                 self.statistics.sample_interval_seconds = interval
                 await asyncio.sleep(interval)
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 - fail closed and report the cause
             # Fail closed: commands must not outlive their resource accounting.
             self.fail_job(f"Job resource accounting failed: {type(error).__name__}: {error}")
 
@@ -409,6 +412,6 @@ class ResourceMonitor:
             scope.monitor.cancel()
             await asyncio.gather(scope.monitor, return_exceptions=True)
             # Include very short/source-only jobs in the final sample.
-            await self._sample_job(scope)
+            await self.sample_job(scope)
         finally:
             self.scope = None

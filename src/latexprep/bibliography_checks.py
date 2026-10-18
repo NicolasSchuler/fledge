@@ -185,15 +185,13 @@ def _all_root_graphs(
     root: Path, inspection: SourceGraph, selected: CitationGraph, uncertainties: list[Uncertainty]
 ) -> list[CitationGraph]:
     """One graph per discovered root; ``selected`` is the graph of ``inspection``."""
-    for item in inspection.findings:
-        if (
-            item.path
-            and Path(item.path).suffix.lower() in ROOT_SUFFIXES
-            and item.rule in UNPARSED_SOURCE_RULES
-        ):
-            uncertainties.append(
-                Uncertainty(f"All-root discovery is incomplete: {item.path}: {item.message}")
-            )
+    uncertainties.extend(
+        Uncertainty(f"All-root discovery is incomplete: {item.path}: {item.message}")
+        for item in inspection.findings
+        if item.path
+        and Path(item.path).suffix.lower() in ROOT_SUFFIXES
+        and item.rule in UNPARSED_SOURCE_RULES
+    )
     if len(inspection.roots) > _MAX_ROOTS:
         uncertainties.append(Uncertainty(f"Document root count exceeds {_MAX_ROOTS}"))
     graphs: list[CitationGraph] = []

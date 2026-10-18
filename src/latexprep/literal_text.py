@@ -122,9 +122,8 @@ _NONCONTENT_COMMANDS = frozenset(
 # Non-content commands whose leading arguments hold a filename, length, counter
 # or style value instead of prose; the token and that many arguments disappear.
 _NONCONTENT_ARGUMENTS = {
-    **{
-        name: 1
-        for name in (
+    **dict.fromkeys(
+        (
             "addbibresource",
             "addtocounter",
             "bibliography",
@@ -149,8 +148,9 @@ _NONCONTENT_ARGUMENTS = {
             "vphantom",
             "vskip",
             "vspace",
-        )
-    },
+        ),
+        1,
+    ),
     "addtolength": 2,
     "fontsize": 2,
     "rule": 2,

@@ -106,9 +106,9 @@ def folder_entries(
                         "Replace it with a real copy of the file or folder, or remove it, "
                         "and run again."
                     )
-                registry.add(path, is_dir)
+                registry.add(path, is_dir=is_dir)
                 entries.append(ProjectEntry(path, is_dir, metadata.st_size if not is_dir else 0))
-                if is_dir and not (exclude_metadata and metadata_prefix(path, True)):
+                if is_dir and not (exclude_metadata and metadata_prefix(path, is_dir=True)):
                     child_fd = os.open(item.name, DIRECTORY_FLAGS, dir_fd=current_fd)
                     try:
                         visit(child_fd, path + "/")
@@ -126,7 +126,7 @@ def _select_entries(
     kept: list[ProjectEntry] = []
     excluded: set[str] = set()
     for entry in entries:
-        prefix = metadata_prefix(entry.path, entry.is_dir) if exclude_metadata else None
+        prefix = metadata_prefix(entry.path, is_dir=entry.is_dir) if exclude_metadata else None
         if prefix:
             excluded.add(prefix)
         else:
@@ -206,7 +206,7 @@ def source_path(source: Path) -> ResolvedSource:
     return ResolvedSource(source.resolve(strict=True), is_dir)
 
 
-def new_destination(source: Path, destination: Path, source_is_dir: bool) -> Path:
+def new_destination(source: Path, destination: Path, *, source_is_dir: bool) -> Path:
     """The resolved ``destination``, which must not exist and must lie outside ``source``."""
     if destination.exists() or destination.is_symlink():
         raise PreparationError(f"Output already exists and will not be overwritten: {destination}.")
@@ -285,7 +285,7 @@ def import_project(
     """
     try:
         resolved = source_path(source)
-        target = new_destination(resolved.path, destination, resolved.is_dir)
+        target = new_destination(resolved.path, destination, source_is_dir=resolved.is_dir)
         budget = ImportBudget(limits)
         if resolved.is_dir:
             return _import_folder(resolved.path, target, budget, exclude_metadata=exclude_metadata)

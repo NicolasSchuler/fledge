@@ -3,10 +3,7 @@
 from __future__ import annotations
 
 import json
-import tempfile
-import unittest
 import zipfile
-from pathlib import Path
 
 from click.testing import CliRunner
 
@@ -15,14 +12,10 @@ from latexprep.submission_text_command import (
     SUBMISSION_TEXT_SCHEMA_VERSION,
     submission_text_command,
 )
+from tests.support import ProjectTestCase
 
 
-class SubmissionTextTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
-
+class SubmissionTextTests(ProjectTestCase):
     def write(self, text: str) -> None:
         (self.root / "main.tex").write_text(text, encoding="utf-8")
 

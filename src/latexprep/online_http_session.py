@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import errno
+import logging
 import socket
 import ssl
 import time
@@ -35,6 +36,10 @@ from .online_options import DEFAULT_USER_AGENT, FetchOutcome, NetworkFailure, On
 from .pinned_dns import JobResolver, Resolver
 from .public_url import Target, parse_public_url, redact_url, require_public_ip
 from .resource_budget import ResourceBudget
+
+# Log lines name the host and the outcome only: a URL can carry a credential or a query
+# secret, and the contact address of the user agent is never logged.
+logger = logging.getLogger(__name__)
 
 # A HEAD answer with one of these may only reflect a server that handles HEAD badly,
 # so the same URL is asked again with GET before the result is reported.
@@ -286,16 +291,17 @@ class OnlineClient:
         async with self._exclusive(key):
             cached = self.cache.get(key)
             if cached is not None:
+                logger.debug("online %s: answered from the cache", "GET" if want_body else "HEAD")
                 return cached
-            result = await self._fetch_uncached(url, want_body)
+            result = await self._fetch_uncached(url, want_body=want_body)
             self.cache.put(key, result)
             return result
 
-    async def _fetch_uncached(self, url: str, want_body: bool) -> Fetch:
+    async def _fetch_uncached(self, url: str, *, want_body: bool) -> Fetch:
         trail = _Trail(url)
         allowance = _Allowance(self.options.online_timeout_seconds * FETCH_TIMEOUT_MULTIPLE)
         try:
-            return await self._follow_redirects(trail, want_body, allowance)
+            return await self._follow_redirects(trail, want_body=want_body, allowance=allowance)
         except NetworkFailure as error:
             return self._failed(trail, allowance, error.outcome, str(error), error)
         except TimeoutError as error:
@@ -328,6 +334,13 @@ class OnlineClient:
         reason: str,
         error: BaseException,
     ) -> Fetch:
+        logger.debug(
+            "online %s: fetch failed as %s (%s) after %.2f s",
+            trail.host or "unknown host",
+            outcome,
+            _error_code(error) or type(error).__name__,
+            allowance.spent,
+        )
         return Fetch(
             outcome,
             redact_url(trail.current),
@@ -339,7 +352,7 @@ class OnlineClient:
         )
 
     async def _follow_redirects(
-        self, trail: _Trail, want_body: bool, allowance: _Allowance
+        self, trail: _Trail, *, want_body: bool, allowance: _Allowance
     ) -> Fetch:
         visited: set[str] = set()
         for _ in range(self.options.online_max_redirects + 1):
@@ -348,22 +361,30 @@ class OnlineClient:
             if target.url in visited:
                 raise NetworkFailure(FetchOutcome.REDIRECT_LOOP, "HTTP redirect loop detected")
             visited.add(target.url)
-            response = await self._ask(target, want_body, allowance)
+            response = await self._ask(target, want_body=want_body, allowance=allowance)
             if response.status not in _REDIRECT_STATUSES:
+                outcome = _http_outcome(response.status)
+                logger.debug(
+                    "online %s: fetch ended as %s after %d redirect(s), %.2f s",
+                    target.host,
+                    outcome,
+                    len(trail.redirects),
+                    allowance.spent,
+                )
                 return Fetch(
-                    _http_outcome(response.status),
+                    outcome,
                     redact_url(target.url),
                     response,
                     tuple(trail.redirects),
                     host=target.host,
                     elapsed_seconds=allowance.spent,
                 )
-            trail.current = self._redirect_destination(target, response, want_body)
+            trail.current = self._redirect_destination(target, response, want_body=want_body)
             trail.redirects.append(redact_url(trail.current))
         raise NetworkFailure(FetchOutcome.REDIRECT_LIMIT, "HTTP redirect limit exhausted")
 
     @staticmethod
-    def _redirect_destination(target: Target, response: Response, want_body: bool) -> str:
+    def _redirect_destination(target: Target, response: Response, *, want_body: bool) -> str:
         location = response.header("location")
         if not location:
             raise NetworkFailure(FetchOutcome.MALFORMED, "Redirect omitted its destination")
@@ -377,12 +398,12 @@ class OnlineClient:
             )
         return destination
 
-    async def _ask(self, target: Target, want_body: bool, allowance: _Allowance) -> Response:
+    async def _ask(self, target: Target, *, want_body: bool, allowance: _Allowance) -> Response:
         """One URL: HEAD, or GET with a body, and a GET when the HEAD was refused."""
         method = "GET" if want_body else "HEAD"
-        response = await self._one(target, method, want_body, allowance)
+        response = await self._one(target, method, want_body=want_body, allowance=allowance)
         if not want_body and response.status in _HEAD_RETRY_STATUSES:
-            response = await self._one(target, "GET", False, allowance)
+            response = await self._one(target, "GET", want_body=False, allowance=allowance)
         return response
 
     def _budget_exhausted(self) -> NetworkFailure:
@@ -397,7 +418,7 @@ class OnlineClient:
         return self.budget.lease("online request", memory_mb=DEFAULT_LEASE_MEMORY_MB)
 
     async def _one(
-        self, target: Target, method: str, want_body: bool, allowance: _Allowance
+        self, target: Target, method: str, *, want_body: bool, allowance: _Allowance
     ) -> Response:
         host = target.host
         async with self._host_locks[host]:
@@ -416,14 +437,27 @@ class OnlineClient:
                     raise self._budget_exhausted()
                 self.requests += 1
                 interval = self.options.online_provider_interval_seconds
-                self._next_request[host] = time.monotonic() + interval
-                response = await self._over_network(target, method, want_body, allowance)
+                started = time.monotonic()
+                self._next_request[host] = started + interval
+                response = await self._over_network(
+                    target, method, want_body=want_body, allowance=allowance
+                )
+                logger.debug(
+                    "online %s %s: HTTP %d in %.2f s (request %d of %d)",
+                    method,
+                    host,
+                    response.status,
+                    time.monotonic() - started,
+                    self.requests,
+                    self.options.online_max_requests,
+                )
                 if response.status == 429:
                     self._throttled.add(host)
+                    logger.info("online %s: throttled the request (HTTP 429); not retried", host)
                 return response
 
     async def _over_network(
-        self, target: Target, method: str, want_body: bool, allowance: _Allowance
+        self, target: Target, method: str, *, want_body: bool, allowance: _Allowance
     ) -> Response:
         limit = min(self.options.online_timeout_seconds, allowance.remaining)
         if limit <= 0:
@@ -434,12 +468,12 @@ class OnlineClient:
                 addresses = await self._resolve(target.host, target.port)
                 # Recheck injected/resolver answers; each request pins one validated address.
                 addresses = tuple(require_public_ip(address) for address in addresses)
-                return await self._first_reachable(target, addresses, method, want_body)
+                return await self._first_reachable(target, addresses, method, want_body=want_body)
         finally:
             allowance.remaining -= time.monotonic() - started
 
     async def _first_reachable(
-        self, target: Target, addresses: tuple[str, ...], method: str, want_body: bool
+        self, target: Target, addresses: tuple[str, ...], method: str, *, want_body: bool
     ) -> Response:
         """Ask the first validated address that accepts a connection.
 

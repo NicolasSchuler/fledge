@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import json
-import tempfile
 import unittest
-from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from latexprep.check_selection import CheckSelection
@@ -21,22 +19,18 @@ from latexprep.pdf_artwork_options import PdfArtworkOptions
 from latexprep.report import Report
 from latexprep.submission_options import SubmissionOptions
 from latexprep.terminal_report import render_terminal
-from tests.test_multi_document import build as fixture_build
-from tests.test_multi_document import project
-from tests.test_runtime import FakeBuildRunner
+from tests.fakes import FakeBuildRunner
+from tests.support import (
+    AsyncProjectTestCase,
+    controlled_backends,
+    minimal_project,
+)
 
 
-async def build(*args, **_kwargs):
-    return await fixture_build(*args)
-
-
-class CheckSelectionWorkflowTests(unittest.IsolatedAsyncioTestCase):
+class CheckSelectionWorkflowTests(AsyncProjectTestCase):
     async def asyncSetUp(self):
-        self.temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
         self.source = self.root / "source"
-        project(self.source)
+        minimal_project(self.source)
 
     async def test_selected_source_check_and_required_dependency_guard_both_run(self):
         main = self.source / "main.tex"
@@ -70,15 +64,12 @@ class CheckSelectionWorkflowTests(unittest.IsolatedAsyncioTestCase):
 
         settings = Settings(max_pages=1, checks=CheckSelection(ignore=("PDF001",)))
         supplied = Report("prepare", execution={"config_path": "latex-prep.toml"})
-        with (
-            patch("latexprep.document_tasks.build_project", side_effect=build),
-            patch("latexprep.document_tasks.inspect_pdf", side_effect=inspection),
-            patch("latexprep.document_tasks.compare_pdfs", new=AsyncMock(return_value=[])),
-        ):
-            report = await run_job(
-                JobRequest("prepare", self.source, settings, self.root / "output"),
-                report=supplied,
-            )
+        backends = controlled_backends(inspect_pdf=inspection)
+        report = await run_job(
+            JobRequest("prepare", self.source, settings, self.root / "output"),
+            report=supplied,
+            backends=backends,
+        )
         self.assertEqual(seen_limits, [None, None])
         self.assertIn(report.outcome, {"passed", "passed_with_advisories"})
         saved = json.loads((self.root / "output/report.json").read_text())
@@ -89,19 +80,16 @@ class CheckSelectionWorkflowTests(unittest.IsolatedAsyncioTestCase):
     async def test_ignore_all_cannot_release_changed_archive(self):
         failure = Finding("compare.rendering", "Rendered pixels changed", severity="error")
         comparison = AsyncMock(side_effect=[[], [failure]])
-        with (
-            patch("latexprep.document_tasks.build_project", side_effect=build),
-            patch("latexprep.document_tasks.inspect_pdf", new=AsyncMock(return_value=[])),
-            patch("latexprep.document_tasks.compare_pdfs", new=comparison),
-        ):
-            report = await run_job(
-                JobRequest(
-                    "prepare",
-                    self.source,
-                    Settings(checks=CheckSelection(ignore=("ALL",))),
-                    self.root / "output",
-                )
-            )
+        backends = controlled_backends(compare_pdfs=comparison)
+        report = await run_job(
+            JobRequest(
+                "prepare",
+                self.source,
+                Settings(checks=CheckSelection(ignore=("ALL",))),
+                self.root / "output",
+            ),
+            backends=backends,
+        )
         self.assertEqual(report.outcome, "blocked")
         self.assertEqual(comparison.await_count, 2)
         self.assertTrue(any(item.code == "CMP003" for item in report.findings))
@@ -151,11 +139,8 @@ class CheckSelectionWorkflowTests(unittest.IsolatedAsyncioTestCase):
         for selected in ("PRV001", "PRV002"):
             with self.subTest(selected=selected):
                 extract = AsyncMock(return_value=("Example Author", {"Pages": "1"}))
-                with (
-                    patch("latexprep.document_tasks.build_project", side_effect=build),
-                    patch("latexprep.document_tasks.inspect_pdf", new=AsyncMock(return_value=[])),
-                    patch("latexprep.pdf_check_pipeline.extract_pdf_evidence", new=extract),
-                ):
+                backends = controlled_backends()
+                with patch("latexprep.pdf_check_pipeline.extract_pdf_evidence", new=extract):
                     report = await run_job(
                         JobRequest(
                             "check",
@@ -166,7 +151,8 @@ class CheckSelectionWorkflowTests(unittest.IsolatedAsyncioTestCase):
                                     identity_terms=("Example Author",)
                                 ),
                             ),
-                        )
+                        ),
+                        backends=backends,
                     )
                 privacy = {
                     item.code for item in report.findings if item.code in {"PRV001", "PRV002"}
@@ -193,17 +179,15 @@ class CheckSelectionWorkflowTests(unittest.IsolatedAsyncioTestCase):
                         return result
 
                     inspection = AsyncMock(return_value=[])
-                    with (
-                        patch("latexprep.document_tasks.build_project", side_effect=measured),
-                        patch("latexprep.document_tasks.inspect_pdf", new=inspection),
-                    ):
-                        report = await run_job(
-                            JobRequest(
-                                "check",
-                                self.source,
-                                Settings(checks=CheckSelection(ignore=(code,) if ignored else ())),
-                            )
-                        )
+                    backends = controlled_backends(build=measured, inspect_pdf=inspection)
+                    report = await run_job(
+                        JobRequest(
+                            "check",
+                            self.source,
+                            Settings(checks=CheckSelection(ignore=(code,) if ignored else ())),
+                        ),
+                        backends=backends,
+                    )
                     self.assertEqual(report.outcome, "passed" if ignored else "blocked")
                     self.assertEqual(builds[0].success, ignored)
                     self.assertTrue(any(item.code == code for item in builds[0].findings))
@@ -229,12 +213,13 @@ class CheckSelectionWorkflowTests(unittest.IsolatedAsyncioTestCase):
                         **kwargs,
                     )
 
-                with patch("latexprep.document_tasks.build_project", side_effect=measured):
-                    report = await run_job(
-                        JobRequest(
-                            "check", self.source, Settings(checks=CheckSelection(ignore=("ALL",)))
-                        )
-                    )
+                backends = controlled_backends(build=measured)
+                report = await run_job(
+                    JobRequest(
+                        "check", self.source, Settings(checks=CheckSelection(ignore=("ALL",)))
+                    ),
+                    backends=backends,
+                )
                 self.assertEqual(report.outcome, "blocked")
 
     async def test_ignored_artwork_with_nondefault_tuning_has_no_scope_requirement(self):
@@ -246,9 +231,8 @@ class CheckSelectionWorkflowTests(unittest.IsolatedAsyncioTestCase):
         )
         for command, source in (("pdf", pdf), ("check", self.source)):
             with self.subTest(command=command):
+                backends = controlled_backends()
                 with (
-                    patch("latexprep.document_tasks.build_project", side_effect=build),
-                    patch("latexprep.document_tasks.inspect_pdf", new=AsyncMock(return_value=[])),
                     patch(
                         "latexprep.pdf_check_pipeline.inspect_pdf", new=AsyncMock(return_value=[])
                     ),
@@ -257,7 +241,7 @@ class CheckSelectionWorkflowTests(unittest.IsolatedAsyncioTestCase):
                         side_effect=AssertionError("No active figure check"),
                     ),
                 ):
-                    report = await run_job(JobRequest(command, source, settings))
+                    report = await run_job(JobRequest(command, source, settings), backends=backends)
                 self.assertEqual(report.outcome, "passed", report.to_dict())
                 self.assertFalse(
                     any(item.rule == "pdf.artwork_input_scope" for item in report.findings)

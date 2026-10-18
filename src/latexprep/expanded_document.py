@@ -207,6 +207,18 @@ class _Splice:
             )
         return resolved.target
 
+    def _count_command(self, command: Command) -> None:
+        """Count a command against the budget shared by every file being spliced."""
+        self.events += 1
+        if self.events > MAX_COMMANDS:
+            raise ParseLimitExceeded("command_count", command.start)
+
+    def _note_unclear_endinput(self, path: str, source: ParsedSource, command: Command) -> None:
+        """Record that ``\\endinput`` stops this file where the text after it is not plain."""
+        suffix = source.masked[command_end(command) :].split("\n", 1)[0]
+        if command.depth or suffix.strip():
+            self.uncertainty.append(f"{path}: unresolved endinput context")
+
     def expand(self, path: str, stack: tuple[str, ...]) -> None:
         """Append the masked text of ``path`` up to its end, splicing in each literal input."""
         cancellation_point()
@@ -229,13 +241,9 @@ class _Splice:
             self.append(source.masked[start:end], path, line, start, comments)
 
         for command in commands_before_end(source):
-            self.events += 1
-            if self.events > MAX_COMMANDS:
-                raise ParseLimitExceeded("command_count", command.start)
+            self._count_command(command)
             if command.name == "endinput":
-                suffix = source.masked[command_end(command) :].split("\n", 1)[0]
-                if command.depth or suffix.strip():
-                    self.uncertainty.append(f"{path}: unresolved endinput context")
+                self._note_unclear_endinput(path, source, command)
                 append_masked(cursor, command.start)
                 return
             if command.name not in CONTENT_INPUT_COMMANDS:
@@ -245,17 +253,25 @@ class _Splice:
                 continue
             append_masked(cursor, command.start)
             self.expand(target, (*stack, path))
-            # The shared lexer records subsequent groups as possible arguments.
-            # Input has only one: preserve later groups and bare-input terminators.
-            cursor = command.arguments[file_argument_index(command.name)].end
-            if source.masked[cursor : cursor + 1] == "}":
-                cursor += 1
+            cursor = _end_of_inclusion(source, command)
             if self.stopped:
                 return
         closing = _document_end(source)
         append_masked(cursor, closing.start if closing else len(source.masked))
         if closing:
             self.stopped = True
+
+
+def _end_of_inclusion(source: ParsedSource, command: Command) -> int:
+    """Where the masked text resumes after an input command.
+
+    The shared lexer records subsequent groups as possible arguments. Input has only one:
+    later groups and bare-input terminators are preserved.
+    """
+    cursor = command.arguments[file_argument_index(command.name)].end
+    if source.masked[cursor : cursor + 1] == "}":
+        cursor += 1
+    return cursor
 
 
 def _document_end(source: ParsedSource) -> Command | None:
@@ -364,6 +380,22 @@ class EnvironmentRegion:
     uncertainty: list[str] = field(default_factory=list)
 
 
+def _open_region(
+    document: ExpandedDocument,
+    command: Command,
+    environment: str,
+    enclosing: list[EnvironmentRegion],
+) -> EnvironmentRegion:
+    """Start the region of a ``\\begin`` and mark it and the open region as nested."""
+    region = EnvironmentRegion(environment, command, command_end(command), len(document.text))
+    if command.depth:
+        region.uncertainty.append("environment declared inside a group or macro argument")
+    if enclosing:
+        region.uncertainty.append("nested manuscript environments")
+        enclosing[-1].uncertainty.append("nested manuscript environments")
+    return region
+
+
 def environment_regions(
     document: ExpandedDocument, kinds: Container[str]
 ) -> tuple[list[EnvironmentRegion], list[str]]:
@@ -379,15 +411,7 @@ def environment_regions(
         cancellation_point()
         environment = command.arguments[0].value.strip() if command.arguments else ""
         if command.name == "begin" and environment in kinds:
-            region = EnvironmentRegion(
-                environment, command, command_end(command), len(document.text)
-            )
-            if command.depth:
-                region.uncertainty.append("environment declared inside a group or macro argument")
-            if stack:
-                region.uncertainty.append("nested manuscript environments")
-                stack[-1].uncertainty.append("nested manuscript environments")
-            stack.append(region)
+            stack.append(_open_region(document, command, environment, stack))
         elif command.name == "end" and environment in kinds:
             if not stack or stack[-1].kind != environment:
                 reasons.append("unmatched or crossed environment delimiters")

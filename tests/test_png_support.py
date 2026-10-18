@@ -125,8 +125,7 @@ class ChunkWalkTests(unittest.TestCase):
         data = png((b"tEXt", b"Author\0Alice"))
         seen = []
         with self.assertRaises(PreparationError):
-            for item in iter_png_chunks(data + b"x", max_chunks=16):
-                seen.append(item.kind)
+            seen.extend(item.kind for item in iter_png_chunks(data + b"x", max_chunks=16))
         self.assertEqual(seen, [b"IHDR", b"tEXt", b"IDAT"])
 
 

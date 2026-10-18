@@ -1,0 +1,7 @@
+Usage: fledge rule [OPTIONS] CODE
+
+  Explain the check with code CODE: its scope, limits and suggested fix.
+
+Options:
+  --json      Print the explanation as JSON, including the tests that demonstrate the check.
+  -h, --help  Show this message and exit.

@@ -7,7 +7,6 @@ commands it started with that statement, so a check that gains a tool cannot be 
 
 from __future__ import annotations
 
-import tempfile
 import unittest
 from collections.abc import Awaitable
 from pathlib import Path
@@ -33,9 +32,8 @@ from latexprep.pdf_structure_checks import (
     required_structure_tools,
 )
 from latexprep.pdf_tools import PDF_TOOLS
-from tests.support import ArtworkRunner
-from tests.test_pdf import FakePdfRunner
-from tests.test_pdf_checks import DetailRunner
+from tests.pdf_fakes import ArtworkRunner, DetailRunner, FakePdfRunner
+from tests.support import AsyncProjectTestCase
 
 REGION = PdfRegion("Area", 1, 10, 10, 90, 90)
 TEXT_TRACE = (
@@ -50,11 +48,8 @@ def commands_started(calls: list[list[str]]) -> set[str]:
     return {argv[0] for argv in calls if argv[-1] not in {"-v", "--version"}}
 
 
-class RequiredToolTests(unittest.IsolatedAsyncioTestCase):
+class RequiredToolTests(AsyncProjectTestCase):
     async def asyncSetUp(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
         self.pdf = self.root / "document.pdf"
         self.pdf.write_bytes(b"%PDF-fixture")
         self.runs = 0

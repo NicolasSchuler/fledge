@@ -197,6 +197,15 @@ the first release of `fledge-latex` is 0.3.0.
 - The terminal and CI excerpt of an unresolved finding now also lists its
   `issues`, shows the reason beside a page number, and names the DOI of each
   candidate (`NET003`, `NET004`).
+- Diagnostic logging. The hidden `--debug` option and `FLEDGE_DEBUG=1`, which only
+  printed tracebacks, now also print log lines to stderr: each tool command's start
+  and end (tool name, plain option names, exit status and duration, never a path),
+  a limit that stopped a tool, online requests (host, status and duration, never a
+  URL or the contact address), scheduler tasks and their block reasons, PDF
+  measurement reuse, which settings file was found and whether it uses a legacy
+  name, and source-analysis cache builds. Standard output stays the report, and
+  the lines show the home and temporary directories generically. Without the
+  option the library prints nothing.
 
 ### Fixed
 
@@ -306,5 +315,10 @@ the first release of `fledge-latex` is 0.3.0.
 - `requirements.md` and `docs/parallelization-plan.md` are marked as historical
   design records. Hard-coded check counts were removed from the backlog, and the
   documentation tests check that every test name the published pages quote exists.
+- A module map (`docs/modules.md`) assigns every module of the flat `latexprep`
+  package to one of five layers with a one-line responsibility, and
+  `architecture.md` relates the layers to its components. A test fails when a module
+  is missing from the map, imports from a layer above its own, or when `click` or
+  `rich` is imported outside the presentation layer.
 
 [0.3.0]: https://github.com/NicolasSchuler/fledge/compare/v0.2.0...HEAD

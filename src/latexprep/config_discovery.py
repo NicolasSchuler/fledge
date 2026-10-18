@@ -7,6 +7,7 @@ turns them into validated ``Settings``.
 
 from __future__ import annotations
 
+import logging
 import tempfile
 import tomllib
 from pathlib import Path
@@ -15,10 +16,15 @@ from .errors import PreparationError, RequestError
 
 # Discovered per directory in this order; the latex-prep names remain supported.
 CONFIG_FILENAMES = (".fledge.toml", "fledge.toml", ".latex-prep.toml", "latex-prep.toml")
+_LEGACY_CONFIG_FILENAMES = frozenset({".latex-prep.toml", "latex-prep.toml"})
 PYPROJECT_TABLES = ("fledge", "latex-prep")
+_LEGACY_PYPROJECT_TABLE = "latex-prep"
 _PYPROJECT = "pyproject.toml"
 # A directory holding one of these is the root of a repository, where the search ends.
 _REPOSITORY_MARKERS = (".git", ".hg")
+
+# Log lines name the file, never the directory that holds it.
+logger = logging.getLogger(__name__)
 
 
 def load_toml(path: Path) -> dict[str, object]:
@@ -52,6 +58,8 @@ def _pyproject_settings(path: Path, values: dict[str, object]) -> dict[str, obje
             f"{path} contains both [tool.fledge] and [tool.latex-prep]; keep only one"
         )
     settings = tool[tables[0]]
+    if tables[0] == _LEGACY_PYPROJECT_TABLE:
+        logger.info("settings: %s uses the legacy [tool.latex-prep] table", path.name)
     if not isinstance(settings, dict):
         raise PreparationError(f"[tool.{tables[0]}] in {path} must be a settings table")
     return settings
@@ -110,8 +118,10 @@ def resolve_config_path(
     if explicit is not None:
         if isolated:
             raise PreparationError("--isolated cannot be combined with --config")
+        logger.debug("settings: using the file named by --config (%s)", explicit.name)
         return explicit.expanduser().resolve()
     if isolated:
+        logger.debug("settings: --isolated, so no settings file is discovered")
         return None
     source = source.expanduser().resolve()
     start = source if source.is_dir() else source.parent
@@ -121,7 +131,17 @@ def resolve_config_path(
         if at_boundary and directory != start:
             break
         if (found := _settings_file_in(directory)) is not None:
+            _log_discovery(found, levels_up=len(start.parts) - len(directory.parts))
             return found
         if at_boundary or _is_repository_root(directory):
             break
+    logger.debug("settings: no settings file found; the defaults apply")
     return None
+
+
+def _log_discovery(found: Path, *, levels_up: int) -> None:
+    """Log which settings file won, and that it carries a name kept for compatibility."""
+    where = f"{levels_up} level(s) above the input" if levels_up else "beside the input"
+    logger.debug("settings: discovered %s %s", found.name, where)
+    if found.name in _LEGACY_CONFIG_FILENAMES:
+        logger.info("settings: %s is a legacy name; fledge.toml is preferred", found.name)

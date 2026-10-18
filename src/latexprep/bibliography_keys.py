@@ -54,12 +54,12 @@ class KeyMapping(NamedTuple):
 
 
 def _unsupported_key_uses(inspection: SourceGraph) -> list[str]:
-    reasons: list[str] = []
-    for path in reachable_sources(inspection):
-        for command in commands_before_end(inspection.sources[path]):
-            if command.name in _KEY_ENTRY_COMMANDS:
-                reasons.append(f"{path}:{command.line}: \\{command.name} key use is unsupported")
-    return reasons
+    return [
+        f"{path}:{command.line}: \\{command.name} key use is unsupported"
+        for path in reachable_sources(inspection)
+        for command in commands_before_end(inspection.sources[path])
+        if command.name in _KEY_ENTRY_COMMANDS
+    ]
 
 
 def _executable_preambles(documents: dict[str, BibDocument]) -> list[str]:
@@ -84,9 +84,11 @@ def require_literal_graph(
     reasons.extend(uncertainty_messages(index.uncertainties))
     reasons.extend(_unsupported_key_uses(inspection))
     reasons.extend(_executable_preambles(documents))
-    for citation in graph.citations:
-        if citation.key not in index.keys and citation.key not in graph.inline_keys:
-            reasons.append(f"Citation key {citation.key!r} is unresolved")
+    reasons.extend(
+        f"Citation key {citation.key!r} is unresolved"
+        for citation in graph.citations
+        if citation.key not in index.keys and citation.key not in graph.inline_keys
+    )
     if reasons:
         raise ProposalBlocked(joined_reasons(reasons))
 
@@ -127,9 +129,11 @@ def _citation_edits(inspection: SourceGraph, mapping: dict[str, str]) -> dict[st
                 continue
             arguments = command.arguments if name in MULTICITE_COMMANDS else command.arguments[:1]
             for argument in arguments:
-                for item in split_argument_items(argument):
-                    if item.value in mapping and mapping[item.value] != item.value:
-                        changes.append(TextEdit(item.start, item.end, mapping[item.value]))
+                changes.extend(
+                    TextEdit(item.start, item.end, mapping[item.value])
+                    for item in split_argument_items(argument)
+                    if item.value in mapping and mapping[item.value] != item.value
+                )
         if changes:
             edits[path] = changes
     return edits

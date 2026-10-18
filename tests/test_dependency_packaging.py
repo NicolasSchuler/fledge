@@ -5,69 +5,21 @@ from __future__ import annotations
 import tempfile
 import unittest
 import zipfile
-from collections import Counter
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from latexprep.bibliography_transform import BibliographyTransformOptions
-from latexprep.build_result import BuildResult
 from latexprep.check_selection import CheckSelection
 from latexprep.config import Settings
 from latexprep.core import run_job
 from latexprep.errors import PreparationError
-from latexprep.findings import Finding
 from latexprep.job_context import JobRequest
 from latexprep.package_inputs import generated_bibliography_inputs
 from latexprep.report import Report
 from latexprep.source_transform import SourceTransformOptions
 from latexprep.submission_options import SubmissionOptions
 from latexprep.workflow_options import DocumentOptions, WorkflowOptions
-
-
-def contents(root: Path) -> dict[str, bytes]:
-    return {
-        path.relative_to(root).as_posix(): path.read_bytes()
-        for path in root.rglob("*")
-        if path.is_file()
-    }
-
-
-class RecordedBuild:
-    """Supply fixed per-document traces; fake PDFs validate orchestration only."""
-
-    def __init__(
-        self,
-        traces: dict[str, tuple[set[str] | None, ...]],
-        *,
-        fail_archive_main: str | None = None,
-        generated_reads: frozenset[str] = frozenset(),
-    ) -> None:
-        self.traces = traces
-        self.generated_reads = generated_reads
-        self.fail_archive_main = fail_archive_main
-        self.counts: Counter[str] = Counter()
-        self.visits: list[tuple[str, str, dict[str, bytes]]] = []
-
-    async def __call__(self, tree, main, work, _engine, _runner, **_kwargs):
-        index = self.counts[main]
-        self.counts[main] += 1
-        self.visits.append((main, work.name, contents(tree)))
-        trace = self.traces[main][index]
-        work.mkdir(parents=True)
-        pdf = work / "built.pdf"
-        pdf.write_bytes(b"%PDF-controlled dependency packaging fixture\n")
-        success = not (work.name == "archive-build" and main == self.fail_archive_main)
-        result = BuildResult(
-            success=success,
-            pdf=pdf if success else None,
-            findings=[]
-            if success
-            else [Finding("build.fixture", "Controlled archive rebuild failure", severity="error")],
-            recorder_project_inputs=set(trace or ()),
-            submission_inputs=None if trace is None else set(trace),
-            generated_reads=self.generated_reads,
-        )
-        return result
+from tests.support import RecordedBuild, controlled_backends, directory_contents
 
 
 class GeneratedBibliographyInputTests(unittest.TestCase):
@@ -109,15 +61,13 @@ class DependencyPackagingTests(unittest.IsolatedAsyncioTestCase):
         destination.write_bytes(value.encode() if isinstance(value, str) else value)
 
     async def prepare(self, settings: Settings, build: RecordedBuild, name: str = "out"):
-        original = contents(self.source)
+        original = directory_contents(self.source)
         output = self.base / name
-        with (
-            patch("latexprep.document_tasks.build_project", side_effect=build.__call__),
-            patch("latexprep.document_tasks.inspect_pdf", new=AsyncMock(return_value=[])),
-            patch("latexprep.document_tasks.compare_pdfs", new=AsyncMock(return_value=[])),
-        ):
-            report = await run_job(JobRequest("prepare", self.source, settings, output))
-        self.assertEqual(contents(self.source), original)
+        backends = controlled_backends(build=build.__call__)
+        report = await run_job(
+            JobRequest("prepare", self.source, settings, output), backends=backends
+        )
+        self.assertEqual(directory_contents(self.source), original)
         return report, output
 
     def archive_contents(self, output: Path, document: str | None = None) -> dict[str, bytes]:
@@ -149,25 +99,26 @@ class DependencyPackagingTests(unittest.IsolatedAsyncioTestCase):
         with zipfile.ZipFile(output / "submission.zip", "w") as archive:
             archive.writestr("previous.tex", "Previously prepared sources.\n")
         (output / "user-notes.bin").write_bytes(b"Existing data\x00must survive")
-        previous = contents(output)
-        original = contents(self.source)
+        previous = directory_contents(output)
+        original = directory_contents(self.source)
         report = Report("prepare")
-        with (
-            patch("latexprep.document_tasks.build_project", new=AsyncMock()) as build,
-            self.assertRaisesRegex(PreparationError, "Output already exists"),
-        ):
+        build = AsyncMock()
+        backends = controlled_backends(build=build)
+        with self.assertRaisesRegex(PreparationError, "Output already exists"):
             await run_job(
-                JobRequest("prepare", self.source, Settings(main="main.tex"), output), report=report
+                JobRequest("prepare", self.source, Settings(main="main.tex"), output),
+                report=report,
+                backends=backends,
             )
         build.assert_not_called()
-        self.assertEqual(contents(output), previous)
-        self.assertEqual(contents(self.source), original)
+        self.assertEqual(directory_contents(output), previous)
+        self.assertEqual(directory_contents(self.source), original)
         self.assertEqual(report.artifacts, {})
 
     async def test_publication_race_preserves_the_other_archive_and_user_data(self) -> None:
         self.write("main.tex", "\\documentclass{article}\n\\begin{document}Body.\\end{document}\n")
         output = (self.base / "raced-output").resolve()
-        original = contents(self.source)
+        original = directory_contents(self.source)
         build = RecordedBuild({"main.tex": ({"main.tex"},) * 3})
         report = Report("prepare")
         mkdir = Path.mkdir
@@ -180,22 +131,22 @@ class DependencyPackagingTests(unittest.IsolatedAsyncioTestCase):
                 with zipfile.ZipFile(path / "submission.zip", "w") as archive:
                     archive.writestr("previous.tex", "Another job's completed archive.\n")
                 (path / "user-notes.bin").write_bytes(b"Another job's data\x00must survive")
-                raced_contents.update(contents(path))
+                raced_contents.update(directory_contents(path))
             mkdir(path, *args, **kwargs)
 
+        backends = controlled_backends(build=build.__call__)
         with (
-            patch("latexprep.document_tasks.build_project", side_effect=build.__call__),
-            patch("latexprep.document_tasks.inspect_pdf", new=AsyncMock(return_value=[])),
-            patch("latexprep.document_tasks.compare_pdfs", new=AsyncMock(return_value=[])),
             patch.object(Path, "mkdir", race_mkdir),
             self.assertRaisesRegex(PreparationError, "Output appeared while the job ran"),
         ):
             await run_job(
-                JobRequest("prepare", self.source, Settings(main="main.tex"), output), report=report
+                JobRequest("prepare", self.source, Settings(main="main.tex"), output),
+                report=report,
+                backends=backends,
             )
         self.assertTrue(raced_contents)
-        self.assertEqual(contents(output), raced_contents)
-        self.assertEqual(contents(self.source), original)
+        self.assertEqual(directory_contents(output), raced_contents)
+        self.assertEqual(directory_contents(self.source), original)
         self.assertEqual(build.counts["main.tex"], 3)
         self.assertEqual(report.artifacts, {})
 

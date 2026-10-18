@@ -18,7 +18,7 @@ from latexprep.job_context import JobRequest
 from latexprep.manuscript import ManuscriptOptions
 from latexprep.pdf_inspection import PdfInspectionOptions, inspect_pdf
 from latexprep.runtime import ToolRunner
-from tests.support import live_tests_enabled
+from tests.support import live_test
 
 
 def write_png(path: Path, rgb: bytes) -> None:
@@ -34,10 +34,7 @@ def write_png(path: Path, rgb: bytes) -> None:
     )
 
 
-@unittest.skipUnless(
-    live_tests_enabled(),
-    "Set FLEDGE_RUN_INTEGRATION=1 for live restricted-tool integration checks",
-)
+@live_test("Set FLEDGE_RUN_INTEGRATION=1 for live restricted-tool integration checks")
 class LiveIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_nested_sources_bibliography_images_formatting_and_zip_rebuild(self):
         with tempfile.TemporaryDirectory(prefix="latex-prep-live-") as directory:

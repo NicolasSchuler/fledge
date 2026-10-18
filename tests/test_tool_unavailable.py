@@ -12,7 +12,7 @@ from latexprep.latexmk_build import build_project
 from latexprep.setting_choices import ENGINES
 from latexprep.toolchain import Toolchain, tool_path
 from latexprep.toolchain_help import explain_missing_toolchain
-from tests.test_runtime import FakeBuildRunner
+from tests.fakes import FakeBuildRunner
 
 _PACKAGES = {
     "Poppler": ("pdfinfo", "pdftotext", "pdftoppm", "pdffonts", "pdfimages", "pdftohtml"),

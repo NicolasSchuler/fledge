@@ -15,6 +15,7 @@ from latexprep.report import (
     Outcome,
     Report,
 )
+from tests.support import schema_keyword_problems, schema_violations
 
 SCHEMA = Path(__file__).resolve().parents[1] / "docs" / "_static" / "report.schema.json"
 
@@ -70,6 +71,83 @@ class ReportSchemaTests(unittest.TestCase):
         self.assertEqual(set(finding["evidence_kind"]["enum"]), set(EvidenceKind))
         change = self.schema["$defs"]["change"]["properties"]
         self.assertEqual(set(change["kind"]["enum"]), set(ChangeKind))
+
+
+class SchemaValidatorTests(unittest.TestCase):
+    """The small validator behind the report-conformance test checks what it claims to."""
+
+    def violations(self, instance: object, schema: dict[str, object]) -> list[str]:
+        return schema_violations(instance, schema)
+
+    def test_types_include_unions_and_exclude_booleans_from_numbers(self) -> None:
+        self.assertEqual(self.violations(None, {"type": ["string", "null"]}), [])
+        self.assertEqual(self.violations(3, {"type": "integer"}), [])
+        self.assertEqual(self.violations(2.5, {"type": "number"}), [])
+        self.assertTrue(self.violations(True, {"type": "integer"}))
+        self.assertTrue(self.violations(True, {"type": "number"}))
+        self.assertTrue(self.violations("3", {"type": "integer"}))
+        self.assertTrue(self.violations(1, {"type": ["string", "null"]}))
+
+    def test_constants_and_enumerations(self) -> None:
+        self.assertEqual(self.violations(2, {"const": 2}), [])
+        self.assertTrue(self.violations(3, {"const": 2}))
+        self.assertEqual(self.violations("a", {"enum": ["a", "b"]}), [])
+        self.assertTrue(self.violations("c", {"enum": ["a", "b"]}))
+
+    def test_objects_check_required_declared_and_additional_properties(self) -> None:
+        schema = {
+            "type": "object",
+            "required": ["name"],
+            "properties": {"name": {"type": "string"}, "size": {"type": "integer"}},
+            "additionalProperties": False,
+        }
+        self.assertEqual(self.violations({"name": "x", "size": 1}, schema), [])
+        self.assertIn("missing required property 'name'", self.violations({}, schema)[0])
+        self.assertTrue(self.violations({"name": 1}, schema))
+        self.assertIn(
+            "unexpected property 'other'", self.violations({"name": "x", "other": 1}, schema)[0]
+        )
+        typed = {"type": "object", "additionalProperties": {"type": "string"}}
+        self.assertEqual(self.violations({"a": "b"}, typed), [])
+        self.assertTrue(self.violations({"a": 1}, typed))
+
+    def test_arrays_check_every_item_and_local_references_resolve(self) -> None:
+        schema = {
+            "type": "array",
+            "items": {"$ref": "#/$defs/name"},
+            "$defs": {"name": {"type": "string"}},
+        }
+        self.assertEqual(self.violations(["a", "b"], schema), [])
+        problems = self.violations(["a", 2], schema)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("$[1]", problems[0])
+
+    def test_a_keyword_it_does_not_check_is_refused_rather_than_ignored(self) -> None:
+        for keyword in ("pattern", "minimum", "oneOf", "allOf", "format"):
+            with self.subTest(keyword=keyword), self.assertRaisesRegex(ValueError, keyword):
+                self.violations("x", {"type": "string", keyword: "x"})
+        nested = {"properties": {"a": {"items": {"minItems": 1}}}}
+        with self.assertRaisesRegex(ValueError, "minItems"):
+            self.violations({}, nested)
+        # A property that is merely called like a keyword is not a keyword.
+        named = {"properties": {"pattern": {"type": "string"}}}
+        self.assertEqual(self.violations({"pattern": "x"}, named), [])
+
+    def test_the_published_report_schema_only_uses_checked_keywords(self) -> None:
+        self.assertEqual(
+            schema_keyword_problems(json.loads(SCHEMA.read_text(encoding="utf-8"))), []
+        )
+
+    def test_a_report_that_breaks_the_schema_is_reported_with_its_location(self) -> None:
+        schema = json.loads(SCHEMA.read_text(encoding="utf-8"))
+        report = Report("check", findings=[Finding("rule.name", "message")]).to_dict()
+        self.assertEqual(self.violations(report, schema), [])
+        report["outcome"] = "unknown"
+        report["findings"][0]["severity"] = "fatal"
+        problems = self.violations(report, schema)
+        self.assertEqual(len(problems), 2, problems)
+        self.assertTrue(any(item.startswith("$.outcome") for item in problems))
+        self.assertTrue(any(item.startswith("$.findings[0].severity") for item in problems))
 
 
 if __name__ == "__main__":

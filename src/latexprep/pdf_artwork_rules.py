@@ -146,7 +146,7 @@ RULES = (
             "workspace. Preview creation does not establish semantic color independence."
         ),
         tests=(
-            "tests.test_pdf_artwork.PdfArtworkTests.test_grayscale_preview_retains_validated_artifact_and_rejects_partial_output",
+            "tests.test_pdf_artwork_rendering.RenderedArtworkTests.test_grayscale_preview_retains_validated_artifact_and_rejects_partial_output",
         ),
         fix="Resolve the renderer limitation and inspect the regenerated grayscale preview.",
     ),
@@ -160,9 +160,9 @@ RULES = (
             "luminance bounds preserve threshold uncertainty; text semantics are not inferred."
         ),
         tests=(
-            "tests.test_pdf_artwork.PdfArtworkTests.test_rendered_sample_contrast_uses_actual_foreground_and_background_pixels",
-            "tests.test_pdf_artwork.PdfArtworkTests.test_rendered_sample_contrast_requires_homogeneous_patches_or_explicit_tolerance",
-            "tests.test_pdf_artwork.PdfArtworkTests.test_rendered_sample_contrast_rejects_incomplete_render_and_unsupported_regions",
+            "tests.test_pdf_artwork_rendering.RenderedArtworkTests.test_rendered_sample_contrast_uses_actual_foreground_and_background_pixels",
+            "tests.test_pdf_artwork_rendering.RenderedArtworkTests.test_rendered_sample_contrast_requires_homogeneous_patches_or_explicit_tolerance",
+            "tests.test_pdf_artwork_rendering.RenderedArtworkTests.test_rendered_sample_contrast_rejects_incomplete_render_and_unsupported_regions",
         ),
         fix="Adjust foreground/background colors or supply valid homogeneous sample patches.",
     ),
@@ -181,7 +181,7 @@ RULES = (
         ),
         tests=(
             "tests.test_pdf_artwork.PdfArtworkTests.test_traced_figure_color_families_against_required_space",
-            "tests.test_pdf_artwork.PdfArtworkTests.test_missing_trace_tool_is_inconclusive",
+            "tests.test_pdf_artwork_adapter.ArtworkAdapterTests.test_missing_trace_tool_is_inconclusive",
             "tests.test_submission_readiness.FigureTests.test_raster_color_space_policy_parses_png_and_jpeg_headers",
         ),
         fix=(

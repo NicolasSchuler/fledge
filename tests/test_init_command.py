@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -16,13 +15,12 @@ from latexprep.config_discovery import resolve_config_path
 from latexprep.init_command import STARTER
 from latexprep.presets import PRESETS, preset_text
 from latexprep.report import Outcome
+from tests.support import ProjectTestCase
 
 
-class InitCommandTests(unittest.TestCase):
+class InitCommandTests(ProjectTestCase):
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name).resolve()
+        super().setUp()
         self.project = self.root / "paper"
         self.project.mkdir()
         self.target = self.project / "fledge.toml"

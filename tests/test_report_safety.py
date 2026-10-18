@@ -26,7 +26,7 @@ from latexprep.online_checks import OnlineOptions
 from latexprep.pdf_artwork_options import PdfArtworkOptions
 from latexprep.report import Change, ChangeKind, Outcome, Report
 from latexprep.terminal_report import render_terminal
-from tests.test_workflow_checks import controlled_build, source_project
+from tests.support import build_with_loaded_class, controlled_backends, single_file_project
 
 
 class ReportSafetyTests(unittest.TestCase):
@@ -253,14 +253,12 @@ class ReportPublicationSafetyTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
             source = root / "input"
-            source_project(source)
+            single_file_project(source)
             output = root / "out?token=findings&"
-            with (
-                patch("latexprep.document_tasks.build_project", side_effect=controlled_build),
-                patch("latexprep.document_tasks.inspect_pdf", new=AsyncMock(return_value=[])),
-                patch("latexprep.document_tasks.compare_pdfs", new=AsyncMock(return_value=[])),
-            ):
-                report = await run_job(JobRequest("prepare", source, Settings(), output))
+            backends = controlled_backends(build=build_with_loaded_class)
+            report = await run_job(
+                JobRequest("prepare", source, Settings(), output), backends=backends
+            )
             self.assertEqual(report.outcome, "error")
             self.assertFalse(output.exists())
             self.assertEqual(report.artifacts, {})
@@ -286,20 +284,17 @@ class ReportPublicationSafetyTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
             source = root / "input"
-            source_project(source)
+            single_file_project(source)
             output = root / "out?token=findings&"
-            with (
-                patch("latexprep.document_tasks.build_project", side_effect=controlled_build),
-                patch("latexprep.document_tasks.inspect_pdf", new=AsyncMock(return_value=[])),
-                patch("latexprep.document_tasks.compare_pdfs", new=AsyncMock(return_value=[])),
-                patch(
-                    "latexprep.document_tasks.inspect_configured_pdf_checks", side_effect=measured
-                ),
+            backends = controlled_backends(build=build_with_loaded_class)
+            with patch(
+                "latexprep.document_tasks.inspect_configured_pdf_checks", side_effect=measured
             ):
                 report = await run_job(
                     JobRequest(
                         "prepare", source, settings, output, preview_output=root / "previews"
-                    )
+                    ),
+                    backends=backends,
                 )
             self.assertFalse(output.exists())
             self.assertFalse((root / "previews").exists())
@@ -330,18 +325,15 @@ class ReportPublicationSafetyTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
             source = root / "input"
-            source_project(source)
+            single_file_project(source)
             previews = root / "previews?token=findings&"
-            with (
-                patch("latexprep.document_tasks.build_project", side_effect=controlled_build),
-                patch("latexprep.document_tasks.inspect_pdf", new=AsyncMock(return_value=[])),
-                patch("latexprep.document_tasks.compare_pdfs", new=AsyncMock(return_value=[])),
-                patch(
-                    "latexprep.document_tasks.inspect_configured_pdf_checks", side_effect=measured
-                ),
+            backends = controlled_backends(build=build_with_loaded_class)
+            with patch(
+                "latexprep.document_tasks.inspect_configured_pdf_checks", side_effect=measured
             ):
                 report = await run_job(
-                    JobRequest("check", source, settings, preview_output=previews)
+                    JobRequest("check", source, settings, preview_output=previews),
+                    backends=backends,
                 )
             self.assertFalse(previews.exists())
         self.assertEqual(report.outcome, "error")
@@ -351,34 +343,28 @@ class ReportPublicationSafetyTests(unittest.IsolatedAsyncioTestCase):
     async def test_a_job_without_publication_sanitizes_its_report_once(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "input"
-            source_project(source)
-            with (
-                patch("latexprep.document_tasks.build_project", side_effect=controlled_build),
-                patch("latexprep.document_tasks.inspect_pdf", new=AsyncMock(return_value=[])),
-                patch("latexprep.document_tasks.compare_pdfs", new=AsyncMock(return_value=[])),
-                patch.object(Report, "redacted_copy", autospec=True) as sanitize,
-            ):
+            single_file_project(source)
+            backends = controlled_backends(build=build_with_loaded_class)
+            with patch.object(Report, "redacted_copy", autospec=True) as sanitize:
                 sanitize.side_effect = lambda report: report
-                await run_job(JobRequest("inspect", source, Settings()))
+                await run_job(JobRequest("inspect", source, Settings()), backends=backends)
         self.assertEqual(sanitize.call_count, 1)
 
     async def test_api_and_published_report_redact_configured_urls(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
             source = root / "input"
-            source_project(source)
+            single_file_project(source)
             credential = "SyntheticCredentialValue_1234"
             settings = Settings(
                 online_checks=OnlineOptions(
                     online_replication_urls=("https://example.org/?token=" + credential,),
                 )
             )
-            with (
-                patch("latexprep.document_tasks.build_project", side_effect=controlled_build),
-                patch("latexprep.document_tasks.inspect_pdf", new=AsyncMock(return_value=[])),
-                patch("latexprep.document_tasks.compare_pdfs", new=AsyncMock(return_value=[])),
-            ):
-                report = await run_job(JobRequest("prepare", source, settings, root / "out"))
+            backends = controlled_backends(build=build_with_loaded_class)
+            report = await run_job(
+                JobRequest("prepare", source, settings, root / "out"), backends=backends
+            )
             self.assertEqual(report.outcome, "passed", report.to_dict())
             self.assertNotIn(credential, str(report.settings))
             self.assertNotIn(credential, (root / "out/report.json").read_text())

@@ -1,20 +1,14 @@
 from __future__ import annotations
 
 import os
-import tempfile
 import unittest
-from pathlib import Path
 
 from latexprep.file_scan import inventory_files
 from latexprep.finding_text import plural
+from tests.support import ProjectTestCase
 
 
-class InventoryTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
-
+class InventoryTests(ProjectTestCase):
     def test_unreadable_directory_is_named_in_the_issue(self) -> None:
         (self.root / "main.tex").write_text("x")
         locked = self.root / "figures" / "raw"

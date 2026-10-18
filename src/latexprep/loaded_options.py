@@ -175,7 +175,8 @@ class LoadedOptionsEvidence:
         )
 
 
-def _native_string(value: str, engine: Engine) -> str:
+def decode_native_string(value: str, engine: Engine) -> str:
+    """Decode a hook field of hexadecimal character units as ``engine`` reports them."""
     width = _HEX_DIGITS_PER_UNIT
     if (
         len(value) > width * _MAX_FIELD_UNITS
@@ -201,10 +202,11 @@ def _native_string(value: str, engine: Engine) -> str:
 def _tagged_value(row: str, tag: str, engine: Engine, reordered: str) -> str:
     if not row.startswith(tag + "|"):
         raise PreparationError(reordered)
-    return _native_string(row.removeprefix(tag + "|"), engine)
+    return decode_native_string(row.removeprefix(tag + "|"), engine)
 
 
-def _parse_options(text: str, token: str, engine: Engine) -> KernelOptions:
+def parse_kernel_options(text: str, token: str, engine: Engine) -> KernelOptions:
+    """Read the option records a build's hook wrote, which must carry this build's ``token``."""
     rows = text.splitlines()
     if not rows or rows[0] != f"START|{token}" or rows[-1] != f"END|{token}":
         raise PreparationError("Complete current-build option start/end markers are absent")
@@ -276,41 +278,47 @@ class BuildEvidence:
     max_bytes: int
 
 
+def _require_fresh_evidence(probe: LoadedOptionsProbe, build: BuildEvidence) -> None:
+    """Raise unless the build, recorder, hook and sidecar are complete and unchanged."""
+    if not build.build_complete or not build.recorder_complete:
+        raise PreparationError("A successful build and complete recorder are required")
+    if probe.hook not in build.recorder_inputs:
+        raise PreparationError("The final recorder did not observe the trusted options hook")
+    if not _unchanged_regular_file(probe.hook, probe.hook_bytes) or not _unchanged_regular_file(
+        probe.main, probe.staged_bytes
+    ):
+        raise PreparationError("The instrumented disposable source changed during execution")
+    info = probe.sidecar.lstat()
+    if not stat.S_ISREG(info.st_mode) or info.st_size > min(build.max_bytes, _MAX_EVIDENCE_BYTES):
+        raise PreparationError("Option evidence is not a bounded regular output file")
+
+
+def _join_recorded_packages(kernel: KernelOptions, build: BuildEvidence) -> KernelOptions:
+    """Attach each recorded path and origin to the kernel's package of the same name."""
+    recorded = {package.name: package for package in build.packages}
+    if len(recorded) != len(build.packages):
+        raise PreparationError("Multiple recorder paths make a package origin ambiguous")
+    if {item.name for item in kernel.packages} != set(recorded):
+        raise PreparationError("Kernel class/package graph does not match the final recorder")
+    joined = tuple(
+        replace(item, path=recorded[item.name].path, origin=recorded[item.name].origin)
+        for item in kernel.packages
+    )
+    if any("\\" in item.options for item in joined) or "\\" in kernel.global_class_options:
+        raise PreparationError("Unexpanded control sequences remain in normalized kernel options")
+    return replace(kernel, packages=joined)
+
+
 def collect_loaded_options(
     probe: LoadedOptionsProbe, build: BuildEvidence
 ) -> LoadedOptionsEvidence:
     """Require fresh complete evidence and a one-to-one recorder/kernel graph."""
     try:
-        if not build.build_complete or not build.recorder_complete:
-            raise PreparationError("A successful build and complete recorder are required")
-        if probe.hook not in build.recorder_inputs:
-            raise PreparationError("The final recorder did not observe the trusted options hook")
-        if not _unchanged_regular_file(probe.hook, probe.hook_bytes) or not _unchanged_regular_file(
-            probe.main, probe.staged_bytes
-        ):
-            raise PreparationError("The instrumented disposable source changed during execution")
-        info = probe.sidecar.lstat()
-        if not stat.S_ISREG(info.st_mode) or info.st_size > min(
-            build.max_bytes, _MAX_EVIDENCE_BYTES
-        ):
-            raise PreparationError("Option evidence is not a bounded regular output file")
-        kernel = _parse_options(
+        _require_fresh_evidence(probe, build)
+        kernel = parse_kernel_options(
             probe.sidecar.read_text(encoding="ascii"), probe.token, build.engine
         )
-        recorded = {package.name: package for package in build.packages}
-        if len(recorded) != len(build.packages):
-            raise PreparationError("Multiple recorder paths make a package origin ambiguous")
-        if {item.name for item in kernel.packages} != set(recorded):
-            raise PreparationError("Kernel class/package graph does not match the final recorder")
-        joined = tuple(
-            replace(item, path=recorded[item.name].path, origin=recorded[item.name].origin)
-            for item in kernel.packages
-        )
-        if any("\\" in item.options for item in joined) or "\\" in kernel.global_class_options:
-            raise PreparationError(
-                "Unexpanded control sequences remain in normalized kernel options"
-            )
-        return LoadedOptionsEvidence(replace(kernel, packages=joined))
+        return LoadedOptionsEvidence(_join_recorded_packages(kernel, build))
     except OSError as error:
         # The cause names no path: the hook's files live in a private temporary directory.
         cause = (error.strerror or type(error).__name__).lower()

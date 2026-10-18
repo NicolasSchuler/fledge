@@ -25,13 +25,11 @@ from .errors import PreparationError
 from .findings import Finding
 from .image_metadata import check_image_metadata
 from .job_context import JobCommand, JobContext, pdf_check_settings
-from .latexmk_build import SELECTABLE_BUILD_ERRORS, build_project
+from .latexmk_build import SELECTABLE_BUILD_ERRORS
 from .manuscript import check_manuscript
 from .manuscript_checks import check_manuscript_policies
 from .online_checks import check_online_references
 from .pdf_check_pipeline import inspect_configured_pdf_checks
-from .pdf_comparison import compare_pdfs
-from .pdf_inspection import inspect_pdf
 from .scheduler import Task
 from .source_analysis import analyze_sources
 from .submission_checks import check_submission
@@ -78,7 +76,7 @@ BASELINE_STAGE = "baseline"
 async def build_document(context: JobContext, tree: Path, main: str, directory: str) -> BuildResult:
     """Build ``main`` from ``tree`` in the new workspace directory ``directory``."""
     settings = context.settings
-    return await build_project(
+    return await context.backends.build(
         tree,
         main,
         context.work / directory,
@@ -102,7 +100,7 @@ async def compare_documents(
     options: ComparisonOptions | None = None,
 ) -> list[Finding]:
     """Compare two PDFs in ``directory``, collecting previews for ``stage`` when requested."""
-    return await compare_pdfs(
+    return await context.backends.compare_pdfs(
         left,
         right,
         context.work / directory,
@@ -375,7 +373,7 @@ def baseline_pdf_tasks(
     tasks.append(
         after_baseline(
             TaskName.BASELINE_PDF_INSPECTION,
-            lambda: inspect_pdf(
+            lambda: context.backends.inspect_pdf(
                 baseline_pdf(),
                 work / "inspect-baseline",
                 runner,
@@ -457,7 +455,7 @@ def _final_pdf_tasks(context: JobContext, extraction: FinalExtraction) -> list[T
         ),
         Task.composite(
             TaskName.FINAL_PDF_INSPECTION,
-            lambda: inspect_pdf(
+            lambda: context.backends.inspect_pdf(
                 final_pdf,
                 work / "inspect-final",
                 runner,

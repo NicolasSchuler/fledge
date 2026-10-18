@@ -205,7 +205,9 @@ class _Converter:
             case "{":
                 argument = self._group(position)
                 if argument is not None:
-                    return self._nested(argument, self.context.literal_punctuation)
+                    return self._nested(
+                        argument, literal_punctuation=self.context.literal_punctuation
+                    )
                 self.issues.append("Unclosed group")
             case "}":
                 self.issues.append("Unmatched closing brace")
@@ -250,7 +252,7 @@ class _Converter:
             self.issues.append("Mathematics needs manual conversion: " + fragment)
         return min(end + 1, len(value))
 
-    def _nested(self, argument: Argument, literal_punctuation: bool) -> int:
+    def _nested(self, argument: Argument, *, literal_punctuation: bool) -> int:
         context = self.context.nested(literal_punctuation=literal_punctuation)
         text, issues = _Converter(argument.value, context).convert()
         self.out.append(text)
@@ -301,7 +303,7 @@ class _Converter:
         literal_punctuation = word.name not in _ROMAN_WRAPPERS and (
             self.context.literal_punctuation or word.name == "texttt"
         )
-        return self._nested(argument, literal_punctuation)
+        return self._nested(argument, literal_punctuation=literal_punctuation)
 
     def _url(self, word: _ControlWord) -> int:
         if word.argument is None:

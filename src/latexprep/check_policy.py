@@ -17,8 +17,9 @@ from .findings import Finding
 from .rules import MANDATORY_CODES
 
 # Each row clears every activation field for one check together. This matters for
-# dataclasses that reject a half-configured pair (regions/coverage, for example).
-_ROOT_CHECKS: dict[str, dict[str, object]] = {
+# dataclasses that reject a half-configured pair (regions/coverage, for example). Public
+# because the tests check that every opt-in check is listed here.
+ROOT_CHECKS: dict[str, dict[str, object]] = {
     "TEX101": {"expected_document_class": None},
     "TEX102": {"required_class_options": (), "forbidden_class_options": ()},
     "TEX103": {"forbidden_packages": ()},
@@ -60,7 +61,7 @@ _ARTWORK_CHECKS: dict[str, dict[str, object]] = {
     "PDF313": {"required_color_space": None},
 }
 
-_GROUP_CHECKS: dict[str, dict[str, dict[str, object]]] = {
+GROUP_CHECKS: dict[str, dict[str, dict[str, object]]] = {
     "bibliography_checks": {
         "BIB101": {"check_citation_coverage": False},
         "BIB102": {"check_uncited_entries": False},
@@ -182,9 +183,9 @@ def opt_in_activation() -> OptInActivation:
     Source and PDF identity checks (PRV001/PRV002) share submission identity terms.
     """
     activation: OptInActivation = {}
-    for code, fields in _ROOT_CHECKS.items():
+    for code, fields in ROOT_CHECKS.items():
         activation.setdefault(code, []).append((None, dict(fields)))
-    for group, policies in _GROUP_CHECKS.items():
+    for group, policies in GROUP_CHECKS.items():
         for code, fields in policies.items():
             activation.setdefault(code, []).append((group, dict(fields)))
     for code in ("PRV001", "PRV002"):
@@ -235,10 +236,10 @@ def unselected_policy_updates(
     """
     updates = {
         name: value
-        for name, value in _disabled_values(_ROOT_CHECKS, selection).items()
+        for name, value in _disabled_values(ROOT_CHECKS, selection).items()
         if values[name] != value
     }
-    for group_name, policies in _GROUP_CHECKS.items():
+    for group_name, policies in GROUP_CHECKS.items():
         current = values[group_name]
         disabled = _disabled_values(policies, selection)
         if group_name == "submission_checks" and not any(

@@ -28,17 +28,7 @@ from latexprep.publication import (
     validate_destination,
 )
 from latexprep.report import Report
-
-
-def project(root: Path) -> None:
-    (root / "sections").mkdir(parents=True)
-    (root / "appendix").mkdir()
-    (root / "main.tex").write_text(
-        "\\documentclass{article}\n\\begin{document}\n"
-        "\\input{sections/results}\n\\input{appendix/results}\n\\end{document}\n"
-    )
-    (root / "sections/results.tex").write_text("Main results.\n")
-    (root / "appendix/results.tex").write_text("Additional results.\n")
+from tests.support import controlled_backends, sectioned_project
 
 
 class WorkflowTests(unittest.IsolatedAsyncioTestCase):
@@ -46,7 +36,7 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
             source = base / "input"
-            project(source)
+            sectioned_project(source)
             (source / "data.txt").write_text("0" * 100_000)
             original = {p.relative_to(source): p.read_bytes() for p in source.rglob("*.tex")}
             build_inputs = []
@@ -71,24 +61,20 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
             passed = [
                 Finding("pdf.comparison", "Controlled comparison", severity="info", status="passed")
             ]
-            with (
-                patch("latexprep.document_tasks.build_project", side_effect=build),
-                patch("latexprep.document_tasks.inspect_pdf", new=AsyncMock(return_value=[])),
-                patch("latexprep.document_tasks.compare_pdfs", new=AsyncMock(return_value=passed)),
-            ):
-                first = await run_job(
-                    JobRequest(
-                        "prepare",
-                        source,
-                        Settings(main="./main.tex", layout="flat", jobs=1),
-                        base / "serial",
-                    )
-                )
-                second = await run_job(
-                    JobRequest(
-                        "prepare", source, Settings(layout="flat", jobs=3), base / "parallel"
-                    )
-                )
+            backends = controlled_backends(build=build, compare_pdfs=passed)
+            first = await run_job(
+                JobRequest(
+                    "prepare",
+                    source,
+                    Settings(main="./main.tex", layout="flat", jobs=1),
+                    base / "serial",
+                ),
+                backends=backends,
+            )
+            second = await run_job(
+                JobRequest("prepare", source, Settings(layout="flat", jobs=3), base / "parallel"),
+                backends=backends,
+            )
             self.assertIn(first.outcome, {"passed", "passed_with_advisories"})
             self.assertEqual(first.outcome, second.outcome)
             self.assertEqual(
@@ -112,7 +98,7 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
             source = base / "input"
-            project(source)
+            sectioned_project(source)
             count = 0
 
             async def build(tree, main, work, engine, runner, **_options):
@@ -133,14 +119,11 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
                     log="",
                 )
 
-            with (
-                patch("latexprep.document_tasks.build_project", side_effect=build),
-                patch("latexprep.document_tasks.inspect_pdf", new=AsyncMock(return_value=[])),
-                patch("latexprep.document_tasks.compare_pdfs", new=AsyncMock(return_value=[])),
-            ):
-                result = await run_job(
-                    JobRequest("prepare", source, Settings(layout="flat"), base / "output")
-                )
+            backends = controlled_backends(build=build)
+            result = await run_job(
+                JobRequest("prepare", source, Settings(layout="flat"), base / "output"),
+                backends=backends,
+            )
             self.assertEqual(count, 3)
             self.assertEqual(result.outcome, "blocked")
             self.assertFalse((base / "output").exists())
@@ -149,7 +132,7 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
     async def test_baseline_failure_keeps_source_diagnostics(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
-            project(base / "input")
+            sectioned_project(base / "input")
             (base / "input/sections/results.tex").write_text("TODO unfinished.\n")
             failure = SimpleNamespace(
                 success=False,
@@ -161,17 +144,17 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
                 generated_reads=frozenset(),
                 log="failure",
             )
-            with patch(
-                "latexprep.document_tasks.build_project", new=AsyncMock(return_value=failure)
-            ):
-                result = await run_job(JobRequest("check", base / "input", Settings()))
+            backends = controlled_backends(build=failure)
+            result = await run_job(
+                JobRequest("check", base / "input", Settings()), backends=backends
+            )
             self.assertEqual(result.outcome, "blocked")
             self.assertTrue(any(item.rule == "source.edit_marker" for item in result.findings))
 
     async def test_bibliography_command_skips_root_discovery_and_the_reference_pdf(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
-            project(base / "input")
+            sectioned_project(base / "input")
             reference = base / "reference.pdf"
             reference.write_bytes(b"%PDF-fixture")
             with (
@@ -199,8 +182,11 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
             base = Path(directory)
             (base / "input").mkdir()
             (base / "input/notes.txt").write_text("not a document\n")
-            with patch("latexprep.document_tasks.build_project", new=AsyncMock()) as build:
-                result = await run_job(JobRequest("check", base / "input", Settings()))
+            build = AsyncMock()
+            backends = controlled_backends(build=build)
+            result = await run_job(
+                JobRequest("check", base / "input", Settings()), backends=backends
+            )
             build.assert_not_called()
         [finding] = [item for item in result.findings if item.rule == "project.main_selection"]
         self.assertIn("no file with \\documentclass was found", finding.message)
@@ -209,10 +195,13 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
     async def test_ambiguous_root_blocks_without_running_tools(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
-            project(base / "input")
+            sectioned_project(base / "input")
             (base / "input/other.tex").write_bytes((base / "input/main.tex").read_bytes())
-            with patch("latexprep.document_tasks.build_project", new=AsyncMock()) as build:
-                result = await run_job(JobRequest("check", base / "input", Settings()))
+            build = AsyncMock()
+            backends = controlled_backends(build=build)
+            result = await run_job(
+                JobRequest("check", base / "input", Settings()), backends=backends
+            )
             self.assertEqual(result.outcome, "blocked")
             build.assert_not_called()
 
@@ -338,7 +327,7 @@ class CliTests(unittest.TestCase):
     def test_json_has_no_progress_and_original_input_is_unchanged(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
-            project(base / "input")
+            sectioned_project(base / "input")
             stdout, stderr = StringIO(), StringIO()
             with redirect_stdout(stdout), redirect_stderr(stderr):
                 code = main(["inspect", str(base / "input"), "--json"])
@@ -351,7 +340,7 @@ class CliTests(unittest.TestCase):
     def test_invalid_config_returns_json_error(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
-            project(base / "input")
+            sectioned_project(base / "input")
             (base / "invalid.toml").write_text('publisher = "unsupported"\n')
             output = StringIO()
             with redirect_stdout(output):
@@ -370,7 +359,7 @@ class CliTests(unittest.TestCase):
     def test_existing_and_contained_outputs_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
-            project(base / "input")
+            sectioned_project(base / "input")
             for output in (base / "input", base / "input/new"):
                 with self.subTest(output=output), self.assertRaises(PreparationError):
                     validate_destination(base / "input", output, "--output")

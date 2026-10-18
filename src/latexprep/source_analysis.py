@@ -139,11 +139,13 @@ def _referenced_labels(source: ParsedSource) -> list[tuple[str, int]]:
     references = []
     for command in source.commands:
         if command.name in REFERENCE_COMMANDS and command.arguments:
-            for argument in split_argument_items(
-                command.arguments[0], comma_separated=command.name in {"cref", "Cref"}
-            ):
-                if is_literal_text(argument.value):
-                    references.append((argument.value, command.line))
+            references.extend(
+                (argument.value, command.line)
+                for argument in split_argument_items(
+                    command.arguments[0], comma_separated=command.name in {"cref", "Cref"}
+                )
+                if is_literal_text(argument.value)
+            )
     return references
 
 

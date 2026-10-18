@@ -152,13 +152,13 @@ class Command:
 
         Spaces around the name inside the braces are ignored unless ``exact`` is set.
         """
-        return self.name == "begin" and self._names_environment(environment, exact)
+        return self.name == "begin" and self._names_environment(environment, exact=exact)
 
     def ends(self, environment: str, *, exact: bool = False) -> bool:
         """Whether this is ``\\end{environment}``; ``exact`` as for :meth:`begins`."""
-        return self.name == "end" and self._names_environment(environment, exact)
+        return self.name == "end" and self._names_environment(environment, exact=exact)
 
-    def _names_environment(self, environment: str, exact: bool) -> bool:
+    def _names_environment(self, environment: str, *, exact: bool) -> bool:
         if not self.arguments:
             return False
         value = self.arguments[0].value
@@ -203,6 +203,15 @@ def skip_trivia(text: str, pos: int) -> int:
             return pos
 
 
+def _brace_depth_after(char: str, depth: int) -> int:
+    """The brace nesting depth once ``char`` has been read, for bracket groups."""
+    if char == "{":
+        return depth + 1
+    if char == "}":
+        return depth - 1
+    return depth
+
+
 def read_group(
     text: str,
     pos: int,
@@ -226,10 +235,7 @@ def read_group(
             cursor += 2
             continue
         if opening == "[":
-            if char == "{":
-                brace_depth += 1
-            elif char == "}":
-                brace_depth -= 1
+            brace_depth = _brace_depth_after(char, brace_depth)
             if brace_depth:
                 cursor += 1
                 continue

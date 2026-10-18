@@ -151,7 +151,8 @@ def _read_evidence_lines(path: Path, root: Path, max_bytes: int) -> list[str]:
 
 def _unchecked_absolute_path(value: str, cwd: Path) -> Path:
     path = Path(value)
-    return Path(os.path.abspath(path if path.is_absolute() else cwd / path))
+    # Normalised lexically: a recorded path is never resolved through links.
+    return Path(os.path.normpath(path if path.is_absolute() else cwd / path))
 
 
 def _absolute_path(value: str, cwd: Path) -> Path:

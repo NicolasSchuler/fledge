@@ -75,9 +75,12 @@ def page_size_from_evidence(
         if evidence.stage != finding.stage or evidence.document != finding.document:
             continue
         sizes = evidence.details.get(DetailKey.DIMENSIONS_PT)
-        if isinstance(sizes, (list, tuple)) and len(sizes) >= page:
-            if (size := _plausible_size(sizes[page - 1])) is not None:
-                return size
+        if (
+            isinstance(sizes, (list, tuple))
+            and len(sizes) >= page
+            and (size := _plausible_size(sizes[page - 1])) is not None
+        ):
+            return size
     return None
 
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from typing import ClassVar
 from unittest.mock import patch
 from urllib.parse import quote
 
@@ -307,7 +308,7 @@ class RedactionTests(unittest.TestCase):
 
 
 class LocalPathScrubbingTests(unittest.TestCase):
-    LABELS = {"/home/ann": "~", "/var/tmp/x": "<tmp>"}
+    LABELS: ClassVar[dict[str, str]] = {"/home/ann": "~", "/var/tmp/x": "<tmp>"}
 
     def test_home_and_temporary_directories_become_generic_everywhere_in_a_tree(self) -> None:
         value = {

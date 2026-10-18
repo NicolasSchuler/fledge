@@ -6,7 +6,6 @@ import asyncio
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
 from latexprep.bibliography_checks import check_bibliography_coverage_and_fields
 from latexprep.build_checks import qualify_citation_findings
@@ -23,8 +22,7 @@ from latexprep.job_context import JobRequest
 from latexprep.report import Outcome, Report
 from latexprep.submission_options import SubmissionOptions
 from latexprep.terminal_report import render_terminal
-
-from .support import write_project
+from tests.support import controlled_backends, write_project
 
 BIB = "@book{knuth, author={Donald Knuth}, title={The TeXbook}, year={1984}, publisher={AW}}\n"
 CITING = (
@@ -109,8 +107,10 @@ class BlockedTaskSummaryTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             source = write_project(Path(directory) / "paper", {"main.tex": CITING, "refs.bib": BIB})
-            with patch("latexprep.document_tasks.build_project", side_effect=failing_build):
-                report = asyncio.run(run_job(JobRequest("check", source, Settings())))
+            backends = controlled_backends(build=failing_build)
+            report = asyncio.run(
+                run_job(JobRequest("check", source, Settings()), backends=backends)
+            )
         tasks = [item for item in report.findings if item.rule == "execution.task"]
         self.assertTrue(tasks)
         self.assertTrue(all(item.details["blocked_by"] == ["baseline build"] for item in tasks))

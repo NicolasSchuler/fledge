@@ -230,7 +230,7 @@ def _without_bib(main: str, options: BblOptions) -> list[Finding]:
     ]
 
 
-def _missing_bbl_consequence(require_bbl: bool) -> str:
+def _missing_bbl_consequence(*, require_bbl: bool) -> str:
     if require_bbl:
         return (
             "Services that compile without running BibTeX or Biber, such as arXiv, would "
@@ -279,7 +279,7 @@ def _presence(graph: SourceGraph, selected: set[str], plan: _Plan, options: BblO
         _BBL_RULE,
         f"{plan.main} reads {', '.join(plan.bib[:_MAX_LISTED])} through "
         f"{plan.backend.display_name}, but {plan.expected} is not in the package. "
-        f"{_missing_bbl_consequence(options.require_bbl)}{elsewhere}",
+        f"{_missing_bbl_consequence(require_bbl=options.require_bbl)}{elsewhere}",
         severity="warning" if options.require_bbl else "info",
         status="failed" if options.require_bbl else "not_applicable",
         path=path or plan.main,

@@ -7,9 +7,7 @@ advisory about how a reference was written can be ignored.
 
 from __future__ import annotations
 
-import tempfile
 import unittest
-from pathlib import Path
 from unittest.mock import patch
 
 from latexprep.check_policy import selected_findings
@@ -19,7 +17,7 @@ from latexprep.flat_layout import plan_flatten
 from latexprep.rule_definition import Rule
 from latexprep.rules import MANDATORY_CODES, RULES
 from latexprep.source_analysis import analyze_sources
-from tests.test_source_graph_rules import ADVISORY_RULES
+from tests.support import SOURCE_GRAPH_ADVISORY_RULES, ProjectTestCase
 
 DOCUMENT = "\\documentclass{article}\n"
 # The source-graph rules whose findings leave the main file selected, or are errors by
@@ -29,17 +27,7 @@ SELECTION_ERRORS = frozenset(
 )
 
 
-class SourceGraphFindingTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
-
-    def write(self, path: str, text: str) -> None:
-        destination = self.root / path
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_text(text, encoding="utf-8")
-
+class SourceGraphFindingTests(ProjectTestCase):
     def report(self, rule: str, main: str | None = "main.tex") -> Finding:
         """The one finding of ``rule`` that the analysis of the project reports."""
         found = [item for item in analyze_sources(self.root, main).findings if item.rule == rule]
@@ -132,14 +120,14 @@ class SourceGraphSelectionTests(unittest.TestCase):
 
     def test_only_advisories_about_how_a_reference_was_written_are_selectable(self) -> None:
         optional = {rule.name for rule in self.graph_rules() if not rule.mandatory}
-        self.assertEqual(optional, ADVISORY_RULES - SELECTION_ERRORS)
+        self.assertEqual(optional, SOURCE_GRAPH_ADVISORY_RULES - SELECTION_ERRORS)
 
     def test_ignoring_the_family_keeps_every_gap_in_the_graph(self) -> None:
         findings = [Finding(rule.name, rule.title) for rule in self.graph_rules()]
         kept = {item.rule for item in selected_findings(findings, CheckSelection(ignore=("TEX",)))}
         self.assertEqual(kept, {rule.name for rule in self.graph_rules() if rule.mandatory})
         self.assertLessEqual(SELECTION_ERRORS | {"source.encoding", "source.input_cycle"}, kept)
-        self.assertFalse(kept & ADVISORY_RULES - SELECTION_ERRORS)
+        self.assertFalse(kept & SOURCE_GRAPH_ADVISORY_RULES - SELECTION_ERRORS)
 
 
 if __name__ == "__main__":

@@ -32,82 +32,15 @@ from latexprep.pdf_tool_output import MAX_PARSED_NODES
 from latexprep.resource_budget import ResourceBudget
 from latexprep.runtime import ToolRunner
 from latexprep.submission_options import SubmissionOptions
-from tests.support import live_tests_enabled
-
-
-def geometry(*, pages: int = 1, rotation: int = 0, crop: str = "0 0 612 792") -> str:
-    return "".join(
-        f"Page {page} size: 612 x 792 pts\nPage {page} rot: {rotation}\n"
-        f"Page {page} MediaBox: 0 0 612 792\nPage {page} CropBox: {crop}\n"
-        for page in range(1, pages + 1)
-    )
-
-
-def text_xml(*, size: float = 12, left: float = 72, extra: str = "", text: str = "Body") -> str:
-    return (
-        '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE pdf2xml SYSTEM "pdf2xml.dtd">'
-        '<pdf2xml producer="poppler" version="26.10.0">'
-        '<page number="1" position="absolute" top="0" left="0" height="792" width="612">'
-        f'<fontspec id="0" size="{size}" family="Times" color="#000000"/>'
-        f'<text top="72" left="{left}" width="100" height="12" font="0">{text}</text>'
-        f"{extra}</page></pdf2xml>"
-    )
-
-
-def object_json(
-    *,
-    language: object = "u:en-GB",
-    annotations: object = None,
-    action: object = None,
-    orphan: object = None,
-) -> str:
-    catalog: dict[str, object] = {"/Type": "/Catalog", "/Pages": "2 0 R"}
-    if language is not None:
-        catalog["/Lang"] = language
-    if action is not None:
-        catalog["/OpenAction"] = "5 0 R"
-    page: dict[str, object] = {"/Type": "/Page", "/Parent": "2 0 R"}
-    objects: dict[str, object] = {
-        "trailer": {"value": {"/Root": "1 0 R"}},
-        "obj:1 0 R": {"value": catalog},
-        "obj:2 0 R": {"value": {"/Type": "/Pages", "/Kids": ["3 0 R"], "/Count": 1}},
-        "obj:3 0 R": {"value": page},
-    }
-    if annotations is not None:
-        page["/Annots"] = ["4 0 R"]
-        objects["obj:4 0 R"] = {"value": annotations}
-    if action is not None:
-        objects["obj:5 0 R"] = {"value": action}
-    if orphan is not None:
-        objects["obj:6 0 R"] = {"value": orphan}
-    return json.dumps(
-        {
-            "version": 2,
-            "pages": [{"object": "3 0 R", "pageposfrom1": 1}],
-            "qpdf": [{"jsonversion": 2}, objects],
-        }
-    )
-
-
-def trace_xml(
-    *,
-    width: str = "0.7",
-    transform: str = "2 0 0 2 0 0",
-    color: str = 'colorspace="DeviceGray" color="0"',
-) -> str:
-    return (
-        '<document filename="document.pdf"><page number="1" mediabox="0 0 612 792">'
-        f'<stroke_path linewidth="{width}" miterlimit="10" linecap="0,0,0" '
-        f'linejoin="0" {color} transform="{transform}">'
-        '<moveto x="30" y="30"/><lineto x="100" y="30"/></stroke_path>'
-        "</page></document>"
-    )
-
-
-def gray_raster(*, blank: bool = False, width: int = 306, height: int = 396) -> bytes:
-    pixels = width * height
-    ink = 0 if blank else pixels // 4
-    return f"P5\n{width} {height}\n255\n".encode() + b"\0" * ink + b"\xff" * (pixels - ink)
+from tests.pdf_fakes import (
+    DetailRunner,
+    geometry,
+    gray_raster,
+    object_json,
+    text_xml,
+    trace_xml,
+)
+from tests.support import live_test
 
 
 def large_page_geometry(width: int, height: int) -> str:
@@ -157,78 +90,6 @@ def simple_pdf() -> bytes:
         f"trailer\n<< /Size 7 /Root 1 0 R /Info 6 0 R >>\nstartxref\n{start}\n%%EOF\n".encode()
     )
     return bytes(output)
-
-
-class DetailRunner(ToolRunner):
-    def __init__(self, **outputs: object):
-        super().__init__()
-        self.info = "Pages: 1\nTitle: Paper\nAuthor: Ada Lovelace\nTagged: yes\n"
-        self.geometry = geometry()
-        self.xml = text_xml()
-        self.objects = object_json()
-        self.trace = trace_xml()
-        self.text = "Body text\n\f"
-        self.raster = gray_raster()
-        self.fonts = (
-            "name type encoding emb sub uni object ID\n---\nFont Type 1 Builtin yes yes no 3 0\n"
-        )
-        self.missing: str | None = None
-        self.failure: str | None = None
-        self.stderr = ""
-        self.calls: list[tuple[list[str], Path, tuple[Path, ...]]] = []
-        self.expected_budget: ResourceBudget | None = None
-        self.block: asyncio.Event | None = None
-        self.started = asyncio.Event()
-        for key, value in outputs.items():
-            setattr(self, key, value)
-
-    def _resolve_tool(self, name: str) -> Path:
-        return Path("/test-tools") / name
-
-    async def run(
-        self,
-        argv: list[str],
-        cwd: Path,
-        workspace: Path,
-        *,
-        readonly_inputs: tuple[Path, ...] = (),
-        memory_mb: int | None = None,
-    ) -> CommandResult:
-        self._frozen.validate(readonly_inputs)
-        if self.expected_budget is not None and self.expected_budget.current_lease is None:
-            raise AssertionError("PDF command ran without its shared budget lease")
-        self.calls.append((list(argv), workspace, readonly_inputs))
-        if argv[0] == self.missing:
-            raise PreparationError(f"Missing tool: {argv[0]}")
-        if argv[-1] in {"-v", "--version"}:
-            if argv[0] == "qpdf" and argv[-1] != "--version":
-                raise AssertionError("qpdf requires --version")
-            return CommandResult(0, argv[0] + " version fixture\n", "", resolved_command=argv)
-        self.started.set()
-        if self.block is not None:
-            await self.block.wait()
-        await asyncio.sleep(0)
-        if argv[0] == "pdfinfo":
-            output = self.geometry if "-box" in argv else self.info
-        else:
-            output = {
-                "pdftohtml": self.xml,
-                "qpdf": self.objects,
-                "mutool": self.trace,
-                "pdftotext": self.text,
-                "pdffonts": self.fonts,
-            }.get(argv[0], "")
-        if argv[0] == "pdftoppm":
-            (workspace / "page.pgm").write_bytes(self.raster)
-        return CommandResult(
-            0,
-            output,
-            self.stderr,
-            resolved_command=argv,
-            timed_out=self.failure == "timeout",
-            output_limited=self.failure == "output",
-            resource_exceeded="Resource exceeded" if self.failure == "resource" else None,
-        )
 
 
 class CountingToolRunner(ToolRunner):
@@ -831,7 +692,7 @@ class PdfDetailTests(unittest.IsolatedAsyncioTestCase):
         async with budget.lease("after cancellation", memory_mb=128):
             pass
 
-    @unittest.skipUnless(live_tests_enabled(), "Opt-in live PDF tools")
+    @live_test("Opt-in live PDF tools")
     async def test_live_poppler_geometry_metadata_and_raster_measurements(self) -> None:
         self.pdf.write_bytes(simple_pdf())
         runner = ToolRunner(RuntimeLimits(timeout_seconds=30, max_memory_mb=512))
@@ -854,7 +715,7 @@ class PdfDetailTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Body text", text)
         self.assertEqual(fields["Title"], "Paper")
 
-    @unittest.skipUnless(live_tests_enabled(), "Opt-in live PDF tools")
+    @live_test("Opt-in live PDF tools")
     async def test_live_poppler_groups_of_one_pdf_share_each_read_only_command(self) -> None:
         self.pdf.write_bytes(simple_pdf())
         runner = CountingToolRunner(RuntimeLimits(timeout_seconds=30, max_memory_mb=512))

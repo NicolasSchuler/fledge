@@ -9,7 +9,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from latexprep.build_result import BuildTools
 from latexprep.config import Settings, load_settings
 from latexprep.core import run_job
 from latexprep.defects import REPORT_DEFECT_SUGGESTION
@@ -20,28 +19,8 @@ from latexprep.main_selection import main_selection_error
 from latexprep.pdf_comparison import compare_pdfs
 from latexprep.staging import stage_document
 from latexprep.workflow_options import ComparisonOptions, DocumentOptions, WorkflowOptions
-from tests.test_pdf import FakePdfRunner
-
-
-def project(root: Path, main: str = "main.tex") -> None:
-    root.mkdir(parents=True, exist_ok=True)
-    (root / main).write_text("\\documentclass{article}\n\\begin{document}Hello.\\end{document}\n")
-
-
-async def build(tree, main, work, engine, runner, **_options):
-    work.mkdir(parents=True)
-    pdf = work / "built.pdf"
-    pdf.write_bytes(b"%PDF-controlled-test\n")
-    return SimpleNamespace(
-        success=True,
-        pdf=pdf,
-        findings=[],
-        recorder_project_inputs={main},
-        submission_inputs={main},
-        tools=BuildTools(),
-        command=[],
-        generated_reads=frozenset(),
-    )
+from tests.pdf_fakes import FakePdfRunner
+from tests.support import controlled_backends, fake_build, minimal_project
 
 
 class MultiDocumentTests(unittest.IsolatedAsyncioTestCase):
@@ -50,8 +29,8 @@ class MultiDocumentTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self.temporary.cleanup)
         self.base = Path(self.temporary.name)
         self.source = self.base / "input"
-        project(self.source / "paper")
-        project(self.source / "supplement", "extra.tex")
+        minimal_project(self.source / "paper")
+        minimal_project(self.source / "supplement", "extra.tex")
         self.settings = Settings(
             workflow=WorkflowOptions(
                 documents=(
@@ -66,16 +45,12 @@ class MultiDocumentTests(unittest.IsolatedAsyncioTestCase):
 
         async def observed(tree, main, work, engine, runner, **_options):
             visits.append((main, work.name, sorted(path.name for path in tree.iterdir())))
-            return await build(tree, main, work, engine, runner)
+            return await fake_build(tree, main, work, engine, runner)
 
-        with (
-            patch("latexprep.document_tasks.build_project", side_effect=observed),
-            patch("latexprep.document_tasks.inspect_pdf", new=AsyncMock(return_value=[])),
-            patch("latexprep.document_tasks.compare_pdfs", new=AsyncMock(return_value=[])),
-        ):
-            report = await run_job(
-                JobRequest("prepare", self.source, self.settings, self.base / "out")
-            )
+        backends = controlled_backends(build=observed)
+        report = await run_job(
+            JobRequest("prepare", self.source, self.settings, self.base / "out"), backends=backends
+        )
         self.assertEqual(report.outcome, "passed", report.to_dict())
         self.assertEqual(len(visits), 6)
         for name, main in (("paper", "main.tex"), ("supplement", "extra.tex")):
@@ -91,20 +66,16 @@ class MultiDocumentTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_one_failed_document_prevents_all_publication(self):
         async def failure(tree, main, work, engine, runner, **_options):
-            result = await build(tree, main, work, engine, runner)
+            result = await fake_build(tree, main, work, engine, runner)
             if main == "extra.tex" and work.name == "archive-build":
                 result.success = False
                 result.pdf = None
             return result
 
-        with (
-            patch("latexprep.document_tasks.build_project", side_effect=failure),
-            patch("latexprep.document_tasks.inspect_pdf", new=AsyncMock(return_value=[])),
-            patch("latexprep.document_tasks.compare_pdfs", new=AsyncMock(return_value=[])),
-        ):
-            report = await run_job(
-                JobRequest("prepare", self.source, self.settings, self.base / "out")
-            )
+        backends = controlled_backends(build=failure)
+        report = await run_job(
+            JobRequest("prepare", self.source, self.settings, self.base / "out"), backends=backends
+        )
         self.assertEqual(report.outcome, "blocked")
         self.assertFalse((self.base / "out").exists())
         self.assertTrue(
@@ -172,12 +143,10 @@ class MultiDocumentTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_unrepresentable_multi_document_report_is_refused_without_output(self):
         output = self.base / "out?token=findings&"
-        with (
-            patch("latexprep.document_tasks.build_project", side_effect=build),
-            patch("latexprep.document_tasks.inspect_pdf", new=AsyncMock(return_value=[])),
-            patch("latexprep.document_tasks.compare_pdfs", new=AsyncMock(return_value=[])),
-        ):
-            report = await run_job(JobRequest("prepare", self.source, self.settings, output))
+        backends = controlled_backends()
+        report = await run_job(
+            JobRequest("prepare", self.source, self.settings, output), backends=backends
+        )
         self.assertEqual(report.outcome, "error")
         self.assertFalse(output.exists())
         self.assertEqual(report.artifacts, {})
@@ -185,22 +154,19 @@ class MultiDocumentTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_blocked_preparation_says_why_nothing_was_published(self):
         async def failure(tree, main, work, engine, runner, **_options):
-            result = await build(tree, main, work, engine, runner)
+            result = await fake_build(tree, main, work, engine, runner)
             if main == "extra.tex" and work.name == "archive-build":
                 result.success = False
                 result.pdf = None
             return result
 
         messages: list[str] = []
-        with (
-            patch("latexprep.document_tasks.build_project", side_effect=failure),
-            patch("latexprep.document_tasks.inspect_pdf", new=AsyncMock(return_value=[])),
-            patch("latexprep.document_tasks.compare_pdfs", new=AsyncMock(return_value=[])),
-        ):
-            await run_job(
-                JobRequest("prepare", self.source, self.settings, self.base / "out"),
-                messages.append,
-            )
+        backends = controlled_backends(build=failure)
+        await run_job(
+            JobRequest("prepare", self.source, self.settings, self.base / "out"),
+            messages.append,
+            backends=backends,
+        )
         self.assertIn(
             "No output was published: the job did not produce a verified package", messages
         )
@@ -242,23 +208,18 @@ class BaselineStabilityTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self.temporary.cleanup)
         self.base = Path(self.temporary.name)
         self.source = self.base / "input"
-        project(self.source)
+        minimal_project(self.source)
         self.settings = Settings(
             workflow=WorkflowOptions(baseline_runs=2, comparison=ComparisonOptions(1, 0.01))
         )
 
     async def test_repeat_build_difference_blocks_publication(self):
-        with (
-            patch("latexprep.document_tasks.build_project", side_effect=build),
-            patch("latexprep.document_tasks.inspect_pdf", new=AsyncMock(return_value=[])),
-            patch(
-                "latexprep.document_tasks.compare_pdfs",
-                new=AsyncMock(return_value=[Finding("compare.text", "Changed", severity="error")]),
-            ),
-        ):
-            report = await run_job(
-                JobRequest("prepare", self.source, self.settings, self.base / "out")
-            )
+        backends = controlled_backends(
+            compare_pdfs=[Finding("compare.text", "Changed", severity="error")]
+        )
+        report = await run_job(
+            JobRequest("prepare", self.source, self.settings, self.base / "out"), backends=backends
+        )
         self.assertEqual(report.outcome, "blocked")
         self.assertFalse((self.base / "out").exists())
         self.assertTrue(
@@ -267,14 +228,10 @@ class BaselineStabilityTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_identical_repeats_pass_and_do_not_relax_archive_comparison(self):
         compare = AsyncMock(return_value=[])
-        with (
-            patch("latexprep.document_tasks.build_project", side_effect=build),
-            patch("latexprep.document_tasks.inspect_pdf", new=AsyncMock(return_value=[])),
-            patch("latexprep.document_tasks.compare_pdfs", new=compare),
-        ):
-            report = await run_job(
-                JobRequest("prepare", self.source, self.settings, self.base / "out")
-            )
+        backends = controlled_backends(compare_pdfs=compare)
+        report = await run_job(
+            JobRequest("prepare", self.source, self.settings, self.base / "out"), backends=backends
+        )
         self.assertEqual(report.outcome, "passed", report.to_dict())
         self.assertEqual(compare.await_count, 3)
         self.assertIsNone(compare.call_args_list[0].kwargs.get("options"))
@@ -287,14 +244,10 @@ class BaselineStabilityTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_every_build_stage_records_its_time(self):
-        with (
-            patch("latexprep.document_tasks.build_project", side_effect=build),
-            patch("latexprep.document_tasks.inspect_pdf", new=AsyncMock(return_value=[])),
-            patch("latexprep.document_tasks.compare_pdfs", new=AsyncMock(return_value=[])),
-        ):
-            report = await run_job(
-                JobRequest("prepare", self.source, self.settings, self.base / "out")
-            )
+        backends = controlled_backends()
+        report = await run_job(
+            JobRequest("prepare", self.source, self.settings, self.base / "out"), backends=backends
+        )
         stages = {stage["name"]: stage for stage in report.stages}
         for name in ("baseline", "baseline repeat 2", "transformed", "archive"):
             with self.subTest(stage=name):
@@ -305,8 +258,8 @@ class BaselineStabilityTests(unittest.IsolatedAsyncioTestCase):
         async def crash(*_args, **_options):
             raise RuntimeError("tool crashed")
 
-        with patch("latexprep.document_tasks.build_project", side_effect=crash):
-            report = await run_job(JobRequest("check", self.source, self.settings))
+        backends = controlled_backends(build=crash)
+        report = await run_job(JobRequest("check", self.source, self.settings), backends=backends)
         stages = {stage["name"]: stage["status"] for stage in report.stages}
         self.assertEqual(stages["baseline"], "failed")
         self.assertNotIn("baseline build", stages)

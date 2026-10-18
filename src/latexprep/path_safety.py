@@ -72,6 +72,28 @@ def _has_unwanted_characters(value: str, characters: PathCharacters) -> bool:
     return ":" in value or any(map(is_unsafe_character, value))
 
 
+def _spelling_problem(value: str) -> RelativePathProblem | None:
+    """The problem visible in the raw spelling, before the path is split into segments."""
+    if not value:
+        return "empty"
+    if value.startswith("/"):
+        return "absolute"
+    if "\\" in value:
+        return "backslash"
+    if "\x00" in value:
+        return "characters"
+    return None
+
+
+def _root_only_problem(
+    value: str, *, normalized: bool, allow_current: bool
+) -> RelativePathProblem | None:
+    """The problem of a path made only of empty and ``.`` segments, such as ``.`` or ``./``."""
+    if normalized and value != ".":
+        return "unnormalized"
+    return None if allow_current else "current"
+
+
 def relative_path_problem(
     value: str,
     *,
@@ -89,22 +111,15 @@ def relative_path_problem(
     ``characters`` sets how unusual characters are treated (see ``PathCharacters``).
     ``component_pattern`` must match every segment completely.
     """
-    if not value:
-        return "empty"
-    if value.startswith("/"):
-        return "absolute"
-    if "\\" in value:
-        return "backslash"
-    if "\x00" in value:
-        return "characters"
+    problem = _spelling_problem(value)
+    if problem is not None:
+        return problem
     segments = value.split("/")
     if ".." in segments:
         return "traversal"
     names = [segment for segment in segments if segment not in {"", "."}]
     if not names:
-        if normalized and value != ".":
-            return "unnormalized"
-        return None if allow_current else "current"
+        return _root_only_problem(value, normalized=normalized, allow_current=allow_current)
     if normalized and len(names) != len(segments):
         return "unnormalized"
     if has_drive_prefix(names[0]):

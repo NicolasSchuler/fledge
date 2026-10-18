@@ -13,7 +13,7 @@ RULES = (
             "are ignored. Advisory heuristic."
         ),
         tests=(
-            "tests.test_source.SourceTests.test_markers_labels_and_refs_are_heuristics_not_blockers",
+            "tests.test_source_commands.SourceCommandTests.test_markers_labels_and_refs_are_heuristics_not_blockers",
         ),
         fix="Finish or remove the marked draft text after reviewing its context.",
         reviewable=True,
@@ -28,7 +28,7 @@ RULES = (
             "heuristic."
         ),
         tests=(
-            "tests.test_source.SourceTests.test_markers_labels_and_refs_are_heuristics_not_blockers",
+            "tests.test_source_commands.SourceCommandTests.test_markers_labels_and_refs_are_heuristics_not_blockers",
         ),
         fix="Resolve the editing note and remove its draft command.",
         reviewable=True,
@@ -43,7 +43,7 @@ RULES = (
             "TeX macros. Advisory heuristic."
         ),
         tests=(
-            "tests.test_source.SourceTests.test_markers_labels_and_refs_are_heuristics_not_blockers",
+            "tests.test_source_commands.SourceCommandTests.test_markers_labels_and_refs_are_heuristics_not_blockers",
         ),
         fix="Give distinct objects unique labels and update their references.",
         reviewable=True,
@@ -58,7 +58,7 @@ RULES = (
             " make this inconclusive; advisory heuristic."
         ),
         tests=(
-            "tests.test_source.SourceTests.test_markers_labels_and_refs_are_heuristics_not_blockers",
+            "tests.test_source_commands.SourceCommandTests.test_markers_labels_and_refs_are_heuristics_not_blockers",
         ),
         fix="Correct the reference key or add the intended label; confirm with a clean build.",
         reviewable=True,
@@ -70,7 +70,7 @@ RULES = (
         title="Missing source dependencies",
         description="Detect absent files named by supported literal source commands.",
         tests=(
-            "tests.test_source.SourceTests.test_absolute_outside_and_missing_dependencies_are_errors",
+            "tests.test_source_analysis.SourceAnalysisTests.test_absolute_outside_and_missing_dependencies_are_errors",
         ),
         fix="Include the missing dependency or correct the literal file path.",
         mandatory=True,
@@ -84,7 +84,7 @@ RULES = (
             "Reject absolute paths and literal file references escaping the imported project."
         ),
         tests=(
-            "tests.test_source.SourceTests.test_absolute_outside_and_missing_dependencies_are_errors",
+            "tests.test_source_analysis.SourceAnalysisTests.test_absolute_outside_and_missing_dependencies_are_errors",
         ),
         fix="Copy the dependency into the project and use a project-relative path.",
         mandatory=True,
@@ -98,7 +98,9 @@ RULES = (
             "Detect case mismatches without guessing which file a case-sensitive submission"
             " system will load."
         ),
-        tests=("tests.test_source.SourceTests.test_case_mismatch_is_reported_and_not_guessed",),
+        tests=(
+            "tests.test_source_analysis.SourceAnalysisTests.test_case_mismatch_is_reported_and_not_guessed",
+        ),
         fix="Make the reference match the filename's exact letter case.",
         mandatory=True,
     ),
@@ -113,8 +115,8 @@ RULES = (
             "extensions in pdfTeX order). Advisory; flat layout rewrites the selected name."
         ),
         tests=(
-            "tests.test_source.SourceTests.test_extensionless_graphics_with_multiple_extensions_are_ambiguous",
-            "tests.test_source.SourceTests.test_searchpath_ambiguity_uses_tex_lookup_order",
+            "tests.test_source_search_paths.SourceSearchPathTests.test_extensionless_graphics_with_multiple_extensions_are_ambiguous",
+            "tests.test_source_search_paths.SourceSearchPathTests.test_searchpath_ambiguity_uses_tex_lookup_order",
         ),
         fix=(
             "Confirm the selected file is intended; use an explicit path and extension "
@@ -235,7 +237,7 @@ RULES = (
             "Block flattening when class, style, bibliography or root filenames cannot "
             "retain their required identities."
         ),
-        tests=("tests.test_source.SourceTests.test_local_style_collision_is_blocked",),
+        tests=("tests.test_flat_layout.FlatLayoutTests.test_local_style_collision_is_blocked",),
         fix="Keep the hierarchy, or resolve colliding protected filenames in the source project.",
         mandatory=True,
     ),
@@ -248,7 +250,9 @@ RULES = (
             "Block flattening when sanitizing a protected filename would change its naming "
             "contract."
         ),
-        tests=("tests.test_source.SourceTests.test_protected_filename_cannot_be_sanitized",),
+        tests=(
+            "tests.test_flat_layout.FlatLayoutTests.test_protected_filename_cannot_be_sanitized",
+        ),
         fix="Keep the hierarchy, or explicitly rename the protected file and its references.",
         mandatory=True,
     ),
@@ -261,7 +265,9 @@ RULES = (
             "Block flattening when relocating a local class/style would shadow a previously"
             " external dependency."
         ),
-        tests=("tests.test_source.SourceTests.test_relocated_style_cannot_shadow_system_style",),
+        tests=(
+            "tests.test_flat_layout.FlatLayoutTests.test_relocated_style_cannot_shadow_system_style",
+        ),
         fix=(
             "Keep the hierarchy, or resolve the local class/style name that would shadow a "
             "system file."
@@ -276,7 +282,9 @@ RULES = (
         description=(
             "Block flattening that would break supported generated/sidecar filename relationships."
         ),
-        tests=("tests.test_source.SourceTests.test_sidecar_relationship_breakage_is_blocked",),
+        tests=(
+            "tests.test_flat_layout.FlatLayoutTests.test_sidecar_relationship_breakage_is_blocked",
+        ),
         fix="Keep the hierarchy, or rename the companion files and their references together.",
         mandatory=True,
     ),

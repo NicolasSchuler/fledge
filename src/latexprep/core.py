@@ -30,6 +30,7 @@ from .findings import Finding
 from .job_context import (
     DOCUMENT_COMMANDS,
     PREVIEW_COMMANDS,
+    DocumentBackends,
     JobCommand,
     JobContext,
     JobRequest,
@@ -319,13 +320,17 @@ async def run_job(
     request: JobRequest,
     progress: Callable[[str], None] | None = None,
     report: Report | None = None,
+    *,
+    backends: DocumentBackends | None = None,
 ) -> Report:
     """Run one job and return its sanitized report.
 
     ``progress`` receives short status messages. Pass ``report`` to keep a handle on the
-    report while the job runs: a cancelled job marks it cancelled and re-raises. Raises
-    ``PreparationError`` (a ``RequestError`` when it names a next step) for a request that
-    cannot succeed; every other outcome, including a missed deadline, is in the report.
+    report while the job runs: a cancelled job marks it cancelled and re-raises.
+    ``backends`` replaces how documents are built, inspected and compared (the default
+    drives the real tools). Raises ``PreparationError`` (a ``RequestError`` when it names a
+    next step) for a request that cannot succeed; every other outcome, including a missed
+    deadline, is in the report.
     """
     emit = progress or (lambda _message: None)
     report = report if report is not None else Report(request.command.value)
@@ -336,7 +341,15 @@ async def run_job(
     reviewed = False
     try:
         with execution.workspace("fledge-") as work:
-            context = JobContext(request, settings, work, execution.runner, execution.budget, emit)
+            context = JobContext(
+                request,
+                settings,
+                work,
+                execution.runner,
+                execution.budget,
+                emit,
+                backends=backends or DocumentBackends(),
+            )
             outputs: JobOutput = None
             try:
                 async with execution.bounded(work):

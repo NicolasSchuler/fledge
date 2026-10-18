@@ -117,7 +117,7 @@ class PathRegistry:
     def __init__(self) -> None:
         self.paths: dict[str, _RegisteredPath] = {}
 
-    def add(self, path: str, is_dir: bool) -> None:
+    def add(self, path: str, *, is_dir: bool) -> None:
         parts = path.split("/")
         for index in range(1, len(parts) + 1):
             candidate = "/".join(parts[:index])
@@ -139,7 +139,7 @@ class PathRegistry:
             self.paths[key] = _RegisteredPath(candidate, True, existing.explicit or explicit)
 
 
-def metadata_prefix(path: str, is_dir: bool) -> str | None:
+def metadata_prefix(path: str, *, is_dir: bool) -> str | None:
     """The version-control or operating-system metadata ``path`` belongs to, if any."""
     parts = path.split("/")
     for index, part in enumerate(parts):

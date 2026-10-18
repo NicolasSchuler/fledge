@@ -210,27 +210,36 @@ class ContentScan:
         # Values to redact from every finding, including those of other rules.
         self.secret_values: set[str] = set()
 
-        def rule(name: str, enabled: bool, *, advisory: bool, lexical: bool) -> _ContentRule:
+        def rule(name: str, *, enabled: bool, advisory: bool, lexical: bool) -> _ContentRule:
             matches = _Matches(limits.max_matches)
             return _ContentRule(name, enabled, matches, advisory=advisory, lexical=lexical)
 
         self.identity_terms = rule(
-            "submission.identity_terms", bool(options.identity_terms), advisory=False, lexical=False
+            "submission.identity_terms",
+            enabled=bool(options.identity_terms),
+            advisory=False,
+            lexical=False,
         )
         self.identity_hints = rule(
-            "submission.identity_hints", options.scan_identity_hints, advisory=True, lexical=True
+            "submission.identity_hints",
+            enabled=options.scan_identity_hints,
+            advisory=True,
+            lexical=True,
         )
         self.secrets = rule(
-            "submission.secrets", options.scan_secrets, advisory=True, lexical=False
+            "submission.secrets", enabled=options.scan_secrets, advisory=True, lexical=False
         )
         self.private_comments = rule(
             "submission.private_comments",
-            options.scan_private_comments,
+            enabled=options.scan_private_comments,
             advisory=True,
             lexical=True,
         )
         self.shell_escape = rule(
-            "submission.shell_escape", options.check_shell_escape, advisory=True, lexical=True
+            "submission.shell_escape",
+            enabled=options.check_shell_escape,
+            advisory=True,
+            lexical=True,
         )
         self.rules = (
             self.identity_terms,

@@ -4,11 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import struct
-import tempfile
 import unittest
 import zlib
-from pathlib import Path
-from unittest.mock import AsyncMock, patch
 
 from latexprep.bbl_checks import BblOptions, validate_bbl_format_version
 from latexprep.config import load_settings
@@ -21,8 +18,7 @@ from latexprep.job_context import JobRequest
 from latexprep.manuscript_check_options import ManuscriptCheckOptions
 from latexprep.manuscript_checks import check_manuscript_policies
 from latexprep.submission_readiness_checks import check_submission_readiness
-
-from .support import fake_build
+from tests.support import ProjectTestCase, controlled_backends, fake_build
 
 PREAMBLE = "\\documentclass{article}\n"
 
@@ -51,17 +47,7 @@ def jpeg(components: int, *, adobe_transform: int | None = None) -> bytes:
     return data + b"\xff\xc0" + struct.pack(">H", len(frame) + 2) + frame + b"\xff\xd9"
 
 
-class ReadinessCase(unittest.TestCase):
-    def setUp(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
-
-    def write(self, name: str, value: str | bytes) -> None:
-        path = self.root / name
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(value.encode() if isinstance(value, str) else value)
-
+class ReadinessCase(ProjectTestCase):
     def document(self, preamble: str = "", body: str = "Text.") -> None:
         self.write(
             "main.tex", PREAMBLE + preamble + "\\begin{document}\n" + body + "\n\\end{document}\n"
@@ -296,11 +282,8 @@ class BibliographyBblTests(ReadinessCase):
         self.write("refs.bib", "@book{knuth, title={The TeXbook}, year={1984}}")
         self.document(body="Text \\cite{knuth}.\n\\bibliography{refs}")
         settings = load_settings(None, {}, preset="arxiv")
-        with (
-            patch("latexprep.document_tasks.build_project", side_effect=fake_build),
-            patch("latexprep.document_tasks.inspect_pdf", new=AsyncMock(return_value=[])),
-        ):
-            report = asyncio.run(run_job(JobRequest("check", self.root, settings)))
+        backends = controlled_backends(build=fake_build)
+        report = asyncio.run(run_job(JobRequest("check", self.root, settings), backends=backends))
         bbl = {item.code: item for item in report.findings if item.code in {"TEX009", "BIB109"}}
         self.assertEqual((bbl["TEX009"].severity, bbl["TEX009"].status), ("warning", "failed"))
         self.assertEqual(

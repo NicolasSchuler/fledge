@@ -292,7 +292,7 @@ async def _inspect_pdf_details_with_source_metadata(
     return findings
 
 
-def _font_scope_finding(main: str, paths: tuple[Path, ...], exhaustive: bool) -> Finding | None:
+def _font_scope_finding(main: str, paths: tuple[Path, ...], *, exhaustive: bool) -> Finding | None:
     """What the source graph says about the figure fonts, when it cannot be taken as measured."""
     if not exhaustive:
         return Finding(
@@ -348,7 +348,10 @@ async def _inspect_included_figures(
     exhaustive = complete and len(paths) <= MAX_FIGURE_INPUTS
     inspected = paths[:MAX_FIGURE_INPUTS]
     findings = []
-    if figure_fonts and (scope := _font_scope_finding(main, paths, exhaustive)) is not None:
+    if (
+        figure_fonts
+        and (scope := _font_scope_finding(main, paths, exhaustive=exhaustive)) is not None
+    ):
         findings.append(scope)
     measured = await inspect_included_pdf_figures(
         inspected, work / "figures", runner, options=settings.details, budget=budget

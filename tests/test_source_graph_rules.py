@@ -6,6 +6,7 @@ from pathlib import Path
 
 from latexprep.source_file_commands import SECOND_ARGUMENT_FILE_COMMANDS, file_argument_index
 from latexprep.source_graph import INCOMPLETE_GRAPH_RULES, UNPARSED_SOURCE_RULES
+from tests.support import SOURCE_GRAPH_ADVISORY_RULES
 
 PACKAGE = Path(__file__).resolve().parents[1] / "src" / "latexprep"
 # The modules that make up the source graph and emit its findings.
@@ -14,21 +15,6 @@ GRAPH_MODULES = (
     "source_loading.py",
     "source_command_checks.py",
     "source_resolution.py",
-)
-
-# Rules the graph emits that do not leave it incomplete: how a reference was written, which
-# directories are searched, and the choice of the main file, which callers report themselves.
-ADVISORY_RULES = frozenset(
-    {
-        "source.path_option",
-        "source.path_identity",
-        "source.dynamic_search_path",
-        "source.scoped_search_path",
-        "source.search_path_syntax",
-        "source.main_invalid",
-        "source.root_ambiguous",
-        "source.root_missing",
-    }
 )
 
 
@@ -57,8 +43,8 @@ class GraphRuleSetTests(unittest.TestCase):
             for module in GRAPH_MODULES
             for rule in re.findall(r'"(source\.[a-z_]+)"', (PACKAGE / module).read_text("utf-8"))
         }
-        self.assertEqual(emitted - INCOMPLETE_GRAPH_RULES - ADVISORY_RULES, set())
-        self.assertTrue(INCOMPLETE_GRAPH_RULES.isdisjoint(ADVISORY_RULES))
+        self.assertEqual(emitted - INCOMPLETE_GRAPH_RULES - SOURCE_GRAPH_ADVISORY_RULES, set())
+        self.assertTrue(INCOMPLETE_GRAPH_RULES.isdisjoint(SOURCE_GRAPH_ADVISORY_RULES))
 
 
 class FileArgumentIndexTests(unittest.TestCase):

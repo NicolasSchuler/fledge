@@ -16,15 +16,15 @@ from latexprep.errors import PreparationError
 from latexprep.latexmk_build import build_project
 from latexprep.loaded_options import (
     BuildEvidence,
-    _native_string,
-    _parse_options,
     collect_loaded_options,
+    decode_native_string,
+    parse_kernel_options,
     stage_loaded_options,
 )
 from latexprep.pdf_comparison import compare_pdfs
 from latexprep.runtime import ToolRunner
-from tests.support import live_tests_enabled
-from tests.test_runtime import FakeBuildRunner
+from tests.fakes import FakeBuildRunner
+from tests.support import live_test
 
 
 def _units(value: str, engine: str = "pdflatex") -> str:
@@ -54,16 +54,19 @@ def _evidence(token: str, engine: str = "pdflatex") -> str:
 
 class OptionsRunner(FakeBuildRunner):
     def __init__(self, toolchain: Path, mutation: str = "", *, log: str = "") -> None:
-        super().__init__(log=log)
-        self.toolchain = toolchain
+        super().__init__(log=log, resource_roots=[toolchain])
+        self.fixture_toolchain = toolchain
         self.mutation = mutation
-        self._test_resource_roots.add(toolchain)
 
     async def run(self, argv, cwd, workspace, **kwargs):
         result = await super().run(argv, cwd, workspace, **kwargs)
         if argv[-1] in {"-v", "--version"}:
             return result
-        trace = [cwd / Path(argv[-1]).name, cwd / "local.sty", self.toolchain / "article.cls"]
+        trace = [
+            cwd / Path(argv[-1]).name,
+            cwd / "local.sty",
+            self.fixture_toolchain / "article.cls",
+        ]
         hooks = list(workspace.glob("latexprep-loaded-options-*.tex"))
         if hooks:
             hook = hooks[0]
@@ -88,7 +91,7 @@ class OptionsRunner(FakeBuildRunner):
             elif self.mutation == "duplicate-record":
                 text = text.replace("PACKAGE|local.sty", "PACKAGE|article.cls")
             elif self.mutation == "ambiguous-origin":
-                other = self.toolchain / "local.sty"
+                other = self.fixture_toolchain / "local.sty"
                 other.write_text("\\ProvidesPackage{local}")
                 trace.append(other)
             elif self.mutation == "unexpanded-value":
@@ -104,7 +107,7 @@ class OptionsRunner(FakeBuildRunner):
                 text = "x" * 2_097_153
             sidecar = workspace / "output" / f"{hook.stem}.lpo"
             if self.mutation == "sidecar-symlink":
-                sidecar.symlink_to(self.toolchain / "article.cls")
+                sidecar.symlink_to(self.fixture_toolchain / "article.cls")
             elif self.mutation != "absent":
                 sidecar.write_text(text)
         (workspace / "output" / (Path(argv[-1]).stem + ".fls")).write_text(
@@ -248,12 +251,12 @@ class LoadedOptionsTests(unittest.IsolatedAsyncioTestCase):
     def test_transport_preserves_delimiters_spaces_and_native_unicode_without_expansion(self):
         value = "empty=,key={a,b|c},word=Grüße,space=two words\nnewline"
         for engine in ("pdflatex", "xelatex", "lualatex"):
-            self.assertEqual(_native_string(_units(value, engine), engine), value)
-            data = _parse_options(_evidence("a" * 32, engine), "a" * 32, engine)
+            self.assertEqual(decode_native_string(_units(value, engine), engine), value)
+            data = parse_kernel_options(_evidence("a" * 32, engine), "a" * 32, engine)
             self.assertEqual(data.packages[1].options, "forwarded=actual,value={a,b|c}")
         for value in ("!", "00", "G" * 8, "FFFFFFFF", "00000000" * 16_385):
             with self.subTest(value=value[:20]), self.assertRaises(PreparationError):
-                _native_string(value, "pdflatex")
+                decode_native_string(value, "pdflatex")
 
     def test_hook_ships_as_package_data_with_its_token_placeholders(self):
         root = Path(__file__).resolve().parents[1]
@@ -337,10 +340,7 @@ class LoadedOptionsDiagnosticsTests(unittest.TestCase):
             self.assertEqual(evidence.uncertainty, "The option evidence is not plain ASCII text")
 
 
-@unittest.skipUnless(
-    live_tests_enabled(),
-    "Enable FLEDGE_RUN_INTEGRATION for real restricted TeX option instrumentation",
-)
+@live_test("Enable FLEDGE_RUN_INTEGRATION for real restricted TeX option instrumentation")
 class LiveLoadedOptionsTests(unittest.IsolatedAsyncioTestCase):
     async def test_live_forwarded_options_preserve_rendered_pdf_and_source(self):
         with tempfile.TemporaryDirectory(prefix="latex-prep-options-") as directory:

@@ -92,13 +92,13 @@ def save_reports(
             html_document = render_redacted_html(public, preview_images=preview_images)
             with files.html.open("x", encoding="utf-8") as stream:
                 stream.write(html_document)
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 - a failed file becomes a finding with its cause
             record_write_failure(report, "--html-report", files.html, error)
             public, html_document = redact_report(report), None
     if files.diagnostics is not None:
         try:
             export_redacted_diagnostic_bundle(public, files.diagnostics)
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 - a failed file becomes a finding with its cause
             record_write_failure(report, "--diagnostics", files.diagnostics, error)
             public, html_document = redact_report(report), None
     encoded = redacted_json(public)
@@ -106,7 +106,7 @@ def save_reports(
         try:
             with files.json.open("x", encoding="utf-8") as stream:
                 stream.write(encoded)
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 - a failed file becomes a finding with its cause
             record_write_failure(report, "--json-report", files.json, error)
             public, html_document = redact_report(report), None
             encoded = redacted_json(public)

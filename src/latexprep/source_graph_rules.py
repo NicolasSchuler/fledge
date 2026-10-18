@@ -19,7 +19,7 @@ RULES = (
             "the checks that depend on them are incomplete."
         ),
         tests=(
-            "tests.test_source.SourceTests.test_read_failures_and_encoding_failures_are_told_apart_without_local_paths",
+            "tests.test_source_analysis.SourceAnalysisTests.test_read_failures_and_encoding_failures_are_told_apart_without_local_paths",
         ),
         fix="Make the file readable and convert an explicit copy to UTF-8, then repeat the check.",
         mandatory=True,
@@ -33,7 +33,7 @@ RULES = (
             "beyond the limit are not read, so the checks that depend on them are incomplete."
         ),
         tests=(
-            "tests.test_source.SourceTests.test_unsupported_encoding_and_large_files_are_explicit",
+            "tests.test_source_analysis.SourceAnalysisTests.test_unsupported_encoding_and_large_files_are_explicit",
         ),
         fix="Reduce the selected source set or inspect the large file separately.",
         mandatory=True,
@@ -48,7 +48,7 @@ RULES = (
             "depend on the file are incomplete."
         ),
         tests=(
-            "tests.test_source.SourceTests.test_selected_analysis_requires_readable_sources_and_rejects_linked_dependencies",
+            "tests.test_source_analysis.SourceAnalysisTests.test_selected_analysis_requires_readable_sources_and_rejects_linked_dependencies",
         ),
         fix="Supply the actual project file inside the project instead of a link.",
         mandatory=True,
@@ -62,7 +62,9 @@ RULES = (
             "the scan examines. Nothing past the limit is inspected, so the checks that depend "
             "on it are incomplete."
         ),
-        tests=("tests.test_source.SourceTests.test_lexical_bounds_report_their_cause_and_line",),
+        tests=(
+            "tests.test_source_analysis.SourceAnalysisTests.test_lexical_bounds_report_their_cause_and_line",
+        ),
         fix="Split the file or reduce the selected source set.",
         mandatory=True,
     ),
@@ -76,8 +78,8 @@ RULES = (
             "the file cannot be read reliably, so its commands are not inspected."
         ),
         tests=(
-            "tests.test_source.SourceTests.test_unclosed_and_oversized_arguments_are_bounded_and_explicit",
-            "tests.test_source.SourceTests.test_lexical_bounds_report_their_cause_and_line",
+            "tests.test_source_commands.SourceCommandTests.test_unclosed_and_oversized_arguments_are_bounded_and_explicit",
+            "tests.test_source_analysis.SourceAnalysisTests.test_lexical_bounds_report_their_cause_and_line",
         ),
         fix=(
             "Close the brace group, or move long text out of the command argument, for "
@@ -110,7 +112,7 @@ RULES = (
             "the checks that depend on it are incomplete."
         ),
         tests=(
-            "tests.test_source.SourceTests.test_selected_analysis_reports_unsupported_or_unresolved_dependencies_as_incomplete",
+            "tests.test_source_analysis.SourceAnalysisTests.test_selected_analysis_reports_unsupported_or_unresolved_dependencies_as_incomplete",
         ),
         fix="Use a plain literal filename in the file command.",
         mandatory=True,
@@ -153,7 +155,7 @@ RULES = (
             "the recorded build covers are not reported."
         ),
         tests=(
-            "tests.test_source.SourceTests.test_conditional_uncertainty_covers_only_enclosed_project_references",
+            "tests.test_source_commands.SourceCommandTests.test_conditional_uncertainty_covers_only_enclosed_project_references",
         ),
         fix=(
             "Make the dependency unconditional so it can be followed; with layout = "
@@ -170,7 +172,7 @@ RULES = (
             "Its lookup semantics are unknown, so the file cannot be followed or rewritten."
         ),
         tests=(
-            "tests.test_source.SourceTests.test_selected_analysis_reports_unsupported_or_unresolved_dependencies_as_incomplete",
+            "tests.test_source_analysis.SourceAnalysisTests.test_selected_analysis_reports_unsupported_or_unresolved_dependencies_as_incomplete",
         ),
         fix="Name the file with a supported command such as \\input or \\includegraphics.",
         mandatory=True,
@@ -185,7 +187,7 @@ RULES = (
             "literal subset."
         ),
         tests=(
-            "tests.test_source.SourceTests.test_selected_analysis_reports_unsupported_or_unresolved_dependencies_as_incomplete",
+            "tests.test_source_analysis.SourceAnalysisTests.test_selected_analysis_reports_unsupported_or_unresolved_dependencies_as_incomplete",
         ),
         fix="Replace the command with a literal file reference the scan can follow.",
         mandatory=True,
@@ -233,7 +235,7 @@ RULES = (
             "how the reference was written."
         ),
         tests=(
-            "tests.test_source.SourceTests.test_subfiles_parent_path_option_is_explicitly_unsupported",
+            "tests.test_source_search_paths.SourceSearchPathTests.test_subfiles_parent_path_option_is_explicitly_unsupported",
         ),
         fix=(
             "Simplify the option so it no longer looks like a file path, or select the "
@@ -315,7 +317,7 @@ RULES = (
             "the limit are not inspected."
         ),
         tests=(
-            "tests.test_source.SourceTests.test_deep_input_chains_stop_before_python_recursion_limit",
+            "tests.test_source_search_paths.SourceSearchPathTests.test_deep_input_chains_stop_before_python_recursion_limit",
         ),
         fix="Reduce the nesting of \\input and \\include.",
         mandatory=True,
@@ -343,7 +345,7 @@ RULES = (
             "different path contexts, for example a file input from two directories."
         ),
         tests=(
-            "tests.test_source.SourceTests.test_repeated_input_in_different_search_contexts_is_blocked",
+            "tests.test_source_search_paths.SourceSearchPathTests.test_repeated_input_in_different_search_contexts_is_blocked",
         ),
         fix=(
             "Give the file a name that resolves to the same file from every directory that "
@@ -376,7 +378,7 @@ RULES = (
             "repeat is omitted."
         ),
         tests=(
-            "tests.test_source.SourceTests.test_main_file_and_root_selection_errors_list_what_exists",
+            "tests.test_source_analysis.SourceAnalysisTests.test_main_file_and_root_selection_errors_list_what_exists",
         ),
         fix="Select the main file explicitly with --main (or the main setting).",
         mandatory=True,
@@ -405,8 +407,8 @@ RULES = (
             "project file. The path is never read outside the project."
         ),
         tests=(
-            "tests.test_source.SourceTests.test_main_file_and_root_selection_errors_list_what_exists",
-            "tests.test_source.SourceTests.test_invalid_main_does_not_read_external_file",
+            "tests.test_source_analysis.SourceAnalysisTests.test_main_file_and_root_selection_errors_list_what_exists",
+            "tests.test_source_analysis.SourceAnalysisTests.test_invalid_main_does_not_read_external_file",
         ),
         fix="Give the main file relative to the project folder, for example --main paper/main.tex.",
         mandatory=True,
@@ -421,8 +423,8 @@ RULES = (
             "in details.source_rule."
         ),
         tests=(
-            "tests.test_source.SourceTests.test_dynamic_and_unsupported_commands_are_flat_blockers",
-            "tests.test_source.SourceTests.test_advice_names_the_layout_setting_only_where_it_applies",
+            "tests.test_source_commands.SourceCommandTests.test_dynamic_and_unsupported_commands_are_flat_blockers",
+            "tests.test_flat_layout.FlatLayoutTests.test_advice_names_the_layout_setting_only_where_it_applies",
         ),
         fix='Resolve the construct the finding names, or set layout = "preserve".',
         mandatory=True,
@@ -436,7 +438,7 @@ RULES = (
             "cannot share the top level with the selected document."
         ),
         tests=(
-            "tests.test_source.SourceTests.test_flat_layout_with_other_roots_explains_the_limit_in_plain_words",
+            "tests.test_flat_layout.FlatLayoutTests.test_flat_layout_with_other_roots_explains_the_limit_in_plain_words",
         ),
         fix="Select only this document and its dependencies.",
         mandatory=True,

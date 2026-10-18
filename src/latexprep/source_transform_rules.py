@@ -117,7 +117,7 @@ RULES = (
             "Apply portable unique filename overrides with unchanged extensions to the "
             "flat map; renaming required root/class/style/bibliography identities is unsupported."
         ),
-        tests=("tests.test_source.SourceTests.test_filename_overrides",),
+        tests=("tests.test_flat_layout.FlatLayoutTests.test_filename_overrides",),
         fix="Choose unique portable names with unchanged extensions and protected identities.",
         mandatory=True,
     ),

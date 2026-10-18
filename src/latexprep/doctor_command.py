@@ -50,6 +50,7 @@ def doctor_command(
     project: Path | None,
     engine: Engine | None,
     config: Path | None,
+    *,
     isolated: bool,
     json_output: bool,
     quiet: bool,
@@ -61,7 +62,7 @@ def doctor_command(
     Your manuscript is never compiled or changed. A pass covers the built-in
     fixture, not project packages, custom classes, or venue compliance.
     """
-    reject_config_with_isolated(config, isolated)
+    reject_config_with_isolated(config, isolated=isolated)
     report = Report("doctor", scope=UNFINISHED_SCOPE)
     try:
         selected = (
@@ -81,7 +82,7 @@ def doctor_command(
                 "Setup diagnostics were cancelled.", "Rerun fledge doctor when ready."
             ),
         )
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001 - recorded as a job failure with its cause
         record_job_failure(
             report,
             error,

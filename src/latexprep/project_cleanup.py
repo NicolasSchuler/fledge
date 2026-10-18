@@ -58,7 +58,7 @@ _AUXILIARY_SUFFIXES = (
 def cleanup_reason(path: str) -> str | None:
     """Why a project file is known debris, or ``None`` when it is not."""
     *directories, name = path.split("/")
-    if metadata_prefix(path, False) or name in {"Thumbs.db", "desktop.ini"}:
+    if metadata_prefix(path, is_dir=False) or name in {"Thumbs.db", "desktop.ini"}:
         return "Operating-system or version-control metadata."
     # Never ``.bbl``: a submission usually needs the generated bibliography.
     if name.endswith(_AUXILIARY_SUFFIXES) or any(
@@ -66,11 +66,10 @@ def cleanup_reason(path: str) -> str | None:
     ):
         return "Rebuildable LaTeX auxiliary or diagnostic file."
     if (
-        name.endswith("~")
-        or name.startswith(".#")
+        name.startswith(".#")
         or (name.startswith("#") and name.endswith("#"))
         or (name.startswith(".") and name.endswith((".swp", ".swo")))
-        or name.endswith((".tex.bak", ".bib.bak", ".sty.bak", ".cls.bak"))
+        or name.endswith(("~", ".tex.bak", ".bib.bak", ".sty.bak", ".cls.bak"))
     ):
         return "Editor backup or swap file."
     return None

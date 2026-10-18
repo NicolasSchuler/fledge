@@ -260,7 +260,7 @@ class SharedTableTests(unittest.TestCase):
         self.assertEqual(
             set(structure),
             {"author_command", "required_author_fields"}
-            | {name for name in StructureOptions.__dataclass_fields__},
+            | set(StructureOptions.__dataclass_fields__),
         )
         for group in ("author_records", "bbl_checks"):
             self.assertNotIn(group, recorded)
@@ -294,10 +294,8 @@ class SharedTableTests(unittest.TestCase):
 
 
 class BuildSettingsTests(unittest.TestCase):
-    def test_building_settings_leaves_the_given_values_unchanged(self) -> None:
+    def test_loading_settings_leaves_the_given_values_unchanged(self) -> None:
         from copy import deepcopy
-
-        from latexprep.config import _build_settings
 
         values = {
             "jobs": 3,
@@ -308,7 +306,7 @@ class BuildSettingsTests(unittest.TestCase):
             "checks": {"select": ["TEX"]},
         }
         original = deepcopy(values)
-        settings = _build_settings(values, None)
+        settings = load_settings(None, values)
         self.assertEqual(values, original)
         self.assertEqual(settings.jobs, 3)
         self.assertEqual(settings.formatting_options.wrap_length, 90)

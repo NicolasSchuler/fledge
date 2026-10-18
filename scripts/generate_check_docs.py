@@ -73,7 +73,7 @@ def _cell(text: str) -> str:
     return " ".join(text.split()).replace("|", "\\|")
 
 
-def _table(rules: list[tuple[Rule, str]], with_setting: bool) -> str:
+def _table(rules: list[tuple[Rule, str]], *, with_setting: bool) -> str:
     columns = ["Code", "Check and scope", *(["Enabled by"] if with_setting else []), "Typical fix"]
     lines = ["| " + " | ".join(columns) + " |", "|" + " --- |" * len(columns)]
     for rule, setting in rules:

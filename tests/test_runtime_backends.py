@@ -12,9 +12,9 @@ from unittest.mock import AsyncMock, patch
 
 from latexprep.biber_toolchain import (
     BiberToolchain,
-    _host_macho_slice,
-    _seal_toolchain,
     create_biber_toolchain,
+    host_macho_slice,
+    seal_toolchain,
 )
 from latexprep.build_bibliography import sources_may_use_biber
 from latexprep.command_runner import CommandResult
@@ -22,13 +22,13 @@ from latexprep.errors import PreparationError, SandboxRefusedError, ToolUnavaila
 from latexprep.file_safety import DirectoryIdentity, regular_file_identity
 from latexprep.latexmk_build import build_project
 from latexprep.process_table import ProcessSample, parse_ancestry_rows, parse_group_rows
-from latexprep.resource_monitor import _group_usage
+from latexprep.resource_monitor import group_usage
 from latexprep.runtime import ToolRunner
 from latexprep.sandbox import BubblewrapSandbox, SeatbeltSandbox, UnavailableSandbox
 from latexprep.tool_launch import create_tool_environment
 from latexprep.toolchain import ToolContext, distribution_roots
-from tests.support import live_tests_enabled
-from tests.test_runtime import FakeBuildRunner
+from tests.fakes import FakeBuildRunner
+from tests.support import live_test
 
 _BCF = (
     '<?xml version="1.0" encoding="UTF-8"?>'
@@ -276,16 +276,17 @@ class LinuxSandboxTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [group for pid, group, _ in rows if pid in {100, 101, 102, 103}], [100] * 4
         )
-        memory, failure = _group_usage(rows, 100, 1)
+        memory, failure = group_usage(rows, 100, 1)
         self.assertEqual(memory, 1210)
         self.assertIn("exceeded 1 MiB", failure or "")
         for malformed in (b"", b"1 2 3\n", b"1 invalid 1 1\n", b"1 0 1 -2\n"):
             with self.subTest(malformed=malformed), self.assertRaises(PreparationError):
                 parse_ancestry_rows(malformed, {1})
 
-    @unittest.skipUnless(
-        sys.platform == "linux" and live_tests_enabled("LATEXPREP_RUN_SANDBOX_TESTS"),
+    @live_test(
         "opt-in live Linux isolation check; requires operational Bubblewrap user namespaces",
+        "LATEXPREP_RUN_SANDBOX_TESTS",
+        platform="linux",
     )
     async def test_live_linux_denies_sibling_reads_and_writes(self) -> None:
         perl = shutil.which("perl")
@@ -335,11 +336,11 @@ class ToolIsolationTests(unittest.IsolatedAsyncioTestCase):
                     self.subTest(wide=wide, machine=machine),
                     patch("latexprep.biber_toolchain.platform.machine", return_value=machine),
                 ):
-                    self.assertEqual(_host_macho_slice(image), expected)
+                    self.assertEqual(host_macho_slice(image), expected)
 
     def test_unusable_containers_are_refused_and_thin_images_pass_through(self) -> None:
         thin = b"\xcf\xfa\xed\xfe single architecture executable"
-        self.assertEqual(_host_macho_slice(thin), thin)
+        self.assertEqual(host_macho_slice(thin), thin)
         with patch("latexprep.biber_toolchain.platform.machine", return_value="arm64"):
             for description, image in (
                 ("absent host slice", self.universal(((0x01000007, b"x86_64 only"),))),
@@ -348,16 +349,16 @@ class ToolIsolationTests(unittest.IsolatedAsyncioTestCase):
                 ("short image", b"\xca\xfe\xba\xbe"),
             ):
                 with self.subTest(description=description), self.assertRaises(PreparationError):
-                    _host_macho_slice(image)
+                    host_macho_slice(image)
             escaping = bytearray(self.universal(((0x0100000C, b"arm64 slice image"),)))
             escaping[16:20] = (len(escaping) - 4).to_bytes(4, "big")
             with self.assertRaisesRegex(PreparationError, "outside its container"):
-                _host_macho_slice(bytes(escaping))
+                host_macho_slice(bytes(escaping))
         with (
             patch("latexprep.biber_toolchain.platform.machine", return_value="riscv64"),
             self.assertRaisesRegex(PreparationError, "Unsupported host architecture"),
         ):
-            _host_macho_slice(self.universal(((0x0100000C, b"arm64 slice image"),)))
+            host_macho_slice(self.universal(((0x0100000C, b"arm64 slice image"),)))
 
     def test_each_preparation_gets_its_own_private_inert_directory(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -385,7 +386,7 @@ class ToolIsolationTests(unittest.IsolatedAsyncioTestCase):
             (base / "biber").write_bytes(b"thin image")
             (base / "biber").chmod(0o700)
             (base / "payload/inner/module.pm").write_bytes(b"payload module")
-            _seal_toolchain(base)
+            seal_toolchain(base)
             for path in (base, *base.rglob("*")):
                 with self.subTest(path=path.name):
                     self.assertFalse(path.stat().st_mode & 0o222, path)
@@ -393,7 +394,7 @@ class ToolIsolationTests(unittest.IsolatedAsyncioTestCase):
             (base / "payload").chmod(0o700)
             (base / "payload/link").symlink_to(base / "biber")
             with self.assertRaisesRegex(PreparationError, "unsupported entry"):
-                _seal_toolchain(base)
+                seal_toolchain(base)
 
     @unittest.skipUnless(sys.platform == "darwin", "Seatbelt profiles are macOS-only")
     async def test_only_commands_that_may_run_biber_receive_payload_grants(self) -> None:

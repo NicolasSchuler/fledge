@@ -12,6 +12,7 @@ from typing import TypeVar
 import click
 
 from .defects import REPORT_DEFECT_SUGGESTION, is_expected_failure, summarize_traceback
+from .diagnostic_logging import debug_logging
 from .findings import Finding, internal_error_finding, request_error_finding
 from .report import REQUEST_SCOPE, UNFINISHED_SCOPE, Outcome, Report
 
@@ -56,18 +57,27 @@ main_option = click.option(
 )
 
 
-def reject_config_with_isolated(config: Path | None, isolated: bool) -> None:
+def reject_config_with_isolated(config: Path | None, *, isolated: bool) -> None:
     if isolated and config is not None:
         raise click.UsageError("--isolated cannot be combined with --config")
 
 
-def _remember_debug(context: click.Context, _parameter: click.Parameter, value: bool) -> bool:
+def _remember_debug(
+    context: click.Context,
+    _parameter: click.Parameter,
+    value: bool,  # noqa: FBT001 - click passes option callbacks their value positionally
+) -> bool:
+    """Remember ``--debug`` and, once it or ``FLEDGE_DEBUG`` asks for it, start the log lines."""
     if value:
         context.meta[_DEBUG_CONTEXT_KEY] = True
+    if debug_enabled():
+        # The handler is removed when the context closes, so a later command that runs in
+        # the same process without --debug prints nothing.
+        context.with_resource(debug_logging())
     return value
 
 
-# Hidden: only a person reporting a defect needs the traceback of an internal error.
+# Hidden: only a person reporting a defect needs the traceback and the log lines.
 debug_option = click.option(
     "--debug",
     is_flag=True,
@@ -75,7 +85,7 @@ debug_option = click.option(
     expose_value=False,
     is_eager=True,
     callback=_remember_debug,
-    help="Print the traceback of an internal error to stderr.",
+    help="Print diagnostic log lines and the traceback of an internal error to stderr.",
 )
 
 

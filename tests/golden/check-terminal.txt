@@ -1,0 +1,24 @@
+╭────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ Passed with advisories — selected source, bibliography, privacy, isolated build and PDF checks │
+│ 0 errors, 1 warning, 1 incomplete, 3 not applicable, 3 passed results                          │
+╰────────────────────────────────────────────────────────────────────────────────────────────────╯
+Document: main.tex
+
+BIB102  Apparently uncited bibliography entries  [WARNING / failed]
+  Where: references.bib:2 [bibliography coverage and fields]
+  1 of 2 entries have no scanned use: unused2020
+  Evidence: references.bib:2
+  Next: Review each candidate against all intended documents, filters and bibliography backend
+  behavior before considering removal. This check never prunes a bibliography.
+
+BLD105  Local TeX distribution release  [INFO / inconclusive]
+  Where: project [baseline]
+  The TeX distribution is unknown: the build recorded no engine version output.
+  Next: Resolve the missing or ambiguous evidence described above, then repeat this check.
+
+Not checked (needs your settings): anonymity, page limit, ZIP size limit, forbidden packages, strict
+font embedding, image resolution, 93 other opt-in checks. Set them in fledge.toml (start with fledge
+init --preset anonymous-review|arxiv|camera-ready); see
+https://nicolasschuler.github.io/fledge/configuration.html
+
+Explain a check: fledge rule CODE

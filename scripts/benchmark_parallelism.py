@@ -195,7 +195,7 @@ async def _run_once(
     try:
         async with asyncio.timeout(remaining):
             await run_job(JobRequest("prepare", corpus.path, settings, output), report=report)
-    except (Exception, asyncio.CancelledError) as error:
+    except (Exception, asyncio.CancelledError) as error:  # noqa: BLE001 - recorded in the result
         failure = f"{type(error).__name__}: {error}"
     elapsed = time.monotonic() - started
     evidence = _evidence(report, root)
@@ -286,12 +286,9 @@ def _summaries(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return summaries
 
 
-async def benchmark(max_seconds: float, repetitions: int) -> dict[str, Any]:
-    started = time.monotonic()
-    # Stop admission five seconds before the requested bound for child reaping,
-    # temporary-directory cleanup, and JSON assembly. Cleanup is never abandoned.
-    deadline = started + max_seconds - 5
-    result: dict[str, Any] = {
+def _initial_result(max_seconds: float, repetitions: int) -> dict[str, Any]:
+    """The machine, settings and unavailable-metric description every result starts from."""
+    return {
         "status": "completed",
         "started_utc": datetime.now(UTC).isoformat(),
         "machine": {
@@ -332,6 +329,63 @@ async def benchmark(max_seconds: float, repetitions: int) -> dict[str, Any]:
         "records": [],
         "skipped_corpora": [],
     }
+
+
+async def _run_pilots(
+    corpora: list[Corpus],
+    root: Path,
+    deadline: float,
+    expected: dict[str, ExpectedResult],
+    records: list[dict[str, Any]],
+) -> None:
+    """One pilot per corpus and configuration, in alternating order; stop on a failure."""
+    for index, corpus in enumerate(corpora):
+        order = list(CONFIGURATIONS)
+        if index % 2:
+            order.reverse()
+        for configuration in order:
+            record = await _run_once(corpus, configuration, "pilot", 0, root, deadline, expected)
+            records.append(record)
+            console.print(
+                f"pilot {corpus.name} {configuration}: "
+                f"{record['elapsed_seconds']:.3f}s, {record['outcome']}",
+            )
+            if record["failure"]:
+                raise RuntimeError(f"Pilot stopped: {record['failure']}")
+
+
+async def _run_measured(
+    corpus: Corpus,
+    repetitions: int,
+    root: Path,
+    deadline: float,
+    expected: dict[str, ExpectedResult],
+    records: list[dict[str, Any]],
+) -> None:
+    """The measured repetitions of one corpus, alternating the configuration order."""
+    for repetition in range(1, repetitions + 1):
+        order = list(CONFIGURATIONS)
+        if repetition % 2 == 0:
+            order.reverse()
+        for configuration in order:
+            record = await _run_once(
+                corpus, configuration, "measured", repetition, root, deadline, expected
+            )
+            records.append(record)
+            console.print(
+                f"repeat {repetition} {corpus.name} {configuration}: "
+                f"{record['elapsed_seconds']:.3f}s, {record['outcome']}",
+            )
+            if record["failure"]:
+                raise RuntimeError(f"Measured run stopped: {record['failure']}")
+
+
+async def benchmark(max_seconds: float, repetitions: int) -> dict[str, Any]:
+    started = time.monotonic()
+    # Stop admission five seconds before the requested bound for child reaping,
+    # temporary-directory cleanup, and JSON assembly. Cleanup is never abandoned.
+    deadline = started + max_seconds - 5
+    result = _initial_result(max_seconds, repetitions)
     records: list[dict[str, Any]] = result["records"]
     expected: dict[str, ExpectedResult] = {}
     with tempfile.TemporaryDirectory(prefix="latexprep-benchmark-") as temporary:
@@ -347,21 +401,7 @@ async def benchmark(max_seconds: float, repetitions: int) -> dict[str, Any]:
             for corpus in corpora
         ]
         try:
-            for index, corpus in enumerate(corpora):
-                order = list(CONFIGURATIONS)
-                if index % 2:
-                    order.reverse()
-                for configuration in order:
-                    record = await _run_once(
-                        corpus, configuration, "pilot", 0, root, deadline, expected
-                    )
-                    records.append(record)
-                    console.print(
-                        f"pilot {corpus.name} {configuration}: "
-                        f"{record['elapsed_seconds']:.3f}s, {record['outcome']}",
-                    )
-                    if record["failure"]:
-                        raise RuntimeError(f"Pilot stopped: {record['failure']}")
+            await _run_pilots(corpora, root, deadline, expected, records)
             for corpus in corpora:
                 pilot_seconds = sum(
                     record["elapsed_seconds"]
@@ -381,21 +421,7 @@ async def benchmark(max_seconds: float, repetitions: int) -> dict[str, Any]:
                         }
                     )
                     continue
-                for repetition in range(1, repetitions + 1):
-                    order = list(CONFIGURATIONS)
-                    if repetition % 2 == 0:
-                        order.reverse()
-                    for configuration in order:
-                        record = await _run_once(
-                            corpus, configuration, "measured", repetition, root, deadline, expected
-                        )
-                        records.append(record)
-                        console.print(
-                            f"repeat {repetition} {corpus.name} {configuration}: "
-                            f"{record['elapsed_seconds']:.3f}s, {record['outcome']}",
-                        )
-                        if record["failure"]:
-                            raise RuntimeError(f"Measured run stopped: {record['failure']}")
+                await _run_measured(corpus, repetitions, root, deadline, expected, records)
         except (RuntimeError, TimeoutError) as error:
             result["status"] = "stopped"
             result["failure"] = str(error)

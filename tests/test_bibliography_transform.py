@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import tempfile
 import unittest
 from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
@@ -14,21 +13,14 @@ from latexprep.bibtex_syntax import BibDocument, parse_bibtex
 from latexprep.errors import PreparationError
 from latexprep.findings import Finding, has_blockers
 from latexprep.report import Change
+from tests.support import ProjectTestCase
 
 
-class BibliographyTransformTests(unittest.TestCase):
+class BibliographyTransformTests(ProjectTestCase):
     def setUp(self) -> None:
-        directory = tempfile.TemporaryDirectory()
-        self.addCleanup(directory.cleanup)
-        self.root = Path(directory.name)
+        super().setUp()
         self.options = BibliographyTransformOptions()
         self.manuscript()
-
-    def write(self, name: str, value: str | bytes) -> Path:
-        path = self.root / name
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(value.encode("utf-8") if isinstance(value, str) else value)
-        return path
 
     def manuscript(self, body: str = "", resources: str = "references") -> None:
         self.write(

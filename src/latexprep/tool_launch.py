@@ -67,7 +67,7 @@ def with_ulimits(command: list[str], *, max_file_bytes: int, timeout_seconds: in
     # what the computed argument assumes. Dash, the Debian/Ubuntu /bin/sh,
     # counts 512-byte blocks instead and would halve the limit; macOS /bin/sh
     # is bash and already agrees with /bin/bash here.
-    shell = "/bin/bash" if os.path.isfile("/bin/bash") else "/bin/sh"
+    shell = "/bin/bash" if Path("/bin/bash").is_file() else "/bin/sh"
     return [
         shell,
         "-c",

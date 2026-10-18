@@ -23,7 +23,7 @@ from latexprep.raster_pixels import read_pnm_raster
 from latexprep.resource_budget import ResourceBudget
 from latexprep.runtime import ToolRunner
 from latexprep.submission_options import SubmissionOptions
-from tests.test_pdf import FakePdfRunner
+from tests.pdf_fakes import FakePdfRunner
 
 
 class RecordingPdfRunner(FakePdfRunner):
@@ -302,17 +302,9 @@ class ParallelPdfTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             probes,
             Counter(
-                {
-                    name: 1
-                    for name in (
-                        "pdfinfo",
-                        "pdftotext",
-                        "pdftoppm",
-                        "pdffonts",
-                        "pdfdetach",
-                        "pdfimages",
-                    )
-                }
+                dict.fromkeys(
+                    ("pdfinfo", "pdftotext", "pdftoppm", "pdffonts", "pdfdetach", "pdfimages"), 1
+                )
             ),
         )
         tools = next(item.details["tools"] for item in first if item.rule == "compare.tools")
