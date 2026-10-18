@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import ClassVar, Literal, NamedTuple
 
 from .cancellation import bounded_map
-from .command_runner import CommandResult, CommandRunner
+from .command_runner import CommandResult, CommandRunner, RuntimeLimits
 from .errors import PreparationError, SettingsError
 from .findings import Finding, has_blockers
 from .limits import MIB
@@ -171,11 +171,13 @@ def _unformattable(rule: str, message: str, relative: str) -> Finding:
     return Finding(rule, message, severity="error", status="inconclusive", path=relative)
 
 
-def _formatter_failure(result: CommandResult, subject: str) -> str:
+def _formatter_failure(result: CommandResult, subject: str, limits: RuntimeLimits) -> str:
     """Why tex-fmt did not complete: its exit status and the first line of its message.
 
     The message is shortened and local paths in it are replaced, so findings do not
-    carry the workspace layout or long source excerpts.
+    carry the workspace layout or long source excerpts (``CommandResult.failure_reason``
+    quotes stderr as it is). A tool a limit stopped is explained by ``failure_reason``,
+    with the value of the limit it exceeded.
     """
     if result.returncode and result.within_limits:
         first_line = next((line.strip() for line in result.stderr.splitlines() if line.strip()), "")
@@ -183,7 +185,7 @@ def _formatter_failure(result: CommandResult, subject: str) -> str:
         return f"{subject} failed with exit status {result.returncode}" + (
             f": {message}" if message else ""
         )
-    return result.failure_reason(subject) or f"{subject} did not complete"
+    return result.failure_reason(subject, limits) or f"{subject} did not complete"
 
 
 async def _tex_fmt(
@@ -197,7 +199,7 @@ async def _tex_fmt(
         command, cwd=workspace, workspace=workspace, memory_mb=_FORMATTER_MEMORY_MB
     )
     if not result.completed_normally:
-        raise PreparationError(_formatter_failure(result, subject))
+        raise PreparationError(_formatter_failure(result, subject, context.runner.limits))
     if context.options.blank_lines == "collapse":
         return _collapse_blank_lines(result.stdout)
     return result.stdout

@@ -268,7 +268,7 @@ class ReportPublicationSafetyTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("report.redaction_limit", {item.rule for item in report.findings})
 
     async def test_redaction_refusal_leaves_no_references_to_unpublished_previews(self):
-        async def measured(_pdf, _root, _main, work, *_args):
+        async def measured(_pdf, _root, _main, work, *_args, **_options):
             work.mkdir(parents=True)
             preview = work / "gray.png"
             preview.write_bytes(b"PNG fixture")
@@ -310,6 +310,57 @@ class ReportPublicationSafetyTests(unittest.IsolatedAsyncioTestCase):
         for item in previews:
             self.assertEqual(item.details["artifacts"], [])
             self.assertEqual(item.details["previews_exported"], 0)
+
+    async def test_preview_only_publication_refuses_a_report_it_cannot_represent(self):
+        async def measured(_pdf, _root, _main, work, *_args, **_options):
+            work.mkdir(parents=True)
+            preview = work / "gray.png"
+            preview.write_bytes(b"PNG fixture")
+            return [
+                Finding(
+                    "pdf.grayscale_preview",
+                    "Generated",
+                    severity="info",
+                    status="passed",
+                    details={"artifacts": [str(preview)]},
+                )
+            ]
+
+        settings = Settings(rendered_pdf_artwork=PdfArtworkOptions(grayscale_preview=True))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            source = root / "input"
+            source_project(source)
+            previews = root / "previews?token=findings&"
+            with (
+                patch("latexprep.document_tasks.build_project", side_effect=controlled_build),
+                patch("latexprep.document_tasks.inspect_pdf", new=AsyncMock(return_value=[])),
+                patch("latexprep.document_tasks.compare_pdfs", new=AsyncMock(return_value=[])),
+                patch(
+                    "latexprep.document_tasks.inspect_configured_pdf_checks", side_effect=measured
+                ),
+            ):
+                report = await run_job(
+                    JobRequest("check", source, settings, preview_output=previews)
+                )
+            self.assertFalse(previews.exists())
+        self.assertEqual(report.outcome, "error")
+        self.assertEqual(report.artifacts, {})
+        self.assertIn("report.redaction_limit", {item.rule for item in report.findings})
+
+    async def test_a_job_without_publication_sanitizes_its_report_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "input"
+            source_project(source)
+            with (
+                patch("latexprep.document_tasks.build_project", side_effect=controlled_build),
+                patch("latexprep.document_tasks.inspect_pdf", new=AsyncMock(return_value=[])),
+                patch("latexprep.document_tasks.compare_pdfs", new=AsyncMock(return_value=[])),
+                patch.object(Report, "redacted_copy", autospec=True) as sanitize,
+            ):
+                sanitize.side_effect = lambda report: report
+                await run_job(JobRequest("inspect", source, Settings()))
+        self.assertEqual(sanitize.call_count, 1)
 
     async def test_api_and_published_report_redact_configured_urls(self):
         with tempfile.TemporaryDirectory() as directory:

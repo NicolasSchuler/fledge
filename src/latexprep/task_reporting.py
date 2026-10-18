@@ -32,6 +32,7 @@ from .package_inventory import (
 )
 from .report import Change, Report
 from .scheduler import TaskResult, TaskStatus
+from .source_graph import ROOT_AMBIGUOUS_RULE, ROOT_MISSING_RULE
 from .task_findings import blocked_task_finding, failed_task_finding
 from .toolchain_help import explain_missing_toolchain
 
@@ -42,7 +43,7 @@ from .toolchain_help import explain_missing_toolchain
 _UNTAGGED_FINDING_TASKS = frozenset({TaskName.BIBLIOGRAPHY_CHECKS, TaskName.MANUSCRIPT_CHECKS})
 # Root-selection findings of the source analysis, which repeat what main selection
 # reports when it found no single main file, with its candidates.
-_ROOT_SELECTION_RULES = frozenset({"source.root_ambiguous", "source.root_missing"})
+_ROOT_SELECTION_RULES = frozenset({ROOT_AMBIGUOUS_RULE, ROOT_MISSING_RULE})
 
 
 class InputSelection(NamedTuple):

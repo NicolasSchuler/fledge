@@ -689,7 +689,7 @@ class OnlineCheckTests(unittest.IsolatedAsyncioTestCase):
     async def test_cancellation_drains_owned_input_reader_before_return(self):
         entered, release, stopped = threading.Event(), threading.Event(), threading.Event()
 
-        def collect(*_args):
+        def collect(*_args, **_options):
             entered.set()
             try:
                 release.wait(3)

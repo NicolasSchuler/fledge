@@ -267,6 +267,14 @@ def evaluate_font_policy(
 
 def parse_tool_xml(output: str, root_name: str) -> ET.Element:
     """The root of tool XML that declares no entities and holds at most ``MAX_PARSED_NODES``."""
+    # xml.etree is safe here without defusedxml (the project depends on nothing but click and
+    # rich). Entity expansion ("billion laughs") and external entities both need an <!ENTITY>
+    # declaration, and a declaration can only sit in a DOCTYPE internal subset or in an
+    # external DTD. Output with either an ENTITY declaration or an internal subset is rejected
+    # before the parser sees it. Expat never fetches an external DTD or entity (ElementTree
+    # installs no external-entity handler), and a reference to an undeclared entity is a parse
+    # error, so nothing can expand. The size left to bound is the tool output limit, the node
+    # count below and the RecursionError catch for very deep nesting.
     if "<!ENTITY" in output.upper() or re.search(r"<!DOCTYPE[^>]*\[", output, re.I):
         raise PreparationError("PDF tool XML contains unsupported entity declarations")
     try:
@@ -287,20 +295,14 @@ class TracedDocument(NamedTuple):
     pages: list[tuple[int, ET.Element]]
 
 
-def parse_mupdf_trace(
-    output: str,
-    pages: int,
-    *,
-    invalid_page_message: str = "MuPDF trace contains an invalid page number",
-    incomplete_message: str = "MuPDF trace did not report every page exactly once",
-) -> TracedDocument:
-    """Require every page exactly once and in order; callers keep their own messages."""
+def parse_mupdf_trace(output: str, pages: int) -> TracedDocument:
+    """Require every page exactly once and in order."""
     root = parse_tool_xml(output, "document")
     traced = root.findall("page")
     try:
         numbers = [int(page.attrib["number"]) for page in traced]
     except (KeyError, ValueError) as error:
-        raise PreparationError(invalid_page_message) from error
+        raise PreparationError("MuPDF trace contains an invalid page number") from error
     if numbers != list(range(1, pages + 1)):
-        raise PreparationError(incomplete_message)
+        raise PreparationError("MuPDF trace did not report every page exactly once")
     return TracedDocument(root, list(zip(numbers, traced, strict=True)))

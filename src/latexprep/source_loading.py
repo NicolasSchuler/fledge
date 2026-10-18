@@ -69,7 +69,7 @@ class ParsedSource:
 
     def encode(self, text: str | None = None) -> bytes:
         """``text`` (default: the source's own) as the file stores it, with its byte-order mark."""
-        return with_bom(self.text if text is None else text, self.bom).encode("utf-8")
+        return with_bom(self.text if text is None else text, bom=self.bom).encode("utf-8")
 
 
 def is_document_root(commands: list[Command]) -> bool:

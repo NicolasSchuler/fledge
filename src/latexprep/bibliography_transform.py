@@ -294,7 +294,7 @@ def _assemble(state: _ProposalState, findings: list[Finding]) -> BibliographyPro
     before = dict(state.originals)
     for path in state.sources:
         source = state.inspection.sources[path]
-        before[path] = with_bom(source.text, source.bom)
+        before[path] = with_bom(source.text, bom=source.bom)
     changes = [
         Change(
             path,
@@ -367,7 +367,7 @@ def normalize_dois(root: Path, main: str | None = None) -> BibliographyProposal:
                 edits.append(TextEdit(*span, ""))
         if not edits:
             continue
-        updated = with_bom(apply_text_edits(document.text, edits), document.bom)
+        updated = with_bom(apply_text_edits(document.text, edits), bom=document.bom)
         proposed[document.path] = updated.encode("utf-8")
         changes.append(
             Change(

@@ -161,14 +161,18 @@ def _composition_finding(composition: Composition) -> Finding:
         message,
         [],
         incomplete=composition.unsupported or composition.classification == "empty",
-        font_inventory_error=failure,
-        classification=composition.classification,
-        raster_operations=len(composition.raster),
-        vector_operations=len(composition.vector),
-        unclassified_text_operations=0 if composition.fonts.scalable else len(composition.text),
-        scope="Whole selected PDF, including text and backgrounds; figure categories, "
-        "font text needs a complete scalable-font inventory. Outlined lettering "
-        "and source-to-final attribution are not inferred.",
+        details={
+            "font_inventory_error": failure,
+            "classification": composition.classification,
+            "raster_operations": len(composition.raster),
+            "vector_operations": len(composition.vector),
+            "unclassified_text_operations": 0
+            if composition.fonts.scalable
+            else len(composition.text),
+            "scope": "Whole selected PDF, including text and backgrounds; figure categories, "
+            "font text needs a complete scalable-font inventory. Outlined lettering "
+            "and source-to-final attribution are not inferred.",
+        },
     )
 
 
@@ -255,13 +259,15 @@ def _category_resolution_finding(composition: Composition, options: PdfArtworkOp
         message,
         violations,
         incomplete=incomplete or (not composition.raster and not composition.vector),
-        category=options.artwork_category,
-        minimum_dpi=minimum,
-        measurements=measurements[:MAX_SAMPLES],
-        placement_count=len(composition.raster),
-        font_inventory_error=composition.fonts.failure,
-        scope="Declared category and traced raster placements; axes and coarsest "
-        "sampling includes rotation/shear. Vector operations have no raster DPI.",
+        details={
+            "category": options.artwork_category,
+            "minimum_dpi": minimum,
+            "measurements": measurements[:MAX_SAMPLES],
+            "placement_count": len(composition.raster),
+            "font_inventory_error": composition.fonts.failure,
+            "scope": "Declared category and traced raster placements; axes and coarsest "
+            "sampling includes rotation/shear. Vector operations have no raster DPI.",
+        },
     )
 
 
@@ -332,10 +338,13 @@ def _stroke_finding(artwork: TracedArtwork, options: PdfArtworkOptions) -> Findi
         message,
         violations,
         incomplete=uncertain or measured == 0,
-        measured_segments=measured,
-        minimum_pt=minimum,
-        scope="Straight-segment normal thickness supports arbitrary nonsingular affine transforms; "
-        "curves/text need uniform transforms. Hairlines, joins, caps and raster lines are omitted.",
+        details={
+            "measured_segments": measured,
+            "minimum_pt": minimum,
+            "scope": "Straight-segment normal thickness supports arbitrary nonsingular affine "
+            "transforms; curves/text need uniform transforms. Hairlines, joins, caps and "
+            "raster lines are omitted.",
+        },
     )
 
 
@@ -373,9 +382,11 @@ def _drawing_bounds_finding(artwork: TracedArtwork, options: PdfArtworkOptions) 
         _bounds_message(violations, measured, uncertain),
         violations,
         incomplete=uncertain or measured == 0,
-        measured_operations=measured,
-        scope="Affine image rectangles and polygon bounds after rectangular clipping. "
-        "Text, strokes, curves, masks and unsupported page frames remain unmeasured.",
+        details={
+            "measured_operations": measured,
+            "scope": "Affine image rectangles and polygon bounds after rectangular clipping. "
+            "Text, strokes, curves, masks and unsupported page frames remain unmeasured.",
+        },
     )
 
 
@@ -415,9 +426,11 @@ def _clipping_finding(artwork: TracedArtwork, options: PdfArtworkOptions) -> Fin
         _clipping_message(violations, measured, uncertain),
         violations,
         incomplete=uncertain or measured == 0,
-        measured_operations=measured,
-        scope="Extents crossing page or rectangular clip boundaries are candidates; "
-        "intentional cropping, curves, strokes and arbitrary masks need review.",
+        details={
+            "measured_operations": measured,
+            "scope": "Extents crossing page or rectangular clip boundaries are candidates; "
+            "intentional cropping, curves, strokes and arbitrary masks need review.",
+        },
     )
 
 
@@ -505,12 +518,14 @@ def _raster_region_finding(
         if candidate and not incomplete
         else [],
         incomplete=incomplete or text,
-        page=region.page,
-        region=region.name,
-        raster_coverage=coverage,
-        page_has_text_operations=text,
-        scope="Union of axis-aligned images in an explicit region; high coverage "
-        "without page text is a scan/raster-table candidate, not a semantic diagnosis.",
+        details={
+            "page": region.page,
+            "region": region.name,
+            "raster_coverage": coverage,
+            "page_has_text_operations": text,
+            "scope": "Union of axis-aligned images in an explicit region; high coverage "
+            "without page text is a scan/raster-table candidate, not a semantic diagnosis.",
+        },
     )
 
 
@@ -650,12 +665,14 @@ def color_space_finding(document: TracedDocument, required: ColorSpaceFamily) ->
         _color_space_message(violations, spaces, unknown, required),
         violations,
         incomplete=bool(unknown) or not spaces,
-        required=required,
-        color_spaces=dict(sorted(spaces.items())),
-        unclassified=sorted(unknown)[:MAX_SAMPLES],
-        scope="MuPDF trace colour-space names of painted operations; grayscale satisfies "
-        "either family. Separation, DeviceN, Indexed, Lab and unnamed spaces are unclassified; "
-        "ICC profile contents are not interpreted.",
+        details={
+            "required": required,
+            "color_spaces": dict(sorted(spaces.items())),
+            "unclassified": sorted(unknown)[:MAX_SAMPLES],
+            "scope": "MuPDF trace colour-space names of painted operations; grayscale satisfies "
+            "either family. Separation, DeviceN, Indexed, Lab and unnamed spaces are unclassified; "
+            "ICC profile contents are not interpreted.",
+        },
     )
 
 

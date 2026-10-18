@@ -11,7 +11,9 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from pathlib import Path
+from typing import TypeVar
 
+from .analysed_source import AnalysedSource
 from .author_records import check_author_records
 from .bibliography_checks import check_bibliography_coverage_and_fields
 from .bibliography_integrity import check_bibliography_integrity
@@ -36,6 +38,8 @@ from .submission_checks import check_submission
 from .submission_options import SubmissionOptions
 from .submission_readiness_checks import check_submission_readiness
 from .workflow_options import ComparisonOptions
+
+_T = TypeVar("_T")
 
 
 class TaskName(StrEnum):
@@ -132,13 +136,16 @@ def prepared_submission_options(
     )
 
 
-def source_readiness_findings(root: Path, main: str | None, settings: Settings) -> list[Finding]:
+def source_readiness_findings(
+    root: Path, main: str | None, settings: Settings, analysed: AnalysedSource | None = None
+) -> list[Finding]:
     """The submission-readiness advisories of the sources under ``root``."""
     return check_submission_readiness(
         root,
         main,
-        settings.submission_checks,
+        settings.bbl_checks,
         required_color_space=settings.included_figure_artwork.required_color_space,
+        analysed=analysed,
     )
 
 
@@ -151,10 +158,14 @@ def _selected_main(main: str | None) -> str:
 
 @dataclass(frozen=True, slots=True)
 class SourceCheck:
-    """One check of a document's sources, run on the original and again on the final copy."""
+    """One check of a document's sources, run on the original and again on the final copy.
+
+    ``run`` receives the source analysis shared by every check of the same root and main
+    file, as its last argument.
+    """
 
     task: TaskName
-    run: Callable[[Path, str | None, Settings], list[Finding]]
+    run: Callable[[Path, str | None, Settings, AnalysedSource], list[Finding]]
     # Scheduled on the original sources only after a main file was selected.
     needs_main: bool = False
 
@@ -165,32 +176,37 @@ class SourceCheck:
 # source check is added here and to ``TaskName`` only.
 _SOURCE_CHECKS = (
     SourceCheck(
-        TaskName.BIBLIOGRAPHY_CHECKS, lambda root, main, _: check_bibliography_integrity(root, main)
+        TaskName.BIBLIOGRAPHY_CHECKS,
+        lambda root, main, _, analysed: check_bibliography_integrity(root, main, analysed=analysed),
     ),
     SourceCheck(
         TaskName.BIBLIOGRAPHY_COVERAGE,
-        lambda root, main, settings: check_bibliography_coverage_and_fields(
-            root, main, settings.bibliography_checks
+        lambda root, main, settings, analysed: check_bibliography_coverage_and_fields(
+            root, main, settings.bibliography_checks, analysed=analysed
         ),
     ),
     SourceCheck(
         TaskName.MANUSCRIPT_DETAILS,
-        lambda root, main, settings: check_manuscript_policies(
-            root, main, settings.manuscript_checks
+        lambda root, main, settings, analysed: check_manuscript_policies(
+            root, main, settings.manuscript_checks, analysed=analysed
         ),
     ),
     SourceCheck(
         TaskName.IMAGE_METADATA_PRIVACY,
-        lambda root, _, settings: check_image_metadata(root, settings.metadata_privacy),
+        lambda root, _main, settings, _analysed: check_image_metadata(
+            root, settings.metadata_privacy
+        ),
     ),
     SourceCheck(
         TaskName.AUTHOR_FIELDS,
-        lambda root, main, settings: check_author_records(root, main, settings.structure_checks),
+        lambda root, main, settings, analysed: check_author_records(
+            root, main, settings.author_records, analysed=analysed
+        ),
     ),
     SourceCheck(
         TaskName.MANUSCRIPT_CHECKS,
-        lambda root, main, settings: check_manuscript(
-            root, _selected_main(main), settings.manuscript
+        lambda root, main, settings, analysed: check_manuscript(
+            root, _selected_main(main), settings.manuscript, analysed=analysed
         ),
         needs_main=True,
     ),
@@ -198,11 +214,13 @@ _SOURCE_CHECKS = (
 )
 
 
-def _final_source_findings(root: Path, main: str, settings: Settings) -> list[Finding]:
+def _final_source_findings(
+    root: Path, main: str, settings: Settings, analysed: AnalysedSource
+) -> list[Finding]:
     """Re-evaluate the actual shipped sources after all transformations."""
-    findings = list(analyze_sources(root, main).findings)
+    findings = list(analyze_sources(root, main, analysed=analysed).findings)
     for check in _SOURCE_CHECKS:
-        findings.extend(check.run(root, main, settings))
+        findings.extend(check.run(root, main, settings, analysed))
     return findings
 
 
@@ -221,17 +239,71 @@ def _original_submission_options(settings: Settings, command: JobCommand) -> Sub
     return submission
 
 
+def _in_thread_with_analysis(
+    context: JobContext,
+    function: Callable[..., _T],
+    root: Path,
+    main: str | None,
+    *arguments: object,
+) -> Awaitable[_T]:
+    """Run ``function(root, main, *arguments, analysed=...)`` in a worker thread.
+
+    The analysis is the one the job shares for this root and main file, so concurrent
+    checks of the same sources build their graph once.
+    """
+    return run_in_thread(function, root, main, *arguments, analysed=context.sources.get(root, main))
+
+
+def _run_source_check(
+    context: JobContext, check: SourceCheck, root: Path, main: str | None
+) -> Awaitable[list[Finding]]:
+    """Run one source check in a worker thread on the job's shared analysis of ``root``."""
+    return run_in_thread(check.run, root, main, context.settings, context.sources.get(root, main))
+
+
+def _online_references(
+    context: JobContext, root: Path, main: str | None
+) -> Awaitable[list[Finding]]:
+    """The online reference checks of the sources under ``root``, sharing their analysis."""
+    return check_online_references(
+        root,
+        main,
+        options=context.settings.online_checks,
+        budget=context.budget,
+        analysed=context.sources.get(root, main),
+    )
+
+
+def _configured_pdf_checks(
+    context: JobContext, pdf: Path, root: Path, main: str, directory: str
+) -> Awaitable[list[Finding]]:
+    """The configured PDF checks of ``pdf``, with expected values read from ``root``."""
+    return inspect_configured_pdf_checks(
+        pdf,
+        root,
+        main,
+        context.work / directory,
+        context.runner,
+        pdf_check_settings(context.settings),
+        context.budget,
+        analysed=context.sources.get(root, main),
+    )
+
+
 def source_analysis_tasks(
     context: JobContext, snapshot: Callable[[], Path], main: str | None
 ) -> list[Task]:
     """Source, bibliography, manuscript and privacy checks of ``snapshot()``."""
     request, settings = context.request, context.settings
     tasks = [
-        Task(TaskName.SOURCE_CHECKS, lambda: run_in_thread(analyze_sources, snapshot(), main)),
+        Task(
+            TaskName.SOURCE_CHECKS,
+            lambda: _in_thread_with_analysis(context, analyze_sources, snapshot(), main),
+        ),
         *(
             Task(
                 check.task,
-                lambda check=check: run_in_thread(check.run, snapshot(), main, settings),
+                lambda check=check: _run_source_check(context, check, snapshot(), main),
             )
             for check in _SOURCE_CHECKS
             if main is not None or not check.needs_main
@@ -241,7 +313,9 @@ def source_analysis_tasks(
     tasks.append(
         Task(
             TaskName.SOURCE_SUBMISSION_CHECKS,
-            lambda: run_in_thread(check_submission, snapshot(), main, submission),
+            lambda: _in_thread_with_analysis(
+                context, check_submission, snapshot(), main, submission
+            ),
         )
     )
     # A released package needs evidence about its transformed references. Run
@@ -251,9 +325,7 @@ def source_analysis_tasks(
         tasks.append(
             Task.composite(
                 TaskName.ONLINE_REFERENCES,
-                lambda: check_online_references(
-                    snapshot(), main, options=settings.online_checks, budget=context.budget
-                ),
+                lambda: _online_references(context, snapshot(), main),
             )
         )
     return tasks
@@ -286,14 +358,8 @@ def baseline_pdf_tasks(
     tasks = [
         after_baseline(
             TaskName.BASELINE_CONFIGURED_PDF_CHECKS,
-            lambda: inspect_configured_pdf_checks(
-                baseline_pdf(),
-                snapshot(),
-                main,
-                work / "additional-baseline",
-                runner,
-                pdf_check_settings(settings),
-                budget,
+            lambda: _configured_pdf_checks(
+                context, baseline_pdf(), snapshot(), main, "additional-baseline"
             ),
         )
     ]
@@ -359,17 +425,17 @@ def _final_source_tasks(context: JobContext, extraction: FinalExtraction) -> lis
     return [
         Task(
             TaskName.FINAL_SOURCE_CHECKS,
-            lambda: run_in_thread(_final_source_findings, root, main, settings),
+            lambda: _in_thread_with_analysis(context, _final_source_findings, root, main, settings),
         ),
         Task.composite(
             TaskName.FINAL_ONLINE_REFERENCES,
-            lambda: check_online_references(
-                root, main, options=settings.online_checks, budget=context.budget
-            ),
+            lambda: _online_references(context, root, main),
         ),
         Task(
             TaskName.FINAL_SUBMISSION_CHECKS,
-            lambda: run_in_thread(check_submission, root, main, extraction.submission),
+            lambda: _in_thread_with_analysis(
+                context, check_submission, root, main, extraction.submission
+            ),
         ),
     ]
 
@@ -402,15 +468,7 @@ def _final_pdf_tasks(context: JobContext, extraction: FinalExtraction) -> list[T
         ),
         Task.composite(
             TaskName.FINAL_CONFIGURED_PDF_CHECKS,
-            lambda: inspect_configured_pdf_checks(
-                final_pdf,
-                root,
-                main,
-                work / "additional-final",
-                runner,
-                pdf_check_settings(settings),
-                budget,
-            ),
+            lambda: _configured_pdf_checks(context, final_pdf, root, main, "additional-final"),
         ),
     ]
     if extraction.reference is not None:

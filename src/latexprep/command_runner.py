@@ -12,10 +12,16 @@ from __future__ import annotations
 from dataclasses import KW_ONLY, dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, ClassVar, Protocol
+from typing import TYPE_CHECKING, ClassVar, Protocol, Self
 
 from .file_safety import byte_count_text
-from .limits import MIB
+from .limits import (
+    DEFAULT_BUILD_MEMORY_MB,
+    DEFAULT_MAX_GENERATED_FILE_BYTES,
+    DEFAULT_MAX_PROJECT_BYTES,
+    DEFAULT_TOOL_TIMEOUT_SECONDS,
+    MIB,
+)
 from .option_config import POSITIVE_INTEGER, Bounds, validate_scalars
 
 if TYPE_CHECKING:
@@ -23,26 +29,76 @@ if TYPE_CHECKING:
 
 # The part of a failed tool's standard error that a message quotes.
 _STDERR_QUOTE_CHARS = 1000
+# Standard output and error that one command may print before it is stopped. It is not a
+# setting: a tool that prints more is looping.
+_MAX_OUTPUT_BYTES = 2 * MIB
+
+
+class ToolLimitSettings(Protocol):
+    """The settings that bound one tool command; ``config.Settings`` provides them."""
+
+    @property
+    def timeout_seconds(self) -> int: ...
+
+    @property
+    def build_memory_mb(self) -> int: ...
+
+    @property
+    def generated_file_byte_limit(self) -> int: ...
+
+    @property
+    def import_byte_limit(self) -> int: ...
 
 
 @dataclass(frozen=True, slots=True)
 class RuntimeLimits:
-    """What one tool command may use: wall time, output, memory and the size of any file."""
+    """What one tool command may use: wall time, output, memory and the size of any file.
+
+    ``max_file_bytes`` bounds any single file a command writes or opens.
+    ``max_copy_bytes`` is a budget for the sources copied into a tool workspace before
+    any command runs; it bounds their combined size, not a single file.
+
+    The defaults come from ``limits``, the constants that also default the settings, so a
+    limit has one default. A job builds its limits with ``from_settings``.
+    """
 
     FIELD_BOUNDS: ClassVar[dict[str, Bounds]] = dict.fromkeys(
-        ("timeout_seconds", "max_output_bytes", "max_memory_mb", "max_file_bytes"),
+        (
+            "timeout_seconds",
+            "max_output_bytes",
+            "max_memory_mb",
+            "max_file_bytes",
+            "max_copy_bytes",
+        ),
         POSITIVE_INTEGER,
     )
 
-    timeout_seconds: int = 120
-    max_output_bytes: int = 2 * MIB
-    max_memory_mb: int = 2048
-    max_file_bytes: int = 256 * MIB
+    timeout_seconds: int = DEFAULT_TOOL_TIMEOUT_SECONDS
+    max_output_bytes: int = _MAX_OUTPUT_BYTES
+    max_memory_mb: int = DEFAULT_BUILD_MEMORY_MB
+    max_file_bytes: int = DEFAULT_MAX_GENERATED_FILE_BYTES
+    max_copy_bytes: int = DEFAULT_MAX_PROJECT_BYTES
 
     def __post_init__(self) -> None:
         validate_scalars(self)
 
+    @classmethod
+    def from_settings(cls, settings: ToolLimitSettings) -> Self:
+        """The limits a job's settings give its tool commands.
+
+        Time is ``timeout_seconds``, memory ``build_memory_mb``, the size of any one file
+        ``max_generated_file_bytes`` and the copied sources ``max_import_bytes``; the two
+        byte limits are ``max_bytes`` unless set.
+        """
+        return cls(
+            timeout_seconds=settings.timeout_seconds,
+            max_memory_mb=settings.build_memory_mb,
+            max_file_bytes=settings.generated_file_byte_limit,
+            max_copy_bytes=settings.import_byte_limit,
+        )
+
     def to_report(self) -> dict[str, int]:
+        """The limits of a command, as a build records them; the copy budget is not one."""
         return {
             "timeout_seconds": self.timeout_seconds,
             "max_output_bytes": self.max_output_bytes,

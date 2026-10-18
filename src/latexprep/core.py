@@ -14,12 +14,18 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import NamedTuple
 
-from .check_policy import MANDATORY_CODES, configured_opt_in_codes
+from .check_policy import configured_opt_in_codes
 from .config import Settings, effective_settings
 from .coverage_hints import not_checked_areas
 from .document_run import run_project
 from .documents import run_documents
 from .errors import PreparationError, RequestError
+from .execution_records import (
+    CheckSelectionRecord,
+    record_check_selection,
+    record_not_checked,
+    record_pdf_previews,
+)
 from .findings import Finding
 from .job_context import (
     DOCUMENT_COMMANDS,
@@ -44,6 +50,7 @@ from .publication import (
     validate_destination,
 )
 from .report import Outcome, Report
+from .rules import MANDATORY_CODES
 from .standalone_checks import check_bibliography, check_formatting, check_standalone_pdf
 
 
@@ -64,14 +71,18 @@ def _record_settings(request: JobRequest, report: Report) -> Settings:
     effective = effective_settings(settings)
     if effective is not settings:
         report.execution["effective_settings"] = effective.to_dict()
-    report.execution["check_selection"] = {
-        "select": list(effective.checks.select),
-        "ignore": list(effective.checks.ignore),
-        "always_enforced_when_applicable": sorted(MANDATORY_CODES),
-    }
+    record_check_selection(
+        report.execution,
+        CheckSelectionRecord(
+            effective.checks.select,
+            effective.checks.ignore,
+            tuple(sorted(MANDATORY_CODES)),
+        ),
+    )
     if request.command in DOCUMENT_COMMANDS:
-        report.execution["not_checked"] = not_checked_areas(
-            configured_opt_in_codes(effective.top_level_values())
+        record_not_checked(
+            report.execution,
+            not_checked_areas(configured_opt_in_codes(effective.top_level_values())),
         )
     return effective
 
@@ -162,7 +173,7 @@ def _record_execution(report: Report, execution: JobExecution, request: JobReque
     )
     report.stages.sort(key=lambda item: str(item["name"]))
     if request.pdf_previews is not None:
-        report.execution["pdf_previews"] = request.pdf_previews.summary()
+        record_pdf_previews(report.execution, request.pdf_previews.summary())
 
 
 def _block_on_resource_failure(report: Report, execution: JobExecution) -> bool:
@@ -344,15 +355,12 @@ async def run_job(
                     destinations,
                     publishable=_is_publishable(outputs, report, settings),
                 )
-            # The same redacted report is used by API callers and saved output. A
-            # sanitization limit must be resolved before publishing a verified bundle.
             select_and_review(report, settings)
             reviewed = True
-            redacted = report.redacted_copy()
-            if redacted.outcome == Outcome.ERROR:
-                report, outputs, previews = redacted, None, ()
             # All asynchronous readers, tool children and the monitor are drained.
             # Publication is the final synchronous critical section, never an early branch.
+            # It renders the report before it writes anything and refuses a report that
+            # cannot be sanitized, so the report is sanitized only once, on return.
             _publish(report, context, destinations, execution, outputs, previews)
     except JobDeadlineExceeded:
         if not reviewed:

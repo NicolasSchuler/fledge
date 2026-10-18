@@ -139,7 +139,8 @@ class DependencyPackagingTests(unittest.IsolatedAsyncioTestCase):
         diagnostics = [item for item in report.findings if item.rule == "package.dependencies"]
         self.assertTrue(diagnostics, report.findings)
         self.assertTrue(any(item.severity == "error" for item in diagnostics))
-        self.assertTrue(all(item.code is None for item in diagnostics))
+        # Ignoring every check does not remove the finding: PKG302 is mandatory.
+        self.assertTrue(all(item.code == "PKG302" for item in diagnostics))
 
     async def test_existing_output_archive_is_rejected_before_any_build(self) -> None:
         self.write("main.tex", "\\documentclass{article}\n\\begin{document}Body.\\end{document}\n")

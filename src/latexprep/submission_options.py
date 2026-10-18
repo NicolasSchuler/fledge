@@ -1,10 +1,11 @@
 """The ``[submission_checks]`` settings: what to scan a submission bundle for, and how.
 
 These options choose the privacy scans (identity terms, secrets, private comments,
-shell escape), the file-name and archive policies, the deliverables and template
-references to verify, and the shipped-bibliography checks that the readiness checks
-run. This module owns only the options and their validation; the scans that use them
-live in ``submission_checks``, ``submission_content_scan`` and the readiness checks.
+shell escape), the file-name and archive policies, and the deliverables and template
+references to verify. This module owns only the options and their validation; the scans
+that use them live in ``submission_checks`` and ``submission_content_scan``. The same
+table also holds the shipped-bibliography options, ``bbl_checks.BblOptions``, which
+``config`` reads separately.
 """
 
 from __future__ import annotations
@@ -34,23 +35,13 @@ _MAX_LISTED_ENTRIES = 256  # entries in one list setting
 _MAX_TERM_CHARACTERS = 1024  # characters in one identity term or extension
 _MAX_CHARACTER_SET_CHARACTERS = 4096  # characters in filename_allowed_characters
 _MAX_PAIR_CHARACTERS = 4096  # characters in a deliverable or template path or value
-_BBL_FORMAT_VERSION = re.compile(r"[0-9]{1,4}(?:\.[0-9]{1,4}){0,3}")
 _FINAL_EXTENSION = TextFormat(
     re.compile(r"\.[A-Za-z0-9_+-]+"), "a dot-prefixed final extension such as .tex"
 )
 
 # Options that do not make ``check_submission`` inspect the bundle: a matching mode that
-# only refines identity terms, the compressed archive (``check_submission_archive``) and
-# the shipped bibliography (``check_bbl`` in the readiness checks).
-_OPTIONS_OUTSIDE_BUNDLE_SCAN = frozenset(
-    {
-        "identity_term_matching",
-        "max_archive_bytes",
-        "check_bbl_coverage",
-        "require_bbl",
-        "biblatex_bbl_format_version",
-    }
-)
+# only refines identity terms, and the compressed archive (``check_submission_archive``).
+_OPTIONS_OUTSIDE_BUNDLE_SCAN = frozenset({"identity_term_matching", "max_archive_bytes"})
 
 
 def _require_project_path(name: str, value: object) -> None:
@@ -83,20 +74,9 @@ class SubmissionOptions:
     report_unused_assets: bool = False
     template_references: tuple[tuple[str, str], ...] = ()
     identity_term_matching: IdentityTermMatching = "word"
-    check_bbl_coverage: bool = False
-    require_bbl: bool = False
-    biblatex_bbl_format_version: str | None = None
 
     def __post_init__(self) -> None:
         validate_scalars(self)
-        require_text(
-            "biblatex_bbl_format_version",
-            self.biblatex_bbl_format_version,
-            expected='a version such as "3.3", as written on the second line of a biblatex '
-            ".bbl file",
-            pattern=_BBL_FORMAT_VERSION,
-            allow_none=True,
-        )
         require_unique_strings(
             "identity_terms",
             self.identity_terms,

@@ -10,6 +10,7 @@ import zlib
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+from latexprep.bbl_checks import BblOptions, validate_bbl_format_version
 from latexprep.config import load_settings
 from latexprep.core import run_job
 from latexprep.document_tasks import source_readiness_findings
@@ -19,7 +20,6 @@ from latexprep.findings import Finding
 from latexprep.job_context import JobRequest
 from latexprep.manuscript_check_options import ManuscriptCheckOptions
 from latexprep.manuscript_checks import check_manuscript_policies
-from latexprep.submission_options import SubmissionOptions
 from latexprep.submission_readiness_checks import check_submission_readiness
 
 from .support import fake_build
@@ -77,7 +77,7 @@ class ReadinessCase(unittest.TestCase):
         readiness = check_submission_readiness(
             self.root,
             main,
-            SubmissionOptions(**options),  # type: ignore[arg-type]
+            BblOptions(**options),  # type: ignore[arg-type]
             required_color_space=required_color_space,
         )
         return [item for item in readiness if item.rule == rule]
@@ -125,7 +125,7 @@ class BibliographyBblTests(ReadinessCase):
         shipped = self.one("source.bibliography_bbl", require_bbl=True)
         self.assertEqual((shipped.severity, shipped.status), ("info", "passed"))
         with self.assertRaisesRegex(PreparationError, "require_bbl must be a boolean"):
-            SubmissionOptions(require_bbl="yes")  # type: ignore[arg-type]
+            BblOptions(require_bbl="yes")  # type: ignore[arg-type]
 
     def test_require_bbl_is_read_from_project_settings_and_reaches_the_check(self) -> None:
         self.write("refs.bib", "@book{knuth, title={The TeXbook}, year={1984}}")
@@ -245,7 +245,52 @@ class BibliographyBblTests(ReadinessCase):
                 with self.assertRaisesRegex(PreparationError, "biblatex_bbl_format_version"):
                     load_settings(config, {})
         with self.assertRaisesRegex(PreparationError, "biblatex_bbl_format_version"):
-            SubmissionOptions(biblatex_bbl_format_version=3.3)  # type: ignore[arg-type]
+            BblOptions(biblatex_bbl_format_version=3.3)  # type: ignore[arg-type]
+
+    def test_the_format_version_is_validated_where_the_bbl_options_live(self) -> None:
+        for version in (None, "3", "3.3", "3.3.1.2"):
+            with self.subTest(version=version):
+                validate_bbl_format_version(version)
+        for version in ("", " ", "3.3 ", "v3.3", "3.3.1.2.5", "33333.1", 3.3):
+            with (
+                self.subTest(version=version),
+                self.assertRaisesRegex(
+                    PreparationError, 'biblatex_bbl_format_version must be a version such as "3.3"'
+                ),
+            ):
+                validate_bbl_format_version(version)
+
+    def test_the_bbl_options_share_the_submission_checks_table_without_changing_its_keys(
+        self,
+    ) -> None:
+        config = self.root / "fledge.toml"
+        config.write_text(
+            "[submission_checks]\n"
+            "scan_secrets = true\n"
+            "check_bbl_coverage = true\n"
+            "require_bbl = true\n"
+            'biblatex_bbl_format_version = "3.3"\n'
+        )
+        settings = load_settings(config, {})
+        self.assertTrue(settings.submission_checks.scan_secrets)
+        self.assertEqual(
+            settings.bbl_checks,
+            BblOptions(
+                check_bbl_coverage=True, require_bbl=True, biblatex_bbl_format_version="3.3"
+            ),
+        )
+        recorded = settings.to_dict()["submission_checks"]
+        assert isinstance(recorded, dict)
+        self.assertTrue(recorded["scan_secrets"])
+        self.assertEqual(recorded["biblatex_bbl_format_version"], "3.3")
+        self.assertNotIn("bbl_checks", settings.to_dict())
+        config.write_text("[submission_checks]\ncheck_bbl_coverage_typo = true\n")
+        with self.assertRaisesRegex(
+            PreparationError,
+            r"Unknown submission_checks setting\(s\): check_bbl_coverage_typo "
+            r"\(did you mean check_bbl_coverage\?\)",
+        ):
+            load_settings(config, {})
 
     def test_arxiv_preset_without_a_bbl_is_an_advisory_not_a_block(self) -> None:
         self.write("refs.bib", "@book{knuth, title={The TeXbook}, year={1984}}")

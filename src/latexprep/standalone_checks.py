@@ -44,9 +44,11 @@ async def check_bibliography(context: JobContext, report: Report) -> None:
     snapshot = (await import_input(context, report)).root
     # Without a main file the checks still cover every bibliography file of the project.
     main = report.main = (await resolve_main(context, snapshot)).main
+    # The three checks read the same sources, so they share one source analysis.
+    analysed = context.sources.get(snapshot, main)
     report.findings.extend(
         await context.thread_operation(
-            "bibliography checks", check_bibliography_integrity, snapshot, main
+            "bibliography checks", check_bibliography_integrity, snapshot, main, analysed=analysed
         )
     )
     report.findings.extend(
@@ -56,11 +58,12 @@ async def check_bibliography(context: JobContext, report: Report) -> None:
             snapshot,
             main,
             settings.bibliography_checks,
+            analysed=analysed,
         )
     )
     report.findings.extend(
         await check_online_references(
-            snapshot, main, options=settings.online_checks, budget=context.budget
+            snapshot, main, options=settings.online_checks, budget=context.budget, analysed=analysed
         )
     )
     report.outcome = job_outcome(report, settings)

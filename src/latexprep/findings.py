@@ -43,8 +43,6 @@ class DetailKey(StrEnum):
     STAGE = "stage"
     PAGE = "page"
     INPUT_LINE = "input_line"
-    TASK = "task"
-    BLOCKED_BY = "blocked_by"
     REVIEW = "review"
     VIOLATIONS = "violations"
     VIOLATION_COUNT = "violation_count"

@@ -2,22 +2,26 @@
 
 The user supplies the record-opening command and its required associated commands.
 This does not interpret arbitrary author templates, shared author lists or
-affiliation indices.
+affiliation indices. The module owns those two options, ``AuthorRecordOptions``, which a
+settings file writes in the ``[structure_checks]`` table.
 """
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 
+from .analysed_source import AnalysedSource, reuse_or_analyse
 from .cancellation import cancellation_point
-from .expanded_document import ExpandedDocument, expand_document
+from .errors import SettingsError
+from .expanded_document import ExpandedDocument
 from .finding_text import check_status, location_label, more_suffix
 from .finding_weight import POLICY
 from .findings import Finding
 from .literal_text import is_placeholder_text, plain_argument_text
-from .pdf_structure_checks import StructureOptions
+from .option_config import TextFormat, require_text, require_unique_strings
 from .tex_commands import COMMAND_DEFINITION_COMMANDS, PRIMITIVE_DEFINITION_COMMANDS
 from .tex_lexer import Command, command_end, in_conditional
 
@@ -26,6 +30,36 @@ _MAX_REPORTED_RECORDS = 100
 # Records and fields named in the message; the details list up to _MAX_REPORTED_RECORDS.
 _MAX_NAMED_PROBLEMS = 3
 _DYNAMIC_COMMANDS = PRIMITIVE_DEFINITION_COMMANDS | {"csname", "catcode"}
+# Associated author-block commands, such as affiliation or email, that must follow each author.
+_MAX_AUTHOR_FIELDS = 32
+_COMMAND = re.compile(r"[A-Za-z][A-Za-z@]{0,63}")
+
+
+@dataclass(frozen=True)
+class AuthorRecordOptions:
+    """The command that opens an author record and the commands each record must contain."""
+
+    author_command: str = "author"
+    required_author_fields: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        require_text(
+            "author_command",
+            self.author_command,
+            expected="a command name without the backslash",
+            pattern=_COMMAND,
+        )
+        require_unique_strings(
+            "required_author_fields",
+            self.required_author_fields,
+            max_items=_MAX_AUTHOR_FIELDS,
+            item_format=TextFormat(_COMMAND, "a command name without the backslash"),
+        )
+        if self.author_command in self.required_author_fields:
+            raise SettingsError(
+                "required_author_fields must not list the author_command itself",
+                ("required_author_fields", "author_command"),
+            )
 
 
 def _problem(item: dict[str, object]) -> str:
@@ -201,14 +235,22 @@ def _author_finding(scan: _AuthorScan, main: str | None) -> Finding:
     )
 
 
-def check_author_records(root: Path, main: str | None, options: StructureOptions) -> list[Finding]:
+def check_author_records(
+    root: Path,
+    main: str | None,
+    options: AuthorRecordOptions,
+    *,
+    analysed: AnalysedSource | None = None,
+) -> list[Finding]:
     """Check sequential top-level literal records before begin{document}/maketitle.
 
     Each opener starts a new author; fields apply only until the next opener.
+    ``analysed`` shares the source analysis of the same root and main file with other
+    checks; without one the document is expanded here.
     """
     if not options.required_author_fields:
         return []
-    document = expand_document(root, main)
+    document = reuse_or_analyse(root, main, analysed).expanded
     scan = _AuthorScan(
         options.author_command, options.required_author_fields, list(document.graph_uncertainty)
     )

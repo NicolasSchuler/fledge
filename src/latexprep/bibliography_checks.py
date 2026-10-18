@@ -17,6 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from .analysed_source import AnalysedSource, reuse_or_analyse
 from .bibliography_duplicates import find_fuzzy_duplicates
 from .bibliography_field_checks import check_entry_fields
 from .bibliography_files import BibliographyBudget, read_declared_bibliographies
@@ -266,6 +267,8 @@ def check_bibliography_coverage_and_fields(
     root: Path,
     main: str | None = None,
     options: BibliographyOptions = _DEFAULT_OPTIONS,
+    *,
+    analysed: AnalysedSource | None = None,
 ) -> list[Finding]:
     """Inspect offline evidence without writing files or resolving remote metadata.
 
@@ -273,13 +276,15 @@ def check_bibliography_coverage_and_fields(
     citation coverage then remains inconclusive. With TeX roots, only selected
     resources are checked. ``all_roots`` unions usage but resolves keys separately
     for each root. Passed summaries describe only the supported literal subset.
+    ``analysed`` shares the source analysis of the same root and main file with other
+    checks; without one the checks build their own.
     """
     if not isinstance(options, BibliographyOptions):
         raise PreparationError("Bibliography checks require BibliographyOptions")
     if not options.any_enabled:
         return []
     require_directory(root, "Bibliography input")
-    scope = _select_scope(root, main, options, SourceGraph.build(root, main))
+    scope = _select_scope(root, main, options, reuse_or_analyse(root, main, analysed).graph)
     documents, input_gaps = _load_resources(root, scope.names)
     scope.add_input_gaps(input_gaps)
     references = located_entries(document for document in documents if document.valid)

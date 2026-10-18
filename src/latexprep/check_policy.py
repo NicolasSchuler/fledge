@@ -2,7 +2,8 @@
 
 Selection can remove an optional policy, but cannot supply its missing arguments,
 grant network permission, cancel a requested edit, or weaken preparation guards.
-Uncoded execution diagnostics and explicit inventories always remain visible.
+Operational results (which have no code), explicit inventories and the findings of
+mandatory rules (``Rule.mandatory``) always remain visible.
 """
 
 from __future__ import annotations
@@ -13,57 +14,7 @@ from typing import Any
 
 from .check_selection import CheckSelection
 from .findings import Finding
-
-# These establish the safety of reading, transforming, building or publishing a
-# prepared copy. Bibliography syntax, key, macro and relationship checks are kept
-# in every command rather than trying to infer which proposed edit relies on them.
-MANDATORY_CODES = frozenset(
-    {
-        "TEX005",
-        "TEX006",
-        "TEX007",
-        "PKG001",
-        "PKG002",
-        "PKG003",
-        "PKG004",
-        "PKG201",
-        "PKG301",
-        "CMP001",
-        "CMP002",
-        "CMP003",
-        "CMP101",
-        "FMT002",
-        "FMT101",
-        "FMT102",
-        "FMT103",
-        "BLD008",
-        "BLD009",
-        "BLD201",
-        "BLD202",
-        "PRV101",
-        "PRV102",
-        "TEX201",
-        "TEX202",
-        "TEX203",
-        "BIB001",
-        "BIB002",
-        "BIB004",
-        "BIB005",
-        "BIB201",
-        "BIB202",
-        "BIB203",
-        "BIB204",
-        "BIB205",
-        "BIB206",
-        "RPT101",
-        "RPT102",
-        "RPT103",
-    }
-)
-
-# Cheap deterministic advisories that run by default without any option. Selection
-# filters their findings; they never block preparation on their own.
-DEFAULT_ADVISORY_CODES = frozenset({"TEX009", "TEX010", "TEX011", "PRV007"})
+from .rules import MANDATORY_CODES
 
 # Each row clears every activation field for one check together. This matters for
 # dataclasses that reject a half-configured pair (regions/coverage, for example).
@@ -185,8 +136,8 @@ _GROUP_CHECKS: dict[str, dict[str, dict[str, object]]] = {
     },
     "rendered_pdf_artwork": _ARTWORK_CHECKS,
     "included_figure_artwork": _ARTWORK_CHECKS,
+    "author_records": {"MAN201": {"required_author_fields": ()}},
     "structure_checks": {
-        "MAN201": {"required_author_fields": ()},
         "PDF401": {"heading_expectations": ()},
         "PDF402": {"check_table_structure": False},
         "PDF403": {"check_link_structure": False},
@@ -205,14 +156,17 @@ _GROUP_CHECKS: dict[str, dict[str, dict[str, object]]] = {
         "PKG105": {"max_archive_bytes": None},
         "PKG106": {"report_unused_assets": False},
         "PKG107": {"template_references": ()},
+    },
+    "bbl_checks": {
         "BIB109": {"check_bbl_coverage": False},
         "BIB110": {"biblatex_bbl_format_version": None},
     },
 }
 
 
-# Settings table (None for top-level settings) and the disabled value of each
-# field that activates an opt-in check. Names are the TOML setting names.
+# Settings group (None for top-level settings) and the disabled value of each field that
+# activates an opt-in check. Names are the TOML setting names; a group is a field of
+# ``Settings``, which ``config.toml_table`` maps to the table a settings file uses.
 OptInActivation = dict[str, list[tuple[str | None, dict[str, object]]]]
 
 # The policies read the settings as ``Settings.top_level_values`` returns them:

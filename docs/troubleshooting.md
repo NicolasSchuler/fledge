@@ -21,11 +21,11 @@ Fledge's own source scan and point at the line. Correct the misspelled key, add
 the missing `\label` or bibliography entry, or declare the right `.bib` file,
 then rerun. The [quick start](quickstart.md#3-read-the-result) shows an example.
 
-### `project.main_selection`: ambiguous main file
+### `TEX324`: ambiguous main file
 
-The project contains more than one file with `\documentclass`, such as a paper
-and its slides, and Fledge does not guess. Pass `--main main.tex`, set
-`main = "main.tex"` in `fledge.toml`, or configure
+The finding is named `project.main_selection`. The project contains more than one
+file with `\documentclass`, such as a paper and its slides, and Fledge does not
+guess. Pass `--main main.tex`, set `main = "main.tex"` in `fledge.toml`, or configure
 [independent packages](preparation-options.md#independent-manuscript-and-supplement-packages)
 for several documents.
 

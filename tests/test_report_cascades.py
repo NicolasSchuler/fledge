@@ -16,7 +16,7 @@ from latexprep.compact_report import render_compact
 from latexprep.config import Settings
 from latexprep.core import run_job
 from latexprep.coverage_hints import not_checked_areas, not_checked_summary
-from latexprep.execution_records import read_not_checked
+from latexprep.execution_records import record_not_checked, record_settings_source
 from latexprep.finding_view import RenderOptions
 from latexprep.findings import Finding
 from latexprep.job_context import JobRequest
@@ -338,7 +338,7 @@ class MainSelectionTests(unittest.TestCase):
 class NotCheckedFooterTests(unittest.TestCase):
     def test_default_settings_name_major_opt_in_areas(self):
         entries = not_checked_areas(configured_opt_in_codes(Settings().top_level_values()))
-        areas = [entry["area"] for entry in entries]
+        areas = [entry.area for entry in entries]
         self.assertEqual(
             areas,
             [
@@ -351,19 +351,29 @@ class NotCheckedFooterTests(unittest.TestCase):
                 "other_opt_in_checks",
             ],
         )
-        self.assertEqual(entries[0]["settings"], ["submission_checks.identity_terms"])
-        self.assertEqual(entries[1]["settings"], ["max_pages"])
-        others = entries[-1]["codes"]
-        assert isinstance(others, list)
+        self.assertEqual(entries[0].settings, ("submission_checks.identity_terms",))
+        self.assertEqual(entries[1].settings, ("max_pages",))
+        others = entries[-1].codes
         self.assertIn("TEX101", others)
         self.assertNotIn("PDF001", others)
+
+    def test_settings_are_named_by_the_table_a_settings_file_writes_them_in(self):
+        others = not_checked_areas(configured_opt_in_codes(Settings().top_level_values()))[-1]
+        for setting in (
+            "structure_checks.required_author_fields",
+            "submission_checks.check_bbl_coverage",
+            "submission_checks.biblatex_bbl_format_version",
+        ):
+            self.assertIn(setting, others.settings)
+        self.assertNotIn("author_records.required_author_fields", others.settings)
+        self.assertNotIn("bbl_checks.check_bbl_coverage", others.settings)
 
     def test_configured_areas_are_omitted(self):
         settings = Settings(
             max_pages=8, submission_checks=SubmissionOptions(identity_terms=("Ada Lovelace",))
         )
         areas = [
-            entry["area"]
+            entry.area
             for entry in not_checked_areas(configured_opt_in_codes(settings.top_level_values()))
         ]
         self.assertNotIn("page_limit", areas)
@@ -380,17 +390,16 @@ class NotCheckedFooterTests(unittest.TestCase):
         self.assertIn(
             "page_limit",
             [
-                entry["area"]
+                entry.area
                 for entry in not_checked_areas(configured_opt_in_codes(settings.top_level_values()))
             ],
         )
 
     def test_terminal_footer_is_one_line_and_compact_omits_it(self):
         report = Report("check", outcome=Outcome.PASSED)
-        report.execution["not_checked"] = not_checked_areas(
-            configured_opt_in_codes(Settings().top_level_values())
-        )
-        summary = not_checked_summary(read_not_checked(report.execution["not_checked"]))
+        areas = not_checked_areas(configured_opt_in_codes(Settings().top_level_values()))
+        record_not_checked(report.execution, areas)
+        summary = not_checked_summary(areas)
         assert summary is not None
         self.assertTrue(
             summary.startswith(
@@ -406,22 +415,17 @@ class NotCheckedFooterTests(unittest.TestCase):
 
     def test_footer_points_at_the_loaded_settings_file_instead_of_init(self):
         report = Report("check", outcome=Outcome.PASSED)
-        report.execution["not_checked"] = not_checked_areas(
-            configured_opt_in_codes(Settings().top_level_values())
-        )
-        report.execution["config_path"] = "/work/paper/fledge.toml"
-        summary = not_checked_summary(
-            read_not_checked(report.execution["not_checked"]), report.execution["config_path"]
-        )
+        areas = not_checked_areas(configured_opt_in_codes(Settings().top_level_values()))
+        record_not_checked(report.execution, areas)
+        record_settings_source(report.execution, config_path="/work/paper/fledge.toml", preset=None)
+        summary = not_checked_summary(areas, "/work/paper/fledge.toml")
         assert summary is not None
         self.assertIn("Add them to /work/paper/fledge.toml; see ", summary)
         self.assertNotIn("fledge init", summary)
         self.assertIn(summary, render_terminal(report).splitlines())
         for missing in (None, ""):
             with self.subTest(config_path=missing):
-                fallback = not_checked_summary(
-                    read_not_checked(report.execution["not_checked"]), missing
-                )
+                fallback = not_checked_summary(areas, missing)
                 assert fallback is not None
                 self.assertIn("fledge init --preset", fallback)
 
@@ -438,7 +442,6 @@ class NotCheckedFooterTests(unittest.TestCase):
     def test_reports_without_the_field_have_no_footer(self):
         self.assertNotIn("Not checked", render_terminal(Report("pdf", outcome=Outcome.PASSED)))
         self.assertIsNone(not_checked_summary(()))
-        self.assertIsNone(not_checked_summary(read_not_checked(None)))
 
 
 if __name__ == "__main__":

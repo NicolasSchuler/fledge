@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import ClassVar, NamedTuple
 
+from .analysed_source import AnalysedSource, reuse_or_analyse
 from .cancellation import cancellation_point
 from .errors import SettingsError
 from .expanded_document import CONTENT_INPUT_COMMANDS, reachable_sources
@@ -520,9 +521,8 @@ def _required_sections_finding(evidence: _Evidence, required: tuple[str, ...]) -
     )
 
 
-def _collect_evidence(root: Path, main: str) -> _Evidence:
+def _collect_evidence(main: str, graph: SourceGraph) -> _Evidence:
     """Scan the sources the main file reaches for the declarations the constraints need."""
-    graph = SourceGraph.build(root, main)
     selected = reachable_sources(graph)
     # Content follows input/include/import edges. Definitions inside class/style files are
     # package evidence, not manuscript abstracts, keywords, or section headings.
@@ -544,11 +544,17 @@ def _collect_evidence(root: Path, main: str) -> _Evidence:
     )
 
 
-def check_manuscript(root: Path, main: str, options: ManuscriptOptions) -> list[Finding]:
-    """Check explicit constraints; only the selected graph supplies manuscript evidence."""
+def check_manuscript(
+    root: Path, main: str, options: ManuscriptOptions, *, analysed: AnalysedSource | None = None
+) -> list[Finding]:
+    """Check explicit constraints; only the selected graph supplies manuscript evidence.
+
+    ``analysed`` shares the source analysis of the same root and main file with other
+    checks; without one the graph is built here.
+    """
     if options == ManuscriptOptions():
         return []
-    evidence = _collect_evidence(root, main)
+    evidence = _collect_evidence(main, reuse_or_analyse(root, main, analysed).graph)
     findings = [_inventory_finding(evidence)]
     if options.expected_document_class is not None:
         findings.append(_document_class_finding(evidence, options.expected_document_class))

@@ -572,7 +572,7 @@ class RenderTests(unittest.TestCase):
                             "pdf.rendered_text_size",
                             "Compared reported text sizes with configured minima.",
                             [violation],
-                            stage=stage,
+                            details={"stage": stage},
                         )
                         for stage, violation in (
                             ("baseline", baseline_violation),
@@ -596,7 +596,7 @@ class RenderTests(unittest.TestCase):
                     "pdf.rendered_text_size",
                     "Compared reported text sizes with configured minima.",
                     [violation],
-                    stage=stage,
+                    details={"stage": stage},
                 )
                 for stage, violation in (
                     ("baseline", {"page": 1, "reported_size_pt": 8}),

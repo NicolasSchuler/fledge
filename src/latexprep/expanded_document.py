@@ -101,12 +101,18 @@ class Location(NamedTuple):
 
 @dataclass(frozen=True, slots=True)
 class SourceSegment:
-    """Where a span of the expanded text was copied from."""
+    """Where a span of the expanded text was copied from.
+
+    ``start`` and ``end`` bound the span in the expanded text; ``path`` and ``line`` name the
+    file and 1-based line it starts on, and ``source_start`` is its offset in that file's
+    masked text (which has the same offsets as its raw text).
+    """
 
     start: int
     end: int
     path: str
     line: int
+    source_start: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,13 +175,17 @@ class _Splice:
     # Set at \end{document}: nothing after it, in any file, is manuscript content.
     stopped: bool = False
 
-    def append(self, value: str, path: str, line: int, comments: Sequence[int] = ()) -> None:
-        """Add ``value`` to the expanded text; ``comments`` are offsets inside it."""
+    def append(
+        self, value: str, path: str, line: int, source_start: int, comments: Sequence[int] = ()
+    ) -> None:
+        """Add ``value``, copied from ``path`` at ``source_start``; ``comments`` lie within it."""
         if not value:
             return
         if self.size + len(value) > MAX_TOTAL_SOURCE_BYTES:
             raise ParseLimitExceeded("expanded_size", self.size)
-        self.segments.append(SourceSegment(self.size, self.size + len(value), path, line))
+        self.segments.append(
+            SourceSegment(self.size, self.size + len(value), path, line, source_start)
+        )
         self.chunks.append(value)
         self.comment_starts.extend(self.size + offset for offset in comments)
         self.size += len(value)
@@ -216,7 +226,7 @@ class _Splice:
             high = bisect_left(source.comment_starts, end)
             comments = [offset - start for offset in source.comment_starts[low:high]]
             line = bisect_right(newlines, start - 1) + 1
-            self.append(source.masked[start:end], path, line, comments)
+            self.append(source.masked[start:end], path, line, start, comments)
 
         for command in commands_before_end(source):
             self.events += 1

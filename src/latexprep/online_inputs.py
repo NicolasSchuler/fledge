@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple
 
+from .analysed_source import AnalysedSource, reuse_or_analyse
 from .bibliography_files import (
     BibliographyBudget,
     discover_bibliographies,
@@ -187,16 +188,23 @@ def _source_links(
     return links
 
 
-def collect_inputs(root: Path, main: str | None, options: OnlineOptions) -> OnlineInputs:
+def collect_inputs(
+    root: Path,
+    main: str | None,
+    options: OnlineOptions,
+    *,
+    analysed: AnalysedSource | None = None,
+) -> OnlineInputs:
     """Read the entries and links that the selected online checks would send.
 
     Raises ``PreparationError`` when ``root`` is not a directory. Everything else that
-    cannot be read becomes a gap.
+    cannot be read becomes a gap. ``analysed`` shares the source analysis of the same
+    root and main file with other checks.
     """
     require_directory(root, "Online reference input")
     gaps: list[str] = []
     # Both bibliography entries and source links are scoped by the selected graph.
-    inspection = SourceGraph.build(root, main)
+    inspection = reuse_or_analyse(root, main, analysed).graph
     references = (
         _bibliography_references(root, _bibliography_names(root, inspection, gaps), gaps)
         if options.reads_bibliography

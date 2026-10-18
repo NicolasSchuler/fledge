@@ -7,11 +7,12 @@ Report bookkeeping lives in ``job_report`` and choosing the main file in
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from pathlib import Path
 from typing import ParamSpec, TypeVar
 
+from .analysed_source import AnalysedSourceCache
 from .cancellation import run_in_thread
 from .config import Settings
 from .errors import PreparationError
@@ -67,7 +68,12 @@ class JobRequest:
 
 @dataclass(frozen=True, slots=True)
 class JobContext:
-    """What every stage of one job reads; ``settings`` are the effective settings."""
+    """What every stage of one job reads; ``settings`` are the effective settings.
+
+    ``sources`` holds the source analysis of each project root the job's checks read, so
+    that checks of the same sources share one graph. A document of a multi-document job
+    has its own context and so its own analyses.
+    """
 
     request: JobRequest
     settings: Settings
@@ -75,6 +81,7 @@ class JobContext:
     runner: ToolRunner
     budget: ResourceBudget
     emit: Callable[[str], None]
+    sources: AnalysedSourceCache = field(default_factory=AnalysedSourceCache)
 
     async def thread_operation(
         self, name: str, function: Callable[P, R], /, *args: P.args, **kwargs: P.kwargs

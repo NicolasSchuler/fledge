@@ -20,6 +20,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
+from .analysed_source import AnalysedSource
 from .cancellation import cancellation_point
 from .file_scan import ByteBudget, inventory_files
 from .finding_text import more_suffix, redact_findings
@@ -123,8 +124,13 @@ def check_submission(
     options: SubmissionOptions = _DEFAULT_OPTIONS,
     *,
     limits: ScanLimits = DEFAULT_SCAN_LIMITS,
+    analysed: AnalysedSource | None = None,
 ) -> list[Finding]:
-    """Inspect local files without modifying or excluding any bundle contents."""
+    """Inspect local files without modifying or excluding any bundle contents.
+
+    ``analysed`` shares the source analysis of the same root and main file with other
+    checks; the unused-asset scan is the only one that needs it.
+    """
     if not options.inspects_bundle():
         return []
     files, inventory_issues = inventory_files(root)
@@ -139,7 +145,7 @@ def check_submission(
     if options.template_references:
         findings.extend(_templates(files, inventory_issues, options, limits))
     if options.report_unused_assets:
-        findings.append(_unused(root, main, files, inventory_issues, limits))
+        findings.append(_unused(root, main, files, inventory_issues, limits, analysed))
     return redact_findings(findings, content.secret_values)
 
 
@@ -276,13 +282,18 @@ def _unused_assets(matches: Sequence[Mapping[str, object]], count: str) -> str:
 
 
 def _unused(
-    root: Path, main: str | None, files: dict[str, Path], issues: list[str], limits: ScanLimits
+    root: Path,
+    main: str | None,
+    files: dict[str, Path],
+    issues: list[str],
+    limits: ScanLimits,
+    analysed: AnalysedSource | None,
 ) -> Finding:
     incomplete = list(issues)
     candidates = []
     if not incomplete:
         try:
-            analysis = analyze_sources(root, main)
+            analysis = analyze_sources(root, main, analysed=analysed)
             if analysis.main is None:
                 incomplete.append("No unambiguous selected document root is available.")
             if any(

@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from latexprep.command_runner import CommandResult, CommandRunner, ToolVersion
 from latexprep.config import Settings
+from latexprep.file_safety import byte_count_text
 from latexprep.findings import has_blockers
 from latexprep.formatting import FormattingOptions, FormattingResult, format_project
 from latexprep.runtime import ToolRunner
@@ -202,6 +203,30 @@ class FormattingTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(finding.message, expected)
                 self.assertNotIn("second line", finding.message)
                 self.assertNotIn(str(base), finding.message)
+
+    async def test_a_formatter_stopped_by_a_limit_names_the_limit_it_exceeded(self):
+        limits = FakeFormatter([]).limits
+        for stopped, expected in (
+            (
+                CommandResult(-9, "", "", resolved_command=[], timed_out=True),
+                f"tex-fmt was stopped after {limits.timeout_seconds} s because it ran too long",
+            ),
+            (
+                CommandResult(0, "", "", resolved_command=[], output_limited=True),
+                "tex-fmt was stopped after printing more than "
+                f"{byte_count_text(limits.max_output_bytes)} of output",
+            ),
+        ):
+            with self.subTest(expected=expected), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory)
+                (base / "source").mkdir()
+                (base / "source" / "main.tex").write_text("text\n")
+                with patch("latexprep.formatting.shutil.which", return_value="/fake/tex-fmt"):
+                    result = await format_with(
+                        base / "source", base / "work", FakeFormatter([stopped]), Settings()
+                    )
+                (finding,) = [f for f in result.findings if f.rule == "source.format_execution"]
+                self.assertEqual(finding.message, expected)
 
     async def test_a_failed_second_pass_is_named_with_its_exit_status(self):
         with tempfile.TemporaryDirectory() as directory:

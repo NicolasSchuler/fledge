@@ -13,6 +13,8 @@ from dataclasses import asdict, dataclass, field, fields, is_dataclass, replace
 from pathlib import Path
 from typing import Any, ClassVar, get_type_hints
 
+from .author_records import AuthorRecordOptions
+from .bbl_checks import BblOptions
 from .bibliography_options import BibliographyOptions
 from .bibliography_transform import BibliographyTransformOptions
 from .build_checks import BuildCheckOptions
@@ -21,7 +23,13 @@ from .check_selection import CheckSelection
 from .config_discovery import read_settings_file
 from .errors import PreparationError, RequestError, SettingsError
 from .formatting import FormattingOptions
-from .limits import DEFAULT_MAX_FOLDER_LEVELS, DEFAULT_MAX_PROJECT_BYTES, MAX_PROJECT_ENTRIES
+from .limits import (
+    DEFAULT_BUILD_MEMORY_MB,
+    DEFAULT_MAX_FOLDER_LEVELS,
+    DEFAULT_MAX_PROJECT_BYTES,
+    DEFAULT_TOOL_TIMEOUT_SECONDS,
+    MAX_PROJECT_ENTRIES,
+)
 from .manuscript import ManuscriptOptions
 from .manuscript_check_options import ManuscriptCheckOptions
 from .metadata_privacy import MetadataPrivacyOptions
@@ -30,6 +38,7 @@ from .option_config import (
     POSITIVE_INTEGER,
     Bounds,
     closest_names,
+    read_option_groups,
     read_options,
     read_top_level_options,
     require_text,
@@ -100,6 +109,8 @@ class Settings:
 
     ``manuscript`` and ``pdf`` hold constraints that TOML and reports spell as
     top-level keys, as do ``formatting_options.wrap_length`` and ``tab_size``.
+    ``author_records`` and ``bbl_checks`` are written inside the ``structure_checks`` and
+    ``submission_checks`` tables (see ``SHARED_TABLES``), and reports record them there.
     """
 
     FIELD_BOUNDS: ClassVar[dict[str, Bounds]] = {
@@ -114,12 +125,15 @@ class Settings:
         "source_date_epoch": Bounds(0, MAX_SOURCE_DATE_EPOCH),
         "max_files": POSITIVE_INTEGER,
         "max_bytes": POSITIVE_INTEGER,
+        "max_import_bytes": POSITIVE_INTEGER,
+        "max_generated_file_bytes": POSITIVE_INTEGER,
         "max_depth": POSITIVE_INTEGER,
         "max_pages": POSITIVE_INTEGER,
     }
 
     checks: CheckSelection = field(default_factory=CheckSelection)
     structure_checks: StructureOptions = field(default_factory=StructureOptions)
+    author_records: AuthorRecordOptions = field(default_factory=AuthorRecordOptions)
     metadata_privacy: MetadataPrivacyOptions = field(default_factory=MetadataPrivacyOptions)
     formatting_options: FormattingOptions = field(default_factory=FormattingOptions)
     source_transforms: SourceTransformOptions = field(default_factory=SourceTransformOptions)
@@ -138,6 +152,7 @@ class Settings:
     online_checks: OnlineOptions = field(default_factory=OnlineOptions)
     pdf_checks: PdfCheckOptions = field(default_factory=PdfCheckOptions)
     submission_checks: SubmissionOptions = field(default_factory=SubmissionOptions)
+    bbl_checks: BblOptions = field(default_factory=BblOptions)
     manuscript: ManuscriptOptions = field(default_factory=ManuscriptOptions)
     pdf: PdfInspectionOptions = field(default_factory=PdfInspectionOptions)
     match_source_pdf_metadata: tuple[str, ...] = ()
@@ -152,13 +167,17 @@ class Settings:
     build_jobs: int = 1
     render_jobs: int = 1
     memory_mb: int = 2048
-    build_memory_mb: int = 1024
-    timeout_seconds: int = 120
+    build_memory_mb: int = DEFAULT_BUILD_MEMORY_MB
+    timeout_seconds: int = DEFAULT_TOOL_TIMEOUT_SECONDS
     job_timeout_seconds: int = 600
     max_temporary_bytes: int = 2_147_483_648
     source_date_epoch: int | None = None
     max_files: int = MAX_PROJECT_ENTRIES
+    # ``max_bytes`` is the default of both byte limits below; read them through
+    # ``import_byte_limit`` and ``generated_file_byte_limit``, which apply that fallback.
     max_bytes: int = DEFAULT_MAX_PROJECT_BYTES
+    max_import_bytes: int | None = None
+    max_generated_file_bytes: int | None = None
     max_depth: int = DEFAULT_MAX_FOLDER_LEVELS
     max_pages: int | None = None
 
@@ -198,13 +217,37 @@ class Settings:
                 ("memory_mb", "build_memory_mb"),
             )
 
+    @property
+    def import_byte_limit(self) -> int:
+        """Combined size of the files of one project or archive import and of its build copy.
+
+        ``max_import_bytes`` when set, otherwise ``max_bytes``.
+        """
+        return self.max_bytes if self.max_import_bytes is None else self.max_import_bytes
+
+    @property
+    def generated_file_byte_limit(self) -> int:
+        """Size of the largest single file a tool command may write or read.
+
+        ``max_generated_file_bytes`` when set, otherwise ``max_bytes``.
+        """
+        if self.max_generated_file_bytes is None:
+            return self.max_bytes
+        return self.max_generated_file_bytes
+
     def to_dict(self) -> dict[str, object]:
         """The settings in their TOML layout, as reports record them."""
         values = asdict(self)
         formatting = values["formatting_options"]
         line_format = {name: formatting.pop(name) for name in _FORMATTING_KEYS}
+        for group, table in SHARED_TABLES.items():
+            values[table] = {**values[table], **values[group]}
         return {
-            **{name: value for name, value in values.items() if name not in _FLATTENED_GROUPS},
+            **{
+                name: value
+                for name, value in values.items()
+                if name not in _FLATTENED_GROUPS and name not in SHARED_TABLES
+            },
             **line_format,
             **values["manuscript"],
             **values["pdf"],
@@ -237,6 +280,14 @@ class Settings:
 
 # Option groups whose fields are top-level TOML keys rather than a table.
 _FLATTENED_GROUPS = ("manuscript", "pdf")
+# Option groups that a settings file writes inside another group's table, mapped to that
+# table: the author-record options of the author_records module are in ``[structure_checks]``
+# and the .bbl options of bbl_checks in ``[submission_checks]``. Each module keeps the
+# options of its own feature; only this schema knows where the file spells them.
+SHARED_TABLES: dict[str, str] = {
+    "author_records": "structure_checks",
+    "bbl_checks": "submission_checks",
+}
 # Formatting options spelled as top-level TOML keys.
 _FORMATTING_KEYS = ("wrap_length", "tab_size")
 _TOP_LEVEL_FIELDS: dict[str, str] = {
@@ -251,13 +302,24 @@ _OPTION_TYPES: dict[str, type] = {
     if isinstance(kind, type) and is_dataclass(kind)
 }
 _OPTION_TABLES = {
-    name: kind for name, kind in _OPTION_TYPES.items() if name not in _FLATTENED_GROUPS
+    name: kind
+    for name, kind in _OPTION_TYPES.items()
+    if name not in _FLATTENED_GROUPS and name not in SHARED_TABLES
 }
 # The top-level TOML settings, in their current spelling.
 SETTING_NAMES: frozenset[str] = frozenset(
-    {item.name for item in fields(Settings) if item.name not in _FLATTENED_GROUPS}
+    {
+        item.name
+        for item in fields(Settings)
+        if item.name not in _FLATTENED_GROUPS and item.name not in SHARED_TABLES
+    }
     | set(_TOP_LEVEL_FIELDS)
 )
+
+
+def toml_table(group: str) -> str:
+    """The TOML table in which a settings file writes the option group ``group``."""
+    return SHARED_TABLES.get(group, group)
 
 
 def effective_settings(settings: Settings) -> Settings:
@@ -327,7 +389,14 @@ def _build_settings(values: Mapping[str, Any], path: Path | None) -> Settings:
             value = remaining.pop(name)
             if name == "bibliography_transform":
                 value = _bibliography_edit_tables(value)
-            tables[name] = read_options(kind, value, name)
+            sharing = [group for group, table in SHARED_TABLES.items() if table == name]
+            if sharing:
+                kinds = [kind, *(_OPTION_TYPES[group] for group in sharing)]
+                tables.update(
+                    zip([name, *sharing], read_option_groups(kinds, value, name), strict=True)
+                )
+            else:
+                tables[name] = read_options(kind, value, name)
     if line_format:
         # The options validate these values with the messages of top-level settings.
         formatting = tables.get("formatting_options", FormattingOptions())

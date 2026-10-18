@@ -252,13 +252,18 @@ records: they explain why Fledge is built as it is, were written on 6 to
 Follow the current option and dispatch paths rather than treating the design
 documents as an implemented plugin API. A check usually needs its typed options,
 family rule metadata, execution dispatch, and selection policy in
-{download}`check_policy.py <../src/latexprep/check_policy.py>` to agree. If it is
-eligible for a reviewed exception, check the review policy in
-{download}`review_policy.py <../src/latexprep/review_policy.py>` too.
+{download}`check_policy.py <../src/latexprep/check_policy.py>` to agree. The
+per-rule facts are fields of the rule itself: `mandatory` for a guard that check
+selection never removes, `reviewable` when a reviewed exception may target it, and
+`not_checked_area` for an opt-in area that a run reports as not checked. Only the
+mapping from an opt-in code to its option fields stays in `check_policy.py`.
 
 Add an explicit code, descriptive title, scope and fix text to the applicable
 data-only `*_rules.py` module, registered by
-{download}`rules.py <../src/latexprep/rules.py>`. Codes are never reused. Link
+{download}`rules.py <../src/latexprep/rules.py>`. Codes are never reused. A name that a finding
+carries but that describes the run or the tool environment rather than the manuscript
+belongs in `OPERATIONAL_RULE_NAMES` instead; a test fails for an emitted name that is
+neither catalogued nor operational. Link
 the rule to a unit test that runs the actual checker on a meaningful fixture and
 asserts both the code and the intended behavior. Include a valid counterpart, a
 violating case, and an unavailable or ambiguous evidence case when applicable.
@@ -341,8 +346,9 @@ the inspected content and phase explicit.
 The architecture document includes target design: per-task timeout/artifact
 descriptors and a structured progress-event schema are not implemented as
 described there. Current execution uses progress strings and a shared whole-job
-deadline alongside per-tool limits. Some evidence is parsed repeatedly. Checkers
-that read TeX source share two public modules:
+deadline alongside per-tool limits. Bibliography files and PDF measurements are
+still parsed by each check that reads them. Checkers that read TeX source share two
+public modules:
 {download}`tex_lexer.py <../src/latexprep/tex_lexer.py>` provides the bounded
 lexical subset (commands and their argument groups, comment and verbatim
 masking, conditional spans), and
@@ -365,6 +371,15 @@ suffixes, math markers, macro-definition and citation commands) are in
 unfinished-work and private-note markers is in
 {download}`comment_markers.py <../src/latexprep/comment_markers.py>`. Add a command
 or phrase there, not as a private list in a check.
+The checks of one job do not each read the project again:
+{download}`analysed_source.py <../src/latexprep/analysed_source.py>` holds the graph
+and expanded document of one project root and main file (`AnalysedSource`), builds
+each on first use, and `JobContext.sources` hands the same one to every task that
+reads that root, however many threads ask. A check accepts it as an optional
+`analysed` argument and builds its own when it runs stand-alone; an analysis of
+another root or main file is refused. It is read-only, so the transformations that
+plan each edit on a staged copy that earlier edits changed (`source_transform`,
+`bibliography_transform`, `flat_layout`) build their own graph.
 {download}`text_safety.py <../src/latexprep/text_safety.py>` escapes untrusted text
 for the terminal, HTML reports, CI annotations and one-line messages. Checks that
 scan every supplied file use the bounded inventory and per-scan byte budget in
@@ -417,7 +432,14 @@ option schema of the configured measurements is
 `pdf.*` rule names are the `PdfRule` enum in
 {download}`pdf_rule_names.py <../src/latexprep/pdf_rule_names.py>`. A session remembers
 each completed read-only measurement by its arguments, so two checks that need the same
-output run the tool once. Each PDF adapter module states the external tools of its
+output run the tool once. The check groups of one PDF in a pipeline run
+({download}`pdf_check_pipeline.py <../src/latexprep/pdf_check_pipeline.py>`) go further:
+they share one `SharedPdfSession`, which freezes the PDF on first use and hands each group
+a view with its own working directory and its own tool record over one shared memo, so a
+read-only measurement runs once per PDF for the whole run. The memo keeps the output of
+each distinct read-only command (at most the runner's output limit each) until the run
+ends and then releases it; renders are never kept. Each group entry point takes
+`session=` and works unchanged without it. Each PDF adapter module states the external tools of its
 configured checks (`required_pdf_check_tools`, `required_artwork_tools`,
 `required_structure_tools`, `required_inspection_tools`, `COMPARISON_TOOLS`), and
 `fledge doctor` unions them.

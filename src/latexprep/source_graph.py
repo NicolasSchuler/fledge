@@ -65,6 +65,9 @@ from .tex_lexer import (
 )
 
 MAX_INPUT_DEPTH = 128
+# The findings of a project without exactly one document root to select.
+ROOT_AMBIGUOUS_RULE = "source.root_ambiguous"
+ROOT_MISSING_RULE = "source.root_missing"
 _FONT_EXTENSIONS = frozenset({".otf", ".ttf", ".ttc"})
 _FONT_OPTION_KEYS = frozenset({"Path", "Ligatures", "Scale", "Renderer", "Numbers"})
 _FONT_PATH_OPTION = re.compile(r"(?:^|,)\s*Path\s*=\s*(\{[^{}]*\}|[^,]*)")
@@ -301,7 +304,7 @@ class SourceGraph:
             return self.roots[0]
         self.findings.append(
             Finding(
-                "source.root_ambiguous" if self.roots else "source.root_missing",
+                ROOT_AMBIGUOUS_RULE if self.roots else ROOT_MISSING_RULE,
                 f"Multiple document roots were found: {listed_names(self.roots)}."
                 if self.roots
                 else "No literal document root could be selected.",

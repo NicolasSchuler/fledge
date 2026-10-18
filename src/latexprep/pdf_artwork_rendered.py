@@ -18,7 +18,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
-from typing import Any, Final, NamedTuple
+from typing import Final, NamedTuple
 
 from .cancellation import cancellation_point
 from .errors import PreparationError
@@ -35,6 +35,7 @@ from .pdf_artwork_options import (
 )
 from .pdf_check_options import PdfRegion
 from .pdf_geometry import (
+    WCAG_FLARE,
     contains,
     exceeds_measurement_raster,
     measurement_raster_size,
@@ -49,9 +50,6 @@ from .raster_pixels import InkMask, PixelBox, RasterImage, channel_extrema
 # The pixel size of a render may differ from the size computed from the page box by this
 # many pixels per side (Poppler rounds the page size itself).
 _RENDER_SIZE_SLACK_PIXELS: Final = 1
-# WCAG 2 relative-luminance offset that models a little ambient light: contrast is
-# (L1 + 0.05) / (L2 + 0.05).
-_WCAG_FLARE: Final = 0.05
 
 
 class PageGeometry(NamedTuple):
@@ -144,7 +142,7 @@ def region_ink(
 
 
 def _whitespace_finding(
-    limit: float, where: str, ink: RegionInk, details: dict[str, Any]
+    limit: float, where: str, ink: RegionInk, details: dict[str, object]
 ) -> Finding:
     over = ink.outside_content_box_ratio > limit
     if not ink.ink_pixels:
@@ -158,14 +156,18 @@ def _whitespace_finding(
         ArtworkRule.FIGURE_WHITESPACE,
         outcome + ".",
         [details] if over else [],
-        **details,
-        maximum_ratio=limit,
-        scope="Area outside the ink box under the configured background; "
-        "internal white areas and intended padding are not judged.",
+        details={
+            **details,
+            "maximum_ratio": limit,
+            "scope": "Area outside the ink box under the configured background; "
+            "internal white areas and intended padding are not judged.",
+        },
     )
 
 
-def _edge_ink_finding(band: float, where: str, ink: RegionInk, details: dict[str, Any]) -> Finding:
+def _edge_ink_finding(
+    band: float, where: str, ink: RegionInk, details: dict[str, object]
+) -> Finding:
     if ink.edge_ink_pixels:
         message = (
             f"Ink touches the outer {band:g} pt border of {where} "
@@ -177,10 +179,12 @@ def _edge_ink_finding(band: float, where: str, ink: RegionInk, details: dict[str
         ArtworkRule.FIGURE_EDGE_INK,
         message,
         [{**details, "edge_ink_pixels": ink.edge_ink_pixels}] if ink.edge_ink_pixels else [],
-        **details,
-        edge_band_pt=band,
-        scope="Boundary ink is a cropping/border candidate, not proof of "
-        "clipping; intended borders and touching content need review.",
+        details={
+            **details,
+            "edge_band_pt": band,
+            "scope": "Boundary ink is a cropping/border candidate, not proof of "
+            "clipping; intended borders and touching content need review.",
+        },
     )
 
 
@@ -188,7 +192,7 @@ def _region_findings(
     figures: _RenderedFigures, raster: GrayPage, region: PdfRegion, ink: RegionInk
 ) -> list[Finding]:
     options = figures.options
-    details: dict[str, Any] = {
+    details: dict[str, object] = {
         "page": raster.page,
         "region": region.name,
         "content_bounds_pt": ink.content_bounds_pt,
@@ -220,10 +224,12 @@ def _grayscale_preview_finding(figures: _RenderedFigures, raster: GrayPage) -> F
         ArtworkRule.GRAYSCALE_PREVIEW,
         f"Created grayscale preview for page {raster.page}.",
         [],
-        page=raster.page,
-        artifacts=[str(preview)],
-        raster_dpi=figures.options.raster_dpi,
-        scope="Review preview; semantic color independence is unverified.",
+        details={
+            "page": raster.page,
+            "artifacts": [str(preview)],
+            "raster_dpi": figures.options.raster_dpi,
+            "scope": "Review preview; semantic color independence is unverified.",
+        },
     )
 
 
@@ -419,12 +425,12 @@ def _contrast_interval(
     low_bg, high_bg = background
     minimum = 1.0
     if high_fg < low_bg:
-        minimum = (low_bg + _WCAG_FLARE) / (high_fg + _WCAG_FLARE)
+        minimum = (low_bg + WCAG_FLARE) / (high_fg + WCAG_FLARE)
     elif high_bg < low_fg:
-        minimum = (low_fg + _WCAG_FLARE) / (high_bg + _WCAG_FLARE)
+        minimum = (low_fg + WCAG_FLARE) / (high_bg + WCAG_FLARE)
     maximum = max(
-        (high_fg + _WCAG_FLARE) / (low_bg + _WCAG_FLARE),
-        (high_bg + _WCAG_FLARE) / (low_fg + _WCAG_FLARE),
+        (high_fg + WCAG_FLARE) / (low_bg + WCAG_FLARE),
+        (high_bg + WCAG_FLARE) / (low_fg + WCAG_FLARE),
     )
     return ContrastBounds(minimum, maximum)
 
@@ -483,7 +489,7 @@ def _sample_contrast_finding(
     luminances = [(_luminance(minimum), _luminance(maximum)) for minimum, maximum in colors]
     bounds = _contrast_interval(luminances[0], luminances[1])
     uniform = max(spreads) <= sample.max_channel_spread
-    details: dict[str, Any] = {
+    details: dict[str, object] = {
         "page": page,
         "sample": sample.name,
         "foreground_bounds_pt": sample.foreground.box,
@@ -501,12 +507,14 @@ def _sample_contrast_finding(
         _contrast_message(sample, page, bounds, max(spreads), uniform),
         [details] if uniform and bounds.maximum < sample.minimum_ratio else [],
         incomplete=not uniform or bounds.minimum < sample.minimum_ratio <= bounds.maximum,
-        **details,
-        scope="Rendered/composited RGB patches interpreted as sRGB. "
-        "Channel extrema give conservative luminance/ratio bounds. "
-        "Nonuniform "
-        "patches need an explicit spread tolerance; text meaning, all text "
-        "contrast, perceptual quality and accessibility are not inferred.",
+        details={
+            **details,
+            "scope": "Rendered/composited RGB patches interpreted as sRGB. "
+            "Channel extrema give conservative luminance/ratio bounds. "
+            "Nonuniform "
+            "patches need an explicit spread tolerance; text meaning, all text "
+            "contrast, perceptual quality and accessibility are not inferred.",
+        },
     )
 
 

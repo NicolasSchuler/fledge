@@ -189,6 +189,64 @@ keep their existing typed tables. See [the check catalogue](checks.md),
 {download}`constraint settings <../examples/settings.toml>`, and
 {download}`additional check settings <../examples/checks.toml>` for supported policies.
 
+## Size, time and memory limits
+
+Fledge bounds what one job may import, write and run. The defaults suit ordinary
+papers; raise a limit when an error message names it.
+
+| Setting | Default | What it bounds |
+| --- | --- | --- |
+| `max_files` | 10000 | Files and folders together in an imported project or ZIP |
+| `max_depth` | 32 | Folder levels in an imported project or ZIP |
+| `max_bytes` | 268435456 (256 MiB) | The default of `max_import_bytes` and `max_generated_file_bytes` below |
+| `max_import_bytes` | `max_bytes` | Combined size of all files in a project folder or ZIP import, of the copy each build makes of the sources, and of the prepared archive when it is extracted again to verify it |
+| `max_generated_file_bytes` | `max_bytes` | Size of any one file a tool may write, and the largest PDF or image a tool opens |
+| `timeout_seconds` | 120 | One tool command (`--timeout-seconds`) |
+| `job_timeout_seconds` | 600 | The whole job (`--job-timeout-seconds`) |
+| `build_memory_mb` | 1024 | Memory of one build command |
+| `memory_mb` | 2048 | Memory shared by all running tools; it must allow `build_memory_mb` plus 128 MiB for the coordinator |
+| `max_temporary_bytes` | 2147483648 (2 GiB) | Temporary data of the whole job |
+
+`max_bytes` is the one number that older settings files use for both byte limits,
+and it keeps working: set alone, it gives `max_import_bytes` and
+`max_generated_file_bytes` the same value. An explicit `max_import_bytes` or
+`max_generated_file_bytes` wins for its own purpose, and the other limit keeps
+following `max_bytes`. The two limits answer different questions, so a large
+data-heavy project can raise the import total without letting a runaway tool write a
+file of that size:
+
+```toml
+max_bytes = 268435456           # default for both limits below: 256 MiB
+max_import_bytes = 1073741824   # projects, ZIP files and build copies up to 1 GiB
+max_generated_file_bytes = 67108864   # no tool file above 64 MiB
+```
+
+A tool workspace may hold at most four times `max_generated_file_bytes` in total,
+and that includes the copy of your sources, so keep `max_import_bytes` at or below
+that product when you lower the per-file limit. A job that exceeds a limit stops with
+a finding that names it. Reports record all three byte settings under `settings`;
+`max_import_bytes` and `max_generated_file_bytes` are `null` when you did not set
+them.
+
+## Similar names, different checks
+
+A few settings look alike but belong to different checks. They are independent: set
+whichever applies, or both with different values.
+
+- **`min_stroke_width_pt`** exists in two places. Under `[pdf_checks]` it enables
+  `PDF213`, which reads the stroke width that MuPDF reports for each drawn stroke and
+  scales it by the placement transform, but only where that transform is uniform;
+  hairlines and nonuniform transforms are not measured. Under
+  `[rendered_pdf_artwork]` and `[included_figure_artwork]` it enables `PDF309`, which
+  measures the thickness of each straight segment perpendicular to its direction after
+  a full affine transform, so it also catches a figure that was stretched in one
+  direction (curves and text still need a uniform transform). `rendered_pdf_artwork` applies it to the final PDF and
+  `included_figure_artwork` to each included PDF figure.
+- **`require_embedded_fonts`** is a top-level setting that requires every font in the
+  final PDF to be embedded (`PDF104`). **`require_embedded_figure_fonts`**, under
+  `[pdf_checks]`, applies the same requirement to each PDF figure you include
+  (`PDF212`).
+
 ## Renamed settings
 
 Three settings have clearer names. Their former names are still accepted, but

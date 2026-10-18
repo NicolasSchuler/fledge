@@ -5,8 +5,10 @@ unless the user requires one. Coverage and format checks run only when configure
 and their missing evidence is inconclusive, not a pass. No source is modified.
 
 This module owns reading the keys out of a generated .bbl (BibTeX's ``\\bibitem`` form
-and biblatex's ``\\entry`` form) and the checks that compare them with the citations of
-the selected manuscript. The .bib files themselves are read by ``bibtex_syntax``.
+and biblatex's ``\\entry`` form), the checks that compare them with the citations of
+the selected manuscript, and their options, ``BblOptions``, which a settings file writes
+in the ``[submission_checks]`` table. The .bib files themselves are read by
+``bibtex_syntax``.
 """
 
 from __future__ import annotations
@@ -25,9 +27,9 @@ from .file_scan import MAX_SCAN_MATCHES
 from .finding_text import list_locations, more_suffix
 from .findings import EvidenceKind, Finding
 from .literal_text import PACKAGE_COMMANDS, first_argument_names
+from .option_config import require_text, validate_scalars
 from .rules import code_for
 from .source_graph import SourceGraph
-from .submission_options import SubmissionOptions
 from .tex_lexer import MAX_SOURCE_BYTES
 
 _BBL_RULE = "source.bibliography_bbl"
@@ -44,6 +46,31 @@ _BIBITEM_KEY = re.compile(r"\{([^{}]+)\}")
 _ENTRY_START = re.compile(r"\\entry\s*\{")
 _ENTRY_KEY = re.compile(r"\\entry\s*\{([^{}]+)\}\s*\{")
 _KEY_ALIAS = re.compile(r"\\keyalias\s*\{([^{}]+)\}")
+_BBL_FORMAT_VERSION = re.compile(r"[0-9]{1,4}(?:\.[0-9]{1,4}){0,3}")
+
+
+def validate_bbl_format_version(value: object) -> None:
+    """Reject a biblatex .bbl format version that is not a short dotted number, or ``None``."""
+    require_text(
+        "biblatex_bbl_format_version",
+        value,
+        expected='a version such as "3.3", as written on the second line of a biblatex .bbl file',
+        pattern=_BBL_FORMAT_VERSION,
+        allow_none=True,
+    )
+
+
+@dataclass(frozen=True)
+class BblOptions:
+    """Which checks of the shipped .bbl run: presence, citation coverage and biblatex format."""
+
+    check_bbl_coverage: bool = False
+    require_bbl: bool = False
+    biblatex_bbl_format_version: str | None = None
+
+    def __post_init__(self) -> None:
+        validate_scalars(self)
+        validate_bbl_format_version(self.biblatex_bbl_format_version)
 
 
 class Backend(StrEnum):
@@ -164,7 +191,7 @@ def _unreadable(rule: str, expected: str, **details: object) -> Finding:
 
 
 def check_bbl(
-    root: Path, graph: SourceGraph, selected: set[str], options: SubmissionOptions
+    root: Path, graph: SourceGraph, selected: set[str], options: BblOptions
 ) -> list[Finding]:
     """Check the .bbl named after the main file; ``graph`` must have a selected main."""
     main = graph.main
@@ -185,7 +212,7 @@ def check_bbl(
     return findings
 
 
-def _without_bib(main: str, options: SubmissionOptions) -> list[Finding]:
+def _without_bib(main: str, options: BblOptions) -> list[Finding]:
     unchecked = []
     if options.check_bbl_coverage:
         unchecked.append((_COVERAGE_RULE, "shipped .bbl coverage"))
@@ -216,9 +243,7 @@ def _missing_bbl_consequence(require_bbl: bool) -> str:
     )
 
 
-def _presence(
-    graph: SourceGraph, selected: set[str], plan: _Plan, options: SubmissionOptions
-) -> Finding:
+def _presence(graph: SourceGraph, selected: set[str], plan: _Plan, options: BblOptions) -> Finding:
     others = sorted(
         name for name in graph.files if name.lower().endswith(".bbl") and name != plan.expected
     )

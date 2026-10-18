@@ -31,7 +31,7 @@ class ImportLimitSettings(Protocol):
     def max_files(self) -> int: ...
 
     @property
-    def max_bytes(self) -> int: ...
+    def import_byte_limit(self) -> int: ...
 
     @property
     def max_depth(self) -> int: ...
@@ -55,13 +55,15 @@ class ImportLimits:
 
     @classmethod
     def from_settings(cls, settings: ImportLimitSettings, *, max_ratio: int | None = None) -> Self:
-        """The limits that a job's ``max_files``, ``max_bytes`` and ``max_depth`` set.
+        """The limits that a job's ``max_files``, import byte limit and ``max_depth`` set.
+
+        The byte limit is ``max_import_bytes``, which is ``max_bytes`` unless set.
 
         The compression ratio keeps its default unless ``max_ratio`` is given.
         """
         bounds = {
             "max_files": settings.max_files,
-            "max_bytes": settings.max_bytes,
+            "max_bytes": settings.import_byte_limit,
             "max_depth": settings.max_depth,
         }
         return cls(**bounds) if max_ratio is None else cls(**bounds, max_ratio=max_ratio)

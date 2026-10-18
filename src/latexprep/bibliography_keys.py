@@ -225,7 +225,7 @@ def map_keys(
     count = 0
     for path, changes in _citation_edits(inspection, mapping).items():
         source = inspection.sources[path]
-        sources[path] = with_bom(apply_edits(source.text, changes, path=path), source.bom)
+        sources[path] = with_bom(apply_edits(source.text, changes, path=path), bom=source.bom)
         count += len(changes)
     return KeyMapping(mapping, sources, count)
 

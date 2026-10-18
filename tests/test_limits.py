@@ -7,7 +7,7 @@ from pathlib import Path
 from latexprep import limits
 
 MODULE = Path(limits.__file__)
-UNIT_SUFFIXES = ("_BYTES", "_CHARS", "_ENTRIES", "_LEVELS", "_MB")
+UNIT_SUFFIXES = ("_BYTES", "_CHARS", "_ENTRIES", "_LEVELS", "_MB", "_SECONDS")
 
 
 def _constants() -> dict[str, int]:
@@ -40,6 +40,12 @@ class LimitsTests(unittest.TestCase):
         self.assertEqual(limits.CANCELLATION_STRIDE_CHARS, 4096)
         self.assertEqual(limits.MAX_PDF_NESTING_LEVELS, 100)
         self.assertEqual(limits.DEFAULT_LEASE_MEMORY_MB, 64)
+
+    def test_tool_defaults_keep_their_established_values(self) -> None:
+        self.assertEqual(limits.DEFAULT_TOOL_TIMEOUT_SECONDS, 120)
+        self.assertEqual(limits.DEFAULT_BUILD_MEMORY_MB, 1024)
+        self.assertEqual(limits.DEFAULT_MAX_PROJECT_BYTES, 256 * limits.MIB)
+        self.assertEqual(limits.DEFAULT_MAX_GENERATED_FILE_BYTES, limits.DEFAULT_MAX_PROJECT_BYTES)
 
     def test_the_module_is_a_leaf_that_imports_no_package_module(self) -> None:
         tree = ast.parse(MODULE.read_text(encoding="utf-8"))

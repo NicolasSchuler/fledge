@@ -148,6 +148,8 @@ class DocumentRun:
         """Run the document's stages; the package when preparation verified one."""
         report, settings = self.report, self.settings
         await self.scheduler.execute(self._analysis_tasks())
+        # Later stages read other trees; free the graphs the analysis tasks shared.
+        self.context.sources.clear()
         if self.command is JobCommand.INSPECT:
             report.scope = "source and bibliography checks; compilation and PDF checks not run"
             report.outcome = job_outcome(report, settings)

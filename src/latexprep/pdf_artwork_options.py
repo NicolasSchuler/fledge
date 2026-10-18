@@ -35,6 +35,7 @@ from .option_config import (
 )
 from .pdf_check_options import (
     CONTRAST_RATIO_BOUNDS,
+    DEFAULT_GEOMETRY_TOLERANCE_PT,
     MAX_REGIONS_PER_POLICY,
     RASTER_SAMPLING_BOUNDS,
     PdfRegion,
@@ -155,7 +156,7 @@ class PdfArtworkOptions:
     raster_dpi: int = 72
     background_gray: int = 255
     ink_difference: int = 5
-    geometry_tolerance_pt: float = 0.5
+    geometry_tolerance_pt: float = DEFAULT_GEOMETRY_TOLERANCE_PT
 
     def __post_init__(self) -> None:
         validate_scalars(self)

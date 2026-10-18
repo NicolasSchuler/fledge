@@ -37,6 +37,7 @@ from .pdf_tool_output import evaluate_font_policy, font_inventory, split_text_pa
 from .pdf_tools import (
     PdfPreflight,
     PdfToolSession,
+    SharedPdfSession,
     font_inventory_argv,
     layout_text_argv,
     open_pdf_session,
@@ -63,13 +64,15 @@ async def extract_pdf_evidence(
     runner: CommandRunner,
     *,
     budget: ResourceBudget | None = None,
+    session: SharedPdfSession | None = None,
 ) -> tuple[str, dict[str, str]]:
     """Return bounded text/properties for caller-owned privacy or agreement checks.
 
     Empty pages remain empty evidence, not proof of anonymity or readability.
     No PDF text or metadata is copied into diagnostic messages by this helper.
+    A shared ``session`` for ``pdf`` supplies the frozen PDF and remembered measurements.
     """
-    preflight = await PdfPreflight.open(pdf, work, runner, budget)
+    preflight = await PdfPreflight.open(pdf, work, runner, budget, session=session)
 
     def extract(result: CommandResult) -> str:
         # Only the page boundaries are validated; the privacy scan reads the text as extracted.
@@ -88,8 +91,10 @@ def _required_metadata_finding(fields: dict[str, str], options: PdfCheckOptions)
         PdfRule.REQUIRED_METADATA,
         "Compared nonempty PDF properties with configured required fields.",
         missing,
-        required=list(options.required_metadata),
-        scope="pdfinfo document properties",
+        details={
+            "required": list(options.required_metadata),
+            "scope": "pdfinfo document properties",
+        },
     )
 
 
@@ -106,9 +111,12 @@ def _metadata_agreement_finding(fields: dict[str, str], options: PdfCheckOptions
         PdfRule.METADATA_AGREEMENT,
         "Compared PDF properties with supplied expected text.",
         different,
-        compared_fields=[key for key, _ in options.expected_metadata],
-        normalization="Whitespace only; case, punctuation and author order are retained.",
-        scope="Explicit expected text; source macro expansion and identity are not established.",
+        details={
+            "compared_fields": [key for key, _ in options.expected_metadata],
+            "normalization": "Whitespace only; case, punctuation and author order are retained.",
+            "scope": "Explicit expected text; source macro expansion and identity are not "
+            "established.",
+        },
     )
 
 
@@ -119,8 +127,11 @@ def _tagging_finding(fields: dict[str, str]) -> Finding:
         "Checked the reported presence of PDF tagging.",
         ["Tagged: no"] if value == "no" else [],
         incomplete=value not in {"yes", "no"},
-        reported=value or None,
-        scope="Tagging presence only; reading order, links, tables and PDF/UA are not validated.",
+        details={
+            "reported": value or None,
+            "scope": "Tagging presence only; reading order, links, tables and PDF/UA are not "
+            "validated.",
+        },
     )
 
 
@@ -172,14 +183,16 @@ def _section_findings(pages: int, options: PdfCheckOptions) -> list[Finding]:
                 message,
                 violations,
                 incomplete=outside,
-                section=section.name,
-                start_page=section.start_page,
-                end_page=section.end_page,
-                observed_total_pages=pages,
-                section_pages=None if outside else actual,
-                maximum=section.max_pages,
-                scope="Inclusive user-supplied boundaries; semantic section locations "
-                "are not inferred.",
+                details={
+                    "section": section.name,
+                    "start_page": section.start_page,
+                    "end_page": section.end_page,
+                    "observed_total_pages": pages,
+                    "section_pages": None if outside else actual,
+                    "maximum": section.max_pages,
+                    "scope": "Inclusive user-supplied boundaries; semantic section locations "
+                    "are not inferred.",
+                },
             )
         )
     return result
@@ -192,20 +205,25 @@ async def inspect_pdf_details(
     *,
     options: PdfCheckOptions | None = None,
     budget: ResourceBudget | None = None,
+    session: SharedPdfSession | None = None,
 ) -> list[Finding]:
-    """Run only configured checks; unsupported or partial evidence is inconclusive."""
+    """Run only configured checks; unsupported or partial evidence is inconclusive.
+
+    A shared ``session`` for ``pdf`` supplies the frozen PDF and remembered measurements;
+    without one the PDF is frozen in ``work``.
+    """
     options = options or PdfCheckOptions()
     configured = configured_pdf_check_rules(options)
     if not configured:
         return []
-    preflight = await preflight_pdf(pdf, work, runner, budget, configured)
+    preflight = await preflight_pdf(pdf, work, runner, budget, configured, session=session)
     if isinstance(preflight, list):
         return preflight
-    session, pages = preflight.session, preflight.pages
+    tools, pages = preflight.session, preflight.pages
     result = [*_metadata_findings(preflight.fields, options), *_section_findings(pages, options)]
     for family_rules, measure in _MEASUREMENT_FAMILIES:
         if selected := tuple(rule for rule in configured if rule in family_rules):
-            result.extend(await measure(session, pages, options, selected))
+            result.extend(await measure(tools, pages, options, selected))
     return result
 
 
@@ -227,11 +245,13 @@ def _figure_font_finding(execution: CommandResult, *, options: PdfCheckOptions) 
         if inventory
         else "No font resources in this figure; nothing to embed.",
         violations,
-        font_count=len(inventory),
-        require_embedded=options.require_embedded_figure_fonts,
-        forbid_type3=options.forbid_type3_figure_fonts,
-        scope="Input-figure font resources; final-PDF attribution is not established. "
-        "Type 3 does not imply bitmap glyphs.",
+        details={
+            "font_count": len(inventory),
+            "require_embedded": options.require_embedded_figure_fonts,
+            "forbid_type3": options.forbid_type3_figure_fonts,
+            "scope": "Input-figure font resources; final-PDF attribution is not established. "
+            "Type 3 does not imply bitmap glyphs.",
+        },
     )
 
 

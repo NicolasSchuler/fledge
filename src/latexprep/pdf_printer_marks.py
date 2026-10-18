@@ -180,10 +180,12 @@ def printer_mark_finding(artwork: TracedArtwork, options: PdfArtworkOptions) -> 
         _mark_message(violations, measured, uncertain),
         violations,
         incomplete=uncertain or measured == 0,
-        measured_trim_regions=measured,
-        exempt_pages=exemptions,
-        scope="Geometric paired-corner and crossed-stroke candidates. Outlined, curved and "
-        "raster marks are unrecognized; intentional marks and similar artwork require review.",
+        details={
+            "measured_trim_regions": measured,
+            "exempt_pages": exemptions,
+            "scope": "Geometric paired-corner and crossed-stroke candidates. Outlined, curved and "
+            "raster marks are unrecognized; intentional marks and similar artwork require review.",
+        },
     )
 
 

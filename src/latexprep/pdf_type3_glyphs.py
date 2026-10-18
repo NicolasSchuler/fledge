@@ -229,13 +229,15 @@ def _type3_finding(objects: QpdfObjectGraph, *, forbid_bitmap: bool) -> Finding:
         _type3_message(violations, count, len(fonts), uncertain, forbid_bitmap),
         violations,
         incomplete=uncertain,
-        font_count=len(fonts),
-        glyph_count=count,
-        inventory=inventory,
-        forbidden_bitmap=forbid_bitmap,
-        scope="Reachable declared glyph programs, including supported nested Form XObjects. "
-        "Unused glyphs may be inventoried. Unsupported operators, compressed/opaque streams "
-        "and inline-image tails retain uncertainty; Type 3 alone never implies bitmap glyphs.",
+        details={
+            "font_count": len(fonts),
+            "glyph_count": count,
+            "inventory": inventory,
+            "forbidden_bitmap": forbid_bitmap,
+            "scope": "Reachable declared glyph programs, including supported nested Form XObjects. "
+            "Unused glyphs may be inventoried. Unsupported operators, compressed/opaque streams "
+            "and inline-image tails retain uncertainty; Type 3 alone never implies bitmap glyphs.",
+        },
     )
 
 

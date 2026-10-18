@@ -113,15 +113,16 @@ class PackageVerification:
         if self._blocked():
             return None
         archive_bytes = archive.stat().st_size
-        if archive_bytes > settings.max_bytes:
+        if archive_bytes > settings.import_byte_limit:
             report.findings.append(
                 Finding(
                     "package.archive_limit",
-                    f"Prepared archive has {archive_bytes} bytes; max_bytes is "
-                    f"{settings.max_bytes}. It cannot be re-extracted for verification.",
+                    f"Prepared archive has {archive_bytes} bytes; the import size limit "
+                    f"(max_import_bytes, or max_bytes when that is not set) is "
+                    f"{settings.import_byte_limit}. It cannot be re-extracted for verification.",
                     severity="error",
                     status="failed",
-                    suggestion="Reduce the shipped files or raise max_bytes explicitly.",
+                    suggestion="Reduce the shipped files or raise max_import_bytes explicitly.",
                 )
             )
             return None
@@ -132,7 +133,9 @@ class PackageVerification:
         context = self.context
         # The archive is our own bounded output; preserve byte/count limits without
         # rejecting legitimate highly compressible sources on ratio alone.
-        limits = ImportLimits.from_settings(context.settings, max_ratio=context.settings.max_bytes)
+        limits = ImportLimits.from_settings(
+            context.settings, max_ratio=context.settings.import_byte_limit
+        )
         return await context.thread_operation(
             "extract archive",
             import_project,
@@ -160,6 +163,8 @@ class PackageVerification:
             extracted.root, shipped.main, shipped.pdf, final_pdf, submission, self.reference
         )
         await self.scheduler.execute(final_verification_tasks(context, extraction))
+        # The extraction's source analysis is not needed again; free its graph.
+        context.sources.clear()
         inspection = self.results.get(TaskName.FINAL_PDF_INSPECTION)
         record_findings(
             report,

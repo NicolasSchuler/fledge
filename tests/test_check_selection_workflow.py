@@ -110,7 +110,7 @@ class CheckSelectionWorkflowTests(unittest.IsolatedAsyncioTestCase):
     async def test_online_selection_is_disabled_before_network_adapter(self):
         seen = []
 
-        async def online(_root, _main, *, options, budget):
+        async def online(_root, _main, *, options, budget, analysed):
             seen.append(options)
             self.assertFalse(options.online_doi_resolution)
             self.assertFalse(options.online_metadata)

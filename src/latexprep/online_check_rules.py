@@ -18,6 +18,7 @@ RULES = (
             "Check the DOI and retry unavailable services; a resolving DOI alone does not "
             "verify the cited work."
         ),
+        reviewable=True,
     ),
     Rule(
         code="NET002",
@@ -32,6 +33,7 @@ RULES = (
             "Review local and provider metadata against the cited version; do not replace "
             "fields automatically."
         ),
+        reviewable=True,
     ),
     Rule(
         code="NET003",
@@ -48,6 +50,7 @@ RULES = (
             "Inspect each candidate's title, authors and year before adding a DOI; a missing "
             "candidate is not proof that no DOI exists."
         ),
+        reviewable=True,
     ),
     Rule(
         code="NET004",
@@ -65,6 +68,7 @@ RULES = (
             "Review the relation and cited version before changing the reference; retain the "
             "preprint when appropriate."
         ),
+        reviewable=True,
     ),
     Rule(
         code="NET005",
@@ -79,6 +83,7 @@ RULES = (
             "Read the attributed notice and assess its relevance; absence of Crossref update "
             "metadata is not proof that no notice exists."
         ),
+        reviewable=True,
     ),
     Rule(
         code="NET006",
@@ -96,6 +101,7 @@ RULES = (
             "Review broken links and retry restricted or temporarily unavailable resources "
             "without exposing credentials."
         ),
+        reviewable=True,
     ),
     Rule(
         code="NET007",
@@ -113,5 +119,26 @@ RULES = (
             "Review artifact destinations and access requirements, then verify their contents "
             "and reproducibility separately."
         ),
+        reviewable=True,
+    ),
+    Rule(
+        code="NET008",
+        name="online.sharing",
+        title="Data shared with online services",
+        description=(
+            "State what leaves the machine when online checks run: DOI identifiers, URL "
+            "destinations and bibliography titles go to DOI and Crossref services and to the "
+            "selected public hosts. No bibliography or manuscript file is uploaded. Online "
+            "checks are off unless requested."
+        ),
+        tests=(
+            "tests.test_online_checks.OnlineCheckTests.test_doi_resolution_valid_invalid_uncertain",
+            "tests.test_terminal_presentation.OnlineDisclosureTests.test_the_privacy_disclosure_is_listed_without_show_passed",
+        ),
+        fix=(
+            "Check that sharing these fields is acceptable before using --online; "
+            "otherwise leave online checks off."
+        ),
+        mandatory=True,
     ),
 )

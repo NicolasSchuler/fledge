@@ -260,32 +260,45 @@ def _unchanged_regular_file(path: Path, expected: bytes) -> bool:
     )
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class BuildEvidence:
+    """What the final build and its file recorder established, to join with the kernel's report.
+
+    ``packages`` and ``recorder_inputs`` are what the recorder saw; ``max_bytes`` bounds the
+    option file the build wrote.
+    """
+
+    engine: Engine
+    packages: tuple[LoadedPackage, ...]
+    recorder_inputs: frozenset[Path]
+    recorder_complete: bool
+    build_complete: bool
+    max_bytes: int
+
+
 def collect_loaded_options(
-    probe: LoadedOptionsProbe,
-    packages: list[LoadedPackage],
-    recorder_inputs: set[Path],
-    *,
-    engine: Engine,
-    recorder_complete: bool,
-    build_complete: bool,
-    max_bytes: int,
+    probe: LoadedOptionsProbe, build: BuildEvidence
 ) -> LoadedOptionsEvidence:
     """Require fresh complete evidence and a one-to-one recorder/kernel graph."""
     try:
-        if not build_complete or not recorder_complete:
+        if not build.build_complete or not build.recorder_complete:
             raise PreparationError("A successful build and complete recorder are required")
-        if probe.hook not in recorder_inputs:
+        if probe.hook not in build.recorder_inputs:
             raise PreparationError("The final recorder did not observe the trusted options hook")
         if not _unchanged_regular_file(probe.hook, probe.hook_bytes) or not _unchanged_regular_file(
             probe.main, probe.staged_bytes
         ):
             raise PreparationError("The instrumented disposable source changed during execution")
         info = probe.sidecar.lstat()
-        if not stat.S_ISREG(info.st_mode) or info.st_size > min(max_bytes, _MAX_EVIDENCE_BYTES):
+        if not stat.S_ISREG(info.st_mode) or info.st_size > min(
+            build.max_bytes, _MAX_EVIDENCE_BYTES
+        ):
             raise PreparationError("Option evidence is not a bounded regular output file")
-        kernel = _parse_options(probe.sidecar.read_text(encoding="ascii"), probe.token, engine)
-        recorded = {package.name: package for package in packages}
-        if len(recorded) != len(packages):
+        kernel = _parse_options(
+            probe.sidecar.read_text(encoding="ascii"), probe.token, build.engine
+        )
+        recorded = {package.name: package for package in build.packages}
+        if len(recorded) != len(build.packages):
             raise PreparationError("Multiple recorder paths make a package origin ambiguous")
         if {item.name for item in kernel.packages} != set(recorded):
             raise PreparationError("Kernel class/package graph does not match the final recorder")

@@ -20,6 +20,7 @@ from .findings import DetailKey, Finding
 from .report import RedactedReport
 from .review_policy import review_marker
 from .rules import BY_NAME
+from .task_findings import TASK_DETAIL, blocked_prerequisites
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -178,16 +179,6 @@ def _priority(finding: Finding) -> int:
     return 2 if finding.severity == "warning" else 3
 
 
-def _blocked_by(finding: Finding) -> tuple[str, ...]:
-    """Failed prerequisites of a task the scheduler never started, if this records one."""
-    prerequisites = finding.details.get(DetailKey.BLOCKED_BY)
-    if finding.rule != "execution.task" or finding.status != "skipped":
-        return ()
-    if not isinstance(prerequisites, list):
-        return ()
-    return tuple(str(item) for item in prerequisites)
-
-
 def _identity(finding: Finding) -> tuple[object, ...]:
     # The same result re-checked at another stage (baseline, transformed, archive
     # rebuild or final sources) is one issue for a reader; JSON keeps every stage.
@@ -246,9 +237,9 @@ def not_run_summaries(report: RedactedReport) -> list[str]:
     """One line per failed prerequisite instead of one note per task it prevented."""
     groups: dict[tuple[str, tuple[str, ...]], list[str]] = {}
     for finding in report.findings:
-        if prerequisites := _blocked_by(finding):
+        if prerequisites := blocked_prerequisites(finding):
             key = (finding.document or "", prerequisites)
-            task = str(finding.details.get(DetailKey.TASK, finding.message))
+            task = str(finding.details.get(TASK_DETAIL, finding.message))
             if task not in groups.setdefault(key, []):
                 groups[key].append(task)
     lines = []
@@ -344,7 +335,7 @@ def finding_views(report: RedactedReport, *, show_hidden: bool) -> list[FindingV
     entries = merge_stage_copies(
         item
         for item in report.findings
-        if not _blocked_by(item) and (show_hidden or not _hidden_by_default(item))
+        if not blocked_prerequisites(item) and (show_hidden or not _hidden_by_default(item))
     )
     entries.sort(key=lambda entry: (_priority(entry.finding), order[id(entry.finding)]))
     return [FindingView.from_finding(entry.finding, entry.stages) for entry in entries]

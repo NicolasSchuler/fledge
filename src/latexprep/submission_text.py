@@ -407,24 +407,14 @@ def _local_definitions(document: ExpandedDocument) -> tuple[frozenset[str], froz
     return frozenset(redefined), frozenset(active_characters)
 
 
-def _original_text(document: ExpandedDocument) -> tuple[str, list[str]]:
-    """The raw source behind the masked expanded text, and where it was not recovered."""
-    raw: list[str] = []
-    issues: list[str] = []
-    for segment in document.segments:
-        source = document.graph.sources[segment.path]
-        line_start = 0
-        for _ in range(segment.line - 1):
-            line_start = source.text.find("\n", line_start) + 1
-        chunk = document.text[segment.start : segment.end]
-        offset = source.masked.find(chunk, line_start)
-        line_end = source.text.find("\n", line_start)
-        if offset < 0 or (line_end >= 0 and offset > line_end):
-            issues.append("Could not recover original source text")
-            raw.append(chunk)
-        else:
-            raw.append(source.text[offset : offset + len(chunk)])
-    return "".join(raw), issues
+def _original_text(document: ExpandedDocument) -> str:
+    """The raw source behind the masked expanded text, at the same offsets."""
+    return "".join(
+        document.graph.sources[segment.path].text[
+            segment.source_start : segment.source_start + segment.end - segment.start
+        ]
+        for segment in document.segments
+    )
 
 
 def _field_definition_spans(document: ExpandedDocument) -> list[tuple[int, int]]:
@@ -552,11 +542,10 @@ def read_submission_text(root: Path, main: str | None = None) -> dict[str, Submi
     """Read unique declarations, preserving raw source behind the shared masked lexer."""
     document = expand_document(root, main)
     redefined, active_characters = _local_definitions(document)
-    original, recovery_issues = _original_text(document)
     reader = _FieldReader(
         document,
-        original,
-        [*document.presence_uncertainty, *recovery_issues],
+        _original_text(document),
+        list(document.presence_uncertainty),
         redefined,
         active_characters,
     )

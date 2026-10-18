@@ -16,6 +16,7 @@ RULES = (
             "tests.test_source.SourceTests.test_markers_labels_and_refs_are_heuristics_not_blockers",
         ),
         fix="Finish or remove the marked draft text after reviewing its context.",
+        reviewable=True,
     ),
     Rule(
         code="TEX002",
@@ -30,6 +31,7 @@ RULES = (
             "tests.test_source.SourceTests.test_markers_labels_and_refs_are_heuristics_not_blockers",
         ),
         fix="Resolve the editing note and remove its draft command.",
+        reviewable=True,
     ),
     Rule(
         code="TEX003",
@@ -44,6 +46,7 @@ RULES = (
             "tests.test_source.SourceTests.test_markers_labels_and_refs_are_heuristics_not_blockers",
         ),
         fix="Give distinct objects unique labels and update their references.",
+        reviewable=True,
     ),
     Rule(
         code="TEX004",
@@ -57,7 +60,8 @@ RULES = (
         tests=(
             "tests.test_source.SourceTests.test_markers_labels_and_refs_are_heuristics_not_blockers",
         ),
-        fix=("Correct the reference key or add the intended label; confirm with a clean build."),
+        fix="Correct the reference key or add the intended label; confirm with a clean build.",
+        reviewable=True,
     ),
     Rule(
         code="TEX005",
@@ -69,6 +73,7 @@ RULES = (
             "tests.test_source.SourceTests.test_absolute_outside_and_missing_dependencies_are_errors",
         ),
         fix="Include the missing dependency or correct the literal file path.",
+        mandatory=True,
     ),
     Rule(
         code="TEX006",
@@ -82,6 +87,7 @@ RULES = (
             "tests.test_source.SourceTests.test_absolute_outside_and_missing_dependencies_are_errors",
         ),
         fix="Copy the dependency into the project and use a project-relative path.",
+        mandatory=True,
     ),
     Rule(
         code="TEX007",
@@ -94,6 +100,7 @@ RULES = (
         ),
         tests=("tests.test_source.SourceTests.test_case_mismatch_is_reported_and_not_guessed",),
         fix="Make the reference match the filename's exact letter case.",
+        mandatory=True,
     ),
     Rule(
         code="TEX008",
@@ -125,7 +132,8 @@ RULES = (
         tests=(
             "tests.test_manuscript.ManuscriptTests.test_expected_document_class_matches_and_mismatch_blocks",
         ),
-        fix=("Use the configured document class, or correct the expected class in your settings."),
+        fix="Use the configured document class, or correct the expected class in your settings.",
+        reviewable=True,
     ),
     Rule(
         code="TEX102",
@@ -139,6 +147,7 @@ RULES = (
             "tests.test_manuscript.ManuscriptTests.test_class_options_report_missing_and_forbidden_values",
         ),
         fix="Add the missing class options and remove the forbidden options listed above.",
+        reviewable=True,
     ),
     Rule(
         code="TEX103",
@@ -152,20 +161,21 @@ RULES = (
             "tests.test_manuscript.ManuscriptTests.test_forbidden_packages_check_direct_local_graph_declarations",
         ),
         fix="Remove or replace the listed forbidden package declarations and rebuild.",
+        reviewable=True,
+        not_checked_area="forbidden_packages",
     ),
     Rule(
         code="TEX104",
         name="manuscript.abstract_required",
         title="Required abstract",
-        description=(
-            "Require one supported abstract declaration when require_abstract is enabled."
-        ),
+        description="Require one supported abstract declaration when require_abstract is enabled.",
         tests=(
             "tests.test_manuscript.ManuscriptTests.test_required_abstract_rejects_missing_and_empty_content",
             "tests.test_manuscript.ManuscriptTests.test_invisible_abstract_commands_do_not_establish_nonempty_content",
             "tests.test_manuscript.ManuscriptTests.test_math_only_abstract_presence_is_inconclusive_but_word_count_is_explicit",
         ),
         fix="Add a nonempty abstract in a supported abstract declaration.",
+        reviewable=True,
     ),
     Rule(
         code="TEX105",
@@ -182,6 +192,7 @@ RULES = (
             "tests.test_manuscript.ManuscriptTests.test_unresolved_abstract_macros_bound_the_word_count",
         ),
         fix="Edit the abstract to fit the configured word range, preserving its meaning.",
+        reviewable=True,
     ),
     Rule(
         code="TEX106",
@@ -195,6 +206,7 @@ RULES = (
             "tests.test_manuscript.ManuscriptTests.test_keyword_limits_count_phrases_and_common_environments",
         ),
         fix="Adjust the keyword list to the configured range using explicit separators.",
+        reviewable=True,
     ),
     Rule(
         code="TEX107",
@@ -211,7 +223,8 @@ RULES = (
             "tests.test_manuscript.ManuscriptTests.test_endinput_same_line_conditional_and_macro_contexts_are_inconclusive",
             "tests.test_manuscript.ManuscriptTests.test_executed_conditional_still_blocks_the_declarations_it_encloses",
         ),
-        fix=("Add the required section headings and their content, or correct their spelling."),
+        fix="Add the required section headings and their content, or correct their spelling.",
+        reviewable=True,
     ),
     Rule(
         code="PKG001",
@@ -223,7 +236,8 @@ RULES = (
             "retain their required identities."
         ),
         tests=("tests.test_source.SourceTests.test_local_style_collision_is_blocked",),
-        fix=("Keep the hierarchy, or resolve colliding protected filenames in the source project."),
+        fix="Keep the hierarchy, or resolve colliding protected filenames in the source project.",
+        mandatory=True,
     ),
     Rule(
         code="PKG002",
@@ -235,7 +249,8 @@ RULES = (
             "contract."
         ),
         tests=("tests.test_source.SourceTests.test_protected_filename_cannot_be_sanitized",),
-        fix=("Keep the hierarchy, or explicitly rename the protected file and its references."),
+        fix="Keep the hierarchy, or explicitly rename the protected file and its references.",
+        mandatory=True,
     ),
     Rule(
         code="PKG003",
@@ -251,6 +266,7 @@ RULES = (
             "Keep the hierarchy, or resolve the local class/style name that would shadow a "
             "system file."
         ),
+        mandatory=True,
     ),
     Rule(
         code="PKG004",
@@ -261,7 +277,22 @@ RULES = (
             "Block flattening that would break supported generated/sidecar filename relationships."
         ),
         tests=("tests.test_source.SourceTests.test_sidecar_relationship_breakage_is_blocked",),
-        fix=("Keep the hierarchy, or rename the companion files and their references together."),
+        fix="Keep the hierarchy, or rename the companion files and their references together.",
+        mandatory=True,
+    ),
+    Rule(
+        code="PKG005",
+        name="project.nonportable_filename",
+        title="Nonportable project file names",
+        description=(
+            "Warn once per kept file or empty folder whose path contains a control character, "
+            'a character from <>:"|?*, a trailing space or dot, or a reserved Windows device '
+            "name. The file is kept unchanged."
+        ),
+        tests=(
+            "tests.test_project.ProjectTests.test_nonportable_zip_names_are_kept_with_one_warning_per_file",
+        ),
+        fix="Rename the file to a portable name, or accept that it is awkward on other systems.",
     ),
     Rule(
         code="BIB001",
@@ -274,7 +305,8 @@ RULES = (
         tests=(
             "tests.test_bibliography.BibliographyTests.test_malformed_file_is_never_partially_normalized",
         ),
-        fix=("Repair the indicated entry syntax before applying bibliography transformations."),
+        fix="Repair the indicated entry syntax before applying bibliography transformations.",
+        mandatory=True,
     ),
     Rule(
         code="BIB002",
@@ -286,7 +318,8 @@ RULES = (
         tests=(
             "tests.test_bibliography.BibliographyTests.test_duplicate_keys_and_dois_include_conflicts_without_merging",
         ),
-        fix=("Review conflicting entries, choose distinct keys, and update affected citations."),
+        fix="Review conflicting entries, choose distinct keys, and update affected citations.",
+        mandatory=True,
     ),
     Rule(
         code="BIB003",
@@ -315,10 +348,12 @@ RULES = (
             "tests.test_bibliography.BibliographyTests.test_literal_relationships_and_builtin_months_are_checked",
         ),
         fix="Define the missing string macro or replace it with the intended literal text.",
+        mandatory=True,
     ),
     Rule(
         code="BIB005",
         name="bibliography.missing_relationship",
+        aliases=("bibliography.relationship_unresolved",),
         title="Bibliography relationship targets",
         description=(
             "Resolve supported cross-reference relationships locally; dynamic or "
@@ -328,11 +363,12 @@ RULES = (
             "tests.test_bibliography.BibliographyTests.test_literal_relationships_and_builtin_months_are_checked",
         ),
         fix="Add the missing parent entry or correct the relationship target key.",
-        aliases=("bibliography.relationship_unresolved",),
+        mandatory=True,
     ),
     Rule(
         code="BIB006",
         name="bibliography.invalid_doi",
+        aliases=("bibliography.doi_unresolved",),
         title="Literal DOI syntax",
         description=(
             "Validate supported literal DOI syntax; macros, concatenation and ambiguous "
@@ -342,8 +378,8 @@ RULES = (
             "tests.test_bibliography.BibliographyTests.test_invalid_plain_dois_and_ambiguous_markup_are_distinct",
             "tests.test_bibliography.BibliographyTests.test_macro_and_concatenated_dois_remain_unchanged",
         ),
-        fix=("Check the DOI against the publication and correct its literal bibliography value."),
-        aliases=("bibliography.doi_unresolved",),
+        fix="Check the DOI against the publication and correct its literal bibliography value.",
+        reviewable=True,
     ),
     Rule(
         code="BIB007",
@@ -361,6 +397,41 @@ RULES = (
             "Review whether the entries describe the same work before merging or changing "
             "citations."
         ),
+        reviewable=True,
+    ),
+    Rule(
+        code="BIB008",
+        name="bibliography.input",
+        title="Unreadable bibliography files",
+        description=(
+            "Report a .bib file that is a symbolic link, cannot be read, is not UTF-8 or "
+            "exceeds the bibliography size limit. It is neither inspected nor normalized, so "
+            "the checks over its entries are incomplete."
+        ),
+        tests=(
+            "tests.test_bibliography.BibliographyTests.test_non_utf8_and_symbolic_link_inputs_are_not_modified",
+        ),
+        fix=(
+            "Make the file readable, save it as UTF-8 and keep it within the size limit, or "
+            "supply the actual file instead of a link."
+        ),
+        mandatory=True,
+    ),
+    Rule(
+        code="BIB009",
+        name="bibliography.source_error",
+        title="Bibliography checks incomplete after a source error",
+        description=(
+            "Replace the inconclusive bibliography checks whose only cause is a source error "
+            "reported elsewhere, such as a missing file or an ambiguous main file, with one "
+            "note that lists them, instead of repeating the cause once per check."
+        ),
+        tests=(
+            "tests.test_report_cascades.BibliographyCascadeTests.test_missing_figure_yields_one_bibliography_note",
+            "tests.test_report_cascades.BibliographyCascadeTests.test_ambiguous_main_yields_one_bibliography_note",
+        ),
+        fix="Fix the reported source error; these bibliography checks then run in full.",
+        mandatory=True,
     ),
     Rule(
         code="BLD001",
@@ -409,7 +480,8 @@ RULES = (
         title="Font warnings in build log",
         description="Detect font substitution and other TeX font warnings.",
         tests=("tests.test_runtime.BuildTests.test_build_log_check_codes_match_diagnostics",),
-        fix=("Use an available font and shape; check the rebuilt PDF for unintended substitution."),
+        fix="Use an available font and shape; check the rebuilt PDF for unintended substitution.",
+        reviewable=True,
     ),
     Rule(
         code="BLD006",
@@ -427,6 +499,7 @@ RULES = (
             "Inspect the reported box; reflow the text, equation or table within the "
             "intended margins."
         ),
+        reviewable=True,
     ),
     Rule(
         code="BLD007",
@@ -435,6 +508,7 @@ RULES = (
         description="Detect underfull horizontal/vertical box warnings emitted by TeX.",
         tests=("tests.test_runtime.BuildTests.test_build_log_check_codes_match_diagnostics",),
         fix="Inspect the reported box for poor spacing and adjust its line or page breaks.",
+        reviewable=True,
     ),
     Rule(
         code="BLD008",
@@ -448,6 +522,7 @@ RULES = (
         fix=(
             "Resolve the remaining reference/bibliography rerun request and rebuild to convergence."
         ),
+        mandatory=True,
     ),
     Rule(
         code="BLD009",
@@ -456,6 +531,23 @@ RULES = (
         description="Detect explicit TeX error, fatal-error and emergency-stop diagnostics.",
         tests=("tests.test_runtime.BuildTests.test_build_log_check_codes_match_diagnostics",),
         fix="Fix the reported TeX error and repeat the clean build.",
+        mandatory=True,
+    ),
+    Rule(
+        code="BLD010",
+        name="build.external_dependency",
+        title="Undeclared external build inputs",
+        description=(
+            "Report a file outside the project and the declared TeX trees that the build "
+            "recorder shows the TeX run read. The build is not reproducible from the project "
+            "alone, so it does not succeed."
+        ),
+        tests=("tests.test_runtime.BuildTests.test_external_recorder_dependency_blocks_success",),
+        fix=(
+            "Copy the file into the project and refer to it by a project-relative path, or "
+            "remove the dependency, then rebuild."
+        ),
+        mandatory=True,
     ),
     Rule(
         code="PDF001",
@@ -470,6 +562,8 @@ RULES = (
             "Reduce the document to the configured total page limit, including appendices "
             "and references."
         ),
+        reviewable=True,
+        not_checked_area="page_limit",
     ),
     Rule(
         code="PDF101",
@@ -483,6 +577,7 @@ RULES = (
             "tests.test_pdf.PdfConstraintTests.test_expected_dimensions_measure_every_page_with_pdf_point_tolerance",
         ),
         fix="Set the intended paper dimensions in the source and rebuild the PDF.",
+        reviewable=True,
     ),
     Rule(
         code="PDF102",
@@ -495,9 +590,8 @@ RULES = (
         tests=(
             "tests.test_pdf.PdfConstraintTests.test_page_consistency_uses_full_range_not_just_first_page",
         ),
-        fix=(
-            "Make the page sizes consistent, checking imported PDF pages and orientation settings."
-        ),
+        fix="Make the page sizes consistent, checking imported PDF pages and orientation settings.",
+        reviewable=True,
     ),
     Rule(
         code="PDF103",
@@ -514,6 +608,8 @@ RULES = (
             "Replace the reported raster with a higher-resolution original or reduce its "
             "rendered size."
         ),
+        reviewable=True,
+        not_checked_area="image_resolution",
     ),
     Rule(
         code="PDF104",
@@ -526,9 +622,9 @@ RULES = (
         tests=(
             "tests.test_pdf.PdfConstraintTests.test_font_embedding_violation_changes_status_and_zero_fonts_are_inconclusive",
         ),
-        fix=(
-            "Embed the named fonts when exporting figures or building the document, then rebuild."
-        ),
+        fix="Embed the named fonts when exporting figures or building the document, then rebuild.",
+        reviewable=True,
+        not_checked_area="font_embedding",
     ),
     Rule(
         code="PDF105",
@@ -541,7 +637,9 @@ RULES = (
         tests=(
             "tests.test_pdf.PdfConstraintTests.test_forbidden_type3_font_policy_detects_only_type3",
         ),
-        fix=("Replace the reported Type 3 fonts with suitable embedded outline fonts and rebuild."),
+        fix="Replace the reported Type 3 fonts with suitable embedded outline fonts and rebuild.",
+        reviewable=True,
+        not_checked_area="font_embedding",
     ),
     Rule(
         code="PDF106",
@@ -597,6 +695,8 @@ RULES = (
             "Check the selected source/PDF versions and explain or correct the differing "
             "page count."
         ),
+        mandatory=True,
+        reviewable=True,
     ),
     Rule(
         code="CMP002",
@@ -608,7 +708,9 @@ RULES = (
         tests=(
             "tests.test_pdf.PdfTests.test_extracted_text_change_is_detected_when_raster_matches",
         ),
-        fix=("Inspect changed pages and restore the intended text before publishing the bundle."),
+        fix="Inspect changed pages and restore the intended text before publishing the bundle.",
+        mandatory=True,
+        reviewable=True,
     ),
     Rule(
         code="CMP003",
@@ -622,7 +724,9 @@ RULES = (
             "tests.test_pdf.PdfTests.test_rendered_change_is_detected_when_text_matches",
             "tests.test_pdf.PdfTests.test_matching_comparison_states_exact_tolerance_and_limits",
         ),
-        fix=("Inspect changed pages and correct unintended visual differences before publishing."),
+        fix="Inspect changed pages and correct unintended visual differences before publishing.",
+        mandatory=True,
+        reviewable=True,
     ),
     Rule(
         code="FMT001",
@@ -639,6 +743,7 @@ RULES = (
             "Review the formatting diff; use prepare --format to apply it to a separate "
             "verified copy."
         ),
+        reviewable=True,
     ),
     Rule(
         code="FMT002",
@@ -650,5 +755,6 @@ RULES = (
             "Inspect the unstable formatter output or change formatter settings/version "
             "before retrying."
         ),
+        mandatory=True,
     ),
 )

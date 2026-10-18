@@ -4,9 +4,19 @@ from __future__ import annotations
 
 import unittest
 
+from latexprep.check_policy import opt_in_activation
+from latexprep.coverage_hints import not_checked_areas
+from latexprep.execution_records import OTHER_OPT_IN_AREA
 from latexprep.findings import Finding
 from latexprep.report import Report
-from latexprep.rules import BY_CODE, BY_NAME, RULES, get_rule
+from latexprep.rules import (
+    BY_CODE,
+    BY_NAME,
+    MANDATORY_CODES,
+    REVIEWABLE_CODES,
+    RULES,
+    get_rule,
+)
 
 
 class RuleRegistryTests(unittest.TestCase):
@@ -38,6 +48,29 @@ class RuleRegistryTests(unittest.TestCase):
         self.assertEqual(get_rule("tex001").code, "TEX001")
         with self.assertRaisesRegex(ValueError, "Unknown check code"):
             get_rule("TEX999")
+
+    def test_rule_facts_are_fields_and_the_code_sets_are_derived_from_them(self):
+        self.assertEqual(MANDATORY_CODES, {rule.code for rule in RULES if rule.mandatory})
+        self.assertEqual(REVIEWABLE_CODES, {rule.code for rule in RULES if rule.reviewable})
+        self.assertTrue(get_rule("TEX005").to_dict()["mandatory"])
+        self.assertFalse(get_rule("TEX005").to_dict()["reviewable"])
+        self.assertTrue(get_rule("PDF001").to_dict()["reviewable"])
+        self.assertEqual(get_rule("PDF001").to_dict()["not_checked_area"], "page_limit")
+        self.assertFalse(get_rule("BIB101").to_dict()["mandatory"])
+        # An opt-in check is switched on by a setting; a guard that selection cannot remove
+        # is not one.
+        self.assertFalse(MANDATORY_CODES & set(opt_in_activation()))
+
+    def test_every_not_checked_area_of_a_rule_is_one_a_run_reports(self):
+        reported = {
+            entry.area: entry.codes
+            for entry in not_checked_areas(frozenset())
+            if entry.area != OTHER_OPT_IN_AREA
+        }
+        named = {rule.not_checked_area for rule in RULES if rule.not_checked_area}
+        self.assertEqual(set(reported), named)
+        for area, codes in reported.items():
+            self.assertTrue(set(codes) <= set(opt_in_activation()), area)
 
     def test_report_order_is_stable_across_completion_orders_and_numeric_pages(self):
         findings = [

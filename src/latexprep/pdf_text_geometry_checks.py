@@ -172,10 +172,12 @@ def _text_size_finding(layout: _TextLayout) -> Finding:
         "Compared reported text sizes with configured minima.",
         violations,
         incomplete=uncertain,
-        measured_text_boxes=measured,
-        unsupported_pages=sorted(layout.unsupported),
-        precision_pt=FONT_SIZE_ROUNDING_PT,
-        scope=_LAYOUT_SCOPE,
+        details={
+            "measured_text_boxes": measured,
+            "unsupported_pages": sorted(layout.unsupported),
+            "precision_pt": FONT_SIZE_ROUNDING_PT,
+            "scope": _LAYOUT_SCOPE,
+        },
     )
 
 
@@ -220,10 +222,12 @@ def _printable_bounds_finding(layout: _TextLayout) -> Finding:
         "Checked text boxes against supplied printable regions.",
         violations,
         incomplete=uncertain or measured == 0,
-        measured_text_boxes=measured,
-        unsupported_pages=sorted(layout.unsupported),
-        tolerance_pt=options.geometry_tolerance_pt,
-        scope=_LAYOUT_SCOPE,
+        details={
+            "measured_text_boxes": measured,
+            "unsupported_pages": sorted(layout.unsupported),
+            "tolerance_pt": options.geometry_tolerance_pt,
+            "scope": _LAYOUT_SCOPE,
+        },
     )
 
 
@@ -270,10 +274,12 @@ def _overlap_finding(layout: _TextLayout, minimum_ratio: float) -> Finding:
         overlaps,
         incomplete=uncertain or measured == 0,
         total_violations=overlap_count,
-        minimum_area_ratio=minimum_ratio,
-        comparisons=min(comparisons, MAX_PAIR_CHECKS),
-        scope=_LAYOUT_SCOPE
-        + " Overlaps are candidates, including legitimate mathematical overlays.",
+        details={
+            "minimum_area_ratio": minimum_ratio,
+            "comparisons": min(comparisons, MAX_PAIR_CHECKS),
+            "scope": _LAYOUT_SCOPE
+            + " Overlaps are candidates, including legitimate mathematical overlays.",
+        },
     )
 
 

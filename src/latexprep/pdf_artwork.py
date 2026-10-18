@@ -44,7 +44,13 @@ from .pdf_artwork_rendered import (
 from .pdf_artwork_trace import misaligned_frame_pages, parse_drawing_trace
 from .pdf_check_options import MAX_FIGURE_INPUTS
 from .pdf_tool_output import PageFrames, TracedDocument, page_frames, parse_mupdf_trace
-from .pdf_tools import PdfToolSession, mupdf_trace_argv, page_boxes_argv, preflight_pdf
+from .pdf_tools import (
+    PdfToolSession,
+    SharedPdfSession,
+    mupdf_trace_argv,
+    page_boxes_argv,
+    preflight_pdf,
+)
 from .pdf_type3_glyphs import inspect_type3_glyphs
 from .resource_budget import ResourceBudget
 
@@ -159,12 +165,13 @@ async def _inspect_artwork(
     runner: CommandRunner,
     budget: ResourceBudget | None,
     policy: _ArtworkPolicy,
+    shared: SharedPdfSession | None = None,
 ) -> list[Finding]:
     options = policy.options
     configured = configured_artwork_rules(options)
     if not configured:
         return []
-    preflight = await preflight_pdf(pdf, work, runner, budget, configured)
+    preflight = await preflight_pdf(pdf, work, runner, budget, configured, session=shared)
     if isinstance(preflight, list):
         return preflight
     session, pages = preflight.session, preflight.pages
@@ -205,10 +212,14 @@ async def inspect_pdf_artwork(
     options: PdfArtworkOptions | None = None,
     budget: ResourceBudget | None = None,
     limits: ArtworkLimits | None = None,
+    session: SharedPdfSession | None = None,
 ) -> list[Finding]:
-    """Inspect one manuscript PDF; figure measurements need explicit regions."""
+    """Inspect one manuscript PDF; figure measurements need explicit regions.
+
+    A shared ``session`` for ``pdf`` supplies the frozen PDF and remembered measurements.
+    """
     policy = _ArtworkPolicy(options or PdfArtworkOptions(), limits or ArtworkLimits())
-    return await _inspect_artwork(pdf, work, runner, budget, policy)
+    return await _inspect_artwork(pdf, work, runner, budget, policy, session)
 
 
 async def inspect_artwork_inputs(

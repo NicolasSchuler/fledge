@@ -42,6 +42,7 @@ from .errors import PreparationError, ToolUnavailableError
 from .findings import Finding
 from .latexmk_command import BiberPlan, controlled_rules, latexmk_command
 from .loaded_options import (
+    BuildEvidence,
     LoadedOptionsEvidence,
     LoadedOptionsProbe,
     collect_loaded_options,
@@ -158,7 +159,7 @@ async def build_project(
 async def _build_once(request: BuildRequest, runner: ToolRunner, biber: BiberPlan) -> BuildResult:
     """Run one isolated build; raise ``BiberRequired`` if a deferred build needs Biber."""
     layout = await run_in_thread(
-        prepare_layout, request.source, request.main, request.work, runner.limits.max_file_bytes
+        prepare_layout, request.source, request.main, request.work, runner.limits.max_copy_bytes
     )
     staged = _stage_loaded_options(request, layout)
     biber_setup = await prepare_biber(
@@ -361,12 +362,14 @@ def _loaded_options(
         return staged
     return collect_loaded_options(
         staged,
-        list(recorder.loaded_packages),
-        set(recorder.inputs),
-        engine=request.engine,
-        recorder_complete=recorder.complete,
-        build_complete=built,
-        max_bytes=max_bytes,
+        BuildEvidence(
+            engine=request.engine,
+            packages=tuple(recorder.loaded_packages),
+            recorder_inputs=frozenset(recorder.inputs),
+            recorder_complete=recorder.complete,
+            build_complete=built,
+            max_bytes=max_bytes,
+        ),
     )
 
 
@@ -387,8 +390,8 @@ def _failure_suggestion(failure: CommandFailure, limits: RuntimeLimits) -> str |
         case CommandFailure.RESOURCE_LIMIT:
             return (
                 "Check for a runaway document. If it legitimately needs more, raise "
-                "build_memory_mb (memory), max_bytes (size of generated files) or "
-                "max_temporary_bytes (temporary disk) in your configuration."
+                "build_memory_mb (memory), max_generated_file_bytes (size of one generated "
+                "file) or max_temporary_bytes (temporary disk) in your configuration."
             )
     return None
 

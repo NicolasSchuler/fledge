@@ -93,6 +93,7 @@ class WorkflowExtensionTests(unittest.IsolatedAsyncioTestCase):
                     *,
                     options,
                     budget,
+                    analysed,
                     seen=observed,
                     finding_status=status,
                     doi=replacement,
@@ -324,7 +325,7 @@ class WorkflowExtensionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.findings[0].details["artifacts"], [scrub_local_paths(str(preview))])
 
     async def test_preview_export_timeout_rolls_back_single_and_multiple_packages(self):
-        async def measured(_pdf, _root, _main, work, *_args):
+        async def measured(_pdf, _root, _main, work, *_args, **_options):
             work.mkdir(parents=True)
             preview = work / "gray.png"
             preview.write_bytes(b"PNG fixture")

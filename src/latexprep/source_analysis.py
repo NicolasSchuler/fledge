@@ -16,6 +16,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .analysed_source import AnalysedSource, reuse_or_analyse
 from .comment_markers import MarkerCategory, marker_pattern
 from .file_safety import read_regular_file
 from .findings import EvidenceKind, Finding
@@ -197,9 +198,16 @@ def lint_sources(graph: SourceGraph) -> list[Finding]:
     return findings
 
 
-def analyze_sources(root: Path, main: str | None = None) -> SourceAnalysis:
-    """Inspect a selected root and report literal dependencies without editing files."""
-    graph = SourceGraph.build(root, main)
+def analyze_sources(
+    root: Path, main: str | None = None, *, analysed: AnalysedSource | None = None
+) -> SourceAnalysis:
+    """Inspect a selected root and report literal dependencies without editing files.
+
+    ``analysed`` shares the source analysis of the same root and main file with other
+    checks; without one the graph is built here. The result holds copies of the graph's
+    roots and dependencies, so a shared graph stays unchanged by whoever edits them.
+    """
+    graph = reuse_or_analyse(root, main, analysed).graph
     # Every source file is read to discover roots, but a selected document is not
     # described by lexical uncertainties of files outside its own graph.
     outside = {
@@ -212,10 +220,10 @@ def analyze_sources(root: Path, main: str | None = None) -> SourceAnalysis:
         *lint_sources(graph),
     ]
     return SourceAnalysis(
-        graph.roots,
+        list(graph.roots),
         graph.main,
         findings,
-        graph.dependencies,
+        set(graph.dependencies),
         complete=bool(graph.main in graph.visited)
         and all(id(item) in outside for item in graph.uncertainties)
         and not any(finding.severity == "error" for finding in findings),

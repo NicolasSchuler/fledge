@@ -15,6 +15,7 @@ from latexprep.build_result import BuildResult
 from latexprep.errors import PreparationError
 from latexprep.latexmk_build import build_project
 from latexprep.loaded_options import (
+    BuildEvidence,
     _native_string,
     _parse_options,
     collect_loaded_options,
@@ -290,16 +291,21 @@ class LoadedOptionsDiagnosticsTests(unittest.TestCase):
         if sidecar is not None:
             probe.sidecar.parent.mkdir(parents=True)
             probe.sidecar.write_bytes(sidecar)
-        evidence = collect_loaded_options(
-            probe,
-            [],
-            {probe.hook},
-            engine="pdflatex",
-            recorder_complete=True,
-            build_complete=True,
-            max_bytes=1_000_000,
-        )
+        evidence = collect_loaded_options(probe, self.build_evidence(probe))
         return probe, evidence
+
+    def build_evidence(self, probe, **overrides) -> BuildEvidence:
+        return BuildEvidence(
+            **{
+                "engine": "pdflatex",
+                "packages": (),
+                "recorder_inputs": frozenset({probe.hook}),
+                "recorder_complete": True,
+                "build_complete": True,
+                "max_bytes": 1_000_000,
+                **overrides,
+            }
+        )
 
     def test_a_missing_option_file_is_explained_without_local_paths_or_the_token(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -309,6 +315,20 @@ class LoadedOptionsDiagnosticsTests(unittest.TestCase):
             for private in (directory, str(Path(directory).resolve()), probe.token, ".lpo"):
                 self.assertNotIn(private, evidence.uncertainty)
             self.assertNotIn(probe.token, evidence.finding("main.tex").message)
+
+    def test_evidence_needs_a_successful_build_and_a_complete_recorder(self):
+        with tempfile.TemporaryDirectory() as directory:
+            probe, _ = self.collect(directory, None)
+            for overrides, reason in (
+                ({"build_complete": False}, "A successful build and complete recorder"),
+                ({"recorder_complete": False}, "A successful build and complete recorder"),
+                ({"recorder_inputs": frozenset()}, "did not observe the trusted options hook"),
+            ):
+                with self.subTest(overrides=overrides):
+                    build = self.build_evidence(probe, **overrides)
+                    evidence = collect_loaded_options(probe, build)
+                    self.assertFalse(evidence.complete)
+                    self.assertIn(reason, evidence.uncertainty)
 
     def test_option_evidence_that_is_not_ascii_is_reported_as_such(self):
         with tempfile.TemporaryDirectory() as directory:

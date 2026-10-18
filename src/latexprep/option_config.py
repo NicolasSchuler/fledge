@@ -452,6 +452,18 @@ def with_suggestions(names: Iterable[str], guesses: Mapping[str, str]) -> str:
 # --- TOML conversion ------------------------------------------------------------------
 
 
+def _reject_unknown_keys(table: Mapping[object, object], known: set[str], location: str) -> None:
+    """Raise for the keys of ``table`` that are not in ``known``, suggesting the nearest names."""
+    unknown = sorted(map(str, set(table) - known))
+    if unknown:
+        guesses = closest_names(unknown, known)
+        raise _settings_error(
+            location,
+            f"Unknown {location} setting(s): {with_suggestions(unknown, guesses)}. "
+            f"Valid {location} settings: {', '.join(sorted(known))}.",
+        )
+
+
 def read_options(kind: type[T], value: object, location: str) -> T:
     """Convert one TOML table into the option dataclass ``kind``; reuse an instance as is."""
     if isinstance(value, kind):
@@ -460,15 +472,7 @@ def read_options(kind: type[T], value: object, location: str) -> T:
         raise _settings_error(location, f"{location} must be a settings table")
     if not is_dataclass(kind):
         raise _settings_error(location, f"{location} requires a dataclass option schema")
-    known = {item.name for item in fields(kind)}
-    unknown = sorted(map(str, set(value) - known))
-    if unknown:
-        guesses = closest_names(unknown, known)
-        raise _settings_error(
-            location,
-            f"Unknown {location} setting(s): {with_suggestions(unknown, guesses)}. "
-            f"Valid {location} settings: {', '.join(sorted(known))}.",
-        )
+    _reject_unknown_keys(value, {item.name for item in fields(kind)}, location)
     hints = get_type_hints(kind)
     limits: Mapping[str, Bounds] = getattr(kind, "FIELD_BOUNDS", {})
     converted = {
@@ -479,6 +483,36 @@ def read_options(kind: type[T], value: object, location: str) -> T:
         return kind(**converted)
     except (ValueError, TypeError, PreparationError) as error:
         raise _settings_error(location, f"Invalid {location} settings: {error}") from error
+
+
+def read_option_groups(kinds: Sequence[type], value: object, location: str) -> tuple[Any, ...]:
+    """Convert one TOML table into several option dataclasses that each own some of its keys.
+
+    A module keeps the options of its own feature, but a settings file may write them in a
+    table that another feature named. Every key belongs to exactly one of ``kinds``; an
+    unknown key is reported against the keys of all of them, as ``read_options`` does for
+    one. The result has one option object per kind, in the order of ``kinds``.
+    """
+    if not isinstance(value, dict):
+        raise _settings_error(location, f"{location} must be a settings table")
+    owners: dict[str, type] = {}
+    for kind in kinds:
+        if not is_dataclass(kind):
+            raise _settings_error(location, f"{location} requires a dataclass option schema")
+        for item in fields(kind):
+            if item.name in owners:
+                raise TypeError(
+                    f"{item.name} is an option of both {owners[item.name].__name__} "
+                    f"and {kind.__name__}"
+                )
+            owners[item.name] = kind
+    _reject_unknown_keys(value, set(owners), location)
+    return tuple(
+        read_options(
+            kind, {name: item for name, item in value.items() if owners[name] is kind}, location
+        )
+        for kind in kinds
+    )
 
 
 def read_top_level_options(kind: type[T], values: Mapping[str, object]) -> T:

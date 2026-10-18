@@ -139,6 +139,19 @@ class SubmissionTextTests(unittest.TestCase):
         self.assertEqual(abstract.status, "ready", abstract)
         self.assertEqual(abstract.draft, "An included final result.")
 
+    def test_text_between_included_files_keeps_its_own_raw_source(self) -> None:
+        # The space between the two inputs also occurs, blanked, inside the verbatim span.
+        self.write(
+            r"\documentclass{article}\begin{document}"
+            r"\begin{abstract}\verb|ab| \input{first} \input{second}\end{abstract}"
+            r"\end{document}"
+        )
+        (self.root / "first.tex").write_text("one", encoding="utf-8")
+        (self.root / "second.tex").write_text("two", encoding="utf-8")
+        abstract = read_submission_text(self.root, "main.tex")["abstract"]
+        self.assertEqual(abstract.draft, r"\verb|ab| one two")
+        self.assertNotIn("Could not recover original source text", abstract.issues)
+
     def test_control_text_is_visible_and_blocks_plain_export(self) -> None:
         self.write("\\documentclass{article}\\title{Safe\x1b[31m text\u202e}")
         runner = CliRunner()

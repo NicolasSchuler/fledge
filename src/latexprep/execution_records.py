@@ -1,26 +1,47 @@
-"""Typed reads of the ``Report.execution`` entries that renderers use.
+"""Typed records of the ``Report.execution`` entries that jobs write and renderers show.
 
 ``Report.execution`` is a free-form record that jobs fill in and that JSON carries as it
-is. The few entries a renderer shows are read here, once, into typed records, so a
-renderer never re-checks dictionary shapes. A malformed or missing entry reads as absent
-rather than failing the report. This module does not produce the entries; the job does.
+is. The few entries a renderer shows have one definition here: the typed records, the
+``record_*`` functions that a job writes them with, and the readers that give them back,
+so a renderer never re-checks dictionary shapes. A malformed or missing entry reads as
+absent rather than failing the report. Entries that no renderer reads, such as resource
+statistics, are not described here.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 # The ``area`` of the entry that counts every opt-in check not named individually.
 OTHER_OPT_IN_AREA = "other_opt_in_checks"
 
+# The keys of the entries in ``Report.execution``, shared by the writers and the readers.
+CONFIG_PATH_KEY = "config_path"
+PRESET_KEY = "preset"
+CHECK_SELECTION_KEY = "check_selection"
+NOT_CHECKED_KEY = "not_checked"
+PDF_PREVIEWS_KEY = "pdf_previews"
+
 
 @dataclass(frozen=True, slots=True)
 class CheckSelectionRecord:
-    """The ``--select`` and ``--ignore`` selectors a run used."""
+    """The ``--select`` and ``--ignore`` selectors a run used.
+
+    ``always_enforced`` lists the codes of the guards that selection cannot switch off.
+    """
 
     select: tuple[str, ...]
     ignore: tuple[str, ...]
+    always_enforced: tuple[str, ...] = ()
+
+    def to_report(self) -> dict[str, object]:
+        """The entry as ``Report.execution`` carries it."""
+        return {
+            "select": list(self.select),
+            "ignore": list(self.ignore),
+            "always_enforced_when_applicable": list(self.always_enforced),
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,6 +57,15 @@ class NotCheckedArea:
     codes: tuple[str, ...]
     settings: tuple[str, ...]
 
+    def to_report(self) -> dict[str, object]:
+        """The entry as ``Report.execution`` carries it."""
+        return {
+            "area": self.area,
+            "label": self.label,
+            "codes": list(self.codes),
+            "settings": list(self.settings),
+        }
+
 
 @dataclass(frozen=True, slots=True)
 class ExecutionRecords:
@@ -45,6 +75,29 @@ class ExecutionRecords:
     preset: str | None = None
     check_selection: CheckSelectionRecord | None = None
     not_checked: tuple[NotCheckedArea, ...] = ()
+
+
+def record_settings_source(
+    execution: dict[str, object], *, config_path: str | None, preset: str | None
+) -> None:
+    """Record which settings file and preset a run used; ``None`` means it used none."""
+    execution[CONFIG_PATH_KEY] = config_path
+    execution[PRESET_KEY] = preset
+
+
+def record_check_selection(execution: dict[str, object], selection: CheckSelectionRecord) -> None:
+    """Record the check selectors a run used."""
+    execution[CHECK_SELECTION_KEY] = selection.to_report()
+
+
+def record_not_checked(execution: dict[str, object], areas: Sequence[NotCheckedArea]) -> None:
+    """Record the opt-in areas a run left unchecked, which may be none."""
+    execution[NOT_CHECKED_KEY] = [area.to_report() for area in areas]
+
+
+def record_pdf_previews(execution: dict[str, object], summary: Mapping[str, object]) -> None:
+    """Record the summary of the page-preview comparisons that ``pdf_previews`` collected."""
+    execution[PDF_PREVIEWS_KEY] = dict(summary)
 
 
 def _strings(value: object) -> tuple[str, ...] | None:
@@ -62,7 +115,8 @@ def read_check_selection(value: object) -> CheckSelectionRecord | None:
     ignore = _strings(value.get("ignore", []))
     if select is None or ignore is None:
         return None
-    return CheckSelectionRecord(select, ignore)
+    always_enforced = _strings(value.get("always_enforced_when_applicable")) or ()
+    return CheckSelectionRecord(select, ignore, always_enforced)
 
 
 def read_not_checked(entries: object) -> tuple[NotCheckedArea, ...]:
@@ -91,8 +145,8 @@ def _text(value: object) -> str | None:
 def read_execution_records(execution: Mapping[str, object]) -> ExecutionRecords:
     """Read the entries renderers show from ``Report.execution``."""
     return ExecutionRecords(
-        config_path=_text(execution.get("config_path")),
-        preset=_text(execution.get("preset")),
-        check_selection=read_check_selection(execution.get("check_selection")),
-        not_checked=read_not_checked(execution.get("not_checked")),
+        config_path=_text(execution.get(CONFIG_PATH_KEY)),
+        preset=_text(execution.get(PRESET_KEY)),
+        check_selection=read_check_selection(execution.get(CHECK_SELECTION_KEY)),
+        not_checked=read_not_checked(execution.get(NOT_CHECKED_KEY)),
     )

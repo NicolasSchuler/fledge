@@ -19,6 +19,7 @@ from .command_options import (
 from .config import Settings, load_settings
 from .config_discovery import resolve_config_path
 from .doctor import run_doctor
+from .execution_records import CONFIG_PATH_KEY
 from .finding_view import RenderOptions
 from .findings import cancelled_finding
 from .report import UNFINISHED_SCOPE, Report
@@ -71,7 +72,7 @@ def doctor_command(
         settings = load_settings(selected, {"engine": engine})
         with TerminalProgress(stderr_console(), quiet=quiet) as progress:
             report = asyncio.run(run_doctor(settings, progress=progress))
-        report.execution["config_path"] = str(selected) if selected is not None else None
+        report.execution[CONFIG_PATH_KEY] = str(selected) if selected is not None else None
         report.execution["project"] = str(project) if project is not None else None
     except (KeyboardInterrupt, asyncio.CancelledError):
         record_cancellation(

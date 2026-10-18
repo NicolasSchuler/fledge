@@ -8,9 +8,9 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
-from latexprep.author_records import check_author_records
+from latexprep.author_records import AuthorRecordOptions, check_author_records
 from latexprep.errors import PreparationError
-from latexprep.option_config import read_options
+from latexprep.option_config import read_option_groups, read_options
 from latexprep.pdf_structure_checks import (
     HeadingExpectation,
     StructureOptions,
@@ -86,7 +86,7 @@ def object_value(document: dict[str, object], number: int) -> dict[str, object]:
 
 
 class AuthorRecordTests(unittest.TestCase):
-    def check(self, preamble: str, options: StructureOptions | None = None):
+    def check(self, preamble: str, options: AuthorRecordOptions | None = None):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "main.tex").write_text(
@@ -97,7 +97,7 @@ class AuthorRecordTests(unittest.TestCase):
             return check_author_records(
                 root,
                 "main.tex",
-                options or StructureOptions(required_author_fields=("affiliation", "email")),
+                options or AuthorRecordOptions(required_author_fields=("affiliation", "email")),
             )
 
     def test_each_author_needs_its_own_fields(self) -> None:
@@ -116,7 +116,7 @@ class AuthorRecordTests(unittest.TestCase):
         custom = self.check(
             "\\newcommand{\\person}[1]{#1}\n"
             "\\person{Ada}\\contact{ada@example.org}\n% \\person{Ignored}\n",
-            StructureOptions(author_command="person", required_author_fields=("contact",)),
+            AuthorRecordOptions(author_command="person", required_author_fields=("contact",)),
         )[0]
         self.assertEqual(custom.status, "passed")
         self.assertEqual(len(custom.details["records"]), 1)
@@ -133,7 +133,9 @@ class AuthorRecordTests(unittest.TestCase):
             with self.subTest(declaration=declaration):
                 result = self.check(
                     declaration + "\\person{Ada}\\contact{ada@example.org}",
-                    StructureOptions(author_command="person", required_author_fields=("contact",)),
+                    AuthorRecordOptions(
+                        author_command="person", required_author_fields=("contact",)
+                    ),
                 )[0]
                 self.assertEqual(result.status, "passed")
                 self.assertEqual(len(result.details["records"]), 1)
@@ -164,7 +166,7 @@ class AuthorRecordTests(unittest.TestCase):
         )
 
     def test_a_record_with_two_problems_is_counted_once(self) -> None:
-        options = StructureOptions(required_author_fields=("email",))
+        options = AuthorRecordOptions(required_author_fields=("email",))
         result = self.check("\\author{}", options)[0]
         self.assertEqual(result.status, "failed")
         self.assertEqual(
@@ -184,7 +186,7 @@ class AuthorRecordTests(unittest.TestCase):
         self.assertIn("structure_checks.author_command", none.message)
         first = self.check(
             "\\affiliation{Lab}\\author{Ada}",
-            StructureOptions(required_author_fields=("affiliation",)),
+            AuthorRecordOptions(required_author_fields=("affiliation",)),
         )[0]
         self.assertEqual(
             first.message,
@@ -194,7 +196,7 @@ class AuthorRecordTests(unittest.TestCase):
 
     def test_long_failure_lists_name_the_first_records_and_count_the_rest(self) -> None:
         authors = "".join(f"\\author{{Author {number}}}\n" for number in range(1, 6))
-        result = self.check(authors, StructureOptions(required_author_fields=("email",)))[0]
+        result = self.check(authors, AuthorRecordOptions(required_author_fields=("email",)))[0]
         self.assertEqual(result.details["violation_count"], 5)
         self.assertTrue(result.message.startswith("Incomplete author records (5 of 5): main.tex:2"))
         self.assertTrue(result.message.endswith("(+2 more)."), result.message)
@@ -202,17 +204,11 @@ class AuthorRecordTests(unittest.TestCase):
     def test_option_schema_is_explicit_and_frozen(self) -> None:
         parsed = read_options(
             StructureOptions,
-            {
-                "required_author_fields": ["email"],
-                "heading_expectations": [{"page": 1, "title": "Methods", "number": "2"}],
-            },
+            {"heading_expectations": [{"page": 1, "title": "Methods", "number": "2"}]},
             "structure_checks",
         )
         self.assertEqual(parsed.heading_expectations, (HeadingExpectation(1, "Methods", "2"),))
         for values in (
-            {"author_command": "\\author"},
-            {"required_author_fields": ("email", "email")},
-            {"required_author_fields": ("author",)},
             {"require_structure_tree": 1},
             {
                 "heading_expectations": (
@@ -225,6 +221,47 @@ class AuthorRecordTests(unittest.TestCase):
                 StructureOptions(**values)
         with self.assertRaises(PreparationError):
             HeadingExpectation(True, "Methods", "2")
+
+    def test_author_record_options_are_validated_on_their_own(self) -> None:
+        parsed = read_options(AuthorRecordOptions, {"required_author_fields": ["email"]}, "x")
+        self.assertEqual(parsed, AuthorRecordOptions(required_author_fields=("email",)))
+        self.assertEqual(AuthorRecordOptions().author_command, "author")
+        for values in (
+            {"author_command": "\\author"},
+            {"required_author_fields": ("email", "email")},
+            {"required_author_fields": ("author",)},
+        ):
+            with self.subTest(values=values), self.assertRaises(PreparationError):
+                AuthorRecordOptions(**values)
+
+    def test_structure_options_hold_no_author_record_options(self) -> None:
+        for name in ("author_command", "required_author_fields"):
+            with self.assertRaises(TypeError):
+                StructureOptions(**{name: ()})
+
+    def test_one_table_fills_both_option_groups_and_reports_every_valid_key(self) -> None:
+        structure, authors = read_option_groups(
+            [StructureOptions, AuthorRecordOptions],
+            {"check_table_structure": True, "required_author_fields": ["email"]},
+            "structure_checks",
+        )
+        self.assertTrue(structure.check_table_structure)
+        self.assertEqual(authors.required_author_fields, ("email",))
+        with self.assertRaisesRegex(
+            PreparationError,
+            r"Unknown structure_checks setting\(s\): author_comand "
+            r"\(did you mean author_command\?\)\. "
+            r"Valid structure_checks settings: author_command, ",
+        ):
+            read_option_groups(
+                [StructureOptions, AuthorRecordOptions], {"author_comand": "x"}, "structure_checks"
+            )
+        with self.assertRaisesRegex(PreparationError, "structure_checks must be a settings table"):
+            read_option_groups([StructureOptions, AuthorRecordOptions], 3, "structure_checks")
+
+    def test_an_option_cannot_belong_to_two_groups_of_one_table(self) -> None:
+        with self.assertRaisesRegex(TypeError, "is an option of both"):
+            read_option_groups([StructureOptions, StructureOptions], {}, "structure_checks")
 
 
 class PdfStructureTests(unittest.IsolatedAsyncioTestCase):

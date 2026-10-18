@@ -22,6 +22,7 @@ RULES = (
             "Select the bibliography backend required by the source and supplied generated "
             "files, or correct the source/backend configuration, then rebuild."
         ),
+        mandatory=True,
     ),
     Rule(
         code="BLD202",
@@ -40,5 +41,6 @@ RULES = (
             "Install the required compatible bibliography tool explicitly or select a "
             "compatible supported strategy, then repeat the complete build."
         ),
+        mandatory=True,
     ),
 )

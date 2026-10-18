@@ -21,6 +21,13 @@ class Rule:
     dotted ids (``tests.test_module.Class.test_name``) of the tests that demonstrate
     the behaviour; a test verifies that each one exists. They document the check for
     developers and are shown only in the JSON form of ``fledge rule``.
+
+    The remaining fields are facts about how the rule is treated, so no module keeps a
+    list of codes of its own. ``mandatory`` marks a guard whose finding check selection
+    never removes: ignoring its code does not switch it off. ``reviewable`` marks a
+    check whose failure an explicit review decision may suppress or accept.
+    ``not_checked_area`` names the opt-in area (``coverage_hints``) that a run reports
+    as not checked while none of the area's checks is configured.
     """
 
     code: str
@@ -30,6 +37,9 @@ class Rule:
     tests: tuple[str, ...]
     fix: str
     aliases: tuple[str, ...] = ()
+    mandatory: bool = False
+    reviewable: bool = False
+    not_checked_area: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         """The rule as plain data for ``fledge rules --json`` and ``fledge rule --json``."""

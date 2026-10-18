@@ -4,11 +4,11 @@
 Run ``python scripts/generate_check_docs.py`` after changing a rule; use
 ``--check`` to fail when the documentation is out of date (used by the tests).
 
-Each code is placed in one of three tables, derived from
-``latexprep.check_policy.MANDATORY_CODES``, ``check_policy.opt_in_activation()``
-and the default ``Settings``:
+Each code is placed in one of three tables, derived from the rules marked ``mandatory``
+(``latexprep.rules.MANDATORY_CODES``), ``check_policy.opt_in_activation()`` and the
+default ``Settings``:
 
-- always enforced: guards in ``MANDATORY_CODES``, which selection cannot remove;
+- always enforced: rules marked ``mandatory``, which selection cannot remove;
 - on by default: checks that run without any configuration;
 - opt-in: checks whose activating setting is off or empty by default.
 """
@@ -22,8 +22,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from latexprep import check_policy  # noqa: E402
-from latexprep.config import Settings  # noqa: E402
-from latexprep.rules import RULES, Rule  # noqa: E402
+from latexprep.config import Settings, toml_table  # noqa: E402
+from latexprep.rules import MANDATORY_CODES, RULES, Rule  # noqa: E402
 
 DOCUMENT = ROOT / "docs" / "checks.md"
 BEGIN = "% Begin generated catalogue: run scripts/generate_check_docs.py; do not edit by hand.\n"
@@ -52,7 +52,7 @@ def _activation() -> dict[str, list[tuple[str | None, tuple[str, ...]]]]:
 
 def classify(rule: Rule, defaults: Settings | None = None) -> tuple[str, str]:
     """Return the rule's kind and, for opt-in checks, the settings that enable it."""
-    if rule.code in check_policy.MANDATORY_CODES:
+    if rule.code in MANDATORY_CODES:
         return ALWAYS, ""
     entries = _activation().get(rule.code)
     if not entries:
@@ -64,7 +64,7 @@ def classify(rule: Rule, defaults: Settings | None = None) -> tuple[str, str]:
     )
     if not disabled:
         return DEFAULT, ""
-    tables = " or ".join(dict.fromkeys(f"`{name}`" for name, _ in entries if name))
+    tables = " or ".join(dict.fromkeys(f"`{toml_table(name)}`" for name, _ in entries if name))
     names = " or ".join(f"`{field}`" for field in fields)
     return OPT_IN, f"{names} in {tables}" if tables else names
 
@@ -103,8 +103,8 @@ SECTIONS = (
         ALWAYS,
         "Always enforced",
         "These {count} guards protect reading, transforming, building and publishing the "
-        "prepared copy. They apply whenever their stage runs, and ignoring their code "
-        "does not switch them off.",
+        "prepared copy, and report what Fledge could not read or follow. They apply whenever "
+        "their stage runs, and ignoring their code does not switch them off.",
     ),
 )
 

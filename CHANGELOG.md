@@ -126,9 +126,41 @@ the first release of `fledge-latex` is 0.3.0.
 - Artwork findings (`PDF301` to `PDF313`) lead with the outcome and the numbers that
   matter, such as the lowest image resolution, the thinnest stroke or the pages with
   printer marks, instead of describing the method.
+- The configured PDF check groups that run together on one PDF share a single frozen
+  copy and each read-only tool measurement: with every group configured, `qpdf`,
+  `mutool`, `pdftotext` and `pdfinfo` run once per PDF instead of once per group.
+  Findings are unchanged. The measurement output is held in memory until the checks of
+  that PDF finish.
+- `max_bytes` served three purposes under one name. It now stays the default of two
+  limits that can be set apart: the total size of an import, of each build's copy of
+  the sources and of the prepared archive that is extracted again to verify it
+  (`max_import_bytes`), and the size of any one file a tool may write
+  (`max_generated_file_bytes`). With `max_bytes` alone, every limit is as before. The
+  `package.archive_limit` and resource-limit messages name the setting to raise.
+- A tool command that a job runs without explicit limits now uses the same defaults as
+  the settings: a memory limit of 1024 MiB (`build_memory_mb`) instead of 2048 MiB.
+  A job always passes its own limits, so real runs are unchanged.
+
+- The checks of one document now share one analysis of its sources instead of each
+  reading and lexing the whole project again: `fledge inspect` of a project with 200
+  input files (3 MB) takes about 1.6 s instead of 5.0 s, and a full run builds the
+  source graph once for each tree it checks. Findings are unchanged.
+- A `tex-fmt` run that a time or output limit stopped now says which limit and its
+  value, as a stopped build does, instead of "did not complete".
 
 ### Added
 
+- Findings that had no check code now have one, so `fledge rule`, `--select` and
+  `--ignore` work for them and they carry fix guidance: the source-graph findings
+  `TEX301` to `TEX327` (unreadable or over-limit sources, constructs the scan cannot
+  follow, traversal limits and main-file selection), `PKG005` (nonportable file
+  names), `PKG006` to `PKG008` (flat-layout errors), `PKG302` and `PKG303` (package
+  inputs and archive size), `BIB008` and `BIB009`, `BLD010`, `FMT003`, `FMT004` and
+  `NET008` (what online checks share). Gaps and errors are always enforced, so
+  ignoring their code does not hide them; only the advisories `TEX315` to `TEX319`
+  and `PKG005` can be ignored. Results that describe the run or the tool
+  environment, such as `execution.*`, `build.failed` and `doctor.*`, stay uncoded.
+  `fledge rules --json` also reports whether a check is `mandatory` or `reviewable`.
 - `--json-report` names the option that saves the JSON report; `--report` remains an
   alias. The HTML report has a `<main>` landmark, a title that names the command and
   document, captions on its tables, and dark-mode and print styles.
@@ -136,6 +168,10 @@ the first release of `fledge-latex` is 0.3.0.
   documentation.
 - Opt-in check `BIB110` verifies the biblatex `.bbl` format version a receiving
   service expects (`submission_checks.biblatex_bbl_format_version`).
+- `max_import_bytes` and `max_generated_file_bytes` settings, documented with the other
+  size, time and memory limits in the configuration guide. The guide also explains the
+  two `min_stroke_width_pt` settings (`PDF213` under `[pdf_checks]` and `PDF309` under
+  the artwork tables) and the two embedded-font settings.
 - `fledge doctor` also exercises installed BibTeX and Biber as advisory stages.
   A missing tool or a failing fixture is an advisory, not a failure.
 - Reports record elapsed seconds for each stage, including the transformed and
@@ -164,6 +200,10 @@ the first release of `fledge-latex` is 0.3.0.
 
 ### Fixed
 
+- Copy-ready submission text could read the wrong raw source for a span between two
+  included files when that text also occurred, blanked, earlier on the same line (for
+  example after `\verb|...|`), and then showed a stray backslash or letter. Every
+  copied span now records its exact offset in its file.
 - Redirected terminal reports no longer carry trailing spaces on wrapped lines.
 - Configuration discovery no longer reads a settings file from the system temporary
   directory, where any local user could have placed one.

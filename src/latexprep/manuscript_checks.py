@@ -25,7 +25,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
-from .expanded_document import expand_document
+from .analysed_source import AnalysedSource, reuse_or_analyse
 from .findings import Finding
 from .manuscript_abstract_checks import abstract_checks
 from .manuscript_check_options import ManuscriptCheckOptions
@@ -58,9 +58,15 @@ def check_manuscript_policies(
     root: Path,
     main: str | None,
     options: ManuscriptCheckOptions = _DEFAULT_OPTIONS,
+    *,
+    analysed: AnalysedSource | None = None,
 ) -> list[Finding]:
-    """Run selected source policy checks; defaults enable no additional manuscript policy."""
+    """Run selected source policy checks; defaults enable no additional manuscript policy.
+
+    ``analysed`` shares the source analysis of the same root and main file with other
+    checks; without one the document is expanded here.
+    """
     if options == _DEFAULT_OPTIONS:
         return []
-    reading = interpret(expand_document(root, main))
+    reading = interpret(reuse_or_analyse(root, main, analysed).expanded)
     return [finding for family in _FAMILIES for finding in family(reading, options)]

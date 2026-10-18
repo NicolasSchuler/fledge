@@ -200,7 +200,8 @@ class WorkflowCheckTests(unittest.IsolatedAsyncioTestCase):
         source_project(self.source)
         stages = []
 
-        async def configured(_pdf, root, _main, work, _runner, _settings, _budget):
+        async def configured(_pdf, root, _main, work, _runner, _settings, _budget, *, analysed):
+            self.assertTrue(analysed.covers(root, _main))
             stages.append((root, work.name))
             final = work.name == "additional-final"
             return [

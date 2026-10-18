@@ -32,7 +32,7 @@ def apply_text_edits(text: str, edits: Iterable[TextEdit]) -> str:
     return "".join(pieces)
 
 
-def with_bom(text: str, bom: bool) -> str:
+def with_bom(text: str, *, bom: bool) -> str:
     """``text`` as stored in its file, restoring a byte-order mark the reader removed."""
     return "﻿" + text if bom else text
 

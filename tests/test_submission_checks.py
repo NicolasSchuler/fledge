@@ -264,9 +264,6 @@ class SubmissionTests(unittest.TestCase):
         elsewhere = {
             "identity_term_matching": "substring",
             "max_archive_bytes": 1,
-            "check_bbl_coverage": True,
-            "require_bbl": True,
-            "biblatex_bbl_format_version": "3.3",
         }
         # A new option has to be classified here, so it cannot silently run no check.
         self.assertEqual(

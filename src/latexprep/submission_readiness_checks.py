@@ -20,16 +20,12 @@ import unicodedata
 from functools import partial
 from pathlib import Path, PurePosixPath
 
-from .bbl_checks import check_bbl
+from .analysed_source import AnalysedSource, reuse_or_analyse
+from .bbl_checks import BblOptions, check_bbl
 from .cancellation import cancellation_point
 from .comment_markers import MarkerCategory, matching_category
 from .errors import PreparationError
-from .expanded_document import (
-    ExpandedDocument,
-    Location,
-    expand_document,
-    reachable_sources,
-)
+from .expanded_document import ExpandedDocument, Location, reachable_sources
 from .figure_color_space import FIGURE_COLOR_SPACES, color_space_finding
 from .file_scan import MAX_SCAN_MATCHES, ByteBudget, inventory_files
 from .finding_text import location_label, more_suffix
@@ -38,14 +34,13 @@ from .findings import EvidenceKind, Finding
 from .literal_text import PACKAGE_COMMANDS, first_argument_names, plain_text
 from .redaction import redact_secrets
 from .source_graph import SourceGraph
-from .submission_options import SubmissionOptions
 from .tex_commands import ROOT_SUFFIXES
 from .tex_comments import marked_comments, tex_comments
 from .tex_lexer import definition_spans, in_conditional, in_half_open_span
 
 # Matches and figures named in a message; the details list every one.
 _MAX_LISTED = 3
-_DEFAULT_OPTIONS = SubmissionOptions()
+_DEFAULT_BBL_OPTIONS = BblOptions()
 # A comment scan that finds markers warns; one that could not read every file only informs.
 _PRIVATE_MARKER_WEIGHT = Weight("warning", "info", EvidenceKind.HEURISTIC)
 _HYPERREF_WEIGHT = Weight("warning", "warning", EvidenceKind.DERIVED)
@@ -284,25 +279,28 @@ def _private_markers(root: Path, author_initials: frozenset[str]) -> Finding:
 def check_submission_readiness(
     root: Path,
     main: str | None,
-    options: SubmissionOptions = _DEFAULT_OPTIONS,
+    bbl_options: BblOptions = _DEFAULT_BBL_OPTIONS,
     *,
     required_color_space: str | None = None,
+    analysed: AnalysedSource | None = None,
 ) -> list[Finding]:
-    """Run default advisories and the readiness policies configured in ``options``.
+    """Run default advisories and the readiness policies configured in ``bbl_options``.
 
-    ``required_color_space`` comes from the figure artwork settings.
+    ``required_color_space`` comes from the figure artwork settings. ``analysed`` shares
+    the source analysis of the same root and main file with other checks.
     """
     if required_color_space is not None and required_color_space not in FIGURE_COLOR_SPACES:
         raise PreparationError("required_color_space must be 'rgb' or 'cmyk'")
-    graph = SourceGraph.build(root, main)
-    document = expand_document(root, graph.main, graph) if graph.main is not None else None
+    source = reuse_or_analyse(root, main, analysed)
+    graph = source.graph
+    document = source.expanded if graph.main is not None else None
     # Without literal author names, initials cannot be told from acronyms and are not reported.
     initials = _author_initials(document) if document else frozenset()
     findings = [_private_markers(root, initials)]
     if graph.main is None or document is None:
         return findings
     selected = reachable_sources(graph)
-    findings.extend(check_bbl(root, graph, selected, options))
+    findings.extend(check_bbl(root, graph, selected, bbl_options))
     findings.extend(_hyperref_order(document))
     figures = _figures(graph, selected)
     findings.extend(_eps_finding(figures, graph.main))

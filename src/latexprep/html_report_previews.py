@@ -12,6 +12,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from .errors import PreparationError
+from .execution_records import PDF_PREVIEWS_KEY
 from .html_text import escape_html
 from .pdf_previews import MAX_PREVIEW_BYTES, preview_dimensions
 from .report import RedactedReport
@@ -78,7 +79,7 @@ def _read_page(page: dict) -> PreviewPage:
 
 def read_preview_comparisons(execution: Mapping[str, object]) -> tuple[PreviewComparison, ...]:
     """The comparisons in ``execution.pdf_previews``; malformed entries are skipped."""
-    summary = execution.get("pdf_previews")
+    summary = execution.get(PDF_PREVIEWS_KEY)
     comparisons = summary.get("comparisons", []) if isinstance(summary, dict) else []
     if not isinstance(comparisons, list):
         return ()

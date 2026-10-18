@@ -390,11 +390,22 @@ class BuildTests(unittest.IsolatedAsyncioTestCase):
                 )
         (self.source / "extra.tex").write_bytes(b"x" * 2048)
         small = FakeBuildRunner()
-        small.limits = RuntimeLimits(max_file_bytes=1024)
+        small.limits = RuntimeLimits(max_copy_bytes=1024)
         with self.assertRaisesRegex(
             PreparationError, "exceeds the 1 KiB size limit at 'extra.tex'"
         ):
             await build_project(self.source, "main.tex", self.root / "bytes", "pdflatex", small)
+
+    async def test_the_build_copy_is_bounded_by_its_own_limit_not_the_per_file_tool_limit(
+        self,
+    ) -> None:
+        (self.source / "extra.tex").write_bytes(b"x" * 2048)
+        runner = FakeBuildRunner()
+        runner.limits = RuntimeLimits(max_file_bytes=1024)
+        result = await build_project(
+            self.source, "main.tex", self.root / "bounded", "pdflatex", runner
+        )
+        self.assertTrue(result.success)
 
     async def test_copying_the_project_does_not_block_the_event_loop(self) -> None:
         threads: list[int] = []

@@ -91,7 +91,7 @@ class ParallelWorkflowTests(unittest.IsolatedAsyncioTestCase):
         started, release = threading.Event(), threading.Event()
         inspected = asyncio.Event()
 
-        def bibliography(_root, _main=None):
+        def bibliography(_root, _main=None, **_options):
             started.set()
             if not release.wait(5):
                 raise AssertionError("PDF branch did not release the independent analysis")
@@ -295,7 +295,7 @@ class ParallelWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIsInstance(raised.exception, JobDeadlineExceeded)
 
     async def test_a_crashed_check_is_reported_as_a_defect_without_paths(self):
-        def crash(_root, _main=None):
+        def crash(_root, _main=None, **_options):
             raise KeyError("unexpected")
 
         with tempfile.TemporaryDirectory() as directory:

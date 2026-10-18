@@ -245,7 +245,7 @@ class OnlineDisclosureTests(unittest.TestCase):
 
     def test_the_privacy_disclosure_is_listed_without_show_passed(self):
         for text in (render_terminal(self.report()), render_compact(self.report())):
-            self.assertIn("online.sharing", text)
+            self.assertIn("NET008", text)
             self.assertIn("share DOI identifiers", text)
             self.assertNotIn("Metadata inventory", text)
 

@@ -7,7 +7,7 @@ This module builds those findings; it does not run tools or read PDF output.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 
 from .errors import PreparationError
 from .findings import EvidenceKind, Finding, Severity
@@ -26,7 +26,7 @@ def unavailable_finding(
     *,
     severity: Severity = "error",
     suggestion: str = EVIDENCE_LIMITATION_SUGGESTION,
-    details: dict[str, object] | None = None,
+    details: Mapping[str, object] | None = None,
 ) -> Finding:
     """Evidence that could not be measured; never a pass."""
     return Finding(
@@ -36,25 +36,28 @@ def unavailable_finding(
         status="inconclusive",
         incomplete=True,
         suggestion=suggestion,
-        details={} if details is None else details,
+        details={} if details is None else dict(details),
     )
 
 
 def measurement_finding(
     rule: str,
     message: str,
-    violations: list[object],
+    violations: Sequence[object],
     *,
+    details: Mapping[str, object] | None = None,
     incomplete: bool = False,
     severity: Severity | None = None,
     evidence_kind: EvidenceKind = EvidenceKind.DERIVED,
     total_violations: int | None = None,
-    **details: object,
 ) -> Finding:
     """A configured measurement: failed on a violation, inconclusive on incomplete evidence.
 
     Without an explicit severity a violation or incomplete evidence is an error and a
     clean measurement is informational. Advisory candidates pass one fixed severity.
+    ``details`` is what the finding reports about the measurement; the violations (the
+    first ``MAX_SAMPLES``), their count and ``incomplete`` are added to it and win over
+    equally named entries.
     """
     status = "failed" if violations else "inconclusive" if incomplete else "passed"
     if severity is None:
@@ -67,8 +70,8 @@ def measurement_finding(
         evidence_kind=evidence_kind,
         incomplete=incomplete,
         details={
-            **details,
-            "violations": violations[:MAX_SAMPLES],
+            **(details or {}),
+            "violations": list(violations[:MAX_SAMPLES]),
             "violation_count": len(violations) if total_violations is None else total_violations,
             "incomplete": incomplete,
         },
@@ -78,22 +81,22 @@ def measurement_finding(
 def heuristic_finding(
     rule: str,
     message: str,
-    violations: list[object],
+    violations: Sequence[object],
     *,
+    details: Mapping[str, object] | None = None,
     incomplete: bool = False,
     total_violations: int | None = None,
-    **details: object,
 ) -> Finding:
     """A heuristic candidate: a warning that informs review whatever the outcome."""
     return measurement_finding(
         rule,
         message,
         violations,
+        details=details,
         incomplete=incomplete,
         severity="warning",
         evidence_kind=EvidenceKind.HEURISTIC,
         total_violations=total_violations,
-        **details,
     )
 
 

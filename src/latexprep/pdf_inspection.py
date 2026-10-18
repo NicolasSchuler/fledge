@@ -31,6 +31,7 @@ from .pdf_tool_output import (
     parse_page_sizes,
 )
 from .pdf_tools import (
+    SharedPdfSession,
     ToolMeasurement,
     attachment_list_argv,
     font_inventory_argv,
@@ -666,8 +667,13 @@ async def inspect_pdf(
     *,
     options: PdfInspectionOptions | None = None,
     budget: ResourceBudget | None = None,
+    session: SharedPdfSession | None = None,
 ) -> list[Finding]:
-    """Measure a PDF and evaluate only explicitly configured acceptance constraints."""
+    """Measure a PDF and evaluate only explicitly configured acceptance constraints.
+
+    A shared ``session`` for ``pdf`` supplies the frozen PDF and remembered measurements;
+    the ``pdf.tools`` finding still lists exactly the tools this inspection relied on.
+    """
     options = options or PdfInspectionOptions()
     configured = configured_policy_rules(options, max_pages)
     # The inspection runs under exactly the supplied budget; its failures name the tool step.
@@ -679,12 +685,13 @@ async def inspect_pdf(
         [PdfRule.INSPECTION_UNAVAILABLE, *configured],
         default_to_runner_budget=False,
         suggestion=TOOL_FAILURE_SUGGESTION,
+        session=session,
     )
     if isinstance(preflight, list):
         return preflight
-    session, fields, pages = preflight.session, preflight.fields, preflight.pages
+    tools, fields, pages = preflight.session, preflight.fields, preflight.pages
     context = _InspectionContext(pages, options, frozenset(configured))
-    geometry, *inventories = await run_tool_measurements(session, _inspection_measurements(context))
+    geometry, *inventories = await run_tool_measurements(tools, _inspection_measurements(context))
     return [
         *_document_findings(pages, fields, max_pages),
         *geometry,
@@ -696,6 +703,6 @@ async def inspect_pdf(
             "PDF tool versions were recorded.",
             severity="info",
             status="passed",
-            details={"tools": session.tool_versions()},
+            details={"tools": tools.tool_versions()},
         ),
     ]

@@ -3,7 +3,7 @@
 A limit that only one module uses stays beside the code it bounds. A constant lives
 here when two or more modules would otherwise repeat the same number for the same
 purpose, where the copies could drift apart. Every name carries its unit
-(``_BYTES``, ``_ENTRIES``, ``_CHARS``, ``_MB``, ``_LEVELS``), and a comment states
+(``_BYTES``, ``_ENTRIES``, ``_CHARS``, ``_MB``, ``_LEVELS``, ``_SECONDS``), and a comment states
 what the number protects.
 
 This module imports nothing, so any module may use it.
@@ -26,9 +26,17 @@ CANCELLATION_STRIDE_CHARS = 4096
 # import limit, and the bound on a project inventory, which lists an imported project.
 MAX_PROJECT_ENTRIES = 10_000
 # Defaults of the ``max_bytes`` and ``max_depth`` import limits: the combined size of
-# the imported files, and the folder nesting accepted from an archive.
+# the imported files, and the folder nesting accepted from an archive. ``max_bytes`` is
+# also the fallback of ``max_import_bytes`` and ``max_generated_file_bytes``, so one
+# number is the default of the import total and of the size of any one tool file.
 DEFAULT_MAX_PROJECT_BYTES = 256 * MIB
+DEFAULT_MAX_GENERATED_FILE_BYTES = DEFAULT_MAX_PROJECT_BYTES
 DEFAULT_MAX_FOLDER_LEVELS = 32
+
+# Defaults of the per-command tool limits that ``timeout_seconds`` and ``build_memory_mb``
+# set: wall time of one tool command, and the memory of one build command.
+DEFAULT_TOOL_TIMEOUT_SECONDS = 120
+DEFAULT_BUILD_MEMORY_MB = 1024
 
 # Deepest folder nesting walked when the caller sets no depth limit, and the depth a
 # build copy accepts. Each level holds one open descriptor and one stack frame; macOS

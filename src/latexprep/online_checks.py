@@ -25,6 +25,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any, NamedTuple, TypeVar
 
+from .analysed_source import AnalysedSource
 from .cancellation import bounded_map, run_in_thread
 from .crossref import (
     SEARCH_ROWS,
@@ -718,7 +719,11 @@ def _request_summary(client: OnlineClient) -> Finding:
 
 
 async def _collect(
-    root: Path, main: str | None, options: OnlineOptions, budget: ResourceBudget | None
+    root: Path,
+    main: str | None,
+    options: OnlineOptions,
+    budget: ResourceBudget | None,
+    analysed: AnalysedSource | None,
 ) -> OnlineInputs:
     """Read the entries and links off the event loop, under a share of the job's budget."""
     reservation = (
@@ -727,7 +732,7 @@ async def _collect(
         else contextlib.nullcontext()
     )
     async with reservation:
-        return await run_in_thread(collect_inputs, root, main, options)
+        return await run_in_thread(collect_inputs, root, main, options, analysed=analysed)
 
 
 async def _run_checks(
@@ -752,6 +757,7 @@ async def check_online_references(
     budget: ResourceBudget | None = None,
     resolver: Resolver | None = None,
     transport: Transport | None = None,
+    analysed: AnalysedSource | None = None,
 ) -> list[Finding]:
     """Opt-in only: share DOI/URL identifiers and titles, never whole source files.
 
@@ -763,14 +769,15 @@ async def check_online_references(
     metadata match, and the bounded request budget is reported with the findings.
 
     ``resolver`` and ``transport`` replace name resolution and the network exchange,
-    so that tests run the checks without a network.
+    so that tests run the checks without a network. ``analysed`` shares the source analysis
+    of the same root and main file with other checks.
     """
     enabled = options.selected_rules
     if not options.online:
         return _offline_findings(enabled)
     if not enabled:
         return []
-    inputs = await _collect(root, main, options, budget)
+    inputs = await _collect(root, main, options, budget, analysed)
     client = OnlineClient(options, budget, resolver=resolver, transport=transport)
     findings = [_sharing_finding(enabled), *await _run_checks(client, inputs, budget)]
     findings.extend(_coverage_findings(enabled, findings, inputs.gaps))

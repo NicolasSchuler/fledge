@@ -4,13 +4,11 @@ The tagged-structure checks read the structure tree through qpdf's object data: 
 links, figure alternative text and the parent links that tie marked content to its
 elements. Expected-heading checks read the extracted text. None of them infer heading
 semantics or establish PDF/UA conformance, meaningful reading order, or description
-quality. The options also configure the literal author-record contract that
-``author_records`` checks, which is not a PDF check.
+quality.
 """
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import ClassVar, NamedTuple
@@ -21,17 +19,20 @@ from .findings import Finding
 from .measurement_findings import MAX_SAMPLES, measurement_finding, unavailable_finding
 from .option_config import (
     Bounds,
-    TextFormat,
     require_records,
-    require_text,
-    require_unique_strings,
     validate_scalars,
 )
 from .pdf_qpdf_graph import QpdfObjectGraph, is_object_reference
 from .pdf_rule_names import PdfRule
 from .pdf_structure_tree import MAX_STRUCTURE_ITEMS, StructureElement, StructureTree
 from .pdf_tool_output import MAX_INSPECTION_PAGES, split_text_pages
-from .pdf_tools import ToolMeasurement, layout_text_argv, preflight_pdf, qpdf_objects_argv
+from .pdf_tools import (
+    SharedPdfSession,
+    ToolMeasurement,
+    layout_text_argv,
+    preflight_pdf,
+    qpdf_objects_argv,
+)
 from .resource_budget import ResourceBudget
 
 # Lines of a page that end with an expected title, shown as candidates when none matches.
@@ -40,9 +41,6 @@ _MAX_HEADING_CANDIDATES = 10
 _MAX_HEADING_EXPECTATIONS = 300
 _MAX_HEADING_TITLE_CHARACTERS = 256
 _MAX_HEADING_NUMBER_CHARACTERS = 64
-# Associated author-block commands, such as affiliation or email, that must follow each author.
-_MAX_AUTHOR_FIELDS = 32
-_COMMAND = re.compile(r"[A-Za-z][A-Za-z@]{0,63}")
 
 
 def _require_single_line(name: str, value: object, max_length: int) -> None:
@@ -77,8 +75,12 @@ class HeadingExpectation:
 
 @dataclass(frozen=True)
 class StructureOptions:
-    author_command: str = "author"
-    required_author_fields: tuple[str, ...] = ()
+    """The PDF structure checks to run and the headings to expect.
+
+    These are the PDF keys of ``[structure_checks]``; the same table also holds the
+    ``AuthorRecordOptions`` keys, which ``config`` reads separately.
+    """
+
     heading_expectations: tuple[HeadingExpectation, ...] = ()
     require_structure_tree: bool = False
     check_table_structure: bool = False
@@ -88,23 +90,6 @@ class StructureOptions:
 
     def __post_init__(self) -> None:
         validate_scalars(self)
-        require_text(
-            "author_command",
-            self.author_command,
-            expected="a command name without the backslash",
-            pattern=_COMMAND,
-        )
-        require_unique_strings(
-            "required_author_fields",
-            self.required_author_fields,
-            max_items=_MAX_AUTHOR_FIELDS,
-            item_format=TextFormat(_COMMAND, "a command name without the backslash"),
-        )
-        if self.author_command in self.required_author_fields:
-            raise SettingsError(
-                "required_author_fields must not list the author_command itself",
-                ("required_author_fields", "author_command"),
-            )
         require_records(
             "heading_expectations",
             self.heading_expectations,
@@ -138,13 +123,15 @@ def _heading_findings(text: str, pages: int, options: StructureOptions) -> list[
                 if not count and not uncertain
                 else [],
                 incomplete=uncertain,
-                page=expectation.page,
-                expected_title=expectation.title,
-                expected_number=expectation.number,
-                matching_line_count=count,
-                candidates=candidates[:_MAX_HEADING_CANDIDATES],
-                scope="Exact line after whitespace normalization; heading meaning and "
-                "numbering are supplied, not inferred.",
+                details={
+                    "page": expectation.page,
+                    "expected_title": expectation.title,
+                    "expected_number": expectation.number,
+                    "matching_line_count": count,
+                    "candidates": candidates[:_MAX_HEADING_CANDIDATES],
+                    "scope": "Exact line after whitespace normalization; heading meaning and "
+                    "numbering are supplied, not inferred.",
+                },
             )
         )
     return results
@@ -209,12 +196,14 @@ def _structure_references(tree: StructureTree, required: bool) -> Finding:
         "Checked structure-tree parent links and marked-content references.",
         problems,
         incomplete=bool(tree.uncertainty),
-        uncertainty=sorted(tree.uncertainty),
-        structural_sequence=sequence[:MAX_SAMPLES],
-        element_count=len(tree.elements),
-        marked_content_count=len(tree.content),
-        scope="Declared references only; stream completeness and intended reading order "
-        "require human review. No PDF/UA claim.",
+        details={
+            "uncertainty": sorted(tree.uncertainty),
+            "structural_sequence": sequence[:MAX_SAMPLES],
+            "element_count": len(tree.elements),
+            "marked_content_count": len(tree.content),
+            "scope": "Declared references only; stream completeness and intended reading order "
+            "require human review. No PDF/UA claim.",
+        },
     )
 
 
@@ -274,10 +263,12 @@ def _table_structure(tree: StructureTree) -> Finding:
         "Checked tagged table, row and cell relationships.",
         violations,
         incomplete=bool(tree.uncertainty),
-        tables=tables,
-        uncertainty=sorted(tree.uncertainty),
-        scope="Tagged Tables only; untagged visual tables, header meaning, spans and "
-        "associations are not inferred.",
+        details={
+            "tables": tables,
+            "uncertainty": sorted(tree.uncertainty),
+            "scope": "Tagged Tables only; untagged visual tables, header meaning, spans and "
+            "associations are not inferred.",
+        },
     )
     if not tables and not tree.uncertainty:
         result = replace(result, status="not_applicable")
@@ -307,9 +298,11 @@ def _figure_alt(tree: StructureTree) -> Finding:
         "Checked nonempty Alt strings on tagged Figures.",
         violations,
         incomplete=uncertain,
-        figure_count=figures,
-        scope="Tagged Figure Alt presence only; image coverage and description quality "
-        "are not established.",
+        details={
+            "figure_count": figures,
+            "scope": "Tagged Figure Alt presence only; image coverage and description quality "
+            "are not established.",
+        },
     )
     if not figures and not uncertain:
         result = replace(result, status="not_applicable")
@@ -467,10 +460,12 @@ def _link_structure(tree: StructureTree) -> Finding:
         "Checked Link tags against page Link annotations.",
         audit.violations,
         incomplete=bool(audit.uncertainty),
-        annotations=audit.annotations[:MAX_SAMPLES],
-        uncertainty=sorted(audit.uncertainty),
-        scope="Object associations and supported target presence only; name adequacy, "
-        "navigation and target availability are unverified.",
+        details={
+            "annotations": audit.annotations[:MAX_SAMPLES],
+            "uncertainty": sorted(audit.uncertainty),
+            "scope": "Object associations and supported target presence only; name adequacy, "
+            "navigation and target availability are unverified.",
+        },
     )
     if not (audit.annotations or linked_owners or audit.violations or audit.uncertainty):
         result = replace(result, status="not_applicable")
@@ -544,18 +539,23 @@ async def inspect_pdf_structure(
     runner: CommandRunner,
     options: StructureOptions,
     budget: ResourceBudget | None = None,
+    *,
+    session: SharedPdfSession | None = None,
 ) -> list[Finding]:
-    """Inspect only selected line expectations and tagged PDF object structures."""
+    """Inspect only selected line expectations and tagged PDF object structures.
+
+    A shared ``session`` for ``pdf`` supplies the frozen PDF and remembered measurements.
+    """
     object_rules = _object_rules(options)
     configured = (
         [PdfRule.EXPECTED_HEADINGS] if options.heading_expectations else []
     ) + object_rules
     if not configured:
         return []
-    preflight = await preflight_pdf(pdf, work, runner, budget, configured)
+    preflight = await preflight_pdf(pdf, work, runner, budget, configured, session=session)
     if isinstance(preflight, list):
         return preflight
-    session, pages = preflight.session, preflight.pages
+    tools, pages = preflight.session, preflight.pages
     measurements: list[ToolMeasurement] = []
     if options.heading_expectations:
         measurements.append(
@@ -577,5 +577,5 @@ async def inspect_pdf_structure(
         )
     findings: list[Finding] = []
     for measurement in measurements:
-        findings.extend(await measurement.run(session))
+        findings.extend(await measurement.run(tools))
     return findings

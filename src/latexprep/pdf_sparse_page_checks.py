@@ -166,18 +166,20 @@ async def _sparse_page_finding(
         PdfRule.SPARSE_PAGES,
         message,
         violations,
-        page=page,
-        last_page=page == pages,
-        ink_ratio=coverage.ratio,
-        minimum=minimum,
-        raster_pixels=[coverage.width, coverage.height],
-        background_gray=options.background_gray,
-        ink_difference=options.ink_difference,
-        raster_dpi=options.raster_dpi,
-        scope="Rendered pixel coverage; intentional blank/image-only pages "
-        "are not inferred. "
-        f"Pages above {MAX_MEASUREMENT_PIXELS:,} pixels ({MAX_MEASUREMENT_DIMENSION:,} per side) "
-        "are inconclusive before rendering.",
+        details={
+            "page": page,
+            "last_page": page == pages,
+            "ink_ratio": coverage.ratio,
+            "minimum": minimum,
+            "raster_pixels": [coverage.width, coverage.height],
+            "background_gray": options.background_gray,
+            "ink_difference": options.ink_difference,
+            "raster_dpi": options.raster_dpi,
+            "scope": "Rendered pixel coverage; intentional blank/image-only pages "
+            "are not inferred. "
+            f"Pages above {MAX_MEASUREMENT_PIXELS:,} pixels "
+            f"({MAX_MEASUREMENT_DIMENSION:,} per side) are inconclusive before rendering.",
+        },
     )
 
 

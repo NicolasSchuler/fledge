@@ -42,11 +42,7 @@ class JobExecution:
             coordinator_memory_mb=COORDINATOR_MEMORY_MB,
         )
         self.runner = ToolRunner(
-            RuntimeLimits(
-                timeout_seconds=settings.timeout_seconds,
-                max_memory_mb=settings.build_memory_mb,
-                max_file_bytes=settings.max_bytes,
-            ),
+            RuntimeLimits.from_settings(settings),
             budget=self.budget,
             source_date_epoch=settings.source_date_epoch,
         )

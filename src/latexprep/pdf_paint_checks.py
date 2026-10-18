@@ -112,11 +112,13 @@ def _stroke_width_finding(trace: TracedDocument, minimum: float) -> Finding:
         "Compared uniformly transformed stroke widths with the supplied minimum.",
         strokes,
         incomplete=uncertain or count == 0,
-        stroke_count=count,
-        minimum_pt=minimum,
-        scope="Stroke operators including placement scale; raster lines "
-        "and filled outlines "
-        "are excluded. Hairlines and nonuniform transforms are unmeasured.",
+        details={
+            "stroke_count": count,
+            "minimum_pt": minimum,
+            "scope": "Stroke operators including placement scale; raster lines "
+            "and filled outlines "
+            "are excluded. Hairlines and nonuniform transforms are unmeasured.",
+        },
     )
 
 
@@ -140,10 +142,12 @@ def _color_space_finding(trace: TracedDocument, allowed: Sequence[str]) -> Findi
         "Compared rendered operation color-space names with the supplied list.",
         colors,
         incomplete=uncertain or count == 0,
-        measured_operations=count,
-        allowed=list(allowed),
-        scope="MuPDF rendering color-space names; source encoding, contrast, color-only "
-        "meaning and perceptual accessibility are not established.",
+        details={
+            "measured_operations": count,
+            "allowed": list(allowed),
+            "scope": "MuPDF rendering color-space names; source encoding, contrast, color-only "
+            "meaning and perceptual accessibility are not established.",
+        },
     )
 
 
@@ -244,12 +248,14 @@ def _text_contrast_finding(options: PdfCheckOptions, contrast: _TextContrast) ->
         "Compared opaque text colors with the supplied background.",
         contrast.violations,
         incomplete=contrast.uncertain or contrast.measured == 0,
-        measured_text_operations=contrast.measured,
-        minimum_ratio=options.min_text_contrast,
-        assumed_background_rgb=options.contrast_background_rgb,
-        scope="DeviceRGB/Gray treated as sRGB on a user-asserted uniform background. "
-        "Actual backgrounds, raster/outlined text, alpha blending, soft masks, "
-        "ICC conversion and semantic accessibility are not established.",
+        details={
+            "measured_text_operations": contrast.measured,
+            "minimum_ratio": options.min_text_contrast,
+            "assumed_background_rgb": options.contrast_background_rgb,
+            "scope": "DeviceRGB/Gray treated as sRGB on a user-asserted uniform background. "
+            "Actual backgrounds, raster/outlined text, alpha blending, soft masks, "
+            "ICC conversion and semantic accessibility are not established.",
+        },
     )
 
 
@@ -269,12 +275,14 @@ def _separation_finding(palettes: _PagePalettes, minimum_difference: float) -> F
         samples,
         incomplete=palettes.uncertain or scan.capped or palettes.entries == 0,
         total_violations=total,
-        page_palette_entries=palettes.entries,
-        compared_pairs=scan.compared,
-        minimum_difference=minimum_difference,
-        scope="Opaque DeviceRGB/Gray colors treated as sRGB. A close pair is advisory; "
-        "semantic color-only encoding, visual proximity and perceptual discrimination "
-        "are not inferred. Raster colors, ICC conversion and compositing are unmeasured.",
+        details={
+            "page_palette_entries": palettes.entries,
+            "compared_pairs": scan.compared,
+            "minimum_difference": minimum_difference,
+            "scope": "Opaque DeviceRGB/Gray colors treated as sRGB. A close pair is advisory; "
+            "semantic color-only encoding, visual proximity and perceptual discrimination "
+            "are not inferred. Raster colors, ICC conversion and compositing are unmeasured.",
+        },
     )
 
 

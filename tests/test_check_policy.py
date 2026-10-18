@@ -6,19 +6,14 @@ from dataclasses import asdict, replace
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-from latexprep.author_records import check_author_records
+from latexprep.author_records import AuthorRecordOptions, check_author_records
+from latexprep.bbl_checks import BblOptions
 from latexprep.bibliography_checks import check_bibliography_coverage_and_fields
 from latexprep.bibliography_options import BibliographyOptions
 from latexprep.bibliography_transform import BibliographyTransformOptions
 from latexprep.build_checks import BuildCheckOptions, check_build_details
 from latexprep.build_result import BuildResult
-from latexprep.check_policy import (
-    _GROUP_CHECKS,
-    _ROOT_CHECKS,
-    DEFAULT_ADVISORY_CODES,
-    MANDATORY_CODES,
-    selected_findings,
-)
+from latexprep.check_policy import _GROUP_CHECKS, _ROOT_CHECKS, selected_findings
 from latexprep.check_selection import CheckSelection
 from latexprep.config import Settings, effective_settings
 from latexprep.findings import Finding
@@ -43,7 +38,7 @@ from latexprep.pdf_structure_checks import (
     StructureOptions,
     inspect_pdf_structure,
 )
-from latexprep.rules import BY_CODE, BY_NAME, RULES, code_for
+from latexprep.rules import BY_CODE, BY_NAME, MANDATORY_CODES, RULES, code_for
 from latexprep.source_analysis import analyze_sources
 from latexprep.source_transform import SourceTransformOptions
 from latexprep.submission_checks import (
@@ -98,7 +93,7 @@ def configured_manuscript() -> Settings:
             check_float_reference_order=True,
             require_figure_descriptions=True,
         ),
-        structure_checks=StructureOptions(required_author_fields=("email",)),
+        author_records=AuthorRecordOptions(required_author_fields=("email",)),
     )
 
 
@@ -224,7 +219,7 @@ class CheckPolicyTests(unittest.TestCase):
             return [
                 *check_manuscript(self.root, "main.tex", settings.manuscript),
                 *check_manuscript_policies(self.root, "main.tex", settings.manuscript_checks),
-                *check_author_records(self.root, "main.tex", settings.structure_checks),
+                *check_author_records(self.root, "main.tex", settings.author_records),
             ]
 
         self.assertEqual(codes(inspect(original)), expected)
@@ -235,16 +230,12 @@ class CheckPolicyTests(unittest.TestCase):
         disabled = effective_settings(replace(original, checks=selection()))
         with (
             patch(
-                "latexprep.manuscript.SourceGraph",
+                "latexprep.analysed_source.SourceGraph",
                 **{"build.side_effect": AssertionError("source scan")},
             ),
             patch(
-                "latexprep.manuscript_checks.expand_document",
+                "latexprep.analysed_source.expand_document",
                 side_effect=AssertionError("source scan"),
-            ),
-            patch(
-                "latexprep.author_records.expand_document",
-                side_effect=AssertionError("author scan"),
             ),
         ):
             self.assertEqual(inspect(disabled), [])
@@ -409,6 +400,24 @@ class CheckPolicyTests(unittest.TestCase):
         findings = analyze_sources(self.root, "main.tex").findings
         self.assertIn("TEX005", codes(selected_findings(findings, effective.checks)))
 
+    def test_bbl_policies_are_disabled_with_their_codes(self) -> None:
+        original = Settings(
+            bbl_checks=BblOptions(
+                check_bbl_coverage=True, require_bbl=True, biblatex_bbl_format_version="3.3"
+            )
+        )
+        coverage = effective_settings(replace(original, checks=selection("BIB109")))
+        self.assertTrue(coverage.bbl_checks.check_bbl_coverage)
+        self.assertIsNone(coverage.bbl_checks.biblatex_bbl_format_version)
+        version = effective_settings(replace(original, checks=selection("BIB110")))
+        self.assertFalse(version.bbl_checks.check_bbl_coverage)
+        self.assertEqual(version.bbl_checks.biblatex_bbl_format_version, "3.3")
+        disabled = effective_settings(replace(original, checks=selection()))
+        self.assertEqual(
+            disabled.bbl_checks,
+            BblOptions(require_bbl=True),
+        )
+
     def test_privacy_shared_terms_remain_until_both_producers_are_disabled(self) -> None:
         original = Settings(submission_checks=SubmissionOptions(identity_terms=("Ada",)))
         for code in ("PRV001", "PRV002"):
@@ -518,6 +527,20 @@ class CheckPolicyTests(unittest.TestCase):
             "RPT101",
             "RPT102",
             "RPT103",
+            # Gaps in the source graph, which every check that reads the source depends on,
+            # and the other guards whose finding must not disappear from a report.
+            *(f"TEX3{number:02d}" for number in (*range(1, 15), *range(20, 28))),
+            "PKG006",
+            "PKG007",
+            "PKG008",
+            "PKG302",
+            "PKG303",
+            "BIB008",
+            "BIB009",
+            "BLD010",
+            "FMT003",
+            "FMT004",
+            "NET008",
         }
         self.assertEqual(MANDATORY_CODES, expected)
         findings = [Finding(rule.name, rule.title) for rule in RULES]
@@ -567,12 +590,21 @@ class CheckPolicyTests(unittest.TestCase):
             "BLD006",
             "BLD007",
             "FMT001",
+            # Advisories about how a reference or a file name was written.
+            "TEX315",
+            "TEX316",
+            "TEX317",
+            "TEX318",
+            "TEX319",
+            "PKG005",
         }
+        # Cheap deterministic advisories that run by default without any option.
+        default_advisories = {"TEX009", "TEX010", "TEX011", "PRV007"}
         self.assertFalse(gated & MANDATORY_CODES)
-        self.assertFalse(DEFAULT_ADVISORY_CODES & (gated | MANDATORY_CODES))
+        self.assertFalse(default_advisories & (gated | MANDATORY_CODES))
         self.assertEqual(
             set(BY_CODE),
-            gated | shared | MANDATORY_CODES | produced_with_required_work | DEFAULT_ADVISORY_CODES,
+            gated | shared | MANDATORY_CODES | produced_with_required_work | default_advisories,
         )
 
 
@@ -628,7 +660,8 @@ class CheckPolicyAdapterTests(unittest.IsolatedAsyncioTestCase):
         findings = await check_online_references(
             self.root, options=original.online_checks, resolver=dns, transport=http
         )
-        self.assertEqual(codes(findings), {"NET001"})
+        # The check and the notice of what the requests shared (NET008).
+        self.assertEqual(codes(findings), {"NET001", "NET008"})
         self.assertGreater(dns.await_count, 0)
         self.assertGreater(http.await_count, 0)
         effective = effective_settings(replace(original, checks=CheckSelection(ignore=("NET",))))
@@ -826,7 +859,6 @@ class CheckPolicyMapTests(unittest.TestCase):
                 self.assertIn(code, BY_CODE)
                 for name in fields:
                     self.assertTrue(hasattr(options, name), (group, code, name))
-        self.assertLessEqual(set(check_policy.MANDATORY_CODES), set(BY_CODE))
 
     def test_opt_in_activation_names_existing_fields_for_every_gated_check(self) -> None:
         from latexprep import check_policy

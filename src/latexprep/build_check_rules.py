@@ -31,6 +31,7 @@ RULES = (
             "Review all loaded class/package filenames, replace forbidden dependencies, or "
             "update the explicit policy."
         ),
+        not_checked_area="forbidden_packages",
     ),
     Rule(
         code="BLD103",
@@ -49,6 +50,7 @@ RULES = (
             "Supply the intended compatible class/package release, or update the explicit "
             "minimum date after review."
         ),
+        reviewable=True,
     ),
     Rule(
         code="BLD104",
@@ -63,6 +65,7 @@ RULES = (
             "Compare the local class/package with the intended template or toolchain and "
             "retain overrides only when deliberate."
         ),
+        reviewable=True,
     ),
     Rule(
         code="BLD105",

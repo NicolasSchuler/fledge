@@ -11,9 +11,14 @@ from latexprep.execution_records import (
     read_check_selection,
     read_execution_records,
     read_not_checked,
+    record_check_selection,
+    record_not_checked,
+    record_pdf_previews,
+    record_settings_source,
 )
 from latexprep.findings import DetailKey, Finding
 from latexprep.html_report_previews import read_preview_comparisons
+from latexprep.report import Report
 
 
 class ExecutionRecordTests(unittest.TestCase):
@@ -56,6 +61,62 @@ class ExecutionRecordTests(unittest.TestCase):
         self.assertIsNone(records.check_selection)
         self.assertEqual(records.not_checked, ())
         self.assertEqual(read_execution_records({}), read_execution_records({"unrelated": 1}))
+
+    def test_what_a_job_records_reads_back_as_the_same_records(self):
+        selection = CheckSelectionRecord(("TEX",), ("TEX001",), ("TEX005", "PKG001"))
+        areas = (
+            NotCheckedArea("page_limit", "page limit", ("PDF001",), ("max_pages",)),
+            NotCheckedArea(OTHER_OPT_IN_AREA, "other opt-in checks", ("BIB103",), ()),
+        )
+        execution: dict[str, object] = {}
+        record_settings_source(execution, config_path="/work/fledge.toml", preset="arxiv")
+        record_check_selection(execution, selection)
+        record_not_checked(execution, areas)
+        records = read_execution_records(execution)
+        self.assertEqual(records.config_path, "/work/fledge.toml")
+        self.assertEqual(records.preset, "arxiv")
+        self.assertEqual(records.check_selection, selection)
+        self.assertEqual(records.not_checked, areas)
+
+    def test_entries_keep_their_documented_json_layout(self):
+        execution: dict[str, object] = {}
+        record_settings_source(execution, config_path=None, preset=None)
+        record_check_selection(execution, CheckSelectionRecord(("ALL",), (), ("TEX005",)))
+        record_not_checked(
+            execution, [NotCheckedArea("page_limit", "page limit", ("PDF001",), ("max_pages",))]
+        )
+        self.assertEqual(
+            execution,
+            {
+                "config_path": None,
+                "preset": None,
+                "check_selection": {
+                    "select": ["ALL"],
+                    "ignore": [],
+                    "always_enforced_when_applicable": ["TEX005"],
+                },
+                "not_checked": [
+                    {
+                        "area": "page_limit",
+                        "label": "page limit",
+                        "codes": ["PDF001"],
+                        "settings": ["max_pages"],
+                    }
+                ],
+            },
+        )
+        record_not_checked(execution, [])
+        self.assertEqual(execution["not_checked"], [])
+
+    def test_preview_summaries_are_recorded_where_the_html_report_reads_them(self):
+        report = Report("check")
+        record_pdf_previews(
+            report.execution,
+            {"comparisons": [{"stage": "baseline", "pages": [{"page": 2, "status": "omitted"}]}]},
+        )
+        [comparison] = read_preview_comparisons(report.execution)
+        self.assertEqual(comparison.title, "baseline")
+        self.assertTrue(comparison.pages[0].omitted)
 
     def test_selection_defaults_to_all_and_rejects_non_lists(self):
         self.assertEqual(read_check_selection({}), CheckSelectionRecord(("ALL",), ()))

@@ -12,6 +12,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from pathlib import Path
 
+from .analysed_source import AnalysedSource
 from .bibliography_files import (
     BibliographyBudget,
     BibliographyProblem,
@@ -282,16 +283,18 @@ def _integrity_findings(
 
 
 def inspect_bibliography_integrity(
-    root: Path, main: str | None = None
+    root: Path, main: str | None = None, *, analysed: AnalysedSource | None = None
 ) -> tuple[list[BibDocument], list[Finding]]:
     """The parsed documents of :func:`check_bibliography_integrity` with its findings."""
-    selection = selected_bibliography(root, main)
+    selection = selected_bibliography(root, main, analysed=analysed)
     documents, findings = _load_bibliographies(root, selection.resources)
     style = style_macros(root, selection.styles)
     return documents, _integrity_findings(documents, findings, style)
 
 
-def check_bibliography_integrity(root: Path, main: str | None = None) -> list[Finding]:
+def check_bibliography_integrity(
+    root: Path, main: str | None = None, *, analysed: AnalysedSource | None = None
+) -> list[Finding]:
     """Inspect UTF-8 .bib files without changing them or accessing the network.
 
     When ``main`` names a source whose selected literal graph declares resolvable
@@ -306,5 +309,8 @@ def check_bibliography_integrity(root: Path, main: str | None = None) -> list[Fi
 
     No findings means no problem was found by these checks, not that metadata,
     macro expansion order, style requirements, or rendered citations are valid.
+
+    ``analysed`` shares the source analysis of the same root and main file with other
+    checks; without one the checks build their own.
     """
-    return inspect_bibliography_integrity(root, main)[1]
+    return inspect_bibliography_integrity(root, main, analysed=analysed)[1]

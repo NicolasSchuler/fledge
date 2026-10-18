@@ -42,9 +42,12 @@ def _language_finding(objects: QpdfObjectGraph, options: PdfCheckOptions) -> Fin
         "Checked the catalog language declaration.",
         violations,
         incomplete=raw is not None and language is None,
-        declared_language=language,
-        expected=expected,
-        scope="Declaration presence/exact language-tag agreement, not the language of the prose.",
+        details={
+            "declared_language": language,
+            "expected": expected,
+            "scope": "Declaration presence/exact language-tag agreement, not the language of "
+            "the prose.",
+        },
     )
 
 
@@ -72,10 +75,12 @@ def _annotation_finding(objects: QpdfObjectGraph, options: PdfCheckOptions) -> F
         PdfRule.ANNOTATION_POLICY,
         "Inspected page annotation object subtypes.",
         annotations,
-        annotation_count=count,
-        forbidden_types=list(options.forbidden_annotation_types),
-        scope="Page Annots arrays; content-stream drawings and inaccessible "
-        "orphan objects excluded.",
+        details={
+            "annotation_count": count,
+            "forbidden_types": list(options.forbidden_annotation_types),
+            "scope": "Page Annots arrays; content-stream drawings and inaccessible "
+            "orphan objects excluded.",
+        },
     )
 
 
@@ -95,10 +100,12 @@ def _action_finding(objects: QpdfObjectGraph, options: PdfCheckOptions) -> Findi
         PdfRule.ACTION_POLICY,
         "Scanned reachable object dictionaries for configured action names.",
         actions,
-        forbidden_types=list(options.forbidden_action_types),
-        scope="Reachable /S names; a match is an action candidate requiring "
-        "context review. "
-        "Opaque streams and unreferenced objects are excluded; no malware-free claim.",
+        details={
+            "forbidden_types": list(options.forbidden_action_types),
+            "scope": "Reachable /S names; a match is an action candidate requiring "
+            "context review. "
+            "Opaque streams and unreferenced objects are excluded; no malware-free claim.",
+        },
     )
 
 

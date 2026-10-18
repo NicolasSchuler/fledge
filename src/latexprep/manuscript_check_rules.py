@@ -18,6 +18,7 @@ RULES = (
             "Remove or replace the disallowed direct package declaration, or update the "
             "explicit allowlist after reviewing the requirement."
         ),
+        reviewable=True,
     ),
     Rule(
         code="MAN002",
@@ -32,6 +33,7 @@ RULES = (
             "Review the reported layout override in the compiled document and retain it only "
             "when intended and permitted by your requirements."
         ),
+        reviewable=True,
     ),
     Rule(
         code="MAN003",
@@ -46,6 +48,7 @@ RULES = (
             "Review the abstract citation against the explicitly selected policy and revise it "
             "manually if needed."
         ),
+        reviewable=True,
     ),
     Rule(
         code="MAN004",
@@ -61,6 +64,7 @@ RULES = (
             "Review the candidate abbreviation, add its definition if required, or add an "
             "intentional exception to the explicit policy."
         ),
+        reviewable=True,
     ),
     Rule(
         code="MAN005",
@@ -75,6 +79,7 @@ RULES = (
             "Review headings deeper than the configured limit and reorganize them manually if "
             "the limit applies."
         ),
+        reviewable=True,
     ),
     Rule(
         code="MAN006",
@@ -96,6 +101,7 @@ RULES = (
             "Review the apparently empty section in the compiled manuscript and add content or "
             "remove its heading if appropriate."
         ),
+        reviewable=True,
     ),
     Rule(
         code="MAN007",
@@ -110,6 +116,7 @@ RULES = (
             "Review the numbered reference and use a label/reference command when it refers to "
             "a manuscript object."
         ),
+        reviewable=True,
     ),
     Rule(
         code="MAN008",
@@ -129,6 +136,7 @@ RULES = (
             "Supply the configured metadata using a supported literal command, or inspect the "
             "template-specific metadata manually."
         ),
+        reviewable=True,
     ),
     Rule(
         code="MAN009",
@@ -143,6 +151,7 @@ RULES = (
             "Correct the reported ORCID from the author's verified identifier; a valid "
             "checksum alone does not establish identity or ownership."
         ),
+        reviewable=True,
     ),
     Rule(
         code="MAN010",
@@ -157,6 +166,7 @@ RULES = (
             "Supply a nonempty statement for the configured declaration and review its "
             "applicability and adequacy manually."
         ),
+        reviewable=True,
     ),
     Rule(
         code="MAN011",
@@ -179,6 +189,7 @@ RULES = (
             "Add a nonempty caption to the reported figure or table, or review unsupported "
             "template-generated captions manually."
         ),
+        reviewable=True,
     ),
     Rule(
         code="MAN012",
@@ -193,6 +204,7 @@ RULES = (
             "Add an unambiguous literal label to the reported figure or table, normally after "
             "its caption."
         ),
+        reviewable=True,
     ),
     Rule(
         code="MAN013",
@@ -207,6 +219,7 @@ RULES = (
             "Place the figure/table label after the corresponding caption and verify its "
             "resolved number after compilation."
         ),
+        reviewable=True,
     ),
     Rule(
         code="MAN014",
@@ -221,6 +234,7 @@ RULES = (
             "Add a meaningful reference to the figure or table in the manuscript, or review "
             "unsupported generated references manually."
         ),
+        reviewable=True,
     ),
     Rule(
         code="MAN015",
@@ -235,6 +249,7 @@ RULES = (
             "Review figure/table introductions in source order and the compiled document; "
             "float placement may differ from source order."
         ),
+        reviewable=True,
     ),
     Rule(
         code="MAN016",
@@ -250,6 +265,7 @@ RULES = (
             "Add a useful nonempty Description for the figure and manually assess whether it "
             "conveys the information needed by readers."
         ),
+        reviewable=True,
     ),
     Rule(
         code="MAN017",

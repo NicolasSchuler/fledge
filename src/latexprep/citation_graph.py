@@ -17,11 +17,18 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
+from .analysed_source import AnalysedSource, reuse_or_analyse
 from .cancellation import cancellation_point
 from .errors import PreparationError
 from .expanded_document import commands_before_end, reachable_sources
 from .findings import Finding
-from .source_graph import INCOMPLETE_GRAPH_RULES, ArgumentLocation, SourceGraph
+from .source_graph import (
+    INCOMPLETE_GRAPH_RULES,
+    ROOT_AMBIGUOUS_RULE,
+    ROOT_MISSING_RULE,
+    ArgumentLocation,
+    SourceGraph,
+)
 from .source_loading import ParsedSource
 from .tex_commands import (
     CITATION_COMMANDS,
@@ -72,7 +79,7 @@ _FILTERS = frozenset(
     }
 )
 # Source findings that leave no selected document; each is a blocking error.
-_ROOT_FAILURES = frozenset({"source.root_ambiguous", "source.root_missing", "source.main_invalid"})
+_ROOT_FAILURES = frozenset({ROOT_AMBIGUOUS_RULE, ROOT_MISSING_RULE, "source.main_invalid"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -200,15 +207,19 @@ def bibliography_styles(inspection: SourceGraph, selected: set[str]) -> list[Sty
     return styles
 
 
-def selected_bibliography(root: Path, main: str | None) -> BibliographySelection:
+def selected_bibliography(
+    root: Path, main: str | None, *, analysed: AnalysedSource | None = None
+) -> BibliographySelection:
     """Resources and styles one selected literal graph declares; None where unavailable.
 
     An unselectable main source or a declaration that cannot be resolved keeps the
     documented whole-tree scope instead of silently narrowing the inspected files.
+    ``analysed`` is a source analysis of the same root and main file shared with other
+    checks; without one the graph is built here.
     """
     if main is None:
         return BibliographySelection(None, None)
-    inspection = SourceGraph.build(root, main)
+    inspection = reuse_or_analyse(root, main, analysed).graph
     if inspection.main is None:
         return BibliographySelection(None, None)
     selected = reachable_sources(inspection)

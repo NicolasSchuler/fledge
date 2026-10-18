@@ -264,7 +264,7 @@ def _plan_file(name: str, original: bytes, selected: Sequence[MetadataEdit]) -> 
         reason="Explicitly selected literal metadata replacements; final PDF recheck required.",
         diff=unified_diff_text(name, text, prepared),
     )
-    return PlannedEdit(original, with_bom(prepared, bom).encode("utf-8"), change)
+    return PlannedEdit(original, with_bom(prepared, bom=bom).encode("utf-8"), change)
 
 
 def _matched_finding(name: str, selected: Sequence[MetadataEdit]) -> Finding:

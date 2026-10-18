@@ -134,7 +134,7 @@ class BibDocument:
     @property
     def file_text(self) -> str:
         """The decoded file content, including a byte-order mark the reader removed."""
-        return with_bom(self.text, self.bom)
+        return with_bom(self.text, bom=self.bom)
 
     def line(self, offset: int) -> int:
         """The 1-based line that holds the character at ``offset``."""

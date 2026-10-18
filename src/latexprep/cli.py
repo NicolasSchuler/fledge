@@ -37,6 +37,7 @@ from .config_discovery import resolve_config_path
 from .core import run_job
 from .doctor_command import doctor_command
 from .errors import PreparationError, RequestError, SettingsError
+from .execution_records import record_settings_source
 from .finding_view import RenderOptions
 from .findings import cancelled_finding
 from .init_command import init_command
@@ -547,8 +548,11 @@ def _load_command_settings(options: CommandOptions, report: Report) -> Settings:
     """Layer the preset, the selected settings file and the command-line options."""
     overrides = options.setting_overrides()
     config_path = resolve_config_path(options.source, options.config, isolated=options.isolated)
-    report.execution["config_path"] = str(config_path) if config_path is not None else None
-    report.execution["preset"] = options.preset
+    record_settings_source(
+        report.execution,
+        config_path=str(config_path) if config_path is not None else None,
+        preset=options.preset,
+    )
     try:
         settings = load_settings(config_path, overrides, preset=options.preset)
     except RequestError:

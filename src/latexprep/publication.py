@@ -322,11 +322,20 @@ def publish_previews(
     previews: PreviewPlan,
     report: Report,
     check_deadline: Callable[[], None],
-) -> None:
-    """Write the previews and the final report into the new explicit preview directory."""
+) -> bool:
+    """Write the previews and the final report into the new explicit preview directory.
+
+    Returns False, recording why in ``report``, when the final report cannot be
+    represented safely; nothing is written then.
+    """
+    rendered = _render_report(report, report.artifacts)
+    if rendered is None:
+        _refuse(report, "The final report could not be safely represented;")
+        return False
     transaction.create(destination, "Preview output")
     _copy_previews(previews, check_deadline)
-    _write_new_text(destination / "report.json", report.to_json())
+    _write_new_text(destination / "report.json", rendered.text)
+    return True
 
 
 def _check_exportable_preview(work: Path, path: Path, *, exported: int) -> None:

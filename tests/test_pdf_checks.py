@@ -4,6 +4,7 @@ import asyncio
 import json
 import tempfile
 import unittest
+from collections import Counter
 from dataclasses import replace
 from itertools import chain, combinations, islice
 from pathlib import Path
@@ -12,6 +13,7 @@ from latexprep.command_runner import CommandResult, RuntimeLimits
 from latexprep.errors import PreparationError
 from latexprep.measurement_findings import MAX_SAMPLES
 from latexprep.pdf_check_options import PdfCheckOptions, PdfRegion, PdfSectionBudget
+from latexprep.pdf_check_pipeline import PdfCheckSettings, inspect_standalone_pdf
 from latexprep.pdf_checks import (
     extract_pdf_evidence,
     inspect_included_pdf_figures,
@@ -23,10 +25,13 @@ from latexprep.pdf_geometry import (
     MIN_MEASUREMENT_DPI,
     relative_luminance,
 )
+from latexprep.pdf_inspection import PdfInspectionOptions
 from latexprep.pdf_paint_checks import MAX_PAGE_PALETTE_COLORS
+from latexprep.pdf_structure_checks import HeadingExpectation, StructureOptions
 from latexprep.pdf_tool_output import MAX_PARSED_NODES
 from latexprep.resource_budget import ResourceBudget
 from latexprep.runtime import ToolRunner
+from latexprep.submission_options import SubmissionOptions
 from tests.support import live_tests_enabled
 
 
@@ -223,6 +228,29 @@ class DetailRunner(ToolRunner):
             timed_out=self.failure == "timeout",
             output_limited=self.failure == "output",
             resource_exceeded="Resource exceeded" if self.failure == "resource" else None,
+        )
+
+
+class CountingToolRunner(ToolRunner):
+    """The real runner, counting every command that is not a version probe."""
+
+    def __init__(self, limits: RuntimeLimits | None = None) -> None:
+        super().__init__(limits)
+        self.counts: Counter[tuple[str, ...]] = Counter()
+
+    async def run(
+        self,
+        argv: list[str],
+        cwd: Path,
+        workspace: Path,
+        *,
+        readonly_inputs: tuple[Path, ...] = (),
+        memory_mb: int | None = None,
+    ) -> CommandResult:
+        if argv[-1] not in {"-v", "--version"}:
+            self.counts[tuple(argv)] += 1
+        return await super().run(
+            argv, cwd, workspace, readonly_inputs=readonly_inputs, memory_mb=memory_mb
         )
 
 
@@ -825,6 +853,30 @@ class PdfDetailTests(unittest.IsolatedAsyncioTestCase):
         text, fields = await extract_pdf_evidence(self.pdf, self.work(), runner)
         self.assertIn("Body text", text)
         self.assertEqual(fields["Title"], "Paper")
+
+    @unittest.skipUnless(live_tests_enabled(), "Opt-in live PDF tools")
+    async def test_live_poppler_groups_of_one_pdf_share_each_read_only_command(self) -> None:
+        self.pdf.write_bytes(simple_pdf())
+        runner = CountingToolRunner(RuntimeLimits(timeout_seconds=30, max_memory_mb=512))
+        settings = PdfCheckSettings(
+            max_pages=5,
+            inspection=PdfInspectionOptions(require_embedded_fonts=True, forbid_attachments=True),
+            details=PdfCheckOptions(
+                min_text_size_pt=10, required_metadata=("Title",), min_page_ink_ratio=0.00001
+            ),
+            structure=StructureOptions(heading_expectations=(HeadingExpectation(1, "Body", ""),)),
+            privacy=SubmissionOptions(identity_terms=("Nobody Atall",)),
+        )
+        findings = await inspect_standalone_pdf(
+            self.pdf, self.work(), runner, settings, ResourceBudget(2, 512)
+        )
+        self.assertTrue(findings)
+        self.assertFalse([item for item in findings if item.incomplete], findings)
+        reads = {argv: count for argv, count in runner.counts.items() if argv[0] != "pdftoppm"}
+        self.assertEqual(set(reads.values()), {1}, reads)
+        # Properties, page boxes and text are each needed by several groups.
+        self.assertEqual(sum(argv[0] == "pdfinfo" for argv in reads), 2)
+        self.assertEqual(sum(argv[0] == "pdftotext" for argv in reads), 1)
 
     def test_options_reject_mutable_nonfinite_and_ambiguous_configuration(self) -> None:
         for kwargs in (

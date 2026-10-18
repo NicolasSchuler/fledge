@@ -30,8 +30,9 @@ MIN_MEASUREMENT_DPI = 18
 MAX_MEASUREMENT_DPI = 144
 # Pairs of boxes or colors one measurement compares before it reports itself incomplete.
 MAX_PAIR_CHECKS = 250_000
-# WCAG adds this flare term to both luminances before taking their ratio.
-_WCAG_FLARE = 0.05
+# WCAG adds this flare term to both luminances before taking their ratio: contrast is
+# (L1 + 0.05) / (L2 + 0.05), which models a little ambient light.
+WCAG_FLARE = 0.05
 
 
 def finite_number(value: str | None) -> float:
@@ -75,7 +76,7 @@ def relative_luminance(rgb: tuple[float, float, float]) -> float:
 def wcag_contrast_ratio(first_luminance: float, second_luminance: float) -> float:
     """The WCAG contrast ratio, from 1 to 21, of two relative luminances in either order."""
     lighter, darker = max(first_luminance, second_luminance), min(first_luminance, second_luminance)
-    return (lighter + _WCAG_FLARE) / (darker + _WCAG_FLARE)
+    return (lighter + WCAG_FLARE) / (darker + WCAG_FLARE)
 
 
 def measurement_raster_size(size: tuple[float, float], dpi: int) -> tuple[int, int]:

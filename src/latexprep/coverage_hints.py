@@ -1,8 +1,8 @@
 """Opt-in checks that a run did not perform because its settings left them off.
 
 The job records the areas in ``execution.not_checked`` (``not_checked_areas`` builds
-them); the terminal report names them in a one-line hint (``not_checked_summary``) with
-where to enable them. ``execution_records`` reads the recorded areas back.
+them, and ``execution_records`` writes and reads them); the terminal report names them
+in a one-line hint (``not_checked_summary``) with where to enable them.
 """
 
 from __future__ import annotations
@@ -10,24 +10,27 @@ from __future__ import annotations
 from collections.abc import Collection, Sequence
 
 from .check_policy import opt_in_activation
+from .config import toml_table
 from .documentation_links import CONFIGURATION_GUIDE
 from .execution_records import OTHER_OPT_IN_AREA, NotCheckedArea
 from .presets import preset_names
+from .rules import RULES
 
 # Opt-in areas named individually when they are not configured; every other
-# unconfigured opt-in check is counted together. Codes and settings come from
-# the check policy's activation tables, so a renamed setting cannot go stale here.
-_NOT_CHECKED_AREAS = (
-    ("anonymity", "anonymity", ("PRV001", "PRV002")),
-    ("page_limit", "page limit", ("PDF001",)),
-    ("archive_size", "ZIP size limit", ("PKG105",)),
-    ("forbidden_packages", "forbidden packages", ("TEX103", "BLD102")),
-    ("font_embedding", "strict font embedding", ("PDF104", "PDF105")),
-    ("image_resolution", "image resolution", ("PDF103",)),
-)
+# unconfigured opt-in check is counted together. An area's checks are the rules that
+# name it as their ``not_checked_area``, and their settings come from the check policy's
+# activation tables, so a renamed setting cannot go stale here.
+_AREA_LABELS = {
+    "anonymity": "anonymity",
+    "page_limit": "page limit",
+    "archive_size": "ZIP size limit",
+    "forbidden_packages": "forbidden packages",
+    "font_embedding": "strict font embedding",
+    "image_resolution": "image resolution",
+}
 
 
-def not_checked_areas(configured_codes: Collection[str]) -> list[dict[str, object]]:
+def not_checked_areas(configured_codes: Collection[str]) -> list[NotCheckedArea]:
     """Opt-in checks outside ``configured_codes``, the codes a run's settings activate.
 
     Pass ``check_policy.configured_opt_in_codes`` of the effective settings. The
@@ -37,40 +40,31 @@ def not_checked_areas(configured_codes: Collection[str]) -> list[dict[str, objec
     """
     activation = opt_in_activation()
 
-    def setting_names(codes: Sequence[str]) -> list[str]:
-        return list(
+    def setting_names(codes: Sequence[str]) -> tuple[str, ...]:
+        return tuple(
             dict.fromkeys(
-                name if group is None else f"{group}.{name}"
+                name if group is None else f"{toml_table(group)}.{name}"
                 for code in codes
                 for group, fields in activation[code]
                 for name in fields
             )
         )
 
-    entries: list[dict[str, object]] = []
+    entries: list[NotCheckedArea] = []
     named: set[str] = set()
-    for area, label, codes in _NOT_CHECKED_AREAS:
+    for area, label in _AREA_LABELS.items():
+        codes = tuple(rule.code for rule in RULES if rule.not_checked_area == area)
         named.update(codes)
         if not any(code in configured_codes for code in codes):
-            entries.append(
-                {
-                    "area": area,
-                    "label": label,
-                    "codes": list(codes),
-                    "settings": setting_names(codes),
-                }
-            )
+            entries.append(NotCheckedArea(area, label, codes, setting_names(codes)))
     others = sorted(
         code for code in activation if code not in named and code not in configured_codes
     )
     if others:
         entries.append(
-            {
-                "area": OTHER_OPT_IN_AREA,
-                "label": "other opt-in checks",
-                "codes": others,
-                "settings": setting_names(others),
-            }
+            NotCheckedArea(
+                OTHER_OPT_IN_AREA, "other opt-in checks", tuple(others), setting_names(others)
+            )
         )
     return entries
 

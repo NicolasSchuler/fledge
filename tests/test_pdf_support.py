@@ -9,6 +9,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from latexprep.cancellation import cancellation_point
 from latexprep.command_runner import CommandResult
@@ -23,6 +24,8 @@ from latexprep.pdf_tool_output import (
     evaluate_font_policy,
     font_inventory,
     normalized_text_pages,
+    parse_mupdf_trace,
+    parse_tool_xml,
     split_text_pages,
 )
 from latexprep.pdf_tools import (
@@ -178,6 +181,63 @@ class FontPolicyTests(unittest.TestCase):
     def test_an_empty_inventory_violates_nothing(self) -> None:
         outcome = evaluate_font_policy([], require_embedded=True, forbid_type3=True)
         self.assertEqual((outcome.nonembedded, outcome.type3, outcome.violations), ([], [], []))
+
+
+class ToolXmlTests(unittest.TestCase):
+    """Tool XML is parsed with xml.etree, so entity tricks must never reach the parser."""
+
+    BILLION_LAUGHS = (
+        '<?xml version="1.0"?><!DOCTYPE pdf2xml ['
+        '<!ENTITY a "aaaaaaaaaa">'
+        '<!ENTITY b "&a;&a;&a;&a;&a;&a;&a;&a;&a;&a;">'
+        '<!ENTITY c "&b;&b;&b;&b;&b;&b;&b;&b;&b;&b;">'
+        '<!ENTITY d "&c;&c;&c;&c;&c;&c;&c;&c;&c;&c;">'
+        "]><pdf2xml>&d;</pdf2xml>"
+    )
+    EXTERNAL_ENTITY = (
+        '<?xml version="1.0"?><!DOCTYPE pdf2xml ['
+        '<!ENTITY secret SYSTEM "file:///etc/passwd">]><pdf2xml>&secret;</pdf2xml>'
+    )
+    EXTERNAL_PARAMETER_ENTITY = (
+        '<!DOCTYPE pdf2xml [<!ENTITY % remote SYSTEM "http://example.invalid/e.dtd">%remote;]>'
+        "<pdf2xml/>"
+    )
+
+    def test_entity_declarations_and_internal_subsets_are_rejected_before_parsing(self) -> None:
+        rejected = {
+            "billion laughs": self.BILLION_LAUGHS,
+            "external entity": self.EXTERNAL_ENTITY,
+            "external parameter entity": self.EXTERNAL_PARAMETER_ENTITY,
+            "lower-case declaration": self.EXTERNAL_ENTITY.replace("ENTITY", "entity"),
+            "internal subset without entities": (
+                "<!DOCTYPE pdf2xml [<!ELEMENT pdf2xml ANY>]><pdf2xml/>"
+            ),
+        }
+        for label, output in rejected.items():
+            with (
+                self.subTest(label),
+                patch("latexprep.pdf_tool_output.ET.fromstring") as parser,
+                self.assertRaisesRegex(PreparationError, "unsupported entity declarations"),
+            ):
+                parse_tool_xml(output, "pdf2xml")
+            parser.assert_not_called()
+
+    def test_the_trace_parser_applies_the_same_rejection(self) -> None:
+        with self.assertRaisesRegex(PreparationError, "unsupported entity declarations"):
+            parse_mupdf_trace(self.BILLION_LAUGHS.replace("pdf2xml", "document"), 1)
+
+    def test_a_reference_to_an_undeclared_entity_is_malformed_not_fetched(self) -> None:
+        output = (
+            '<!DOCTYPE pdf2xml SYSTEM "http://example.invalid/pdf2xml.dtd"><pdf2xml>&x;</pdf2xml>'
+        )
+        with self.assertRaisesRegex(PreparationError, "malformed XML"):
+            parse_tool_xml(output, "pdf2xml")
+
+    def test_the_external_dtd_reference_pdftohtml_writes_still_parses(self) -> None:
+        output = (
+            '<?xml version="1.0"?><!DOCTYPE pdf2xml SYSTEM "pdf2xml.dtd"><pdf2xml><page/></pdf2xml>'
+        )
+        self.assertEqual(parse_tool_xml(output, "pdf2xml").tag, "pdf2xml")
 
 
 class QpdfEnvelopeTests(unittest.TestCase):

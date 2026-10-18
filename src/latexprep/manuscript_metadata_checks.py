@@ -14,7 +14,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from .expanded_document import ExpandedDocument, expand_document
+from .analysed_source import AnalysedSource, reuse_or_analyse
+from .expanded_document import ExpandedDocument
 from .finding_text import plural
 from .findings import Finding
 from .literal_text import is_placeholder_text, plain_argument_text
@@ -78,7 +79,11 @@ def _metadata(document: ExpandedDocument) -> tuple[dict[str, list[MetadataValue]
 
 
 def read_literal_metadata(
-    root: Path, main: str | None, fields: tuple[str, ...] | None = None
+    root: Path,
+    main: str | None,
+    fields: tuple[str, ...] | None = None,
+    *,
+    analysed: AnalysedSource | None = None,
 ) -> tuple[dict[str, str], list[str]]:
     """Return canonical, unambiguous literal values and any interpretation gaps.
 
@@ -86,9 +91,10 @@ def read_literal_metadata(
     Multiple declarations may represent overwrites or repeated authors and are
     consequently not returned as a resolved PDF metadata value. When fields are
     selected, only their values and field-specific uncertainty are returned;
-    uncertainty about the source graph still applies to every selection.
+    uncertainty about the source graph still applies to every selection. ``analysed``
+    shares the source analysis of the same root and main file with other checks.
     """
-    metadata, reasons = _metadata(expand_document(root, main))
+    metadata, reasons = _metadata(reuse_or_analyse(root, main, analysed).expanded)
     values: dict[str, str] = {}
     for key, declarations in metadata.items():
         if fields is not None and key not in fields:

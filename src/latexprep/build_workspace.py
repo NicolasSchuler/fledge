@@ -55,10 +55,9 @@ def prepare_layout(source: Path, main: str, work: Path, max_total_bytes: int) ->
 def copy_source(source: Path, destination: Path, max_total_bytes: int) -> None:
     """Import a bounded project snapshot into a disposable writable build copy.
 
-    ``max_total_bytes`` is the per-job import budget: it caps the combined size of
+    ``max_total_bytes`` is the import budget of the copy: it caps the combined size of
     every imported file rather than the size of any single one. Callers pass
-    ``RuntimeLimits.max_file_bytes``, which therefore acts as the whole-tree limit
-    here, not as a per-file limit.
+    ``RuntimeLimits.max_copy_bytes``, the job's import byte limit, not the per-file limit.
     """
     limits = ImportLimits(
         max_files=MAX_WORKSPACE_ENTRIES,

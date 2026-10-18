@@ -203,8 +203,10 @@ location, shows your home directory as `~` and the system temporary directory as
 project stay relative, and `artifacts` keeps the real location of the files Fledge
 wrote.
 
-A finding's `code` is `null` for operational results such as `build.failed`;
-its `rule` always holds a descriptive name. `evidence_kind` says how directly
+A finding's `code` is `null` for operational results such as `build.failed`: results
+that describe the run or the tool environment rather than the manuscript. They cannot
+be selected or ignored and are always reported. Its `rule` always holds a descriptive
+name. `evidence_kind` says how directly
 the evidence supports the result (`direct`, `derived` or `heuristic`), and
 `next_step` gives the suggested action when one applies. `incomplete` is `true`
 when the check's evidence was partial, unavailable or bounded, for example an
@@ -226,7 +228,9 @@ descriptive and may grow.
 The JSON of `fledge rules`, `fledge rule CODE` and `fledge submission-text` has
 its own `schema_version`, currently `1`, with the same rule: it increases only when
 a field is removed, renamed or changes meaning. `fledge rules --json` lists the
-checks under `rules`.
+checks under `rules`; each check says whether it is `mandatory` (check selection never
+removes its findings) and whether it is `reviewable` (an explicit review decision may
+suppress or accept it).
 
 Version 2 renamed the finding fields `evidence` to `evidence_kind` and
 `suggestion` to `next_step`, and added `incomplete`. Hyphenated rule names such

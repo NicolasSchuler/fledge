@@ -17,6 +17,11 @@ max_temporary_bytes = 2147483648
 # source_date_epoch = 1700000000
 max_files = 10000
 max_bytes = 268435456
+# max_bytes is the default of both limits below; set one to give its purpose its own value:
+# the total size of an imported project, ZIP file or build copy, and the size of any one
+# file a tool may write.
+# max_import_bytes = 536870912
+# max_generated_file_bytes = 134217728
 max_depth = 32
 # Total PDF pages, including references and appendices, if you enable this limit:
 # max_pages = 12
