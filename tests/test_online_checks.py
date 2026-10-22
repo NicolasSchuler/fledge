@@ -8,6 +8,7 @@ in ``test_online_http_wire`` and the choice of inputs in ``test_online_inputs``.
 from __future__ import annotations
 
 import asyncio
+import errno
 import ssl
 import tempfile
 import threading
@@ -489,7 +490,7 @@ class OnlineCheckTests(unittest.IsolatedAsyncioTestCase):
             return error
 
         def raise_reset(_request):
-            return ConnectionResetError(54, "Connection reset by peer")
+            return ConnectionResetError(errno.ECONNRESET, "Connection reset by peer")
 
         for response, outcome, reason, advice in (
             (Response(429), "rate_limited", None, "Wait a few minutes and rerun"),

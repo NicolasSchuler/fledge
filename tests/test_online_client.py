@@ -6,6 +6,7 @@ The client takes a resolver and a transport, so every case here runs without a n
 from __future__ import annotations
 
 import asyncio
+import errno
 import ssl
 import unittest
 from unittest.mock import AsyncMock, patch
@@ -164,7 +165,7 @@ class AddressFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(transport.requests), 2)
         self.assertEqual(result.message, "Could not connect to any of the server's 2 addresses")
         client, transport = client_for(
-            ConnectionResetError(54, "Connection reset by peer"), resolver=resolver
+            ConnectionResetError(errno.ECONNRESET, "Connection reset by peer"), resolver=resolver
         )
         result = await client.fetch("https://example.org/")
         self.assertEqual(result.outcome, "unavailable")
@@ -299,7 +300,7 @@ class DeadlineAndDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(result.elapsed_seconds, 0.5)
 
     async def test_a_failed_fetch_records_host_time_and_error_code(self):
-        client, _ = client_for(ConnectionResetError(54, "Connection reset by peer"))
+        client, _ = client_for(ConnectionResetError(errno.ECONNRESET, "Connection reset by peer"))
         result = await client.fetch("https://example.org/data")
         self.assertEqual(
             (result.outcome, result.host, result.error_code),
