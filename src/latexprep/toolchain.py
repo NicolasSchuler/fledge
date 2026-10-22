@@ -41,7 +41,16 @@ _SANDBOXED_TOOL_NAMES = (
 _INTERPRETERS = (Path("/usr/bin/perl"), Path("/usr/bin/env"), Path("/bin/sh"), Path("/bin/bash"))
 # Where a researcher gets each external tool: its package, with the commands that install it.
 _POPPLER = "Poppler: brew install poppler, or sudo apt install poppler-utils"
-_TEX_LIVE = "TeX Live: brew install --cask basictex, or sudo apt install texlive latexmk"
+_TEX_LIVE = "TeX Live: brew install --cask basictex, or sudo apt install texlive"
+# BasicTeX ships neither latexmk nor Biber; tlmgr adds them, and Debian packages them apart.
+_LATEXMK = (
+    "TeX Live: brew install --cask basictex, then sudo tlmgr install latexmk; "
+    "or sudo apt install latexmk"
+)
+_BIBER = (
+    "TeX Live: brew install --cask basictex, then sudo tlmgr install biber; "
+    "or sudo apt install biber"
+)
 _INSTALL_HINTS: dict[str, str] = {
     **dict.fromkeys(
         ("pdfinfo", "pdftotext", "pdftoppm", "pdffonts", "pdfimages", "pdfdetach", "pdftohtml"),
@@ -51,18 +60,10 @@ _INSTALL_HINTS: dict[str, str] = {
     "mutool": "MuPDF: brew install mupdf-tools, or sudo apt install mupdf-tools",
     "tex-fmt": "tex-fmt: brew install tex-fmt, or a release binary from "
     "https://github.com/WGUNDERWOOD/tex-fmt/releases",
+    "latexmk": _LATEXMK,
+    "biber": _BIBER,
     **dict.fromkeys(
-        (
-            "latexmk",
-            "pdflatex",
-            "xelatex",
-            "lualatex",
-            "biber",
-            "bibtex",
-            "xdvipdfmx",
-            "kpsewhich",
-            "makeindex",
-        ),
+        ("pdflatex", "xelatex", "lualatex", "bibtex", "xdvipdfmx", "kpsewhich", "makeindex"),
         _TEX_LIVE,
     ),
 }
@@ -81,12 +82,18 @@ def _resolved_tool(found: Path, name: str) -> Path:
     return found.resolve() if name == "latexmk" else found.parent.resolve() / found.name
 
 
+def install_hint(name: str) -> str | None:
+    """The package that provides the tool ``name`` and how to install it, when known."""
+    return _INSTALL_HINTS.get(name)
+
+
 def tool_path(name: str) -> Path:
     found = shutil.which(name)
     if not found:
-        hint = f" ({_INSTALL_HINTS[name]})" if name in _INSTALL_HINTS else ""
+        hint = install_hint(name)
+        how = f" ({hint})" if hint else ""
         raise ToolUnavailableError(
-            f"Required tool is unavailable: {name}. Install it explicitly{hint}.", name
+            f"Required tool is unavailable: {name}. Install it explicitly{how}.", name
         )
     return _resolved_tool(Path(found).absolute(), name)
 

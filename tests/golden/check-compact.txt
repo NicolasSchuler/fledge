@@ -1,0 +1,4 @@
+passed_with_advisories | 0 errors, 1 warning, 1 incomplete, 3 not applicable, 3 passed results | scope: selected source, bibliography, privacy, isolated build and PDF checks
+document: main.tex
+BIB102 warning/failed references.bib:2 [bibliography coverage and fields] | Apparently uncited bibliography entries: 1 of 2 entries have no scanned use: unused2020 | evidence: references.bib:2 | next: Review each candidate against all intended documents, filters and bibliography backend behavior before considering removal. This check never prunes a bibliography.
+BLD105 info/inconclusive project [baseline] | Local TeX distribution release: The TeX distribution is unknown: the build recorded no engine version output. | next: Resolve the missing or ambiguous evidence described above, then repeat this check.

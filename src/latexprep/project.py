@@ -98,7 +98,12 @@ def folder_entries(
                         f"Folder nesting exceeds {MAX_WALKED_FOLDER_LEVELS} levels at {path!r}. "
                         "Move the files closer to the project root and run again."
                     )
-                metadata = item.stat(follow_symlinks=False)
+                try:
+                    metadata = item.stat(follow_symlinks=False)
+                except OSError as error:
+                    # An entry listed through a directory descriptor knows only its name.
+                    error.filename = path
+                    raise
                 is_dir = stat.S_ISDIR(metadata.st_mode)
                 if not is_dir and not stat.S_ISREG(metadata.st_mode):
                     raise PreparationError(
@@ -109,7 +114,7 @@ def folder_entries(
                 registry.add(path, is_dir=is_dir)
                 entries.append(ProjectEntry(path, is_dir, metadata.st_size if not is_dir else 0))
                 if is_dir and not (exclude_metadata and metadata_prefix(path, is_dir=True)):
-                    child_fd = os.open(item.name, DIRECTORY_FLAGS, dir_fd=current_fd)
+                    child_fd = _open_below(current_fd, item.name, DIRECTORY_FLAGS, path)
                     try:
                         visit(child_fd, path + "/")
                     finally:
@@ -216,16 +221,30 @@ def new_destination(source: Path, destination: Path, *, source_is_dir: bool) -> 
     return target
 
 
+def _open_below(directory_fd: int, name: str, flags: int, path: str) -> int:
+    """Open ``name`` below an open directory; a failure names the project path ``path``.
+
+    ``os.open`` with ``dir_fd`` reports only the name it was given, which for a file in a
+    folder is the bare file name; whoever fixes its permissions needs the path within
+    the project.
+    """
+    try:
+        return os.open(name, flags, dir_fd=directory_fd)
+    except OSError as error:
+        error.filename = path
+        raise
+
+
 def open_regular(directory_fd: int, path: str) -> BinaryIO:
     """Open ``path`` below an open directory without following a link anywhere on the way."""
     parts = path.split("/")
     current_fd = os.dup(directory_fd)
     try:
-        for part in parts[:-1]:
-            child_fd = os.open(part, DIRECTORY_FLAGS, dir_fd=current_fd)
+        for depth, part in enumerate(parts[:-1], start=1):
+            child_fd = _open_below(current_fd, part, DIRECTORY_FLAGS, "/".join(parts[:depth]))
             os.close(current_fd)
             current_fd = child_fd
-        file_fd = os.open(parts[-1], _FILE_FLAGS, dir_fd=current_fd)
+        file_fd = _open_below(current_fd, parts[-1], _FILE_FLAGS, path)
         if not stat.S_ISREG(os.fstat(file_fd).st_mode):
             os.close(file_fd)
             raise PreparationError(f"Project file became a link or special file: {path!r}.")

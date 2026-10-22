@@ -7,7 +7,8 @@
 ``wheel DIST_DIRECTORY``
     Install the one built wheel into a fresh virtual environment and run it from
     another directory, so a file missing from the wheel cannot be hidden by the
-    source tree.
+    source tree: ``--version``, ``--help`` and an offline inspection of the example
+    in ``docs/examples.md``, which needs no TeX or PDF tools and must pass.
 ``installed VERSION``
     Used by ``wheel`` inside the fresh environment: the installed distribution, its
     commands and its shipped presets match the expected version and the source tree.
@@ -17,10 +18,12 @@ from __future__ import annotations
 
 import argparse
 import ast
+import json
 import subprocess
 import sys
 import tempfile
 import tomllib
+from collections.abc import Sequence
 from importlib import metadata, resources
 from pathlib import Path
 
@@ -30,6 +33,36 @@ COMMANDS = ("fledge", "latex-prep")
 VERSION_ATTRIBUTE = "latexprep.__version__"
 # Package data besides the presets, which are compared with the source directory.
 PACKAGED_RESOURCES = ("loaded_options_hook.tex", "report.css")
+
+# The offline example of docs/examples.md, kept here so that this script needs nothing but
+# itself; tests/test_process_boundary.py checks that both copies agree.
+DEMO_MAIN_TEX = r"""\documentclass{article}
+\title{A small paper}
+\author{Example Author}
+\date{}
+\begin{document}
+\maketitle
+\begin{abstract}
+A minimal project for checking a local source bundle.
+\end{abstract}
+\section{Introduction}
+The source cites a book about TeX~\cite{knuth1984}.
+\bibliographystyle{plain}
+\bibliography{references}
+\end{document}
+"""
+DEMO_REFERENCES_BIB = """@book{knuth1984,
+  author = {Donald E. Knuth},
+  title = {The {TeXbook}},
+  year = {1984},
+  publisher = {Addison-Wesley}
+}
+"""
+DEMO_INSPECT_OPTIONS = ("--main", "main.tex", "--isolated", "--offline", "--json", "--quiet")
+# The inspection takes about a second; one that hangs must not hold the job until it times out.
+DEMO_TIMEOUT_SECONDS = 300
+# How many trailing lines of the inspection's stdout and stderr a failure shows.
+OUTPUT_TAIL_LINES = 20
 
 
 def declared_version(root: Path = ROOT) -> str:
@@ -122,9 +155,97 @@ def check_wheel(dist: Path) -> int:
             check=True,
             stdout=subprocess.DEVNULL,
         )
+        fledge = [str(environment / "bin" / "fledge")]
+        if inspect_offline_demo(fledge, Path(temporary) / "offline-example") != 0:
+            return 1
         script = Path(__file__).resolve()
         installed = [str(python), "-I", str(script), "installed", version]
         return subprocess.run(installed, cwd=temporary, check=False).returncode
+
+
+def inspect_offline_demo(fledge: Sequence[str], directory: Path) -> int:
+    """Inspect the offline example with ``fledge``, a command and its leading arguments.
+
+    The example is written below ``directory``, a new directory that is also the working
+    directory. Returns 0 when the run exits with 0 and its JSON report says ``passed``. A
+    failure prints the report's errors and warnings or, when stdout holds no report, the end
+    of stdout, and the end of stderr.
+    """
+    paper = directory / "paper"
+    paper.mkdir(parents=True)
+    (paper / "main.tex").write_text(DEMO_MAIN_TEX, encoding="utf-8")
+    (paper / "references.bib").write_text(DEMO_REFERENCES_BIB, encoding="utf-8")
+    try:
+        completed = subprocess.run(
+            [*fledge, "inspect", str(paper), *DEMO_INSPECT_OPTIONS],
+            cwd=directory,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=DEMO_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as expired:
+        print(
+            "::error::fledge inspect of the offline example did not finish within "
+            f"{DEMO_TIMEOUT_SECONDS} seconds"
+        )
+        _print_tail("stdout", expired.stdout)
+        _print_tail("stderr", expired.stderr)
+        return 1
+    report = _json_object(completed.stdout)
+    outcome = report.get("outcome")
+    if completed.returncode == 0 and outcome == "passed":
+        # Flushed so that the line precedes the output of the next check, a child process.
+        print(
+            "fledge inspect passed the offline example of docs/examples.md (exit code 0).",
+            flush=True,
+        )
+        return 0
+    print(
+        f"::error::fledge inspect of the offline example exited with {completed.returncode} "
+        f"and outcome {outcome!r}; expected 0 and 'passed'"
+    )
+    for line in _errors_and_warnings(report):
+        print(f"  {line}")
+    if not report:
+        _print_tail("stdout", completed.stdout)
+    _print_tail("stderr", completed.stderr)
+    return 1
+
+
+def _print_tail(stream: str, output: str | bytes | None) -> None:
+    """Print the last lines a child wrote to ``stream``, or that it wrote nothing there.
+
+    ``output`` is bytes when it comes from ``subprocess.TimeoutExpired``.
+    """
+    if isinstance(output, bytes):
+        output = output.decode("utf-8", errors="replace")
+    lines = (output or "").strip().splitlines()[-OUTPUT_TAIL_LINES:]
+    for line in lines or ["(empty)"]:
+        print(f"  {stream}: {line}")
+
+
+def _json_object(text: str) -> dict[str, object]:
+    """The JSON object in ``text``, or an empty one when ``text`` holds none."""
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _errors_and_warnings(report: dict[str, object]) -> list[str]:
+    """One line per error or warning in ``report`` that did not pass: its code and message."""
+    findings = report.get("findings")
+    return [
+        f"{finding.get('code') or finding.get('rule')}: {finding.get('message')}"
+        for finding in (findings if isinstance(findings, list) else [])
+        if isinstance(finding, dict)
+        and finding.get("severity") in {"error", "warning"}
+        and finding.get("status") != "passed"
+    ]
 
 
 def check_installed(expected_version: str) -> int:

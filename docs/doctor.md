@@ -40,7 +40,8 @@ Only enabled additional PDF measurements cause advisory probes of their optional
 tools, such as `qpdf`, MuPDF or `pdftohtml`. These probes establish installation
 and version availability only. They do not exercise those measurements or prove
 support for the manuscript's PDF structures. Missing optional tools produce
-advisories; missing required tools block the diagnostic result.
+advisories; missing required tools block the diagnostic result. Either finding
+names the package that provides the tool and how to install it.
 
 The JSON report distinguishes a tool found on `PATH`, a version verified under
 isolation, and a tool exercised by the built-in fixture. A present executable

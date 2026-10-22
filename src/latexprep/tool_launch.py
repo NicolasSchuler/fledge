@@ -80,6 +80,15 @@ def with_ulimits(command: list[str], *, max_file_bytes: int, timeout_seconds: in
     ]
 
 
+def tool_state_directory(workspace: Path) -> Path:
+    """Where ``create_tool_environment`` keeps the state of the commands run in ``workspace``.
+
+    Tools write their own files there, for example the font cache luaotfload keeps under
+    ``TEXMFVAR``, and read them back; the TeX recorder lists such reads as inputs.
+    """
+    return workspace / ".tool-state"
+
+
 def create_tool_environment(
     workspace: Path, context: ToolContext, *, source_date_epoch: str
 ) -> ToolEnvironment:
@@ -89,7 +98,7 @@ def create_tool_environment(
     holds the tool's temporary, configuration and cache locations; the caller removes it
     when the command ends, because a later command must never find an earlier one's files.
     """
-    container = workspace / ".tool-state"
+    container = tool_state_directory(workspace)
     container.mkdir(exist_ok=True)
     state = Path(tempfile.mkdtemp(prefix="invocation-", dir=container))
     for name in _STATE_DIRECTORIES:

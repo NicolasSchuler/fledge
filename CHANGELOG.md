@@ -7,6 +7,53 @@ breaking changes are listed under their own heading.
 
 The version is defined once, as `__version__` in `src/latexprep/__init__.py`.
 
+## [0.3.1] - 2026-10-22
+
+### Fixed
+
+- `prepare` with the LuaLaTeX engine was always blocked with `PKG302`: the font cache
+  that `luaotfload` writes under the build's tool state and reads back was recorded as
+  an input outside the declared paths, so the dependency evidence was incomplete. The
+  cache is now toolchain evidence, and LuaLaTeX documents are packaged like pdfLaTeX
+  and XeLaTeX ones.
+- A failed build whose `latexmk` exited normally, because error-level log findings
+  failed it, had no finding with the last lines of the TeX log. The `build.<stage>`
+  finding now carries `details.log_tail` whenever no other finding of the build does,
+  as the report documentation promises.
+- `fledge doctor` names the package that provides a missing tool and how to install
+  it, for example Poppler for `pdfinfo`, as `check` and `prepare` already did. The
+  hint for `latexmk` and Biber now says that BasicTeX needs `tlmgr` to add them and
+  names their Debian packages.
+- A file or folder that cannot be read during import is named by its path within the
+  project, not by its bare name.
+
+### Added
+
+- End-to-end tests that run whole commands against real TeX, Poppler and `tex-fmt`
+  tools, opt-in with `FLEDGE_RUN_INTEGRATION=1` and part of both live CI jobs: ZIP
+  input, debris and awkward paths, identical output across execution modes, blocked
+  runs, page limits and presets, `init`, reference PDFs, accepted exceptions with
+  HTML previews, grayscale previews, repeated baselines, hostile source constructs,
+  `import` and `subfiles`, local classes and styles, EPS figures, Biber
+  transformations, `.bbl` inlining, XeLaTeX and LuaLaTeX, mixed-engine packages,
+  failing PDF policies, timeouts, `fmt`, `doctor`, an interrupted build and the
+  documented CI recipe.
+- Tests that run the command as a separate process without TeX: the exit codes a
+  run without a build can reach (0, 1, 3, 4 and 64), stream separation and
+  `NO_COLOR`, an unreadable source file and the offline example page of the
+  documentation, whose commands are parsed and run.
+- Golden files for the compact, CI-annotation and HTML renderings of the controlled
+  `check` run, next to the JSON and terminal goldens.
+
+### Changed
+
+- The package CI job and the release dry run also run `fledge inspect` on the
+  offline example from the freshly installed wheel.
+- The live CI jobs install the `import`, `subfiles` and `embedfile` LaTeX packages,
+  so the tests that need them run instead of skipping.
+- The limitations page records that builds never generate bitmap fonts and that a
+  double quote in the temporary directory path stops `latexmk`.
+
 ## [0.3.0] - 2026-10-22
 
 Compared with the `v0.2.0` tag. That tag predates the distribution rename, the
@@ -390,4 +437,5 @@ the first release of `fledge-latex` is 0.3.0.
   stays untested (other distributions, WSL 2); the CI guide shows the steps for a
   Linux runner.
 
+[0.3.1]: https://github.com/NicolasSchuler/fledge/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/NicolasSchuler/fledge/compare/v0.2.0...v0.3.0

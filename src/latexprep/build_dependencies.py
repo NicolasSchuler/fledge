@@ -125,6 +125,9 @@ class DependencyRequest:
     resource_roots: tuple[Path, ...]
     max_bytes: int
     owned_inputs: tuple[Path, ...] = ()
+    # Where the runner kept the state of this build's tools. What they wrote there and
+    # read back, such as the font cache of luaotfload, is not part of the submission.
+    tool_state: Path | None = None
 
 
 def _read_owned_bytes(path: Path, root: Path, max_bytes: int) -> bytes:
@@ -385,11 +388,15 @@ def _merge_rule_evidence(
 def _classify_inputs(request: DependencyRequest, observed: _ObservedPaths) -> _ClassifiedInputs:
     """Sort every input into an original project file, a generated file or a toolchain file.
 
-    An input that is none of these, or an original that is missing or linked, makes
-    the evidence unusable.
+    The build's own tool state counts as toolchain: the font cache luaotfload writes
+    under ``TEXMFVAR`` and reads back is neither an original input nor a generated
+    file to ship. An input that is none of these, or an original that is missing or
+    linked, makes the evidence unusable.
     """
     layout = request.layout
     roots = tuple(root.resolve() for root in request.resource_roots)
+    if request.tool_state is not None:
+        roots += (request.tool_state.resolve(),)
     owned = set(request.owned_inputs)
     project_inputs: set[str] = set()
     generated_reads: set[str] = set()

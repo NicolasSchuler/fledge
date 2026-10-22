@@ -96,7 +96,7 @@ Fledge's own workflows; a tool such as Dependabot can keep them current.
 - **TeX and Poppler.** BasicTeX is a small TeX Live distribution, and `tlmgr` adds
   `latexmk`, Biber and BibLaTeX. A package your paper needs but the runner lacks
   is reported as a build failure; add it to the `tlmgr install` line.
-  Pin the version of Fledge, for example `fledge-latex==0.3.0`, if you want the
+  Pin the version of Fledge, for example `fledge-latex==0.3.1`, if you want the
   same checks on every run.
 - **`--output-format ci`** prints each finding as a GitHub annotation, and
   `--quiet` leaves out the progress messages. Fledge also reads a `fledge.toml` in

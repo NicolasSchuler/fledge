@@ -34,6 +34,7 @@ from .report import Outcome, Report, StageStatus, outcome_from_findings
 from .resource_budget import ResourceBudget
 from .runtime import ToolRunner
 from .setting_choices import BibliographyBackend, Engine
+from .toolchain import install_hint
 
 # The built-in PDF stage inspects and compares one document, so these tools are required.
 _PDF_PIPELINE_TOOLS = frozenset(required_inspection_tools() | COMPARISON_TOOLS)
@@ -228,6 +229,8 @@ def _survey_tools(
         }
         report.tools[name] = tools[name]
         if executable is None:
+            hint = install_hint(name)
+            how = f" ({hint})" if hint else ""
             report.findings.append(
                 Finding(
                     "doctor.tool_missing",
@@ -235,8 +238,10 @@ def _survey_tools(
                     f"tool is unavailable: {name}.",
                     severity="error" if name in required else "warning",
                     status="inconclusive",
-                    suggestion=f"Install {name} explicitly and ensure it is on PATH, then rerun "
-                    "fledge doctor.",
+                    suggestion=(
+                        f"Install {name} explicitly{how} and ensure it is on PATH, then rerun "
+                        "fledge doctor."
+                    ),
                     details={"tool": name, "required": name in required},
                 )
             )

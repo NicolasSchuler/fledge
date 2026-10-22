@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 
 from latexprep.build_dependencies import (
     DependencyRequest,
@@ -81,7 +82,13 @@ class SubmissionDependenciesTests(ProjectTestCase):
             )
         )
 
-    def collect(self, *, complete: bool = True, max_bytes: int = 2_097_152):
+    def collect(
+        self,
+        *,
+        complete: bool = True,
+        max_bytes: int = 2_097_152,
+        tool_state: Path | None = None,
+    ):
         layout = BuildLayout(self.source, self.project.parent, self.project, self.output, self.cwd)
         return collect_submission_dependencies(
             DependencyRequest(
@@ -92,6 +99,7 @@ class SubmissionDependenciesTests(ProjectTestCase):
                 recorder_complete=complete,
                 resource_roots=(self.toolchain,),
                 max_bytes=max_bytes,
+                tool_state=tool_state,
             )
         )
 
@@ -150,6 +158,27 @@ class SubmissionDependenciesTests(ProjectTestCase):
         self.assertEqual(result.generated_inputs, 3)
         # Generated files the build read, relative to the directory that holds them.
         self.assertEqual(result.generated_reads, {"main.aux", "main.bbl", "article/rebuilt.dat"})
+
+    def test_tool_state_the_build_wrote_and_read_back_is_a_toolchain_input(self):
+        """luaotfload writes its font cache under the build's tool state (``TEXMFVAR``) and
+        reads it back, and the TeX recorder lists that read. The cache is toolchain evidence,
+        not an input outside the declared paths, so a LuaLaTeX build's evidence is complete.
+        """
+        cache = (
+            "../../.tool-state/invocation-x/texmf-var/luatex-cache/generic/fonts/otl/"
+            "lmroman10-regular.luc"
+        )
+        self.evidence((cache,), generated=(cache,))
+        self.assert_incomplete("outside declared")
+        tool_state = self.project.parent / ".tool-state"
+        result = self.collect(tool_state=tool_state)
+        self.assertEqual(result.inputs, {"article/main.tex"}, result.to_details())
+        self.assertEqual((result.toolchain_inputs, result.generated_inputs), (1, 0))
+        # A sibling of the tool state is still an input outside the declared paths.
+        self.evidence(("../../.tool-state-x/names.luc",))
+        result = self.collect(tool_state=tool_state)
+        self.assertIsNone(result.inputs, result.to_details())
+        self.assertIn("outside declared", str(result.to_details()["uncertainty"]))
 
     def test_new_project_outputs_and_rewritten_inputs_are_not_original_inputs(self):
         (self.cwd / "generated.tex").write_text("new generated input")

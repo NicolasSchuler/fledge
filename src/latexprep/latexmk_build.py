@@ -53,6 +53,7 @@ from .option_config import require_unique_strings, validate_scalars
 from .path_safety import is_relative_posix_path
 from .runtime import ToolRunner
 from .setting_choices import BibliographyBackend, Engine
+from .tool_launch import tool_state_directory
 
 # Only these policy-level log errors may be deselected. Tool failures, incomplete
 # output/recorder evidence, TeX errors and unresolved reruns remain build failures.
@@ -210,6 +211,7 @@ async def _build_once(request: BuildRequest, runner: ToolRunner, biber: BiberPla
             resource_roots=declared_roots,
             max_bytes=max_output_bytes,
             owned_inputs=(staged.hook,) if isinstance(staged, LoadedOptionsProbe) else (),
+            tool_state=tool_state_directory(layout.work),
         )
     )
     result.submission_inputs = submission.inputs

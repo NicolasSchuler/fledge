@@ -212,6 +212,26 @@ class BuildTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result.success)
         self.assertIn("build.external_dependency", {item.rule for item in result.findings})
 
+    async def test_tool_state_reads_keep_the_dependency_evidence_complete(self) -> None:
+        """The runner keeps each command's state under the workspace's ``.tool-state``; what
+        a tool writes there and reads back, such as the font cache of luaotfload, is toolchain
+        evidence, so the build still establishes the inputs the submission needs."""
+        work = (self.root / "build").resolve()
+        cache = work / ".tool-state/invocation-x/texmf-var/luatex-cache/generic/fonts/otl/lm.luc"
+        trace = (
+            f"INPUT {work / 'project/main.tex'}\nINPUT {cache}\nOUTPUT {cache}\n"
+            f"OUTPUT {work / 'output/main.pdf'}\n"
+        )
+        result = await build_project(
+            self.source, "main.tex", work, "lualatex", FakeBuildRunner(trace=trace)
+        )
+        self.assertTrue(result.success, result.findings)
+        self.assertEqual(result.submission_inputs, {"main.tex"})
+        dependencies = result.tools.submission_dependencies
+        assert dependencies is not None
+        self.assertEqual((dependencies.inputs, dependencies.toolchain_inputs), ({"main.tex"}, 1))
+        self.assertNotIn("build.submission_dependencies", {item.rule for item in result.findings})
+
     async def test_recorder_uses_command_roots_and_tool_metadata_is_a_snapshot(self) -> None:
         metadata = ToolVersion(("build tool test",), "/tools/build", ())
         declared = self.root / "toolchain"

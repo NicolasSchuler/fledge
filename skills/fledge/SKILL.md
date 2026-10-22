@@ -78,8 +78,10 @@ the JSON report's `execution.not_checked`; a pass covers only what ran.
 - `failed` means a detected problem; `inconclusive` means Fledge could not decide
   (for example an unsupported macro or a missing tool) — it is never a pass.
 - `BLD0xx` codes come from the TeX log: fix the source construct named in the
-  message, then rebuild. A `build.failed` finding carries the end of the TeX log in
-  its evidence (`details.log_tail` in JSON).
+  message, then rebuild. The end of the TeX log is in the evidence of the
+  `build.failed` finding, or of the `build.<stage>` finding (such as
+  `build.baseline`) when `latexmk` itself exited normally (`details.log_tail` in
+  JSON).
 - `TEX005`–`TEX007`, `BIB001`–`BIB005`, `CMP*` and other safety guards stay
   enforced even if deselected; fix the cause instead of ignoring them.
 - Do not change scientific content, citations or wording to silence a heuristic

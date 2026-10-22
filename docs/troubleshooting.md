@@ -110,7 +110,7 @@ no external tools and still works meanwhile.
 | Unknown setting or selector | The request error suggests the closest valid name, such as `max_pages` for `max_page`, or the closest codes for a selector. See [choose checks](configuration.md#choose-checks) and `fledge rules`. |
 | Output already exists | Choose a new path outside the input. |
 | Isolation failure or Biber preparation failure | See [installation](installation.md#tools) and [Biber on macOS](workflow-reference.md#biber-on-macos). |
-| Build failed | Read `details.log_tail` of the `build.failed` finding in the JSON or HTML report: the last 60 lines of the TeX log. |
+| Build failed | Read `details.log_tail` in the JSON or HTML report: the last 60 lines of the TeX log, on the `build.failed` finding, or on the `build.<stage>` finding (for example `build.baseline`) when `latexmk` itself exited normally. |
 | Missing or incomplete build trace | Resolve the reported build evidence. Preparation cannot choose package contents safely without a complete trace. |
 | A wanted extra file is omitted | List its source-relative path under [`[package] include`](configuration.md#package-contents). `--no-cleanup` does not retain unrelated files. |
 | `project.nonportable_filename` warning | A name that is not valid on every operating system was kept unchanged; rename it if the submission system rejects it. |

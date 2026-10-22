@@ -90,10 +90,7 @@ Live tests are opt-in with `FLEDGE_RUN_INTEGRATION=1`. Run them separately
 where application isolation and the relevant tools can actually start:
 
 ```sh
-FLEDGE_RUN_INTEGRATION=1 python -m pytest tests/test_integration.py \
-  tests/test_integration_checks.py tests/test_integration_packages.py \
-  tests/test_integration_backends.py tests/test_integration_realistic.py \
-  tests/test_runtime_inputs.py tests/test_runtime_monitoring.py -v
+FLEDGE_RUN_INTEGRATION=1 python -m pytest tests -m live -v
 ```
 
 Every live test carries the `@live_test(...)` decorator from `tests/support.py`,
@@ -102,7 +99,19 @@ Select them with `-m live`, or leave them out of a run with `-m 'not live'`.
 
 `tests.test_integration_realistic` builds, checks and prepares projects with
 constructs found in ordinary papers and journal templates (template classes,
-`[0,1)` intervals, several matching graphics, a spare `.bib`, Biber).
+`[0,1)` intervals, several matching graphics, a spare `.bib`, Biber). The other
+`tests.test_integration_*` modules each run whole commands against real tools for
+one theme: inputs (ZIP input, debris, awkward paths, identical output across
+execution modes), policies (blocked runs, page limits, presets, `init`),
+comparisons (reference PDFs, accepted exceptions with HTML previews, grayscale
+previews, repeated baselines), sources (hostile constructs, `import` and
+`subfiles`, local classes and styles, EPS figures), bibliography (Biber
+transformations, `.bbl` inlining), engines (XeLaTeX, LuaLaTeX, mixed-engine
+packages, failing PDF policies) and runtime (timeouts, `fmt` and `doctor`, an
+interrupted build, the documented CI recipe). A test that needs a LaTeX package
+BasicTeX may lack probes for it with `kpsewhich` and skips with a reason.
+`tests/test_process_boundary.py` runs the command as a separate process without
+TeX: exit codes, stream separation and the offline example page.
 
 Tests distinguish component and workflow tests with controlled tool doubles from
 real tool execution. Controlled doubles establish component behavior, not live
@@ -149,12 +158,14 @@ module-wide limit.
 
 ## Golden outputs
 
-`tests/test_golden_outputs.py` compares three outputs with files in `tests/golden/`:
-the `--help` text of every command (at width 100, without colour), the JSON report
-of a `check` run with controlled backends, and its terminal summary. The JSON
-report is normalised first: paths, the version and measured times and resource
-figures become placeholders, so the golden changes only when the report does. The
-same report is validated against `docs/_static/report.schema.json`.
+`tests/test_golden_outputs.py` compares outputs with files in `tests/golden/`:
+the `--help` text of every command (at width 100, without colour), and the JSON
+report of a `check` run with controlled backends together with its terminal
+summary and its compact, CI-annotation and HTML renderings. The JSON report and
+the run details inside the HTML are normalised first: paths, the version and
+measured times and resource figures become placeholders, so a golden changes only
+when the output does. The same report is validated against
+`docs/_static/report.schema.json`.
 
 After an intended change of an option, a message or the report, regenerate the
 files and review the diff before committing:
@@ -177,7 +188,8 @@ runs on pushes to `main`, pull requests, manual dispatch and weekly. Every run:
 - builds the documentation with `-n -W`, as the Deploy documentation workflow does,
   so a broken link fails the pull request instead of the merge;
 - builds the source archive and wheel, installs the wheel into a fresh
-  environment, runs `fledge --version` from another directory, and runs
+  environment, runs `fledge --version` from another directory, inspects the
+  [offline example](examples.md) with that installation, and runs
   `tests/test_docs.py` and `tests/test_packaging.py` from the extracted source
   archive, so a file missing from either distribution fails the pull request;
 - runs the unit tests with pytest on macOS and Ubuntu with Python 3.11, 3.12 and 3.13.
@@ -256,10 +268,11 @@ reaches `main`.
    from the Actions tab when the release depends on them.
 3. Optional dry run: on the Release workflow page choose **Run workflow** on
    `main`. It builds the source archive and wheel, installs the wheel into a fresh
-   environment, checks `fledge --version` and the packaged presets, and uploads
-   the files as the `python-distributions` artifact, but never publishes.
+   environment, checks `fledge --version`, the offline example and the packaged
+   presets, and uploads the files as the `python-distributions` artifact, but
+   never publishes.
 4. Create a GitHub release: choose or create the tag `vX.Y.Z` (for the current
-   version, `v0.3.0`) on `main` and publish the release. Publishing starts the
+   version, `v0.3.1`) on `main` and publish the release. Publishing starts the
    workflow, which verifies the tag, builds, smoke-tests and then uploads to PyPI
    from the `pypi` environment. Approve the deployment if you added a reviewer.
 5. Check the result in a clean environment: `pipx install fledge-latex==X.Y.Z`,

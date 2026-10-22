@@ -103,7 +103,7 @@ jobs:
           python -m pip install --disable-pip-version-check 'build>=1.2,<2' 'twine>=6,<7'
           python -m build --outdir dist
           python -m twine check --strict dist/*
-      - name: Install the wheel in a fresh environment and run fledge --version
+      - name: Install the wheel in a fresh environment and run fledge on the offline example
         run: python scripts/release_checks.py wheel dist
       - name: Run the documentation and packaging tests from the source distribution
         run: |
@@ -173,7 +173,8 @@ jobs:
       - name: Install TeX packages
         run: |
           sudo /Library/TeX/texbin/tlmgr update --self
-          sudo /Library/TeX/texbin/tlmgr install latexmk biber biblatex hyperref
+          sudo /Library/TeX/texbin/tlmgr install latexmk biber biblatex hyperref \
+            import subfiles embedfile
       - name: Show tool versions
         run: |
           latexmk -v | head -n 2
@@ -195,12 +196,19 @@ jobs:
           tests/test_integration_checks.py
           tests/test_integration_packages.py
           tests/test_integration_backends.py
+          tests/test_integration_bibliography.py
+          tests/test_integration_comparisons.py
+          tests/test_integration_engines.py
+          tests/test_integration_inputs.py
+          tests/test_integration_policies.py
+          tests/test_integration_runtime.py
+          tests/test_integration_sources.py
           tests/test_loaded_options.py
           tests/test_pdf.py
           tests/test_pdf_checks.py
           tests/test_runtime_inputs.py
           tests/test_runtime_monitoring.py
-          -v -ra -p no:cacheprovider
+          -v -ra --durations=25 -p no:cacheprovider
 
   # Live Linux tests: real builds under the Bubblewrap sandbox on a GitHub-hosted
   # Ubuntu runner, with TeX Live, Biber and Poppler from apt, weekly and on manual
@@ -245,14 +253,16 @@ jobs:
       # prefixes such as /usr/share/texlive and /var/lib/texmf (see
       # _LINUX_SYSTEM_RESOURCES in src/latexprep/runtime.py). The latex-recommended
       # package carries etoolbox, which biblatex needs; bibtex-extra carries
-      # biblatex itself. The engines xelatex and lualatex come from their packages.
+      # biblatex itself, and latex-extra the import, subfiles and embedfile packages
+      # that the live source and engine tests use. The engines xelatex and lualatex
+      # come from their packages.
       - name: Install TeX, PDF tools and Bubblewrap
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
             bubblewrap latexmk biber poppler-utils \
             texlive-latex-base texlive-latex-recommended texlive-fonts-recommended \
-            texlive-bibtex-extra texlive-xetex texlive-luatex
+            texlive-bibtex-extra texlive-latex-extra texlive-xetex texlive-luatex
       # Ubuntu does not package tex-fmt, but the formatting step of the live
       # preparation test needs it, and the sandbox accepts only tools under /usr.
       # Install a pinned release binary, verified against its SHA-256, into
@@ -311,9 +321,16 @@ jobs:
           tests/test_integration_checks.py
           tests/test_integration_packages.py
           tests/test_integration_backends.py
+          tests/test_integration_bibliography.py
+          tests/test_integration_comparisons.py
+          tests/test_integration_engines.py
+          tests/test_integration_inputs.py
+          tests/test_integration_policies.py
+          tests/test_integration_runtime.py
+          tests/test_integration_sources.py
           tests/test_integration_realistic.py
           tests/test_loaded_options.py
           tests/test_pdf.py
           tests/test_pdf_checks.py
           tests/test_runtime_backends.py
-          -v -ra -p no:cacheprovider
+          -v -ra --durations=25 -p no:cacheprovider

@@ -36,6 +36,21 @@ class ProjectTests(unittest.TestCase):
         path.write_bytes(content)
         return path
 
+    @unittest.skipIf(
+        not hasattr(os, "geteuid") or os.geteuid() == 0,
+        "permission bits do not stop this user from reading a file",
+    )
+    def test_an_unreadable_nested_file_is_named_by_its_project_path(self):
+        """The import opens each path component below a directory descriptor, which reports
+        only the bare name it was given; the error names the path within the project."""
+        self.write_file("main.tex", b"\\input{sections/intro}\n")
+        unreadable = self.write_file("sections/intro.tex", b"The introduction.\n")
+        unreadable.chmod(0)
+        self.addCleanup(unreadable.chmod, 0o644)
+        with self.assertRaises(PreparationError) as caught:
+            import_project(self.source, self.base / "import")
+        self.assertIn("sections/intro.tex cannot be read", str(caught.exception))
+
     def make_zip(
         self,
         entries: list[tuple[str | zipfile.ZipInfo, bytes]],

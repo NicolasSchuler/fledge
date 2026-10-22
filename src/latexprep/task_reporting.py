@@ -18,6 +18,7 @@ from .build_checks import (
     check_tex_distribution,
     qualify_citation_findings,
 )
+from .build_log import log_tail
 from .build_result import BuildResult
 from .config import Settings
 from .document_tasks import BASELINE_STAGE, TaskName
@@ -199,6 +200,20 @@ class TaskReporter:
                     f"Required {stage} build did not succeed",
                     severity="error",
                     status="inconclusive",
+                    details=_failed_build_details(result, findings),
                 )
             )
         return built
+
+
+def _failed_build_details(result: BuildResult, findings: list[Finding]) -> dict[str, object]:
+    """The log tail of a failed build, unless one of its findings already carries it.
+
+    ``build.failed`` and ``build.missing_pdf`` attach the tail when latexmk exits with an
+    error or leaves no PDF. When latexmk exits normally and error-level log findings
+    fail the build, no finding does, so the stage's own finding carries it: the report
+    promises a failed build's finding the last lines of the TeX log, once.
+    """
+    if not result.log or any("log_tail" in finding.details for finding in findings):
+        return {}
+    return {"log_tail": log_tail(result.log)}

@@ -245,6 +245,7 @@ class ParallelWorkflowTests(unittest.IsolatedAsyncioTestCase):
             tools=BuildTools(),
             command=[],
             generated_reads=frozenset(),
+            log="",
         )
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "input"

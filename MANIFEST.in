@@ -7,7 +7,7 @@ recursive-include src/latexprep/presets *.toml
 include src/latexprep/loaded_options_hook.tex
 include src/latexprep/report.css
 recursive-include tests *.py
-recursive-include tests/golden *.txt *.json
+recursive-include tests/golden *.txt *.json *.html
 recursive-include scripts *.py
 prune docs/_build
 recursive-include skills *.md

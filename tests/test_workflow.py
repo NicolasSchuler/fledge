@@ -13,7 +13,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from latexprep.build_result import BuildTools
+from latexprep.build_result import BuildResult, BuildTools
 from latexprep.cli import main
 from latexprep.config import Settings
 from latexprep.core import run_job
@@ -151,6 +151,40 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(result.outcome, "blocked")
             self.assertTrue(any(item.rule == "source.edit_marker" for item in result.findings))
+
+    async def test_failed_baseline_finding_carries_the_log_tail_when_no_other_finding_does(self):
+        """docs/reports.md: a failed build's finding carries the last lines of the TeX log.
+        When latexmk exits normally and error-level log findings fail the build, no finding
+        of the build has the tail, so build.baseline carries it; when build.failed already
+        does, build.baseline does not repeat it."""
+        log = "log line\n! Emergency stop."
+        latexmk_failed = Finding(
+            "build.failed",
+            "Build tool exited with status 12.",
+            severity="error",
+            details={"log_tail": "! Emergency stop."},
+        )
+        cases = (
+            ("latexmk exited normally", [], {"build.baseline": log}),
+            ("latexmk failed", [latexmk_failed], {"build.failed": "! Emergency stop."}),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            sectioned_project(base / "input")
+            for case, findings, expected in cases:
+                with self.subTest(case=case):
+                    failure = BuildResult(success=False, findings=findings, log=log)
+                    result = await run_job(
+                        JobRequest("check", base / "input", Settings()),
+                        backends=controlled_backends(build=failure),
+                    )
+                    self.assertEqual(result.outcome, "blocked")
+                    tails = {
+                        item.rule: item.details["log_tail"]
+                        for item in result.findings
+                        if "log_tail" in item.details
+                    }
+                    self.assertEqual(tails, expected)
 
     async def test_bibliography_command_skips_root_discovery_and_the_reference_pdf(self):
         with tempfile.TemporaryDirectory() as directory:

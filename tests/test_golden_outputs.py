@@ -1,8 +1,9 @@
 """Golden outputs: the help of every command and the report of a controlled check run.
 
-The expected texts live in ``tests/golden``. After an intended change of an output, regenerate
-them with ``FLEDGE_UPDATE_GOLDEN=1 python -m pytest tests/test_golden_outputs.py`` and review
-the diff; see "Golden outputs" in ``docs/development.md``.
+The report is compared in every output format: JSON, terminal, compact, CI annotations and
+HTML. The expected texts live in ``tests/golden``. After an intended change of an output,
+regenerate them with ``FLEDGE_UPDATE_GOLDEN=1 python -m pytest tests/test_golden_outputs.py``
+and review the diff; see "Golden outputs" in ``docs/development.md``.
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ import asyncio
 import json
 import os
 import unittest
+from dataclasses import replace
 from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
@@ -24,8 +26,10 @@ from latexprep.cli import cli
 from latexprep.config import Settings
 from latexprep.core import run_job
 from latexprep.findings import Finding
+from latexprep.html_text import escape_html
 from latexprep.job_context import JobRequest
-from latexprep.report import Report
+from latexprep.report import Report, redact_report
+from latexprep.report_formats import OutputFormat, render_redacted_document
 from latexprep.terminal_report import print_report
 from tests.support import (
     GOLDEN_DIRECTORY,
@@ -168,11 +172,59 @@ class ControlledCheckGoldenTests(ProjectTestCase):
         # Rich pads wrapped lines; trailing spaces are not part of what a reader sees.
         return "".join(line.rstrip() + "\n" for line in text.splitlines())
 
+    def report_with_placeholders(self) -> Report:
+        """A copy of the report whose measured times and resource figures are placeholders.
+
+        They are in ``execution`` and ``stages`` only, and are replaced there by the rules of
+        the JSON golden, so the renderers format the copy as they would format any report.
+        The original report is left unchanged.
+        """
+        return replace(
+            self.report,
+            execution=normalise_report_data(self.report.execution, {}, measured=MEASURED_SECTIONS),
+            stages=normalise_report_data(self.report.stages, {}, measured=MEASURED_SECTIONS),
+        )
+
+    def rendered(self, output_format: OutputFormat) -> str:
+        """The copy with placeholders as ``--output-format`` renders it, ending with a newline."""
+        report = redact_report(self.report_with_placeholders())
+        text = render_redacted_document(report, output_format)
+        return text if text.endswith("\n") else text + "\n"
+
+    def plain_text(self, output_format: OutputFormat) -> str:
+        """The compact or CI rendering with paths and the version replaced."""
+        text = self.rendered(output_format)
+        for old, new in self.replacements().items():
+            text = text.replace(old, new)
+        return text
+
+    def html_text(self) -> str:
+        """The HTML rendering with paths and the version replaced, one tag per line.
+
+        Apart from its style sheet and preformatted evidence the page is a single line, so a
+        line break is added between adjacent tags to let a change show as a line diff. The
+        renderer writes none there, which this asserts, so the added breaks hide nothing.
+        """
+        text = self.rendered(OutputFormat.HTML)
+        self.assertNotIn(">\n<", text, "the renderer now breaks lines between tags")
+        for old, new in self.replacements().items():
+            text = text.replace(old, escape_html(new))
+        return text.replace("><", ">\n<")
+
     def test_the_json_report_matches_its_golden_file(self) -> None:
         assert_matches_golden(self, "check-report.json", self.normalised_json())
 
     def test_the_terminal_summary_matches_its_golden_file(self) -> None:
         assert_matches_golden(self, "check-terminal.txt", self.terminal_text())
+
+    def test_the_compact_report_matches_its_golden_file(self) -> None:
+        assert_matches_golden(self, "check-compact.txt", self.plain_text(OutputFormat.COMPACT))
+
+    def test_the_ci_annotations_match_their_golden_file(self) -> None:
+        assert_matches_golden(self, "check-ci.txt", self.plain_text(OutputFormat.CI))
+
+    def test_the_html_report_matches_its_golden_file(self) -> None:
+        assert_matches_golden(self, "check-report.html", self.html_text())
 
     def test_the_report_conforms_to_the_published_schema(self) -> None:
         schema = json.loads(SCHEMA.read_text(encoding="utf-8"))
@@ -184,6 +236,13 @@ class ControlledCheckGoldenTests(ProjectTestCase):
         self.assertEqual(list(normalised), list(original))
         self.assertEqual(normalised["findings"], original["findings"])
         self.assertEqual(normalised["settings"], original["settings"])
+
+    def test_the_copy_with_placeholders_keeps_no_measured_value(self) -> None:
+        """The compact, CI and HTML goldens render a copy with placeholders in ``execution``
+        and ``stages``; normalising its JSON again changes nothing, so no measured time or
+        resource figure elsewhere in the report can make those goldens vary."""
+        data = json.loads(self.report_with_placeholders().to_json())
+        self.assertEqual(normalise_report_data(data, {}, measured=MEASURED_SECTIONS), data)
 
 
 if __name__ == "__main__":

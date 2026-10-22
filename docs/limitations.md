@@ -23,6 +23,18 @@ direct. No Fledge result guarantees that a venue will accept a submission.
 - **Optional `qpdf` and MuPDF checks** are tested against recorded tool output,
   not against the live tools. If either tool is missing, its checks are
   reported as incomplete.
+- **Builds never generate bitmap fonts.** The build environment disables
+  `mktexpk`, so a font that exists only as METAFONT source, for example
+  T1-encoded Computer Modern without the `cm-super` package, ends the build
+  with a missing-font finding instead of a PDF with bitmap glyphs. Install the
+  Type 1 fonts (`tlmgr install cm-super`) or use a font that has them.
+- **A double quote in the temporary directory path** makes `latexmk` refuse to
+  build. Fledge reports the failed build; point `TMPDIR` at a path without
+  quotes. Spaces and non-ASCII characters in that path are fine.
+- **LuaLaTeX builds start without a font cache.** Every build runs with an empty
+  `TEXMFVAR`, so `luaotfload` rebuilds its font database and font caches each
+  time. LuaLaTeX documents therefore build more slowly than with pdfLaTeX or
+  XeLaTeX; raise `timeout_seconds` if a build that loads many fonts is stopped.
 
 ## Venue rules
 

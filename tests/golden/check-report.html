@@ -1,0 +1,1116 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
+<title>Fledge check report: main.tex</title>
+<style>:root{color-scheme:light dark}
+body{font:16px/1.5 system-ui,sans-serif;max-width:1100px;margin:2rem auto;padding:0 1rem;color:#17202a;background:#fafafa}
+article,section{margin:1rem 0;padding:1rem;border:1px solid #bcc6cc;border-radius:.35rem;background:white}
+h1,h2,h3{line-height:1.2}
+pre,td{white-space:pre-wrap;overflow-wrap:anywhere}
+pre{overflow:auto}
+table{width:100%;border-collapse:collapse;table-layout:fixed}
+td,th{text-align:left;vertical-align:top;border:1px solid #cad1d6;padding:.4rem}
+.removed{background:#ffe8e8}
+.added{background:#e3f6e7}
+.context{background:#edf0f3}
+.review{border-left:4px solid #9a6200;padding:.5rem}
+.location{color:#42515e}
+svg{max-height:400px;max-width:100%;width:340px}
+.paper{fill:white;stroke:#526474;stroke-width:1}
+.region{fill:#eaa43b;fill-opacity:.3;stroke:#9a4900;stroke-width:1}
+figcaption{font-size:.85rem}
+a{color:#005599}
+.page-pair{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1rem}
+.page-pair figure{margin:0;min-width:0}
+.page-pair img{display:block;width:100%;height:auto}
+.page-pair figcaption{font-weight:600;margin-bottom:.4rem}
+.page-navigation{display:flex;flex-wrap:wrap;gap:.5rem 1rem}
+.page-navigation a,summary{padding:.25rem 0}
+summary{cursor:pointer}
+a:focus-visible,summary:focus-visible{outline:3px solid #006b9a;outline-offset:3px}
+.difference-overlay{position:relative;isolation:isolate;background:black;max-width:700px}
+.difference-overlay img{display:block;width:100%;height:auto}
+.difference-overlay .difference-layer{position:absolute;inset:0;mix-blend-mode:difference}
+caption{text-align:left;font-weight:600;padding:.5rem 0}
+@media(max-width:650px){body{margin:1rem auto;padding:0 .5rem}
+article,section{padding:.65rem}
+.page-pair{grid-template-columns:1fr}
+.file-table{overflow-x:auto}
+.file-table table{min-width:480px}}
+@media(prefers-color-scheme:dark){
+body{color:#e4e8ec;background:#12161a}
+article,section{border-color:#3b4650;background:#1b2128}
+td,th{border-color:#3b4650}
+.removed{background:#4d2327}
+.added{background:#1f4128}
+.context{background:#27303a}
+.location{color:#a9b6c2}
+a{color:#7fbaf2}
+.paper{fill:#1b2128;stroke:#8696a5}
+.region{fill:#eaa43b;fill-opacity:.35;stroke:#f2b866}
+a:focus-visible,summary:focus-visible{outline-color:#7cc7f5}}
+@media print{
+body{max-width:none;margin:0;color:black;background:white}
+article,section{break-inside:avoid;border-color:#888;background:white}
+a{color:inherit}
+.page-navigation{display:none}
+.removed{background:#f3d6d6}
+.added{background:#d4ecd9}}
+</style>
+</head>
+<body>
+<header>
+<h1>Passed with advisories</h1>
+<p>selected source, bibliography, privacy, isolated build and PDF checks</p>
+<p>Results cover the stated checks. Review decisions retain the original evidence; they do not prove compliance or supply missing verification.</p>
+<p>Document: main.tex</p>
+</header>
+<main>
+<h2>Findings and actions</h2>
+<article id="finding-1">
+<h3>BIB102 — Apparently uncited bibliography entries</h3>
+<p>warning / failed</p>
+<p class="location">references.bib:2 [bibliography coverage and fields]</p>
+<p>1 of 2 entries have no scanned use: unused2020</p>
+<p>Evidence: references.bib:2</p>
+<p>
+<strong>Next action:</strong> Review each candidate against all intended documents, filters and bibliography backend behavior before considering removal. This check never prunes a bibliography.</p>
+<details>
+<summary>Recorded evidence</summary>
+<pre>{
+  &quot;documents&quot;: [
+    &quot;main.tex&quot;
+  ],
+  &quot;entries&quot;: [
+    {
+      &quot;entry&quot;: &quot;unused2020&quot;,
+      &quot;entry_type&quot;: &quot;misc&quot;,
+      &quot;line&quot;: 2,
+      &quot;path&quot;: &quot;references.bib&quot;
+    }
+  ],
+  &quot;evidence_kind&quot;: &quot;heuristic&quot;,
+  &quot;network&quot;: &quot;not used&quot;,
+  &quot;resources&quot;: [
+    &quot;references.bib&quot;
+  ],
+  &quot;scope&quot;: &quot;selected literal document graph&quot;,
+  &quot;source_expansion&quot;: &quot;not performed&quot;,
+  &quot;stage&quot;: &quot;bibliography coverage and fields&quot;,
+  &quot;uncertainty&quot;: []
+}</pre>
+</details>
+</article>
+<article id="finding-2">
+<h3>BLD105 — Local TeX distribution release</h3>
+<p>info / inconclusive</p>
+<p class="location">project [baseline]</p>
+<p>The TeX distribution is unknown: the build recorded no engine version output.</p>
+<p>
+<strong>Next action:</strong> Resolve the missing or ambiguous evidence described above, then repeat this check.</p>
+<details>
+<summary>Recorded evidence</summary>
+<pre>{
+  &quot;engine&quot;: null,
+  &quot;evidence_kind&quot;: &quot;direct&quot;,
+  &quot;stage&quot;: &quot;baseline&quot;,
+  &quot;version_banner&quot;: null
+}</pre>
+</details>
+</article>
+<article id="finding-3">
+<h3>BIB105 — Bibliography page-range syntax</h3>
+<p>info / not applicable</p>
+<p class="location">project [bibliography coverage and fields]</p>
+<p>No supported items to check.</p>
+<details>
+<summary>Recorded evidence</summary>
+<pre>{
+  &quot;checked&quot;: 0,
+  &quot;documents&quot;: [
+    &quot;main.tex&quot;
+  ],
+  &quot;evidence_kind&quot;: &quot;derived&quot;,
+  &quot;network&quot;: &quot;not used&quot;,
+  &quot;resources&quot;: [
+    &quot;references.bib&quot;
+  ],
+  &quot;scope&quot;: &quot;selected literal document graph&quot;,
+  &quot;source_expansion&quot;: &quot;not performed&quot;,
+  &quot;stage&quot;: &quot;bibliography coverage and fields&quot;
+}</pre>
+</details>
+</article>
+<article id="finding-4">
+<h3>BIB106 — Bibliography URL syntax</h3>
+<p>info / not applicable</p>
+<p class="location">project [bibliography coverage and fields]</p>
+<p>No supported items to check.</p>
+<details>
+<summary>Recorded evidence</summary>
+<pre>{
+  &quot;checked&quot;: 0,
+  &quot;documents&quot;: [
+    &quot;main.tex&quot;
+  ],
+  &quot;evidence_kind&quot;: &quot;derived&quot;,
+  &quot;network&quot;: &quot;not used&quot;,
+  &quot;resources&quot;: [
+    &quot;references.bib&quot;
+  ],
+  &quot;scope&quot;: &quot;selected literal document graph&quot;,
+  &quot;source_expansion&quot;: &quot;not performed&quot;,
+  &quot;stage&quot;: &quot;bibliography coverage and fields&quot;
+}</pre>
+</details>
+</article>
+<article id="finding-5">
+<h3>TEX009 — Generated bibliography shipped with the sources</h3>
+<p>info / not applicable</p>
+<p class="location">main.tex:5 [submission readiness]</p>
+<p>main.tex reads references.bib through BibTeX, but main.bbl is not in the package. Only services that compile without running BibTeX or Biber, such as arXiv, need it; set submission_checks.require_bbl = true (the arxiv preset does) to require it.</p>
+<details>
+<summary>Recorded evidence</summary>
+<pre>{
+  &quot;backend&quot;: &quot;bibtex&quot;,
+  &quot;bibliography_files&quot;: [
+    &quot;references.bib&quot;
+  ],
+  &quot;evidence_kind&quot;: &quot;derived&quot;,
+  &quot;expected_bbl&quot;: &quot;main.bbl&quot;,
+  &quot;other_bbl_files&quot;: [],
+  &quot;require_bbl&quot;: false,
+  &quot;scope&quot;: &quot;Literal bibliography declarations in the selected source graph; the shipped file set is the supplied or prepared directory.&quot;,
+  &quot;stage&quot;: &quot;submission readiness&quot;
+}</pre>
+</details>
+</article>
+<article id="finding-6">
+<h3>pdf.page_count — pdf / page count</h3>
+<p>info / passed</p>
+<p class="location">project [baseline PDF inspection]</p>
+<p>The PDF has 1 page.</p>
+<details>
+<summary>Recorded evidence</summary>
+<pre>{
+  &quot;evidence_kind&quot;: &quot;direct&quot;,
+  &quot;stage&quot;: &quot;baseline PDF inspection&quot;
+}</pre>
+</details>
+</article>
+<article id="finding-7">
+<h3>PRV007 — Comments carrying private-note markers</h3>
+<p>info / passed</p>
+<p class="location">project [submission readiness]</p>
+<p>No private-note markers in TeX comments.</p>
+<details>
+<summary>Recorded evidence</summary>
+<pre>{
+  &quot;evidence_kind&quot;: &quot;direct&quot;,
+  &quot;issues&quot;: [],
+  &quot;matches&quot;: [],
+  &quot;scope&quot;: &quot;TeX comments in supplied .tex/.ltx/.latex files, outside common literal regions; only locations and marker categories are reported.&quot;,
+  &quot;stage&quot;: &quot;submission readiness&quot;
+}</pre>
+</details>
+</article>
+<article id="finding-8">
+<h3>BIB101 — Source citation coverage</h3>
+<p>info / passed</p>
+<p class="location">main.tex: project [bibliography coverage and fields]</p>
+<p>Supported literal citation coverage: no issue found in 1 supported item(s).</p>
+<details>
+<summary>Recorded evidence</summary>
+<pre>{
+  &quot;checked&quot;: 1,
+  &quot;document&quot;: &quot;main.tex&quot;,
+  &quot;documents&quot;: [
+    &quot;main.tex&quot;
+  ],
+  &quot;evidence_kind&quot;: &quot;derived&quot;,
+  &quot;network&quot;: &quot;not used&quot;,
+  &quot;resources&quot;: [
+    &quot;references.bib&quot;
+  ],
+  &quot;scope&quot;: &quot;selected literal document graph&quot;,
+  &quot;source_expansion&quot;: &quot;not performed&quot;,
+  &quot;stage&quot;: &quot;bibliography coverage and fields&quot;
+}</pre>
+</details>
+</article>
+<details>
+<summary>Run settings, stages, tools and artifacts</summary>
+<pre>{
+  &quot;artifacts&quot;: {},
+  &quot;execution&quot;: {
+    &quot;check_selection&quot;: {
+      &quot;always_enforced_when_applicable&quot;: [
+        &quot;BIB001&quot;,
+        &quot;BIB002&quot;,
+        &quot;BIB004&quot;,
+        &quot;BIB005&quot;,
+        &quot;BIB008&quot;,
+        &quot;BIB009&quot;,
+        &quot;BIB201&quot;,
+        &quot;BIB202&quot;,
+        &quot;BIB203&quot;,
+        &quot;BIB204&quot;,
+        &quot;BIB205&quot;,
+        &quot;BIB206&quot;,
+        &quot;BLD008&quot;,
+        &quot;BLD009&quot;,
+        &quot;BLD010&quot;,
+        &quot;BLD201&quot;,
+        &quot;BLD202&quot;,
+        &quot;CMP001&quot;,
+        &quot;CMP002&quot;,
+        &quot;CMP003&quot;,
+        &quot;CMP101&quot;,
+        &quot;FMT002&quot;,
+        &quot;FMT003&quot;,
+        &quot;FMT004&quot;,
+        &quot;FMT101&quot;,
+        &quot;FMT102&quot;,
+        &quot;FMT103&quot;,
+        &quot;NET008&quot;,
+        &quot;PKG001&quot;,
+        &quot;PKG002&quot;,
+        &quot;PKG003&quot;,
+        &quot;PKG004&quot;,
+        &quot;PKG006&quot;,
+        &quot;PKG007&quot;,
+        &quot;PKG008&quot;,
+        &quot;PKG201&quot;,
+        &quot;PKG301&quot;,
+        &quot;PKG302&quot;,
+        &quot;PKG303&quot;,
+        &quot;PRV101&quot;,
+        &quot;PRV102&quot;,
+        &quot;RPT101&quot;,
+        &quot;RPT102&quot;,
+        &quot;RPT103&quot;,
+        &quot;TEX005&quot;,
+        &quot;TEX006&quot;,
+        &quot;TEX007&quot;,
+        &quot;TEX201&quot;,
+        &quot;TEX202&quot;,
+        &quot;TEX203&quot;,
+        &quot;TEX301&quot;,
+        &quot;TEX302&quot;,
+        &quot;TEX303&quot;,
+        &quot;TEX304&quot;,
+        &quot;TEX305&quot;,
+        &quot;TEX306&quot;,
+        &quot;TEX307&quot;,
+        &quot;TEX308&quot;,
+        &quot;TEX309&quot;,
+        &quot;TEX310&quot;,
+        &quot;TEX311&quot;,
+        &quot;TEX312&quot;,
+        &quot;TEX313&quot;,
+        &quot;TEX314&quot;,
+        &quot;TEX320&quot;,
+        &quot;TEX321&quot;,
+        &quot;TEX322&quot;,
+        &quot;TEX323&quot;,
+        &quot;TEX324&quot;,
+        &quot;TEX325&quot;,
+        &quot;TEX326&quot;,
+        &quot;TEX327&quot;
+      ],
+      &quot;ignore&quot;: [],
+      &quot;select&quot;: [
+        &quot;ALL&quot;
+      ]
+    },
+    &quot;elapsed_seconds&quot;: &quot;&lt;seconds&gt;&quot;,
+    &quot;not_checked&quot;: [
+      {
+        &quot;area&quot;: &quot;anonymity&quot;,
+        &quot;codes&quot;: [
+          &quot;PRV001&quot;,
+          &quot;PRV002&quot;
+        ],
+        &quot;label&quot;: &quot;anonymity&quot;,
+        &quot;settings&quot;: [
+          &quot;submission_checks.identity_terms&quot;
+        ]
+      },
+      {
+        &quot;area&quot;: &quot;page_limit&quot;,
+        &quot;codes&quot;: [
+          &quot;PDF001&quot;
+        ],
+        &quot;label&quot;: &quot;page limit&quot;,
+        &quot;settings&quot;: [
+          &quot;max_pages&quot;
+        ]
+      },
+      {
+        &quot;area&quot;: &quot;archive_size&quot;,
+        &quot;codes&quot;: [
+          &quot;PKG105&quot;
+        ],
+        &quot;label&quot;: &quot;ZIP size limit&quot;,
+        &quot;settings&quot;: [
+          &quot;submission_checks.max_archive_bytes&quot;
+        ]
+      },
+      {
+        &quot;area&quot;: &quot;forbidden_packages&quot;,
+        &quot;codes&quot;: [
+          &quot;TEX103&quot;,
+          &quot;BLD102&quot;
+        ],
+        &quot;label&quot;: &quot;forbidden packages&quot;,
+        &quot;settings&quot;: [
+          &quot;forbidden_packages&quot;,
+          &quot;build_checks.allowed_loaded_packages&quot;,
+          &quot;build_checks.forbidden_loaded_packages&quot;,
+          &quot;build_checks.required_loaded_packages&quot;
+        ]
+      },
+      {
+        &quot;area&quot;: &quot;font_embedding&quot;,
+        &quot;codes&quot;: [
+          &quot;PDF104&quot;,
+          &quot;PDF105&quot;
+        ],
+        &quot;label&quot;: &quot;strict font embedding&quot;,
+        &quot;settings&quot;: [
+          &quot;require_embedded_fonts&quot;,
+          &quot;forbid_type3_fonts&quot;
+        ]
+      },
+      {
+        &quot;area&quot;: &quot;image_resolution&quot;,
+        &quot;codes&quot;: [
+          &quot;PDF103&quot;
+        ],
+        &quot;label&quot;: &quot;image resolution&quot;,
+        &quot;settings&quot;: [
+          &quot;min_image_dpi&quot;
+        ]
+      },
+      {
+        &quot;area&quot;: &quot;other_opt_in_checks&quot;,
+        &quot;codes&quot;: [
+          &quot;BIB103&quot;,
+          &quot;BIB104&quot;,
+          &quot;BIB107&quot;,
+          &quot;BIB108&quot;,
+          &quot;BIB109&quot;,
+          &quot;BIB110&quot;,
+          &quot;BLD101&quot;,
+          &quot;BLD103&quot;,
+          &quot;BLD104&quot;,
+          &quot;BLD105&quot;,
+          &quot;BLD301&quot;,
+          &quot;MAN001&quot;,
+          &quot;MAN002&quot;,
+          &quot;MAN003&quot;,
+          &quot;MAN004&quot;,
+          &quot;MAN005&quot;,
+          &quot;MAN006&quot;,
+          &quot;MAN007&quot;,
+          &quot;MAN008&quot;,
+          &quot;MAN009&quot;,
+          &quot;MAN010&quot;,
+          &quot;MAN011&quot;,
+          &quot;MAN012&quot;,
+          &quot;MAN013&quot;,
+          &quot;MAN014&quot;,
+          &quot;MAN015&quot;,
+          &quot;MAN016&quot;,
+          &quot;MAN017&quot;,
+          &quot;MAN201&quot;,
+          &quot;NET001&quot;,
+          &quot;NET002&quot;,
+          &quot;NET003&quot;,
+          &quot;NET004&quot;,
+          &quot;NET005&quot;,
+          &quot;NET006&quot;,
+          &quot;NET007&quot;,
+          &quot;PDF101&quot;,
+          &quot;PDF102&quot;,
+          &quot;PDF106&quot;,
+          &quot;PDF107&quot;,
+          &quot;PDF108&quot;,
+          &quot;PDF109&quot;,
+          &quot;PDF201&quot;,
+          &quot;PDF202&quot;,
+          &quot;PDF203&quot;,
+          &quot;PDF204&quot;,
+          &quot;PDF205&quot;,
+          &quot;PDF206&quot;,
+          &quot;PDF207&quot;,
+          &quot;PDF208&quot;,
+          &quot;PDF209&quot;,
+          &quot;PDF210&quot;,
+          &quot;PDF211&quot;,
+          &quot;PDF212&quot;,
+          &quot;PDF213&quot;,
+          &quot;PDF214&quot;,
+          &quot;PDF215&quot;,
+          &quot;PDF216&quot;,
+          &quot;PDF301&quot;,
+          &quot;PDF302&quot;,
+          &quot;PDF303&quot;,
+          &quot;PDF304&quot;,
+          &quot;PDF305&quot;,
+          &quot;PDF306&quot;,
+          &quot;PDF307&quot;,
+          &quot;PDF308&quot;,
+          &quot;PDF309&quot;,
+          &quot;PDF310&quot;,
+          &quot;PDF311&quot;,
+          &quot;PDF312&quot;,
+          &quot;PDF313&quot;,
+          &quot;PDF401&quot;,
+          &quot;PDF402&quot;,
+          &quot;PDF403&quot;,
+          &quot;PDF404&quot;,
+          &quot;PDF405&quot;,
+          &quot;PKG101&quot;,
+          &quot;PKG102&quot;,
+          &quot;PKG103&quot;,
+          &quot;PKG104&quot;,
+          &quot;PKG106&quot;,
+          &quot;PKG107&quot;,
+          &quot;PRV003&quot;,
+          &quot;PRV004&quot;,
+          &quot;PRV005&quot;,
+          &quot;PRV006&quot;,
+          &quot;PRV103&quot;,
+          &quot;TEX101&quot;,
+          &quot;TEX102&quot;,
+          &quot;TEX104&quot;,
+          &quot;TEX105&quot;,
+          &quot;TEX106&quot;,
+          &quot;TEX107&quot;
+        ],
+        &quot;label&quot;: &quot;other opt-in checks&quot;,
+        &quot;settings&quot;: [
+          &quot;bibliography_checks.required_fields&quot;,
+          &quot;bibliography_checks.doi_entry_types&quot;,
+          &quot;bibliography_checks.check_capitalization&quot;,
+          &quot;bibliography_checks.check_fuzzy_duplicates&quot;,
+          &quot;submission_checks.check_bbl_coverage&quot;,
+          &quot;submission_checks.biblatex_bbl_format_version&quot;,
+          &quot;build_checks.overfull_tolerance_pt&quot;,
+          &quot;build_checks.minimum_package_dates&quot;,
+          &quot;build_checks.check_local_package_shadows&quot;,
+          &quot;build_checks.expected_texlive_year&quot;,
+          &quot;build_checks.inventory_loaded_options&quot;,
+          &quot;manuscript_checks.allowed_packages&quot;,
+          &quot;manuscript_checks.check_layout_manipulation&quot;,
+          &quot;manuscript_checks.forbid_abstract_citations&quot;,
+          &quot;manuscript_checks.abstract_abbreviation_policy&quot;,
+          &quot;manuscript_checks.abstract_abbreviation_exceptions&quot;,
+          &quot;manuscript_checks.max_heading_depth&quot;,
+          &quot;manuscript_checks.check_empty_sections&quot;,
+          &quot;manuscript_checks.check_hardcoded_references&quot;,
+          &quot;manuscript_checks.required_metadata&quot;,
+          &quot;manuscript_checks.check_orcid&quot;,
+          &quot;manuscript_checks.required_declarations&quot;,
+          &quot;manuscript_checks.require_float_captions&quot;,
+          &quot;manuscript_checks.require_float_labels&quot;,
+          &quot;manuscript_checks.check_float_label_order&quot;,
+          &quot;manuscript_checks.require_float_references&quot;,
+          &quot;manuscript_checks.check_float_reference_order&quot;,
+          &quot;manuscript_checks.require_figure_descriptions&quot;,
+          &quot;manuscript_checks.require_line_numbers&quot;,
+          &quot;manuscript_checks.forbid_line_numbers&quot;,
+          &quot;structure_checks.required_author_fields&quot;,
+          &quot;online_checks.online_doi_resolution&quot;,
+          &quot;online_checks.online_metadata&quot;,
+          &quot;online_checks.online_missing_doi&quot;,
+          &quot;online_checks.online_published_versions&quot;,
+          &quot;online_checks.online_notices&quot;,
+          &quot;online_checks.online_reference_links&quot;,
+          &quot;online_checks.online_replication_links&quot;,
+          &quot;expected_page_width_pt&quot;,
+          &quot;expected_page_height_pt&quot;,
+          &quot;require_consistent_page_size&quot;,
+          &quot;forbid_encryption&quot;,
+          &quot;forbid_forms&quot;,
+          &quot;forbid_javascript&quot;,
+          &quot;forbid_attachments&quot;,
+          &quot;pdf_checks.section_budgets&quot;,
+          &quot;pdf_checks.min_text_size_pt&quot;,
+          &quot;pdf_checks.text_size_regions&quot;,
+          &quot;pdf_checks.printable_margins_pt&quot;,
+          &quot;pdf_checks.printable_regions&quot;,
+          &quot;pdf_checks.overlap_min_area_ratio&quot;,
+          &quot;pdf_checks.min_page_ink_ratio&quot;,
+          &quot;pdf_checks.sparse_page_exemptions&quot;,
+          &quot;pdf_checks.required_metadata&quot;,
+          &quot;match_source_pdf_metadata&quot;,
+          &quot;pdf_checks.expected_metadata&quot;,
+          &quot;pdf_checks.require_tagged&quot;,
+          &quot;pdf_checks.require_language&quot;,
+          &quot;pdf_checks.expected_language&quot;,
+          &quot;pdf_checks.forbidden_annotation_types&quot;,
+          &quot;pdf_checks.forbidden_action_types&quot;,
+          &quot;pdf_checks.require_embedded_figure_fonts&quot;,
+          &quot;pdf_checks.forbid_type3_figure_fonts&quot;,
+          &quot;pdf_checks.min_stroke_width_pt&quot;,
+          &quot;pdf_checks.allowed_color_spaces&quot;,
+          &quot;pdf_checks.min_text_contrast&quot;,
+          &quot;pdf_checks.contrast_background_rgb&quot;,
+          &quot;pdf_checks.min_grayscale_luminance_difference&quot;,
+          &quot;rendered_pdf_artwork.detect_printer_marks&quot;,
+          &quot;rendered_pdf_artwork.trim_regions&quot;,
+          &quot;rendered_pdf_artwork.printer_mark_max_length_pt&quot;,
+          &quot;rendered_pdf_artwork.printer_mark_exemptions&quot;,
+          &quot;included_figure_artwork.detect_printer_marks&quot;,
+          &quot;included_figure_artwork.trim_regions&quot;,
+          &quot;included_figure_artwork.printer_mark_max_length_pt&quot;,
+          &quot;included_figure_artwork.printer_mark_exemptions&quot;,
+          &quot;rendered_pdf_artwork.max_figure_whitespace_ratio&quot;,
+          &quot;included_figure_artwork.max_figure_whitespace_ratio&quot;,
+          &quot;rendered_pdf_artwork.figure_edge_band_pt&quot;,
+          &quot;included_figure_artwork.figure_edge_band_pt&quot;,
+          &quot;rendered_pdf_artwork.drawing_regions&quot;,
+          &quot;included_figure_artwork.drawing_regions&quot;,
+          &quot;rendered_pdf_artwork.check_clipping&quot;,
+          &quot;included_figure_artwork.check_clipping&quot;,
+          &quot;rendered_pdf_artwork.classify_artwork&quot;,
+          &quot;included_figure_artwork.classify_artwork&quot;,
+          &quot;rendered_pdf_artwork.artwork_category&quot;,
+          &quot;rendered_pdf_artwork.category_min_dpi&quot;,
+          &quot;included_figure_artwork.artwork_category&quot;,
+          &quot;included_figure_artwork.category_min_dpi&quot;,
+          &quot;rendered_pdf_artwork.classify_type3_glyphs&quot;,
+          &quot;rendered_pdf_artwork.forbid_bitmap_type3_glyphs&quot;,
+          &quot;included_figure_artwork.classify_type3_glyphs&quot;,
+          &quot;included_figure_artwork.forbid_bitmap_type3_glyphs&quot;,
+          &quot;rendered_pdf_artwork.min_stroke_width_pt&quot;,
+          &quot;included_figure_artwork.min_stroke_width_pt&quot;,
+          &quot;rendered_pdf_artwork.raster_regions&quot;,
+          &quot;rendered_pdf_artwork.min_raster_region_coverage&quot;,
+          &quot;included_figure_artwork.raster_regions&quot;,
+          &quot;included_figure_artwork.min_raster_region_coverage&quot;,
+          &quot;rendered_pdf_artwork.grayscale_preview&quot;,
+          &quot;included_figure_artwork.grayscale_preview&quot;,
+          &quot;rendered_pdf_artwork.contrast_samples&quot;,
+          &quot;included_figure_artwork.contrast_samples&quot;,
+          &quot;rendered_pdf_artwork.required_color_space&quot;,
+          &quot;included_figure_artwork.required_color_space&quot;,
+          &quot;structure_checks.heading_expectations&quot;,
+          &quot;structure_checks.check_table_structure&quot;,
+          &quot;structure_checks.check_link_structure&quot;,
+          &quot;structure_checks.require_figure_alt&quot;,
+          &quot;structure_checks.require_structure_tree&quot;,
+          &quot;structure_checks.check_structure_references&quot;,
+          &quot;submission_checks.filename_max_length&quot;,
+          &quot;submission_checks.filename_allowed_characters&quot;,
+          &quot;submission_checks.allowed_extensions&quot;,
+          &quot;submission_checks.required_deliverables&quot;,
+          &quot;submission_checks.report_unused_assets&quot;,
+          &quot;submission_checks.template_references&quot;,
+          &quot;submission_checks.scan_identity_hints&quot;,
+          &quot;submission_checks.scan_secrets&quot;,
+          &quot;submission_checks.scan_private_comments&quot;,
+          &quot;submission_checks.check_shell_escape&quot;,
+          &quot;metadata_privacy.image_identity_terms&quot;,
+          &quot;expected_document_class&quot;,
+          &quot;required_class_options&quot;,
+          &quot;forbidden_class_options&quot;,
+          &quot;require_abstract&quot;,
+          &quot;abstract_min_words&quot;,
+          &quot;abstract_max_words&quot;,
+          &quot;keywords_min_count&quot;,
+          &quot;keywords_max_count&quot;,
+          &quot;required_sections&quot;
+        ]
+      }
+    ],
+    &quot;observed&quot;: {
+      &quot;commands&quot;: &quot;&lt;measured&gt;&quot;,
+      &quot;memory_accounting&quot;: &quot;sampled parent and registered process groups&quot;,
+      &quot;memory_accounting_problem&quot;: null,
+      &quot;memory_enforcement&quot;: &quot;reactive samples; not an OS hard RSS limit&quot;,
+      &quot;memory_limit_mb&quot;: &quot;&lt;measured&gt;&quot;,
+      &quot;monitor_seconds&quot;: &quot;&lt;measured&gt;&quot;,
+      &quot;parent_memory_reservation_mb&quot;: &quot;&lt;measured&gt;&quot;,
+      &quot;peak_active_commands&quot;: &quot;&lt;measured&gt;&quot;,
+      &quot;peak_command_memory_limit_mb&quot;: &quot;&lt;measured&gt;&quot;,
+      &quot;peak_command_memory_reservation_mb&quot;: &quot;&lt;measured&gt;&quot;,
+      &quot;peak_command_rss_mb&quot;: null,
+      &quot;peak_parent_rss_mb&quot;: &quot;&lt;measured&gt;&quot;,
+      &quot;peak_temp_bytes&quot;: &quot;&lt;measured&gt;&quot;,
+      &quot;peak_tool_rss_mb&quot;: &quot;&lt;measured&gt;&quot;,
+      &quot;peak_total_rss_mb&quot;: &quot;&lt;measured&gt;&quot;,
+      &quot;resource_exceeded&quot;: null,
+      &quot;sample_interval_seconds&quot;: &quot;&lt;measured&gt;&quot;,
+      &quot;samples&quot;: &quot;&lt;measured&gt;&quot;,
+      &quot;version_probes&quot;: &quot;&lt;measured&gt;&quot;
+    },
+    &quot;resources&quot;: {
+      &quot;active_cpu&quot;: &quot;&lt;measured&gt;&quot;,
+      &quot;active_memory_mb&quot;: &quot;&lt;measured&gt;&quot;,
+      &quot;build_jobs&quot;: &quot;&lt;measured&gt;&quot;,
+      &quot;jobs&quot;: &quot;&lt;measured&gt;&quot;,
+      &quot;memory_mb&quot;: &quot;&lt;measured&gt;&quot;,
+      &quot;operations&quot;: [
+        {
+          &quot;cpu&quot;: &quot;&lt;measured&gt;&quot;,
+          &quot;elapsed_seconds&quot;: &quot;&lt;seconds&gt;&quot;,
+          &quot;kind&quot;: &quot;build&quot;,
+          &quot;memory_mb&quot;: &quot;&lt;measured&gt;&quot;,
+          &quot;name&quot;: &quot;baseline build&quot;,
+          &quot;queue_seconds&quot;: &quot;&lt;seconds&gt;&quot;
+        },
+        {
+          &quot;cpu&quot;: &quot;&lt;measured&gt;&quot;,
+          &quot;elapsed_seconds&quot;: &quot;&lt;seconds&gt;&quot;,
+          &quot;kind&quot;: null,
+          &quot;memory_mb&quot;: &quot;&lt;measured&gt;&quot;,
+          &quot;name&quot;: &quot;bibliography checks&quot;,
+          &quot;queue_seconds&quot;: &quot;&lt;seconds&gt;&quot;
+        },
+        {
+          &quot;cpu&quot;: &quot;&lt;measured&gt;&quot;,
+          &quot;elapsed_seconds&quot;: &quot;&lt;seconds&gt;&quot;,
+          &quot;kind&quot;: null,
+          &quot;memory_mb&quot;: &quot;&lt;measured&gt;&quot;,
+          &quot;name&quot;: &quot;bibliography coverage and fields&quot;,
+          &quot;queue_seconds&quot;: &quot;&lt;seconds&gt;&quot;
+        },
+        {
+          &quot;cpu&quot;: &quot;&lt;measured&gt;&quot;,
+          &quot;elapsed_seconds&quot;: &quot;&lt;seconds&gt;&quot;,
+          &quot;kind&quot;: null,
+          &quot;memory_mb&quot;: &quot;&lt;measured&gt;&quot;,
+          &quot;name&quot;: &quot;discover roots&quot;,
+          &quot;queue_seconds&quot;: &quot;&lt;seconds&gt;&quot;
+        },
+        {
+          &quot;cpu&quot;: &quot;&lt;measured&gt;&quot;,
+          &quot;elapsed_seconds&quot;: &quot;&lt;seconds&gt;&quot;,
+          &quot;kind&quot;: null,
+          &quot;memory_mb&quot;: &quot;&lt;measured&gt;&quot;,
+          &quot;name&quot;: &quot;image metadata privacy&quot;,
+          &quot;queue_seconds&quot;: &quot;&lt;seconds&gt;&quot;
+        },
+        {
+          &quot;cpu&quot;: &quot;&lt;measured&gt;&quot;,
+          &quot;elapsed_seconds&quot;: &quot;&lt;seconds&gt;&quot;,
+          &quot;kind&quot;: null,
+          &quot;memory_mb&quot;: &quot;&lt;measured&gt;&quot;,
+          &quot;name&quot;: &quot;import project&quot;,
+          &quot;queue_seconds&quot;: &quot;&lt;seconds&gt;&quot;
+        },
+        {
+          &quot;cpu&quot;: &quot;&lt;measured&gt;&quot;,
+          &quot;elapsed_seconds&quot;: &quot;&lt;seconds&gt;&quot;,
+          &quot;kind&quot;: null,
+          &quot;memory_mb&quot;: &quot;&lt;measured&gt;&quot;,
+          &quot;name&quot;: &quot;manuscript checks&quot;,
+          &quot;queue_seconds&quot;: &quot;&lt;seconds&gt;&quot;
+        },
+        {
+          &quot;cpu&quot;: &quot;&lt;measured&gt;&quot;,
+          &quot;elapsed_seconds&quot;: &quot;&lt;seconds&gt;&quot;,
+          &quot;kind&quot;: null,
+          &quot;memory_mb&quot;: &quot;&lt;measured&gt;&quot;,
+          &quot;name&quot;: &quot;manuscript details&quot;,
+          &quot;queue_seconds&quot;: &quot;&lt;seconds&gt;&quot;
+        },
+        {
+          &quot;cpu&quot;: &quot;&lt;measured&gt;&quot;,
+          &quot;elapsed_seconds&quot;: &quot;&lt;seconds&gt;&quot;,
+          &quot;kind&quot;: null,
+          &quot;memory_mb&quot;: &quot;&lt;measured&gt;&quot;,
+          &quot;name&quot;: &quot;per-author fields&quot;,
+          &quot;queue_seconds&quot;: &quot;&lt;seconds&gt;&quot;
+        },
+        {
+          &quot;cpu&quot;: &quot;&lt;measured&gt;&quot;,
+          &quot;elapsed_seconds&quot;: &quot;&lt;seconds&gt;&quot;,
+          &quot;kind&quot;: null,
+          &quot;memory_mb&quot;: &quot;&lt;measured&gt;&quot;,
+          &quot;name&quot;: &quot;source checks&quot;,
+          &quot;queue_seconds&quot;: &quot;&lt;seconds&gt;&quot;
+        },
+        {
+          &quot;cpu&quot;: &quot;&lt;measured&gt;&quot;,
+          &quot;elapsed_seconds&quot;: &quot;&lt;seconds&gt;&quot;,
+          &quot;kind&quot;: null,
+          &quot;memory_mb&quot;: &quot;&lt;measured&gt;&quot;,
+          &quot;name&quot;: &quot;source privacy and bundle checks&quot;,
+          &quot;queue_seconds&quot;: &quot;&lt;seconds&gt;&quot;
+        },
+        {
+          &quot;cpu&quot;: &quot;&lt;measured&gt;&quot;,
+          &quot;elapsed_seconds&quot;: &quot;&lt;seconds&gt;&quot;,
+          &quot;kind&quot;: null,
+          &quot;memory_mb&quot;: &quot;&lt;measured&gt;&quot;,
+          &quot;name&quot;: &quot;submission readiness&quot;,
+          &quot;queue_seconds&quot;: &quot;&lt;seconds&gt;&quot;
+        }
+      ],
+      &quot;parent_reserved_memory_mb&quot;: &quot;&lt;measured&gt;&quot;,
+      &quot;peak_builds&quot;: &quot;&lt;measured&gt;&quot;,
+      &quot;peak_renders&quot;: &quot;&lt;measured&gt;&quot;,
+      &quot;peak_reserved_cpu&quot;: &quot;&lt;measured&gt;&quot;,
+      &quot;peak_reserved_memory_mb&quot;: &quot;&lt;measured&gt;&quot;,
+      &quot;queued&quot;: &quot;&lt;measured&gt;&quot;,
+      &quot;render_jobs&quot;: &quot;&lt;measured&gt;&quot;,
+      &quot;reservation_scope&quot;: &quot;Estimates; sampled RSS is reported separately by the runtime.&quot;
+    }
+  },
+  &quot;settings&quot;: {
+    &quot;abstract_max_words&quot;: null,
+    &quot;abstract_min_words&quot;: null,
+    &quot;apply_formatting&quot;: false,
+    &quot;bibliography_backend&quot;: &quot;auto&quot;,
+    &quot;bibliography_checks&quot;: {
+      &quot;all_roots&quot;: false,
+      &quot;check_capitalization&quot;: false,
+      &quot;check_citation_coverage&quot;: true,
+      &quot;check_fuzzy_duplicates&quot;: false,
+      &quot;check_page_ranges&quot;: true,
+      &quot;check_uncited_entries&quot;: true,
+      &quot;check_urls&quot;: true,
+      &quot;doi_entry_types&quot;: [],
+      &quot;fuzzy_duplicate_threshold&quot;: 0.93,
+      &quot;required_fields&quot;: []
+    },
+    &quot;bibliography_transform&quot;: {
+      &quot;cited_only&quot;: false,
+      &quot;field_edits&quot;: [],
+      &quot;format_entries&quot;: false,
+      &quot;key_renames&quot;: [],
+      &quot;merge_keys&quot;: [],
+      &quot;order_entries&quot;: false,
+      &quot;remove_fields&quot;: []
+    },
+    &quot;build_checks&quot;: {
+      &quot;allowed_loaded_packages&quot;: null,
+      &quot;check_local_package_shadows&quot;: false,
+      &quot;expected_texlive_year&quot;: null,
+      &quot;forbidden_loaded_packages&quot;: [],
+      &quot;inventory_loaded_options&quot;: false,
+      &quot;inventory_loaded_packages&quot;: false,
+      &quot;minimum_package_dates&quot;: [],
+      &quot;overfull_tolerance_pt&quot;: null,
+      &quot;required_loaded_packages&quot;: []
+    },
+    &quot;build_jobs&quot;: 1,
+    &quot;build_memory_mb&quot;: 1024,
+    &quot;checks&quot;: {
+      &quot;ignore&quot;: [],
+      &quot;select&quot;: [
+        &quot;ALL&quot;
+      ]
+    },
+    &quot;cleanup&quot;: true,
+    &quot;engine&quot;: &quot;pdflatex&quot;,
+    &quot;expected_document_class&quot;: null,
+    &quot;expected_page_height_pt&quot;: null,
+    &quot;expected_page_width_pt&quot;: null,
+    &quot;forbid_attachments&quot;: false,
+    &quot;forbid_encryption&quot;: false,
+    &quot;forbid_forms&quot;: false,
+    &quot;forbid_javascript&quot;: false,
+    &quot;forbid_type3_fonts&quot;: false,
+    &quot;forbidden_class_options&quot;: [],
+    &quot;forbidden_packages&quot;: [],
+    &quot;formatting_options&quot;: {
+      &quot;blank_lines&quot;: &quot;formatter&quot;,
+      &quot;exclude&quot;: []
+    },
+    &quot;included_figure_artwork&quot;: {
+      &quot;artwork_category&quot;: null,
+      &quot;background_gray&quot;: 255,
+      &quot;category_min_dpi&quot;: [],
+      &quot;check_clipping&quot;: false,
+      &quot;classify_artwork&quot;: false,
+      &quot;classify_type3_glyphs&quot;: false,
+      &quot;contrast_samples&quot;: [],
+      &quot;detect_printer_marks&quot;: false,
+      &quot;drawing_regions&quot;: [],
+      &quot;figure_edge_band_pt&quot;: null,
+      &quot;figure_regions&quot;: [],
+      &quot;forbid_bitmap_type3_glyphs&quot;: false,
+      &quot;geometry_tolerance_pt&quot;: 0.5,
+      &quot;grayscale_preview&quot;: false,
+      &quot;ink_difference&quot;: 5,
+      &quot;max_figure_whitespace_ratio&quot;: null,
+      &quot;min_raster_region_coverage&quot;: null,
+      &quot;min_stroke_width_pt&quot;: null,
+      &quot;printer_mark_exemptions&quot;: [],
+      &quot;printer_mark_max_length_pt&quot;: null,
+      &quot;raster_dpi&quot;: 72,
+      &quot;raster_regions&quot;: [],
+      &quot;required_color_space&quot;: null,
+      &quot;trim_regions&quot;: []
+    },
+    &quot;job_timeout_seconds&quot;: 600,
+    &quot;jobs&quot;: 2,
+    &quot;keywords_max_count&quot;: null,
+    &quot;keywords_min_count&quot;: null,
+    &quot;layout&quot;: &quot;preserve&quot;,
+    &quot;main&quot;: null,
+    &quot;manuscript_checks&quot;: {
+      &quot;abstract_abbreviation_exceptions&quot;: [],
+      &quot;abstract_abbreviation_policy&quot;: null,
+      &quot;allowed_packages&quot;: null,
+      &quot;check_empty_sections&quot;: false,
+      &quot;check_float_label_order&quot;: false,
+      &quot;check_float_reference_order&quot;: false,
+      &quot;check_hardcoded_references&quot;: false,
+      &quot;check_layout_manipulation&quot;: false,
+      &quot;check_orcid&quot;: false,
+      &quot;forbid_abstract_citations&quot;: false,
+      &quot;forbid_line_numbers&quot;: false,
+      &quot;inventory_packages&quot;: false,
+      &quot;max_heading_depth&quot;: null,
+      &quot;require_figure_descriptions&quot;: false,
+      &quot;require_float_captions&quot;: false,
+      &quot;require_float_labels&quot;: false,
+      &quot;require_float_references&quot;: false,
+      &quot;require_line_numbers&quot;: false,
+      &quot;required_declarations&quot;: [],
+      &quot;required_metadata&quot;: []
+    },
+    &quot;match_source_pdf_metadata&quot;: [],
+    &quot;max_bytes&quot;: 268435456,
+    &quot;max_depth&quot;: 32,
+    &quot;max_files&quot;: 10000,
+    &quot;max_generated_file_bytes&quot;: null,
+    &quot;max_import_bytes&quot;: null,
+    &quot;max_pages&quot;: null,
+    &quot;max_temporary_bytes&quot;: 2147483648,
+    &quot;memory_mb&quot;: 2048,
+    &quot;metadata_privacy&quot;: {
+      &quot;edits&quot;: [],
+      &quot;image_identity_terms&quot;: []
+    },
+    &quot;min_image_dpi&quot;: null,
+    &quot;normalize_doi&quot;: false,
+    &quot;online_checks&quot;: {
+      &quot;online&quot;: false,
+      &quot;online_contact_email&quot;: null,
+      &quot;online_doi_resolution&quot;: false,
+      &quot;online_jobs&quot;: 2,
+      &quot;online_max_redirects&quot;: 4,
+      &quot;online_max_requests&quot;: 40,
+      &quot;online_max_response_bytes&quot;: 1048576,
+      &quot;online_metadata&quot;: false,
+      &quot;online_missing_doi&quot;: false,
+      &quot;online_notices&quot;: false,
+      &quot;online_provider_interval_seconds&quot;: 1.0,
+      &quot;online_published_versions&quot;: false,
+      &quot;online_reference_links&quot;: false,
+      &quot;online_replication_links&quot;: false,
+      &quot;online_replication_urls&quot;: [],
+      &quot;online_timeout_seconds&quot;: 10
+    },
+    &quot;package&quot;: {
+      &quot;include&quot;: []
+    },
+    &quot;page_size_tolerance_pt&quot;: 1.0,
+    &quot;pdf_checks&quot;: {
+      &quot;allowed_color_spaces&quot;: [],
+      &quot;background_gray&quot;: 255,
+      &quot;contrast_background_rgb&quot;: null,
+      &quot;expected_language&quot;: null,
+      &quot;expected_metadata&quot;: [],
+      &quot;forbid_type3_figure_fonts&quot;: false,
+      &quot;forbidden_action_types&quot;: [],
+      &quot;forbidden_annotation_types&quot;: [],
+      &quot;geometry_tolerance_pt&quot;: 0.5,
+      &quot;ink_difference&quot;: 5,
+      &quot;min_grayscale_luminance_difference&quot;: null,
+      &quot;min_page_ink_ratio&quot;: null,
+      &quot;min_stroke_width_pt&quot;: null,
+      &quot;min_text_contrast&quot;: null,
+      &quot;min_text_size_pt&quot;: null,
+      &quot;overlap_min_area_ratio&quot;: null,
+      &quot;printable_margins_pt&quot;: null,
+      &quot;printable_regions&quot;: [],
+      &quot;raster_dpi&quot;: 36,
+      &quot;require_embedded_figure_fonts&quot;: false,
+      &quot;require_language&quot;: false,
+      &quot;require_tagged&quot;: false,
+      &quot;required_metadata&quot;: [],
+      &quot;section_budgets&quot;: [],
+      &quot;sparse_page_exemptions&quot;: [],
+      &quot;text_size_regions&quot;: []
+    },
+    &quot;render_jobs&quot;: 1,
+    &quot;rendered_pdf_artwork&quot;: {
+      &quot;artwork_category&quot;: null,
+      &quot;background_gray&quot;: 255,
+      &quot;category_min_dpi&quot;: [],
+      &quot;check_clipping&quot;: false,
+      &quot;classify_artwork&quot;: false,
+      &quot;classify_type3_glyphs&quot;: false,
+      &quot;contrast_samples&quot;: [],
+      &quot;detect_printer_marks&quot;: false,
+      &quot;drawing_regions&quot;: [],
+      &quot;figure_edge_band_pt&quot;: null,
+      &quot;figure_regions&quot;: [],
+      &quot;forbid_bitmap_type3_glyphs&quot;: false,
+      &quot;geometry_tolerance_pt&quot;: 0.5,
+      &quot;grayscale_preview&quot;: false,
+      &quot;ink_difference&quot;: 5,
+      &quot;max_figure_whitespace_ratio&quot;: null,
+      &quot;min_raster_region_coverage&quot;: null,
+      &quot;min_stroke_width_pt&quot;: null,
+      &quot;printer_mark_exemptions&quot;: [],
+      &quot;printer_mark_max_length_pt&quot;: null,
+      &quot;raster_dpi&quot;: 72,
+      &quot;raster_regions&quot;: [],
+      &quot;required_color_space&quot;: null,
+      &quot;trim_regions&quot;: []
+    },
+    &quot;reporting&quot;: {
+      &quot;accepted_exceptions&quot;: [],
+      &quot;suppressions&quot;: []
+    },
+    &quot;require_abstract&quot;: false,
+    &quot;require_consistent_page_size&quot;: false,
+    &quot;require_embedded_fonts&quot;: false,
+    &quot;required_class_options&quot;: [],
+    &quot;required_sections&quot;: [],
+    &quot;source_date_epoch&quot;: null,
+    &quot;source_transforms&quot;: {
+      &quot;comment_policy&quot;: &quot;retain&quot;,
+      &quot;filename_overrides&quot;: [],
+      &quot;inline_bibliography&quot;: null,
+      &quot;merge_inputs&quot;: false
+    },
+    &quot;structure_checks&quot;: {
+      &quot;author_command&quot;: &quot;author&quot;,
+      &quot;check_link_structure&quot;: false,
+      &quot;check_structure_references&quot;: false,
+      &quot;check_table_structure&quot;: false,
+      &quot;heading_expectations&quot;: [],
+      &quot;require_figure_alt&quot;: false,
+      &quot;require_structure_tree&quot;: false,
+      &quot;required_author_fields&quot;: []
+    },
+    &quot;submission_checks&quot;: {
+      &quot;allowed_extensions&quot;: [],
+      &quot;biblatex_bbl_format_version&quot;: null,
+      &quot;check_bbl_coverage&quot;: false,
+      &quot;check_shell_escape&quot;: false,
+      &quot;filename_allowed_characters&quot;: null,
+      &quot;filename_max_length&quot;: null,
+      &quot;identity_term_matching&quot;: &quot;word&quot;,
+      &quot;identity_terms&quot;: [],
+      &quot;max_archive_bytes&quot;: null,
+      &quot;report_unused_assets&quot;: false,
+      &quot;require_bbl&quot;: false,
+      &quot;required_deliverables&quot;: [],
+      &quot;scan_identity_hints&quot;: false,
+      &quot;scan_private_comments&quot;: false,
+      &quot;scan_secrets&quot;: false,
+      &quot;template_references&quot;: []
+    },
+    &quot;tab_size&quot;: 2,
+    &quot;timeout_seconds&quot;: 120,
+    &quot;workflow&quot;: {
+      &quot;baseline_runs&quot;: 1,
+      &quot;comparison&quot;: {
+        &quot;channel_tolerance&quot;: 0,
+        &quot;max_changed_pixel_ratio&quot;: 0.0
+      },
+      &quot;documents&quot;: []
+    },
+    &quot;wrap_length&quot;: 80
+  },
+  &quot;stages&quot;: [
+    {
+      &quot;command&quot;: [],
+      &quot;elapsed_seconds&quot;: &quot;&lt;seconds&gt;&quot;,
+      &quot;name&quot;: &quot;baseline&quot;,
+      &quot;queue_seconds&quot;: &quot;&lt;seconds&gt;&quot;,
+      &quot;status&quot;: &quot;succeeded&quot;
+    },
+    {
+      &quot;elapsed_seconds&quot;: &quot;&lt;seconds&gt;&quot;,
+      &quot;name&quot;: &quot;baseline PDF inspection&quot;,
+      &quot;queue_seconds&quot;: &quot;&lt;seconds&gt;&quot;,
+      &quot;status&quot;: &quot;succeeded&quot;
+    },
+    {
+      &quot;elapsed_seconds&quot;: &quot;&lt;seconds&gt;&quot;,
+      &quot;name&quot;: &quot;baseline configured PDF checks&quot;,
+      &quot;queue_seconds&quot;: &quot;&lt;seconds&gt;&quot;,
+      &quot;status&quot;: &quot;succeeded&quot;
+    },
+    {
+      &quot;elapsed_seconds&quot;: &quot;&lt;seconds&gt;&quot;,
+      &quot;name&quot;: &quot;bibliography checks&quot;,
+      &quot;queue_seconds&quot;: &quot;&lt;seconds&gt;&quot;,
+      &quot;status&quot;: &quot;succeeded&quot;
+    },
+    {
+      &quot;elapsed_seconds&quot;: &quot;&lt;seconds&gt;&quot;,
+      &quot;name&quot;: &quot;bibliography coverage and fields&quot;,
+      &quot;queue_seconds&quot;: &quot;&lt;seconds&gt;&quot;,
+      &quot;status&quot;: &quot;succeeded&quot;
+    },
+    {
+      &quot;elapsed_seconds&quot;: &quot;&lt;seconds&gt;&quot;,
+      &quot;name&quot;: &quot;image metadata privacy&quot;,
+      &quot;queue_seconds&quot;: &quot;&lt;seconds&gt;&quot;,
+      &quot;status&quot;: &quot;succeeded&quot;
+    },
+    {
+      &quot;elapsed_seconds&quot;: &quot;&lt;seconds&gt;&quot;,
+      &quot;name&quot;: &quot;manuscript checks&quot;,
+      &quot;queue_seconds&quot;: &quot;&lt;seconds&gt;&quot;,
+      &quot;status&quot;: &quot;succeeded&quot;
+    },
+    {
+      &quot;elapsed_seconds&quot;: &quot;&lt;seconds&gt;&quot;,
+      &quot;name&quot;: &quot;manuscript details&quot;,
+      &quot;queue_seconds&quot;: &quot;&lt;seconds&gt;&quot;,
+      &quot;status&quot;: &quot;succeeded&quot;
+    },
+    {
+      &quot;elapsed_seconds&quot;: &quot;&lt;seconds&gt;&quot;,
+      &quot;name&quot;: &quot;online reference checks&quot;,
+      &quot;queue_seconds&quot;: &quot;&lt;seconds&gt;&quot;,
+      &quot;status&quot;: &quot;succeeded&quot;
+    },
+    {
+      &quot;elapsed_seconds&quot;: &quot;&lt;seconds&gt;&quot;,
+      &quot;name&quot;: &quot;per-author fields&quot;,
+      &quot;queue_seconds&quot;: &quot;&lt;seconds&gt;&quot;,
+      &quot;status&quot;: &quot;succeeded&quot;
+    },
+    {
+      &quot;elapsed_seconds&quot;: &quot;&lt;seconds&gt;&quot;,
+      &quot;name&quot;: &quot;source checks&quot;,
+      &quot;queue_seconds&quot;: &quot;&lt;seconds&gt;&quot;,
+      &quot;status&quot;: &quot;succeeded&quot;
+    },
+    {
+      &quot;elapsed_seconds&quot;: &quot;&lt;seconds&gt;&quot;,
+      &quot;name&quot;: &quot;source privacy and bundle checks&quot;,
+      &quot;queue_seconds&quot;: &quot;&lt;seconds&gt;&quot;,
+      &quot;status&quot;: &quot;succeeded&quot;
+    },
+    {
+      &quot;elapsed_seconds&quot;: &quot;&lt;seconds&gt;&quot;,
+      &quot;name&quot;: &quot;submission readiness&quot;,
+      &quot;queue_seconds&quot;: &quot;&lt;seconds&gt;&quot;,
+      &quot;status&quot;: &quot;succeeded&quot;
+    }
+  ],
+  &quot;tools&quot;: {}
+}</pre>
+</details>
+</main>
+</body>
+</html>

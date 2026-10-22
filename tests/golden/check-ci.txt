@@ -1,0 +1,2 @@
+::warning title=BIB102,file=references.bib,line=2::warning/failed: 1 of 2 entries have no scanned use: unused2020 | Evidence: references.bib:2 | Next: Review each candidate against all intended documents, filters and bibliography backend behavior before considering removal. This check never prunes a bibliography.
+::notice title=BLD105::info/inconclusive: The TeX distribution is unknown: the build recorded no engine version output. | Next: Resolve the missing or ambiguous evidence described above, then repeat this check.

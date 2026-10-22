@@ -140,7 +140,10 @@ class DoctorTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(report.tools["pdflatex"]["installed"])
         self.assertFalse(report.tools["latexmk"]["exercised"])
         self.assertEqual(self.builds, [])
-        self.assertTrue(any(item.rule == "doctor.tool_missing" for item in report.findings))
+        missing = next(item for item in report.findings if item.rule == "doctor.tool_missing")
+        self.assertEqual(missing.details["tool"], "pdflatex")
+        # The next step names the package that provides the tool, as check and prepare do.
+        self.assertIn("TeX Live", missing.next_step)
 
     async def test_installed_tool_with_failed_version_is_not_exercised(self):
         original = DoctorRunner.tool_version
@@ -387,6 +390,31 @@ class DoctorTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(report.tools["pdftohtml"]["required"])
         report = await run_doctor(Settings())
         self.assertNotIn("pdftohtml", report.tools)
+
+    def test_every_tool_the_doctor_can_survey_has_an_install_hint(self):
+        """docs/doctor.md: the finding for a missing tool names the package that provides it."""
+        from latexprep.doctor import selected_tools
+        from latexprep.pdf_artwork_options import PdfArtworkOptions
+        from latexprep.pdf_check_options import PdfCheckOptions
+        from latexprep.pdf_structure_checks import StructureOptions
+        from latexprep.toolchain import install_hint
+
+        surveyed: set[str] = set()
+        for settings in (
+            Settings(),
+            Settings(engine="xelatex", bibliography_backend="biber", apply_formatting=True),
+            Settings(engine="lualatex", bibliography_backend="bibtex"),
+            Settings(
+                pdf_checks=PdfCheckOptions(
+                    require_language=True, min_stroke_width_pt=0.1, overlap_min_area_ratio=0.5
+                ),
+                structure_checks=StructureOptions(check_table_structure=True),
+                included_figure_artwork=PdfArtworkOptions(classify_type3_glyphs=True),
+            ),
+        ):
+            surveyed.update(*selected_tools(settings))
+        self.assertLessEqual({"latexmk", "xelatex", "lualatex", "biber", "tex-fmt"}, surveyed)
+        self.assertEqual([name for name in sorted(surveyed) if install_hint(name) is None], [])
 
     def test_configured_checks_select_the_tools_their_adapters_name(self):
         from latexprep.doctor import selected_tools
