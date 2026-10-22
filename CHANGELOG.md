@@ -7,7 +7,7 @@ breaking changes are listed under their own heading.
 
 The version is defined once, as `__version__` in `src/latexprep/__init__.py`.
 
-## [0.3.0] - unreleased
+## [0.3.0] - 2026-10-22
 
 Compared with the `v0.2.0` tag. That tag predates the distribution rename, the
 license and the release workflow, and it still names the distribution `fledge`, so
@@ -384,5 +384,10 @@ the first release of `fledge-latex` is 0.3.0.
   `architecture.md` relates the layers to its components. A test fails when a module
   is missing from the map, imports from a layer above its own, or when `click` or
   `rich` is imported outside the presentation layer.
+- The Linux sandbox is now tested live in CI: a weekly `live-linux` job runs the
+  integration tests under Bubblewrap on Ubuntu 24.04 with TeX Live from apt. The
+  documentation no longer describes Linux builds as unvalidated and names what
+  stays untested (other distributions, WSL 2); the CI guide shows the steps for a
+  Linux runner.
 
-[0.3.0]: https://github.com/NicolasSchuler/fledge/compare/v0.2.0...HEAD
+[0.3.0]: https://github.com/NicolasSchuler/fledge/compare/v0.2.0...v0.3.0

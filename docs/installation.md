@@ -104,9 +104,10 @@ namespaces on Linux. Windows has no build sandbox. See
 
 ## Linux
 
-Fledge's Linux sandbox has passed controlled-command tests only; it has **not yet
-been validated on a live Linux host**. On Debian or Ubuntu, the intended package
-set, which matches Fledge's Linux test job, is:
+Fledge's Linux sandbox is tested in CI: a weekly job runs the live integration
+tests under Bubblewrap on a GitHub-hosted Ubuntu 24.04 runner. Other
+distributions are not tested. On Debian or Ubuntu, install the same base
+packages as that job:
 
 ```sh
 sudo apt-get install bubblewrap latexmk biber poppler-utils \
@@ -134,8 +135,7 @@ test job sets it to `0` only on its disposable runner.
 Native Windows has no build sandbox, so `check` and `prepare` cannot build there;
 `inspect` and `bib check` need only Python. To build on Windows, use WSL 2 with a
 Linux distribution such as Ubuntu and follow the [Linux](#linux) instructions
-inside it. The same caveat applies: that route is not yet validated on a live
-host.
+inside it. That route has not been tested live.
 
 ## Tools
 

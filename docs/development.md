@@ -194,9 +194,9 @@ is missing from both lists:
   leaves out `test_runtime_inputs.py` and `test_runtime_monitoring.py`, whose live tests
   run only on macOS, and
   adds `test_runtime_backends.py` for the live Bubblewrap isolation test.
-  **This job is unvalidated until a maintainer has run it from the Actions tab
-  and it passes**; until then the documentation must keep saying that Linux has
-  not run live. On Ubuntu 24.04 it sets
+  It first passed on 2026-10-12. What the documentation says about Linux rests
+  on this job, so a failure is a real result that must not be ignored: fix the
+  cause or correct those statements. On Ubuntu 24.04 it sets
   `kernel.apparmor_restrict_unprivileged_userns=0` on the disposable runner, a
   CI setting that users must decide on for their own hosts (see
   [installation](installation.md#linux)).

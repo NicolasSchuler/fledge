@@ -54,8 +54,10 @@ coordinate system. Final-document coordinates are not reused for figures.
 Concrete remaining engineering includes image optimization/externalized-figure
 adapters, annotated PDF output, broader literal
 source forms and drawing/clip/mask coverage, OCR/automatic figure-table
-segmentation, Windows isolation and a web interface. Linux Bubblewrap, qpdf and
-MuPDF live validation is incomplete on the macOS development host.
+segmentation, Windows isolation and a web interface. qpdf and MuPDF live
+validation is incomplete on the macOS development host. Linux Bubblewrap runs
+live only in the weekly `live-linux` CI job on an Ubuntu 24.04 runner; other
+distributions, TeX layouts and WSL 2 are untested.
 These gaps are separate from semantic questions that no current check answers,
 such as reference identity, declaration adequacy and natural reading order.
 
@@ -165,7 +167,7 @@ such as reference identity, declaration adequacy and natural reading order.
 | Partial | Next | Automatic flat hierarchy and command-aware rewriting for a documented literal subset. | `plan_flatten` adds literal import/subimport aliases, constrained subfiles, selected data/font paths and `PKG201` explicit filename overrides to existing inputs/graphics/bibliography/class/style handling. Protected identities and ambiguous/dynamic contexts block unsafe maps. Broader readers and source execution semantics remain engineering work. |
 | Implemented | None | Explicit tex-fmt check/diff/application, project exclusions, protected regions and blank-line policies for supported source. | `FMT001`/`FMT002` retain isolated proposals/idempotence; `FMT101`–`FMT103` verify protected bytes, report exclusion scope and enforce formatter/preserve/collapse blank-line policies. The installed formatter exposes no blank-line flag, so this policy is adapter-side. Custom literal semantics remain outside the subset; final PDF comparison is still required. |
 | Implemented | None | Assign explicit document roots and independent supplementary source packages; rebuild each solely from its archive. | `workflow.documents` materializes each selected directory/file set with its own root, optional engine and reference PDF. `PKG301` requires all selected packages to verify before output release. Selection is explicit; no automatic assignment or content-adequacy claim is made. |
-| Partial | Next | Validate engines and explicit bibliography backends on restricted platform runtimes. | pdfLaTeX/BibTeX workflows and XeLaTeX/LuaLaTeX smoke builds pass live on macOS. `BLD201`/`BLD202` validate fresh bibliography controls and required tool evidence. On macOS, Biber runs from a runtime-owned, sealed single-architecture copy (see [Biber on macOS](workflow-reference.md#biber-on-macos)) and passes live, including a realistic biblatex project; no unconfined fallback exists. Linux Bubblewrap has controlled-command tests but no live Linux run. Windows isolation is unimplemented. |
+| Partial | Next | Validate engines and explicit bibliography backends on restricted platform runtimes. | pdfLaTeX/BibTeX workflows and XeLaTeX/LuaLaTeX smoke builds pass live on macOS. `BLD201`/`BLD202` validate fresh bibliography controls and required tool evidence. On macOS, Biber runs from a runtime-owned, sealed single-architecture copy (see [Biber on macOS](workflow-reference.md#biber-on-macos)) and passes live, including a realistic biblatex project; no unconfined fallback exists. Under Linux Bubblewrap, the live pdfLaTeX/BibTeX, Biber and XeLaTeX/LuaLaTeX builds pass in the weekly `live-linux` CI job on an Ubuntu 24.04 runner with TeX Live from apt; other distributions and TeX layouts are untested. Windows isolation is unimplemented. |
 | Implemented | None | Compare baseline, prepared, archive-rebuilt and explicitly supplied PDFs separately. | `CMP001`–`CMP003` compare page count, extracted text and RGB renders at 144 DPI. Supplied-PDF, repeated-baseline and archive comparisons remain exact; explicit tolerances/reviewed changes apply only to baseline versus prepared. Unavailable required evidence blocks preparation. |
 | Partial | Next | Baseline stability, explicit comparison tolerances and reviewed expected-output changes. | `CMP101` checks 2–5 configured independent baselines when repeats are requested. Explicit channel/pixel tolerances and eligible scoped exceptions apply only to baseline versus prepared; archive/reference comparisons cannot be relaxed. Inspection accepts up to 5000 pages, but renders (comparisons and rendered measurements) remain bounded to 300 pages/16 million pixels per page and do not prove semantic equivalence, PDF internals or subpixel fidelity. |
 | Implemented | None | Scoped review controls, standalone PDF inspection and explicitly unverified diagnostic exports. | `RPT101`–`RPT103` cover unmatched/ineligible decisions and diagnostic export; CLI pdf check, exact scoped suppressions/accepted exceptions with reasons and original evidence retention exist. Missing evidence, build/isolation failures and archive mismatches cannot be waived. Accepted exceptions remain a distinct outcome. |
@@ -221,9 +223,9 @@ subfile and input-merge fixtures passed page-count, extracted-text and exact
 144-DPI render comparisons with unchanged originals. Actual kernel-option
 instrumentation passed against an uninstrumented pdfLaTeX build; XeLaTeX and
 LuaLaTeX option/build smoke tests also passed. This does not validate all options
-or combinations. qpdf and MuPDF are not installed, and Linux isolation has not run
-on Linux. The live Biber test and a realistic biblatex/Biber preparation test
-pass on macOS with the sealed Biber copy; they run only with
+or combinations. qpdf and MuPDF are not installed, and Linux isolation runs live
+only in the `live-linux` CI job. The live Biber test and a realistic biblatex/Biber
+preparation test pass on macOS with the sealed Biber copy; they run only with
 `FLEDGE_RUN_INTEGRATION=1`.
 
 ### Build evidence

@@ -202,14 +202,15 @@ jobs:
           tests/test_runtime_monitoring.py
           -v -ra -p no:cacheprovider
 
-  # UNVALIDATED: the Linux Bubblewrap sandbox has only been exercised with
-  # controlled commands. This job is the first live Linux run; until a maintainer
-  # has run it from the Actions tab and it passes, no documentation may claim
-  # that Linux builds are validated. A failure here is a real result, so the job
-  # is not allowed to fail silently (no continue-on-error).
+  # Live Linux tests: real builds under the Bubblewrap sandbox on a GitHub-hosted
+  # Ubuntu runner, with TeX Live, Biber and Poppler from apt, weekly and on manual
+  # dispatch. The job first passed on 2026-10-12, and what the documentation says
+  # about Linux rests on it; the runner is pinned to the Ubuntu release the
+  # documentation names. A failure here is a real result, so the job is not
+  # allowed to fail silently (no continue-on-error).
   live-linux:
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     continue-on-error: false
     timeout-minutes: 60
     env:

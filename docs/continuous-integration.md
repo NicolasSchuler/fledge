@@ -6,9 +6,10 @@ reports as a downloadable artifact. A broken citation or a missing file then sho
 up when you push it, not on submission day.
 
 The workflow below uses a macOS runner because macOS is the platform on which
-Fledge's sandbox and builds are validated; see [limitations](limitations.md#platforms-and-tools).
-Linux runners will be documented once the Linux sandbox passes on a live Linux
-host.
+Fledge's sandbox and builds are tested most thoroughly; see
+[limitations](limitations.md#platforms-and-tools). The Linux sandbox is also
+tested in CI on Ubuntu, and the [Linux runner](#linux-runner) section below shows
+the steps that change.
 
 ## The workflow
 
@@ -135,5 +136,31 @@ repositories, a macOS minute costs more than a Linux minute; see
 Every run installs BasicTeX and its packages again, which adds to the minutes used.
 
 Fledge cannot build on a Windows runner because Windows has no build sandbox. A
-Linux runner is the cheaper option once the Linux sandbox has been validated; this
-page will show that workflow then.
+Linux runner is the cheaper option; the next section shows how to switch.
+
+## Linux runner
+
+Fledge's own CI runs its live integration tests under Bubblewrap, the Linux
+sandbox, on GitHub's Ubuntu 24.04 runner with TeX Live from Ubuntu's packages.
+To check a paper on that runner, set `runs-on: ubuntu-24.04` in the workflow
+above, remove its `env` block, and replace the steps "Install TeX and Poppler"
+and "Install TeX packages" with these:
+
+```yaml
+      # Bubblewrap needs unprivileged user namespaces, which Ubuntu 24.04
+      # restricts with AppArmor. This changes only the disposable runner.
+      - name: Allow unprivileged user namespaces
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      # Add any other Ubuntu packages your paper needs to the install line.
+      - name: Install TeX, Poppler and Bubblewrap
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            bubblewrap latexmk biber poppler-utils \
+            texlive-latex-base texlive-latex-recommended texlive-fonts-recommended \
+            texlive-bibtex-extra
+```
+
+Ubuntu splits TeX Live into packages such as `texlive-latex-extra` and
+`texlive-science`; add `texlive-xetex` or `texlive-luatex` for those engines. As
+on macOS, a LaTeX package the runner lacks is reported as a build failure.

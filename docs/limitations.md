@@ -6,17 +6,18 @@ direct. No Fledge result guarantees that a venue will accept a submission.
 
 ## Platforms and tools
 
-- **macOS is the tested platform.** Builds, Biber, multi-document packages and a
-  corpus of realistic projects pass live on the macOS development host.
+- **macOS is the main tested platform.** Builds, Biber, multi-document packages
+  and a corpus of realistic projects pass live on the macOS development host.
 - **The macOS installer's Homebrew and MacTeX steps** are tested with controlled
   commands and dry runs, not with a live installation.
 - **Linux** needs a manual installation and Bubblewrap with working user
-  namespaces. Its sandbox has controlled-command tests but has not run on a live
-  Linux host.
+  namespaces. Fledge's live integration tests run weekly in CI under Bubblewrap
+  on a GitHub-hosted Ubuntu 24.04 runner, with TeX Live from Ubuntu's packages.
+  Other distributions and TeX installations are not tested.
 - **Windows** has no build sandbox, so `check` and `prepare` cannot build there.
   `inspect` and `bib check` need only Python. To build on Windows, use WSL 2 with
   the Linux instructions in [installation](installation.md#windows); that route
-  carries the Linux caveat above and is not yet validated on a live host.
+  has not been tested live.
 - **No unsandboxed fallback exists.** If the sandbox cannot start, for example
   inside another sandbox or under a restrictive host policy, builds are blocked.
 - **Optional `qpdf` and MuPDF checks** are tested against recorded tool output,
