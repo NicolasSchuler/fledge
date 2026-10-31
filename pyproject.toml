@@ -92,8 +92,15 @@ select = [
     "G", "LOG",
     # Complexity ceilings that keep functions small.
     "C901", "PLR0912", "PLR0913", "PLR0915",
+    # Docstrings in Google style (see "Docstring convention" in docs/development.md). D401
+    # (imperative summary line) is named explicitly because the Google convention would
+    # otherwise disable it.
+    "D", "D401",
 ]
 ignore = [
+    # Constructors and magic methods are described by the class docstring and their
+    # signature; a docstring of their own would repeat it.
+    "D105", "D107",
     # The ambiguous characters in strings are intentional: typographic dashes, quotes, the
     # multiplication sign and Greek letters that the text checks recognise or produce for
     # the user. RUF002 and RUF003 (docstrings and comments) stay enabled.
@@ -106,6 +113,9 @@ ignore = [
 [tool.ruff.lint.mccabe]
 max-complexity = 10
 
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
 [tool.ruff.lint.pylint]
 max-args = 8
 max-branches = 12
@@ -116,12 +126,16 @@ max-statements = 50
 # of the interface even when one backend ignores some of them.
 "src/latexprep/sandbox.py" = ["ARG002"]
 "src/latexprep/process_table.py" = ["ARG002"]
-# Command-line scripts report through print.
-"scripts/*" = ["T201"]
+# Command-line scripts report through print. Scripts and the Sphinx configuration are
+# outside the docstring convention.
+"scripts/*" = ["T201", "D"]
+"docs/conf.py" = ["D"]
 # Test doubles mirror the signatures they replace, so their unused arguments are intended.
 # `with` blocks nest in unittest (`subTest` inside `assertRaises`), and a few tests catch
-# BaseException on purpose to record what escaped a thread or a cancelled task.
-"tests/*" = ["ARG", "SIM117", "C408", "BLE001"]
+# BaseException on purpose to record what escaped a thread or a cancelled task. Test
+# methods may rely on their name instead of a docstring (D102), as the Google style guide
+# allows; test modules, classes, doubles and helpers are documented like production code.
+"tests/*" = ["ARG", "SIM117", "C408", "BLE001", "D102"]
 # A fixture builder with a keyword for every build field.
 "tests/support.py" = ["PLR0913"]
 # Long live scenarios and a harness that mimics a whole build.

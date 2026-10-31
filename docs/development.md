@@ -72,7 +72,8 @@ ty check src/latexprep
 ```
 
 Ruff enforces, besides formatting and import order, the rule families `B`, `UP`, `C4`,
-`PIE`, `PERF`, `PTH`, `SIM`, `RUF`, `PGH`, `T20`, `BLE`, `ARG`, `G` and `LOG`, the
+`PIE`, `PERF`, `PTH`, `SIM`, `RUF`, `PGH`, `T20`, `BLE`, `ARG`, `G`, `LOG` and `D` (the
+[docstring convention](#docstring-convention) below), the
 keyword-only rule for boolean parameters (`FBT001`, `FBT002`) and ceilings on complexity
 (10), branches (12), statements (50) and arguments (8); `[tool.ruff.lint]` in
 `pyproject.toml` names the few deliberate exceptions and says why. Split a function
@@ -125,6 +126,65 @@ fake transports, so they verify request handling, not provider availability.
 Optional `qpdf`/`mutool` adapters must remain inconclusive when their tools or
 evidence are absent. The [limitations](limitations.md) page lists what has not
 been validated live.
+
+## Docstring convention
+
+Every module, class, function and method in `src/` and `tests/` carries a docstring in
+Google style, and ruff's pydocstyle rules (`D` with `convention = "google"`, plus `D401`)
+enforce the layout. The rules that the linter cannot check are these:
+
+- The summary is one imperative sentence that fits on the first line and ends with a
+  period: "Read a regular file.", not "Reads ..." or "This function reads ...". A property
+  is the exception; its summary is a noun phrase naming the value, as for an attribute.
+- A blank line separates the summary from further prose, which says what the signature
+  does not: intent, invariants, side effects, ordering, limits, and why a choice was made.
+- Parameters, results and exceptions go in `Args:`, `Returns:` (or `Yields:`) and
+  `Raises:` sections, in that order, each entry indented four spaces as
+  `name: description` with the description wrapped under its own first word. An `Args:`
+  section describes every parameter, so leave it out only when the summary and the
+  signature already say everything, as for a one-argument helper. Once a docstring has
+  any section it has all that apply: a function with two or more parameters gets
+  `Args:`, and a function that returns or yields a value gets `Returns:` or `Yields:`.
+  `Returns:` is omitted for a function that returns `None`, and `Raises:` lists the
+  exceptions that belong to the contract, not every error a callee might raise.
+- A yes/no function's summary reads "Return whether ...". `None`, `True` and `False` are
+  written in double backticks like any other identifier.
+- A class docstring lists its public attributes and dataclass fields under `Attributes:`,
+  and an enum lists its members there (a pure name registry may instead say in one
+  sentence where the meanings live). Constructor parameters that are not stored as public
+  attributes go in a class-level `Args:` section. A class whose `__post_init__` validates
+  its fields says so in one sentence before `Attributes:` ("Construction raises
+  ``SettingsError`` when ..."). Constructors and magic methods need no docstring of their
+  own, and a `#` comment on a field is dropped once the attribute entry says the same.
+- A Protocol method carries the full contract. An implementation says "The arguments are
+  those of :meth:`Protocol.method`." and adds only its own `Raises:` and caveats.
+- Code identifiers in prose use double backticks, and cross-references use Sphinx roles
+  such as :func:`scan_commands`. A docstring that contains a backslash (a LaTeX command,
+  a regular expression) is a raw string, `r"""`.
+- Test modules and test case classes say what they cover. A test method may omit its
+  docstring when its name describes the case; test doubles and helpers are documented
+  like production code.
+
+```python
+def read_regular_file(path: Path, limit: int) -> bytes:
+    """Read a whole regular, unlinked file that holds at most ``limit`` bytes.
+
+    The reasons the function itself gives (link, special file, size) are in
+    ``strerror`` and name no path.
+
+    Args:
+        path: The file to read.
+        limit: The largest number of bytes the file may hold.
+
+    Returns:
+        The contents of the file.
+
+    Raises:
+        OSError: The path is a link or a special file, or reading failed.
+        FileTooLargeError: The file holds more than ``limit`` bytes, including when it
+            grows while it is read.
+    """
+```
 
 ## Test structure and seams
 
