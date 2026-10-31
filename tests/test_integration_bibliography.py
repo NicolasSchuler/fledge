@@ -133,6 +133,10 @@ _FIELD = re.compile(r"(\w+)\s*=\s*\{([^{}]*)\}")
 
 
 def _biber_settings() -> Settings:
+    """Return Biber settings that format entries, drop ``file``, rename one key and merge two.
+
+    Only cited entries are kept, and the fixed epoch and the live job deadline apply.
+    """
     return Settings(
         main="main.tex",
         bibliography_backend="biber",
@@ -151,6 +155,7 @@ def _biber_settings() -> Settings:
 
 
 def _inlining_settings() -> Settings:
+    """Return BibTeX settings that inline the supplied ``main.bbl``, with the fixed epoch."""
     return Settings(
         main="main.tex",
         bibliography_backend="bibtex",
@@ -161,7 +166,14 @@ def _inlining_settings() -> Settings:
 
 
 def _entries(text: str) -> list[tuple[str, dict[str, str]]]:
-    """Each entry of a .bib text in order: its key and its fields with their values."""
+    """Split a .bib text into its entries.
+
+    Args:
+        text: The .bib text, whose fields have brace-delimited values without nested braces.
+
+    Returns:
+        Each entry in order: its key and its fields with their values.
+    """
     entries = []
     for record in text.split("@")[1:]:
         head, _, body = record.partition(",")
@@ -170,13 +182,28 @@ def _entries(text: str) -> list[tuple[str, dict[str, str]]]:
 
 
 def _shipped_files(output: Path) -> dict[str, str]:
-    """The text of every file in the published submission.zip, by archive name."""
+    """Read the text of every file in the published submission.zip.
+
+    Args:
+        output: The output directory that holds ``submission.zip``.
+
+    Returns:
+        The UTF-8 text of each entry by archive name.
+    """
     with zipfile.ZipFile(output / "submission.zip") as archive:
         return {name: archive.read(name).decode("utf-8") for name in archive.namelist()}
 
 
 def _problems(report: Report) -> list[tuple[str | None, str, str, str | None, str]]:
-    """The findings that block or advise, shown when an outcome is not the expected one."""
+    """List the findings that block or advise, shown when an outcome is not the expected one.
+
+    Args:
+        report: The report of the job.
+
+    Returns:
+        The code, rule, status, stage and message of each finding that is not informational
+        and did not pass.
+    """
     return [
         (item.code, item.rule, item.status, item.stage, item.message)
         for item in report.findings
@@ -185,7 +212,16 @@ def _problems(report: Report) -> list[tuple[str | None, str, str, str | None, st
 
 
 def _statuses(report: Report, code: str, stage: str | None = None) -> list[str]:
-    """The status of every finding with ``code``; only those of ``stage`` when one is given."""
+    """List the status of every finding with ``code``; only those of ``stage`` when one is given.
+
+    Args:
+        report: The report of the job.
+        code: The finding code.
+        stage: The stage to select, or ``None`` for every stage.
+
+    Returns:
+        The statuses in report order.
+    """
     return [
         item.status
         for item in report.findings
@@ -194,7 +230,17 @@ def _statuses(report: Report, code: str, stage: str | None = None) -> list[str]:
 
 
 def _backend_checks(report: Report) -> dict[str | None, tuple[str, object]]:
-    """Each build stage's BLD201 status with the backends its fresh control files required."""
+    """Map each build stage to its BLD201 status and the backends it required.
+
+    The backends are those that the stage's fresh control files required, as the
+    ``observed_backends`` detail records them.
+
+    Args:
+        report: The report of the job.
+
+    Returns:
+        The status and the backends of the BLD201 finding of each stage.
+    """
     return {
         item.stage: (item.status, item.details.get("observed_backends"))
         for item in report.findings
@@ -206,6 +252,13 @@ def _run_latexmk(project: Path, scratch: Path) -> subprocess.CompletedProcess[st
     """Build a copy of ``project`` in ``scratch`` with the host's latexmk, writing main.bbl.
 
     ``-norc`` keeps a personal latexmkrc from moving the output elsewhere.
+
+    Args:
+        project: The project to copy.
+        scratch: The new directory for the copy, which latexmk builds in.
+
+    Returns:
+        The completed latexmk process with its text output, also when latexmk failed.
     """
     shutil.copytree(project, scratch)
     return subprocess.run(
@@ -221,25 +274,43 @@ def _run_latexmk(project: Path, scratch: Path) -> subprocess.CompletedProcess[st
 
 @live_test("Set FLEDGE_RUN_INTEGRATION=1 for live TeX, Biber and Poppler preparation checks")
 class LiveBibliographyPreparationTests(unittest.IsolatedAsyncioTestCase):
+    """Real ``prepare`` jobs that transform the bibliography and must render like the baseline."""
+
     def setUp(self) -> None:
+        """Create a temporary base directory."""
         temporary = tempfile.TemporaryDirectory(prefix="fledge-bibliography-")
         self.addCleanup(temporary.cleanup)
         self.base = Path(temporary.name).resolve()
 
     def require_tools(self, *names: str) -> None:
+        """Skip the test unless every one of ``names`` is installed."""
         missing = [name for name in names if shutil.which(name) is None]
         if missing:
             self.skipTest("Required installed tools are absent: " + ", ".join(missing))
 
     async def prepare(self, source: Path, settings: Settings) -> tuple[Report, dict[str, str]]:
-        """Prepare ``source``; require a passing outcome and return the report and shipped files."""
+        """Prepare ``source`` into ``prepared`` and require a passing outcome.
+
+        Args:
+            source: The project to prepare.
+            settings: The settings of the job.
+
+        Returns:
+            The report and the text of each shipped file by archive name.
+        """
         output = self.base / "prepared"
         report = await run_job(JobRequest("prepare", source, settings, output))
         self.assertIn(report.outcome, PASSING_OUTCOMES, _problems(report))
         return report, _shipped_files(output)
 
     def assert_passed(self, report: Report, codes: Iterable[str], stage: str | None = None) -> None:
-        """Each code has exactly one finding (in ``stage`` when given), and it passed."""
+        """Assert that each code has exactly one finding (in ``stage`` when given) and it passed.
+
+        Args:
+            report: The report of the job.
+            codes: The finding codes.
+            stage: The stage to select, or ``None`` for every stage.
+        """
         codes = tuple(codes)
         self.assertEqual(
             {code: _statuses(report, code, stage) for code in codes},
@@ -248,7 +319,16 @@ class LiveBibliographyPreparationTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def generate_bbl(self, source: Path) -> str:
-        """Run BibTeX through latexmk on a copy of ``source``; put its main.bbl beside main.tex."""
+        """Run BibTeX through latexmk on a copy of ``source``; put its main.bbl beside main.tex.
+
+        Asserts that latexmk succeeded and wrote main.bbl.
+
+        Args:
+            source: The project; it receives the generated main.bbl.
+
+        Returns:
+            The text of the generated main.bbl.
+        """
         scratch = self.base / "scratch"
         built = await asyncio.to_thread(_run_latexmk, source, scratch)
         # latexmk reports its own errors on stderr and the TeX run on stdout.
@@ -260,7 +340,9 @@ class LiveBibliographyPreparationTests(unittest.IsolatedAsyncioTestCase):
         return generated.read_text(encoding="utf-8")
 
     async def test_biber_key_mapping_and_cited_only_output_render_like_the_baseline(self) -> None:
-        """Key renames, a merge, field removal and cited-only output keep the Biber rendering.
+        """Check that Biber key mapping and cited-only output render like the baseline.
+
+        Key renames, a merge, field removal and cited-only output keep the Biber rendering.
 
         Verifies docs/preparation-options.md, "Bibliography and source transformations":
         renames update the literal citations and the resource together, a merge keeps the
@@ -293,7 +375,9 @@ class LiveBibliographyPreparationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(directory_contents(source), originals)
 
     async def test_inlined_bibtex_bibliography_replaces_the_bibliography_files(self) -> None:
-        """A supplied BibTeX .bbl replaces the bibliography command and renders like the baseline.
+        """Check that an inlined BibTeX bibliography replaces the bibliography files.
+
+        A supplied BibTeX .bbl replaces the bibliography command and renders like the baseline.
 
         Verifies docs/preparation-options.md, "Bibliography and source transformations":
         bibliography inlining accepts an explicitly supplied literal BibTeX thebibliography

@@ -71,31 +71,49 @@ _TEXT_NORMALIZATION: Final = "line endings and trailing horizontal whitespace on
 
 
 def _unavailable(rule: str, error: Exception, details: dict[str, object] | None = None) -> Finding:
+    """Report ``rule`` as unavailable evidence, with the suggestion for a tool failure.
+
+    Args:
+        rule: The rule that could not be measured.
+        error: The cause.
+        details: The details of the finding, or ``None``.
+
+    Returns:
+        The unavailable finding.
+    """
     return unavailable_finding(rule, error, suggestion=TOOL_FAILURE_SUGGESTION, details=details)
 
 
 @dataclass(frozen=True, slots=True)
 class ComparisonPolicy:
-    """The parameters a comparison ran with, reported with each of its findings."""
+    """The parameters a comparison ran with, reported with each of its findings.
+
+    Attributes:
+        dpi: The resolution of the renders.
+        max_changed_pixel_ratio: The largest share of a page's pixels that may differ before
+            the page counts as changed.
+        channel_tolerance: The largest per-channel difference (0 to 255) that still counts
+            as the same color.
+    """
 
     dpi: int
-    # Largest share of a page's pixels that may differ before the page counts as changed.
     max_changed_pixel_ratio: float
-    # Largest per-channel difference (0 to 255) that still counts as the same color.
     channel_tolerance: int
 
     @classmethod
     def of(cls, options: ComparisonOptions | None) -> ComparisonPolicy:
-        """The policy of explicit tolerances, or the exact comparison when there are none."""
+        """Return the policy of explicit tolerances, or the exact comparison when there are none."""
         if options is None:
             return cls(COMPARISON_DPI, 0, 0)
         return cls(COMPARISON_DPI, options.max_changed_pixel_ratio, options.channel_tolerance)
 
     @property
     def tolerant(self) -> bool:
+        """Whether any tolerance is set."""
         return bool(self.channel_tolerance or self.max_changed_pixel_ratio)
 
     def to_details(self) -> dict[str, object]:
+        """Return the policy as finding details, with what the comparison does not establish."""
         return {
             "dpi": self.dpi,
             "max_changed_pixel_ratio": self.max_changed_pixel_ratio,
@@ -108,7 +126,17 @@ class ComparisonPolicy:
 
 @dataclass(frozen=True, slots=True)
 class PageDifference:
-    """How the renders of one page pair differ; absent pairs are identical and not recorded."""
+    """How the renders of one page pair differ; absent pairs are identical and not recorded.
+
+    Attributes:
+        page: The page number.
+        left_pixels: The width and height of the left render.
+        right_pixels: The width and height of the right render.
+        page_dimensions_changed: Whether the page sizes differ.
+        changed_pixels: The number of pixels that differ beyond the channel tolerance.
+        changed_pixel_ratio: The share of the page's pixels that differ.
+        within_tolerance: Whether that share is within the configured limit.
+    """
 
     page: int
     left_pixels: tuple[int, int]
@@ -126,6 +154,7 @@ class PageDifference:
         return not self.within_tolerance
 
     def to_report(self) -> dict[str, object]:
+        """Return the difference as a report row, with the pixel counts when they were counted."""
         row: dict[str, object] = {
             "page": self.page,
             "left_pixels": self.left_pixels,
@@ -143,6 +172,15 @@ class PageDifference:
 
 @dataclass(frozen=True, slots=True)
 class _ComparisonSide:
+    """One preflighted comparison input.
+
+    Attributes:
+        pages: The number of pages.
+        dimensions: The size of every page in points, or ``None`` when unavailable.
+        text: The normalized text of every page, or ``None`` when unavailable.
+        errors: Why some of the evidence is unavailable.
+    """
+
     pages: int
     dimensions: list[tuple[float, float]] | None
     text: list[str] | None
@@ -150,24 +188,33 @@ class _ComparisonSide:
 
 
 class _SidePair(NamedTuple):
-    """Both preflighted comparison inputs, aligned page by page."""
+    """Both preflighted comparison inputs, aligned page by page.
+
+    Attributes:
+        left: The left input.
+        right: The right input.
+    """
 
     left: _ComparisonSide
     right: _ComparisonSide
 
     def named(self) -> Iterator[tuple[str, _ComparisonSide]]:
+        """Return each side with its name, left first."""
         return zip(_SIDES, self, strict=True)
 
     @property
     def common_pages(self) -> int:
+        """The number of pages that both sides have."""
         return min(self.left.pages, self.right.pages)
 
     @property
     def missing_pages(self) -> list[int]:
+        """The pages that only the longer side has."""
         return list(range(self.common_pages + 1, max(self.left.pages, self.right.pages) + 1))
 
     @property
     def dimensions_known(self) -> bool:
+        """Whether the page sizes of both sides are known."""
         return self.left.dimensions is not None and self.right.dimensions is not None
 
 
@@ -178,6 +225,18 @@ def _side_evidence(
     subject: str,
     errors: list[str],
 ) -> _T | None:
+    """Parse one measurement of a side, recording a failure in ``errors`` instead of raising.
+
+    Args:
+        outcome: The result of the measurement's command, or the error it ended with.
+        parse: Parses the command's output for the page count.
+        pages: The page count of the side.
+        subject: Names the measurement in ``errors``.
+        errors: The errors of the side, extended in place.
+
+    Returns:
+        The parsed evidence, or ``None`` when it is unavailable.
+    """
     if isinstance(outcome, PreparationError):
         errors.append(f"{subject}: {outcome}")
         return None
@@ -189,13 +248,38 @@ def _side_evidence(
 
 
 def _comparable_page_sizes(output: str, pages: int) -> list[tuple[float, float]]:
-    """Page sizes in points, refusing pages too large to render at the comparison resolution."""
+    """Parse the page sizes in points, refusing pages too large to compare.
+
+    A page must fit the raster limits when it is rendered at the comparison resolution.
+
+    Args:
+        output: The page box output of pdfinfo.
+        pages: The number of pages.
+
+    Returns:
+        The width and height of every page.
+
+    Raises:
+        PreparationError: The sizes cannot be parsed, or a page is too large.
+    """
     sizes = parse_page_sizes(output, pages)
     require_comparison_raster_fit(sizes)
     return sizes
 
 
 async def _prepare_side(session: PdfToolSession, name: str) -> _ComparisonSide:
+    """Preflight one comparison input: its page count, page sizes and text.
+
+    Args:
+        session: The comparison's tool session.
+        name: The side, ``left`` or ``right``.
+
+    Returns:
+        The side; a failed geometry or text measurement is recorded among its errors.
+
+    Raises:
+        PreparationError: The page count cannot be read or exceeds the rendered page limit.
+    """
     document = pdf_input(name)
     info = await session.run(f"{name}/properties", pdfinfo_argv(document))
     pages = page_count(pdfinfo_fields(info.stdout))
@@ -218,6 +302,11 @@ async def _prepare_side(session: PdfToolSession, name: str) -> _ComparisonSide:
 
 
 async def _prepare_sides(session: PdfToolSession) -> tuple[_SidePair | None, list[str]]:
+    """Preflight both comparison inputs concurrently.
+
+    Returns:
+        The pair, or ``None`` when either side failed its preflight, and every error.
+    """
     prepared = await gather_measurements(
         [partial(_prepare_side, session, name) for name in _SIDES], session.budget
     )
@@ -233,19 +322,26 @@ async def _prepare_sides(session: PdfToolSession) -> tuple[_SidePair | None, lis
 
 
 def raster_pixel_count(size: tuple[float, float]) -> int:
-    """Pixels of a page of ``size`` points rendered at the comparison resolution."""
+    """Return the pixels of a page of ``size`` points rendered at the comparison resolution."""
     return math.prod(measurement_raster_size(size, COMPARISON_DPI))
 
 
 def pair_memory_mb(left: tuple[float, float], right: tuple[float, float]) -> int:
-    """Memory to reserve for holding both renders of a page pair, in MiB."""
+    """Return the memory to reserve for holding both renders of a page pair, in MiB."""
     pixels = raster_pixel_count(left) + raster_pixel_count(right)
     return math.ceil(_RGB_BYTES_PER_PIXEL * pixels / MIB) + _RENDER_HEADROOM_MB
 
 
 @dataclass(frozen=True, slots=True)
 class _PageRenders:
-    """What every page-pair render of one comparison shares."""
+    """What every page-pair render of one comparison shares.
+
+    Attributes:
+        session: The comparison's tool session.
+        dimensions: The page sizes of each side, by side name.
+        policy: The comparison policy.
+        count_changes: Whether changed pixels are counted, which only tolerances need.
+    """
 
     session: PdfToolSession
     dimensions: dict[str, list[tuple[float, float]]]
@@ -254,7 +350,17 @@ class _PageRenders:
 
 
 async def _read_render(renders: _PageRenders, name: str, side: str, page: int) -> RasterImage:
-    """Render one side of a page pair and read its raster, removing the file afterwards."""
+    """Render one side of a page pair and read its raster, removing the file afterwards.
+
+    Args:
+        renders: What every page-pair render shares.
+        name: The name of the page pair's work directory.
+        side: The side, ``left`` or ``right``.
+        page: The page number.
+
+    Returns:
+        The raster.
+    """
     await renders.session.run_without_lease(
         f"{name}/{side}",
         render_page_argv(page, COMPARISON_DPI, "rgb", pdf_input(side)),
@@ -269,6 +375,17 @@ async def _read_render(renders: _PageRenders, name: str, side: str, page: int) -
 
 
 async def _rendered_difference(renders: _PageRenders, page: int) -> PageDifference | None:
+    """Render both sides of a page and measure how they differ.
+
+    The page pair's work directory is removed afterwards, even after a failure.
+
+    Args:
+        renders: What every page-pair render shares.
+        page: The page number.
+
+    Returns:
+        The difference, or ``None`` when the renders and page sizes are identical.
+    """
     session = renders.session
     name = f"page-{page:04d}"
     try:
@@ -310,6 +427,7 @@ async def _rendered_difference(renders: _PageRenders, page: int) -> PageDifferen
 
 
 async def _render_pair(renders: _PageRenders, page: int) -> PageDifference | None:
+    """Render a page pair under a lease that reserves memory for both renders."""
     memory_mb = pair_memory_mb(
         renders.dimensions["left"][page - 1], renders.dimensions["right"][page - 1]
     )
@@ -321,7 +439,14 @@ async def _render_pair(renders: _PageRenders, page: int) -> PageDifference | Non
 
 @dataclass(slots=True)
 class _RenderOutcome:
-    """Page-pair render results of one comparison, collected in page order."""
+    """Page-pair render results of one comparison, collected in page order.
+
+    Attributes:
+        differences: The pairs whose renders differ.
+        completed_pages: The pages whose pair was rendered.
+        failed_pages: The pages whose pair could not be rendered.
+        errors: Why those pages could not be rendered.
+    """
 
     differences: list[PageDifference]
     completed_pages: list[int]
@@ -330,10 +455,12 @@ class _RenderOutcome:
 
     @property
     def changed_pages(self) -> list[int]:
+        """The pages that differ beyond the tolerances."""
         return [item.page for item in self.differences if item.counts_as_changed]
 
 
 async def _render_pages(renders: _PageRenders, pages: int) -> _RenderOutcome:
+    """Render the first ``pages`` page pairs concurrently and collect them in page order."""
     results = await gather_measurements(
         [partial(_render_pair, renders, page) for page in range(1, pages + 1)],
         renders.session.budget,
@@ -351,6 +478,7 @@ async def _render_pages(renders: _PageRenders, pages: int) -> _RenderOutcome:
 
 
 def _page_count_finding(pair: _SidePair, policy: ComparisonPolicy) -> Finding:
+    """Compare the page counts of both sides."""
     page_counts = {name: side.pages for name, side in pair.named()}
     same_count = pair.left.pages == pair.right.pages
     return Finding(
@@ -363,9 +491,10 @@ def _page_count_finding(pair: _SidePair, policy: ComparisonPolicy) -> Finding:
 
 
 def _changed_text_pages(pair: _SidePair) -> list[int] | None:
-    """Pages whose normalized text differs (pages missing on one side included).
+    """Return the pages whose normalized text differs (pages missing on one side included).
 
-    None when the text of either side could not be extracted.
+    Returns:
+        The pages, or ``None`` when the text of either side could not be extracted.
     """
     left_text, right_text = pair.left.text, pair.right.text
     if left_text is None or right_text is None:
@@ -379,6 +508,7 @@ def _changed_text_pages(pair: _SidePair) -> list[int] | None:
 
 
 def _text_finding(changed_text: list[int], policy: ComparisonPolicy) -> Finding:
+    """Report the pages whose extracted text differs."""
     return Finding(
         "compare.text",
         "Normalized extracted text matches."
@@ -393,6 +523,16 @@ def _text_finding(changed_text: list[int], policy: ComparisonPolicy) -> Finding:
 def _rendering_finding(
     changed_pages: list[int], differences: Sequence[PageDifference], policy: ComparisonPolicy
 ) -> Finding:
+    """Report the pages whose rendering differs.
+
+    Args:
+        changed_pages: The pages that differ beyond the tolerances or exist on one side only.
+        differences: The measured difference of every page pair that differs.
+        policy: The comparison policy.
+
+    Returns:
+        The finding.
+    """
     if changed_pages:
         message = f"Rendered output differs on {len(changed_pages)} pages."
     elif policy.tolerant:
@@ -414,7 +554,15 @@ def _rendering_finding(
 
 @dataclass(slots=True)
 class _Comparison:
-    """What comparing two prepared PDFs established, before it becomes findings."""
+    """What comparing two prepared PDFs established, before it becomes findings.
+
+    Attributes:
+        findings: The findings so far.
+        errors: Why some evidence is unavailable.
+        text_changes: The pages whose text differs, or ``None`` when text was not compared.
+        renders: The render results, or ``None`` when the pages were not rendered.
+        render_evidence: What the renders established when some pages failed, or ``None``.
+    """
 
     findings: list[Finding]
     errors: list[str]
@@ -431,6 +579,18 @@ async def _compare_prepared(
     *,
     count_changes: bool,
 ) -> _Comparison:
+    """Compare the page counts, text and renders of both prepared sides.
+
+    Args:
+        session: The comparison's tool session.
+        pair: The prepared sides.
+        errors: The errors so far, extended in place.
+        policy: The comparison policy.
+        count_changes: Whether changed pixels are counted.
+
+    Returns:
+        What the comparison established.
+    """
     comparison = _Comparison([_page_count_finding(pair, policy)], errors)
     comparison.text_changes = _changed_text_pages(pair)
     if comparison.text_changes is not None:
@@ -469,7 +629,20 @@ async def compare_pdfs(
     options: ComparisonOptions | None = None,
     previews: PdfPreviewCollector | None = None,
 ) -> list[Finding]:
-    """Compare two PDFs by page count, text and render; capture previews if a collector is given."""
+    """Compare two PDFs by page count, text and render; capture previews if a collector is given.
+
+    Args:
+        left: The first PDF, such as the reference.
+        right: The second PDF.
+        work: The workspace of the comparison.
+        runner: Runs the PDF tools.
+        budget: The resource budget, or ``None``.
+        options: The tolerances, or ``None`` for an exact comparison.
+        previews: Collects the previews of the affected pages, or ``None``.
+
+    Returns:
+        The findings.
+    """
     policy = ComparisonPolicy.of(options)
     try:
         session = await PdfToolSession.open(work, {"left": left, "right": right}, runner, budget)
@@ -513,7 +686,13 @@ async def compare_pdfs(
 
 
 class _PageSide(NamedTuple):
-    """One side of a page pair: which page, which PDF and how large the page is in points."""
+    """One side of a page pair: which page, which PDF and how large the page is in points.
+
+    Attributes:
+        page: The page number.
+        side: The side, ``left`` or ``right``.
+        size: The width and height of the page, in points.
+    """
 
     page: int
     side: str
@@ -523,7 +702,22 @@ class _PageSide(NamedTuple):
 async def _capture_png(
     session: PdfToolSession, target: _PageSide, store: PdfPreviewStore, slot: int
 ) -> tuple[str, tuple[int, int]]:
-    """Render one optional image without retaining any scratch-file references."""
+    """Render one optional image without retaining any scratch-file references.
+
+    Args:
+        session: The comparison's tool session.
+        target: The side of the page to render.
+        store: The shared preview budget, which keeps the image.
+        slot: The preview slot of the page pair.
+
+    Returns:
+        The image id and the width and height of the image.
+
+    Raises:
+        PreviewLimitError: A preview or tool file byte limit is reached.
+        PreparationError: The renderer produced no regular PNG within the geometry
+            reservation.
+    """
     page, side, size = target
     name = f"preview-{page:04d}-{side}"
     async with session.lease(
@@ -561,9 +755,17 @@ async def _capture_png(
 
 @dataclass(frozen=True, slots=True)
 class _ChangeEvidence:
-    """What the comparison established about each page of a side pair."""
+    """What the comparison established about each page of a side pair.
 
-    # Pages whose text differs (None: text was not compared) and the rendering differences.
+    Attributes:
+        text_changes: The pages whose text differs, or ``None`` when text was not compared.
+        differences: The rendering differences, by page.
+        completed: The pages whose pair was rendered.
+        missing_pages: The pages that only one side has.
+        dimensions_changed: The pages whose size differs between the sides.
+        incomplete: Whether some comparison evidence is unavailable.
+    """
+
     text_changes: frozenset[int] | None
     differences: Mapping[int, PageDifference]
     completed: frozenset[int]
@@ -573,6 +775,16 @@ class _ChangeEvidence:
 
     @classmethod
     def of(cls, pair: _SidePair, comparison: _Comparison, *, incomplete: bool) -> _ChangeEvidence:
+        """Collect what ``comparison`` established about each page of ``pair``.
+
+        Args:
+            pair: The prepared sides.
+            comparison: What the comparison established.
+            incomplete: Whether some comparison evidence is unavailable.
+
+        Returns:
+            The evidence.
+        """
         renders = comparison.renders
         left, right = pair.left.dimensions, pair.right.dimensions
         return cls(
@@ -592,6 +804,7 @@ class _ChangeEvidence:
 
     @property
     def affected_pages(self) -> list[int]:
+        """The pages that differ in any way, in order."""
         return sorted(
             (self.text_changes or frozenset())
             | self.differences.keys()
@@ -601,7 +814,16 @@ class _ChangeEvidence:
 
 
 def _preview_page(page: int, pair: _SidePair, evidence: _ChangeEvidence) -> PreviewPage:
-    """A page's change summary with both of its sides pending capture."""
+    """Return a page's change summary with both of its sides pending capture.
+
+    Args:
+        page: The page number.
+        pair: The prepared sides.
+        evidence: What the comparison established about each page.
+
+    Returns:
+        The descriptor of the page.
+    """
     sides = []
     for _, side in pair.named():
         present = page <= side.pages
@@ -647,6 +869,15 @@ async def _capture_page(
     store: PdfPreviewStore,
     slot: int,
 ) -> None:
+    """Capture the preview of each present side of a page, recording failures on it.
+
+    Args:
+        session: The comparison's tool session.
+        pair: The prepared sides.
+        preview: The descriptor of the page, updated in place.
+        store: The shared preview budget.
+        slot: The preview slot of the page pair.
+    """
     for (name, descriptor), (_, side) in zip(preview.sides(), pair.named(), strict=True):
         if not descriptor.present:
             continue
@@ -669,12 +900,13 @@ async def _capture_page(
 
 
 def _combined_status(preview: PreviewPage) -> PreviewStatus:
-    """The status shared by the present sides of a page pair, else partial."""
+    """Return the status shared by the present sides of a page pair, else partial."""
     statuses = {side.status for _, side in preview.sides() if side.present}
     return next(iter(statuses)) if len(statuses) == 1 else "partial"
 
 
 def _omit(preview: PreviewPage) -> None:
+    """Mark a page and its present sides as omitted because a shared limit was reached."""
     preview.status = "omitted"
     preview.omission_reason = "The shared preview page or byte limit was reached."
     for _, side in preview.sides():
@@ -688,7 +920,14 @@ async def _capture_previews(
     evidence: _ChangeEvidence | None,
     collector: PdfPreviewCollector,
 ) -> None:
-    """Capture only identified differences; preview failures never change findings."""
+    """Capture only identified differences; preview failures never change findings.
+
+    Args:
+        session: The comparison's tool session.
+        pair: The prepared sides, or ``None`` when the preflight failed.
+        evidence: What the comparison established, or ``None`` when the preflight failed.
+        collector: Collects the previews of this comparison.
+    """
     if pair is None or evidence is None:
         collector.unavailable(
             "PDF comparison preflight was unavailable; affected pages are unknown."

@@ -27,7 +27,17 @@ from .cancellation import cancellation_point
 
 
 class ProblemKind(StrEnum):
-    """Why one declared bibliography file, or the set of them, could not be used."""
+    """Why one declared bibliography file, or the set of them, could not be used.
+
+    Attributes:
+        LINKED: The file is, or lies behind, a symbolic link.
+        NOT_A_FILE: The file is missing or is not a regular file.
+        TOO_LARGE: The file exceeds the byte budget.
+        UNREADABLE: Reading the file failed.
+        NOT_UTF8: The file is not valid UTF-8.
+        TOO_MANY_FILES: The set holds more files than the budget allows.
+        TOO_MANY_ENTRIES: The documents together hold more records than the budget allows.
+    """
 
     LINKED = "linked"
     NOT_A_FILE = "not_a_file"
@@ -42,8 +52,11 @@ class ProblemKind(StrEnum):
 class BibliographyProblem:
     """A file that was not read, or a limit of the whole set that was reached.
 
-    ``detail`` is a phrase that follows the file name ("is not valid UTF-8 (…)"). A
-    problem of the whole set has no ``name`` and a complete sentence as its detail.
+    Attributes:
+        kind: Why the file or the set could not be used.
+        detail: A phrase that follows the file name ("is not valid UTF-8 (…)"), or a
+            complete sentence for a problem of the whole set.
+        name: The file's project-relative name, or ``None`` for a problem of the whole set.
     """
 
     kind: ProblemKind
@@ -52,21 +65,34 @@ class BibliographyProblem:
 
     @property
     def message(self) -> str:
+        """The detail, preceded by the file name when the problem has one."""
         return self.detail if self.name is None else f"{self.name} {self.detail}"
 
 
 @dataclass(frozen=True, slots=True)
 class BibliographyBudget:
-    """How much one read may take: bytes per file and in total, files and records."""
+    """How much one read may take: bytes per file and in total, files and records.
+
+    Attributes:
+        max_file_bytes: The most bytes one file may hold.
+        max_total_bytes: The most bytes all files may hold together, or ``None`` for no
+            cumulative limit.
+        max_files: The most files that are read, or ``None`` for no limit.
+        max_records: The most entries, ``@string`` and ``@preamble`` declarations all
+            documents may hold together, or ``None`` for no limit.
+    """
 
     max_file_bytes: int = MAX_BIB_FILE_BYTES
     max_total_bytes: int | None = None
     max_files: int | None = None
-    # Entries, @string and @preamble declarations of all documents together.
     max_records: int | None = None
 
     def describe(self) -> str:
-        """The byte limits as a phrase for messages, built from the limits themselves."""
+        """Describe the byte limits as a phrase for messages, built from the limits themselves.
+
+        Returns:
+            The per-file limit and, when set, the total limit, in parentheses.
+        """
         text = f"{mebibytes(self.max_file_bytes)} per file"
         if self.max_total_bytes is not None:
             text += f", {mebibytes(self.max_total_bytes)} in total"
@@ -74,14 +100,19 @@ class BibliographyBudget:
 
 
 class BibliographyLoad(NamedTuple):
-    """The documents that were read, valid or not, and what stopped the others."""
+    """The documents that were read, valid or not, and what stopped the others.
+
+    Attributes:
+        documents: The documents that were read, including those with syntax errors.
+        problems: The files that were skipped and the limits of the set that were reached.
+    """
 
     documents: list[BibDocument]
     problems: list[BibliographyProblem]
 
 
 def discover_bibliographies(root: Path) -> list[str]:
-    """Project-relative names of every .bib file or link below ``root``, sorted."""
+    """List the project-relative names of every .bib file or link below ``root``, sorted."""
     return sorted(
         path.relative_to(root).as_posix()
         for path in root.rglob("*")
@@ -99,6 +130,14 @@ def read_declared_bibliographies(
     file or record limit adds a problem for the set and stops reading. A document
     with a syntax error is returned, because only the caller knows whether that
     makes it unusable.
+
+    Args:
+        root: The project directory the names are relative to.
+        names: The project-relative names of the declared files.
+        budget: The byte, file and record limits of this read.
+
+    Returns:
+        The documents that were read and the problems that stopped the others.
     """
     reader = BibFileReader(
         max_file_bytes=budget.max_file_bytes, max_total_bytes=budget.max_total_bytes
@@ -131,6 +170,18 @@ def _read_one(
     budget: BibliographyBudget,
     problems: list[BibliographyProblem],
 ) -> BibDocument | None:
+    """Read one named file, or record why it cannot be used.
+
+    Args:
+        root: The project directory the name is relative to.
+        name: The project-relative name of the file.
+        reader: The reader that keeps the cumulative byte allowance.
+        budget: The limits whose description a byte-budget problem names.
+        problems: The list that receives the problem when the file is skipped.
+
+    Returns:
+        The document, valid or not, or ``None`` when the file was skipped.
+    """
     path = root / name
     if _has_link_below(root, name):
         detail = "is, or lies behind, a symbolic link, which is not supported"
@@ -159,9 +210,16 @@ def _read_one(
 
 
 def _has_link_below(root: Path, name: str) -> bool:
-    """Whether the file or a directory between it and ``root`` is a symbolic link.
+    """Return whether the file or a directory between it and ``root`` is a symbolic link.
 
     ``root`` itself may be reached through a link: it is the project the user named.
+
+    Args:
+        root: The project directory.
+        name: The file's path relative to ``root``.
+
+    Returns:
+        Whether a symbolic link lies on the path below ``root``.
     """
     parts = Path(name).parts
     return any(root.joinpath(*parts[:count]).is_symlink() for count in range(1, len(parts) + 1))

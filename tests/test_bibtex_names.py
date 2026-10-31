@@ -8,11 +8,14 @@ from latexprep.bibtex_names import FamilyName, parse_author_list, without_partic
 
 
 def families(text: str) -> list[str] | None:
+    """Return the full family names that ``parse_author_list`` reads, or ``None``."""
     parsed = parse_author_list(text)
     return None if parsed is None else [name.full for name in parsed.names]
 
 
 class ParseAuthorListTests(unittest.TestCase):
+    """Tests of the family names, particles and truncation that ``parse_author_list`` reads."""
+
     def test_both_name_orders_give_the_family_name(self):
         self.assertEqual(families("Ada Smith and Jones, Bo"), ["Smith", "Jones"])
         self.assertEqual(families("Smith, Jr., Ada"), ["Smith"])
@@ -51,6 +54,8 @@ class ParseAuthorListTests(unittest.TestCase):
 
 
 class SpellingTests(unittest.TestCase):
+    """Tests of ``FamilyName.spellings`` and ``without_particles``."""
+
     def test_a_family_name_offers_every_spelling_another_source_may_use(self):
         name = FamilyName("van der Berg", "Berg")
         self.assertEqual(name.spellings(), ("van der Berg", "Berg", "Berg"))

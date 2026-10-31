@@ -33,6 +33,12 @@ def resolved_unique_directories(*directories):
 
     On merged-/usr Linux, /bin and /sbin resolve to /usr/bin and /usr/sbin, and
     the launcher keeps only the first entry naming each directory.
+
+    Args:
+        *directories: The directories to resolve.
+
+    Returns:
+        The resolved directories in the order they first appear.
     """
     return list(dict.fromkeys(os.path.realpath(directory) for directory in directories))
 
@@ -107,7 +113,15 @@ main "$@"
 
 
 class InstallerTests(unittest.TestCase):
+    """``install.sh`` with mock tools: options, tool discovery, installation and uninstallation."""
+
     def setUp(self):
+        """Prepare a copy of the installer, a home directory and fake tools in paths with spaces.
+
+        Every mock tool is a copy of ``MOCK_PROGRAM`` that logs its command line to
+        ``commands.jsonl``; ``sandbox-exec`` is present from the start. ``self.env`` points
+        the installer at them and pretends to be a macOS host and a regular user.
+        """
         temporary = tempfile.TemporaryDirectory(prefix="fledge installer tests ")
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
@@ -138,20 +152,29 @@ class InstallerTests(unittest.TestCase):
 
     @property
     def prefix(self):
+        """The default installation directory below the test home."""
         return self.home / ".local/share/fledge"
 
     @property
     def launcher(self):
+        """The default launcher path below the test home."""
         return self.home / ".local/bin/fledge"
 
     def add_tools(self, *names):
+        """Provide each of ``names`` as a mock tool in the fake tools directory."""
         for name in names:
             shutil.copy2(self.program, self.tools / name)
 
     def complete_tools(self):
+        """Provide ``python3`` and every required TeX and PDF tool as mock tools."""
         self.add_tools("python3", *TEX_TOOLS, *PDF_TOOLS)
 
     def run_installer(self, *args):
+        """Run the installer with ``args`` through the harness that fakes host and tool discovery.
+
+        Returns:
+            The completed process with its text output captured.
+        """
         return subprocess.run(
             ["/bin/bash", "-c", HARNESS, "installer-test", str(self.script), *args],
             cwd=self.root,
@@ -162,6 +185,15 @@ class InstallerTests(unittest.TestCase):
         )
 
     def run_interactive(self, answer, *args):
+        """Run the installer through the harness with a terminal as its input and type ``answer``.
+
+        Args:
+            answer: The bytes written to the terminal.
+            *args: The installer arguments.
+
+        Returns:
+            The exit code, the standard output and the standard error.
+        """
         master, slave = pty.openpty()
         self.addCleanup(os.close, master)
         self.addCleanup(os.close, slave)
@@ -179,7 +211,16 @@ class InstallerTests(unittest.TestCase):
         return process.returncode, stdout, stderr
 
     def run_with_real_discovery(self, path, fallbacks, *args):
-        """Run the installer's own find_tool with PATH and the fallback directories chosen here."""
+        """Run the installer's own find_tool with PATH and the fallback directories chosen here.
+
+        Args:
+            path: The ``PATH`` of the installer process.
+            fallbacks: The directories that replace the installer's fallback tool directories.
+            *args: The installer arguments.
+
+        Returns:
+            The completed process with its text output captured.
+        """
         # Replace only the host-specific fallback paths in this isolated script copy, so no
         # machine's installed TeX is involved. Discovery itself is the unmodified function.
         original = self.script.read_text()
@@ -197,7 +238,16 @@ class InstallerTests(unittest.TestCase):
         )
 
     def launcher_path(self, launcher=None):
-        """Return the PATH entries saved in a generated launcher, resolved for comparison."""
+        """Return the PATH entries saved in a generated launcher, resolved for comparison.
+
+        Fails the test when the launcher exports no PATH.
+
+        Args:
+            launcher: The launcher to read, or ``None`` for the default launcher.
+
+        Returns:
+            The resolved entries in their order.
+        """
         for line in (launcher or self.launcher).read_text().splitlines():
             if line.startswith("export PATH="):
                 value = shlex.split(line)[1].removeprefix("PATH=")
@@ -205,11 +255,13 @@ class InstallerTests(unittest.TestCase):
         self.fail("The launcher does not export PATH")
 
     def commands(self):
+        """Return every command the mock tools logged, each as its name and arguments."""
         if not self.log.exists():
             return []
         return [json.loads(line) for line in self.log.read_text().splitlines()]
 
     def assert_no_install(self):
+        """Assert that nothing was installed and that only ``-c`` probes ran."""
         self.assertFalse(self.prefix.exists())
         self.assertFalse(self.launcher.exists())
         self.assertTrue(all(command[1:2] == ["-c"] for command in self.commands()))
@@ -528,6 +580,15 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(self.cleanup_command(result.stderr), self.uninstall_command())
 
     def uninstall_command(self, prefix=None, bin_dir=None):
+        """Return the uninstall command that the installer prints.
+
+        Args:
+            prefix: The installation directory, or ``None`` for the default one.
+            bin_dir: The launcher directory, or ``None`` for that of the default launcher.
+
+        Returns:
+            The command line, which names the installer by its physical path.
+        """
         return [
             "bash",
             os.path.realpath(self.script),  # the installer reports its physical directory
@@ -539,7 +600,14 @@ class InstallerTests(unittest.TestCase):
         ]
 
     def cleanup_command(self, stderr):
-        """The command printed after 'run the installer again:' by a failed install."""
+        """Return the command printed after 'run the installer again:' by a failed install.
+
+        Args:
+            stderr: The standard error of the failed install.
+
+        Returns:
+            The command split into its words.
+        """
         lines = stderr.splitlines()
         announcement = next(i for i, line in enumerate(lines) if "then run the installer" in line)
         return shlex.split(lines[announcement + 1])
@@ -620,6 +688,7 @@ class InstallerTests(unittest.TestCase):
         self.assertTrue(self.prefix.is_dir())
 
     def install(self, *args):
+        """Install with every required tool and ``args``, and assert that it succeeded."""
         self.complete_tools()
         result = self.run_installer("--yes", *args)
         self.assertEqual(result.returncode, 0, result.stderr)

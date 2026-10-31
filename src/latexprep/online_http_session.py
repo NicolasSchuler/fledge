@@ -65,14 +65,31 @@ _CACHE_MAX_BODY_BYTES = 4 * MIB
 
 
 class ConnectFailure(NetworkFailure):
-    """The TCP connection to one validated address failed; another address may work."""
+    """The TCP connection to one validated address failed; another address may work.
+
+    The outcome is always ``FetchOutcome.UNAVAILABLE``.
+
+    Args:
+        message: Why the connection failed, in words for a report.
+    """
 
     def __init__(self, message: str = "Could not connect to the server") -> None:
         super().__init__(FetchOutcome.UNAVAILABLE, message)
 
 
 class ExchangeRequest(NamedTuple):
-    """Everything one exchange needs: where to connect, what to ask, and the bounds."""
+    """Everything one exchange needs: where to connect, what to ask, and the bounds.
+
+    Attributes:
+        target: The URL's host, port, scheme and path.
+        address: The validated numeric address to connect to.
+        method: The request method, ``GET`` or ``HEAD``.
+        want_body: Whether to read the body of a 2xx response.
+        max_body_bytes: The largest accepted body.
+        user_agent: The ``User-Agent`` header value.
+        connect_timeout: The longest a connection attempt may take, or ``None`` for no
+            separate limit.
+    """
 
     target: Target
     address: str
@@ -88,7 +105,7 @@ Transport = Callable[[ExchangeRequest], Awaitable[Response]]
 
 @cache
 def default_ssl_context() -> ssl.SSLContext:
-    """The default verifying TLS context, built once: certificate and host name are checked."""
+    """Return the default verifying TLS context, built once; it checks certificate and host name."""
     return ssl.create_default_context()
 
 
@@ -101,8 +118,18 @@ async def open_pinned(
 ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
     """Connect to the numeric ``address``; TLS, if any, verifies the host name of ``target``.
 
-    A failed or timed-out connection raises :class:`ConnectFailure`, so the caller can
-    try another address of the same host.
+    Args:
+        target: The URL's host, which TLS verifies, and port.
+        address: The numeric IPv4 or IPv6 address to connect to.
+        ssl_context: The TLS context, or ``None`` for a plain connection.
+        connect_timeout: The longest the TCP connection may take, or ``None``.
+
+    Returns:
+        The reader and writer of the connection.
+
+    Raises:
+        ConnectFailure: The connection failed or timed out, so the caller can try another
+            address of the same host.
     """
     family = socket.AF_INET6 if ":" in address else socket.AF_INET
     sock = socket.socket(family, socket.SOCK_STREAM)
@@ -125,7 +152,22 @@ async def open_pinned(
 
 
 async def exchange(request: ExchangeRequest) -> Response:
-    """Send one request to its address and read the bounded response (the real transport)."""
+    """Send one request to its address and read the bounded response (the real transport).
+
+    HTTPS uses the default verifying TLS context, and the connection is aborted
+    afterwards.
+
+    Args:
+        request: The exchange to perform.
+
+    Returns:
+        The response, with its body when one was wanted and the status is 2xx.
+
+    Raises:
+        ConnectFailure: The connection failed or timed out.
+        NetworkFailure: The address is not public, or the response is malformed or over a
+            bound.
+    """
     address = require_public_ip(request.address)
     context = default_ssl_context() if request.target.scheme == "https" else None
     reader, writer = await open_pinned(
@@ -147,9 +189,16 @@ async def exchange(request: ExchangeRequest) -> Response:
 class Fetch:
     """How one URL fetch ended.
 
-    ``message`` says why a fetch failed, in words for a report; ``error_code`` is the
-    operating-system or TLS code behind it (``ECONNRESET``, ``CERTIFICATE_VERIFY_FAILED``)
-    and ``elapsed_seconds`` the time its network requests took.
+    Attributes:
+        outcome: How the fetch ended.
+        url: The last URL asked, redacted.
+        response: The final response, or ``None`` when the fetch failed.
+        redirects: The redirect destinations followed, redacted.
+        message: Why a fetch failed, in words for a report.
+        host: The host of the last URL asked, or ``None``.
+        elapsed_seconds: The time its network requests took.
+        error_code: The operating-system or TLS code behind a failure (``ECONNRESET``,
+            ``CERTIFICATE_VERIFY_FAILED``).
     """
 
     outcome: FetchOutcome
@@ -163,18 +212,21 @@ class Fetch:
 
 
 def _http_outcome(status: int) -> FetchOutcome:
+    """Classify a final HTTP status; an unlisted error status is unavailable."""
     if 200 <= status < 300:
         return FetchOutcome.AVAILABLE
     return _HTTP_OUTCOMES.get(status, FetchOutcome.UNAVAILABLE)
 
 
 def _tls_reason(error: ssl.SSLError) -> str:
+    """Explain a TLS failure, quoting the certificate verification message if there is one."""
     if isinstance(error, ssl.SSLCertVerificationError) and error.verify_message:
         return f"The server's certificate could not be verified ({error.verify_message})"
     return "The secure (TLS) connection could not be established"
 
 
 def _transport_reason(error: Exception) -> str:
+    """Explain a failed network connection by the error's type and system message."""
     detail = type(error).__name__
     if isinstance(error, OSError) and error.strerror:
         detail += f": {error.strerror}"
@@ -182,7 +234,7 @@ def _transport_reason(error: Exception) -> str:
 
 
 def _error_code(error: BaseException) -> str | None:
-    """The TLS reason or errno name behind ``error`` or the exception it was raised from."""
+    """Name the TLS reason or errno behind ``error`` or the exception it was raised from."""
     cause = error if isinstance(error, OSError) else error.__cause__
     if isinstance(cause, ssl.SSLError):
         # An error built by hand rather than by the ssl module has no reason.
@@ -193,7 +245,12 @@ def _error_code(error: BaseException) -> str | None:
 
 
 class _BoundedCache:
-    """Finished fetches by request; the oldest go first when entries or body bytes run over."""
+    """Finished fetches by request; the oldest go first when entries or body bytes run over.
+
+    Args:
+        max_entries: The most fetches kept.
+        max_body_bytes: The most response body bytes kept, over all fetches.
+    """
 
     def __init__(self, max_entries: int, max_body_bytes: int) -> None:
         self._max_entries = max_entries
@@ -203,16 +260,24 @@ class _BoundedCache:
 
     @staticmethod
     def _size(item: Fetch) -> int:
+        """Return the body bytes a cached fetch holds."""
         return len(item.response.body) if item.response else 0
 
     def get(self, key: tuple[str, bool]) -> Fetch | None:
+        """Return the cached fetch for ``key``, or ``None``."""
         return self._items.get(key)
 
     def values(self) -> list[Fetch]:
-        """The cached fetches, oldest first."""
+        """List the cached fetches, oldest first."""
         return list(self._items.values())
 
     def put(self, key: tuple[str, bool], item: Fetch) -> None:
+        """Cache ``item`` under ``key``, then drop the oldest entries until within bounds.
+
+        Args:
+            key: The URL and whether a body was wanted.
+            item: The finished fetch.
+        """
         self._items[key] = item
         self._body_bytes += self._size(item)
         while len(self._items) > self._max_entries or self._body_bytes > self._max_body_bytes:
@@ -221,7 +286,16 @@ class _BoundedCache:
 
 
 class _Allowance:
-    """The network time one fetch may still use, shared by all of its requests."""
+    """The network time one fetch may still use, shared by all of its requests.
+
+    Args:
+        seconds: The network time the fetch may use, the start of ``total`` and
+            ``remaining``.
+
+    Attributes:
+        total: The seconds the fetch may use in all.
+        remaining: The seconds still left.
+    """
 
     def __init__(self, seconds: float) -> None:
         self.total = seconds
@@ -229,11 +303,21 @@ class _Allowance:
 
     @property
     def spent(self) -> float:
+        """The seconds used so far."""
         return self.total - self.remaining
 
 
 class _Trail:
-    """Where a fetch has got to: the URL being asked, the redirects so far and the host."""
+    """Where a fetch has got to: the URL being asked, the redirects so far and the host.
+
+    Args:
+        url: The URL the fetch starts with, the first ``current``.
+
+    Attributes:
+        current: The URL being asked.
+        redirects: The redirect destinations so far, redacted.
+        host: The host of the current URL, once it has been validated.
+    """
 
     def __init__(self, url: str) -> None:
         self.current = url
@@ -242,7 +326,22 @@ class _Trail:
 
 
 class OnlineClient:
-    """Fetches URLs within one job's bounds; see the module documentation."""
+    """Fetches URLs within one job's bounds; see the module documentation.
+
+    Args:
+        options: The online options, kept as ``options``.
+        budget: The job's resource budget, kept as ``budget``.
+        resolver: Names a host's addresses; defaults to the job's DNS resolver. Tests
+            replace it to keep the network out.
+        transport: Performs one exchange with one address; defaults to :func:`exchange`.
+            Tests replace it to keep the network out.
+
+    Attributes:
+        options: The online options, which set the budget, timeouts, spacing and limits.
+        budget: The job's resource budget that each request leases from, or ``None``.
+        requests: The requests made so far.
+        cache: The finished fetches kept for repeated URLs.
+    """
 
     def __init__(
         self,
@@ -273,6 +372,7 @@ class OnlineClient:
 
     @contextlib.asynccontextmanager
     async def _exclusive(self, key: tuple[str, bool]) -> AsyncGenerator[None]:
+        """Hold the lock of one fetch key, so that identical fetches run one at a time."""
         lock, users = self._in_flight.get(key, (asyncio.Lock(), 0))
         self._in_flight[key] = (lock, users + 1)
         try:
@@ -286,7 +386,17 @@ class OnlineClient:
                 self._in_flight[key] = (lock, users - 1)
 
     async def fetch(self, url: str, *, want_body: bool = False) -> Fetch:
-        """Ask ``url`` with HEAD, or with GET and a bounded body when ``want_body`` is set."""
+        """Ask ``url`` with HEAD, or with GET and a bounded body when ``want_body`` is set.
+
+        Concurrent identical fetches share one result, and finished results are cached.
+
+        Args:
+            url: The URL to fetch.
+            want_body: Whether to read the response body.
+
+        Returns:
+            How the fetch ended; a failure is a result, never an exception.
+        """
         key = (url, want_body)
         async with self._exclusive(key):
             cached = self.cache.get(key)
@@ -298,6 +408,15 @@ class OnlineClient:
             return result
 
     async def _fetch_uncached(self, url: str, *, want_body: bool) -> Fetch:
+        """Fetch ``url`` over the network, turning every network failure into a result.
+
+        Args:
+            url: The URL to fetch.
+            want_body: Whether to read the response body.
+
+        Returns:
+            How the fetch ended.
+        """
         trail = _Trail(url)
         allowance = _Allowance(self.options.online_timeout_seconds * FETCH_TIMEOUT_MULTIPLE)
         try:
@@ -318,6 +437,7 @@ class OnlineClient:
             )
 
     def _timeout_reason(self, allowance: _Allowance) -> str:
+        """Explain a timeout: one request too slow, or the whole fetch over its allowance."""
         seconds = self.options.online_timeout_seconds
         if allowance.remaining <= 0:
             return (
@@ -334,6 +454,18 @@ class OnlineClient:
         reason: str,
         error: BaseException,
     ) -> Fetch:
+        """Log a failed fetch and describe it as a result.
+
+        Args:
+            trail: Where the fetch had got to.
+            allowance: The fetch's network time, whose spent part is reported.
+            outcome: How the fetch failed.
+            reason: Why, in words for a report.
+            error: The error behind the failure, which supplies the error code.
+
+        Returns:
+            The failed fetch.
+        """
         logger.debug(
             "online %s: fetch failed as %s (%s) after %.2f s",
             trail.host or "unknown host",
@@ -354,6 +486,22 @@ class OnlineClient:
     async def _follow_redirects(
         self, trail: _Trail, *, want_body: bool, allowance: _Allowance
     ) -> Fetch:
+        """Ask the trail's URL and follow its redirects, up to the configured limit.
+
+        Args:
+            trail: Where the fetch has got to; it is updated with each redirect.
+            want_body: Whether to read the final response body.
+            allowance: The fetch's remaining network time.
+
+        Returns:
+            How the fetch ended at the first response that is not a redirect.
+
+        Raises:
+            NetworkFailure: A URL is unsafe, a redirect loops, is malformed or unsafe, the
+                redirect limit or request budget is exhausted, the host throttled, or a
+                response is malformed.
+            TimeoutError: A request or the fetch ran out of time.
+        """
         visited: set[str] = set()
         for _ in range(self.options.online_max_redirects + 1):
             target = parse_public_url(trail.current)
@@ -385,6 +533,21 @@ class OnlineClient:
 
     @staticmethod
     def _redirect_destination(target: Target, response: Response, *, want_body: bool) -> str:
+        """Resolve and validate the destination of a redirect.
+
+        Args:
+            target: The URL that answered with the redirect.
+            response: The redirect response.
+            want_body: Whether a metadata body is wanted, which forbids a redirect from
+                HTTPS to plain HTTP.
+
+        Returns:
+            The absolute destination URL.
+
+        Raises:
+            NetworkFailure: The redirect has no destination, the destination is not a
+                public URL, or it downgrades a metadata request to plain HTTP.
+        """
         location = response.header("location")
         if not location:
             raise NetworkFailure(FetchOutcome.MALFORMED, "Redirect omitted its destination")
@@ -399,7 +562,7 @@ class OnlineClient:
         return destination
 
     async def _ask(self, target: Target, *, want_body: bool, allowance: _Allowance) -> Response:
-        """One URL: HEAD, or GET with a body, and a GET when the HEAD was refused."""
+        """Ask one URL: HEAD, or GET with a body, and a GET when the HEAD was refused."""
         method = "GET" if want_body else "HEAD"
         response = await self._one(target, method, want_body=want_body, allowance=allowance)
         if not want_body and response.status in _HEAD_RETRY_STATUSES:
@@ -407,12 +570,14 @@ class OnlineClient:
         return response
 
     def _budget_exhausted(self) -> NetworkFailure:
+        """Build the failure for a used-up request budget."""
         return NetworkFailure(
             FetchOutcome.REQUEST_LIMIT,
             f"The budget of {self.options.online_max_requests} online requests is used up",
         )
 
     def _lease(self) -> contextlib.AbstractAsyncContextManager[object]:
+        """Lease the resources of one request from the job's budget, if there is one."""
         if self.budget is None:
             return contextlib.nullcontext()
         return self.budget.lease("online request", memory_mb=DEFAULT_LEASE_MEMORY_MB)
@@ -420,6 +585,24 @@ class OnlineClient:
     async def _one(
         self, target: Target, method: str, *, want_body: bool, allowance: _Allowance
     ) -> Response:
+        """Make one request, spaced from the last request to the same host and counted.
+
+        A host that answered HTTP 429 is not asked again.
+
+        Args:
+            target: The URL to ask.
+            method: The request method.
+            want_body: Whether to read the response body.
+            allowance: The fetch's remaining network time.
+
+        Returns:
+            The response.
+
+        Raises:
+            NetworkFailure: The host throttled an earlier request, the request budget is
+                used up, or the exchange failed.
+            TimeoutError: The request or the fetch ran out of time.
+        """
         host = target.host
         async with self._host_locks[host]:
             if host in self._throttled:
@@ -459,6 +642,23 @@ class OnlineClient:
     async def _over_network(
         self, target: Target, method: str, *, want_body: bool, allowance: _Allowance
     ) -> Response:
+        """Resolve the host and ask its first reachable public address within the time left.
+
+        The time the request takes is deducted from ``allowance``.
+
+        Args:
+            target: The URL to ask.
+            method: The request method.
+            want_body: Whether to read the response body.
+            allowance: The fetch's remaining network time.
+
+        Returns:
+            The response.
+
+        Raises:
+            TimeoutError: The request timeout or the fetch's allowance ran out.
+            NetworkFailure: An address is not public, or the exchange failed.
+        """
         limit = min(self.options.online_timeout_seconds, allowance.remaining)
         if limit <= 0:
             raise TimeoutError
@@ -480,6 +680,20 @@ class OnlineClient:
         Only a failed connection moves on to the next address; IPv4 goes first because
         a missing IPv6 route is the commoner failure, and the first connection attempt
         gets a share of the timeout so that a silent address cannot use all of it.
+
+        Args:
+            target: The URL to ask.
+            addresses: The host's validated addresses; at most ``_MAX_ADDRESS_ATTEMPTS``
+                are tried.
+            method: The request method.
+            want_body: Whether to read the response body.
+
+        Returns:
+            The response of the first address that accepted a connection.
+
+        Raises:
+            NetworkFailure: There are no addresses.
+            ConnectFailure: No address accepted a connection.
         """
         ordered = sorted(addresses, key=lambda address: ":" in address)[:_MAX_ADDRESS_ATTEMPTS]
         connect_timeout = (

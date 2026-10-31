@@ -22,6 +22,8 @@ from latexprep.report import Report
 
 
 class ExecutionRecordTests(unittest.TestCase):
+    """Reading and recording execution entries, including malformed and missing ones."""
+
     def test_entries_are_read_into_typed_records(self):
         records = read_execution_records(
             {
@@ -159,6 +161,8 @@ class ExecutionRecordTests(unittest.TestCase):
 
 
 class DetailKeyTests(unittest.TestCase):
+    """The shared detail keys of findings and the notes they mark."""
+
     def test_a_key_equals_its_plain_string_so_checks_may_write_either(self):
         finding = Finding(
             "pdf.page_size",

@@ -21,7 +21,10 @@ from latexprep.config import Settings
 
 
 class HelpTests(unittest.TestCase):
+    """Tests of the ``--help`` text of the commands: option sections, defaults and wording."""
+
     def help_text(self, *command: str) -> str:
+        """Return the ``--help`` output of ``command`` at width 200, asserting that it succeeds."""
         result = CliRunner().invoke(cli, [*command, "--help"], terminal_width=200)
         self.assertEqual(result.exit_code, 0, result.output)
         return result.output

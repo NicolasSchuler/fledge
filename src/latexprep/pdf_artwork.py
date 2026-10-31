@@ -61,7 +61,19 @@ _RENDERED_FIGURE_RULES: Final = frozenset(
 
 
 async def _read_trace(session: PdfToolSession, pages: int) -> TracedDocument:
-    """One MuPDF trace, parsed once and shared by the drawing and colour-space measurements."""
+    """Read one MuPDF trace, parsed once and shared by the drawing and colour-space measurements.
+
+    Args:
+        session: The PDF tool session that runs the trace.
+        pages: The number of pages to trace.
+
+    Returns:
+        The parsed trace.
+
+    Raises:
+        PreparationError: The trace could not be run or parsed.
+        OSError: The tool could not be run.
+    """
     return await session.measure(
         "trace",
         mupdf_trace_argv(pages),
@@ -76,10 +88,22 @@ async def _drawing_findings(
     options: PdfArtworkOptions,
     rules: list[ArtworkRule],
 ) -> tuple[list[Finding], frozenset[int]]:
-    """The trace-based findings, and every page whose coordinate frame cannot be aligned.
+    """Return the trace-based findings, and every page whose coordinate frame cannot be aligned.
 
     The pages are those Poppler reports as rotated or cropped plus those whose trace frame
-    disagrees with the reported size; the rendered measurements skip them as well.
+    disagrees with the reported size; the rendered measurements skip them as well. When the
+    trace cannot be parsed, every rule is unavailable evidence and only Poppler's pages are
+    returned.
+
+    Args:
+        session: The PDF tool session.
+        trace: The MuPDF trace.
+        frames: The page sizes and the pages Poppler reports as rotated or cropped.
+        options: The artwork options.
+        rules: The configured trace rules.
+
+    Returns:
+        The findings and the misaligned pages.
     """
     try:
         async with session.lease("drawing trace"):
@@ -95,6 +119,16 @@ async def _drawing_findings(
 async def _color_space_finding(
     session: PdfToolSession, trace: TracedDocument, required: ColorSpaceFamily
 ) -> Finding:
+    """Compare the colour spaces of the trace with ``required``; unavailable on failure.
+
+    Args:
+        session: The PDF tool session.
+        trace: The MuPDF trace.
+        required: The required colour family.
+
+    Returns:
+        The finding.
+    """
     try:
         async with session.lease("color trace"):
             return await run_in_thread(color_space_finding, trace, required)
@@ -104,22 +138,43 @@ async def _color_space_finding(
 
 @dataclass(frozen=True, slots=True)
 class _ArtworkPolicy:
-    """What an inspection measures and how: the options, work bounds and figure scope."""
+    """What an inspection measures and how: the options, work bounds and figure scope.
+
+    Attributes:
+        options: The artwork options.
+        limits: The work bounds of the rendered measurements.
+        whole_page_figures: Whether every page of an input figure is measured whole when the
+            options name no figure regions.
+    """
 
     options: PdfArtworkOptions
     limits: ArtworkLimits
-    # Measure every page of an input figure whole when the options name no figure regions.
     whole_page_figures: bool = False
 
 
 class _Trace(NamedTuple):
-    """The MuPDF trace of a document, or why it could not be read."""
+    """The MuPDF trace of a document, or why it could not be read.
+
+    Attributes:
+        document: The parsed trace, or ``None``.
+        failure: Why the trace could not be read, or ``None``.
+    """
 
     document: TracedDocument | None
     failure: PreparationError | OSError | None
 
 
 async def _read_optional_trace(session: PdfToolSession, pages: int, *, wanted: bool) -> _Trace:
+    """Read the MuPDF trace if it is ``wanted``, keeping a failure instead of raising it.
+
+    Args:
+        session: The PDF tool session that runs the trace.
+        pages: The number of pages to trace.
+        wanted: Whether any configured measurement needs the trace.
+
+    Returns:
+        The trace or its failure; neither when the trace is not wanted.
+    """
     if not wanted:
         return _Trace(None, None)
     try:
@@ -131,6 +186,16 @@ async def _read_optional_trace(session: PdfToolSession, pages: int, *, wanted: b
 async def _type3_finding(
     session: PdfToolSession, pages: int, options: PdfArtworkOptions
 ) -> Finding:
+    """Classify the Type 3 glyph programs; unavailable evidence when the inspection fails.
+
+    Args:
+        session: The PDF tool session.
+        pages: The number of pages of the PDF.
+        options: The artwork options, which say whether bitmap glyphs are forbidden.
+
+    Returns:
+        The finding.
+    """
     try:
         return await inspect_type3_glyphs(
             session, pages, forbid_bitmap=options.forbid_bitmap_type3_glyphs
@@ -145,6 +210,17 @@ async def _rendered_findings(
     policy: _ArtworkPolicy,
     configured: Sequence[ArtworkRule],
 ) -> list[Finding]:
+    """Return the findings of the configured figure region, preview and contrast measurements.
+
+    Args:
+        session: The PDF tool session that renders the pages.
+        geometry: The page sizes and the pages whose frame must be skipped.
+        policy: What the inspection measures and how.
+        configured: The configured rules.
+
+    Returns:
+        The figure region and preview findings, then the contrast findings.
+    """
     options = policy.options
     result: list[Finding] = []
     if _RENDERED_FIGURE_RULES & set(configured):
@@ -167,6 +243,19 @@ async def _inspect_artwork(
     policy: _ArtworkPolicy,
     shared: SharedPdfSession | None = None,
 ) -> list[Finding]:
+    """Run the configured artwork measurements on one PDF, in report order.
+
+    Args:
+        pdf: The PDF to inspect.
+        work: The inspection workspace.
+        runner: Runs the PDF tools.
+        budget: The resource budget, or ``None``.
+        policy: What the inspection measures and how.
+        shared: A shared session for ``pdf``, or ``None``.
+
+    Returns:
+        The findings; empty when no rule is configured.
+    """
     options = policy.options
     configured = configured_artwork_rules(options)
     if not configured:
@@ -218,7 +307,18 @@ async def inspect_pdf_artwork(
 ) -> list[Finding]:
     """Inspect one manuscript PDF; figure measurements need explicit regions.
 
-    A shared ``session`` for ``pdf`` supplies the frozen PDF and remembered measurements.
+    Args:
+        pdf: The manuscript PDF.
+        work: The inspection workspace.
+        runner: Runs the PDF tools.
+        options: The artwork options; ``None`` uses the defaults, which select nothing.
+        budget: The resource budget, or ``None``.
+        limits: The work bounds of the rendered measurements; ``None`` uses the defaults.
+        session: A shared session for ``pdf``, which supplies the frozen PDF and remembered
+            measurements, or ``None``.
+
+    Returns:
+        The findings, in report order.
     """
     policy = _ArtworkPolicy(options or PdfArtworkOptions(), limits or ArtworkLimits())
     return await _inspect_artwork(pdf, work, runner, budget, policy, session)
@@ -236,6 +336,21 @@ async def inspect_artwork_inputs(
     """Apply the selected artwork policy separately to explicit input PDF figures.
 
     Unless the policy names figure regions, every page of an input figure is measured whole.
+
+    Args:
+        figures: The input PDF figures; a repeated figure is measured once.
+        work: A new inspection workspace, which must not exist yet.
+        runner: Runs the PDF tools.
+        options: The artwork options; ``None`` uses the defaults, which select nothing.
+        budget: The resource budget, or ``None``.
+        limits: The work bounds of the rendered measurements; ``None`` uses the defaults.
+
+    Returns:
+        The findings of every figure, each with the figure's path.
+
+    Raises:
+        PreparationError: ``figures`` is not a tuple of at most ``MAX_FIGURE_INPUTS`` paths,
+            or ``work`` already exists.
     """
     if (
         not isinstance(figures, tuple)

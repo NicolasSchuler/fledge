@@ -16,7 +16,12 @@ from .rule_definition import Rule
 
 
 def print_rule_table(rules: Sequence[Rule], console: Console) -> None:
-    """List every given check with its code and title."""
+    """List every given check with its code and title.
+
+    Args:
+        rules: The checks to list, in the order given.
+        console: The console that prints the table.
+    """
     table = Table(title=f"{len(rules)} registered checks", box=None, padding=(0, 2, 0, 0))
     table.add_column("Code", style="bold", no_wrap=True)
     table.add_column("Check")
@@ -27,7 +32,12 @@ def print_rule_table(rules: Sequence[Rule], console: Console) -> None:
 
 
 def print_rule_explanation(rule: Rule, console: Console) -> None:
-    """Explain one check: what it examines, the suggested fix and its diagnostic name."""
+    """Explain one check: what it examines, the suggested fix and its diagnostic name.
+
+    Args:
+        rule: The check to explain.
+        console: The console that prints the explanation.
+    """
     console.print(Text(f"{rule.code}: {rule.title}", style="bold"))
     console.print(Text(rule.description))
     console.print(Text(f"Next: {rule.fix}"))

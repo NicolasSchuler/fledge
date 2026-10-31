@@ -31,7 +31,18 @@ UNFINISHED_SCOPE = "run did not finish"
 
 
 class Outcome(StrEnum):
-    """The overall result of a job; serialized as its string value."""
+    """The overall result of a job; serialized as its string value.
+
+    Attributes:
+        PASSED: Everything in the stated scope passed.
+        PLANNED: A ``--dry-run`` plan; nothing was verified.
+        PASSED_WITH_ADVISORIES: Required checks passed; warnings need review.
+        ACCEPTED_EXCEPTIONS: Passed only because of reviewed exceptions in the settings.
+        BLOCKED: A required check failed or lacked evidence.
+        ERROR: An input, configuration, execution or report-writing problem, or an
+            internal error.
+        CANCELLED: The run was interrupted.
+    """
 
     PASSED = "passed"
     PLANNED = "planned"
@@ -43,7 +54,10 @@ class Outcome(StrEnum):
 
     @property
     def exit_code(self) -> int:
-        """The process exit code: 0 passed, 1 advisories, 2 exceptions, 3 blocked, 4 error."""
+        """The process exit code of the outcome.
+
+        0 passed or planned, 1 advisories, 2 exceptions, 3 blocked, 4 error, 130 cancelled.
+        """
         return _EXIT_CODE_BY_OUTCOME[self]
 
 
@@ -59,7 +73,19 @@ _EXIT_CODE_BY_OUTCOME: dict[Outcome, int] = {
 
 
 class ChangeKind(StrEnum):
-    """The kind of edit a preparation change makes to the separate copy."""
+    """The kind of edit a preparation change makes to the separate copy.
+
+    Attributes:
+        EXCLUDE: A file is left out of the copy.
+        REMOVE: A file is removed, such as an input merged into the main source.
+        MOVE: A file moves to another path, such as into the flat layout.
+        REWRITE: The text of a file is rewritten.
+        UNWRAP: The single ZIP wrapper directory is removed from the project root.
+        FORMAT: A source file is formatted with ``tex-fmt``.
+        BIBLIOGRAPHY_TRANSFORM: Selected bibliography edits are applied.
+        NORMALIZE_DOI: A DOI is normalized.
+        METADATA_SANITIZATION: Metadata is sanitized.
+    """
 
     EXCLUDE = "exclude"
     REMOVE = "remove"
@@ -82,8 +108,13 @@ StageStatus = Literal[
 class StageRecord(TypedDict):
     """One task, build or diagnostic step in ``Report.stages``.
 
-    ``name`` identifies the stage; for a multi-document job ``document`` says which
-    document it belongs to. The optional times are seconds.
+    Attributes:
+        name: Identifies the stage.
+        status: How the stage ended.
+        command: The command the stage ran, if recorded.
+        elapsed_seconds: How long the stage ran, in seconds.
+        queue_seconds: How long the stage waited to start, in seconds.
+        document: For a multi-document job, the document the stage belongs to.
     """
 
     name: str
@@ -98,9 +129,14 @@ class StageRecord(TypedDict):
 class Change:
     """One edit a preparation makes, or would make, to the separate copy.
 
-    ``path`` is the source path inside the project, ``destination`` the path in the
-    copy when it moves, and ``diff`` the unified diff of a rewrite. The original input
-    is never edited.
+    The original input is never edited.
+
+    Attributes:
+        path: The source path inside the project.
+        kind: The kind of edit.
+        reason: Why the edit is made.
+        destination: The path in the copy when the file moves.
+        diff: The unified diff of a rewrite.
     """
 
     path: str
@@ -117,10 +153,24 @@ class Report:
 
     A report starts as ``Outcome.BLOCKED`` so that a run that never reaches its end
     fails closed instead of passing; whoever finishes the run sets the real outcome.
-    ``command`` is one of ``REPORT_COMMANDS``. ``settings``, ``tools`` and ``execution``
-    are descriptive records for people and scripts; renderers read the parts they need
-    through :mod:`latexprep.execution_records`. Output goes through ``redacted_copy``,
+    ``settings``, ``tools`` and ``execution`` are descriptive records for people and
+    scripts; renderers read the parts they need through
+    :mod:`latexprep.execution_records`. Output goes through ``redacted_copy``,
     ``to_dict`` or ``to_json``, which remove credentials and generalize local paths.
+
+    Attributes:
+        command: The command that produced the report, one of ``REPORT_COMMANDS``.
+        outcome: The overall result.
+        scope: What the results cover.
+        main: The selected main document, if any.
+        findings: The findings of the run.
+        changes: The edits made, or proposed, to the separate copy.
+        settings: The descriptive record of the settings.
+        tools: The descriptive record of the tools.
+        stages: The tasks, builds and diagnostic steps.
+        artifacts: The paths of the files the job published, by name.
+        execution: The descriptive record of the execution.
+        package_contents: The inventories of the prepared package contents.
     """
 
     command: str
@@ -139,7 +189,7 @@ class Report:
 
     @property
     def is_request_error(self) -> bool:
-        """The request was rejected, so no check result describes the project."""
+        """Whether the request was rejected, so no check result describes the project."""
         return (
             self.outcome is Outcome.ERROR
             and self.scope == REQUEST_SCOPE
@@ -147,7 +197,14 @@ class Report:
         )
 
     def redacted_copy(self) -> Report:
-        """Sanitize every output field together, including settings and tool inventories."""
+        """Sanitize every output field together, including settings and tool inventories.
+
+        Artifact paths keep their location; every other local path is generalized.
+
+        Returns:
+            The sanitized report, or a report without content that names the cause when
+            the output cannot be sanitized safely.
+        """
         values = redact_data(asdict(self))
         if not isinstance(values, dict):
             return _withheld_report(self.command, _REDACTION_LIMIT_CAUSE)
@@ -172,12 +229,18 @@ class Report:
         return result
 
     def _with_control_data(self, values: dict[str, Any]) -> dict[str, Any]:
-        """Redacted ``values`` with the original enums and rule names restored.
+        """Restore the original enums and rule names in the redacted ``values``.
 
         These finite, application-defined enums and registered rule IDs are control data,
         not manuscript content (a password could be "passed"). Redaction returns plain
         strings, so the original enum members are restored; a value outside an enum
-        raises, which withholds the report. Findings and changes become objects again.
+        raises, which withholds the report.
+
+        Returns:
+            ``values``, updated in place, with findings and changes as objects again.
+
+        Raises:
+            ValueError: An original value lies outside its enum.
         """
         if self.command in REPORT_COMMANDS:
             values["command"] = self.command
@@ -198,7 +261,7 @@ class Report:
         return values
 
     def sorted_findings(self) -> list[Finding]:
-        """The findings in a stable order that does not depend on the order checks ran in."""
+        """Return the findings in a stable order that does not depend on the order checks ran in."""
         return sorted(
             self.findings,
             key=lambda item: (
@@ -217,11 +280,11 @@ class Report:
         )
 
     def to_dict(self) -> dict[str, object]:
-        """The sanitized report in its JSON layout, with deterministic ordering."""
+        """Return the sanitized report in its JSON layout, with deterministic ordering."""
         return redacted_dict(redact_report(self))
 
     def to_json(self) -> str:
-        """``to_dict`` as indented UTF-8 JSON text ending in a newline."""
+        """Return ``to_dict`` as indented UTF-8 JSON text ending in a newline."""
         return redacted_json(redact_report(self))
 
 
@@ -236,7 +299,7 @@ def redact_report(report: Report) -> RedactedReport:
 
 
 def redacted_dict(public: RedactedReport) -> dict[str, object]:
-    """The JSON layout of an already sanitized report, with deterministic ordering."""
+    """Return the JSON layout of an already sanitized report, with deterministic ordering."""
     result: dict[str, object] = {"schema_version": REPORT_SCHEMA_VERSION, **asdict(public)}
     result["findings"] = [
         {**asdict(finding), "code": finding.code, "next_step": finding.next_step}
@@ -258,7 +321,7 @@ def redacted_dict(public: RedactedReport) -> dict[str, object]:
 
 
 def redacted_json(public: RedactedReport) -> str:
-    """``redacted_dict`` as indented UTF-8 JSON text ending in a newline."""
+    """Return ``redacted_dict`` as indented UTF-8 JSON text ending in a newline."""
     return json.dumps(redacted_dict(public), indent=2, ensure_ascii=False) + "\n"
 
 
@@ -267,10 +330,17 @@ _REDACTION_LIMIT_CAUSE = "redaction_limit"
 
 
 def _withheld_report(command: str, cause: str) -> Report:
-    """A report without content, for output that cannot be sanitized safely.
+    """Build a report without content, for output that cannot be sanitized safely.
 
-    ``cause`` is ``redaction_limit`` or the name of the error that stopped sanitizing,
-    so an oversized report and a defect are distinguishable; it never quotes content.
+    Args:
+        command: The command of the original report; one outside ``REPORT_COMMANDS``
+            becomes ``inspect``.
+        cause: ``redaction_limit`` or the name of the error that stopped sanitizing, so
+            an oversized report and a defect are distinguishable; it never quotes
+            content.
+
+    Returns:
+        An error report with one finding that names the cause.
     """
     if cause == _REDACTION_LIMIT_CAUSE:
         message = (
@@ -304,7 +374,15 @@ def _withheld_report(command: str, cause: str) -> Report:
 
 
 def outcome_from_findings(findings: list[Finding], *, blocked: bool) -> Outcome:
-    """Classify a completed run: blocked, passed with open warnings, or passed."""
+    """Classify a completed run: blocked, passed with open warnings, or passed.
+
+    Args:
+        findings: The findings of the run; a warning that did not pass is open.
+        blocked: Whether the run is blocked, whatever the findings say.
+
+    Returns:
+        ``Outcome.BLOCKED``, ``Outcome.PASSED_WITH_ADVISORIES`` or ``Outcome.PASSED``.
+    """
     if blocked:
         return Outcome.BLOCKED
     if any(item.severity == "warning" and item.status != "passed" for item in findings):
@@ -313,6 +391,7 @@ def outcome_from_findings(findings: list[Finding], *, blocked: bool) -> Outcome:
 
 
 def _page_order(page: object) -> tuple[int, int, str]:
+    """Return a sort key that orders numeric pages by number before any other label."""
     if isinstance(page, int):
         return 0, page, ""
     if isinstance(page, str) and page.isdecimal():

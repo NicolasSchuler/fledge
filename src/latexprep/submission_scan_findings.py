@@ -28,7 +28,12 @@ _MAX_LABEL_CHARS = 120
 
 
 class ScanLimits(NamedTuple):
-    """How much one submission scan reports and reads."""
+    """How much one submission scan reports and reads.
+
+    Attributes:
+        max_matches: The most matches one rule collects and reports.
+        max_pdf_evidence_bytes: The most extracted PDF text and metadata read in total.
+    """
 
     # Matches one rule reports before it stops collecting; a full list means "at least".
     max_matches: int = MAX_SCAN_MATCHES
@@ -45,7 +50,16 @@ Describe = Callable[[Sequence[Mapping[str, object]], str], str]
 
 @dataclass(frozen=True, slots=True)
 class ScanRule:
-    """How one rule reports: its name, the scope sentence, its weight and its wording."""
+    """How one rule reports: its name, the scope sentence, its weight and its wording.
+
+    Attributes:
+        name: The rule name of the finding.
+        scope: The sentence that states what the scan covers, kept in the details.
+        advisory: Whether the finding has the advisory weight instead of the direct-policy
+            weight.
+        describe: The rule's own message wording for its matches, or ``None`` for the
+            generic "N matches: location" wording.
+    """
 
     name: str
     scope: str
@@ -54,22 +68,57 @@ class ScanRule:
 
 
 def short_name(value: str) -> str:
-    """Shorten an over-long file name; it is the finding itself and the details keep it whole."""
+    """Shorten an over-long file name; it is the finding itself and the details keep it whole.
+
+    Args:
+        value: The file name or label to shorten.
+
+    Returns:
+        ``value`` itself when it is at most ``_MAX_LABEL_CHARS`` characters long, otherwise
+        its start followed by an ellipsis.
+    """
     return value if len(value) <= _MAX_LABEL_CHARS else value[: _MAX_LABEL_CHARS - 1] + "…"
 
 
 def listed(items: Sequence[str]) -> str:
-    """The first few distinct items; the suffix counts hidden items, repeats included."""
+    """Return the first few distinct items; the suffix counts hidden items, repeats included.
+
+    Args:
+        items: The items to list, in order.
+
+    Returns:
+        At most ``MAX_LISTED`` distinct items joined by commas, followed by a count of the
+        items not shown.
+    """
     shown = list(dict.fromkeys(items))[:MAX_LISTED]
     return ", ".join(shown) + more_suffix(sum(item not in shown for item in items))
 
 
 def match_count(matches: Sequence[object], limits: ScanLimits) -> str:
-    """The number of matches, with ``+`` when collecting stopped at the limit."""
+    """Return the number of matches, with ``+`` when collecting stopped at the limit.
+
+    Args:
+        matches: The matches one rule collected.
+        limits: The limits of the scan, whose ``max_matches`` is the collection limit.
+
+    Returns:
+        The count as text, such as ``5`` or ``200+``.
+    """
     return f"{len(matches)}{'+' if len(matches) == limits.max_matches else ''}"
 
 
 def _match_label(match: Mapping[str, object]) -> str:
+    """Return the message label of one match: its location and reason.
+
+    The location is the path, or the channel when there is no path, with the line when the
+    match has one; a match without either is an "unspecified location".
+
+    Args:
+        match: One match of a scan.
+
+    Returns:
+        The label, with an over-long file name shortened.
+    """
     # Matches hold only locations and generated reasons, never matched text or terms.
     path, line, reason = match.get("path"), match.get("line"), match.get("reason")
     label = path if isinstance(path, str) else match.get("channel")
@@ -88,6 +137,18 @@ def _message(
     issues: list[str],
     limits: ScanLimits,
 ) -> str:
+    """Return the finding message for one scan's matches and issues.
+
+    Args:
+        rule: The rule, whose own wording replaces the generic one when it has one.
+        matches: The matches of the scan.
+        issues: The reasons the scan was incomplete.
+        limits: The limits of the scan.
+
+    Returns:
+        The match count and first locations, or a statement that nothing matched, with the
+        first issue appended when the scan was incomplete.
+    """
     if not matches:
         if not issues:
             return "No matches in the stated scope."
@@ -111,7 +172,22 @@ def scan_finding(
     *,
     details: dict[str, object] | None = None,
 ) -> Finding:
-    """The finding for one scan: a violation fails it, an incomplete scan leaves it open."""
+    """Return the finding for one scan: a violation fails it, an incomplete scan leaves it open.
+
+    A scan that collected ``limits.max_matches`` matches counts as incomplete, because
+    further matches may be unlisted.
+
+    Args:
+        rule: How the rule reports.
+        matches: The matches of the scan; the details keep up to ``limits.max_matches``.
+        issues: The reasons the scan was incomplete; the details keep up to
+            ``limits.max_matches``.
+        limits: The limits of the scan.
+        details: Further details to add to the finding, or ``None``.
+
+    Returns:
+        The finding of the scan.
+    """
     status = check_status(failed=bool(matches), incomplete=bool(issues))
     weight = ADVISORY if rule.advisory else DIRECT_POLICY
     # Scans stop collecting at the reporting limit, so further matches may be unlisted.

@@ -37,7 +37,13 @@ SCOPE = (
 
 
 class Policy(NamedTuple):
-    """One policy's rule name, the title it reports, and how hard a violation hits."""
+    """One policy's rule name, the title it reports, and how hard a violation hits.
+
+    Attributes:
+        rule: The rule name of the finding.
+        title: The title the finding reports, also its message when the policy passes.
+        weight: How hard a violation hits: the severity per status and the evidence kind.
+    """
 
     rule: str
     title: str
@@ -45,7 +51,13 @@ class Policy(NamedTuple):
 
 
 class CheckOutcome(NamedTuple):
-    """What one check established: confirmed violations and the gaps that remain."""
+    """What one check established: confirmed violations and the gaps that remain.
+
+    Attributes:
+        violations: The confirmed violations, each with its location and details.
+        uncertainty: The interpretation gaps that remain.
+        other_gaps: Whether the details report gaps beyond ``uncertainty``.
+    """
 
     violations: Sequence[Mapping[str, object]]
     uncertainty: Iterable[str]
@@ -55,13 +67,31 @@ class CheckOutcome(NamedTuple):
 
 
 def listing(label: str, names: Iterable[str]) -> str:
-    """``Missing: a, b, c (+2 more)``: the first few distinct names under a label."""
+    """Format the first few distinct names under a label: ``Missing: a, b, c (+2 more)``.
+
+    Args:
+        label: The text before the colon.
+        names: The names to list; repeats are dropped and at most ``MAX_NAMED`` are
+            spelled out.
+
+    Returns:
+        The label followed by the names and a count of the rest.
+    """
     unique = list(dict.fromkeys(names))
     return f"{label}: {', '.join(unique[:MAX_NAMED])}{more_suffix(len(unique) - MAX_NAMED)}"
 
 
 def _unknown_reasons(unknown: Sequence[tuple[int, str]], start: int, end: int) -> list[str]:
-    """Describe unexpanded body constructs inside one checked region only."""
+    """Describe unexpanded body constructs inside one checked region only.
+
+    Args:
+        unknown: Offset and label of each unexpanded body construct.
+        start: The first offset of the region.
+        end: The offset just past the region.
+
+    Returns:
+        One reason naming the distinct labels in the region, or an empty list.
+    """
     labels = sorted({label for offset, label in unknown if start <= offset < end})
     if not labels:
         return []
@@ -73,26 +103,53 @@ def _unknown_reasons(unknown: Sequence[tuple[int, str]], start: int, end: int) -
 
 @dataclass(frozen=True, slots=True)
 class Reading:
-    """The expanded document and the body constructs these checks cannot interpret."""
+    """The expanded document and the body constructs these checks cannot interpret.
+
+    Attributes:
+        document: The expanded document that was read.
+        unknown: Offset and label of each unexpanded body construct, in source order.
+        uncertainty: Everything a document-wide scan cannot interpret.
+    """
 
     document: ExpandedDocument
-    # Offset and label of each unexpanded body construct, in source order.
     unknown: list[tuple[int, str]]
-    # Everything a document-wide scan cannot interpret.
     uncertainty: list[str]
 
     def unknown_reasons(self, start: int, end: int) -> list[str]:
-        """The unexpanded constructs between two offsets, as one reason or none."""
+        """Describe the unexpanded constructs between two offsets as one reason or none.
+
+        Args:
+            start: The first offset of the range.
+            end: The offset just past the range.
+
+        Returns:
+            One reason naming the constructs in the range, or an empty list.
+        """
         return _unknown_reasons(self.unknown, start, end)
 
     def scope(self, region: EnvironmentRegion) -> None:
-        """Attach only the interpretation gaps that fall inside this region."""
+        """Attach only the interpretation gaps that fall inside this region.
+
+        A region whose opening command lies inside a conditional also gets
+        ``CONDITIONAL_FLOW``.
+
+        Args:
+            region: The region whose ``uncertainty`` is extended in place.
+        """
         if in_conditional(self.document.conditionals, region.command.start):
             region.uncertainty.append(CONDITIONAL_FLOW)
         region.uncertainty.extend(self.unknown_reasons(region.start, region.end))
 
     def scoped_regions(self, kinds: Iterable[str]) -> tuple[list[EnvironmentRegion], list[str]]:
-        """Environment regions with the unexpanded constructs inside each one."""
+        """Find environment regions with the unexpanded constructs inside each one.
+
+        Args:
+            kinds: The environment names to collect.
+
+        Returns:
+            The regions in source order, each with its unexpanded constructs added to its
+            ``uncertainty``, and the delimiter problems found while collecting them.
+        """
         regions, reasons = environment_regions(self.document, frozenset(kinds))
         for region in regions:
             region.uncertainty.extend(self.unknown_reasons(region.start, region.end))
@@ -104,6 +161,13 @@ def interpret(document: ExpandedDocument) -> Reading:
 
     Preamble declarations configure the toolchain; they are not manuscript content,
     and a macro definition only names a replacement body.
+
+    Args:
+        document: The expanded document to read.
+
+    Returns:
+        The reading, whose document-wide uncertainty adds the document's presence
+        uncertainty to the unexpanded constructs.
     """
     definitions = definition_spans(document.text, document.commands)
     unknown: list[tuple[int, str]] = []
@@ -138,10 +202,18 @@ def policy_finding(
 
     Callers only record a violation for a construct they could interpret, so a
     violation is never in doubt. Remaining interpretation gaps stay in the details
-    and decide the outcome only when nothing was confirmed. ``failure`` summarizes
-    the violations; it defaults to the policy title. ``named`` lists the offending
-    items after the locations. Any remaining gap, or ``outcome.other_gaps``, marks the
-    evidence incomplete.
+    and decide the outcome only when nothing was confirmed. Any remaining gap, or
+    ``outcome.other_gaps``, marks the evidence incomplete.
+
+    Args:
+        policy: The policy whose rule, title and weight the finding carries.
+        outcome: The confirmed violations and remaining gaps of the check.
+        failure: A summary of the violations; it defaults to the policy title.
+        details: Extra details merged after the matches, uncertainty and scope.
+        named: The offending items, listed after the locations.
+
+    Returns:
+        One finding that failed, passed or is inconclusive.
     """
     violations = outcome.violations
     reasons = sorted(set(outcome.uncertainty))

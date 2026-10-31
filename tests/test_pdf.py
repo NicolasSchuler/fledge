@@ -1,3 +1,11 @@
+"""PDF comparison and PDF inspection with controlled and live Poppler output.
+
+The comparison detects text, rendering and page-count differences and states its tolerances;
+the inspection measures page sizes, image resolution, fonts and the document policies, stays
+inconclusive on missing or malformed tool output, and rejects pathological dimensions and
+invalid constraint values.
+"""
+
 from __future__ import annotations
 
 import json
@@ -21,7 +29,10 @@ from tests.support import live_test
 
 
 class PdfTests(unittest.IsolatedAsyncioTestCase):
+    """PDF comparison findings, page-count bounds and page-size parsing."""
+
     async def asyncSetUp(self) -> None:
+        """Create ``a.pdf`` and ``b.pdf``; only ``b.pdf`` contains "right", as the fakes expect."""
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
         self.left, self.right = self.root / "a.pdf", self.root / "b.pdf"
@@ -29,6 +40,7 @@ class PdfTests(unittest.IsolatedAsyncioTestCase):
         self.right.write_bytes(b"%PDF-test-right")
 
     async def asyncTearDown(self) -> None:
+        """Remove the temporary directory."""
         self.temporary.cleanup()
 
     async def test_rendered_change_is_detected_when_text_matches(self) -> None:
@@ -207,7 +219,10 @@ class PdfTests(unittest.IsolatedAsyncioTestCase):
 
 
 def stencil_mask_pdf() -> bytes:
-    """One page painting an 8 x 8 one-bit image mask, which pdfimages lists as a stencil."""
+    """Return a one-page PDF that paints an 8 x 8 one-bit image mask.
+
+    ``pdfimages`` lists the mask as a stencil.
+    """
     content = b"q 100 0 0 100 10 10 cm /M Do Q\n"
     objects = (
         b"<< /Type /Catalog /Pages 2 0 R >>",
@@ -231,6 +246,20 @@ def stencil_mask_pdf() -> bytes:
 
 
 class ConfigurablePdfRunner(FakePdfRunner):
+    """Poppler output for one PDF whose page count and tool outputs a test chooses.
+
+    Every command other than a ``-v`` probe succeeds with the output of ``outputs``, else a
+    default for ``pages`` letter pages (``pdfinfo``, ``pdfinfo -box`` and ``pdftotext``),
+    else the output of :class:`FakePdfRunner`.
+
+    Args:
+        missing: A missing tool, passed to :class:`FakePdfRunner`.
+
+    Attributes:
+        pages: The page count of the default outputs.
+        outputs: Outputs by tool name; the key ``geometry`` stands for ``pdfinfo -box``.
+    """
+
     def __init__(
         self, *, pages: int = 1, outputs: dict[str, str] | None = None, missing: str | None = None
     ) -> None:
@@ -247,6 +276,11 @@ class ConfigurablePdfRunner(FakePdfRunner):
         readonly_inputs: tuple[Path, ...] = (),
         memory_mb: int | None = None,
     ) -> CommandResult:
+        """Answer the command with the chosen output, the default or the base output.
+
+        The arguments are those of :meth:`CommandRunner.run`. A ``-v`` probe gets the base
+        result; any other command succeeds with the output described in the class docstring.
+        """
         result = await super().run(
             argv, cwd, workspace, readonly_inputs=readonly_inputs, memory_mb=memory_mb
         )
@@ -265,7 +299,10 @@ class ConfigurablePdfRunner(FakePdfRunner):
 
 
 class PdfConstraintTests(unittest.IsolatedAsyncioTestCase):
+    """The configured constraints of a PDF inspection and their inconclusive outcomes."""
+
     async def asyncSetUp(self) -> None:
+        """Create a placeholder ``input.pdf`` in a temporary directory."""
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
         self.pdf = self.root / "input.pdf"
@@ -273,9 +310,21 @@ class PdfConstraintTests(unittest.IsolatedAsyncioTestCase):
         self.counter = 0
 
     async def asyncTearDown(self) -> None:
+        """Remove the temporary directory."""
         self.temporary.cleanup()
 
     async def inspect(self, options=None, *, runner=None, max_pages=None):
+        """Inspect ``input.pdf`` in a new work directory.
+
+        Args:
+            options: The inspection options, or ``None`` for the defaults.
+            runner: The runner of the tools; a default :class:`ConfigurablePdfRunner` when
+                ``None``.
+            max_pages: The page limit passed to :func:`inspect_pdf`.
+
+        Returns:
+            The findings by rule.
+        """
         self.counter += 1
         findings = await inspect_pdf(
             self.pdf,

@@ -24,11 +24,25 @@ from latexprep.text_safety import sanitize_terminal_text
 
 
 class TerminalBuffer(StringIO):
+    """A string buffer that claims to be a terminal."""
+
     def isatty(self) -> bool:
+        """Return ``True``, as a terminal would."""
         return True
 
 
 def render(report: Report, width: int, *, color: bool = False, show_files: bool = False) -> str:
+    """Render ``report`` as the terminal report on a console ``width`` columns wide.
+
+    Args:
+        report: The report to render.
+        width: The console width, in columns.
+        color: Whether to render as a terminal with the standard colour system.
+        show_files: Whether to show the full file inventory of the package.
+
+    Returns:
+        The rendered text, with colour codes when ``color`` is set.
+    """
     output = StringIO()
     console = Console(
         file=output,
@@ -43,6 +57,18 @@ def render(report: Report, width: int, *, color: bool = False, show_files: bool 
 
 
 def package(status: str = "verified") -> dict:
+    """Return a package inventory of one document with an included and an excluded file.
+
+    The excluded file's name holds Rich markup, an escape sequence and a C1 control, and its
+    reason holds Rich markup. Compressed and archive sizes are measured only for a ``verified``
+    package.
+
+    Args:
+        status: The status of the package.
+
+    Returns:
+        The inventory, as a report's ``package_contents`` holds it.
+    """
     measured = status == "verified"
     return {
         "document": "main.tex",
@@ -71,6 +97,8 @@ def package(status: str = "verified") -> dict:
 
 
 class TerminalPresentationTests(unittest.TestCase):
+    """The terminal report: wrapping, colours, literal text, the package summary and redaction."""
+
     def test_paths_actions_and_scope_wrap_without_losing_text(self):
         path = "sections/" + "long-results-directory/" * 8 + "[bold]results.tex"
         report = Report(
@@ -206,6 +234,8 @@ class TerminalPresentationTests(unittest.TestCase):
 
 
 class InvisibleCharacterTests(unittest.TestCase):
+    """Invisible format characters, escape sequences and controls in terminal text."""
+
     def test_format_characters_such_as_bidi_overrides_are_shown_not_applied(self):
         text = "gpj.\u202etxet\u2066x\u200d\U000e0001"
         self.assertEqual(sanitize_terminal_text(text), "gpj.\\u202etxet\\u2066x\\u200d\\U000e0001")
@@ -228,7 +258,10 @@ class InvisibleCharacterTests(unittest.TestCase):
 
 
 class OnlineDisclosureTests(unittest.TestCase):
+    """The privacy disclosure of online checks, listed even when passed results are hidden."""
+
     def report(self) -> Report:
+        """Return a passed report with the online sharing disclosure and one other finding."""
         return Report(
             "inspect",
             outcome=Outcome.PASSED,
@@ -258,6 +291,12 @@ class OnlineDisclosureTests(unittest.TestCase):
 
 
 class ConsoleFactoryTests(unittest.TestCase):
+    """The consoles of standard output and standard error: blanks, terminals and literal text.
+
+    Attributes:
+        PADDED: A wrapped, indented action line whose first line ends with a blank.
+    """
+
     PADDED = "Next: a long action that wraps \n  onto a second line\n"
 
     def test_redirected_report_carries_no_trailing_blanks(self):
@@ -294,6 +333,8 @@ class ConsoleFactoryTests(unittest.TestCase):
 
 
 class TerminalProgressTests(unittest.TestCase):
+    """Progress on terminals, redirected output, dumb and colourless terminals, and when quiet."""
+
     def test_redirected_progress_is_plain_literal_stages(self):
         output = StringIO()
         console = Console(file=output, width=80, markup=True)

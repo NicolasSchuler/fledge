@@ -20,12 +20,26 @@ PUBLIC_IPV6_ADDRESS = "2606:2800:220:1:248:1893:25c8:1946"
 
 
 def options(**changes: Any) -> OnlineOptions:
-    """Online options with network permission and the shortest spacing between requests."""
+    """Build online options with network permission and the shortest spacing between requests.
+
+    Args:
+        **changes: Further ``OnlineOptions`` fields.
+
+    Returns:
+        The online options.
+    """
     return OnlineOptions(online=True, online_provider_interval_seconds=0.1, **changes)
 
 
 def crossref_work(**changes: Any) -> dict[str, Any]:
-    """The ``message`` of a Crossref record that agrees with the entries the tests write."""
+    """Return the ``message`` of a Crossref record that agrees with the entries the tests write.
+
+    Args:
+        **changes: Fields that replace or extend those of the record.
+
+    Returns:
+        The record as a JSON-ready mapping.
+    """
     return {
         "DOI": "10.1234/example",
         "title": ["A reference title"],
@@ -38,12 +52,12 @@ def crossref_work(**changes: Any) -> dict[str, Any]:
 
 
 def crossref_reply(message: Any) -> Response:
-    """A successful Crossref reply carrying ``message``."""
+    """Return a successful Crossref reply carrying ``message``."""
     return Response(200, body=json.dumps({"status": "ok", "message": message}).encode())
 
 
 async def public_resolver(host: str, port: int) -> tuple[str, ...]:
-    """Name every host as one public address."""
+    """Name every host as one public address, ``PUBLIC_ADDRESS``; the port is ignored."""
     return (PUBLIC_ADDRESS,)
 
 
@@ -51,11 +65,15 @@ Answer = Response | BaseException | Callable[[ExchangeRequest], Response | BaseE
 
 
 class FakeTransport:
-    """Records each exchange and answers it.
+    """A transport that records each exchange and answers it.
 
-    ``answers`` is one answer used for every exchange, or an iterable of answers used in
-    turn. An answer is a response, an exception to raise, or a function of the request
-    that returns either.
+    Args:
+        answers: One answer used for every exchange, or a list or tuple of answers used in
+            turn. An answer is a response, an exception to raise, or a function of the
+            request that returns either.
+
+    Attributes:
+        requests: Every request, in order.
     """
 
     def __init__(self, answers: Answer | Iterable[Answer]) -> None:

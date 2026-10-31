@@ -1,10 +1,10 @@
-"""Heading depth, empty sections and required declarations (``MAN005``, ``MAN006``, ``MAN010``).
+r"""Heading depth, empty sections and required declarations (``MAN005``, ``MAN006``, ``MAN010``).
 
 All three read the sectioning commands of the expanded document. A heading's subtree
 runs to the next heading of the same or a higher level. Depth compares each literal
 heading with a configured maximum; the empty-section scan is advisory and treats any
 unknown command as possible content; required declarations look for a nonempty
-section or ``\\declaration{name}{text}`` under each configured name. Presence is the
+section or ``\declaration{name}{text}`` under each configured name. Presence is the
 only claim: whether a statement is adequate needs a human.
 """
 
@@ -64,7 +64,19 @@ _GENERATED_CONTENT = {
 
 @dataclass(slots=True)
 class Heading:
-    """One literal sectioning command and the offsets of the subtree it opens."""
+    """One literal sectioning command and the offsets of the subtree it opens.
+
+    Attributes:
+        path: The source file of the command, or ``None``.
+        line: The line of the command, or ``None``.
+        title: The plain text of the heading's argument.
+        depth: The heading level, from part (-1) to subparagraph (5).
+        start: The offset of the sectioning command.
+        body_start: The offset just past the command, where the subtree's body begins.
+        end: The offset of the next heading of the same or a higher level, or the end of
+            the text.
+        uncertainty: Why the heading's argument or the control flow around it is unclear.
+    """
 
     path: str | None
     line: int | None
@@ -76,7 +88,7 @@ class Heading:
     uncertainty: list[str]
 
     def as_dict(self) -> dict[str, object]:
-        """The heading as report details."""
+        """Render the heading as report details."""
         return {
             "path": self.path,
             "line": self.line,
@@ -90,6 +102,14 @@ class Heading:
 
 
 def _headings(document: ExpandedDocument) -> list[Heading]:
+    """Read every sectioning command with the extent of the subtree it opens.
+
+    Args:
+        document: The expanded document to read.
+
+    Returns:
+        The headings in source order.
+    """
     result: list[Heading] = []
     pending: list[int] = []
     for command in document.commands:
@@ -119,6 +139,7 @@ def _headings(document: ExpandedDocument) -> list[Heading]:
 
 
 def _heading_reasons(reading: Reading, headings: list[Heading]) -> list[str]:
+    """Combine the document-wide interpretation gaps with those of every heading."""
     return [
         *reading.uncertainty,
         *(reason for heading in headings for reason in heading.uncertainty),
@@ -126,6 +147,21 @@ def _heading_reasons(reading: Reading, headings: list[Heading]) -> list[str]:
 
 
 def _content(document: ExpandedDocument, start: int, end: int) -> tuple[bool, list[str]]:
+    """Judge whether a stretch of the document has observable content.
+
+    Headings, labels and similar commands that add no content are blanked first. A
+    command that generates content without literal text, or any mathematics, makes the
+    stretch nonempty.
+
+    Args:
+        document: The expanded document.
+        start: The first offset of the stretch.
+        end: The offset just past the stretch.
+
+    Returns:
+        Whether the stretch has content, and the reasons its plain text is unclear, which
+        are empty when content was established by a generating command or mathematics.
+    """
     text = document.text[start:end]
     commands = document.between(start, end)
     edits = [
@@ -147,6 +183,18 @@ def _content(document: ExpandedDocument, start: int, end: int) -> tuple[bool, li
 
 
 def _heading_depth_finding(headings: list[Heading], reasons: list[str], maximum: int) -> Finding:
+    """Report the literal headings deeper than ``maximum``.
+
+    A heading with its own interpretation gaps is never reported as a violation.
+
+    Args:
+        headings: Every heading of the document.
+        reasons: The interpretation gaps of the document and of the headings.
+        maximum: The deepest heading level allowed.
+
+    Returns:
+        The ``manuscript.heading_depth`` finding.
+    """
     deep = [heading for heading in headings if heading.depth > maximum and not heading.uncertainty]
     count = plural(len(headings), "literal heading")
     return policy_finding(
@@ -162,6 +210,15 @@ def _heading_depth_finding(headings: list[Heading], reasons: list[str], maximum:
 
 
 def _empty_sections_finding(document: ExpandedDocument, headings: list[Heading]) -> Finding:
+    """Report the section subtrees with no observable content.
+
+    Args:
+        document: The expanded document.
+        headings: Every heading of the document.
+
+    Returns:
+        The advisory ``manuscript.empty_sections`` finding.
+    """
     empty = []
     # Only the section's own heading and body decide whether it looks empty;
     # unexpanded constructs elsewhere cannot fill this subtree.
@@ -181,7 +238,16 @@ def _empty_sections_finding(document: ExpandedDocument, headings: list[Heading])
 
 
 def heading_checks(reading: Reading, options: ManuscriptCheckOptions) -> list[Finding]:
-    """The heading-depth and empty-section policies that are switched on."""
+    """Run the heading-depth and empty-section policies that are switched on.
+
+    Args:
+        reading: The expanded document and its document-wide interpretation gaps.
+        options: ``max_heading_depth`` switches on the depth policy, and
+            ``check_empty_sections`` the empty-section advisory.
+
+    Returns:
+        The depth finding and then the empty-section finding, each when switched on.
+    """
     if options.max_heading_depth is None and not options.check_empty_sections:
         return []
     headings = _headings(reading.document)
@@ -197,7 +263,17 @@ def heading_checks(reading: Reading, options: ManuscriptCheckOptions) -> list[Fi
 def _declaration_entries(
     document: ExpandedDocument, headings: list[Heading], required: tuple[str, ...]
 ) -> tuple[list[dict[str, object]], list[str]]:
-    """The headings and ``\\declaration`` commands that could supply a required declaration."""
+    r"""Collect the headings and ``\declaration`` commands that could supply a required declaration.
+
+    Args:
+        document: The expanded document.
+        headings: Every heading of the document.
+        required: The configured declaration names, compared after heading normalization.
+
+    Returns:
+        Each candidate with its title and whether it is nonempty, headings first, and the
+        reasons their content is unclear.
+    """
     declarations: list[dict[str, object]] = []
     unknown: list[str] = []
     required_names = {normalize_heading(name) for name in required}
@@ -220,7 +296,16 @@ def _declaration_entries(
 
 
 def declaration_checks(reading: Reading, options: ManuscriptCheckOptions) -> list[Finding]:
-    """The required-declarations policy, when declarations are configured."""
+    """Run the required-declarations policy when declarations are configured.
+
+    Args:
+        reading: The expanded document and its document-wide interpretation gaps.
+        options: ``required_declarations`` names the declarations that must be present.
+
+    Returns:
+        One ``manuscript.required_declarations`` finding, or an empty list when no
+        declarations are configured.
+    """
     required = options.required_declarations
     if not required:
         return []

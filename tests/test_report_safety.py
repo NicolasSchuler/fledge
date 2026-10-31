@@ -30,7 +30,17 @@ from tests.support import build_with_loaded_class, controlled_backends, single_f
 
 
 class ReportSafetyTests(unittest.TestCase):
+    """A credential stays redacted across the sections and output formats of a report."""
+
     def report(self):
+        """Return a synthetic credential and a report that carries it in several sections.
+
+        The credential appears in a configured URL, in finding details, a message and a
+        suggestion, in the diff of a change and in the tool records.
+
+        Returns:
+            The credential and the report.
+        """
         credential = "SyntheticCredentialValue_1234"
         return credential, Report(
             "check",
@@ -155,6 +165,7 @@ class WithheldReportTests(unittest.TestCase):
     """A withheld report says whether it was too large or sanitizing failed, never why in detail."""
 
     def report(self) -> Report:
+        """Return a passed ``check`` report without findings."""
         return Report("check", outcome=Outcome.PASSED, scope="fixture")
 
     def test_oversized_report_records_the_redaction_limit(self):
@@ -181,6 +192,7 @@ class LocalPathTests(unittest.TestCase):
     """Shared reports do not reveal the user name or the directory layout of a machine."""
 
     def setUp(self):
+        """Build a report that names paths below the home and the temporary directories."""
         self.home = str(Path.home().resolve())
         self.temporary = str(Path(tempfile.gettempdir()).resolve())
         self.report = Report(
@@ -249,6 +261,8 @@ class LocalPathTests(unittest.TestCase):
 
 
 class ReportPublicationSafetyTests(unittest.IsolatedAsyncioTestCase):
+    """How a job sanitizes its report, and what it publishes when sanitizing refuses."""
+
     async def test_artifact_path_redaction_failure_blocks_before_creating_output(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()

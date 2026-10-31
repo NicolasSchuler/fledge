@@ -63,8 +63,17 @@ def check_manuscript_policies(
 ) -> list[Finding]:
     """Run selected source policy checks; defaults enable no additional manuscript policy.
 
-    ``analysed`` shares the source analysis of the same root and main file with other
-    checks; without one the document is expanded here.
+    Args:
+        root: The project root to analyse.
+        main: The main file as the caller named it; ``None`` selects the single document
+            root.
+        options: Which policies run and the values they compare against.
+        analysed: The source analysis of the same root and main file, shared with other
+            checks; without one the document is expanded here.
+
+    Returns:
+        The findings of every policy family that is switched on, in reporting order, or
+        an empty list with the default options.
     """
     if options == _DEFAULT_OPTIONS:
         return []

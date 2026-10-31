@@ -1,6 +1,6 @@
-"""Citations and uppercase abbreviations in the abstract (``MAN003``, ``MAN004``).
+r"""Citations and uppercase abbreviations in the abstract (``MAN003``, ``MAN004``).
 
-An abstract is an ``abstract`` environment or an ``\\abstract{...}`` declaration. The
+An abstract is an ``abstract`` environment or an ``\abstract{...}`` declaration. The
 citation policy flags citation commands inside it. The abbreviation policy lists
 uppercase tokens of two or more characters and whether the first occurrence follows
 spelled-out words in parentheses; that is a review candidate, never proof that an
@@ -45,7 +45,17 @@ _ABBREVIATION_DEFINITION = re.compile(
 
 
 def _abstract_regions(reading: Reading) -> tuple[list[EnvironmentRegion], list[str]]:
-    """Abstract environments and \\abstract{...} declarations, each with its own gaps."""
+    r"""Collect abstract environments and \abstract{...} declarations, each with its own gaps.
+
+    A declaration without an argument, or inside a group, is an ambiguous abstract
+    declaration.
+
+    Args:
+        reading: The expanded document and its interpretation gaps.
+
+    Returns:
+        The abstract regions and the delimiter problems found while collecting them.
+    """
     regions, reasons = reading.scoped_regions({"abstract"})
     for command in reading.document.commands:
         if command.name != "abstract":
@@ -62,7 +72,17 @@ def _abstract_regions(reading: Reading) -> tuple[list[EnvironmentRegion], list[s
 
 
 def _abbreviation_candidates(value: str, options: ManuscriptCheckOptions) -> list[tuple[str, bool]]:
-    """First occurrences of uppercase tokens that the policy reports, with definition status."""
+    """Find first occurrences of uppercase tokens that the policy reports, with definition status.
+
+    Args:
+        value: The plain text of one abstract.
+        options: The abbreviation policy and its exceptions; the ``forbid`` policy reports
+            every token, the ``define`` policy only those without a definition candidate.
+
+    Returns:
+        Each reported token with whether its first occurrence follows spelled-out words in
+        parentheses, in text order; listed exceptions are skipped.
+    """
     candidates = []
     seen: set[str] = set(options.abstract_abbreviation_exceptions)
     for match in _ABBREVIATION.finditer(value):
@@ -83,7 +103,14 @@ def _abbreviation_candidates(value: str, options: ManuscriptCheckOptions) -> lis
 
 @dataclass(slots=True)
 class _AbstractScan:
-    """What the abstracts contain that the two policies report, and what stayed unclear."""
+    """What the abstracts contain that the two policies report, and what stayed unclear.
+
+    Attributes:
+        reasons: The interpretation gaps of the document graph and of the abstracts.
+        citations: The located citation commands found in abstracts.
+        abbreviations: The located abbreviation candidates with their definition status.
+        abbreviation_names: The abbreviation candidates' tokens, in the same order.
+    """
 
     reasons: list[str]
     citations: list[dict[str, object]] = field(default_factory=list)
@@ -92,6 +119,18 @@ class _AbstractScan:
 
 
 def _scan_abstracts(reading: Reading, options: ManuscriptCheckOptions) -> _AbstractScan:
+    """Scan every uncontested abstract for citation commands and abbreviation candidates.
+
+    An abstract with interpretation gaps contributes only its gaps. Citation commands are
+    blanked before the abbreviation candidates are read from the plain text.
+
+    Args:
+        reading: The expanded document and its interpretation gaps.
+        options: The abbreviation policy and its exceptions.
+
+    Returns:
+        The citations and abbreviation candidates found, and every gap that remains.
+    """
     document = reading.document
     regions, delimiter_reasons = _abstract_regions(reading)
     scan = _AbstractScan([*document.graph_uncertainty, *delimiter_reasons])
@@ -120,7 +159,16 @@ def _scan_abstracts(reading: Reading, options: ManuscriptCheckOptions) -> _Abstr
 
 
 def abstract_checks(reading: Reading, options: ManuscriptCheckOptions) -> list[Finding]:
-    """The citation and abbreviation policies over every uncontested abstract."""
+    """Run the citation and abbreviation policies over every uncontested abstract.
+
+    Args:
+        reading: The expanded document and its interpretation gaps.
+        options: ``forbid_abstract_citations`` switches on the citation policy, and
+            ``abstract_abbreviation_policy`` the abbreviation policy.
+
+    Returns:
+        One finding per policy that is switched on, citations first.
+    """
     if not options.forbid_abstract_citations and options.abstract_abbreviation_policy is None:
         return []
     scan = _scan_abstracts(reading, options)

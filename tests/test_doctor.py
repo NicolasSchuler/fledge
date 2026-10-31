@@ -29,7 +29,16 @@ from tests.support import fake_build_result, write_project
 
 
 class DoctorRunner(ToolRunner):
-    """A runner with controlled PDF tool output: no commands run and no monitor samples."""
+    """A runner with controlled PDF tool output: no commands run and no monitor samples.
+
+    Args:
+        source_date_epoch: The build date, passed to :class:`ToolRunner`.
+
+    Attributes:
+        limits: The runtime limits, passed to :class:`ToolRunner`.
+        budget: The resource budget, passed to :class:`ToolRunner`.
+        tools: The PDF tool double that answers every command.
+    """
 
     def __init__(self, limits, *, budget=None, source_date_epoch=None):
         super().__init__(
@@ -42,17 +51,45 @@ class DoctorRunner(ToolRunner):
 
     @asynccontextmanager
     async def job_scope(self, root, *, max_temp_bytes):
+        """Yield this runner without starting a resource monitor."""
         yield self
 
     def freeze_input(self, source, storage):
+        """Freeze ``source`` below ``storage`` through the PDF tool double.
+
+        Args:
+            source: The input file to freeze.
+            storage: The directory that holds the frozen copies.
+
+        Returns:
+            The frozen copy that the PDF tool double returns.
+        """
         return self.tools.freeze_input(source, storage)
 
     async def run(self, argv, cwd, workspace, **options):
+        """Answer ``argv`` with the controlled output of the PDF tool double.
+
+        Args:
+            argv: The command line, which is not run.
+            cwd: The working directory the command would run in.
+            workspace: The workspace the command would be granted.
+            **options: Further keyword arguments passed to the PDF tool double.
+
+        Returns:
+            The result that the PDF tool double gives for ``argv``.
+        """
         return await self.tools.run(argv, cwd, workspace, **options)
 
 
 class DoctorTests(unittest.IsolatedAsyncioTestCase):
+    """The tools ``run_doctor`` surveys and exercises, and how it reports failures and limits."""
+
     def setUp(self):
+        """Replace the job's tool runner, the tool lookup and the build with controlled doubles.
+
+        Every tool is found under ``/test-tools``, each runner the job creates is kept in
+        ``self.runner``, and every build is recorded in ``self.builds``.
+        """
         self.runner = None
         self.builds = []
 
@@ -70,6 +107,19 @@ class DoctorTests(unittest.IsolatedAsyncioTestCase):
             self.addCleanup(replacement.stop)
 
     async def build(self, source, main, work, engine, runner, **options):
+        """Record a build in ``self.builds`` and return a successful build result.
+
+        Args:
+            source: The project directory to build.
+            main: The main file, relative to ``source``.
+            work: The working directory of the build.
+            engine: The TeX engine of the build.
+            runner: The tool runner of the build; it is not used.
+            **options: The further build options, which are recorded.
+
+        Returns:
+            A fake build result for ``main`` in ``work``.
+        """
         self.builds.append((engine, source, (source / main).read_text(), options))
         return fake_build_result(work, main)
 
@@ -392,7 +442,10 @@ class DoctorTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("pdftohtml", report.tools)
 
     def test_every_tool_the_doctor_can_survey_has_an_install_hint(self):
-        """docs/doctor.md: the finding for a missing tool names the package that provides it."""
+        """Check that every tool the doctor can survey has an install hint.
+
+        docs/doctor.md: the finding for a missing tool names the package that provides it.
+        """
         from latexprep.doctor import selected_tools
         from latexprep.pdf_artwork_options import PdfArtworkOptions
         from latexprep.pdf_check_options import PdfCheckOptions
@@ -461,6 +514,8 @@ class DoctorTests(unittest.IsolatedAsyncioTestCase):
 
 
 class DoctorCommandTests(unittest.TestCase):
+    """The ``fledge doctor`` command: JSON output, quiet mode, settings files and errors."""
+
     def test_json_stdout_is_clean_and_quiet_suppresses_only_stderr_progress(self):
         from latexprep.report import Report
 

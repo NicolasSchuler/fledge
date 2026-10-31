@@ -33,6 +33,18 @@ _SNIPPET_CHARS = 160
 
 
 def _is_layout_override(document: ExpandedDocument, command: Command) -> bool:
+    """Return whether a command is a layout override candidate.
+
+    Candidates are negative spacing, a change or assignment of a layout length, a float
+    placed with ``H`` or ``!``, and every command in ``LAYOUT_COMMANDS``.
+
+    Args:
+        document: The expanded document, read after the command for an unbraced value.
+        command: The command to classify.
+
+    Returns:
+        ``True`` when the command overrides spacing, page breaks, type size or geometry.
+    """
     match command.name:
         case "hspace" | "vspace" | "hskip" | "vskip" | "kern":
             value = (
@@ -55,6 +67,15 @@ def _is_layout_override(document: ExpandedDocument, command: Command) -> bool:
 
 
 def _layout_overrides(document: ExpandedDocument) -> list[dict[str, object]]:
+    """Locate the layout override candidates outside conditionals.
+
+    Args:
+        document: The expanded document to scan.
+
+    Returns:
+        Each candidate's location with its command name and a source snippet of at most
+        ``_SNIPPET_CHARS`` characters.
+    """
     # A command inside a conditional may never execute, so it is reported as an
     # interpretation gap rather than as a confirmed override.
     return [
@@ -72,7 +93,16 @@ def _layout_overrides(document: ExpandedDocument) -> list[dict[str, object]]:
 
 
 def layout_checks(reading: Reading, options: ManuscriptCheckOptions) -> list[Finding]:
-    """The layout override candidates, when that advisory is switched on."""
+    """Find the layout override candidates when that advisory is switched on.
+
+    Args:
+        reading: The expanded document and its document-wide interpretation gaps.
+        options: ``check_layout_manipulation`` switches the advisory on.
+
+    Returns:
+        One ``manuscript.layout_manipulation`` finding, or an empty list when the advisory
+        is off.
+    """
     if not options.check_layout_manipulation:
         return []
     outcome = CheckOutcome(_layout_overrides(reading.document), reading.uncertainty)
@@ -80,13 +110,22 @@ def layout_checks(reading: Reading, options: ManuscriptCheckOptions) -> list[Fin
 
 
 def _declared_packages(command: Command) -> list[str]:
+    """List the packages a package declaration names literally; other commands name none."""
     if command.name not in PACKAGE_COMMANDS:
         return []
     return first_argument_names(command) or []
 
 
 def _line_number_activation(command: Command) -> str | None:
-    """Name the literal line-number activation a command performs, if any."""
+    """Name the literal line-number activation a command performs, if any.
+
+    Args:
+        command: The command to classify.
+
+    Returns:
+        A description of the activation (a class option, the ``lineno`` package option, a
+        line-number command or environment), or ``None``.
+    """
     option_names = {name for item in command.options for name in literal_list(item.value) or []}
     environment = (
         command.arguments[0].value.strip()
@@ -106,7 +145,20 @@ def _line_number_activation(command: Command) -> str | None:
 
 
 def line_number_checks(reading: Reading, options: ManuscriptCheckOptions) -> list[Finding]:
-    """Find literal lineno activation; class-specific review modes are not interpreted."""
+    """Find literal lineno activation; class-specific review modes are not interpreted.
+
+    An activation inside a macro definition, a group or a conditional is an
+    interpretation gap rather than an activation.
+
+    Args:
+        reading: The expanded document.
+        options: ``require_line_numbers`` or ``forbid_line_numbers`` switches the policy on
+            and decides which way it points.
+
+    Returns:
+        One ``manuscript.line_numbers`` finding, or an empty list when neither option is
+        set.
+    """
     if not (options.require_line_numbers or options.forbid_line_numbers):
         return []
     document = reading.document

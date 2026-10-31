@@ -23,10 +23,12 @@ PRESETS: dict[str, str] = {
 
 
 def preset_names() -> tuple[str, ...]:
+    """Return the names of the shipped presets in sorted order."""
     return tuple(sorted(PRESETS))
 
 
 def _unknown(name: str) -> PreparationError:
+    """Build the error for an unknown preset ``name`` that lists the known ones."""
     return PreparationError(
         f"Unknown preset {name!r}; choose one of {', '.join(preset_names())} "
         "(fledge init --list describes them)"
@@ -34,7 +36,14 @@ def _unknown(name: str) -> PreparationError:
 
 
 def preset_text(name: str) -> str:
-    """Return the commented TOML text of preset ``name``."""
+    """Return the commented TOML text of preset ``name``.
+
+    Returns:
+        The text of the preset file.
+
+    Raises:
+        PreparationError: ``name`` is not a known preset, or its file cannot be read.
+    """
     if name not in PRESETS:
         raise _unknown(name)
     resource = resources.files("latexprep").joinpath("presets", f"{name}.toml")
@@ -45,7 +54,15 @@ def preset_text(name: str) -> str:
 
 
 def preset_values(name: str) -> dict[str, object]:
-    """Parse preset ``name`` into raw settings values for the configuration loader."""
+    """Parse preset ``name`` into raw settings values for the configuration loader.
+
+    Returns:
+        The parsed TOML tables and values.
+
+    Raises:
+        PreparationError: ``name`` is not a known preset, its file cannot be read, or it
+            is not valid TOML.
+    """
     try:
         return tomllib.loads(preset_text(name))
     except tomllib.TOMLDecodeError as error:

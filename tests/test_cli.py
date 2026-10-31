@@ -37,8 +37,10 @@ from tests.support import ProjectTestCase, controlled_backends
 
 
 class BrokenPipeTests(ProjectTestCase):
+    """Tests that a reader closing the output pipe early does not change the exit code."""
+
     def test_a_reader_that_stops_early_does_not_hide_the_exit_code(self):
-        """``fledge inspect INPUT | head -c5`` still ends with the verdict of the run."""
+        """Check that ``fledge inspect INPUT | head -c5`` still ends with the verdict of the run."""
         process = subprocess.Popen(
             [sys.executable, "-m", "latexprep", "inspect", str(self.root / "absent"), "--quiet"],
             stdin=subprocess.DEVNULL,
@@ -56,6 +58,12 @@ class BrokenPipeTests(ProjectTestCase):
 
 
 class ContactAddressTests(ProjectTestCase):
+    """Tests that the online contact address stays in the settings but out of every report.
+
+    Attributes:
+        ADDRESS: The contact address the tests configure.
+    """
+
     ADDRESS = "ann@example.org"
 
     def test_the_contact_address_is_in_no_report_format_but_stays_in_the_settings(self):
@@ -100,7 +108,10 @@ class ContactAddressTests(ProjectTestCase):
 
 
 class CommandTests(ProjectTestCase):
+    """Tests of the commands through Click: output, settings, the rule catalogue and reports."""
+
     def setUp(self):
+        """Write a project whose ``main.tex`` holds a TODO marker, and create a Click runner."""
         super().setUp()
         self.source = self.root / "project"
         self.source.mkdir()
@@ -262,6 +273,7 @@ class RequestErrorTests(ProjectTestCase):
     """Rejected requests name the option or file at fault and a concrete next step."""
 
     def setUp(self):
+        """Write a project with a plain ``main.tex``, and create a Click runner."""
         super().setUp()
         self.source = self.root / "project"
         self.source.mkdir()
@@ -271,6 +283,17 @@ class RequestErrorTests(ProjectTestCase):
         self.runner = CliRunner()
 
     def request_error(self, *arguments: str) -> dict:
+        """Run a command with ``--json`` and return its one request error finding.
+
+        It asserts that the command exits with 4 and reports a request validation error whose
+        next step does not mention missing or ambiguous evidence.
+
+        Args:
+            *arguments: The command and its arguments.
+
+        Returns:
+            The ``execution.request`` finding of the JSON report.
+        """
         result = self.runner.invoke(cli, [*arguments, "--json", "--quiet"])
         self.assertEqual(result.exit_code, 4, result.output)
         report = json.loads(result.stdout)
@@ -389,6 +412,8 @@ class RequestErrorTests(ProjectTestCase):
 
 
 class SettingsSuggestionTests(unittest.TestCase):
+    """Tests of ``settings_suggestion``, which says where each setting at fault was supplied."""
+
     def test_each_named_setting_says_where_it_was_supplied(self):
         names = ("jobs", "apply_formatting", "engine", "layout")
         overrides = {"jobs": 0, "apply_formatting": True}
@@ -420,6 +445,8 @@ class SettingsSuggestionTests(unittest.TestCase):
 
 
 class MissingToolchainTests(unittest.TestCase):
+    """Tests that a missing TeX toolchain is reported once, with installation steps."""
+
     def test_missing_tex_is_reported_once_with_installation_steps(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "project"
@@ -467,6 +494,8 @@ class MissingToolchainTests(unittest.TestCase):
 
 
 class RedactionOncePerRunTests(unittest.TestCase):
+    """Tests that one redaction serves every report file and the final report of a run."""
+
     def test_one_redaction_serves_every_file_and_the_final_report(self):
         from latexprep.redaction import redact_data
 
@@ -499,6 +528,7 @@ class UnexpectedFailureTests(ProjectTestCase):
     """A defect ends with the error exit code, never with a pass or an advisory code."""
 
     def setUp(self):
+        """Write a project whose ``main.tex`` holds a TODO marker."""
         super().setUp()
         self.source = self.root / "project"
         self.source.mkdir()
@@ -507,12 +537,25 @@ class UnexpectedFailureTests(ProjectTestCase):
         )
 
     def run_main(self, *arguments: str) -> tuple[int, str, str]:
+        """Run ``main`` with ``arguments`` and capture its output.
+
+        Returns:
+            The exit code, the standard output and the standard error.
+        """
         out, err = io.StringIO(), io.StringIO()
         with redirect_stdout(out), redirect_stderr(err):
             code = main(list(arguments))
         return code, out.getvalue(), err.getvalue()
 
     def inspect_json(self, *extra: str) -> tuple[int, dict, str]:
+        """Run ``inspect --json --quiet`` on the project and parse its report.
+
+        Args:
+            *extra: Further command-line arguments.
+
+        Returns:
+            The exit code, the parsed JSON report and the standard error.
+        """
         code, out, err = self.run_main("inspect", str(self.source), "--json", "--quiet", *extra)
         return code, json.loads(out), err
 

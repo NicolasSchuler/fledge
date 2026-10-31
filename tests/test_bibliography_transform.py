@@ -17,12 +17,25 @@ from tests.support import ProjectTestCase
 
 
 class BibliographyTransformTests(ProjectTestCase):
+    """Tests of the explicit bibliography proposals of ``plan_bibliography``.
+
+    They cover formatting, field removal, pruning to cited entries, key renames and merges,
+    guarded field edits and ordering: what each preserves, and when each is refused.
+    """
+
     def setUp(self) -> None:
+        """Start each test with the default options and a manuscript with an empty body."""
         super().setUp()
         self.options = BibliographyTransformOptions()
         self.manuscript()
 
     def manuscript(self, body: str = "", resources: str = "references") -> None:
+        r"""Write ``main.tex``, an article with ``body`` followed by ``\bibliography``.
+
+        Args:
+            body: The text of the document before the bibliography.
+            resources: The argument of ``\bibliography``.
+        """
         self.write(
             "main.tex",
             "\\documentclass{article}\n\\begin{document}\n"
@@ -33,9 +46,18 @@ class BibliographyTransformTests(ProjectTestCase):
         )
 
     def plan(self, **options: object) -> tuple[dict[str, bytes], list[Change], list[Finding]]:
+        """Plan the bibliography proposals for ``main.tex``.
+
+        Args:
+            **options: Fields that replace those of ``self.options``.
+
+        Returns:
+            The proposed file contents, the changes and the findings of ``plan_bibliography``.
+        """
         return plan_bibliography(self.root, "main.tex", replace(self.options, **options))
 
     def code(self, rows: list[Finding]) -> str:
+        """Assert that ``rows`` holds one finding and return the code of its rule."""
         self.assertEqual(len(rows), 1)
         definition = next(item for item in RULES if item.name == rows[0].rule)
         return definition.code
@@ -46,6 +68,15 @@ class BibliographyTransformTests(ProjectTestCase):
         code: str,
         status: str = "inconclusive",
     ) -> None:
+        """Assert that a plan proposed nothing because one blocking finding refused it.
+
+        The finding's next step must mention ``no requested transformation``.
+
+        Args:
+            result: The proposals, changes and findings of :meth:`plan`.
+            code: The code of the rule of the blocking finding.
+            status: The status of the blocking finding.
+        """
         proposed, changes, rows = result
         self.assertEqual((proposed, changes), ({}, []))
         self.assertEqual(self.code(rows), code)
@@ -54,6 +85,7 @@ class BibliographyTransformTests(ProjectTestCase):
         self.assertIn("no requested transformation", rows[0].next_step or "")
 
     def parsed(self, text: bytes) -> BibDocument:
+        """Parse ``text`` as UTF-8 BibTeX, asserting that the document is valid."""
         document = parse_bibtex("result.bib", text.decode("utf-8"))
         self.assertTrue(document.valid, document.syntax_error)
         return document

@@ -86,17 +86,29 @@ ACTIVE_TODO_LINE = 4
 
 
 def _unique_main(topic: str) -> str:
-    """A main file name no other process on the machine uses, such as ``deadline_1a2b3c4d.tex``."""
+    """Return a main file name that no other process on the machine uses.
+
+    The name is ``topic`` with a random suffix, such as ``deadline_1a2b3c4d.tex``.
+    """
     return f"{topic}_{secrets.token_hex(4)}.tex"
 
 
 def _cli(*arguments: str) -> list[str]:
-    """The command line of Fledge from this checkout, run as a separate process."""
+    """Return the command line of Fledge from this checkout, run as a separate process."""
     return [sys.executable, "-m", "latexprep", *arguments]
 
 
 def _environment(**overrides: str) -> dict[str, str]:
-    """The environment of such a process: this checkout's sources and plain progress lines."""
+    """Return the environment of such a process: this checkout's sources, plain progress lines.
+
+    The variables that force terminal output are left out of the inherited environment.
+
+    Args:
+        **overrides: Variables that replace inherited ones.
+
+    Returns:
+        The environment variables of the process.
+    """
     inherited = {
         name: value for name, value in os.environ.items() if name not in FORCED_TERMINAL_VARIABLES
     }
@@ -104,7 +116,18 @@ def _environment(**overrides: str) -> dict[str, str]:
 
 
 def _matching_processes(pattern: str, exclude: Collection[int] = ()) -> list[int]:
-    """The processes whose command line matches ``pattern``, by ``pgrep -f``."""
+    """List the processes whose command line matches ``pattern``, by ``pgrep -f``.
+
+    Args:
+        pattern: The pattern given to ``pgrep -f``.
+        exclude: Process IDs to leave out.
+
+    Returns:
+        The IDs of the matching processes.
+
+    Raises:
+        RuntimeError: ``pgrep`` failed.
+    """
     found = subprocess.run(
         ["pgrep", "-f", pattern], capture_output=True, text=True, check=False, timeout=60
     )
@@ -114,7 +137,10 @@ def _matching_processes(pattern: str, exclude: Collection[int] = ()) -> list[int
 
 
 def _survivors(pattern: str) -> list[int]:
-    """The processes that still match ``pattern`` after waiting for them to end."""
+    """List the processes that still match ``pattern`` after waiting for them to end.
+
+    The wait lasts at most ``ORPHAN_WAIT_SECONDS``.
+    """
     deadline = time.monotonic() + ORPHAN_WAIT_SECONDS
     while (found := _matching_processes(pattern)) and time.monotonic() < deadline:
         time.sleep(POLL_SECONDS)
@@ -122,7 +148,15 @@ def _survivors(pattern: str) -> list[int]:
 
 
 def _process_appears(pattern: str, exclude: Collection[int]) -> bool:
-    """Whether a process other than ``exclude`` comes to match ``pattern``."""
+    """Return whether a process other than ``exclude`` comes to match ``pattern``.
+
+    Args:
+        pattern: The pattern given to ``pgrep -f``.
+        exclude: Process IDs to leave out.
+
+    Returns:
+        Whether such a process appeared within ``STARTUP_WAIT_SECONDS``.
+    """
     deadline = time.monotonic() + STARTUP_WAIT_SECONDS
     while not _matching_processes(pattern, exclude):
         if time.monotonic() >= deadline:
@@ -132,14 +166,14 @@ def _process_appears(pattern: str, exclude: Collection[int]) -> bool:
 
 
 def _kill_matching(pattern: str) -> None:
-    """Cleanup: end whatever a failed test left running on its uniquely named document."""
+    """Kill whatever a failed test left running on its uniquely named document, as cleanup."""
     for pid in _matching_processes(pattern):
         with contextlib.suppress(ProcessLookupError):
             os.kill(pid, signal.SIGKILL)
 
 
 def _stop(process: subprocess.Popen[bytes]) -> None:
-    """Cleanup: end the command if a failed test left it running, and close its pipes."""
+    """End the command if a failed test left it running, and close its pipes, as cleanup."""
     if process.poll() is None:
         process.kill()
         process.wait(timeout=STARTUP_WAIT_SECONDS)
@@ -149,10 +183,14 @@ def _stop(process: subprocess.Popen[bytes]) -> None:
 
 
 class _ProcessWatch:
-    """Polls ``pgrep -f`` in a thread and records whether any process matched the pattern.
+    """A context manager that polls ``pgrep -f`` in a thread and records any matching process.
 
     An error of ``pgrep`` ends the polling and is raised again when the watch ends, so a broken
     process search fails the test instead of reading as "no process seen".
+
+    Attributes:
+        pattern: The pattern given to ``pgrep -f``.
+        seen: Whether any process matched the pattern while the watch ran.
     """
 
     def __init__(self, pattern: str) -> None:
@@ -173,6 +211,7 @@ class _ProcessWatch:
             raise self._error
 
     def _poll(self) -> None:
+        """Poll until the watch ends or ``pgrep`` fails, keeping the error for ``__exit__``."""
         try:
             while not self._stopped.is_set():
                 self.seen = self.seen or bool(_matching_processes(self.pattern))
@@ -184,8 +223,15 @@ class _ProcessWatch:
 def _read_until_line(stream: IO[bytes], expected: str) -> tuple[bool, bytes]:
     """Read ``stream`` until a line equal to ``expected`` arrives, it ends, or the wait runs out.
 
-    Returns whether the line arrived and every byte read. The descriptor is read directly, as
-    ``Popen.communicate`` does, so ``communicate`` collects the rest afterwards.
+    The descriptor is read directly, as ``Popen.communicate`` does, so ``communicate``
+    collects the rest afterwards. The wait lasts at most ``STARTUP_WAIT_SECONDS``.
+
+    Args:
+        stream: The output pipe of a process.
+        expected: The line to wait for, compared without surrounding whitespace.
+
+    Returns:
+        Whether the line arrived, and every byte read.
     """
     received = b""
     deadline = time.monotonic() + STARTUP_WAIT_SECONDS
@@ -203,7 +249,15 @@ def _read_until_line(stream: IO[bytes], expected: str) -> tuple[bool, bytes]:
 
 
 def _changed_lines(text: str, sign: str) -> list[str]:
-    """The removed (``-``) or added (``+``) lines of a unified diff, without its file headers."""
+    """List the removed (``-``) or added (``+``) lines of a unified diff, without file headers.
+
+    Args:
+        text: The unified diff.
+        sign: ``-`` for removed lines or ``+`` for added ones.
+
+    Returns:
+        The matching lines in diff order, each with its sign.
+    """
     return [
         line
         for line in text.splitlines()
@@ -212,13 +266,20 @@ def _changed_lines(text: str, sign: str) -> list[str]:
 
 
 def _insert_lines(path: Path, *, after: int, lines: Iterable[str]) -> None:
+    """Insert ``lines`` into the text file at ``path``.
+
+    Args:
+        path: The file to edit.
+        after: The number of existing lines that stay before the inserted ones.
+        lines: The lines to insert, without line ends.
+    """
     text = path.read_text(encoding="utf-8").splitlines(keepends=True)
     text[after:after] = [f"{line}\n" for line in lines]
     path.write_text("".join(text), encoding="utf-8")
 
 
 def _annotations(stdout: str) -> set[tuple[str, str, str, int]]:
-    """The level, title, file and line of each GitHub annotation that names a file and a line."""
+    """Collect the level, title, file and line of each GitHub annotation with a file and line."""
     return {
         (match["level"], match["title"], match["file"], int(match["line"]))
         for match in map(ANNOTATION.match, stdout.splitlines())
@@ -227,11 +288,16 @@ def _annotations(stdout: str) -> set[tuple[str, str, str, int]]:
 
 
 def _error_annotations(stdout: str) -> list[str]:
+    """List the lines of ``stdout`` that are GitHub error annotations."""
     return [line for line in stdout.splitlines() if line.startswith("::error")]
 
 
 def _unresolved(report: dict[str, Any]) -> list[tuple[str, str, str]]:
-    """The findings of a JSON report that did not pass, for assertion messages."""
+    """List the findings of a JSON report that did not pass, for assertion messages.
+
+    Returns:
+        The rule, status and message of each such finding.
+    """
     return [
         (finding["rule"], finding["status"], finding["message"])
         for finding in report["findings"]
@@ -240,7 +306,7 @@ def _unresolved(report: dict[str, Any]) -> list[tuple[str, str, str]]:
 
 
 def _path_without(tool: str) -> str:
-    """``PATH`` without each directory that provides ``tool``; every other entry is kept."""
+    """Return ``PATH`` without each directory that provides ``tool``; other entries are kept."""
     return os.pathsep.join(
         entry
         for entry in os.environ.get("PATH", "").split(os.pathsep)
@@ -251,7 +317,16 @@ def _path_without(tool: str) -> str:
 def _run_command(
     *arguments: str, cwd: Path | None = None, **environment: str
 ) -> subprocess.CompletedProcess[str]:
-    """Run Fledge as a separate process without input, with ``environment`` added to its own."""
+    """Run Fledge as a separate process without input, with ``environment`` added to its own.
+
+    Args:
+        *arguments: The command-line arguments.
+        cwd: The working directory, or ``None`` for the current one.
+        **environment: Environment variables to set for the process.
+
+    Returns:
+        The completed process with its text output, also when the command failed.
+    """
     return subprocess.run(
         _cli(*arguments),
         cwd=cwd,
@@ -265,6 +340,15 @@ def _run_command(
 
 
 class _EndlessRun(NamedTuple):
+    """What a ``prepare`` job of the endless document left behind.
+
+    Attributes:
+        report: The report of the job.
+        main: The unique name of the main file.
+        output: The output directory given to the job.
+        tex_seen: Whether a process working on the document was seen while the job ran.
+    """
+
     report: Report
     main: str
     output: Path
@@ -273,20 +357,26 @@ class _EndlessRun(NamedTuple):
 
 @live_test("Set FLEDGE_RUN_INTEGRATION=1 for live runtime tests with TeX, Poppler and tex-fmt")
 class RuntimeIntegrationTests(unittest.TestCase):
+    """Time limits, interruption, ``fmt``, ``doctor`` and the CI recipe with the real tools."""
+
     def _directory(self, topic: str) -> Path:
+        """Create a temporary directory named after ``topic``, removed after the test."""
         temporary = tempfile.TemporaryDirectory(prefix=f"fledge-{topic}-")
         self.addCleanup(temporary.cleanup)
         return Path(temporary.name).resolve()
 
     def _require_tools(self, *names: str) -> None:
+        """Skip the test unless every one of ``names`` is on ``PATH``."""
         if missing := [name for name in names if shutil.which(name) is None]:
             self.skipTest(f"Not on PATH: {', '.join(missing)} (see docs/installation.md)")
 
     @staticmethod
     def _invoke(*arguments: str) -> Result:
+        """Run the command line ``arguments`` in this process and return the Click result."""
         return CliRunner().invoke(cli, list(arguments))
 
     def _json_report(self, process: subprocess.CompletedProcess[str]) -> dict[str, Any]:
+        """Parse the JSON report that ``process`` printed, failing the test if there is none."""
         try:
             return json.loads(process.stdout)
         except json.JSONDecodeError:
@@ -297,7 +387,19 @@ class RuntimeIntegrationTests(unittest.TestCase):
     def _prepare_endless_document(
         self, topic: str, *, tool_timeout: int, job_timeout: int
     ) -> _EndlessRun:
-        """Prepare the endless document under the given limits, then wait for TeX to be gone."""
+        """Prepare the endless document under the given limits, then wait for TeX to be gone.
+
+        Skips unless TeX and ``pgrep`` are installed, and asserts that no TeX process outlives
+        the job.
+
+        Args:
+            topic: The topic that names the directory and the main file.
+            tool_timeout: The limit of one tool command, ``timeout_seconds``.
+            job_timeout: The limit of the whole job, ``job_timeout_seconds``.
+
+        Returns:
+            What the job left behind.
+        """
         self._require_tools(*TEX_TOOLS, "pgrep")
         base = self._directory(topic)
         main = _unique_main(topic)
@@ -317,7 +419,9 @@ class RuntimeIntegrationTests(unittest.TestCase):
         return _EndlessRun(report, main, output, watch.seen)
 
     def test_job_deadline_stops_the_running_build_and_publishes_nothing(self) -> None:
-        """A missed ``job_timeout_seconds`` deadline blocks the run with ``execution.deadline``.
+        """Check that the job deadline stops the running build and publishes nothing.
+
+        A missed ``job_timeout_seconds`` deadline blocks the run with ``execution.deadline``.
 
         Verifies docs/configuration.md (the deadline bounds the whole job, so the build is
         cancelled rather than timed out), docs/workflow-reference.md (cancellation drains
@@ -336,7 +440,9 @@ class RuntimeIntegrationTests(unittest.TestCase):
             self.skipTest("The deadline passed before TeX started, so no TeX process was stopped")
 
     def test_tool_timeout_stops_the_build_and_records_a_build_timeout(self) -> None:
-        """A build longer than ``timeout_seconds`` is stopped and reported as ``build.timeout``.
+        """Check that the tool timeout stops the build and records a build timeout.
+
+        A build longer than ``timeout_seconds`` is stopped and reported as ``build.timeout``.
 
         Verifies docs/configuration.md (the limit bounds one tool command, not the job: no
         ``execution.deadline``), docs/reports.md (blocked, no bundle) and that the stopped
@@ -357,7 +463,9 @@ class RuntimeIntegrationTests(unittest.TestCase):
     # fmt with the real formatter.
 
     def test_fmt_diff_shows_the_formatter_patch_without_editing_the_project(self) -> None:
-        """``fmt --diff`` reports FMT001 for main.tex and shows tex-fmt's patch, read-only.
+        """Check that ``fmt --diff`` shows the formatter's patch without editing the project.
+
+        ``fmt --diff`` reports FMT001 for main.tex and shows tex-fmt's patch, read-only.
 
         Verifies the ``fmt`` and ``--diff`` help (read-only check; the patch appears in the
         terminal report), docs/checks.md FMT001 (a warning, exit 1) and
@@ -386,7 +494,10 @@ class RuntimeIntegrationTests(unittest.TestCase):
         self.assertEqual(directory_contents(project), before)
 
     def test_fmt_passes_a_project_that_already_matches_the_formatter(self) -> None:
-        """A source tex-fmt leaves unchanged passes ``fmt``: FMT001 passed, exit code 0."""
+        """Check that a source tex-fmt leaves unchanged passes ``fmt``.
+
+        FMT001 passes and the exit code is 0.
+        """
         self._require_tools("tex-fmt")
         project = write_project(self._directory("fmt") / "clean", {"main.tex": WELL_FORMATTED})
         before = directory_contents(project)
@@ -400,7 +511,9 @@ class RuntimeIntegrationTests(unittest.TestCase):
     # doctor with the real tools.
 
     def test_doctor_verifies_and_exercises_the_core_tools(self) -> None:
-        """``doctor --json`` passes on a complete setup and records each core tool's version.
+        """Check that ``doctor`` verifies and exercises the core tools.
+
+        ``doctor --json`` passes on a complete setup and records each core tool's version.
 
         Verifies docs/doctor.md: the outcome is passed or passed with advisories, with exit
         code 0 or 1 to match, and the JSON report records latexmk, pdflatex and pdfinfo as
@@ -421,7 +534,7 @@ class RuntimeIntegrationTests(unittest.TestCase):
                 self.assertTrue(tool["exercised"], tool)
 
     def _path_without_poppler(self) -> str:
-        """``PATH`` without Poppler; skips where TeX shares its directory, as on Ubuntu."""
+        """Return ``PATH`` without Poppler; skip where TeX shares its directory, as on Ubuntu."""
         self._require_tools(*TEX_TOOLS, "pdfinfo")
         path = _path_without("pdfinfo")
         if hidden := [name for name in TEX_TOOLS if shutil.which(name, path=path) is None]:
@@ -432,7 +545,7 @@ class RuntimeIntegrationTests(unittest.TestCase):
         return path
 
     def test_doctor_blocks_when_poppler_is_missing(self) -> None:
-        """A missing required tool blocks the diagnostic result with exit code 3.
+        """Check that a missing required tool blocks the diagnostic result with exit code 3.
 
         Verifies docs/doctor.md: Poppler's ``pdfinfo`` is a core tool, a missing required tool
         blocks, and the report records the tool as not installed.
@@ -458,8 +571,15 @@ class RuntimeIntegrationTests(unittest.TestCase):
     def _await_running_build(self, process: subprocess.Popen[bytes], pattern: str) -> bytes:
         """Wait until stderr announces the baseline build and a TeX process works on it.
 
-        Returns the stderr read so far. The command itself is excluded from the search: its
-        own command line names the main file.
+        The command itself is excluded from the search: its own command line names the main
+        file.
+
+        Args:
+            process: The running command, whose standard error is a pipe.
+            pattern: The pattern that matches a process working on the document.
+
+        Returns:
+            The standard error read so far.
         """
         assert process.stderr is not None
         announced, received = _read_until_line(process.stderr, BASELINE_ANNOUNCEMENT)
@@ -471,7 +591,7 @@ class RuntimeIntegrationTests(unittest.TestCase):
         return received
 
     def test_interrupt_during_the_build_exits_130_without_output_or_tex_process(self) -> None:
-        """SIGINT during the baseline build cancels ``prepare`` with exit code 130.
+        """Check that SIGINT during the baseline build cancels ``prepare`` with exit code 130.
 
         Verifies docs/reports.md (130 means interrupted; no bundle is written), the
         cancellation message of the final report, and docs/workflow-reference.md
@@ -508,6 +628,12 @@ class RuntimeIntegrationTests(unittest.TestCase):
     # The documented CI recipe.
 
     def _assert_check_step(self, project: Path, reports: Path) -> None:
+        """Run the recipe's ``check`` step in ``project`` and assert its annotations and reports.
+
+        Args:
+            project: The project directory, the working directory of the step.
+            reports: The directory for the JSON and HTML reports.
+        """
         check = _run_command(
             *("check", ".", "--main", "main.tex", "--output-format", "ci", "--quiet"),
             *("--json-report", str(reports / "check.json")),
@@ -525,6 +651,12 @@ class RuntimeIntegrationTests(unittest.TestCase):
         self.assertGreater((reports / "check.html").stat().st_size, 0)
 
     def _assert_prepare_step(self, project: Path, reports: Path) -> None:
+        """Run the recipe's ``prepare`` step in ``project`` and assert what it publishes.
+
+        Args:
+            project: The project directory, the working directory of the step.
+            reports: The directory for the submission and the HTML report.
+        """
         submission = reports / "submission"
         prepare = _run_command(
             *("prepare", ".", "--main", "main.tex", "--output", str(submission)),
@@ -542,7 +674,7 @@ class RuntimeIntegrationTests(unittest.TestCase):
         self.assertGreater((reports / "prepare.html").stat().st_size, 0)
 
     def test_documented_ci_recipe_annotates_advisories_and_publishes_the_submission(self) -> None:
-        """The workflow of docs/continuous-integration.md, run from the project directory.
+        """Check the workflow of docs/continuous-integration.md, run from the project directory.
 
         ``check`` and ``prepare`` with ``--output-format ci --quiet`` pass the recipe's exit
         code gate (at most 2) for an advisory, print it as a GitHub warning annotation with

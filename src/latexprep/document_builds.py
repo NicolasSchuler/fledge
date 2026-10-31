@@ -25,7 +25,12 @@ from .task_reporting import TaskReporter
 
 @dataclass(frozen=True, slots=True)
 class BuildStage:
-    """A rebuild of the document: its name in reports, and its workspace directory."""
+    """A rebuild of the document: its name in reports, and its workspace directory.
+
+    Attributes:
+        label: The stage name in reports.
+        directory: The name of the workspace directory of the build.
+    """
 
     label: str
     directory: str
@@ -37,12 +42,29 @@ ARCHIVE = BuildStage("archive", "archive-build")
 
 
 class _TimedBuild(NamedTuple):
+    """A build result with the time the build took and the time it waited for its lease.
+
+    Attributes:
+        result: The build result.
+        elapsed_seconds: The build's own time, in seconds.
+        queue_seconds: The wait for the build lease, in seconds.
+    """
+
     result: BuildResult
     elapsed_seconds: float
     queue_seconds: float
 
 
 class _RepeatedBaseline(NamedTuple):
+    """One repeat of the baseline build and its comparison with the first build.
+
+    Attributes:
+        stage: The stage of the repeat.
+        timed: The repeated build and its times.
+        comparison: The findings of comparing the repeat's PDF with the first PDF; empty
+            when the repeat failed or produced no PDF.
+    """
+
     stage: BuildStage
     timed: _TimedBuild
     comparison: list[Finding]
@@ -51,7 +73,18 @@ class _RepeatedBaseline(NamedTuple):
 async def _leased_build(
     context: JobContext, lease_name: str, tree: Path, main: str, directory: str
 ) -> _TimedBuild:
-    """Build under a build lease; report the build's own time and the wait for the lease."""
+    """Build under a build lease; report the build's own time and the wait for the lease.
+
+    Args:
+        context: The job, whose budget grants the lease.
+        lease_name: The name of the lease.
+        tree: The source tree to build.
+        main: The main file to build.
+        directory: The name of the new workspace directory of the build.
+
+    Returns:
+        The build result with both times.
+    """
     async with context.budget.lease(
         lease_name, memory_mb=context.settings.build_memory_mb, kind="build"
     ) as lease:
@@ -64,7 +97,22 @@ async def _leased_build(
 async def build_stage(
     context: JobContext, reporter: TaskReporter, tree: Path, main: str, stage: BuildStage
 ) -> BuildResult:
-    """Build one staged tree under a build lease and record it like the baseline."""
+    """Build one staged tree under a build lease and record it like the baseline.
+
+    A successful build without submission-input evidence adds an inconclusive
+    ``package.dependencies`` error, and the local package shadow check runs when the
+    settings enable it.
+
+    Args:
+        context: The job.
+        reporter: The reporter that records the build and its findings.
+        tree: The staged source tree.
+        main: The main file to build.
+        stage: The stage that names the build and its workspace directory.
+
+    Returns:
+        The build result.
+    """
     settings, report = context.settings, reporter.report
     context.emit(f"Rebuilding {stage.label} sources")
     timed = await _leased_build(context, f"{stage.label} build", tree, main, stage.directory)
@@ -114,10 +162,24 @@ async def repeat_baselines(
     main: str,
     first_pdf: Path,
 ) -> None:
-    """Rebuild the unchanged baseline and require identical evidence (CMP101)."""
+    """Rebuild the unchanged baseline and require identical evidence (CMP101).
+
+    The ``workflow.baseline_runs`` setting counts the first build, so one fewer repeat is
+    built. Every repeat and its comparison with the first PDF are recorded, followed by a
+    ``compare.baseline_stability`` finding that fails unless every repeat built a PDF
+    without a blocking difference.
+
+    Args:
+        context: The job.
+        reporter: The reporter that records the builds and findings.
+        source: The unchanged source tree.
+        main: The main file to build.
+        first_pdf: The PDF of the first baseline build.
+    """
     settings = context.settings
 
     async def attempt(number: int) -> _RepeatedBaseline:
+        """Build repeat ``number`` and compare its PDF with the first one."""
         stage = BuildStage(f"baseline repeat {number}", f"baseline-{number}")
         timed = await _leased_build(
             context, f"repeat baseline {number}", source, main, stage.directory

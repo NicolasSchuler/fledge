@@ -1,3 +1,5 @@
+"""Formatting proposals from a fake formatter: protected regions, exclusions, limits, failures."""
+
 from __future__ import annotations
 
 import tempfile
@@ -15,7 +17,21 @@ from tests.support import format_with
 
 
 class FormattingTests(unittest.IsolatedAsyncioTestCase):
+    """What formatting proposes for a project and when a formatter failure blocks it."""
+
     async def proposal(self, source_text, output_text, **options):
+        """Format a one-file project with a fake formatter that prints ``output_text`` twice.
+
+        Asserts that ``main.tex`` is unchanged afterwards.
+
+        Args:
+            source_text: The text of ``main.tex``.
+            output_text: The output of both formatter passes.
+            **options: The fields of the :class:`FormattingOptions` to use.
+
+        Returns:
+            The formatting result.
+        """
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
             source = base / "source"

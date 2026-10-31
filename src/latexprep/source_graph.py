@@ -1,4 +1,4 @@
-"""Literal dependency graph of a LaTeX project, built on the bounded lexical subset.
+r"""Literal dependency graph of a LaTeX project, built on the bounded lexical subset.
 
 ``SourceGraph.build`` selects the main file, then walks it in source order, following
 each literal file reference into the file it names. Resolution uses the selected main
@@ -14,7 +14,7 @@ command tables are ``source_file_commands``.
 The walk. ``_visit`` reads a file and goes through its commands in order. A file
 command is resolved in the current lookup scope, its reference is recorded, and the
 file it names is visited in turn with the scope that command establishes (an
-``\\import`` or ``\\subfile`` adds a directory). A ``\\graphicspath`` changes the
+``\import`` or ``\subfile`` adds a directory). A ``\graphicspath`` changes the
 graphics search path for the rest of the file and for what the file's inputs leave
 behind, which is why a visit returns the search path in force at its end. A visit is
 skipped when the same file was already walked with the same search path, directory
@@ -114,7 +114,13 @@ INCOMPLETE_GRAPH_RULES = UNPARSED_SOURCE_RULES | {
 
 
 class ArgumentLocation(NamedTuple):
-    """Where an argument's text sits in one project file."""
+    """Where an argument's text sits in one project file.
+
+    Attributes:
+        path: The project file that holds the argument.
+        start: The offset where the argument's text starts.
+        end: The offset just after the argument's text.
+    """
 
     path: str
     start: int
@@ -122,19 +128,26 @@ class ArgumentLocation(NamedTuple):
 
 
 class FileReference(NamedTuple):
-    """The project file a literal argument resolved to, and the command that read it."""
+    """The project file a literal argument resolved to, and the command that read it.
+
+    Attributes:
+        target: The project file the argument resolved to.
+        command: The name of the command that read it.
+    """
 
     target: str
     command: str
 
 
 class _Frame(NamedTuple):
-    """One visit of a file: the lookup state it starts with.
+    r"""One visit of a file: the lookup state it starts with.
 
-    ``search`` is the graphics search path in force, ``context`` the directories of the
-    files entered so far (innermost first), and ``subfile`` whether the file is read as a
-    ``\\subfile`` body, of which only the part between ``\\begin{document}`` and
-    ``\\end{document}`` counts.
+    Attributes:
+        path: The project file to walk.
+        search: The graphics search path in force.
+        context: The directories of the files entered so far, innermost first.
+        subfile: Whether the file is read as a ``\subfile`` body, of which only the part
+            between ``\begin{document}`` and ``\end{document}`` counts.
     """
 
     path: str
@@ -145,7 +158,14 @@ class _Frame(NamedTuple):
 
 @dataclass(frozen=True, slots=True)
 class _Visit:
-    """The file being walked: its parsed source, the files above it, and its lookup context."""
+    """The file being walked: its parsed source, the files above it, and its lookup context.
+
+    Attributes:
+        path: The project file being walked.
+        source: Its parsed source.
+        stack: The files being read above it.
+        context: The directories of the files entered so far, innermost first.
+    """
 
     path: str
     source: ParsedSource
@@ -164,12 +184,31 @@ GraphScope = Literal["project", "selected"]
 
 
 class SourceGraph:
-    """Literal source dependencies of one selected main file.
+    r"""Literal source dependencies of one selected main file.
 
-    Construct with :meth:`build`. ``findings`` holds every finding in order;
-    ``uncertainties`` is the inconclusive subset outside the supported lexical subset.
-    ``references`` maps each literal file argument to the file it names, and
-    ``search_arguments`` the arguments a flat layout must rewrite for directory changes.
+    Construct with :meth:`build`.
+
+    Args:
+        root: The project folder whose files the graph indexes.
+
+    Attributes:
+        files: The project files by project-relative name.
+        known_paths: The index of every name suffix and directory prefix of ``files``.
+        sources: The parsed source of every file that was loaded, by name.
+        findings: Every finding, in the order it was found.
+        uncertainties: The inconclusive subset of ``findings``: what lies outside the
+            supported lexical subset.
+        dependencies: The main file and every project file a literal reference resolved to.
+        references: The file each literal file argument names, by the argument's location.
+        search_arguments: The arguments a flat layout must rewrite for directory changes,
+            by location, with their replacement text.
+        system_references: The class, package and style references left to the toolchain.
+        visited: The files the walk read.
+        subfile_targets: The files read as supported ``\subfile`` bodies.
+        subfiles_package_loaded: Whether the walk has seen the ``subfiles`` package loaded.
+        roots: The document roots among the loaded sources.
+        main: The selected main file, or ``None`` when none could be selected.
+        cwd: The directory of the main file, relative to the project root.
     """
 
     def __init__(self, root: Path) -> None:
@@ -201,6 +240,20 @@ class SourceGraph:
         """Read the project's sources and follow literal references from the main file.
 
         Without an explicit ``main``, the project's single document root is used.
+
+        Args:
+            root: The project folder.
+            main: The main file relative to the project folder, or ``None`` to select the single
+                document root.
+            scope: ``"project"`` reads every source file to discover the document roots;
+                ``"selected"`` reads only the sources reached from ``main``, so ``roots`` holds
+                only the roots among those.
+
+        Returns:
+            The graph after the walk; a main file that cannot be selected is a finding.
+
+        Raises:
+            PreparationError: ``scope`` is ``"selected"`` and no ``main`` is given.
         """
         if scope == "selected" and main is None:
             raise PreparationError("Selected source analysis requires an explicit main file.")
@@ -233,10 +286,16 @@ class SourceGraph:
         return not self.uncertainties and not has_blockers(self.findings)
 
     def other_roots(self, *, include_subfiles: bool = True) -> list[str]:
-        """The document roots other than the main file.
+        r"""Return the document roots other than the main file.
 
         A subfile body declares its own root; ``include_subfiles=False`` leaves those
         out, since a flat package keeps them under the main file.
+
+        Args:
+            include_subfiles: Whether to keep the roots read as ``\subfile`` bodies.
+
+        Returns:
+            The other roots, in the order of ``roots``.
         """
         return [
             name
@@ -245,12 +304,17 @@ class SourceGraph:
         ]
 
     def _load_project_sources(self) -> None:
+        """Load and check every project file that is parsed as source, in project order.
+
+        Each file is preceded by a cancellation point.
+        """
         for name, path in self.files.items():
             cancellation_point()
             if is_parsed_source(name, path):
                 self._load(name)
 
     def _document_roots(self) -> list[str]:
+        """Return the loaded sources that are document roots and have a root file suffix."""
         return [
             name
             for name, source in self.sources.items()
@@ -258,7 +322,10 @@ class SourceGraph:
         ]
 
     def _load(self, name: str) -> ParsedSource | None:
-        """The parsed source of ``name``, loading and checking it on first use."""
+        """Return the parsed source of ``name``, loading and checking it on first use.
+
+        A file that could not be loaded is not tried again and returns ``None``.
+        """
         if name in self.sources:
             return self.sources[name]
         if name in self._attempted:
@@ -272,6 +339,18 @@ class SourceGraph:
         return source
 
     def _select_main(self, main: str | None) -> str | None:
+        """Choose the main file: the explicit ``main``, or else the single document root.
+
+        An explicit main file that is absolute, escapes the project or is not a project file is
+        an error finding. Without one, no document root or several of them are an inconclusive
+        error finding. An explicit main file not loaded yet is loaded and checked.
+
+        Args:
+            main: The main file relative to the project folder, or ``None``.
+
+        Returns:
+            The normalized project-relative main file, or ``None`` after a recorded finding.
+        """
         if main is not None:
             candidate = posixpath.normpath(main)
             escapes = (
@@ -317,19 +396,46 @@ class SourceGraph:
         return None
 
     def _tree(self) -> ProjectTree:
+        """Return the project files and compilation directory as a lookup tree.
+
+        A linked candidate is passed to :meth:`_load`, which reports the link.
+        """
         return ProjectTree(self.files, self.cwd, self._load)
 
     def _project_path(self, visit: _Visit, command: Command, value: str, base: str) -> str | None:
+        """Return the project-relative path ``value`` names under ``base``.
+
+        Args:
+            visit: The file that holds the command.
+            command: The command that writes ``value``.
+            value: The literal name to join to ``base``.
+            base: The directory to resolve against.
+
+        Returns:
+            The normalized project path, or ``None`` after a reported external path.
+        """
         reference = Reference(value, visit.path, command)
         return project_path(reference, self._tree(), self._reporter, base=base)
 
     def _search_paths(
         self, visit: _Visit, command: Command, context: tuple[str, ...]
     ) -> tuple[str, ...] | None:
-        """The directories a ``\\graphicspath`` declares, or ``None`` when it is not literal.
+        r"""Return the directories a ``\graphicspath`` declares, or ``None`` when it is not literal.
 
         The argument is recorded in ``search_arguments`` so a flat layout rewrites it to
-        the current directory.
+        the current directory. A scoped or macro-defined declaration, one that is not a
+        literal list of groups, or a directory without a trailing slash is reported.
+
+        Args:
+            visit: The file that holds the command.
+            command: The ``\graphicspath`` command.
+            context: The directories of the files entered so far, innermost first. While the
+                ``subfiles`` package is loaded, each directory is taken relative to the innermost
+                one and rewritten relative to the compilation directory.
+
+        Returns:
+            The declared directories in order, or ``None`` after a reported problem or when the
+            command has no argument.
         """
         name = visit.path
         if not command.arguments:
@@ -377,6 +483,17 @@ class SourceGraph:
     def _record_reference(
         self, name: str, argument: Argument, target: str, command: Command
     ) -> None:
+        """Record the project file a literal argument resolved to.
+
+        An argument that already resolved to a different file under another path context is an
+        error finding, and the first file is kept.
+
+        Args:
+            name: The project file that holds the argument.
+            argument: The literal file argument.
+            target: The project file it resolved to.
+            command: The command that reads the file.
+        """
         location = ArgumentLocation(name, argument.start, argument.end)
         previous = self.references.get(location)
         if previous and previous.target != target:
@@ -394,11 +511,18 @@ class SourceGraph:
             self.references[location] = FileReference(target, command.name)
 
     def _font_directory(self, visit: _Visit, command: Command) -> str | None:
-        """The directory a font command's ``Path`` option names, or ``None`` when unsupported.
+        """Return the directory a font command's ``Path`` option names; ``None`` when unsupported.
 
         Only an explicit local font file and the options in ``_FONT_OPTION_KEYS`` are
         followed. The ``Path`` argument is recorded in ``search_arguments`` so a flat
         layout rewrites it.
+
+        Args:
+            visit: The file that holds the command.
+            command: The supported font command.
+
+        Returns:
+            The ``Path`` directory, ``"./"`` without one, or ``None`` after a reported problem.
         """
         name = visit.path
         source = visit.source
@@ -457,10 +581,19 @@ class SourceGraph:
         return directory
 
     def _subfile_commands(self, name: str, source: ParsedSource) -> list[Command]:
-        """The commands of a subfile body, or none when the file is not a supported subfile.
+        """Return the commands of a subfile body, or none when the file is not a supported subfile.
 
         A subfile has one ``subfiles`` document class naming the main file as its parent
         and one document environment; only the commands inside that environment are read.
+        A supported subfile records its parent argument as a reference to the main file and
+        joins ``subfile_targets``; an unsupported one is reported.
+
+        Args:
+            name: The project file read as a subfile.
+            source: Its parsed source.
+
+        Returns:
+            The commands inside the document environment, or an empty list.
         """
         declarations = [command for command in source.commands if command.name == "documentclass"]
         starts = [command for command in source.commands if command.begins("document", exact=True)]
@@ -515,7 +648,15 @@ class SourceGraph:
         cycle, and a stack at ``MAX_INPUT_DEPTH`` is too deep; both are reported and the
         visit returns the search path it was given. A file that cannot be loaded is not
         visited at all. The walk stops, with a finding, once the whole graph has
-        processed ``MAX_COMMANDS`` commands.
+        processed ``MAX_COMMANDS`` commands. A frame already walked in the same ``subfiles``
+        state returns its cached result.
+
+        Args:
+            frame: The file and the lookup state it starts with.
+            stack: The files being read above this one.
+
+        Returns:
+            The graphics search path in force at the end of the file.
         """
         name = frame.path
         if name in stack:
@@ -560,7 +701,16 @@ class SourceGraph:
     def _visit_command(
         self, visit: _Visit, command: Command, search: tuple[str, ...]
     ) -> tuple[str, ...]:
-        """Follow one command of the visited file; return the graphics search path afterwards."""
+        """Follow one command of the visited file; return the graphics search path afterwards.
+
+        Args:
+            visit: The file being walked.
+            command: The command to follow.
+            search: The graphics search path in force before the command.
+
+        Returns:
+            The graphics search path in force after the command.
+        """
         if command.name == "graphicspath":
             paths = self._search_paths(visit, command, visit.context)
             return search if paths is None else paths
@@ -585,7 +735,17 @@ class SourceGraph:
         return search
 
     def _visit_import(self, visit: _Visit, command: Command, search: tuple[str, ...]) -> None:
-        """Follow ``\\import`` and its relatives: a directory argument, then a file in it."""
+        r"""Follow ``\import`` and its relatives: a directory argument, then a file in it.
+
+        The ``sub`` variants take the directory relative to the innermost entered directory,
+        the others relative to the compilation directory. The directory argument is recorded in
+        ``search_arguments`` and the file is walked with the directory added to its context.
+
+        Args:
+            visit: The file being walked.
+            command: The import command.
+            search: The graphics search path in force.
+        """
         if len(command.arguments) < 2:
             return
         name, source = visit.path, visit.source
@@ -620,11 +780,19 @@ class SourceGraph:
     def _visit_file_command(
         self, visit: _Visit, command: Command, search: tuple[str, ...]
     ) -> tuple[str, ...]:
-        """Follow a command whose file argument is a name or a list of names.
+        r"""Follow a command whose file argument is a name or a list of names.
 
-        Each literal name is resolved and recorded. A ``\\subfile`` is read with its own
+        Each literal name is resolved and recorded. A ``\subfile`` is read with its own
         directory as context; the commands in ``TRAVERSED_COMMANDS`` are read in the
         current context, and what they leave of the search path is returned.
+
+        Args:
+            visit: The file being walked.
+            command: The file command.
+            search: The graphics search path in force before the command.
+
+        Returns:
+            The graphics search path in force after the command.
         """
         index = file_argument_index(command.name)
         if len(command.arguments) <= index:
@@ -661,7 +829,17 @@ class SourceGraph:
     def _resolve(
         self, visit: _Visit, command: Command, value: str, scope: LookupScope
     ) -> str | None:
-        """Resolve one file name; a found file joins the dependencies, a toolchain one is kept."""
+        """Resolve one file name; a found file joins the dependencies, a toolchain one is kept.
+
+        Args:
+            visit: The file that holds the command.
+            command: The command that writes the name.
+            value: The literal file name.
+            scope: The directories the lookup may start from.
+
+        Returns:
+            The project file found, or ``None``.
+        """
         resolution = resolve_reference(
             Reference(value, visit.path, command), scope, self._tree(), self._reporter
         )

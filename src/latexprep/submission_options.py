@@ -45,6 +45,16 @@ _OPTIONS_OUTSIDE_BUNDLE_SCAN = frozenset({"identity_term_matching", "max_archive
 
 
 def _require_project_path(name: str, value: object) -> None:
+    """Check that a setting value is a safe path relative to the project.
+
+    Args:
+        name: The setting name that error messages report.
+        value: The configured value.
+
+    Raises:
+        SettingsError: The value is not text within the length bound, or not a relative
+            POSIX path free of ``..``.
+    """
     require_text(name, value, expected="a relative project path", max_length=_MAX_PAIR_CHARACTERS)
     if not isinstance(value, str) or not is_relative_posix_path(value):
         raise SettingsError(
@@ -54,7 +64,33 @@ def _require_project_path(name: str, value: object) -> None:
 
 @dataclass(frozen=True)
 class SubmissionOptions:
-    """Which submission-bundle checks run, and the values they compare against."""
+    """Which submission-bundle checks run, and the values they compare against.
+
+    Construction raises ``SettingsError`` when a field fails its check.
+
+    Attributes:
+        FIELD_BOUNDS: The bounds :func:`validate_scalars` applies to ``filename_max_length``
+            and ``max_archive_bytes``.
+        identity_terms: Literal identity terms to scan the bundle for.
+        scan_identity_hints: Whether to flag possible identifying language.
+        scan_secrets: Whether to scan for credential-shaped values.
+        scan_private_comments: Whether to scan TeX comments for private notes.
+        check_shell_escape: Whether to flag literal shell-execution constructs.
+        filename_max_length: The longest file basename allowed, in characters, or ``None``
+            for no limit.
+        filename_allowed_characters: The literal characters a file basename may use, or
+            ``None`` for no character policy.
+        allowed_extensions: The dot-prefixed final extensions the bundle may contain; empty
+            for no extension policy.
+        required_deliverables: Pairs of a project-relative path and the kind of file
+            expected there, one of ``DELIVERABLE_KINDS``.
+        max_archive_bytes: The largest compressed archive allowed, in bytes, or ``None``
+            for no limit.
+        report_unused_assets: Whether to list assets outside the selected dependency graph.
+        template_references: Pairs of a project-relative path and the reference file to
+            compare it with.
+        identity_term_matching: Whether identity terms match whole words or inside words.
+    """
 
     FIELD_BOUNDS: ClassVar[dict[str, Bounds]] = {
         "filename_max_length": POSITIVE_INTEGER,
@@ -117,7 +153,7 @@ class SubmissionOptions:
         )
 
     def inspects_bundle(self) -> bool:
-        """Whether an option the bundle scan acts on differs from its default.
+        """Return whether an option the bundle scan acts on differs from its default.
 
         A newly added option enables the scan unless ``_OPTIONS_OUTSIDE_BUNDLE_SCAN``
         names it, so a forgotten option runs a check instead of silently running none.

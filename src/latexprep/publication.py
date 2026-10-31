@@ -42,7 +42,13 @@ _REFUSAL_SUGGESTION = "Use an output path without credential values or reduce re
 
 @dataclass(frozen=True, slots=True)
 class VerifiedPackage:
-    """The verified sources, archive and PDF of one package, ready to publish."""
+    """The verified sources, archive and PDF of one package, ready to publish.
+
+    Attributes:
+        sources: The verified source folder.
+        archive: The verified submission ZIP.
+        pdf: The verified PDF.
+    """
 
     sources: Path
     archive: Path
@@ -51,7 +57,13 @@ class VerifiedPackage:
 
 @dataclass(frozen=True, slots=True)
 class DocumentResult:
-    """One selected document's report and its package when verification passed."""
+    """One selected document's report and its package when verification passed.
+
+    Attributes:
+        name: The document's name.
+        report: The document's report.
+        package: The verified package, or ``None`` when verification did not pass.
+    """
 
     name: str
     report: Report
@@ -60,7 +72,11 @@ class DocumentResult:
 
 @dataclass(frozen=True, slots=True)
 class DocumentPackages:
-    """The results of every selected document; all must have a package to be published."""
+    """The results of every selected document; all must have a package to be published.
+
+    Attributes:
+        results: One result per selected document.
+    """
 
     results: tuple[DocumentResult, ...]
 
@@ -71,7 +87,20 @@ JobOutput = VerifiedPackage | DocumentPackages | None
 
 
 def validate_destination(source: Path, destination: Path, option: str) -> Path:
-    """Resolve a new output path outside the input; an error names the ``option`` to change."""
+    """Resolve a new output path outside the input; an error names the ``option`` to change.
+
+    Args:
+        source: The input project.
+        destination: The requested output path.
+        option: The option that named ``destination``.
+
+    Returns:
+        The resolved destination.
+
+    Raises:
+        RequestError: ``destination`` exists, is the input or lies inside it, or its
+            parent folder does not exist.
+    """
     resolved_source = source.resolve()
     resolved = destination.resolve()
     if destination.exists() or destination.is_symlink():
@@ -100,10 +129,13 @@ class OutputTransaction:
     """Directories one publication creates; a failure removes every one of them.
 
     Only directories created by ``create`` are removed, never previous or concurrent data.
-    ``progress`` receives a message when a failure starts the removal and another for each
-    directory that cannot be removed. Such a leftover is also recorded in ``report`` as an
-    ``execution.rollback`` finding that names it, because nothing else shows it: the error
-    that caused the rollback is the one that propagates.
+
+    Args:
+        progress: Receives a message when a failure starts the removal and another for
+            each directory that cannot be removed.
+        report: Receives an ``execution.rollback`` finding that names each directory that
+            could not be removed, because nothing else shows it: the error that caused
+            the rollback is the one that propagates.
     """
 
     def __init__(
@@ -137,7 +169,13 @@ class OutputTransaction:
                 self._report_leftover(path, error, exc_value)
 
     def _report_leftover(self, path: Path, error: OSError, cause: BaseException | None) -> None:
-        """Say that ``path`` stayed behind: in the progress, on the error and in the report."""
+        """Say that ``path`` stayed behind: in the progress, on the error and in the report.
+
+        Args:
+            path: The directory that could not be removed.
+            error: Why removing it failed.
+            cause: The error that caused the rollback, which receives a note, if any.
+        """
         advice = (
             f"Could not remove the partial output {path} ({error}); "
             "remove it manually before running again."
@@ -161,6 +199,18 @@ class OutputTransaction:
             )
 
     def create(self, path: Path, label: str = "Output") -> Path:
+        """Create the new directory ``path`` and remember it for the rollback.
+
+        Args:
+            path: The directory to create.
+            label: Names the output in the error message.
+
+        Returns:
+            ``path``.
+
+        Raises:
+            PreparationError: ``path`` appeared while the job ran.
+        """
         # mkdir is exclusive, so a concurrent creation cannot be overwritten by a rename.
         try:
             path.mkdir()
@@ -171,15 +221,23 @@ class OutputTransaction:
 
 
 def _json_text(values: dict[str, object]) -> str:
+    """Return ``values`` as indented UTF-8 JSON text ending in a newline."""
     return json.dumps(values, indent=2, ensure_ascii=False) + "\n"
 
 
 def _write_new_text(path: Path, text: str) -> None:
+    """Write ``text`` as UTF-8 to the new file ``path``, which must not exist yet."""
     with path.open("x", encoding="utf-8") as stream:
         stream.write(text)
 
 
 def _copy_previews(previews: PreviewPlan, check_deadline: Callable[[], None]) -> None:
+    """Copy each preview image to its published path, which must not exist yet.
+
+    Args:
+        previews: Each preview image with its published path.
+        check_deadline: Called before each copy to enforce the job's deadline.
+    """
     for source, destination in previews:
         check_deadline()
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -188,17 +246,29 @@ def _copy_previews(previews: PreviewPlan, check_deadline: Callable[[], None]) ->
 
 
 class _RenderedReport(NamedTuple):
-    """A report as it will be published: the artifact paths it names and its JSON text."""
+    """A report as it will be published: the artifact paths it names and its JSON text.
+
+    Attributes:
+        artifacts: The artifact paths the report names.
+        text: The JSON text.
+    """
 
     artifacts: dict[str, str]
     text: str
 
 
 def _render_report(report: Report, artifacts: dict[str, str]) -> _RenderedReport | None:
-    """The report with its final artifact paths, or None when it cannot be represented safely.
+    """Render the report with its final artifact paths.
 
     Final paths are included before the first publication mutation: paths themselves
     can contain credentials or push the complete report beyond redaction limits.
+
+    Args:
+        report: The final report.
+        artifacts: The artifact paths the published report names.
+
+    Returns:
+        The rendered report, or ``None`` when it cannot be represented safely.
     """
     public = replace(report, artifacts=artifacts).to_dict()
     if public["outcome"] == "error":
@@ -207,7 +277,12 @@ def _render_report(report: Report, artifacts: dict[str, str]) -> _RenderedReport
 
 
 def _refuse(report: Report, message: str) -> None:
-    """Record that nothing is published because the report cannot be represented safely."""
+    """Record that nothing is published because the report cannot be represented safely.
+
+    Args:
+        report: The report that receives the error outcome and the finding.
+        message: The finding's message before the closing words "no output was published.".
+    """
     report.outcome = Outcome.ERROR
     report.artifacts.clear()
     # No preview was published: findings must not point at exported files.
@@ -224,6 +299,7 @@ def _refuse(report: Report, message: str) -> None:
 
 
 def _package_artifacts(report: Report, output: Path) -> dict[str, str]:
+    """Return the report's artifacts together with the package files in ``output``."""
     return {
         **report.artifacts,
         **{kind: str(output / filename) for kind, filename in _PACKAGE_FILES},
@@ -238,7 +314,16 @@ def _write_package(
     previews: PreviewPlan,
     check_deadline: Callable[[], None],
 ) -> None:
-    """Create ``output`` and write one package, its previews and its rendered report."""
+    """Create ``output`` and write one package, its previews and its rendered report.
+
+    Args:
+        transaction: Creates ``output`` and removes it if publication fails.
+        output: The new package directory.
+        package: The verified package.
+        rendered: The report to write as ``report.json``.
+        previews: The preview images to copy.
+        check_deadline: Called between the steps to enforce the job's deadline.
+    """
     check_deadline()
     transaction.create(output)
     shutil.copytree(package.sources, output / "sources")
@@ -261,8 +346,17 @@ def publish_package(
 ) -> bool:
     """Write the package, its previews and the final report into the new ``output``.
 
-    Returns False, recording why in ``report``, when the final report cannot be
-    represented safely; nothing is written then.
+    Args:
+        transaction: Creates ``output`` and removes it if publication fails.
+        output: The new package directory.
+        package: The verified package.
+        report: The final report; its artifacts receive the published paths.
+        check_deadline: Called between the steps to enforce the job's deadline.
+        previews: The preview images to copy.
+
+    Returns:
+        ``True`` once published, or ``False``, recording why in ``report``, when the final
+        report cannot be represented safely; nothing is written then.
     """
     check_deadline()
     rendered = _render_report(report, _package_artifacts(report, output))
@@ -286,10 +380,25 @@ def publish_documents(
 ) -> bool:
     """Publish each verified document package beside the combined report.
 
-    Returns False, recording why in ``report``, when the combined report or the report
-    of any document cannot be represented safely; nothing is written then. Every
-    document must have a verified package: the caller publishes only when none is
-    missing, so a missing one is a defect and raises.
+    Every document must have a verified package: the caller publishes only when none is
+    missing, so a missing one is a defect and raises. Every report is rendered before
+    anything is created, so a refusal leaves no output.
+
+    Args:
+        transaction: Creates the directories and removes them if publication fails.
+        output: The new directory that holds one package directory per document.
+        documents: The selected documents.
+        report: The combined report; its artifacts receive the published paths.
+        check_deadline: Called between the steps to enforce the job's deadline.
+        previews: The preview images to copy.
+
+    Returns:
+        ``True`` once published, or ``False``, recording why in ``report``, when the
+        combined report or the report of any document cannot be represented safely;
+        nothing is written then.
+
+    Raises:
+        PreparationError: A document has no verified package.
     """
     verified: list[tuple[DocumentResult, VerifiedPackage]] = []
     unverified: list[str] = []
@@ -354,8 +463,16 @@ def publish_previews(
 ) -> bool:
     """Write the previews and the final report into the new explicit preview directory.
 
-    Returns False, recording why in ``report``, when the final report cannot be
-    represented safely; nothing is written then.
+    Args:
+        transaction: Creates ``destination`` and removes it if publication fails.
+        destination: The new preview directory.
+        previews: The preview images to copy.
+        report: The final report.
+        check_deadline: Called before each copy to enforce the job's deadline.
+
+    Returns:
+        ``True`` once published, or ``False``, recording why in ``report``, when the final
+        report cannot be represented safely; nothing is written then.
     """
     rendered = _render_report(report, report.artifacts)
     if rendered is None:
@@ -368,7 +485,17 @@ def publish_previews(
 
 
 def _check_exportable_preview(work: Path, path: Path, *, exported: int) -> None:
-    """Refuse a preview that is not a PNG file of the workspace, or one beyond the limits."""
+    """Refuse a preview that is not a PNG file of the workspace, or one beyond the limits.
+
+    Args:
+        work: The job's workspace.
+        path: The preview image.
+        exported: How many previews are already planned for export.
+
+    Raises:
+        PreparationError: The preview is not a PNG file inside ``work``, is too large, or
+            would exceed the number of previews one job exports.
+    """
     if path.suffix != ".png" or not is_contained(work, path, regular_file=True):
         raise PreparationError(
             f"A page preview is not a PNG image inside the job's workspace: {path.name}. "
@@ -388,7 +515,22 @@ def _check_exportable_preview(work: Path, path: Path, *, exported: int) -> None:
 
 
 def plan_previews(report: Report, work: Path, destination: Path) -> PreviewPlan:
-    """Number every preview image the findings reference for export to ``destination``."""
+    """Give every preview image the findings reference a numbered path in ``destination``.
+
+    Images are numbered once each, in the order of :meth:`Report.sorted_findings`.
+
+    Args:
+        report: The report whose findings reference preview images.
+        work: The job's workspace, which must contain every image.
+        destination: The preview directory.
+
+    Returns:
+        Each image with its published path, from ``page-0001.png`` on.
+
+    Raises:
+        PreparationError: An image is not an exportable PNG file in ``work`` or exceeds
+            a limit.
+    """
     paths: dict[Path, None] = {}
     for finding in report.sorted_findings():
         artifacts = finding.details.get("artifacts", [])
@@ -407,7 +549,14 @@ def plan_previews(report: Report, work: Path, destination: Path) -> PreviewPlan:
 
 
 def locate_previews(report: Report, previews: PreviewPlan) -> None:
-    """Point findings and report artifacts at the exported preview paths."""
+    """Point findings and report artifacts at the exported preview paths.
+
+    A finding keeps only its exported previews and records how many there are.
+
+    Args:
+        report: The report to update in place.
+        previews: Each exported image with its published path.
+    """
     mapping = {str(source): str(target) for source, target in previews}
     findings = []
     used = set()

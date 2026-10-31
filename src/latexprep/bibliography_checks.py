@@ -56,7 +56,7 @@ _DEFAULT_OPTIONS = BibliographyOptions()
 
 
 def _resource_budget() -> BibliographyBudget:
-    """The budget the declared resources of one manuscript share."""
+    """Return the budget the declared resources of one manuscript share."""
     return BibliographyBudget(
         max_total_bytes=MAX_RESOURCES_TOTAL_BYTES,
         max_files=MAX_RESOURCE_FILES,
@@ -65,7 +65,16 @@ def _resource_budget() -> BibliographyBudget:
 
 
 def _load_resources(root: Path, names: set[str]) -> tuple[list[BibDocument], list[Uncertainty]]:
-    """Parse the declared resources within the shared resource-set budget."""
+    """Parse the declared resources within the shared resource-set budget.
+
+    Args:
+        root: The project root.
+        names: The declared resource paths, relative to ``root``.
+
+    Returns:
+        The parsed documents, and the gaps: each loading problem and each document whose
+        syntax is incomplete.
+    """
     load = read_declared_bibliographies(root, names, _resource_budget())
     uncertainties = [Uncertainty(problem.message) for problem in load.problems]
     uncertainties.extend(
@@ -79,6 +88,17 @@ def _load_resources(root: Path, names: set[str]) -> tuple[list[BibDocument], lis
 def _missing_citations(
     graph: CitationGraph, index: EntryIndex, uncertain: list[Uncertainty]
 ) -> list[Finding]:
+    """Report each literal citation whose key has no entry and no inline definition.
+
+    Args:
+        graph: The citation graph of one root.
+        index: The entries of the resources that root declares.
+        uncertain: What is uncertain about the root's coverage; any uncertainty makes a
+            missing key inconclusive instead of failed.
+
+    Returns:
+        One finding per unresolved citation.
+    """
     details = uncertainty_messages(bounded_uncertainties(uncertain))
     missing: list[Finding] = []
     for key, path, line in graph.citations:
@@ -111,6 +131,15 @@ def _uncited_entries(
     uncertainties: list[Uncertainty],
     results: ResultCollector,
 ) -> None:
+    """Add one aggregate finding for the entries nothing reaches, and its summary.
+
+    Args:
+        references: Every entry of the inspected resources.
+        used: The entries a citation, ``nocite`` or relationship reaches.
+        uncertainties: What is uncertain about reachability; any uncertainty makes the
+            finding inconclusive instead of failed.
+        results: The collector that receives the finding and the summary.
+    """
     candidates = [item for item in references if item.identity not in used]
     unused: list[Finding] = []
     if candidates:
@@ -156,6 +185,18 @@ def _coverage(
     options: BibliographyOptions,
     results: ResultCollector,
 ) -> None:
+    """Run the citation coverage and uncited-entry checks that ``options`` enable.
+
+    Keys resolve per root, against only the resources that root declares; the entries
+    reached are united over every root.
+
+    Args:
+        graphs: The citation graph of each document in scope.
+        references: Every entry of the inspected resources.
+        uncertainties: The gaps that weaken coverage.
+        options: Which checks run.
+        results: The collector that receives the findings and summaries.
+    """
     used: set[EntryId] = set()
     unused_uncertainties = list(uncertainties)
     for graph in graphs:
@@ -184,7 +225,18 @@ def _coverage(
 def _all_root_graphs(
     root: Path, inspection: SourceGraph, selected: CitationGraph, uncertainties: list[Uncertainty]
 ) -> list[CitationGraph]:
-    """One graph per discovered root; ``selected`` is the graph of ``inspection``."""
+    """Build one citation graph per discovered root, up to ``_MAX_ROOTS``.
+
+    Args:
+        root: The project root.
+        inspection: The literal source graph whose roots are discovered.
+        selected: The citation graph of ``inspection``, reused for its own main file.
+        uncertainties: Extended in place with the roots that could not be parsed and an
+            excess of roots.
+
+    Returns:
+        The graphs, or ``[selected]`` when no root was discovered.
+    """
     uncertainties.extend(
         Uncertainty(f"All-root discovery is incomplete: {item.path}: {item.message}")
         for item in inspection.findings
@@ -212,6 +264,13 @@ class _EvidenceScope:
     Coverage and the field checks differ in what limits them: a bibliography-only
     directory has no citation scope, so graph gaps weaken coverage but not the field
     checks, which have their own list of gaps.
+
+    Attributes:
+        graphs: The citation graph of each document in scope.
+        names: The bibliography resource paths in scope.
+        description: The scope as the report describes it.
+        coverage_gaps: What weakens citation coverage and reachability.
+        field_gaps: What weakens the field checks and the duplicate search.
     """
 
     graphs: list[CitationGraph]
@@ -229,7 +288,20 @@ class _EvidenceScope:
 def _select_scope(
     root: Path, main: str | None, options: BibliographyOptions, inspection: SourceGraph
 ) -> _EvidenceScope:
-    """Choose the graphs and resource names the checks describe, and why they may be partial."""
+    """Choose the graphs and resource names the checks describe, and why they may be partial.
+
+    A standalone bibliography directory (no root and no main file) that declares no
+    resource covers every local .bib file.
+
+    Args:
+        root: The project root.
+        main: The selected main file, or ``None``.
+        options: Whether every root is in scope.
+        inspection: The literal source graph of ``root`` and ``main``.
+
+    Returns:
+        The evidence scope.
+    """
     graphs = [build_citation_graph(inspection)]
     discovery_gaps: list[Uncertainty] = []
     if options.all_roots:
@@ -274,8 +346,20 @@ def check_bibliography_coverage_and_fields(
     citation coverage then remains inconclusive. With TeX roots, only selected
     resources are checked. ``all_roots`` unions usage but resolves keys separately
     for each root. Passed summaries describe only the supported literal subset.
-    ``analysed`` shares the source analysis of the same root and main file with other
-    checks; without one the checks build their own.
+
+    Args:
+        root: The project root.
+        main: The selected main file, or ``None``.
+        options: Which checks run and their settings.
+        analysed: The source analysis of the same root and main file shared with other
+            checks; without one the checks build their own.
+
+    Returns:
+        The findings in report order, or none when no check is enabled.
+
+    Raises:
+        PreparationError: ``options`` is not a ``BibliographyOptions``, or ``root`` is
+            not a directory.
     """
     if not isinstance(options, BibliographyOptions):
         raise PreparationError("Bibliography checks require BibliographyOptions")

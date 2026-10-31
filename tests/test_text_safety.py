@@ -1,3 +1,5 @@
+"""Escaping unsafe characters for terminals, HTML, CI annotations and single-line text."""
+
 from __future__ import annotations
 
 import unittest
@@ -24,6 +26,8 @@ UNSAFE_NON_CONTROLS = (BIDI_OVERRIDE, LONE_SURROGATE, PRIVATE_USE, UNASSIGNED)
 
 
 class SharedDecisionTests(unittest.TestCase):
+    """Which characters are unsafe, and the visible escapes that every output shares."""
+
     def test_every_other_category_is_unsafe_and_ordinary_text_is_not(self) -> None:
         for char in (CONTROL, C1_CONTROL, "\n", "\x7f", *UNSAFE_NON_CONTROLS):
             with self.subTest(char=char):
@@ -38,6 +42,8 @@ class SharedDecisionTests(unittest.TestCase):
 
 
 class TerminalTests(unittest.TestCase):
+    """Sanitising text for the terminal."""
+
     def test_escape_sequences_and_controls_are_removed_and_newlines_and_tabs_kept(self) -> None:
         text = "a\x1b[31mb\x1b]0;title\x07c\x00d\u0085e\x7ff\r\ng\th"
         self.assertEqual(sanitize_terminal_text(text), "abcdef\ng\th")
@@ -53,6 +59,8 @@ class TerminalTests(unittest.TestCase):
 
 
 class HtmlTests(unittest.TestCase):
+    """Escaping text for HTML."""
+
     def test_markup_is_escaped_and_newlines_and_tabs_are_kept(self) -> None:
         self.assertEqual(
             escape_html_text('<a href="x">&\'\n\t'), "&lt;a href=&quot;x&quot;&gt;&amp;&#x27;\n\t"
@@ -69,6 +77,8 @@ class HtmlTests(unittest.TestCase):
 
 
 class AnnotationTests(unittest.TestCase):
+    """Escaping the messages and properties of CI annotations."""
+
     def test_line_breaks_and_percent_cannot_start_another_command(self) -> None:
         self.assertEqual(
             escape_annotation_text("a%b\r\nc::error::x\x1b\t\x7f"),
@@ -87,6 +97,8 @@ class AnnotationTests(unittest.TestCase):
 
 
 class SingleLineTests(unittest.TestCase):
+    """Escaping text that must stay on one line."""
+
     def test_every_unsafe_character_including_line_breaks_is_visible(self) -> None:
         self.assertEqual(
             escape_single_line_text("a\nb\tc\rd" + CONTROL + BIDI_OVERRIDE + LONE_SURROGATE),

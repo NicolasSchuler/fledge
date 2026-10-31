@@ -26,9 +26,17 @@ QUIET_HELP = "Suppress progress messages on stderr; the final report is still pr
 
 
 def compose_options(*decorators: Callable[[F], F]) -> Callable[[F], F]:
-    """Apply option decorators as if they were stacked in the listed order."""
+    """Apply option decorators as if they were stacked in the listed order.
+
+    Args:
+        *decorators: The option decorators, in the order they would be stacked.
+
+    Returns:
+        A decorator that applies them all.
+    """
 
     def apply(function: F) -> F:
+        """Apply the decorators to ``function``, the last listed first."""
         for decorator in reversed(decorators):
             function = decorator(function)
         return function
@@ -59,6 +67,15 @@ main_option = click.option(
 
 
 def reject_config_with_isolated(config: Path | None, *, isolated: bool) -> None:
+    """Reject ``--config`` combined with ``--isolated``.
+
+    Args:
+        config: The value of ``--config``.
+        isolated: Whether ``--isolated`` was given.
+
+    Raises:
+        click.UsageError: Both options were given.
+    """
     if isolated and config is not None:
         raise click.UsageError("--isolated cannot be combined with --config")
 
@@ -68,7 +85,16 @@ def _remember_debug(
     _parameter: click.Parameter,
     value: bool,  # noqa: FBT001 - click passes option callbacks their value positionally
 ) -> bool:
-    """Remember ``--debug`` and, once it or ``FLEDGE_DEBUG`` asks for it, start the log lines."""
+    """Remember ``--debug`` and, once it or ``FLEDGE_DEBUG`` asks for it, start the log lines.
+
+    Args:
+        context: The context of the running command.
+        _parameter: The ``--debug`` option, unused.
+        value: Whether ``--debug`` was given.
+
+    Returns:
+        ``value`` unchanged.
+    """
     if value:
         context.meta[_DEBUG_CONTEXT_KEY] = True
     if debug_enabled():
@@ -91,7 +117,14 @@ debug_option = click.option(
 
 
 def debug_enabled() -> bool:
-    """Whether ``--debug`` was given to the running command or the environment asks for it."""
+    """Return whether ``--debug`` was given to the running command or the environment asks for it.
+
+    The environment asks for it when ``FLEDGE_DEBUG`` is ``1``, ``true``, ``yes`` or
+    ``on``, in any case and ignoring surrounding white space.
+
+    Returns:
+        Whether debugging was requested.
+    """
     context = click.get_current_context(silent=True)
     if context is not None and context.meta.get(_DEBUG_CONTEXT_KEY):
         return True
@@ -117,14 +150,27 @@ def print_debug_traceback(error: BaseException) -> None:
 
 
 def record_request_error(report: Report, error: Exception, suggestion: str) -> None:
-    """Record a rejected request; a ``RequestError`` supplies its own next step."""
+    """Record a rejected request; a ``RequestError`` supplies its own next step.
+
+    The outcome of the report becomes an error with request scope.
+
+    Args:
+        report: The report to record in.
+        error: The error that rejected the request.
+        suggestion: The next step to suggest when ``error`` is not a ``RequestError``.
+    """
     report.outcome = Outcome.ERROR
     report.scope = REQUEST_SCOPE
     report.findings.append(request_error_finding(error, suggestion))
 
 
 def record_internal_error(report: Report, error: Exception) -> None:
-    """Record a defect with its error type and frames; ``--debug`` also prints the traceback."""
+    """Record a defect with its error type and frames; ``--debug`` also prints the traceback.
+
+    Args:
+        report: The report to record in; its outcome becomes an error.
+        error: The unexpected error.
+    """
     report.outcome = Outcome.ERROR
     report.findings.append(
         internal_error_finding(
@@ -144,7 +190,15 @@ def record_job_failure(
 
     An expected failure before the job started, or a ``RequestError`` at any time, rejects
     the request. Any other expected failure after ``job_started``, such as a full disk
-    while publishing, means the run did not finish; the request was not at fault.
+    while publishing, means the run did not finish; the request was not at fault. A defect
+    also means the run did not finish.
+
+    Args:
+        report: The report to record in.
+        error: The error that stopped the job.
+        request_suggestion: The next step to suggest for a rejected request that is not a
+            ``RequestError``.
+        job_started: Whether the job had started when ``error`` occurred.
     """
     if is_expected_failure(error):
         record_request_error(report, error, request_suggestion)
@@ -156,7 +210,12 @@ def record_job_failure(
 
 
 def record_cancellation(report: Report, finding: Finding) -> None:
-    """Record that the user stopped the run; whatever it verified so far is incomplete."""
+    """Record that the user stopped the run; whatever it verified so far is incomplete.
+
+    Args:
+        report: The report to record in.
+        finding: The finding that reports the cancellation.
+    """
     report.outcome = Outcome.CANCELLED
     report.scope = UNFINISHED_SCOPE
     report.findings.append(finding)

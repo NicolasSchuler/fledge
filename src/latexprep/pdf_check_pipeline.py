@@ -44,7 +44,20 @@ from .submission_options import SubmissionOptions
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class PdfCheckSettings:
-    """The options of every configured PDF check group."""
+    """The options of every configured PDF check group.
+
+    Attributes:
+        max_pages: The page limit of the basic inspection, or ``None``.
+        inspection: The options of the basic inspection of a lone PDF.
+        details: The configured PDF measurements.
+        rendered_artwork: The artwork options of the checked PDF.
+        figure_artwork: The artwork options of the included PDF figures.
+        structure: The options of the structure checks.
+        privacy: The privacy options of the rendered PDF; its identity terms are empty when
+            PDF identity (PRV002) is unselected.
+        match_source_metadata: The metadata fields whose expected PDF value is read from
+            the literal source.
+    """
 
     max_pages: int | None = None
     inspection: PdfInspectionOptions = field(default_factory=PdfInspectionOptions)
@@ -52,14 +65,22 @@ class PdfCheckSettings:
     rendered_artwork: PdfArtworkOptions = field(default_factory=PdfArtworkOptions)
     figure_artwork: PdfArtworkOptions = field(default_factory=PdfArtworkOptions)
     structure: StructureOptions = field(default_factory=StructureOptions)
-    # Rendered-PDF privacy; identity terms are empty when PDF identity (PRV002) is unselected.
     privacy: SubmissionOptions = field(default_factory=SubmissionOptions)
     match_source_metadata: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
 class _PdfCheckContext:
-    """One PDF, its private workspace, the settings and the frozen copy its groups share."""
+    """One PDF, its private workspace, the settings and the frozen copy its groups share.
+
+    Attributes:
+        pdf: The checked PDF.
+        work: The private workspace.
+        runner: Runs the PDF tools.
+        settings: The options of every check group.
+        budget: The shared resource budget.
+        session: The frozen copy and remembered measurements that the groups share.
+    """
 
     pdf: Path
     work: Path
@@ -77,7 +98,18 @@ class _PdfCheckContext:
         settings: PdfCheckSettings,
         budget: ResourceBudget,
     ) -> _PdfCheckContext:
-        """The context of ``pdf``, whose shared session freezes it below ``work``."""
+        """Return the context of ``pdf``, whose shared session freezes it below ``work``.
+
+        Args:
+            pdf: The checked PDF.
+            work: The private workspace.
+            runner: Runs the PDF tools.
+            settings: The options of every check group.
+            budget: The shared resource budget.
+
+        Returns:
+            The context.
+        """
         session = SharedPdfSession(pdf, work / _SHARED_DOCUMENT, runner, budget)
         return cls(pdf, work, runner, settings, budget, session)
 
@@ -89,7 +121,12 @@ _SHARED_DOCUMENT = "document"
 
 
 class _FigureInputs(NamedTuple):
-    """Literal PDF figures of the selected source graph, and whether the set is complete."""
+    """Literal PDF figures of the selected source graph, and whether the set is complete.
+
+    Attributes:
+        paths: The figures, in name order.
+        complete: Whether the source graph establishes the complete set.
+    """
 
     paths: tuple[Path, ...]
     complete: bool
@@ -98,12 +135,27 @@ class _FigureInputs(NamedTuple):
 async def _read(
     budget: ResourceBudget, name: str, function: Callable[..., _T], *args: object
 ) -> _T:
-    """Run a blocking source read in a worker thread under a lease of the shared budget."""
+    """Run a blocking source read in a worker thread under a lease of the shared budget.
+
+    Args:
+        budget: The shared resource budget.
+        name: The name of the lease.
+        function: The blocking read.
+        *args: The arguments of ``function``.
+
+    Returns:
+        What ``function`` returns.
+    """
     async with budget.lease(name):
         return await run_in_thread(function, *args)
 
 
 def _figure_inputs(source: AnalysedSource) -> _FigureInputs:
+    """Find the literal PDF figures of the selected source graph, and whether the set is complete.
+
+    The set is complete when the graph has a main file, no uncertainties and no blocking
+    findings.
+    """
     inspection = source.graph
     figures = tuple(
         source.root / name
@@ -121,8 +173,11 @@ def _figure_inputs(source: AnalysedSource) -> _FigureInputs:
 
 
 def _extraction_failure_reason(error: Exception) -> str:
-    """A cause that is safe to report: tool errors can quote the document, so only a missing
-    tool is named and every other failure keeps its raw message out of the report."""
+    """Return a cause of an extraction failure that is safe to report.
+
+    Tool errors can quote the document, so only a missing tool is named and every other
+    failure keeps its raw message out of the report.
+    """
     if isinstance(error, ToolUnavailableError):
         return f"{error.tool} is not installed"
     return (
@@ -132,7 +187,15 @@ def _extraction_failure_reason(error: Exception) -> str:
 
 
 def _with_extraction_failure(finding: Finding, reason: str) -> Finding:
-    """Tell an incomplete scan why its evidence is missing, unlike a text-free PDF."""
+    """Tell an incomplete scan why its evidence is missing, unlike a text-free PDF.
+
+    Args:
+        finding: A finding of the privacy scan.
+        reason: Why the extraction failed, safe to report.
+
+    Returns:
+        The finding with the reason, or the finding unchanged when it is complete.
+    """
     if not finding.incomplete:
         return finding
     return replace(
@@ -146,6 +209,10 @@ def _with_extraction_failure(finding: Finding, reason: str) -> Finding:
 
 
 async def _inspect_pdf_privacy(context: _PdfCheckContext) -> list[Finding]:
+    """Scan the text and metadata of the PDF for identity terms and secrets, if configured.
+
+    When extraction fails, the findings say why without quoting the tool's message.
+    """
     budget = context.budget
     privacy_options = context.settings.privacy
     if not (privacy_options.identity_terms or privacy_options.scan_secrets):
@@ -173,6 +240,7 @@ async def _inspect_pdf_privacy(context: _PdfCheckContext) -> list[Finding]:
 
 
 async def _inspect_pdf_artwork(context: _PdfCheckContext) -> list[Finding]:
+    """Run the configured artwork measurements on the checked PDF."""
     return await inspect_pdf_artwork(
         context.pdf,
         context.work / "artwork",
@@ -184,6 +252,7 @@ async def _inspect_pdf_artwork(context: _PdfCheckContext) -> list[Finding]:
 
 
 async def _inspect_pdf_structure(context: _PdfCheckContext) -> list[Finding]:
+    """Run the configured structure checks on the checked PDF."""
     return await inspect_pdf_structure(
         context.pdf,
         context.work / "structure",
@@ -195,6 +264,7 @@ async def _inspect_pdf_structure(context: _PdfCheckContext) -> list[Finding]:
 
 
 async def _inspect_pdf_basics(context: _PdfCheckContext) -> list[Finding]:
+    """Run the basic inspection of the checked PDF."""
     settings = context.settings
     return await inspect_pdf(
         context.pdf,
@@ -208,6 +278,7 @@ async def _inspect_pdf_basics(context: _PdfCheckContext) -> list[Finding]:
 
 
 async def _inspect_pdf_details(context: _PdfCheckContext) -> list[Finding]:
+    """Run the configured measurements on the checked PDF."""
     return await inspect_pdf_details(
         context.pdf,
         context.work / "details",
@@ -221,6 +292,16 @@ async def _inspect_pdf_details(context: _PdfCheckContext) -> list[Finding]:
 async def _compare_with_reference(
     context: _PdfCheckContext, reference: Path | None, previews: PdfPreviewCollector | None
 ) -> list[Finding]:
+    """Compare the checked PDF with ``reference``, if one is given.
+
+    Args:
+        context: The checked PDF and what its groups share.
+        reference: The PDF to compare with, or ``None``.
+        previews: Collects the comparison's previews, or ``None``.
+
+    Returns:
+        The comparison findings; none without a reference.
+    """
     if reference is None:
         return []
     return await compare_pdfs(
@@ -236,11 +317,30 @@ async def _compare_with_reference(
 async def _run_groups(
     groups: Sequence[Callable[[], Awaitable[list[Finding]]]], budget: ResourceBudget
 ) -> list[Finding]:
+    """Run the check groups concurrently within the CPU slots of ``budget``.
+
+    Args:
+        groups: The check groups.
+        budget: The shared resource budget.
+
+    Returns:
+        The findings of every group, in the order of ``groups``.
+    """
     results = await bounded_map(groups, lambda function: function(), limit=budget.cpu_slots)
     return [finding for group in results for finding in group]
 
 
 def _source_metadata_finding(name: str, main: str, reasons: object) -> Finding:
+    """Report a source metadata field that cannot be resolved as one literal value.
+
+    Args:
+        name: The metadata field.
+        main: The main file.
+        reasons: Why the source metadata could not be resolved.
+
+    Returns:
+        An inconclusive error.
+    """
     return Finding(
         PdfRule.METADATA_AGREEMENT,
         f"Source {name} cannot be resolved as one literal metadata value.",
@@ -256,7 +356,18 @@ def _source_metadata_finding(name: str, main: str, reasons: object) -> Finding:
 async def _inspect_pdf_details_with_source_metadata(
     context: _PdfCheckContext, source: AnalysedSource, main: str
 ) -> list[Finding]:
-    """Configured measurements, with expected metadata resolved from literal sources."""
+    """Run the configured measurements, with expected metadata resolved from literal sources.
+
+    A value read from the source replaces a configured expected value of the same field.
+
+    Args:
+        context: The checked PDF and what its groups share.
+        source: The analysed source project.
+        main: The main file.
+
+    Returns:
+        The findings of fields that cannot be resolved, then those of the measurements.
+    """
     settings, budget = context.settings, context.budget
     options = settings.details
     findings = []
@@ -293,7 +404,17 @@ async def _inspect_pdf_details_with_source_metadata(
 
 
 def _font_scope_finding(main: str, paths: tuple[Path, ...], *, exhaustive: bool) -> Finding | None:
-    """What the source graph says about the figure fonts, when it cannot be taken as measured."""
+    """Report what the source graph says about the figure fonts, when it is not measured.
+
+    Args:
+        main: The main file.
+        paths: The literal PDF figures of the source graph.
+        exhaustive: Whether ``paths`` is the complete set, within the figure limit.
+
+    Returns:
+        An inconclusive error when the set is not exhaustive, a pass when there is no
+        figure, else ``None``.
+    """
     if not exhaustive:
         return Finding(
             PdfRule.INCLUDED_FIGURE_FONTS,
@@ -315,6 +436,7 @@ def _font_scope_finding(main: str, paths: tuple[Path, ...], *, exhaustive: bool)
 
 
 def _artwork_scope_finding(main: str) -> Finding:
+    """Report that the measured artwork inputs are not an exhaustive inventory."""
     return Finding(
         PdfRule.ARTWORK_INPUT_SCOPE,
         "The full set of PDF artwork inputs could not be established; "
@@ -326,7 +448,10 @@ def _artwork_scope_finding(main: str) -> Finding:
 
 
 def _relative_to_source(findings: list[Finding], root: Path) -> list[Finding]:
-    """Keep locations actionable after temporary workspaces have been removed."""
+    """Make the finding paths under ``root`` relative to it.
+
+    This keeps locations actionable after temporary workspaces have been removed.
+    """
     return [
         replace(finding, path=Path(finding.path).relative_to(root).as_posix())
         if finding.path and Path(finding.path).is_relative_to(root)
@@ -338,7 +463,18 @@ def _relative_to_source(findings: list[Finding], root: Path) -> list[Finding]:
 async def _inspect_included_figures(
     context: _PdfCheckContext, source: AnalysedSource, main: str
 ) -> list[Finding]:
-    """Font and artwork policies applied to each literal PDF figure of the source graph."""
+    """Apply the font and artwork policies to each literal PDF figure of the source graph.
+
+    At most ``MAX_FIGURE_INPUTS`` figures are inspected.
+
+    Args:
+        context: The checked PDF and what its groups share.
+        source: The analysed source project.
+        main: The main file.
+
+    Returns:
+        The scope findings, then the measured findings with source-relative paths.
+    """
     settings, budget, runner, work = context.settings, context.budget, context.runner, context.work
     figure_fonts = figure_font_checks_enabled(settings.details)
     figure_artwork = artwork_checks_enabled(settings.figure_artwork)
@@ -384,8 +520,19 @@ async def inspect_configured_pdf_checks(
 ) -> list[Finding]:
     """Inspect frozen PDF inputs; read source metadata only under shared admission.
 
-    ``analysed`` shares the source analysis of the same root and main file with other
-    checks; the metadata and figure groups share one either way.
+    Args:
+        pdf: The PDF built from the source project.
+        root: The source project.
+        main: The main file, relative to ``root``.
+        work: The workspace of the checks.
+        runner: Runs the PDF tools.
+        settings: The options of every check group.
+        budget: The shared resource budget.
+        analysed: Shares the source analysis of the same root and main file with other
+            checks; the metadata and figure groups share one either way.
+
+    Returns:
+        The findings of every group.
     """
     context = _PdfCheckContext.of(pdf, work, runner, settings, budget)
     source = reuse_or_analyse(root, main, analysed)
@@ -403,7 +550,10 @@ async def inspect_configured_pdf_checks(
 
 
 def _source_only_findings(settings: PdfCheckSettings) -> list[Finding]:
-    """Settings that need a source project: not failures, and no evidence for a lone PDF."""
+    """Report the settings that need a source project as skipped.
+
+    They are not failures, and a lone PDF gives no evidence for them.
+    """
     source_only = []
     if settings.match_source_metadata:
         source_only.append((PdfRule.METADATA_AGREEMENT, "Source-to-PDF metadata comparison"))
@@ -432,7 +582,21 @@ async def inspect_standalone_pdf(
     *,
     previews: PdfPreviewCollector | None = None,
 ) -> list[Finding]:
-    """Run PDF-only constraints without implying that a source bundle was checked."""
+    """Run PDF-only constraints without implying that a source bundle was checked.
+
+    Args:
+        pdf: The PDF to check.
+        work: The workspace of the checks.
+        runner: Runs the PDF tools.
+        settings: The options of every check group.
+        budget: The shared resource budget.
+        reference: A PDF to compare with, or ``None``.
+        previews: Collects the comparison's previews, or ``None``.
+
+    Returns:
+        The findings of every group, then a skipped finding for each setting that needs a
+        source project.
+    """
     context = _PdfCheckContext.of(pdf, work, runner, settings, budget)
     with context.session:
         findings = await _run_groups(

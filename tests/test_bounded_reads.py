@@ -27,7 +27,20 @@ ROOT_DOCUMENT = "\\documentclass{article}\n\\begin{document}Hi\\end{document}\n"
 
 
 def returns_promptly(action: Callable[[], T]) -> T:
-    """Run ``action`` and fail the test, rather than hang it, if it blocks on a pipe."""
+    """Run ``action`` and fail the test, rather than hang it, if it blocks on a pipe.
+
+    The action runs on a daemon thread that is given ten seconds, and an exception it raises
+    is raised again here.
+
+    Args:
+        action: The read to run.
+
+    Returns:
+        What ``action`` returned.
+
+    Raises:
+        AssertionError: ``action`` was still running after ten seconds.
+    """
     outcome: list[T] = []
     errors: list[BaseException] = []
 
@@ -48,6 +61,8 @@ def returns_promptly(action: Callable[[], T]) -> T:
 
 
 class BibFileReaderTests(ProjectTestCase):
+    """Tests of ``BibFileReader``: per-file and total allowances, links and pipes."""
+
     def test_a_file_within_the_allowance_is_parsed_and_counted(self) -> None:
         path = self.write("refs.bib", "@article{a, title={T}}\n")
         reader = BibFileReader(max_file_bytes=1024, max_total_bytes=1024)
@@ -79,6 +94,8 @@ class BibFileReaderTests(ProjectTestCase):
 
 
 class BoundedLogTests(ProjectTestCase):
+    """Tests of ``read_bounded`` on build logs: the limit, invalid UTF-8 and unusable logs."""
+
     def test_a_log_within_the_limit_is_complete(self) -> None:
         path = self.write("main.log", "! Undefined control sequence.\n")
         self.assertEqual(read_bounded(path, 1024), ("! Undefined control sequence.\n", True))
@@ -107,6 +124,8 @@ class BoundedLogTests(ProjectTestCase):
 
 
 class SourceDiscoveryTests(ProjectTestCase):
+    """Tests that ``discover_roots`` skips sources it cannot read safely."""
+
     def test_unreadable_linked_special_and_oversized_sources_are_skipped(self) -> None:
         self.write("main.tex", ROOT_DOCUMENT)
         target = self.write("elsewhere.txt", ROOT_DOCUMENT)
@@ -118,7 +137,10 @@ class SourceDiscoveryTests(ProjectTestCase):
 
 
 class SourceGraphLoadTests(ProjectTestCase):
+    """Tests of how ``SourceGraph`` reports linked, unreadable and oversized sources."""
+
     def build(self, extra: str) -> SourceGraph:
+        """Write a ``main.tex`` article whose document holds ``extra``, and build its graph."""
         self.write(
             "main.tex", f"\\documentclass{{article}}\n\\begin{{document}}{extra}\\end{{document}}\n"
         )
@@ -151,6 +173,12 @@ class SourceGraphLoadTests(ProjectTestCase):
 
 
 class ControlFileEvidenceTests(ProjectTestCase):
+    """Tests of reading bibliography control files within their per-file and combined limits.
+
+    Attributes:
+        BCF: An empty biblatex control file.
+    """
+
     BCF = '<?xml version="1.0"?><bcf:controlfile xmlns:bcf="https://sourceforge.net/projects/biblatex"/>'
 
     def test_control_files_are_read_within_the_combined_limit(self) -> None:

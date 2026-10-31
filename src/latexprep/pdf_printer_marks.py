@@ -29,7 +29,13 @@ Candidate = dict[str, object]
 
 
 class Line(NamedTuple):
-    """A short straight stroke segment after placement, with its operation number."""
+    """A short straight stroke segment after placement, with its operation number.
+
+    Attributes:
+        start: Where the segment starts.
+        end: Where the segment ends.
+        operation: The 1-based number of the stroke operation on its page.
+    """
 
     start: Point
     end: Point
@@ -37,7 +43,15 @@ class Line(NamedTuple):
 
 
 def _short_lines(drawings: Sequence[Drawing], max_length: float) -> list[Line]:
-    """Transformed straight stroke segments no longer than ``max_length``."""
+    """Collect the transformed straight stroke segments no longer than ``max_length``.
+
+    Args:
+        drawings: The drawings of one page.
+        max_length: The longest segment kept, in points.
+
+    Returns:
+        The segments, in drawing order.
+    """
     lines: list[Line] = []
     for drawing in drawings:
         if drawing.kind != "stroke_path":
@@ -54,10 +68,16 @@ def _short_lines(drawings: Sequence[Drawing], max_length: float) -> list[Line]:
 
 
 class _Search(NamedTuple):
-    """How closely strokes must line up with a trim corner to count as a crop mark."""
+    """How closely strokes must line up with a trim corner to count as a crop mark.
 
-    tolerance: float  # points; how far an end may stray from the corner's line or the trim edge
-    max_length: float  # points; how far from the corner a crop stroke may begin
+    Attributes:
+        tolerance: How far an end may stray from the corner's line or the trim edge, in
+            points.
+        max_length: How far from the corner a crop stroke may begin, in points.
+    """
+
+    tolerance: float
+    max_length: float
 
 
 def _crop_stroke_operations(
@@ -68,11 +88,20 @@ def _crop_stroke_operations(
     corner: Point,
     trim: tuple[float, float],
 ) -> list[int]:
-    """Operations of strokes along ``axis`` that start at a trim corner and lie outside the trim.
+    """Find the strokes along ``axis`` that start at a trim corner and lie outside the trim.
 
-    ``axis`` 0 selects horizontal strokes, 1 vertical ones. A crop stroke has both ends on
-    the corner's line, extends away from the trim region and begins within ``max_length``
-    of the corner. ``trim`` is the trim region's low and high edge along the axis.
+    A crop stroke has both ends on the corner's line, extends away from the trim region
+    and begins within ``max_length`` of the corner.
+
+    Args:
+        lines: The short strokes of the page.
+        search: How closely a stroke must line up with the corner.
+        axis: 0 selects horizontal strokes, 1 vertical ones.
+        corner: The trim corner.
+        trim: The trim region's low and high edge along the axis.
+
+    Returns:
+        The operation numbers of the crop strokes.
     """
     tolerance, max_length = search
     cross = 1 - axis
@@ -93,7 +122,16 @@ def _crop_stroke_operations(
 
 
 def _corner_marks(region: PdfRegion, lines: Sequence[Line], search: _Search) -> list[Candidate]:
-    """Corners of the trim region where a horizontal and a vertical crop stroke meet."""
+    """Find the corners of the trim region where a horizontal and a vertical crop stroke meet.
+
+    Args:
+        region: The trim region.
+        lines: The short strokes of its page.
+        search: How closely a stroke must line up with a corner.
+
+    Returns:
+        A candidate row for every such corner.
+    """
     marks: list[Candidate] = []
     left, top, right, bottom = region.box
     for x, y in ((left, top), (right, top), (left, bottom), (right, bottom)):
@@ -118,10 +156,19 @@ def _corner_marks(region: PdfRegion, lines: Sequence[Line], search: _Search) -> 
 def _registration_marks(
     region: PdfRegion, lines: Sequence[Line], tolerance: float
 ) -> list[Candidate] | None:
-    """Crossed strokes outside the trim region; None when the pair work exceeds its bound.
+    """Find crossed strokes outside the trim region; ``None`` if the pair work exceeds its bound.
 
     Crossed short horizontal/vertical strokes outside the trim rectangle are
     registration-target candidates. Graphic content can look identical.
+
+    Args:
+        region: The trim region.
+        lines: The short strokes of its page.
+        tolerance: The alignment slack, in points.
+
+    Returns:
+        A candidate row for every crossing, or ``None`` when more than ``MAX_PAIR_CHECKS``
+        pairs would be compared.
     """
     horizontal = [line for line in lines if abs(line.start.y - line.end.y) <= tolerance]
     vertical = [line for line in lines if abs(line.start.x - line.end.x) <= tolerance]
@@ -155,6 +202,19 @@ def _registration_marks(
 
 
 def printer_mark_finding(artwork: TracedArtwork, options: PdfArtworkOptions) -> Finding:
+    """Look for printer-mark candidates around every configured trim region.
+
+    Exempt pages are skipped. A trim region that cannot be measured, an exempt page
+    beyond the document, or too many stroke pairs make the finding incomplete.
+
+    Args:
+        artwork: The traced drawings.
+        options: The artwork options: trim regions, exempt pages, the longest mark stroke
+            and the geometry tolerance.
+
+    Returns:
+        The finding, with a row for every candidate.
+    """
     exemptions = options.printer_mark_exemptions
     search = _Search(options.geometry_tolerance_pt, options.printer_mark_max_length_pt or 0)
     by_page = artwork.drawings_by_page()
@@ -190,6 +250,16 @@ def printer_mark_finding(artwork: TracedArtwork, options: PdfArtworkOptions) -> 
 
 
 def _mark_message(violations: Sequence[object], measured: int, *, uncertain: bool) -> str:
+    """Word the message of the printer-mark finding.
+
+    Args:
+        violations: The candidate rows.
+        measured: The number of trim regions searched.
+        uncertain: Whether some trim regions could not be measured.
+
+    Returns:
+        The message.
+    """
     rows = [row for row in violations if isinstance(row, dict)]
     if rows:
         corners = sum("corner_pt" in row for row in rows)

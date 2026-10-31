@@ -28,7 +28,18 @@ def unavailable_finding(
     suggestion: str = EVIDENCE_LIMITATION_SUGGESTION,
     details: Mapping[str, object] | None = None,
 ) -> Finding:
-    """Evidence that could not be measured; never a pass."""
+    """Report evidence that could not be measured; never a pass.
+
+    Args:
+        rule: The rule of the finding.
+        error: The error that prevented the measurement; its text is the message.
+        severity: The severity of the finding.
+        suggestion: What the user can do about it.
+        details: The details the finding reports, copied.
+
+    Returns:
+        An inconclusive finding with incomplete evidence.
+    """
     return Finding(
         rule,
         str(error),
@@ -51,13 +62,24 @@ def measurement_finding(
     evidence_kind: EvidenceKind = EvidenceKind.DERIVED,
     total_violations: int | None = None,
 ) -> Finding:
-    """A configured measurement: failed on a violation, inconclusive on incomplete evidence.
+    """Report a configured measurement: failed on a violation, inconclusive on incomplete evidence.
 
-    Without an explicit severity a violation or incomplete evidence is an error and a
-    clean measurement is informational. Advisory candidates pass one fixed severity.
-    ``details`` is what the finding reports about the measurement; the violations (the
-    first ``MAX_SAMPLES``), their count and ``incomplete`` are added to it and win over
-    equally named entries.
+    Args:
+        rule: The rule of the finding.
+        message: The message of the finding.
+        violations: The violations found; the first ``MAX_SAMPLES`` are kept in the details.
+        details: What the finding reports about the measurement; the violations, their
+            count and ``incomplete`` are added to it and win over equally named entries.
+        incomplete: Whether the evidence is incomplete.
+        severity: The severity whatever the outcome; advisory candidates pass one fixed
+            severity. Without it a violation or incomplete evidence is an error and a
+            clean measurement is informational.
+        evidence_kind: The kind of evidence the measurement is.
+        total_violations: The count of all violations when ``violations`` holds only some
+            of them; it defaults to the length of ``violations``.
+
+    Returns:
+        The finding, failed, inconclusive or passed.
     """
     status = "failed" if violations else "inconclusive" if incomplete else "passed"
     if severity is None:
@@ -87,7 +109,19 @@ def heuristic_finding(
     incomplete: bool = False,
     total_violations: int | None = None,
 ) -> Finding:
-    """A heuristic candidate: a warning that informs review whatever the outcome."""
+    """Report a heuristic candidate: a warning that informs review whatever the outcome.
+
+    Args:
+        rule: The rule of the finding.
+        message: The message of the finding.
+        violations: The candidates found.
+        details: What the finding reports, as for :func:`measurement_finding`.
+        incomplete: Whether the evidence is incomplete.
+        total_violations: The count of all candidates when ``violations`` holds only some.
+
+    Returns:
+        A warning with heuristic evidence.
+    """
     return measurement_finding(
         rule,
         message,
@@ -106,11 +140,20 @@ async def findings_or_unavailable(
     *,
     suggestion: str = EVIDENCE_LIMITATION_SUGGESTION,
 ) -> list[Finding]:
-    """The findings of ``measurement``, or each of ``rules`` as unavailable evidence.
+    """Run ``measurement``, reporting each of ``rules`` as unavailable evidence if it fails.
 
     A measurement that cannot run or cannot be read leaves every rule it feeds without
     evidence, so none of them may report a pass. Only errors a tool or its output can
-    cause are translated; a cancellation passes through.
+    cause (``PreparationError`` and ``OSError``) are translated; a cancellation passes
+    through.
+
+    Args:
+        rules: The rules the measurement feeds.
+        measurement: The measurement to await.
+        suggestion: The suggestion of each unavailable finding.
+
+    Returns:
+        The findings of ``measurement``, or one unavailable finding per rule.
     """
     try:
         return await measurement()

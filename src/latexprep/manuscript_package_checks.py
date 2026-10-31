@@ -71,7 +71,15 @@ _INERT_IN_PACKAGE_CONDITIONALS = (
 
 
 def _package_declarations(document: ExpandedDocument) -> tuple[list[Declaration], list[str]]:
-    """Direct package declarations in each selected source, and what could hide others."""
+    """Collect the direct package declarations in each selected source, and what could hide others.
+
+    Args:
+        document: The expanded document whose selected sources are read.
+
+    Returns:
+        The declarations in source order, each with its names, options and its own gaps,
+        and every reason the inventory may be incomplete.
+    """
     declarations: list[Declaration] = []
     reasons = list(document.graph_uncertainty)
     for path in sorted(document.selected):
@@ -124,7 +132,20 @@ def _package_declarations(document: ExpandedDocument) -> tuple[list[Declaration]
 
 
 def package_checks(reading: Reading, options: ManuscriptCheckOptions) -> list[Finding]:
-    """The package inventory, and the allowlist finding when an allowlist is configured."""
+    """Inventory the direct package declarations, and check the allowlist when one is configured.
+
+    A declaration with its own interpretation gaps or nonliteral names is never reported
+    as a violation.
+
+    Args:
+        reading: The expanded document.
+        options: ``inventory_packages`` asks for the inventory, and ``allowed_packages``
+            configures the allowlist, which also produces the inventory.
+
+    Returns:
+        The inventory finding, followed by the allowlist finding when an allowlist is
+        configured, or an empty list when neither is asked for.
+    """
     if options.allowed_packages is None and not options.inventory_packages:
         return []
     declarations, reasons = _package_declarations(reading.document)

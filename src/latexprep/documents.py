@@ -21,6 +21,7 @@ from .workflow_options import DocumentOptions
 
 
 def _document_settings(settings: Settings, document: DocumentOptions) -> Settings:
+    """Derive the settings of one document: its main file and engine, no nested documents."""
     return replace(
         settings,
         main=document.main,
@@ -30,11 +31,12 @@ def _document_settings(settings: Settings, document: DocumentOptions) -> Setting
 
 
 def _document_rules(rules: tuple[ReviewRule, ...], name: str) -> tuple[ReviewRule, ...]:
-    """The review decisions for every document or this one, no longer document-specific."""
+    """Select the review decisions for every document or this one, no longer document-specific."""
     return tuple(replace(rule, document=None) for rule in rules if rule.document in {None, name})
 
 
 def _document_reporting(reporting: ReportingOptions, name: str) -> ReportingOptions:
+    """Keep the accepted exceptions and suppressions that apply to the document ``name``."""
     return replace(
         reporting,
         accepted_exceptions=_document_rules(reporting.accepted_exceptions, name),
@@ -49,6 +51,13 @@ def _failed_document_finding(error: Exception, document: DocumentOptions) -> Fin
     advice of the underlying error does not apply to ``workflow.documents``). A
     defect is reported as one, with its traceback frames, instead of passing for
     an input problem.
+
+    Args:
+        error: The error that stopped the document.
+        document: The document's settings.
+
+    Returns:
+        An inconclusive ``package.document`` error.
     """
     if not is_expected_failure(error):
         return Finding(
@@ -82,6 +91,21 @@ def _failed_document_finding(error: Exception, document: DocumentOptions) -> Fin
 async def _run_document(
     context: JobContext, shared_root: Path, document: DocumentOptions
 ) -> DocumentResult:
+    """Check, and for preparation verify, one document from the shared import.
+
+    The document's files are selected from ``shared_root`` and run as a child job with the
+    document's own settings and review decisions. A failure becomes a finding that blocks
+    this document only.
+
+    Args:
+        context: The parent job.
+        shared_root: The shared import of the project.
+        document: The document's settings.
+
+    Returns:
+        The document's name, report and verified package; the package is ``None`` when the
+        run failed or verified none.
+    """
     request = context.request
     child = Report(request.command.value)
     settings = _document_settings(context.settings, document)
@@ -146,7 +170,24 @@ def _merge_document(report: Report, document: DocumentResult) -> None:
 
 
 async def run_documents(context: JobContext, report: Report) -> list[DocumentResult]:
-    """Check, and for preparation verify, every configured document from one shared import."""
+    """Check, and for preparation verify, every configured document from one shared import.
+
+    The documents run concurrently up to the ``jobs`` setting, one at a time when
+    previews are collected serially. A preparation that is not a dry run adds a
+    ``package.independent_documents`` finding that fails unless every document package
+    was verified.
+
+    Args:
+        context: The job.
+        report: The combined report, which receives every document's results and the
+            job's scope and outcome.
+
+    Returns:
+        One result per document; none when the shared import blocked the job.
+
+    Raises:
+        PreparationError: The command does not support ``workflow.documents``.
+    """
     request, settings = context.request, context.settings
     if request.command not in DOCUMENT_COMMANDS:
         # ``run_job`` routes only these commands here; the others ignore workflow.documents.

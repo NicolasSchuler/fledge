@@ -28,7 +28,17 @@ TRACEBACK_DETAIL = "traceback"
 
 
 def blocked_task_finding(result: TaskResult) -> Finding:
-    """A task skipped because a prerequisite failed; that failure reports itself."""
+    """Return the finding for a task skipped because a prerequisite failed.
+
+    That failure reports itself, so this finding is only information.
+
+    Args:
+        result: The result of the skipped task.
+
+    Returns:
+        A skipped ``execution.task`` finding that names the task and its failed
+        prerequisites.
+    """
     return Finding(
         TASK_RULE,
         f"{result.name} was not run: {result.error}",
@@ -39,7 +49,16 @@ def blocked_task_finding(result: TaskResult) -> Finding:
 
 
 def failed_task_finding(result: TaskResult) -> Finding:
-    """A task that ran and failed, with the defect advice when it failed by a defect."""
+    """Return the finding for a task that ran and failed.
+
+    A task that failed by a defect also carries its traceback frames and the defect advice.
+
+    Args:
+        result: The result of the failed task.
+
+    Returns:
+        An inconclusive ``execution.task`` finding with error severity.
+    """
     details: dict[str, object] = {TASK_DETAIL: result.name}
     if result.defect_frames:
         details[TRACEBACK_DETAIL] = list(result.defect_frames)
@@ -54,12 +73,19 @@ def failed_task_finding(result: TaskResult) -> Finding:
 
 
 def has_task_defect(findings: Iterable[Finding]) -> bool:
-    """Whether a task failed by a defect in Fledge, which makes the whole run an error."""
+    """Return whether a task failed by a defect in Fledge, which makes the whole run an error."""
     return any(item.rule == TASK_RULE and TRACEBACK_DETAIL in item.details for item in findings)
 
 
 def blocked_prerequisites(finding: Finding) -> tuple[str, ...]:
-    """The failed prerequisites a skipped-task finding records, or none for any other finding."""
+    """Return the failed prerequisites a skipped-task finding records.
+
+    Args:
+        finding: Any finding.
+
+    Returns:
+        The prerequisites, or an empty tuple for any other finding.
+    """
     prerequisites = finding.details.get(BLOCKED_BY_DETAIL)
     if finding.rule != TASK_RULE or finding.status != "skipped":
         return ()

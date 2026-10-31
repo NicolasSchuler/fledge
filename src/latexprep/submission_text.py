@@ -87,7 +87,17 @@ _MAX_GROUP_DEPTH = 32
 
 @dataclass(frozen=True, slots=True)
 class SubmissionField:
-    """One field's copy-ready draft, or why it cannot be exported as is."""
+    """One field's copy-ready draft, or why it cannot be exported as is.
+
+    Attributes:
+        status: Whether the field is ready, empty, missing or unresolved.
+        draft: The converted text of the single declaration; empty when there is not
+            exactly one.
+        locations: The path and line of each declaration.
+        issues: The review notes that keep the field from being ready, sorted and without
+            repeats.
+        candidates: The draft of every declaration when there are several; empty otherwise.
+    """
 
     status: FieldStatus
     draft: str = ""
@@ -98,7 +108,16 @@ class SubmissionField:
 
 @dataclass(frozen=True, slots=True)
 class _ConversionContext:
-    """What holds for one field and for the groups nested inside it."""
+    r"""What holds for one field and for the groups nested inside it.
+
+    Attributes:
+        keyword_separators: Whether ``\sep`` and ``\and`` separate keywords with ``"; "``
+            instead of a space.
+        redefined_commands: The commands the project defines, which are kept verbatim and
+            reported.
+        literal_punctuation: Whether ligatures and quote pairs stay as typed.
+        depth: How deeply the current group is nested in the field.
+    """
 
     keyword_separators: bool = False
     redefined_commands: frozenset[str] = frozenset()
@@ -107,22 +126,48 @@ class _ConversionContext:
     depth: int = 0
 
     def nested(self, *, literal_punctuation: bool) -> _ConversionContext:
+        """Return the context of a group nested one level deeper.
+
+        Args:
+            literal_punctuation: Whether the nested group keeps ligatures and quote pairs as
+                typed.
+
+        Returns:
+            A copy of this context with the depth increased by one.
+        """
         return replace(self, depth=self.depth + 1, literal_punctuation=literal_punctuation)
 
 
 class _ControlWord(NamedTuple):
-    """A control sequence in the field and the first group that follows it."""
+    """A control sequence in the field and the first group that follows it.
+
+    Attributes:
+        start: The offset of the backslash.
+        name: The name of the control sequence, without the backslash.
+        stop: The offset just after the name.
+        cursor: The offset after any spaces that follow the name.
+        argument: The group that starts at ``cursor``, or ``None``.
+    """
 
     start: int
     name: str
-    # Offset just after the name, and after any spaces that follow it.
     stop: int
     cursor: int
     argument: Argument | None
 
 
 def _mask_comments(value: str) -> str:
-    """Blank comments so their braces do not delimit groups, keeping every offset."""
+    r"""Blank comments so their braces do not delimit groups, keeping every offset.
+
+    Escaped characters such as ``\%`` and the verbatim arguments of URL commands are not
+    comments and stay as they are.
+
+    Args:
+        value: The field text.
+
+    Returns:
+        The text with each comment replaced by spaces up to its line break.
+    """
     masked = list(value)
     cursor = 0
     while cursor < len(value):
@@ -148,7 +193,17 @@ _Handler = Callable[["_Converter", _ControlWord], int]
 
 
 def _handler_table(*groups: tuple[Iterable[str], _Handler]) -> dict[str, _Handler]:
-    """Map every command name to its handler; a name in two groups is a programming error."""
+    """Map every command name to its handler; a name in two groups is a programming error.
+
+    Args:
+        *groups: Pairs of command names and the handler that converts them.
+
+    Returns:
+        The handler of each command name.
+
+    Raises:
+        RuntimeError: A command name appears in more than one group.
+    """
     table: dict[str, _Handler] = {}
     for names, handler in groups:
         for name in names:
@@ -159,7 +214,15 @@ def _handler_table(*groups: tuple[Iterable[str], _Handler]) -> dict[str, _Handle
 
 
 class _Converter:
-    """Converts one field or group; unknown constructs are kept verbatim and reported."""
+    r"""Converts one field or group; unknown constructs are kept verbatim and reported.
+
+    Attributes:
+        value: The text of the field or group being converted.
+        context: What holds for this group; ``\normalfont`` changes it for the rest of the
+            group.
+        out: The converted pieces so far.
+        issues: The review notes so far.
+    """
 
     def __init__(self, value: str, context: _ConversionContext) -> None:
         self.value = value
@@ -169,6 +232,17 @@ class _Converter:
         self._grouped = value
 
     def convert(self) -> tuple[str, list[str]]:
+        """Convert the text, reporting what needs manual review.
+
+        Text nested deeper than ``_MAX_GROUP_DEPTH`` groups or longer than
+        ``MAX_ARGUMENT_CHARS`` is returned unconverted with a single issue. Unsafe
+        characters other than line breaks and tabs are reported, because the draft shows
+        them as escapes and is never copy-ready.
+
+        Returns:
+            The draft, with whitespace collapsed, NFC-normalized and escaped onto one line,
+            and the escaped issues, sorted and without repeats.
+        """
         value = self.value
         if self.context.depth > _MAX_GROUP_DEPTH or len(value) > MAX_ARGUMENT_CHARS:
             return escape_single_line_text(value), ["Text exceeds bounded conversion limits"]
@@ -189,12 +263,33 @@ class _Converter:
         )
 
     def _group(self, start: int, opening: str = "{", closing: str = "}") -> Argument | None:
+        """Read the balanced group at ``start``, ignoring delimiters inside comments.
+
+        Args:
+            start: The offset of the opening delimiter.
+            opening: The opening delimiter.
+            closing: The closing delimiter.
+
+        Returns:
+            The group with its value taken from the text with comments, or ``None`` when no
+            balanced group starts there.
+        """
         argument = read_group(self._grouped, start, opening, closing)
         if argument is not None:
             return replace(argument, value=self.value[argument.start : argument.end])
         return None
 
     def _step(self, position: int) -> int:
+        """Convert the comment, math, command, group or character at ``position``.
+
+        An unclosed group and an unmatched closing brace are reported and kept as characters.
+
+        Args:
+            position: The offset of the construct.
+
+        Returns:
+            The offset after the construct.
+        """
         match self.value[position]:
             case "%":
                 return self._comment(position)
@@ -214,6 +309,17 @@ class _Converter:
         return self._character(position)
 
     def _character(self, position: int) -> int:
+        """Convert one plain character.
+
+        A tie becomes a space, and dash and quote ligatures become their typographic
+        characters unless punctuation stays literal.
+
+        Args:
+            position: The offset of the character.
+
+        Returns:
+            The offset after the character or ligature.
+        """
         char = self.value[position]
         if char == "~":
             self.out.append(" ")
@@ -227,6 +333,14 @@ class _Converter:
         return position + 1
 
     def _comment(self, position: int) -> int:
+        """Skip a comment, its line break and the spaces and tabs that start the next line.
+
+        Args:
+            position: The offset of the ``%``.
+
+        Returns:
+            The offset of the next text after the comment.
+        """
         value = self.value
         end = value.find("\n", position)
         position = len(value) if end < 0 else end + 1
@@ -235,6 +349,17 @@ class _Converter:
         return position
 
     def _math(self, position: int) -> int:
+        """Convert inline math that reads as plain text; keep the rest verbatim and report it.
+
+        Greek letter commands the project does not define become their letters. Scripts,
+        fractions, other macros and unclosed mathematics are kept as typed, with an issue.
+
+        Args:
+            position: The offset of the opening ``$``.
+
+        Returns:
+            The offset after the closing ``$``, or the end of the text when there is none.
+        """
         value = self.value
         end = position + 1
         while end < len(value) and (value[end] != "$" or value[end - 1] == "\\"):
@@ -253,6 +378,15 @@ class _Converter:
         return min(end + 1, len(value))
 
     def _nested(self, argument: Argument, *, literal_punctuation: bool) -> int:
+        """Convert a group in a context one level deeper and add its text and issues.
+
+        Args:
+            argument: The group to convert.
+            literal_punctuation: Whether the group keeps ligatures and quote pairs as typed.
+
+        Returns:
+            The offset after the group's closing delimiter.
+        """
         context = self.context.nested(literal_punctuation=literal_punctuation)
         text, issues = _Converter(argument.value, context).convert()
         self.out.append(text)
@@ -260,6 +394,17 @@ class _Converter:
         return argument.end + 1
 
     def _control_sequence(self, position: int) -> int:
+        """Convert the control sequence at ``position`` with its handler.
+
+        A command the project defines is kept verbatim, and so is one without a handler; both
+        are reported. A trailing backslash is kept and reported.
+
+        Args:
+            position: The offset of the backslash.
+
+        Returns:
+            The offset after the converted construct.
+        """
         token = _TEXT_CONTROL_SEQUENCE.match(self.value, position)
         if token is None:
             self.out.append("\\")
@@ -276,15 +421,37 @@ class _Converter:
         return handler(self, word)
 
     def _after_argument(self, word: _ControlWord) -> int:
+        """Return the offset after the group following ``word``, or after its name without one."""
         return word.argument.end + 1 if word.argument is not None else word.stop
 
     def _unsupported(self, word: _ControlWord, end: int) -> int:
+        """Keep an unknown fragment whole and report its command.
+
+        The draft text never invents the meaning of a command it does not know.
+
+        Args:
+            word: The unsupported control sequence.
+            end: The offset where the fragment ends.
+
+        Returns:
+            ``end``.
+        """
         # Preserve an unknown fragment whole so draft text never invents its meaning.
         self.out.append(self.value[word.start : end])
         self.issues.append("Unsupported command: \\" + word.name)
         return end
 
     def _redefined(self, word: _ControlWord) -> int:
+        r"""Keep a command the project defines verbatim with its argument, and report it.
+
+        A locally defined ``\href`` keeps both of its groups.
+
+        Args:
+            word: The locally defined control sequence.
+
+        Returns:
+            The offset after the kept fragment.
+        """
         end = self._after_argument(word)
         if word.name == "href" and word.argument is not None:
             second = self._group(skip_space(self.value, end))
@@ -295,6 +462,18 @@ class _Converter:
         return end
 
     def _wrapper(self, word: _ControlWord) -> int:
+        r"""Convert the argument of a text wrapper, or the second argument of ``\href``.
+
+        ``\texttt`` keeps punctuation literal, the roman and sans-serif wrappers restore
+        ordinary punctuation, and the others keep the punctuation of their group. A wrapper
+        without its argument is kept verbatim and reported.
+
+        Args:
+            word: The wrapper command.
+
+        Returns:
+            The offset after the converted argument.
+        """
         argument = word.argument
         if word.name == "href" and argument is not None:
             argument = self._group(skip_space(self.value, argument.end + 1))
@@ -306,12 +485,33 @@ class _Converter:
         return self._nested(argument, literal_punctuation=literal_punctuation)
 
     def _url(self, word: _ControlWord) -> int:
+        """Keep the verbatim argument of a URL command as typed.
+
+        A URL command without an argument is kept verbatim and reported.
+
+        Args:
+            word: The URL command.
+
+        Returns:
+            The offset after the argument.
+        """
         if word.argument is None:
             return self._unsupported(word, word.stop)
         self.out.append(word.argument.value)
         return word.argument.end + 1
 
     def _accent(self, word: _ControlWord) -> int:
+        r"""Accent a single letter, given as the command's argument or as the next character.
+
+        ``\i`` and ``\j`` count as letters unless the project defines them. Anything else is
+        kept verbatim and reported.
+
+        Args:
+            word: The accent command.
+
+        Returns:
+            The offset after the accented letter or the kept fragment.
+        """
         argument = word.argument
         letter = (
             argument.value if argument is not None else self.value[word.cursor : word.cursor + 1]
@@ -324,14 +524,41 @@ class _Converter:
         return self._unsupported(word, self._after_argument(word))
 
     def _symbol(self, word: _ControlWord) -> int:
+        """Write the character a symbol command stands for.
+
+        Args:
+            word: The symbol command.
+
+        Returns:
+            The offset after the command and the spaces that follow it.
+        """
         self.out.append(_SYMBOLS[word.name])
         return word.cursor
 
     def _escaped_character(self, word: _ControlWord) -> int:
+        r"""Write the character that an escaped special character such as ``\%`` stands for.
+
+        Args:
+            word: The control symbol.
+
+        Returns:
+            The offset just after it.
+        """
         self.out.append(word.name)
         return word.stop
 
     def _space(self, word: _ControlWord) -> int:
+        r"""Write the space a spacing or line-break command stands for.
+
+        A line break also consumes its optional bracketed argument, and ``\sep`` and ``\and``
+        write ``"; "`` in keyword fields.
+
+        Args:
+            word: The spacing command.
+
+        Returns:
+            The offset after the command, its following spaces and any optional argument.
+        """
         cursor = word.cursor
         if word.name in _LINE_BREAK_COMMANDS and self.value[cursor : cursor + 1] == "[":
             option = self._group(cursor, "[", "]")
@@ -342,6 +569,14 @@ class _Converter:
         return cursor
 
     def _font_switch(self, word: _ControlWord) -> int:
+        r"""Drop a font switch; ``\normalfont`` restores ordinary punctuation for its group.
+
+        Args:
+            word: The font switch.
+
+        Returns:
+            The offset after the command and the spaces that follow it.
+        """
         if word.name == "normalfont":
             # Recursive group conversion keeps this font reset local to
             # its enclosing group, just like the typewriter wrapper.
@@ -366,13 +601,30 @@ def convert_text(
     keyword_separators: bool = False,
     redefined_commands: frozenset[str] = frozenset(),
 ) -> tuple[str, list[str]]:
-    """Convert a deliberately small grammar without executing or dropping unknown TeX."""
+    r"""Convert a deliberately small grammar without executing or dropping unknown TeX.
+
+    Args:
+        value: The TeX text of a field.
+        keyword_separators: Whether ``\sep`` and ``\and`` separate keywords with ``"; "``.
+        redefined_commands: The commands the project defines, which are kept verbatim and
+            reported.
+
+    Returns:
+        The single-line draft and the issues that need manual review.
+    """
     context = _ConversionContext(keyword_separators, redefined_commands)
     return _Converter(value, context).convert()
 
 
 class _Declaration(NamedTuple):
-    """One source declaration of a field: its command offset and raw text span."""
+    """One source declaration of a field: its command offset and raw text span.
+
+    Attributes:
+        position: The offset of the declaring command in the expanded text.
+        start: The offset where the field's raw text starts.
+        end: The offset where the field's raw text ends.
+        reasons: Why the declaration needs manual review.
+    """
 
     position: int
     start: int
@@ -381,10 +633,17 @@ class _Declaration(NamedTuple):
 
 
 def _local_definitions(document: ExpandedDocument) -> tuple[frozenset[str], frozenset[str]]:
-    """Commands/environments and active characters that the project itself defines.
+    """Return the commands, environments and active characters that the project itself defines.
 
     A supported spelling does not establish meaning when the local project defines
     it. Conditional or order-dependent activation is not inferred.
+
+    Args:
+        document: The expanded document whose selected sources are scanned.
+
+    Returns:
+        The names of the defined commands and environments, and the characters that
+        primitive definitions make active.
     """
     redefined: set[str] = set()
     active_characters: set[str] = set()
@@ -410,7 +669,7 @@ def _local_definitions(document: ExpandedDocument) -> tuple[frozenset[str], froz
 
 
 def _original_text(document: ExpandedDocument) -> str:
-    """The raw source behind the masked expanded text, at the same offsets."""
+    """Return the raw source behind the masked expanded text, at the same offsets."""
     return "".join(
         document.graph.sources[segment.path].text[
             segment.source_start : segment.source_start + segment.end - segment.start
@@ -420,11 +679,17 @@ def _original_text(document: ExpandedDocument) -> str:
 
 
 def _field_definition_spans(document: ExpandedDocument) -> list[tuple[int, int]]:
-    """Definition bodies, with literal let assignments delimited exactly.
+    """Return the definition bodies, with literal let assignments delimited exactly.
 
     The general definition span can conservatively consume a later group on the
     same line after a primitive assignment. For field extraction, delimit literal
     let assignments so following declarations remain visible.
+
+    Args:
+        document: The expanded document.
+
+    Returns:
+        The merged half-open spans of the definitions in the expanded text.
     """
     text = document.text
     spans = definition_spans(
@@ -445,7 +710,17 @@ def _field_definition_spans(document: ExpandedDocument) -> list[tuple[int, int]]
 
 
 def _declarations(document: ExpandedDocument) -> dict[str, list[_Declaration]]:
-    """Command and environment declarations of each field, outside definition bodies."""
+    """Find the command and environment declarations of each field, outside definition bodies.
+
+    Declarations inside a group or macro argument, inside a conditional or without a
+    literal argument record why they need review.
+
+    Args:
+        document: The expanded document.
+
+    Returns:
+        The declarations of each field name, possibly none.
+    """
     definitions = _field_definition_spans(document)
     declarations: dict[str, list[_Declaration]] = {name: [] for name in FIELD_NAMES}
     for command in document.commands:
@@ -481,6 +756,17 @@ def _declarations(document: ExpandedDocument) -> dict[str, list[_Declaration]]:
 
 
 def _field_status(declarations: int, issues: list[str], draft: str) -> FieldStatus:
+    """Return the status of a field from its declarations, issues and draft.
+
+    Args:
+        declarations: The number of declarations.
+        issues: The review notes of the field.
+        draft: The converted text of the single declaration.
+
+    Returns:
+        ``missing`` without declarations or issues, ``unresolved`` with issues or several
+        declarations, otherwise ``ready`` or ``empty`` by the draft.
+    """
     if not declarations:
         return "unresolved" if issues else "missing"
     if declarations != 1 or issues:
@@ -490,7 +776,15 @@ def _field_status(declarations: int, issues: list[str], draft: str) -> FieldStat
 
 @dataclass(frozen=True, slots=True)
 class _FieldReader:
-    """What every field draws on: the document, its raw text and local definitions."""
+    """What every field draws on: the document, its raw text and local definitions.
+
+    Attributes:
+        document: The expanded document.
+        original: The raw source behind the expanded text, at the same offsets.
+        shared_issues: The review notes that apply to every field.
+        redefined_commands: The commands and environments the project defines.
+        active_characters: The characters the project makes active.
+    """
 
     document: ExpandedDocument
     original: str
@@ -499,6 +793,19 @@ class _FieldReader:
     active_characters: frozenset[str]
 
     def convert(self, name: str, declaration: _Declaration) -> tuple[str, list[str]]:
+        """Convert the raw text of one declaration of a field.
+
+        Active characters can change tokenization and even punctuation inside math, so a
+        declaration that uses one is kept whitespace-collapsed but unconverted, with an issue
+        for each such character.
+
+        Args:
+            name: The name of the field; keyword fields separate keywords with ``"; "``.
+            declaration: The declaration to convert.
+
+        Returns:
+            The draft and the issues of the declaration.
+        """
         raw_text = self.original[declaration.start : declaration.end]
         used_active = self.active_characters.intersection(raw_text)
         if used_active:
@@ -516,6 +823,16 @@ class _FieldReader:
         )
 
     def read_field(self, name: str, declarations: list[_Declaration]) -> SubmissionField:
+        """Read one field from its declarations.
+
+        Args:
+            name: The name of the field.
+            declarations: The declarations of the field.
+
+        Returns:
+            The field, with a draft only when there is exactly one declaration and the drafts
+            as candidates when there are several.
+        """
         issues = list(self.shared_issues)
         drafts = []
         locations: list[dict[str, object]] = []
@@ -541,7 +858,16 @@ class _FieldReader:
 
 
 def read_submission_text(root: Path, main: str | None = None) -> dict[str, SubmissionField]:
-    """Read unique declarations, preserving raw source behind the shared masked lexer."""
+    """Read unique declarations, preserving raw source behind the shared masked lexer.
+
+    Args:
+        root: The project root.
+        main: The main file relative to the project root, or ``None`` to select the single
+            document root.
+
+    Returns:
+        Each field, by name, in the order of ``FIELD_NAMES``.
+    """
     document = expand_document(root, main)
     redefined, active_characters = _local_definitions(document)
     reader = _FieldReader(

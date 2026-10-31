@@ -16,7 +16,10 @@ from tests.support import ProjectTestCase
 
 
 class SubmissionTextTests(ProjectTestCase):
+    """Converting LaTeX fields to plain submission text, and the ``submission-text`` command."""
+
     def write(self, text: str) -> None:
+        """Write ``text`` as the project's ``main.tex``, encoded as UTF-8."""
         (self.root / "main.tex").write_text(text, encoding="utf-8")
 
     def test_formatting_accents_comments_and_math_preserve_content(self) -> None:

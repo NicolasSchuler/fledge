@@ -35,6 +35,23 @@ class ReviewRule:
     Paths are literal project-relative paths, never globs. Endpoints are inclusive;
     a start without an end selects one line/page. Missing evidence never matches a
     constrained location, and a sampled aggregate cannot establish complete scope.
+    Construction raises ``SettingsError`` when a field does not match its type or bounds,
+    the code is not registered, the reason is empty or too long, a path or document is not
+    a literal safe relative path, the stage is empty or holds control characters, an end
+    lacks a start or precedes it, or ``line_start`` comes without ``path``.
+
+    Attributes:
+        FIELD_BOUNDS: The bounds :func:`validate_scalars` applies to the line and page
+            fields.
+        code: The exact registered check code a finding must carry.
+        reason: The nonempty explanation of the decision.
+        path: The literal project-relative path a finding must name.
+        line_start: The first selected line; requires ``path``.
+        line_end: The last selected line.
+        page_start: The first selected page.
+        page_end: The last selected page.
+        stage: The stage a finding must come from.
+        document: The document a finding must belong to.
     """
 
     FIELD_BOUNDS: ClassVar[dict[str, Bounds]] = {
@@ -87,6 +104,16 @@ class ReviewRule:
 
 @dataclass(frozen=True)
 class ReportingOptions:
+    """The explicit review decisions in the settings.
+
+    Construction raises ``SettingsError`` when a list is not a tuple of distinct
+    decisions or holds more than ``_MAX_REVIEW_DECISIONS`` of them.
+
+    Attributes:
+        suppressions: Decisions that suppress an advisory.
+        accepted_exceptions: Decisions that accept a failure as a reviewed exception.
+    """
+
     suppressions: tuple[ReviewRule, ...] = ()
     accepted_exceptions: tuple[ReviewRule, ...] = ()
 
@@ -103,6 +130,12 @@ class ReportingOptions:
 
 
 def _affected_pages(finding: Finding) -> set[int] | None:
+    """Collect the pages a finding affects, as far as its evidence establishes them.
+
+    Returns:
+        The pages, or ``None`` when the details name no page, an invalid page, or only a
+        bounded sample of the violations.
+    """
     details = finding.details
     direct = details.get(DetailKey.PAGE)
     if type(direct) is int and direct > 0:
@@ -129,6 +162,7 @@ def _affected_pages(finding: Finding) -> set[int] | None:
 
 
 def _matches(finding: Finding, review: ReviewRule) -> bool:
+    """Return whether ``finding`` lies within the full scope of ``review``."""
     if finding.code != review.code:
         return False
     for key in (DetailKey.STAGE, DetailKey.DOCUMENT):
@@ -152,6 +186,17 @@ def _matches(finding: Finding, review: ReviewRule) -> bool:
 
 
 def _eligible(finding: Finding, action: str) -> bool:
+    """Return whether a review decision may change ``finding``.
+
+    Args:
+        finding: The finding the decision matches.
+        action: ``accepted_exception`` or ``suppressed``.
+
+    Returns:
+        ``True`` only for a failed finding of a reviewable code with complete evidence. A
+        suppression never covers an error, and a comparison finding can only be accepted
+        from the baseline-versus-prepared stage.
+    """
     if finding.code not in REVIEWABLE_CODES or finding.status != "failed":
         return False
     # Partial, unavailable or bounded evidence cannot support a waiver.
@@ -163,13 +208,25 @@ def _eligible(finding: Finding, action: str) -> bool:
 
 
 def _decisions(options: ReportingOptions) -> list[tuple[str, ReviewRule]]:
+    """List every decision with its action, accepted exceptions first."""
     return [("accepted_exception", rule) for rule in options.accepted_exceptions] + [
         ("suppressed", rule) for rule in options.suppressions
     ]
 
 
 def has_unaccepted_blockers(findings: Sequence[Finding], options: ReportingOptions) -> bool:
-    """Evaluate explicit current decisions; stored review metadata grants no authority."""
+    """Return whether a blocking finding remains that no eligible accepted exception covers.
+
+    Only the explicit current decisions are evaluated; stored review metadata grants no
+    authority.
+
+    Args:
+        findings: The findings to evaluate.
+        options: The current review decisions.
+
+    Returns:
+        ``True`` if such a blocking finding remains.
+    """
     return any(
         finding.is_blocking
         and not any(
@@ -184,7 +241,16 @@ def reviewed_findings(findings: Sequence[Finding], options: ReportingOptions) ->
     """Add visible decisions without rewriting the original result or its evidence.
 
     A decision that matches no finding, or only findings it cannot change, adds a
-    ``report.review_unmatched`` or ``report.review_ineligible`` diagnostic.
+    ``report.review_unmatched`` or ``report.review_ineligible`` diagnostic. Review
+    details and review diagnostics already in ``findings`` are discarded first.
+
+    Args:
+        findings: The findings to review.
+        options: The review decisions.
+
+    Returns:
+        The findings with the applied decisions in their review details, followed by the
+        diagnostics.
     """
     result: list[Finding] = []
     decisions = _decisions(options)
@@ -234,6 +300,16 @@ def apply_reviews(report: Report, options: ReportingOptions) -> Report:
 
     A caller may label a successfully completed workflow ``accepted_exceptions``.
     This function never upgrades a blocked, cancelled, incomplete or errored run.
+
+    Args:
+        report: The report of the workflow.
+        options: The review decisions.
+
+    Returns:
+        A copy of ``report`` with reviewed findings. A passing outcome becomes blocked
+        when an unaccepted blocker remains, ``accepted_exceptions`` when an eligible
+        exception matches, and passed with advisories when a passed run has open
+        warnings.
     """
     findings = reviewed_findings(report.findings, options)
     outcome = report.outcome
@@ -254,7 +330,13 @@ def apply_reviews(report: Report, options: ReportingOptions) -> Report:
 
 
 def review_marker(finding: Finding) -> str:
-    """A display-only marker; never use it for acceptance or execution decisions."""
+    """Describe the review decisions applied to ``finding`` for display.
+
+    The marker is display-only; never use it for acceptance or execution decisions.
+
+    Returns:
+        The labelled reasons joined by ``"; "``, or an empty string when none applied.
+    """
     entries = finding.details.get(DetailKey.REVIEW)
     if not isinstance(entries, (list, tuple)):
         return ""

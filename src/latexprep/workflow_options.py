@@ -35,9 +35,15 @@ _DOCUMENT_NAME = re.compile(rf"[A-Za-z0-9][A-Za-z0-9_-]{{0,{MAX_DOCUMENT_NAME_CH
 class ComparisonOptions:
     """How much a rendered page may differ from its reference before it counts as changed.
 
-    ``channel_tolerance`` is the per-pixel difference of a color channel (0 to 255) that
-    is still treated as equal; ``max_changed_pixel_ratio`` is the share of a page's pixels
-    (0 to 1) that may differ. The defaults demand an exact match.
+    The defaults demand an exact match. Construction raises ``SettingsError`` when a field
+    does not match its annotation or its bounds.
+
+    Attributes:
+        FIELD_BOUNDS: The bounds :func:`validate_scalars` applies to ``channel_tolerance``
+            and ``max_changed_pixel_ratio``.
+        channel_tolerance: The per-pixel difference of a color channel (0 to 255) that is
+            still treated as equal.
+        max_changed_pixel_ratio: The share of a page's pixels (0 to 1) that may differ.
     """
 
     FIELD_BOUNDS: ClassVar[dict[str, Bounds]] = {
@@ -53,7 +59,18 @@ class ComparisonOptions:
 
 
 def _relative(value: str, label: str, *, directory: bool = False) -> None:
-    """Require a nonempty relative POSIX path without ``..``; a directory may be ``.``."""
+    """Require a nonempty relative POSIX path without ``..``; a directory may be ``.``.
+
+    ASCII control characters are refused as well.
+
+    Args:
+        value: The path to check.
+        label: The name of the setting, used in the error message.
+        directory: Whether ``value`` names a directory, which allows ``.``.
+
+    Raises:
+        PreparationError: ``value`` is not a string or not such a path.
+    """
     if not isinstance(value, str) or not is_relative_posix_path(
         value, normalized=False, allow_current=directory, characters="no_controls"
     ):
@@ -64,8 +81,14 @@ def _relative(value: str, label: str, *, directory: bool = False) -> None:
 class PackageOptions:
     """Extra project files to ship although the build does not read them.
 
-    Paths are relative to the input project (or a document's source directory)
-    and follow the flat filename map. They are packaging choices, not checks.
+    They are packaging choices, not checks. Construction raises ``SettingsError`` when
+    ``include`` is not a tuple of distinct strings, and ``PreparationError`` when a path is
+    not a nonempty relative POSIX path without ``..`` or is a glob pattern.
+
+    Attributes:
+        include: The exact paths of the files, without repeats and without glob patterns.
+            Paths are relative to the input project (or a document's source directory) and
+            follow the flat filename map.
     """
 
     include: tuple[str, ...] = ()
@@ -82,10 +105,23 @@ class PackageOptions:
 class DocumentOptions:
     """One document of a multi-document job: where it lives, how to build it, what to ship.
 
-    ``name`` labels its stages and files in reports. ``main`` is its root ``.tex`` file
-    and ``include`` lists extra files or patterns, both relative to ``source_directory``.
-    ``engine`` overrides the job's TeX engine; ``reference_pdf`` is the PDF its build is
-    compared with. Every path is a relative POSIX path that stays inside the project.
+    Every path is a relative POSIX path that stays inside the project. Construction raises
+    ``SettingsError`` when a field does not match its annotation, ``name`` or
+    ``reference_pdf`` is not acceptable text, or ``include`` is not a tuple of distinct
+    strings, and ``PreparationError`` when a path is not a nonempty relative POSIX path
+    without ``..`` or ``main`` is not a ``.tex`` file.
+
+    Attributes:
+        name: The label of the document's stages and files in reports: 1 to
+            ``MAX_DOCUMENT_NAME_CHARACTERS`` letters, digits, underscores or hyphens,
+            starting with a letter or digit.
+        main: The document's root ``.tex`` file, relative to ``source_directory``.
+        source_directory: The directory that holds the document's sources; it may be
+            ``.``.
+        include: Extra files or patterns to ship, without repeats, relative to
+            ``source_directory``.
+        engine: The TeX engine that overrides the job's engine for this document.
+        reference_pdf: The PDF the document's build is compared with.
     """
 
     name: str
@@ -120,9 +156,18 @@ class DocumentOptions:
 class WorkflowOptions:
     """The ``workflow`` settings table: several documents, repeated baselines, tolerance.
 
-    Without ``documents`` the job prepares the single document selected by ``main`` or
-    found in the project. ``baseline_runs`` builds the unmodified source that many times
-    to confirm the build is repeatable. Document names must differ, ignoring case.
+    Construction raises ``SettingsError`` when ``baseline_runs`` is outside its bounds,
+    ``comparison`` is not a settings table, or ``documents`` is not a tuple of documents
+    with distinct names and at most ``MAX_DOCUMENTS`` entries.
+
+    Attributes:
+        FIELD_BOUNDS: The bounds :func:`validate_scalars` applies to ``baseline_runs``.
+        documents: The documents of the job, at most ``MAX_DOCUMENTS``; their names must
+            differ, ignoring case. Without documents the job prepares the single document
+            selected by ``main`` or found in the project.
+        baseline_runs: How many times to build the unmodified source to confirm the build
+            is repeatable, from 1 to ``MAX_BASELINE_RUNS``.
+        comparison: How much a rendered page may differ from its reference.
     """
 
     FIELD_BOUNDS: ClassVar[dict[str, Bounds]] = {"baseline_runs": Bounds(1, MAX_BASELINE_RUNS)}

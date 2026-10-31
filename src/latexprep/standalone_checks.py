@@ -1,8 +1,8 @@
 """Checks of one aspect without the build workflow: a PDF, the bibliography or formatting.
 
 Each function runs one single-purpose command to its outcome. The PDF check reads only
-the PDF; the others import a separate snapshot of the input first. None of them builds
-the document, selects preparation inputs or publishes anything.
+the PDF; the others import a separate snapshot of the input first. No check builds the
+document, selects preparation inputs or publishes anything.
 """
 
 from __future__ import annotations
@@ -19,7 +19,13 @@ from .report import Report
 
 
 async def check_standalone_pdf(context: JobContext, report: Report) -> None:
-    """Check PDF constraints of the input PDF itself; no source project is read."""
+    """Check PDF constraints of the input PDF itself; no source project is read.
+
+    Args:
+        context: The job context, whose request names the PDF and an optional reference
+            PDF to compare it with.
+        report: The report that receives the scope, findings and outcome.
+    """
     request, settings = context.request, context.settings
     report.scope = "standalone PDF inspection; source and submission bundle were not verified"
     report.findings.extend(
@@ -37,7 +43,15 @@ async def check_standalone_pdf(context: JobContext, report: Report) -> None:
 
 
 async def check_bibliography(context: JobContext, report: Report) -> None:
-    """Bibliography syntax, citation use and configured fields, optionally online evidence."""
+    """Check bibliography syntax, citation use and configured fields, optionally online evidence.
+
+    The checks read a separate snapshot of the input and share one source analysis.
+    Without a main file they still cover every bibliography file of the project.
+
+    Args:
+        context: The job context with the settings, budget and source analyses.
+        report: The report that receives the scope, main file, findings and outcome.
+    """
     settings = context.settings
     report.scope = "selected bibliography checks; no build or bundle verification"
     context.emit("Importing a separate project snapshot")
@@ -70,7 +84,14 @@ async def check_bibliography(context: JobContext, report: Report) -> None:
 
 
 async def check_formatting(context: JobContext, report: Report) -> None:
-    """Report tex-fmt differences of the input without changing any source."""
+    """Report tex-fmt differences of the input without changing any source.
+
+    The formatter runs on a separate snapshot of the input.
+
+    Args:
+        context: The job context with the runner, settings and budget.
+        report: The report that receives the scope, findings, tools, changes and outcome.
+    """
     report.scope = "formatting check; no build or bundle verification"
     context.emit("Importing a separate project snapshot")
     snapshot = (await import_input(context, report)).root

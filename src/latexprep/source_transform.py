@@ -1,8 +1,8 @@
-"""Opt-in, copy-only source transformations for a bounded literal TeX subset.
+r"""Opt-in, copy-only source transformations for a bounded literal TeX subset.
 
 Three transformations, each a proposal that is computed without writing anything:
-removing comment bodies, merging literal ``\\input`` lines into the main source, and
-inlining a generated ``.bbl`` for a ``\\bibliography`` line. Merging and inlining need
+removing comment bodies, merging literal ``\input`` lines into the main source, and
+inlining a generated ``.bbl`` for a ``\bibliography`` line. Merging and inlining need
 a complete dependency graph (``SourceGraph.is_complete``); comment removal needs every
 source to be readable. A proposal with any blocking finding yields no contents at all.
 
@@ -71,6 +71,16 @@ CommentPolicy = Literal["retain", "private", "all"]
 
 
 def _require_relative_path(name: str, value: object) -> None:
+    """Reject a value that is not a relative POSIX path within the project.
+
+    Args:
+        name: The option name that the error message and the error's field path use.
+        value: The configured value to check.
+
+    Raises:
+        SettingsError: ``value`` is not a string holding a relative POSIX path without line
+            breaks.
+    """
     if not isinstance(value, str) or not is_relative_posix_path(
         value, normalized=False, characters="no_line_breaks"
     ):
@@ -79,7 +89,19 @@ def _require_relative_path(name: str, value: object) -> None:
 
 @dataclass(frozen=True)
 class SourceTransformOptions:
-    """Which source transformations to propose; all are off by default."""
+    r"""Which source transformations to propose; all are off by default.
+
+    Construction raises ``SettingsError`` when a field fails its check.
+
+    Attributes:
+        comment_policy: Which comment bodies to remove: none (``"retain"``), those with an
+            edit marker or privacy keyword (``"private"``), or every one (``"all"``).
+        merge_inputs: Whether to merge literal ``\input`` lines into the main source.
+        inline_bibliography: The project-relative ``.bbl`` file to inline for the
+            ``\bibliography`` line, or ``None`` to inline nothing.
+        filename_overrides: Pairs of project-relative paths, each a file and the name it
+            takes in a flat layout.
+    """
 
     comment_policy: CommentPolicy = "retain"
     merge_inputs: bool = False
@@ -107,8 +129,15 @@ class SourceTransformOptions:
 class SourceTransformPlan:
     """Proposed bytes, removals and diffs for the selected transformations.
 
-    ``originals`` and ``removal_originals`` hold the bytes each target had when it was
-    planned, so a later write can refuse a file that changed in between.
+    Attributes:
+        contents: The proposed bytes of each rewritten file.
+        originals: The bytes each rewritten file had when it was planned, so a later write
+            can refuse a file that changed in between.
+        changes: The reviewable changes: rewrites with their diffs, and removals.
+        findings: The findings of planning, including the ones that explain a rejection.
+        removals: The files to remove from the package because they were merged.
+        removal_originals: The bytes each removed file had when it was planned, so a later
+            removal can refuse a file that changed in between.
     """
 
     contents: dict[str, bytes] = field(default_factory=dict)
@@ -137,6 +166,17 @@ def _problem(
     suggestion: str | None = None,
     details: dict[str, object] | None = None,
 ) -> None:
+    """Add an error finding to ``plan``.
+
+    Args:
+        plan: The plan that receives the finding.
+        rule: The rule name of the finding.
+        message: The message of the finding.
+        path: The file the finding is about, if any.
+        status: The status of the finding.
+        suggestion: The suggestion the finding carries, if any.
+        details: The details of the finding; ``None`` records none.
+    """
     plan.findings.append(
         Finding(
             rule,
@@ -153,11 +193,20 @@ def _problem(
 def _require_complete_graph(
     graph: SourceGraph, plan: SourceTransformPlan, rule: str, action: str
 ) -> bool:
-    """Whether ``action`` may proceed: the graph has no gap and no blocking finding.
+    """Return whether ``action`` may proceed: the graph has no gap and no blocking finding.
 
     A graph with gaps cannot say which files a rewrite would touch. The problem is
     ``failed`` when the graph has an error (a missing file) and ``inconclusive`` when it
     only has constructs the scan could not follow.
+
+    Args:
+        graph: The dependency graph of the project.
+        plan: The plan that receives the problem when the graph is incomplete.
+        rule: The rule name of the problem.
+        action: The transformation's name, used at the start of the message.
+
+    Returns:
+        ``True`` when the graph is complete; otherwise ``False``, after adding the problem.
     """
     if graph.is_complete:
         return True
@@ -171,13 +220,34 @@ def _require_complete_graph(
 
 
 class _CommentRemoval(NamedTuple):
+    """The result of removing comment bodies from one text.
+
+    Attributes:
+        text: The text without the removed comment bodies.
+        removed: The number of comment bodies removed.
+        uncertain: Whether the protected regions of the text could not be determined with
+            certainty, such as for an unclosed region.
+    """
+
     text: str
     removed: int
     uncertain: bool
 
 
 def _remove_comments(text: str, policy: str) -> _CommentRemoval:
-    """``text`` without the bodies of the comments ``policy`` selects, outside protected spans."""
+    """Remove the bodies of the comments ``policy`` selects, outside protected spans.
+
+    Each ``%`` and its line terminator are kept.
+
+    Args:
+        text: The source text.
+        policy: ``"private"`` to remove only comments with an edit marker or privacy
+            keyword; any other value removes every comment body.
+
+    Returns:
+        ``text`` without the selected comment bodies, the number removed, and whether the
+        protected spans were uncertain.
+    """
     scan = source_regions(text)
     protected = protected_spans(text, scan)
     edits: list[TextEdit] = []
@@ -194,6 +264,10 @@ def _remove_comments(text: str, policy: str) -> _CommentRemoval:
 
 
 def _command_comments(text: str) -> str:
+    r"""Return the comments of ``text``, each ended by its own line break.
+
+    Each comment is followed by ``"\r\n"`` when the text has one after it, else ``"\n"``.
+    """
     comments = []
     for start, end, kind in source_regions(text).regions:
         if kind == "comment":
@@ -203,10 +277,17 @@ def _command_comments(text: str) -> str:
 
 
 def _prevents_merging(command: Command, *, in_main: bool) -> bool:
-    """Whether this command has file or execution semantics that input merging cannot keep.
+    r"""Return whether this command has file or execution semantics that input merging cannot keep.
 
-    An ``\\end`` closes an environment and is fine, except ``\\end{document}``, which only
-    the main file may contain.
+    An ``\end`` closes an environment and is fine, except ``\end{document}``, which only
+    the main file may contain. An ``\end`` without an argument also prevents merging.
+
+    Args:
+        command: The command to judge.
+        in_main: Whether the command is in the main file.
+
+    Returns:
+        ``True`` when the command prevents merging.
     """
     if command.name == "end":
         return not command.arguments or (not in_main and command.ends("document", exact=True))
@@ -214,7 +295,13 @@ def _prevents_merging(command: Command, *, in_main: bool) -> bool:
 
 
 class _OwnLine(NamedTuple):
-    """The line holding a command, as offsets into the text."""
+    """The line holding a command, as offsets into the text.
+
+    Attributes:
+        start: Where the line starts.
+        command_end: Where the command ends.
+        end: Where the line ends; the end of the text when no line break follows.
+    """
 
     start: int
     # Just after the command's argument and closing brace.
@@ -224,9 +311,16 @@ class _OwnLine(NamedTuple):
 
 
 def _own_line(text: str, command: Command) -> _OwnLine | None:
-    """The line of ``command`` when nothing but comments shares it, else ``None``.
+    r"""Return the line of ``command`` when nothing but comments shares it, else ``None``.
 
-    The command's first argument is its file; a bare ``\\input name`` has no closing brace.
+    The command's first argument is its file; a bare ``\input name`` has no closing brace.
+
+    Args:
+        text: The source text that holds the command.
+        command: The command, which must have at least one argument.
+
+    Returns:
+        The offsets of the line, or ``None`` when other text shares it.
     """
     argument = command.arguments[0]
     start = text.rfind("\n", 0, command.start) + 1
@@ -239,16 +333,29 @@ def _own_line(text: str, command: Command) -> _OwnLine | None:
 
 
 class _Merge(NamedTuple):
+    r"""One planned merge of an input file.
+
+    Attributes:
+        edit: The edit that replaces the ``\input`` line by the file's expanded text.
+        target: The project path of the merged file.
+    """
+
     edit: TextEdit
     target: str
 
 
 class _InputMerger:
-    """Splices the files named by literal ``\\input`` lines into the main source, recursively.
+    r"""Splices the files named by literal ``\input`` lines into the main source, recursively.
 
-    The proposal is built in ``texts``. Each file merged is remembered so the plan can
-    remove it from the package. A problem is added to the plan as an error finding and
-    stops further merging.
+    A problem is added to the plan as an error finding and stops further merging.
+
+    Attributes:
+        graph: The complete dependency graph of the project.
+        texts: The proposed text of each source, in which the proposal is built.
+        plan: The plan that receives the findings and the removals.
+        expanded_bytes: The UTF-8 size of all merged replacements so far.
+        merged: Each file merged so far, remembered so the plan can remove it from the
+            package.
     """
 
     def __init__(
@@ -261,6 +368,12 @@ class _InputMerger:
         self.merged: set[str] = set()
 
     def run(self) -> None:
+        """Merge the inputs of the main file and record the outcome in the plan.
+
+        A merged input that a different file-reading command also uses is a problem. Without
+        blocking findings, the merged files are added to the plan's removals with a passed
+        finding that lists them.
+        """
         main = self.graph.main
         if main is None:
             return
@@ -283,13 +396,33 @@ class _InputMerger:
             )
 
     def _problem(self, message: str, path: str | None = None) -> None:
+        """Add a merge problem to the plan.
+
+        Args:
+            message: The message of the finding.
+            path: The file the finding is about, if any.
+        """
         _problem(self.plan, _MERGE_RULE, message, path)
 
     def _blocked(self) -> bool:
+        """Return whether the plan already has a blocking finding."""
         return has_blockers(self.plan.findings)
 
     def expand(self, name: str, stack: tuple[str, ...]) -> str:
-        """The proposed text of ``name`` with its ``\\input`` lines replaced by their files."""
+        r"""Return the proposed text of ``name`` with its ``\input`` lines replaced by their files.
+
+        A command that prevents merging is reported as a problem. Once the plan is blocked,
+        or the merged text exceeds ``MAX_TOTAL_SOURCE_BYTES``, the text is returned without
+        further edits.
+
+        Args:
+            name: The project path of the source to expand.
+            stack: The files being expanded around this one, outermost first, so that a cycle
+                can be recognized.
+
+        Returns:
+            The proposed text of ``name`` after merging.
+        """
         source = self.graph.sources[name]
         text = self.texts[name]
         if self._blocked():
@@ -334,7 +467,23 @@ class _InputMerger:
         original: Command | None,
         stack: tuple[str, ...],
     ) -> _Merge | None:
-        """The edit that replaces one ``\\input`` line by its file, or ``None`` after a problem."""
+        r"""Return the edit that merges one ``\input`` line, or ``None`` after a problem.
+
+        The edit replaces the line by its file. The command must be direct and literal, match
+        its inspected original, resolve to a target outside ``stack`` that is UTF-8 and
+        newline-terminated, and occupy its own line. Comments on that line are kept around the
+        merged text.
+
+        Args:
+            name: The project path of the file that holds the command.
+            text: The proposed text of that file.
+            command: The ``\input`` command scanned from the proposed text.
+            original: The command at the same position in the inspected source, if any.
+            stack: The files being expanded around this one, outermost first.
+
+        Returns:
+            The edit and the merged file, or ``None`` after adding a problem.
+        """
         if not command.arguments or command.depth:
             self._problem("Only direct literal input commands can be merged.", name)
             return None
@@ -368,6 +517,15 @@ class _InputMerger:
 
 
 def _merge_inputs(graph: SourceGraph, texts: dict[str, str], plan: SourceTransformPlan) -> None:
+    r"""Plan the merging of literal ``\input`` lines into the main source.
+
+    Merging needs a complete graph with a single document root.
+
+    Args:
+        graph: The dependency graph of the project.
+        texts: The proposed text of each source, updated in place.
+        plan: The plan that receives the findings and the removals.
+    """
     if not _require_complete_graph(graph, plan, _MERGE_RULE, "Input merging"):
         return
     if graph.other_roots():
@@ -377,7 +535,11 @@ def _merge_inputs(graph: SourceGraph, texts: dict[str, str], plan: SourceTransfo
 
 
 def _is_standalone_bibtex_environment(commands: list[Command]) -> bool:
-    """Whether the commands hold one ``thebibliography`` environment and nothing that reads data."""
+    """Return whether the commands hold one ``thebibliography`` environment and no data reads.
+
+    The environment opens once and closes once, after it opens, and no command reads a
+    file or holds biblatex data.
+    """
     starts = [command for command in commands if command.begins("thebibliography", exact=True)]
     ends = [command for command in commands if command.ends("thebibliography", exact=True)]
     return (
@@ -391,9 +553,17 @@ def _is_standalone_bibtex_environment(commands: list[Command]) -> bool:
 def _bibliography_commands(
     graph: SourceGraph, texts: dict[str, str], plan: SourceTransformPlan
 ) -> list[tuple[str, Command]]:
-    """Every ``\\bibliography`` command of the files that stay in the package.
+    r"""Return every ``\bibliography`` command of the files that stay in the package.
 
     A biblatex command is reported as a problem on the way: inlining supports BibTeX only.
+
+    Args:
+        graph: The dependency graph of the project.
+        texts: The proposed text of each source.
+        plan: The plan whose removals are skipped and which receives the problems.
+
+    Returns:
+        Each file and ``\bibliography`` command found in it.
     """
     found = []
     for name in graph.visited - plan.removals:
@@ -410,6 +580,19 @@ def _bibliography_commands(
 def _inline_bibliography(
     graph: SourceGraph, texts: dict[str, str], path: str, plan: SourceTransformPlan
 ) -> None:
+    r"""Plan replacing the single ``\bibliography`` line by the generated bibliography.
+
+    Inlining needs a complete graph, a readable bibliography that holds one standalone
+    BibTeX ``thebibliography`` environment, and exactly one direct literal
+    ``\bibliography`` command with an argument on its own line. Comments on that line are
+    kept around the inlined text.
+
+    Args:
+        graph: The dependency graph of the project.
+        texts: The proposed text of each source, updated in place.
+        path: The project path of the generated ``.bbl`` file.
+        plan: The plan that receives the findings.
+    """
     if not _require_complete_graph(graph, plan, _INLINE_RULE, "Bibliography inlining"):
         return
     if path not in graph.sources or path not in texts:
@@ -476,7 +659,18 @@ def _remove_file_comments(
     policy: CommentPolicy,
     plan: SourceTransformPlan,
 ) -> None:
-    """Plan the comment removal of one document source, or record why it cannot be done."""
+    r"""Plan the comment removal of one document source, or record why it cannot be done.
+
+    Dynamic lexical commands (``\catcode``, ``\scantokens``, ``\csname``) and an
+    unclosed literal or protected region prevent the removal.
+
+    Args:
+        graph: The dependency graph of the project.
+        texts: The proposed text of each source, updated in place.
+        name: The project path of the source.
+        policy: Which comment bodies to remove.
+        plan: The plan that receives the findings.
+    """
     commands = graph.sources[name].commands
     if any(command.name in {"catcode", "scantokens", "csname"} for command in commands):
         _problem(plan, _COMMENT_RULE, "Dynamic lexical behavior prevents comment removal.", name)
@@ -510,7 +704,17 @@ def _plan_comment_removal(
     policy: CommentPolicy,
     plan: SourceTransformPlan,
 ) -> None:
-    """Plan comment removal in every document source; the others are copied verbatim."""
+    """Plan comment removal in every document source; the others are copied verbatim.
+
+    Sources that could not be parsed are reported as a problem, since comment removal
+    needs to read every source file.
+
+    Args:
+        graph: The dependency graph of the project.
+        texts: The proposed text of each source, updated in place.
+        policy: Which comment bodies to remove.
+        plan: The plan that receives the findings.
+    """
     if graph.unparsed:
         unparsed = sorted(graph.unparsed)
         _problem(
@@ -530,7 +734,15 @@ def _plan_comment_removal(
 
 
 def _materialize(graph: SourceGraph, texts: dict[str, str], plan: SourceTransformPlan) -> None:
-    """Turn the proposed texts into bytes, originals, removals and reviewable changes."""
+    """Turn the proposed texts into bytes, originals, removals and reviewable changes.
+
+    A transformed source over ``MAX_SOURCE_BYTES`` is a problem and stops the conversion.
+
+    Args:
+        graph: The dependency graph whose sources hold the original texts.
+        texts: The proposed text of each source.
+        plan: The plan that receives the contents, originals, changes and problems.
+    """
     for name in sorted(plan.removals):
         plan.removal_originals[name] = graph.sources[name].encode()
         plan.changes.append(
@@ -568,7 +780,18 @@ def _materialize(graph: SourceGraph, texts: dict[str, str], plan: SourceTransfor
 def plan_source_transforms(
     root: Path, main: str, options: SourceTransformOptions
 ) -> SourceTransformPlan:
-    """Return proposed bytes/removals/diffs without writing or deleting any file."""
+    """Return proposed bytes/removals/diffs without writing or deleting any file.
+
+    A plan with a blocking finding is rejected, so it holds findings but no proposal.
+
+    Args:
+        root: The project directory.
+        main: The project path of the main file.
+        options: The transformations to propose.
+
+    Returns:
+        The plan; it is empty when no transformation is selected.
+    """
     plan = SourceTransformPlan()
     if (
         options.comment_policy == "retain"

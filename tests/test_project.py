@@ -1,3 +1,12 @@
+"""Project import, archives and cleanup plans.
+
+The import of a folder or a ZIP archive unwraps a single wrapper directory, excludes metadata,
+keeps non-portable names with warnings, and rejects unsafe names, collisions, links, special
+files, unsupported archives and inputs beyond its limits without leaving partial output. The
+archive is reproducible and refuses unsafe destinations; the cleanup plan keeps dependencies
+and proposes only build debris.
+"""
+
 from __future__ import annotations
 
 import io
@@ -23,7 +32,10 @@ from latexprep.project_cleanup import plan_cleanup
 
 
 class ProjectTests(unittest.TestCase):
+    """Importing a project from a folder or a ZIP archive, archiving it and planning cleanup."""
+
     def setUp(self) -> None:
+        """Create an empty ``source`` directory in a temporary directory."""
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.base = Path(self.temporary.name)
@@ -31,6 +43,15 @@ class ProjectTests(unittest.TestCase):
         self.source.mkdir()
 
     def write_file(self, name: str, content: bytes = b"source") -> Path:
+        """Write a file below ``source``, creating its parent directories.
+
+        Args:
+            name: The path of the file relative to ``source``.
+            content: The bytes of the file.
+
+        Returns:
+            The path of the written file.
+        """
         path = self.source / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(content)
@@ -41,8 +62,11 @@ class ProjectTests(unittest.TestCase):
         "permission bits do not stop this user from reading a file",
     )
     def test_an_unreadable_nested_file_is_named_by_its_project_path(self):
-        """The import opens each path component below a directory descriptor, which reports
-        only the bare name it was given; the error names the path within the project."""
+        """Check that an unreadable nested file is named by its path in the project.
+
+        The import opens each path component below a directory descriptor, which reports
+        only the bare name it was given; the error names the path within the project.
+        """
         self.write_file("main.tex", b"\\input{sections/intro}\n")
         unreadable = self.write_file("sections/intro.tex", b"The introduction.\n")
         unreadable.chmod(0)
@@ -57,6 +81,20 @@ class ProjectTests(unittest.TestCase):
         *,
         compression: int = zipfile.ZIP_STORED,
     ) -> Path:
+        """Write ``input.zip`` in the temporary directory with the given entries.
+
+        ``UserWarning`` is ignored while the entries are written, so a name may repeat. An empty
+        name is written through a :class:`zipfile.ZipInfo`, because Python 3.11 rejects an empty
+        name in ``writestr``.
+
+        Args:
+            entries: The name, or a prepared :class:`zipfile.ZipInfo`, and the data of each
+                entry, in archive order.
+            compression: The compression method of the entries.
+
+        Returns:
+            The path of the archive.
+        """
         path = self.base / "input.zip"
         with (
             warnings.catch_warnings(),
@@ -73,6 +111,10 @@ class ProjectTests(unittest.TestCase):
         return path
 
     def tree(self, root: Path) -> dict[str, bytes | None]:
+        """Return every path below ``root``, relative and in POSIX form, with its contents.
+
+        A directory maps to ``None`` and a file to its bytes.
+        """
         return {
             path.relative_to(root).as_posix(): None if path.is_dir() else path.read_bytes()
             for path in root.rglob("*")

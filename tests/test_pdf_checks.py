@@ -1,3 +1,11 @@
+"""The manuscript-PDF detail checks, measured from controlled and live PDF tool output.
+
+The checks cover section budgets, text sizes and regions, printable bounds, overlaps, sparse
+pages, metadata, language, tagging, annotation and action policies, figure fonts, stroke
+widths, colour spaces, contrast and grayscale separation, together with their caps, the shared
+resource budget, cancellation and the option validation.
+"""
+
 from __future__ import annotations
 
 import asyncio
@@ -44,6 +52,15 @@ from tests.support import live_test
 
 
 def large_page_geometry(width: int, height: int) -> str:
+    """Return the ``pdfinfo -box`` output of one unrotated page of the given size.
+
+    Args:
+        width: The page width in points, used for the size, MediaBox and CropBox.
+        height: The page height in points, used for the size, MediaBox and CropBox.
+
+    Returns:
+        The page size, rotation, MediaBox and CropBox lines of page 1.
+    """
     return (
         f"Page 1 size: {width} x {height} pts\nPage 1 rot: 0\n"
         f"Page 1 MediaBox: 0 0 {width} {height}\nPage 1 CropBox: 0 0 {width} {height}\n"
@@ -57,6 +74,17 @@ def color_trace(
     space: str = "DeviceRGB",
     alpha: str = "1",
 ) -> str:
+    """Return a mutool trace of one letter page with one filled glyph and one filled path.
+
+    Args:
+        text_color: The colour components of the glyph ``A``.
+        other_color: The ``DeviceRGB`` colour components of the filled path.
+        space: The colour space of the glyph.
+        alpha: The alpha of the glyph.
+
+    Returns:
+        The trace XML of ``document.pdf``.
+    """
     return (
         '<document filename="document.pdf"><page number="1" mediabox="0 0 612 792">'
         f'<fill_text colorspace="{space}" color="{text_color}" alpha="{alpha}" '
@@ -68,6 +96,14 @@ def color_trace(
 
 
 def simple_pdf() -> bytes:
+    """Return a one-page PDF with Helvetica body text, a language and Title and Author fields.
+
+    The catalogue declares ``en-GB``, the page is letter-sized and shows "Body text", and the
+    information dictionary names the title "Paper" and the author "Ada Lovelace".
+
+    Returns:
+        The bytes of the PDF, with a cross-reference table and a trailer.
+    """
     content = b"BT /F1 12 Tf 72 700 Td (Body text) Tj ET\n"
     objects = (
         b"<< /Type /Catalog /Pages 2 0 R /Lang (en-GB) >>",
@@ -93,7 +129,14 @@ def simple_pdf() -> bytes:
 
 
 class CountingToolRunner(ToolRunner):
-    """The real runner, counting every command that is not a version probe."""
+    """The real runner, counting every command that is not a version probe.
+
+    Args:
+        limits: The runtime limits, passed to :class:`ToolRunner`.
+
+    Attributes:
+        counts: How often each command line ran, apart from the version probes.
+    """
 
     def __init__(self, limits: RuntimeLimits | None = None) -> None:
         super().__init__(limits)
@@ -108,6 +151,11 @@ class CountingToolRunner(ToolRunner):
         readonly_inputs: tuple[Path, ...] = (),
         memory_mb: int | None = None,
     ) -> CommandResult:
+        """Count the command unless it ends with ``-v`` or ``--version``, then run it.
+
+        The arguments are those of :meth:`CommandRunner.run`; the result is that of the real
+        runner.
+        """
         if argv[-1] not in {"-v", "--version"}:
             self.counts[tuple(argv)] += 1
         return await super().run(
@@ -116,7 +164,14 @@ class CountingToolRunner(ToolRunner):
 
 
 class PdfDetailTests(unittest.IsolatedAsyncioTestCase):
+    """The detail checks, the figure-font checks and the evidence helper on one PDF.
+
+    Most tests answer the tool commands with :class:`DetailRunner`; the live tests run Poppler
+    on :func:`simple_pdf`.
+    """
+
     async def asyncSetUp(self) -> None:
+        """Create a temporary directory holding a placeholder ``document.pdf``."""
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
         self.pdf = self.root / "document.pdf"
@@ -124,18 +179,40 @@ class PdfDetailTests(unittest.IsolatedAsyncioTestCase):
         self.sequence = 0
 
     async def asyncTearDown(self) -> None:
+        """Remove the temporary directory."""
         self.temporary.cleanup()
 
     def work(self) -> Path:
+        """Return a new, not yet created work directory path below the temporary root."""
         self.sequence += 1
         return self.root / f"inspect-{self.sequence}"
 
     async def check(self, options: PdfCheckOptions, runner: DetailRunner | None = None):
+        """Run the detail checks on ``document.pdf`` in a new work directory.
+
+        Args:
+            options: The detail checks to run.
+            runner: The runner that answers the tool commands; a default
+                :class:`DetailRunner` when ``None``.
+
+        Returns:
+            The findings of :func:`inspect_pdf_details`.
+        """
         return await inspect_pdf_details(
             self.pdf, self.work(), runner or DetailRunner(), options=options
         )
 
     async def assert_status(self, options: PdfCheckOptions, status: str, **outputs: object):
+        """Assert that the checks produce exactly one finding, with the given status.
+
+        Args:
+            options: The detail checks to run.
+            status: The expected status of the finding.
+            **outputs: Tool outputs that replace the defaults of :class:`DetailRunner`.
+
+        Returns:
+            The one finding.
+        """
         result = await self.check(options, DetailRunner(**outputs))
         self.assertEqual(len(result), 1, result)
         self.assertEqual(result[0].status, status, result)

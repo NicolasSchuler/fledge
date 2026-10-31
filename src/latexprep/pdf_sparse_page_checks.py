@@ -38,7 +38,13 @@ _RASTER_SIZE_TOLERANCE_PX = 1
 
 
 class InkCoverage(NamedTuple):
-    """The pixel size of one rendered page and the fraction of its pixels that carry ink."""
+    """The pixel size of one rendered page and the fraction of its pixels that carry ink.
+
+    Attributes:
+        width: The width of the render, in pixels.
+        height: The height of the render, in pixels.
+        ratio: The fraction of the pixels that carry ink.
+    """
 
     width: int
     height: int
@@ -46,6 +52,7 @@ class InkCoverage(NamedTuple):
 
 
 def _within_tolerance(actual: tuple[int, int], expected: tuple[int, int]) -> bool:
+    """Return whether a render's pixel size is the expected one, give or take a pixel."""
     return all(
         abs(measured - target) <= _RASTER_SIZE_TOLERANCE_PX
         for measured, target in zip(actual, expected, strict=True)
@@ -55,6 +62,21 @@ def _within_tolerance(actual: tuple[int, int], expected: tuple[int, int]) -> boo
 def _ink_coverage(
     path: Path, *, expected: tuple[int, int], options: PdfCheckOptions, max_file_bytes: int
 ) -> InkCoverage:
+    """Measure the share of a rendered page's pixels that carry ink.
+
+    Args:
+        path: The grayscale render.
+        expected: The pixel size the render should have, in either orientation.
+        options: The PDF check options, which give the paper gray and the ink difference.
+        max_file_bytes: The largest render file accepted.
+
+    Returns:
+        The coverage.
+
+    Raises:
+        PreparationError: The render is invalid or its size disagrees with the page-size
+            preflight.
+    """
     image = read_measurement_raster(path, channels=1, max_file_bytes=max_file_bytes)
     size = (image.width, image.height)
     # A render may come out rotated, so the page counts if either orientation matches.
@@ -65,11 +87,12 @@ def _ink_coverage(
 
 
 def _percent(ratio: float) -> str:
+    """Format a ratio as a percentage with three significant digits."""
     return f"{ratio * 100:.3g}%"
 
 
 def _page_ranges(pages: list[int]) -> str:
-    """Ascending page numbers as ``1-3, 5``."""
+    """Format page numbers as ascending ranges, such as ``1-3, 5``."""
     ranges: list[list[int]] = []
     for page in sorted(pages):
         if ranges and page == ranges[-1][1] + 1:
@@ -80,9 +103,14 @@ def _page_ranges(pages: list[int]) -> str:
 
 
 def _merge_page_unavailability(findings: list[Finding]) -> list[Finding]:
-    """One finding for each distinct reason pages could not be measured, naming those pages."""
+    """Keep one finding for each distinct reason pages could not be measured, naming the pages.
+
+    A merged finding takes the place of the first finding with its reason; other findings
+    keep their order.
+    """
 
     def unavailable_page(finding: Finding) -> int | None:
+        """Return the page of an inconclusive finding about one page, else ``None``."""
         page = finding.details.get("page")
         return page if finding.status == "inconclusive" and type(page) is int else None
 
@@ -106,13 +134,23 @@ def _merge_page_unavailability(findings: list[Finding]) -> list[Finding]:
 
 
 def _unavailable_page(page: int, error: Exception) -> Finding:
+    """Report that ``page`` could not be measured, because of ``error``."""
     return unavailable_finding(
         PdfRule.SPARSE_PAGES, error, severity="warning", details={"page": page}
     )
 
 
 def _coverage_outcome(page: int, ratio: float, minimum: float | None) -> tuple[str, list[object]]:
-    """The message about one page's ink coverage and, below the minimum, its violation."""
+    """Word the message about one page's ink coverage and, below the minimum, its violation.
+
+    Args:
+        page: The page number.
+        ratio: The fraction of the page's pixels that carry ink.
+        minimum: The smallest fraction allowed, or ``None``.
+
+    Returns:
+        The message, and the violation as the only item of a list when there is one.
+    """
     ink = f"Page {page} has {_percent(ratio)} inked pixels"
     if minimum is None:
         return f"{ink}.", []
@@ -134,6 +172,18 @@ async def _sparse_page_finding(
     size: tuple[float, float],
     options: PdfCheckOptions,
 ) -> Finding:
+    """Render one page and measure its ink coverage.
+
+    Args:
+        session: The PDF tool session that renders the page.
+        page: The page number.
+        pages: The number of pages of the PDF.
+        size: The width and height of the page, in points.
+        options: The PDF check options.
+
+    Returns:
+        The finding; unavailable when the render would exceed the limits or fails.
+    """
     expected = measurement_raster_size(size, options.raster_dpi)
     if exceeds_measurement_raster(expected):
         return _unavailable_page(
@@ -189,10 +239,17 @@ async def measure_sparse_pages(
     options: PdfCheckOptions,
     rules: Collection[str] = (),  # noqa: ARG001 - the signature every measurement family shares
 ) -> list[Finding]:
-    """One finding per measured page, plus unavailable findings for pages that failed.
+    """Measure the ink coverage of every page that is not exempt.
 
-    ``rules`` completes the signature every measurement family shares; this one always
-    reports under its single rule.
+    Args:
+        session: The PDF tool session that renders the pages.
+        pages: The number of pages of the PDF.
+        options: The PDF check options.
+        rules: Completes the signature every measurement family shares; this one always
+            reports under its single rule.
+
+    Returns:
+        One finding per measured page, plus unavailable findings for pages that failed.
     """
     try:
         require_rendered_pages(pages, "Rendered sparse-page measurement")

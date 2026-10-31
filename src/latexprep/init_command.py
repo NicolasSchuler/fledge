@@ -34,11 +34,18 @@ ignore = [] # For example ["TEX001"] to skip unfinished-text markers.
 
 
 class InitError(click.ClickException):
+    """A refusal of ``fledge init`` to write the settings file.
+
+    Attributes:
+        exit_code: The process exit code when the error ends the command.
+    """
+
     # The CLI's "error" outcome; usage errors use the CLI's usage exit code.
     exit_code = Outcome.ERROR.exit_code
 
 
 def _print_presets() -> None:
+    """Print the presets with their descriptions, and how to copy or apply one."""
     width = max(len(name) for name in PRESETS)
     click.echo("Presets (starting points, not certifications of venue compliance):")
     for name in preset_names():
@@ -49,6 +56,10 @@ def _print_presets() -> None:
 
 
 def _nearest_config(directory: Path) -> Path | None:
+    """Find the settings file that applies in ``directory``, or ``None`` when there is none.
+
+    A search that fails with ``PreparationError`` also gives ``None``.
+    """
     try:
         return resolve_config_path(directory)
     except PreparationError:
@@ -56,6 +67,16 @@ def _nearest_config(directory: Path) -> Path | None:
 
 
 def _next_steps(directory: Path) -> list[str]:
+    """Suggest the commands to run next, as indented lines.
+
+    Args:
+        directory: The directory that received the settings file; it is written as ``.``
+            when it is the current directory.
+
+    Returns:
+        A ``fledge check`` line and a ``fledge prepare`` line whose output is a sibling
+        ``<name>-submission`` folder, with shell-quoted paths.
+    """
     resolved = directory.resolve()
     source = "." if resolved == Path.cwd().resolve() else str(directory)
     output = os.path.relpath(resolved.parent / f"{resolved.name}-submission")
@@ -66,7 +87,16 @@ def _next_steps(directory: Path) -> list[str]:
 
 
 def _check_target(target: Path, *, force: bool) -> None:
-    """Refuse to write through a link or special file, or over a file without ``--force``."""
+    """Refuse to write through a link or special file, or over a file without ``--force``.
+
+    Args:
+        target: The settings file to write.
+        force: Whether an existing regular file may be overwritten.
+
+    Raises:
+        InitError: The target is a link or not a regular file, or it exists and ``force``
+            is false.
+    """
     if target.is_symlink() or (target.exists() and not target.is_file()):
         raise InitError(f"{target} is not a regular file; refusing to write through it")
     if target.exists() and not force:
@@ -74,7 +104,16 @@ def _check_target(target: Path, *, force: bool) -> None:
 
 
 def _write_settings(target: Path, text: str, *, force: bool) -> None:
-    """Validate ``text`` as settings, then write it; an invalid file is never written."""
+    """Validate ``text`` as settings, then write it; an invalid file is never written.
+
+    Args:
+        target: The settings file to write.
+        text: The settings text.
+        force: Whether to overwrite an existing file; otherwise the file must not exist.
+
+    Raises:
+        InitError: The text is not valid settings, or writing failed.
+    """
     # Validate before writing, so --force never replaces a file with an invalid one.
     try:
         parse_settings_text(text, target)
@@ -88,7 +127,13 @@ def _write_settings(target: Path, text: str, *, force: bool) -> None:
 
 
 def _announce_precedence(target: Path, previous: Path | None, current: Path | None) -> None:
-    """Warn when another settings file wins here, or note which one this file now outranks."""
+    """Warn when another settings file wins here, or note which one this file now outranks.
+
+    Args:
+        target: The settings file that was written.
+        previous: The settings file that applied before the write, or ``None``.
+        current: The settings file that applies after the write, or ``None``.
+    """
     if current is not None and current != target.resolve():
         click.echo(
             f"Warning: {current} takes precedence over {CONFIG_NAME} here; "

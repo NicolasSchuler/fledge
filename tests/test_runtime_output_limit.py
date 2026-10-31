@@ -1,3 +1,5 @@
+"""A tool killed for excessive output finishes even when pipe reads lag."""
+
 from __future__ import annotations
 
 import asyncio

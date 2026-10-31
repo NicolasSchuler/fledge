@@ -25,6 +25,11 @@ from latexprep.public_url import Target, parse_public_url
 
 
 def reader_of(payload: bytes) -> asyncio.StreamReader:
+    """Return a stream reader that holds ``payload`` and then ends.
+
+    Returns:
+        The reader, which reaches its end of file after ``payload``.
+    """
     reader = asyncio.StreamReader()
     reader.feed_data(payload)
     reader.feed_eof()
@@ -32,10 +37,26 @@ def reader_of(payload: bytes) -> asyncio.StreamReader:
 
 
 async def read(payload: bytes, *, head_only: bool = False, limit: int = 1024):
+    """Read a response from ``payload`` with :func:`read_response`.
+
+    Args:
+        payload: The bytes the connection delivers before it ends.
+        head_only: Whether to skip the body.
+        limit: The largest accepted body.
+
+    Returns:
+        The final response, with its body when it was read.
+
+    Raises:
+        NetworkFailure: The response is malformed or over a bound.
+        asyncio.IncompleteReadError: The payload ends early.
+    """
     return await read_response(reader_of(payload), head_only=head_only, limit=limit)
 
 
 class ReadResponseTests(unittest.IsolatedAsyncioTestCase):
+    """:func:`read_response` on fed bytes: body framings, headers, interim answers, bounds."""
+
     async def test_the_three_body_framings_read_the_same_body(self):
         framed = {
             "content-length": b"Content-Length: 5\r\n\r\nhello",
@@ -122,6 +143,8 @@ class ReadResponseTests(unittest.IsolatedAsyncioTestCase):
 
 
 class BuildRequestTests(unittest.TestCase):
+    """:func:`build_request`: the request line, the host header and no ambient credentials."""
+
     def test_the_request_names_the_host_and_carries_no_ambient_credentials(self):
         target = parse_public_url("https://example.org/data?id=1")
         request = build_request("GET", target, "agent/1").decode("ascii")
@@ -141,12 +164,32 @@ class BuildRequestTests(unittest.TestCase):
 
 
 def loopback_target(port: int, *, scheme: str = "http") -> Target:
-    """A target for a server on this machine; the public-URL policy would refuse it."""
+    """Build a target for a server on this machine, which the public-URL policy would refuse.
+
+    Args:
+        port: The server's port.
+        scheme: The target's scheme.
+
+    Returns:
+        A target for ``<scheme>://example.org/data`` at ``port``.
+    """
     return Target(f"{scheme}://example.org/data", scheme, "example.org", port, "/data")
 
 
 class LoopbackTests(unittest.IsolatedAsyncioTestCase):
+    """:func:`open_pinned` and :func:`exchange` against a server on the loopback interface."""
+
     async def serve(self, handler):
+        """Start a server on a free loopback port that answers with ``handler``.
+
+        The server closes when the test ends.
+
+        Args:
+            handler: The connection callback for :func:`asyncio.start_server`.
+
+        Returns:
+            The server's port.
+        """
         server = await asyncio.start_server(handler, "127.0.0.1", 0)
         self.addCleanup(server.close)
         return server.sockets[0].getsockname()[1]
@@ -215,6 +258,8 @@ class LoopbackTests(unittest.IsolatedAsyncioTestCase):
 
 
 class TlsConnectionTests(unittest.IsolatedAsyncioTestCase):
+    """The verifying TLS context, and host-name verification over a pinned address."""
+
     def test_the_verifying_context_is_built_once_and_checks_host_names(self):
         context = default_ssl_context()
         self.assertIs(context, default_ssl_context())

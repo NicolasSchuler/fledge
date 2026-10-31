@@ -1,3 +1,5 @@
+"""The bounded TeX lexer: spans, conditionals, source regions, arguments and parse limits."""
+
 from __future__ import annotations
 
 import unittest
@@ -20,6 +22,8 @@ from latexprep.tex_lexer import (
 
 
 class TexLexerTests(unittest.TestCase):
+    """Spans, conditionals, source regions, argument scanning and the bounds of the lexer."""
+
     def test_span_tests_differ_only_at_span_boundaries(self) -> None:
         spans = merge_spans([(10, 20), (20, 25), (30, 40), (32, 35)])
         self.assertEqual(spans, [(10, 25), (30, 40)])

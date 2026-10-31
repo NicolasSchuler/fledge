@@ -16,6 +16,11 @@ from .online_support import options
 
 
 def manuscript_text(body: str) -> str:
+    """Return a ``main.tex`` source that holds ``body`` and uses the bibliography ``references``.
+
+    Returns:
+        The source of an ``article`` document.
+    """
     return (
         "\\documentclass{article}\n\\begin{document}\n"
         + body
@@ -24,7 +29,13 @@ def manuscript_text(body: str) -> str:
 
 
 class CollectInputsTests(unittest.TestCase):
+    """:func:`collect_inputs`: the entries and links it would send, and the gaps it reports."""
+
     def setUp(self):
+        """Create a temporary project whose ``main.tex`` has an empty body.
+
+        ``self.bib`` is the path of ``references.bib``, which is not written yet.
+        """
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.root = Path(directory.name)
@@ -32,9 +43,18 @@ class CollectInputsTests(unittest.TestCase):
         self.manuscript()
 
     def manuscript(self, body: str = ""):
+        """Write ``main.tex`` with ``body`` as the text of the document."""
         (self.root / "main.tex").write_text(manuscript_text(body))
 
     def collect(self, **changes):
+        """Collect the online inputs of ``main.tex`` with online metadata checks selected.
+
+        Args:
+            **changes: Further fields of the online options.
+
+        Returns:
+            The collected inputs.
+        """
         return collect_inputs(self.root, "main.tex", options(online_metadata=True, **changes))
 
     def test_entries_keep_only_the_literal_values_a_lookup_needs(self):

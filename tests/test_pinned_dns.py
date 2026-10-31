@@ -15,6 +15,8 @@ from .online_support import FakeTransport, options
 
 
 class ResolvePublicTests(unittest.IsolatedAsyncioTestCase):
+    """Resolving a public address in a child: literals, outcomes, limits and reaping."""
+
     async def test_an_ip_literal_needs_no_child_and_must_be_public(self):
         with patch("asyncio.create_subprocess_exec", side_effect=AssertionError("no child")):
             self.assertEqual(await resolve_public("93.184.216.34", 443), ("93.184.216.34",))
@@ -121,6 +123,8 @@ class ResolvePublicTests(unittest.IsolatedAsyncioTestCase):
 
 
 class JobResolverTests(unittest.IsolatedAsyncioTestCase):
+    """The per-job cache of successful lookups."""
+
     async def test_a_host_is_looked_up_once_per_job(self):
         lookup = AsyncMock(return_value=("93.184.216.34",))
         resolver = JobResolver(lookup)

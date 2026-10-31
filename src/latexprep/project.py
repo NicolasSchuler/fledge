@@ -49,7 +49,14 @@ _DEFAULT_IMPORT_LIMITS = ImportLimits()
 
 @dataclass
 class ImportedProject:
-    """A finished import: where the copy is, its files, and what was warned or changed."""
+    """A finished import: where the copy is, its files, and what was warned or changed.
+
+    Attributes:
+        root: The new copy.
+        files: The project-relative paths of the copied files, sorted.
+        findings: The warnings of the import, such as nonportable names.
+        changes: What the import left out or unwrapped.
+    """
 
     root: Path
     files: list[str]
@@ -58,14 +65,24 @@ class ImportedProject:
 
 
 class ResolvedSource(NamedTuple):
-    """An input path with its links resolved, and whether it is a folder (else a file)."""
+    """An input path with its links resolved, and whether it is a folder (else a file).
+
+    Attributes:
+        path: The resolved path.
+        is_dir: Whether the input is a folder.
+    """
 
     path: Path
     is_dir: bool
 
 
 class EntrySelection(NamedTuple):
-    """The entries an import keeps, with unwrapped paths, and the changes it made."""
+    """The entries an import keeps, with unwrapped paths, and the changes it made.
+
+    Attributes:
+        entries: The kept entries.
+        changes: The excluded metadata and the removed wrapper folder, if any.
+    """
 
     entries: list[ProjectEntry]
     changes: list[Change]
@@ -77,16 +94,28 @@ def folder_entries(
     *,
     exclude_metadata: bool = False,
 ) -> list[ProjectEntry]:
-    """Every file and folder below an open directory, by normalized path, links refused.
+    """List every file and folder below an open directory, by normalized path, links refused.
 
-    With a ``budget`` the entry count, nesting depth and time are limited by it; without
-    one the nesting is capped at ``MAX_WALKED_FOLDER_LEVELS``. Raises ``PreparationError``
-    for a link, a special file, an unsafe name or a name collision.
+    Args:
+        directory_fd: The open directory to walk.
+        budget: Limits the entry count, nesting depth and time; without one the nesting is
+            capped at ``MAX_WALKED_FOLDER_LEVELS``.
+        exclude_metadata: Whether to skip the contents of metadata folders; the folders
+            themselves are still listed.
+
+    Returns:
+        The entries, sorted by path.
+
+    Raises:
+        PreparationError: An entry is a link or a special file, has an unsafe name or
+            collides with another name, or a limit is exceeded.
+        OSError: An entry cannot be inspected or opened; the error names its project path.
     """
     entries: list[ProjectEntry] = []
     registry = PathRegistry()
 
     def visit(current_fd: int, prefix: str) -> None:
+        """Add the entries below ``current_fd``, whose paths start with ``prefix``."""
         with os.scandir(current_fd) as listing:
             for item in listing:
                 cancellation_point()
@@ -127,7 +156,18 @@ def folder_entries(
 def _select_entries(
     entries: list[ProjectEntry], *, unwrap: bool, exclude_metadata: bool
 ) -> EntrySelection:
-    """Drop metadata and, when asked, the single wrapping folder; record each as a change."""
+    """Drop metadata and, when asked, the single wrapping folder; record each as a change.
+
+    A single top-level folder is a wrapper only when every kept file lies inside it.
+
+    Args:
+        entries: The listed entries.
+        unwrap: Whether to remove a single wrapping folder.
+        exclude_metadata: Whether to drop metadata entries.
+
+    Returns:
+        The kept entries, with the wrapper removed from their paths, and the changes.
+    """
     kept: list[ProjectEntry] = []
     excluded: set[str] = set()
     for entry in entries:
@@ -168,7 +208,7 @@ def _select_entries(
 
 
 def plain_reason(error: Exception) -> str:
-    """Why a file operation or ZIP read failed, in words rather than Python error text."""
+    """Explain why a file operation or ZIP read failed, in words rather than Python error text."""
     if isinstance(error, FileNotFoundError):
         return (
             f"{error.filename or 'a file or folder'} was not found. Check the path and that "
@@ -203,7 +243,15 @@ def plain_reason(error: Exception) -> str:
 
 
 def source_path(source: Path) -> ResolvedSource:
-    """Resolve an input that must be a regular file or a folder, never a link."""
+    """Resolve an input that must be a regular file or a folder, never a link.
+
+    Returns:
+        The resolved path and whether it is a folder.
+
+    Raises:
+        PreparationError: The input is a link or a special file.
+        OSError: The input does not exist or cannot be inspected.
+    """
     metadata = source.lstat()
     is_dir = stat.S_ISDIR(metadata.st_mode)
     if not is_dir and not stat.S_ISREG(metadata.st_mode):
@@ -212,7 +260,20 @@ def source_path(source: Path) -> ResolvedSource:
 
 
 def new_destination(source: Path, destination: Path, *, source_is_dir: bool) -> Path:
-    """The resolved ``destination``, which must not exist and must lie outside ``source``."""
+    """Resolve ``destination``, which must not exist and must lie outside ``source``.
+
+    Args:
+        source: The resolved input.
+        destination: The output path.
+        source_is_dir: Whether ``source`` is a folder, inside which no output may lie.
+
+    Returns:
+        The destination within its resolved parent folder.
+
+    Raises:
+        PreparationError: ``destination`` exists, is ``source`` or lies inside it.
+        OSError: The parent folder of ``destination`` does not exist.
+    """
     if destination.exists() or destination.is_symlink():
         raise PreparationError(f"Output already exists and will not be overwritten: {destination}.")
     target = destination.parent.resolve(strict=True) / destination.name
@@ -227,6 +288,18 @@ def _open_below(directory_fd: int, name: str, flags: int, path: str) -> int:
     ``os.open`` with ``dir_fd`` reports only the name it was given, which for a file in a
     folder is the bare file name; whoever fixes its permissions needs the path within
     the project.
+
+    Args:
+        directory_fd: The open directory.
+        name: The name of the entry in it.
+        flags: The flags for ``os.open``.
+        path: The project path that a failure names.
+
+    Returns:
+        The new file descriptor.
+
+    Raises:
+        OSError: Opening failed; its ``filename`` is ``path``.
     """
     try:
         return os.open(name, flags, dir_fd=directory_fd)
@@ -236,7 +309,20 @@ def _open_below(directory_fd: int, name: str, flags: int, path: str) -> int:
 
 
 def open_regular(directory_fd: int, path: str) -> BinaryIO:
-    """Open ``path`` below an open directory without following a link anywhere on the way."""
+    """Open ``path`` below an open directory without following a link anywhere on the way.
+
+    Args:
+        directory_fd: The open directory.
+        path: The project path of the file, relative to the directory.
+
+    Returns:
+        The file, open for reading bytes.
+
+    Raises:
+        PreparationError: The file is not a regular file.
+        OSError: A part of the path is a link or cannot be opened; the error names the
+            project path up to that part.
+    """
     parts = path.split("/")
     current_fd = os.dup(directory_fd)
     try:
@@ -260,7 +346,19 @@ def _copy_bytes(
     budget: ImportBudget,
     compressed_size: int | None = None,
 ) -> None:
-    """Copy a stream chunk by chunk, counting the bytes actually read against the budget."""
+    """Copy a stream chunk by chunk, counting the bytes actually read against the budget.
+
+    Args:
+        source: The stream to read.
+        target: The stream to write.
+        path: The project path named in errors.
+        budget: The import budget that counts the bytes.
+        compressed_size: The compressed size of an archive entry, which bounds its
+            expansion ratio; ``None`` for a file from a folder.
+
+    Raises:
+        PreparationError: The bytes exceed the size limit or the compression ratio limit.
+    """
     total = 0
     while chunk := source.read(
         min(IO_CHUNK_BYTES, budget.limits.max_bytes - budget.total_bytes + 1)
@@ -299,8 +397,23 @@ def import_project(
     """Import into a new directory, deleting only this new copy on failure.
 
     A ZIP's single wrapping directory is removed by default; folder inputs
-    already identify their logical root. Use ``unwrap=False`` and
-    ``exclude_metadata=False`` when re-extracting an exact final package.
+    already identify their logical root.
+
+    Args:
+        source: The project folder or ZIP file.
+        destination: The new directory; it must not exist and must lie outside ``source``.
+        limits: The bounds on the entries, bytes, nesting and compression ratio.
+        unwrap: Whether to remove a ZIP's single wrapping directory. Use ``unwrap=False``
+            and ``exclude_metadata=False`` when re-extracting an exact final package.
+        exclude_metadata: Whether to leave out version-control and operating-system
+            metadata.
+
+    Returns:
+        The finished import.
+
+    Raises:
+        PreparationError: The input or the destination is unsuitable, an entry is unsafe,
+            a limit is exceeded, or reading or writing failed.
     """
     try:
         resolved = source_path(source)
@@ -329,7 +442,19 @@ def _write_tree(
     budget: ImportBudget,
     open_reader: Callable[[ProjectEntry], AbstractContextManager[IO[bytes]]],
 ) -> ImportedProject:
-    """Create the folders and files of ``entries`` under the new ``target``."""
+    """Create the folders and files of ``entries`` under the new ``target``.
+
+    The new ``target`` is removed again if anything fails.
+
+    Args:
+        target: The directory to create.
+        entries: The entries to write.
+        budget: The import budget.
+        open_reader: Opens the contents of a file entry.
+
+    Returns:
+        The imported project with its portability warnings and no changes yet.
+    """
     target.mkdir(mode=0o700)
     with discard_on_failure(target):
         for entry in entries:
@@ -350,6 +475,17 @@ def _write_tree(
 def _import_folder(
     source: Path, target: Path, budget: ImportBudget, *, exclude_metadata: bool
 ) -> ImportedProject:
+    """Copy a project folder into the new ``target``, reading it without following links.
+
+    Args:
+        source: The resolved folder.
+        target: The new directory.
+        budget: The import budget.
+        exclude_metadata: Whether to leave out metadata.
+
+    Returns:
+        The imported project with its changes.
+    """
     directory_fd = os.open(source, DIRECTORY_FLAGS)
     try:
         entries = folder_entries(directory_fd, budget, exclude_metadata=exclude_metadata)
@@ -369,6 +505,21 @@ def _import_folder(
 def _import_zip(
     source: Path, target: Path, budget: ImportBudget, *, unwrap: bool, exclude_metadata: bool
 ) -> ImportedProject:
+    """Extract a ZIP file into the new ``target`` once its central directory is checked.
+
+    Args:
+        source: The resolved ZIP file.
+        target: The new directory.
+        budget: The import budget.
+        unwrap: Whether to remove a single wrapping directory.
+        exclude_metadata: Whether to leave out metadata.
+
+    Returns:
+        The imported project with its changes.
+
+    Raises:
+        PreparationError: The input became a special file, or an entry is refused.
+    """
     source_fd = os.open(source, _FILE_FLAGS)
     with os.fdopen(source_fd, "rb") as stream:
         if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
@@ -389,6 +540,14 @@ def _import_zip(
 
 
 def _member(entry: ProjectEntry) -> zipfile.ZipInfo:
+    """Return the archive record of an entry read from an archive.
+
+    Returns:
+        The entry's ``zip_info``.
+
+    Raises:
+        ValueError: The entry has no archive record.
+    """
     if entry.zip_info is None:
         raise ValueError(f"Archive entry {entry.path!r} has no archive record")
     return entry.zip_info

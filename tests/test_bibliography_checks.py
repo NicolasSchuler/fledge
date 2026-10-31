@@ -15,18 +15,40 @@ from tests.support import ProjectTestCase
 
 
 def listed(finding: Finding, key: str) -> list:
-    """Read one list-valued detail of a finding without narrowing every element."""
+    """Read one list-valued detail of a finding without narrowing every element.
+
+    Args:
+        finding: The finding whose details are read.
+        key: The name of the detail; a missing detail reads as an empty list.
+
+    Returns:
+        The list the detail holds.
+    """
     value = finding.details.get(key, [])
     assert isinstance(value, list), value
     return value
 
 
 class BibliographyCheckTests(ProjectTestCase):
+    """Tests of the offline citation coverage and bibliography field checks.
+
+    They cover citation coverage, uncited entries, required fields, DOIs, page ranges, URL
+    syntax, capitalization, fuzzy duplicates, scope and input limits, option validation and
+    cancellation of ``check_bibliography_coverage_and_fields``.
+    """
+
     def setUp(self) -> None:
+        """Start each test with the default ``BibliographyOptions``."""
         super().setUp()
         self.options = BibliographyOptions()
 
     def manuscript(self, body: str = "", *, resources: str = "references") -> None:
+        r"""Write ``main.tex``, an article with ``body`` followed by ``\bibliography``.
+
+        Args:
+            body: The text of the document before the bibliography.
+            resources: The argument of ``\bibliography``.
+        """
         self.write(
             "main.tex",
             "\\documentclass{article}\n\\begin{document}\n"
@@ -37,11 +59,28 @@ class BibliographyCheckTests(ProjectTestCase):
         )
 
     def check(self, **options: object) -> list[Finding]:
+        """Run ``check_bibliography_coverage_and_fields`` on ``main.tex``.
+
+        Args:
+            **options: Fields that replace those of ``self.options``.
+
+        Returns:
+            The findings of the check.
+        """
         return check_bibliography_coverage_and_fields(
             self.root, "main.tex", replace(self.options, **options)
         )
 
     def rows(self, suffix: str, **options: object) -> list[Finding]:
+        """Run :meth:`check` and keep the findings of one rule.
+
+        Args:
+            suffix: The rule name after ``bibliography.``.
+            **options: Fields that replace those of ``self.options``.
+
+        Returns:
+            The findings whose rule is ``bibliography.<suffix>``.
+        """
         return [item for item in self.check(**options) if item.rule == f"bibliography.{suffix}"]
 
     def test_citation_coverage_uses_selected_resources_and_inline_entries(self) -> None:

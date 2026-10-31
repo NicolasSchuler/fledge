@@ -39,7 +39,15 @@ _ORCID_X_VALUE = 10  # the check value that is written as the letter X
 
 @dataclass(slots=True)
 class MetadataValue:
-    """One declaration of a metadata field and what is unclear about it."""
+    """One declaration of a metadata field and what is unclear about it.
+
+    Attributes:
+        path: The source file of the declaration, or ``None``.
+        line: The line of the declaration, or ``None``.
+        value: The plain text of the declaration's argument.
+        uncertainty: Why the argument or the control flow around it is unclear.
+        placeholder: Whether the value is placeholder text.
+    """
 
     path: str | None
     line: int | None
@@ -48,7 +56,7 @@ class MetadataValue:
     placeholder: bool
 
     def as_dict(self) -> dict[str, object]:
-        """The declaration as report details."""
+        """Render the declaration as report details."""
         return {
             "path": self.path,
             "line": self.line,
@@ -59,6 +67,15 @@ class MetadataValue:
 
 
 def _metadata(document: ExpandedDocument) -> tuple[dict[str, list[MetadataValue]], list[str]]:
+    """Read every declaration of each metadata field.
+
+    Args:
+        document: The expanded document to read.
+
+    Returns:
+        The declarations of every field in ``METADATA_COMMANDS``, in source order, and the
+        document's presence uncertainty.
+    """
     values: dict[str, list[MetadataValue]] = {name: [] for name in METADATA_COMMANDS}
     # Metadata lives in the preamble, so only the declarations' own arguments and
     # control flow that could add or remove a declaration bear on this reading.
@@ -89,10 +106,21 @@ def read_literal_metadata(
 
     Only title/author/affiliation/email/correspondingauthor commands are supported.
     Multiple declarations may represent overwrites or repeated authors and are
-    consequently not returned as a resolved PDF metadata value. When fields are
-    selected, only their values and field-specific uncertainty are returned;
-    uncertainty about the source graph still applies to every selection. ``analysed``
-    shares the source analysis of the same root and main file with other checks.
+    consequently not returned as a resolved PDF metadata value.
+
+    Args:
+        root: The project root to analyse.
+        main: The main file as the caller named it; ``None`` selects the single document
+            root.
+        fields: The fields to read; when given, only their values and field-specific
+            uncertainty are returned, while uncertainty about the source graph still
+            applies to every selection. ``None`` reads every field.
+        analysed: The source analysis of the same root and main file, shared with other
+            checks.
+
+    Returns:
+        The value of each field with a single unclear-free, non-placeholder, non-empty
+        declaration, and the sorted, distinct interpretation gaps.
     """
     metadata, reasons = _metadata(reuse_or_analyse(root, main, analysed).expanded)
     values: dict[str, str] = {}
@@ -111,6 +139,16 @@ def read_literal_metadata(
 
 
 def _required_metadata_finding(document: ExpandedDocument, required: tuple[str, ...]) -> Finding:
+    """Check that each required metadata field has a literal, non-placeholder value.
+
+    Args:
+        document: The expanded document to read.
+        required: The metadata fields that must be present.
+
+    Returns:
+        The ``manuscript.required_metadata`` finding, whose details list every metadata
+        field.
+    """
     metadata, reasons = _metadata(document)
     for name in required:
         reasons.extend(reason for item in metadata[name] for reason in item.uncertainty)
@@ -148,7 +186,14 @@ def _required_metadata_finding(document: ExpandedDocument, required: tuple[str, 
 
 
 def _orcid_checksum_valid(identifier: str) -> bool:
-    """Check the ISO 7064 MOD 11-2 character of a syntactically valid ORCID identifier."""
+    """Check the ISO 7064 MOD 11-2 character of a syntactically valid ORCID identifier.
+
+    Args:
+        identifier: The identifier without URL prefix, in ``0000-0000-0000-000X`` form.
+
+    Returns:
+        ``True`` when the last character is the check character of the first 15 digits.
+    """
     digits = identifier.replace("-", "")
     total = 0
     for digit in digits[:_ORCID_PAYLOAD_DIGITS]:
@@ -158,6 +203,17 @@ def _orcid_checksum_valid(identifier: str) -> bool:
 
 
 def _orcid_finding(reading: Reading) -> Finding:
+    """Check the syntax and checksum of each literal ORCID identifier.
+
+    An ORCID command without a literal argument, or inside a conditional, is an
+    interpretation gap. An ``https://orcid.org/`` prefix is accepted.
+
+    Args:
+        reading: The expanded document and its document-wide interpretation gaps.
+
+    Returns:
+        The ``manuscript.orcid`` finding, failed for every invalid identifier.
+    """
     document = reading.document
     identifiers = []
     invalid = []
@@ -194,7 +250,16 @@ def _orcid_finding(reading: Reading) -> Finding:
 
 
 def metadata_checks(reading: Reading, options: ManuscriptCheckOptions) -> list[Finding]:
-    """The required-metadata and ORCID policies that are switched on."""
+    """Run the required-metadata and ORCID policies that are switched on.
+
+    Args:
+        reading: The expanded document and its document-wide interpretation gaps.
+        options: ``required_metadata`` names the required fields, and ``check_orcid``
+            switches on the ORCID policy.
+
+    Returns:
+        The required-metadata finding and then the ORCID finding, each when switched on.
+    """
     results = []
     if options.required_metadata:
         results.append(_required_metadata_finding(reading.document, options.required_metadata))

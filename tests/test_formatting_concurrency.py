@@ -1,3 +1,5 @@
+"""Parallel formatting with a controlled formatter: overlap, isolation, failures, cancellation."""
+
 from __future__ import annotations
 
 import asyncio
@@ -15,6 +17,34 @@ from tests.support import format_with
 
 
 class ControlledFormatter(FakeCommandRunner):
+    """A formatter double that answers each pass with a scripted result and records how it ran.
+
+    Each file is formatted in passes; the double checks the workspace, the arguments and the
+    budget lease of every pass, and lets a test hold, observe and cancel the passes.
+
+    Args:
+        blocked: The files whose first pass waits for its gate.
+
+    Attributes:
+        work: The working directory: passes run in workspaces below ``work / "files"``, the
+            version probe in ``work / "version"``.
+        outputs: The scripted results of each file by relative path, one per pass.
+        budget: The resource budget whose current lease each pass checks, or ``None``.
+        entered: An event per file, set when a pass of the file starts.
+        finished: An event per file, set when its second pass starts.
+        gates: An event per blocked file, which its first pass waits for.
+        cleanup_gate: An event that a cancelled pass waits for before it counts as cleaned
+            up, or ``None``.
+        cancelled: Set when a pass is cancelled.
+        cleaned: Set when a cancelled pass has finished its cleanup.
+        passes: Each pass as its file and its number from 1, in the order they started.
+        leases: The budget leases held by the passes of each file.
+        workspaces: The workspace of the latest pass of each file.
+        active: The number of passes running now.
+        max_active: The largest number of passes that ran at once.
+        version_calls: The number of version probes.
+    """
+
     def __init__(self, work, outputs, *, budget=None, blocked=(), cleanup_gate=None):
         super().__init__(budget=budget)
         self.work = work
@@ -33,11 +63,33 @@ class ControlledFormatter(FakeCommandRunner):
         self.version_calls = 0
 
     async def tool_version(self, argv, workspace) -> ToolVersion:
+        """Check that the probe runs in ``work / "version"``, count it, and return a version."""
         self.version_calls += 1
         assert workspace == self.work / "version"
         return ToolVersion(("test formatter",), argv[0], ("--version",))
 
     async def run(self, argv, cwd, workspace, *, readonly_inputs=(), memory_mb=None):
+        """Return the next scripted result of the file in ``workspace`` and check how it runs.
+
+        The pass asserts that it runs in its workspace with 128 MB and names its file, that a
+        later pass reads the output of the previous one, that the tool state in the workspace
+        belongs to this file alone and, with a budget, that it holds a lease larger than its
+        memory. The first pass of a blocked file waits for its gate.
+
+        Args:
+            argv: The formatter command line; its last argument names the file.
+            cwd: The working directory, which must be the workspace.
+            workspace: The workspace of the file, below ``work / "files"``.
+            readonly_inputs: The read-only inputs; they are not used.
+            memory_mb: The memory limit of the command, which must be 128.
+
+        Returns:
+            The scripted result of this pass.
+
+        Raises:
+            asyncio.CancelledError: The pass was cancelled; it sets ``cancelled``, waits for
+                ``cleanup_gate`` when one is given and sets ``cleaned`` first.
+        """
         relative = workspace.relative_to(self.work / "files").as_posix()
         assert cwd == workspace
         assert memory_mb == 128
@@ -80,10 +132,28 @@ class ControlledFormatter(FakeCommandRunner):
 
 
 def output(text, **flags):
+    """Build a successful formatter result.
+
+    Args:
+        text: The standard output of the formatter.
+        **flags: Further fields of the :class:`CommandResult`.
+
+    Returns:
+        The result, with exit code 0 and no standard error.
+    """
     return CommandResult(0, text, "", resolved_command=[], **flags)
 
 
 def source_tree(base, paths):
+    """Create a ``source`` directory in ``base`` with a file at each path.
+
+    Args:
+        base: The directory in which ``source`` is created.
+        paths: The relative paths of the files; each holds the line ``original``.
+
+    Returns:
+        The new ``source`` directory.
+    """
     source = base / "source"
     source.mkdir()
     for relative in paths:
@@ -94,10 +164,25 @@ def source_tree(base, paths):
 
 
 class ParallelFormattingTests(unittest.IsolatedAsyncioTestCase):
+    """Formatting several files at once under a budget, and serial formatting without one."""
+
     async def wait_for_events(self, *events):
+        """Wait until every one of ``events`` is set.
+
+        Raises:
+            TimeoutError: The events were not all set within two seconds.
+        """
         await asyncio.wait_for(asyncio.gather(*(event.wait() for event in events)), 2)
 
     async def finish_task(self, task, runner):
+        """Release every gate of ``runner``, cancel ``task`` if it is running and await its end.
+
+        An exception of ``task`` is not raised again.
+
+        Args:
+            task: The task that runs the formatting.
+            runner: The controlled formatter whose gates and cleanup gate are set.
+        """
         for gate in runner.gates.values():
             gate.set()
         if runner.cleanup_gate is not None:

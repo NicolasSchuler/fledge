@@ -21,6 +21,15 @@ LIMITS = {"max_dimension": 64, "max_pixels": 1024}
 
 
 def chunk(kind: bytes, payload: bytes) -> bytes:
+    """Return a PNG chunk: its length, ``kind``, ``payload`` and CRC-32 checksum.
+
+    Args:
+        kind: The four-byte chunk type.
+        payload: The chunk data.
+
+    Returns:
+        The framed chunk.
+    """
     return (
         struct.pack(">I", len(payload))
         + kind
@@ -32,6 +41,19 @@ def chunk(kind: bytes, payload: bytes) -> bytes:
 def png(
     *chunks: tuple[bytes, bytes], width: int = 1, height: int = 1, color_type: int = 2
 ) -> bytes:
+    """Return a framed PNG with an 8-bit header, the given chunks, one IDAT and an IEND.
+
+    The IDAT chunk holds four compressed zero bytes whatever the dimensions.
+
+    Args:
+        *chunks: The type and payload of each chunk placed between IHDR and IDAT.
+        width: The width in the header.
+        height: The height in the header.
+        color_type: The colour type in the header.
+
+    Returns:
+        The PNG bytes.
+    """
     header = struct.pack(">IIBBBBB", width, height, 8, color_type, 0, 0, 0)
     return (
         PNG_SIGNATURE
@@ -43,6 +65,8 @@ def png(
 
 
 class EncoderTests(unittest.TestCase):
+    """The grayscale PNG encoder and the smallest PNG it can produce."""
+
     def test_encoded_gray_pixels_decode_back_exactly(self) -> None:
         pixels = bytes((x * 31 + y * 7) % 256 for y in range(5) for x in range(7))
         encoded = encode_gray_png(7, 5, pixels)
@@ -59,6 +83,8 @@ class EncoderTests(unittest.TestCase):
 
 
 class DimensionTests(unittest.TestCase):
+    """The strict validator that reports the dimensions of a complete PNG within limits."""
+
     def test_complete_images_report_their_dimensions(self) -> None:
         self.assertEqual(png_dimensions(png(width=3, height=4), **LIMITS), (3, 4))
 
@@ -89,6 +115,8 @@ class DimensionTests(unittest.TestCase):
 
 
 class ChunkWalkTests(unittest.TestCase):
+    """The chunk walker: order, payloads, named structural defects and the chunk bound."""
+
     def test_every_chunk_is_yielded_in_order_with_its_payload(self) -> None:
         data = png((b"tEXt", b"Author\0Alice"), (b"eXIf", b"II*\0"))
         self.assertEqual(
@@ -97,6 +125,13 @@ class ChunkWalkTests(unittest.TestCase):
         )
 
     def assert_rejected(self, data: bytes, message: str, max_chunks: int = 16) -> None:
+        """Assert that walking the chunks of ``data`` raises a matching error.
+
+        Args:
+            data: The PNG bytes to walk.
+            message: A regular expression the :class:`PreparationError` must match.
+            max_chunks: The chunk bound of the walk.
+        """
         with self.assertRaisesRegex(PreparationError, message):
             list(iter_png_chunks(data, max_chunks=max_chunks))
 
@@ -130,6 +165,8 @@ class ChunkWalkTests(unittest.TestCase):
 
 
 class HeaderTests(unittest.TestCase):
+    """The header reader, which needs only a prefix and ignores checksums."""
+
     def test_the_header_is_read_without_checksums_from_a_prefix(self) -> None:
         data = png(width=10, height=20, color_type=6)
         for length in (29, 33, 60, len(data)):

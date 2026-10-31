@@ -8,6 +8,8 @@ from latexprep.text_edits import with_bom
 
 
 class ByteOrderMarkTests(unittest.TestCase):
+    """Restoring a removed byte-order mark with :func:`with_bom`."""
+
     def test_a_removed_mark_is_restored_only_when_the_file_had_one(self) -> None:
         self.assertEqual(with_bom("text", bom=True), "﻿text")
         self.assertEqual(with_bom("text", bom=False), "text")

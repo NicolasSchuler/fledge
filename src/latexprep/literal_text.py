@@ -162,10 +162,15 @@ _CHARACTER_COMMANDS = frozenset({"%", "&", "#", "_", "{", "}"})
 
 
 class _Interpretation(NamedTuple):
-    """How the literal text scan replaces one known command."""
+    """How the literal text scan replaces one known command.
+
+    Attributes:
+        replacement: The text that replaces the command.
+        dropped_arguments: Leading arguments removed together with the token; every
+            option goes too.
+    """
 
     replacement: str
-    # Leading arguments removed together with the token; every option goes too.
     dropped_arguments: int = 0
 
 
@@ -231,6 +236,11 @@ class LiteralText(NamedTuple):
 
     The occurrence count bounds how much rendered text the unresolved macros could
     contribute; it is deliberately not an estimate of their expansion.
+
+    Attributes:
+        text: The countable literal text.
+        unresolved: The sorted, distinct constructs the scan could not resolve.
+        unresolved_macros: How often unknown macros occur.
     """
 
     text: str
@@ -239,7 +249,16 @@ class LiteralText(NamedTuple):
 
 
 def scan_literal_text(value: str) -> LiteralText:
-    """Read literal text from TeX source, dropping math, keys and known layout commands."""
+    """Read literal text from TeX source, dropping math, keys and known layout commands.
+
+    Args:
+        value: The TeX source.
+
+    Returns:
+        The literal text with braces removed and ties as spaces, the unresolved
+        constructs, and the number of unknown macro occurrences. Source beyond the
+        lexer's bounds yields no text and one unresolved construct.
+    """
     value = mask_literals(value)
     uncertain: set[str] = set()
     unresolved_macros = 0
@@ -282,13 +301,29 @@ def scan_literal_text(value: str) -> LiteralText:
 
 
 def plain_text(value: str) -> tuple[str, list[str]]:
-    """Return countable literal text and unresolved constructs, without expanding TeX."""
+    """Return countable literal text and unresolved constructs, without expanding TeX.
+
+    Args:
+        value: The TeX source.
+
+    Returns:
+        The literal text and the sorted, distinct unresolved constructs.
+    """
     text, unresolved, _ = scan_literal_text(value)
     return text, unresolved
 
 
 def plain_argument_text(command: Command, index: int = 0) -> tuple[str, list[str]]:
-    """Return one argument's literal text, whitespace collapsed, and its unresolved constructs."""
+    """Return one argument's literal text, whitespace collapsed, and its unresolved constructs.
+
+    Args:
+        command: The command whose argument is read.
+        index: The position of the argument.
+
+    Returns:
+        The text and the unresolved constructs; a missing argument, or one with only
+        mathematical content, is itself an unresolved construct.
+    """
     if len(command.arguments) <= index:
         return "", ["missing literal argument"]
     raw = command.arguments[index].value
@@ -299,7 +334,7 @@ def plain_argument_text(command: Command, index: int = 0) -> tuple[str, list[str
 
 
 def is_placeholder_text(value: str) -> bool:
-    """Whether a literal value is an obvious template placeholder rather than content."""
+    """Return whether a literal value is an obvious template placeholder rather than content."""
     normalized = value.casefold().strip(" .<>[]")
     return bool(
         _PLACEHOLDER_MARKER.search(normalized)
@@ -311,12 +346,21 @@ def is_placeholder_text(value: str) -> bool:
 
 
 def normalize_heading(value: str) -> str:
-    """Compare headings case-insensitively with collapsed whitespace."""
+    """Normalize a heading so that headings compare case-insensitively with collapsed whitespace."""
     return " ".join(value.split()).casefold()
 
 
 def literal_list(value: str) -> list[str] | None:
-    """Split a comma-separated literal name list; ``None`` when any item is not literal."""
+    """Split a comma-separated literal name list; ``None`` when any item is not literal.
+
+    A list holding a TeX special character or a NUL, or an empty item, is not literal.
+
+    Args:
+        value: The list as written.
+
+    Returns:
+        The stripped items, or ``None``.
+    """
     if re.search(r"[\\{}#$^~&%\x00]", value):
         return None
     items = [item.strip() for item in value.split(",")]
@@ -324,7 +368,15 @@ def literal_list(value: str) -> list[str] | None:
 
 
 class Declaration(TypedDict):
-    """A literal class or package declaration in one source file, as reported in details."""
+    """A literal class or package declaration in one source file, as reported in details.
+
+    Attributes:
+        path: The source file.
+        line: The line of the declaration.
+        names: The declared names, or ``None`` when they are not literal.
+        options: The option arguments as written, or ``None``.
+        uncertainty: Why the declaration is unclear.
+    """
 
     path: str
     line: int
@@ -334,5 +386,13 @@ class Declaration(TypedDict):
 
 
 def first_argument_names(command: Command) -> list[str] | None:
-    """The literal names declared in a command's first argument, such as package names."""
+    """Read the literal names declared in a command's first argument, such as package names.
+
+    Args:
+        command: The declaring command.
+
+    Returns:
+        The names, or ``None`` when the command has no argument or it is not a literal
+        list.
+    """
     return literal_list(command.arguments[0].value) if command.arguments else None

@@ -13,7 +13,19 @@ from tests.support import AsyncProjectTestCase
 
 
 class ScriptedReplyTests(AsyncProjectTestCase):
+    """Scripted replies, queued results and the log of calls of :class:`FakeCommandRunner`."""
+
     async def run_tool(self, runner: FakeCommandRunner, *argv: str, inputs=()) -> CommandResult:
+        """Run a command through ``runner`` in the project root.
+
+        Args:
+            runner: The scripted runner.
+            *argv: The command line.
+            inputs: The read-only inputs granted to the command.
+
+        Returns:
+            The result that ``runner`` gives.
+        """
         return await runner.run(list(argv), self.root, self.root, readonly_inputs=inputs)
 
     async def test_a_tool_answers_with_its_script_and_others_with_the_default(self) -> None:
@@ -48,6 +60,8 @@ class ScriptedReplyTests(AsyncProjectTestCase):
 
 
 class FailureModeTests(AsyncProjectTestCase):
+    """Missing tools, limit failures, held commands and unexpected budget leases."""
+
     async def test_a_missing_tool_raises_even_for_its_version_probe(self) -> None:
         runner = FakeCommandRunner()
         runner.missing = {"qpdf", "mutool"}
@@ -91,6 +105,8 @@ class FailureModeTests(AsyncProjectTestCase):
 
 
 class FrozenInputTests(AsyncProjectTestCase):
+    """Freezing inputs, and the rule that only frozen copies may be granted."""
+
     async def test_inputs_are_copied_once_and_only_the_copies_may_be_granted(self) -> None:
         source = self.write("a.pdf", b"%PDF-a")
         runner = FakeCommandRunner()
@@ -110,6 +126,8 @@ class FrozenInputTests(AsyncProjectTestCase):
 
 
 class VersionProbeTests(AsyncProjectTestCase):
+    """Version probes: run once per tool, remembered, and refused when they print nothing."""
+
     async def test_concurrent_probes_of_one_tool_run_once_and_are_remembered(self) -> None:
         runner = FakeCommandRunner()
         versions = await asyncio.gather(

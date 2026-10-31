@@ -20,10 +20,24 @@ from tests.support import controlled_backends, format_with, sectioned_project
 
 
 class FormatterLimitTests(unittest.IsolatedAsyncioTestCase):
+    """The formatter reports a source that is not UTF-8 or too large as unformattable."""
+
     async def unformattable(
         self, content: bytes, rule: str, limit: int = MAX_SOURCE_BYTES
     ) -> Finding:
-        """The finding of ``rule`` for a ``main.tex`` that the formatter cannot take."""
+        """Return the finding of ``rule`` for a ``main.tex`` that the formatter cannot take.
+
+        The formatter is a fake with no scripted results. The source must stay unchanged,
+        and exactly one finding may have ``rule``.
+
+        Args:
+            content: The bytes of ``main.tex``.
+            rule: The rule of the expected finding.
+            limit: The largest source size, patched over ``MAX_SOURCE_BYTES``.
+
+        Returns:
+            The one finding of ``rule``.
+        """
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
             (base / "source").mkdir()
@@ -55,6 +69,8 @@ class FormatterLimitTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ArchiveLimitTests(unittest.IsolatedAsyncioTestCase):
+    """An archive over its byte limit blocks verification."""
+
     async def test_an_archive_over_max_bytes_blocks_verification(self) -> None:
         async def build(tree, main, work, engine, runner, **_options):
             work.mkdir()

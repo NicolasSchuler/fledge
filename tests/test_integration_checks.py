@@ -25,6 +25,8 @@ from tests.support import live_test
 
 @live_test("Set FLEDGE_RUN_INTEGRATION=1 for the live configured-check preparation workflow")
 class LiveConfiguredChecksTests(unittest.IsolatedAsyncioTestCase):
+    """Configured checks in a real ``prepare`` job with flattening and an archive rebuild."""
+
     async def test_configured_checks_survive_flattening_and_exact_archive_rebuild(self) -> None:
         with tempfile.TemporaryDirectory(prefix="latex-prep-configured-live-") as directory:
             base = Path(directory).resolve()

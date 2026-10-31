@@ -32,6 +32,15 @@ CITING = (
 
 
 def blocked(task: str, document: str | None = None) -> Finding:
+    """Return the skipped-task finding of a task that the failed baseline build blocked.
+
+    Args:
+        task: The name of the task that was not run.
+        document: The document the task belongs to, recorded in the details when given.
+
+    Returns:
+        An informational ``execution.task`` finding with the status ``skipped``.
+    """
     details: dict[str, object] = {"task": task, "blocked_by": ["baseline build"]}
     if document:
         details["document"] = document
@@ -45,7 +54,11 @@ def blocked(task: str, document: str | None = None) -> Finding:
 
 
 def tex_error_build(work: Path) -> BuildResult:
-    """A build that stopped on a TeX error before the bibliography backend ran."""
+    """Return a build that stopped on a TeX error before the bibliography backend ran.
+
+    The build reports the TeX error and the undefined citation of ``knuth`` on input line 3
+    of ``main.tex``. ``work`` is created if it does not exist.
+    """
     work.mkdir(parents=True, exist_ok=True)
     return BuildResult(
         success=False,
@@ -65,6 +78,8 @@ def tex_error_build(work: Path) -> BuildResult:
 
 
 class BlockedTaskSummaryTests(unittest.TestCase):
+    """Tasks blocked by one failed prerequisite are summarized on one line per document."""
+
     def test_tasks_blocked_by_one_failure_render_as_one_line(self):
         names = ("baseline PDF inspection", "baseline configured PDF checks", "pdf fonts")
         report = Report("check", findings=[blocked(name) for name in names])
@@ -124,6 +139,8 @@ class BlockedTaskSummaryTests(unittest.TestCase):
 
 
 class DuplicateFindingTests(unittest.TestCase):
+    """A finding repeated at a later stage is shown once unless its result or place differs."""
+
     def test_identical_recheck_at_a_later_stage_is_shown_once(self):
         marker = Finding(
             "source.edit_marker",
@@ -188,6 +205,8 @@ class DuplicateFindingTests(unittest.TestCase):
 
 
 class CitationAfterTexErrorTests(unittest.TestCase):
+    """Undefined citations and references after a TeX error are inconclusive, not failures."""
+
     def test_citations_after_a_tex_error_are_inconclusive(self):
         with tempfile.TemporaryDirectory() as directory:
             build = tex_error_build(Path(directory))
@@ -264,13 +283,25 @@ class CitationAfterTexErrorTests(unittest.TestCase):
 
 
 class BibliographyCascadeTests(unittest.TestCase):
+    """A source problem makes the bibliography checks report one note instead of four."""
+
     def setUp(self):
+        """Create a temporary root and take the default bibliography check settings."""
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)
         self.options = Settings().bibliography_checks
 
     def assert_one_note(self, findings: list[Finding], cause: str) -> None:
+        """Assert that one inconclusive source note replaces the four bibliography checks.
+
+        No check among BIB101, BIB102, BIB105 and BIB106 may be inconclusive on its own; the one
+        ``bibliography.source_error`` note names ``cause`` and lists those four checks.
+
+        Args:
+            findings: The findings of the bibliography checks.
+            cause: Text that the message of the note must contain.
+        """
         incomplete = [
             item
             for item in findings
@@ -318,6 +349,8 @@ class BibliographyCascadeTests(unittest.TestCase):
 
 
 class MainSelectionTests(unittest.TestCase):
+    """An ambiguous main source is reported once."""
+
     def test_ambiguous_roots_are_reported_once(self):
         with tempfile.TemporaryDirectory() as directory:
             source = write_project(
@@ -336,6 +369,8 @@ class MainSelectionTests(unittest.TestCase):
 
 
 class NotCheckedFooterTests(unittest.TestCase):
+    """The footer that names the opt-in areas a run did not check."""
+
     def test_default_settings_name_major_opt_in_areas(self):
         entries = not_checked_areas(configured_opt_in_codes(Settings().top_level_values()))
         areas = [entry.area for entry in entries]

@@ -14,13 +14,32 @@ from tests.support import live_test
 
 
 class DiagnosticRunner(ToolRunner):
-    """Keep bounded fixture diagnostics without changing actual confinement."""
+    """A tool runner that keeps bounded fixture diagnostics without changing actual confinement.
+
+    It runs every command with the real runner and a fixed ``SOURCE_DATE_EPOCH``.
+
+    Attributes:
+        diagnostics: One entry per command that failed, timed out or exceeded a resource
+            limit: its tool, exit code, the last 6000 characters of its standard error and
+            output, and whether a resource limit was exceeded.
+    """
 
     def __init__(self):
         super().__init__(source_date_epoch=1_700_000_000)
         self.diagnostics = []
 
     async def run(self, argv, cwd, workspace, **kwargs):
+        """Run a command with the real runner and record a diagnostic when it did not succeed.
+
+        Args:
+            argv: The command line.
+            cwd: The working directory.
+            workspace: The workspace granted to the command.
+            **kwargs: Further keyword arguments of :meth:`ToolRunner.run`.
+
+        Returns:
+            The result of the real runner.
+        """
         result = await super().run(argv, cwd, workspace, **kwargs)
         if result.returncode or result.resource_exceeded or result.timed_out:
             self.diagnostics.append(
@@ -37,7 +56,10 @@ class DiagnosticRunner(ToolRunner):
 
 @live_test("Enable FLEDGE_RUN_INTEGRATION for real restricted TeX/Biber tools")
 class LiveBackendIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    """Real Biber, XeLaTeX and LuaLaTeX builds through ``build_project`` in the sandbox."""
+
     async def asyncSetUp(self):
+        """Create a temporary root with an empty ``source`` folder and a diagnostic runner."""
         self.temporary = tempfile.TemporaryDirectory(prefix="latex-prep-backends-")
         self.root = Path(self.temporary.name).resolve()
         self.source = self.root / "source"
@@ -45,9 +67,11 @@ class LiveBackendIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.runner = DiagnosticRunner()
 
     async def asyncTearDown(self):
+        """Remove the temporary root."""
         self.temporary.cleanup()
 
     def require_tools(self, *names):
+        """Skip the test unless every one of ``names`` is installed."""
         missing = [name for name in names if shutil.which(name) is None]
         if missing:
             self.skipTest("Required installed tools are absent: " + ", ".join(missing))
@@ -95,6 +119,11 @@ class LiveBackendIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((self.source / "main.tex").read_text(), original)
 
     async def engine_smoke(self, engine):
+        """Build a two-sided article with ``engine`` and check its build and package inventory.
+
+        Skips unless latexmk and the engine are installed. The source must be left unchanged
+        and the inventory must record the class options of ``article.cls``.
+        """
         self.require_tools("latexmk", engine)
         original = (
             "\\documentclass[11pt,twoside]{article}\n"

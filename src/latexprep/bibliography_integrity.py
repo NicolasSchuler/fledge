@@ -38,7 +38,7 @@ from .findings import Finding, Severity, Status
 
 
 def _input_finding(problem: BibliographyProblem) -> Finding:
-    """The finding for a bibliography file that was not read."""
+    """Build the finding for a bibliography file that was not read."""
     if problem.kind is ProblemKind.LINKED:
         return Finding(
             "bibliography.input",
@@ -63,7 +63,20 @@ def _input_finding(problem: BibliographyProblem) -> Finding:
 def _load_bibliographies(
     root: Path, only: set[str] | None
 ) -> tuple[list[BibDocument], list[Finding]]:
-    """Parse every .bib file below ``root``, or only the named ones."""
+    """Parse every .bib file below ``root``, or only the named ones.
+
+    Args:
+        root: The project directory.
+        only: The project-relative names of the files to read, or ``None`` to read every
+            .bib file below ``root``.
+
+    Returns:
+        The documents that were read, valid or not, and a finding for each file that
+        was not.
+
+    Raises:
+        PreparationError: ``root`` is not a directory.
+    """
     require_directory(root, "Bibliography input")
     names = discover_bibliographies(root) if only is None else only
     load = read_declared_bibliographies(root, names, BibliographyBudget())
@@ -71,6 +84,7 @@ def _load_bibliographies(
 
 
 def _defined_keys(documents: list[BibDocument]) -> set[str]:
+    """Collect every entry key and literal ``ids`` alias of ``documents``."""
     keys = {entry.key for document in documents for entry in document.entries}
     # biblatex's literal ids field supplies alternate entry keys.
     for document in documents:
@@ -83,12 +97,14 @@ def _defined_keys(documents: list[BibDocument]) -> set[str]:
 
 
 def _field_values(entry: Entry) -> dict[str, tuple[tuple[str, str], ...]]:
+    """Map each field name of ``entry`` to the kind and value of each of its atoms."""
     return {
         item.name: tuple((atom.kind, atom.value) for atom in item.atoms) for item in entry.fields
     }
 
 
 def _conflicts(first: Entry, second: Entry) -> list[str]:
+    """List, sorted, the fields other than ``doi`` that both entries hold with different values."""
     first_values = _field_values(first)
     second_values = _field_values(second)
     return sorted(
@@ -99,7 +115,28 @@ def _conflicts(first: Entry, second: Entry) -> list[str]:
 
 
 class _IntegrityCheck:
-    """Cross-file consistency of keys, string macros, relationships and DOIs."""
+    """Cross-file consistency of keys, string macros, relationships and DOIs.
+
+    A missing macro definition or relationship target is a certain error only when
+    ``complete`` is true and the bibliography style is known in full; otherwise it is an
+    inconclusive warning. The first entry seen with a key or DOI is the one that later
+    duplicates are reported against, so records are checked in document order.
+
+    Args:
+        documents: The documents to check, whose keys, ``ids`` aliases and ``@string``
+            names count as defined.
+        complete: Whether every inspected file parsed.
+
+    Attributes:
+        style: The macros the bibliography style is known to define.
+        macro_names: The month macros, the style's macros and the names that the
+            documents' ``@string`` declarations define.
+        keys: Every entry key and literal ``ids`` alias of the documents.
+        severity: The severity of a missing macro definition or relationship target.
+        status: The status of a missing macro definition or relationship target.
+        seen_keys: The first entry seen with each key, and its document.
+        seen_dois: The first entry seen with each DOI, and its document.
+    """
 
     def __init__(
         self, documents: list[BibDocument], *, complete: bool, style: StyleMacros | None = None
@@ -127,6 +164,18 @@ class _IntegrityCheck:
         self.seen_dois: dict[str, tuple[BibDocument, Entry]] = {}
 
     def findings(self, document: BibDocument, record: Entry | Declaration) -> Iterator[Finding]:
+        """Check one record of ``document``.
+
+        A declaration is checked for undefined macros; an entry for a duplicate key,
+        repeated fields, undefined macros, missing relationship targets and its DOI.
+
+        Args:
+            document: The document that holds the record.
+            record: The entry or declaration to check.
+
+        Yields:
+            The record's findings.
+        """
         if isinstance(record, Declaration):
             for bib_field in record.fields:
                 yield from self._undefined_macros(document, bib_field)
@@ -151,6 +200,16 @@ class _IntegrityCheck:
                 yield from self._doi(document, record, bib_field)
 
     def _duplicate_key(self, document: BibDocument, entry: Entry) -> Iterator[Finding]:
+        """Report ``entry`` when an earlier entry has its key, or remember it as the first.
+
+        Args:
+            document: The document that holds the entry.
+            entry: The entry to check.
+
+        Yields:
+            A duplicate-key finding with the first entry's location and the fields
+            whose values differ.
+        """
         first = self.seen_keys.get(entry.key)
         if first is None:
             self.seen_keys[entry.key] = (document, entry)
@@ -171,6 +230,16 @@ class _IntegrityCheck:
         )
 
     def _undefined_macros(self, document: BibDocument, bib_field: Field) -> Iterator[Finding]:
+        """Report each string macro in ``bib_field`` that no known definition covers.
+
+        Args:
+            document: The document that holds the field.
+            bib_field: The field whose macros are checked.
+
+        Yields:
+            One finding per undefined macro, naming the style that may define it when
+            the style is uncertain.
+        """
         for atom in bib_field.atoms:
             if atom.kind == "macro" and atom.value.lower() not in self.macro_names:
                 if self.style.uncertain:
@@ -200,6 +269,19 @@ class _IntegrityCheck:
                 )
 
     def _relationship(self, document: BibDocument, bib_field: Field) -> Iterator[Finding]:
+        """Report the targets of a relationship field that no key or alias defines.
+
+        ``crossref`` and ``xref`` name one target; the other relationship fields list
+        targets separated by commas.
+
+        Args:
+            document: The document that holds the field.
+            bib_field: The relationship field.
+
+        Yields:
+            An inconclusive finding when the value is not a plain literal, otherwise one
+            finding per missing target.
+        """
         value = plain_literal(bib_field)
         if value is None:
             yield located_finding(
@@ -223,6 +305,18 @@ class _IntegrityCheck:
                 )
 
     def _doi(self, document: BibDocument, entry: Entry, bib_field: Field) -> Iterator[Finding]:
+        """Check a DOI's syntax and report a DOI that an earlier entry already has.
+
+        Args:
+            document: The document that holds the entry.
+            entry: The entry that holds the field.
+            bib_field: The DOI field.
+
+        Yields:
+            An inconclusive finding for markup that cannot be read, an invalid-DOI
+            finding, or a duplicate-DOI finding with the first entry's location and the
+            fields whose values differ.
+        """
         reading = read_doi(bib_field)
         if reading.uncertainty:
             yield located_finding(
@@ -267,6 +361,18 @@ class _IntegrityCheck:
 def _integrity_findings(
     documents: list[BibDocument], input_findings: list[Finding], style: StyleMacros
 ) -> list[Finding]:
+    """Run the integrity checks over ``documents``.
+
+    Args:
+        documents: The documents that were read.
+        input_findings: The findings for the files that were not read; any of them
+            makes missing definitions and targets inconclusive.
+        style: The macros the bibliography style is known to define.
+
+    Returns:
+        The input findings, then each document's syntax finding and record findings in
+        document order.
+    """
     findings = list(input_findings)
     check = _IntegrityCheck(
         documents,
@@ -285,7 +391,21 @@ def _integrity_findings(
 def inspect_bibliography_integrity(
     root: Path, main: str | None = None, *, analysed: AnalysedSource | None = None
 ) -> tuple[list[BibDocument], list[Finding]]:
-    """The parsed documents of :func:`check_bibliography_integrity` with its findings."""
+    """Return the parsed documents of :func:`check_bibliography_integrity` with its findings.
+
+    Args:
+        root: The project directory.
+        main: The main source whose declared resources select the files, or ``None`` to
+            inspect every .bib file below ``root``.
+        analysed: A source analysis of the same root and main file shared with other
+            checks; without one the checks build their own.
+
+    Returns:
+        The parsed documents and the findings.
+
+    Raises:
+        PreparationError: ``root`` is not a directory.
+    """
     selection = selected_bibliography(root, main, analysed=analysed)
     documents, findings = _load_bibliographies(root, selection.resources)
     style = style_macros(root, selection.styles)
@@ -310,7 +430,17 @@ def check_bibliography_integrity(
     No findings means no problem was found by these checks, not that metadata,
     macro expansion order, style requirements, or rendered citations are valid.
 
-    ``analysed`` shares the source analysis of the same root and main file with other
-    checks; without one the checks build their own.
+    Args:
+        root: The project directory.
+        main: The main source whose declared resources select the files, or ``None`` to
+            inspect every .bib file below ``root``.
+        analysed: The source analysis of the same root and main file, shared with other
+            checks; without one the checks build their own.
+
+    Returns:
+        The findings.
+
+    Raises:
+        PreparationError: ``root`` is not a directory.
     """
     return inspect_bibliography_integrity(root, main, analysed=analysed)[1]

@@ -38,23 +38,38 @@ _METADATA_STAGE = "final metadata sanitization"
 
 @dataclass(frozen=True, slots=True)
 class ShippedSources:
-    """Selected and possibly flattened sources, rebuilt and matched against the baseline."""
+    """Selected and possibly flattened sources, rebuilt and matched against the baseline.
+
+    Attributes:
+        root: The folder of the sources.
+        main: The main file, relative to ``root``.
+        pdf: The PDF of the build that was matched against the baseline.
+        path_mapping: The source-to-package names of a flattening; empty for the preserved
+            layout.
+    """
 
     root: Path
     main: str
-    # The PDF of the build that was matched against the baseline.
     pdf: Path
-    # Source-to-package names of a flattening; empty for the preserved layout.
     path_mapping: Mapping[str, str]
 
     @property
     def layout(self) -> PackageLayout:
+        """The folder of the sources and its path mapping, as a package layout."""
         return PackageLayout(self.root, self.path_mapping)
 
 
 @dataclass(frozen=True, slots=True)
 class PackageVerification:
-    """Collaborators of the final steps; ``results`` are the scheduler's finished tasks."""
+    """Collaborators of the final steps.
+
+    Attributes:
+        context: The context of the job.
+        reporter: Records the findings and inventories of the steps in the report.
+        scheduler: Runs the final verification tasks.
+        results: The scheduler's finished tasks, by name.
+        reference: The PDF the researcher supplied for comparison, or ``None``.
+    """
 
     context: JobContext
     reporter: TaskReporter
@@ -63,10 +78,18 @@ class PackageVerification:
     reference: Path | None
 
     def _blocked(self) -> bool:
+        """Return whether a finding in the report so far stops the job."""
         return is_blocked(self.reporter.report, self.context.settings)
 
     async def package_and_verify(self, shipped: ShippedSources) -> VerifiedPackage | None:
-        """Write the archive, rebuild a fresh extraction and run the final checks."""
+        """Write the archive, rebuild a fresh extraction and run the final checks.
+
+        Args:
+            shipped: The sources to archive.
+
+        Returns:
+            The verified package, or ``None`` when a step blocks.
+        """
         submission = prepared_submission_options(self.context.settings, shipped.path_mapping)
         if not await self._check_prepared_submission(shipped, submission):
             return None
@@ -79,7 +102,15 @@ class PackageVerification:
     async def _check_prepared_submission(
         self, shipped: ShippedSources, submission: SubmissionOptions
     ) -> bool:
-        """Run the submission checks on the shipped sources; False when they block."""
+        """Run the submission checks on the shipped sources; ``False`` when they block.
+
+        Args:
+            shipped: The sources to check.
+            submission: The submission policy for the shipped layout.
+
+        Returns:
+            Whether the job may continue.
+        """
         record_findings(
             self.reporter.report,
             await self.context.thread_operation(
@@ -94,7 +125,14 @@ class PackageVerification:
         return not self._blocked()
 
     async def _create_archive_and_gate(self, shipped: ShippedSources) -> Path | None:
-        """Write the ZIP and check its policy and size; None when either blocks."""
+        """Write the ZIP and check its policy and size; ``None`` when either blocks.
+
+        Args:
+            shipped: The sources to archive.
+
+        Returns:
+            The archive, or ``None``.
+        """
         context, settings, report = self.context, self.context.settings, self.reporter.report
         context.emit("Packaging sources and rebuilding a fresh extraction of the exact ZIP")
         archive = context.work / "submission.zip"
@@ -153,7 +191,17 @@ class PackageVerification:
         extracted: ImportedProject,
         submission: SubmissionOptions,
     ) -> VerifiedPackage | None:
-        """Rebuild from the extraction and run the final checks; None when anything blocks."""
+        """Rebuild from the extraction and run the final checks; ``None`` when anything blocks.
+
+        Args:
+            shipped: The sources that were archived.
+            archive: The archive that was extracted.
+            extracted: The fresh extraction of ``archive``.
+            submission: The submission policy for the shipped layout.
+
+        Returns:
+            The verified package, or ``None``.
+        """
         context, settings, report = self.context, self.context.settings, self.reporter.report
         final = await build_stage(context, self.reporter, extracted.root, shipped.main, ARCHIVE)
         final_pdf = final.pdf

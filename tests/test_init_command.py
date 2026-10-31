@@ -1,4 +1,4 @@
-"""`fledge init`: written files load, existing files are kept, and errors are clear."""
+"""``fledge init``: written files load, existing files are kept, and errors are clear."""
 
 from __future__ import annotations
 
@@ -19,7 +19,10 @@ from tests.support import ProjectTestCase
 
 
 class InitCommandTests(ProjectTestCase):
+    """The settings files that ``fledge init`` writes, refuses to overwrite or fails to write."""
+
     def setUp(self):
+        """Create an empty ``paper`` project whose settings file would be ``fledge.toml``."""
         super().setUp()
         self.project = self.root / "paper"
         self.project.mkdir()
@@ -27,6 +30,7 @@ class InitCommandTests(ProjectTestCase):
         self.runner = CliRunner()
 
     def init(self, *arguments: str):
+        """Run ``fledge init`` with ``arguments`` and return the Click result."""
         return self.runner.invoke(cli, ["init", *arguments])
 
     def test_each_preset_writes_a_file_the_normal_loader_discovers_and_accepts(self):

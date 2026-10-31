@@ -400,11 +400,33 @@ TABLE_CASES = (
 
 
 def parse(text: str):
+    """Parse ``text``, with a final newline added, as the settings file ``fledge.toml``.
+
+    Returns:
+        The parsed settings.
+
+    Raises:
+        SettingsError: The text is not a valid settings file.
+    """
     return parse_settings_text(text + "\n", Path("fledge.toml"))
 
 
 class SettingsErrorMessageTests(unittest.TestCase):
+    """The messages of settings errors: the key or table at fault, what it accepts and suggestions.
+
+    An error uses the setting name the file used, including a former one; a misspelled key in a
+    table suggests the closest valid key or lists the valid ones; and a valid file still loads.
+    """
+
     def assert_error(self, text: str, names: tuple[str, ...], message: str, *, exact: bool) -> None:
+        """Assert that parsing ``text`` fails with ``message`` and names exactly ``names``.
+
+        Args:
+            text: The settings text to parse.
+            names: The top-level settings the error must name; each must be a known setting.
+            message: The expected message, or a part of it.
+            exact: Whether the message must equal ``message`` instead of containing it.
+        """
         with self.assertRaises(SettingsError) as raised:
             parse(text)
         if exact:
@@ -488,6 +510,12 @@ class SettingsErrorMessageTests(unittest.TestCase):
 
 
 class RasterSamplingDefaultsTests(unittest.TestCase):
+    """The defaults and limits of the three raster sampling tables.
+
+    ``pdf_checks``, ``rendered_pdf_artwork`` and ``included_figure_artwork`` share the defaults and
+    limits of the background gray and the ink difference but keep their own default resolution.
+    """
+
     def test_the_two_tables_share_limits_but_keep_their_own_default_resolution(self) -> None:
         settings = parse("")
         self.assertEqual(settings.pdf_checks.raster_dpi, 36)

@@ -23,12 +23,27 @@ NEEDED_FOR_RESTRUCTURING = (
 
 
 def listed_names(names: Sequence[str]) -> str:
-    """Comma-separated ``names``; many of them are cut short and counted as ``(+N more)``."""
+    """Join ``names`` with commas; many of them are cut short and counted as ``(+N more)``.
+
+    At most ``MAX_LISTED_PATHS`` names are listed.
+
+    Args:
+        names: The names to list, in the order to show them.
+
+    Returns:
+        The comma-separated names, with the ``(+N more)`` suffix when some are left out.
+    """
     return ", ".join(names[:MAX_LISTED_PATHS]) + more_suffix(len(names) - MAX_LISTED_PATHS)
 
 
 class GraphFindings:
-    """The findings of one source graph, written to the lists the graph exposes."""
+    """The findings of one source graph, written to the lists the graph exposes.
+
+    Attributes:
+        findings: Every finding, in the order it was found.
+        uncertainties: The inconclusive subset of ``findings``: what the scan could not
+            follow.
+    """
 
     def __init__(self, findings: list[Finding], uncertainties: list[Finding]) -> None:
         self.findings = findings
@@ -43,7 +58,18 @@ class GraphFindings:
         suggestion: str | None = None,
         details: dict[str, object] | None = None,
     ) -> None:
-        """Record something the scan could not follow; an identical finding is kept once."""
+        """Record something the scan could not follow; an identical finding is kept once.
+
+        The finding is inconclusive and goes to both ``uncertainties`` and ``findings``.
+
+        Args:
+            rule: The descriptive dotted rule name of the finding.
+            message: The message of the finding.
+            path: The project file the finding concerns.
+            line: The line the finding concerns, if known.
+            suggestion: The fix for this occurrence, if any.
+            details: Evidence for renderers and JSON; ``None`` records none.
+        """
         finding = Finding(
             rule,
             message,
@@ -67,7 +93,18 @@ class GraphFindings:
         *,
         suggestion: str | None = None,
     ) -> None:
-        """Record a reference that cannot be satisfied; an identical finding is kept once."""
+        """Record a reference that cannot be satisfied; an identical finding is kept once.
+
+        The finding has error severity and goes to ``findings`` only.
+
+        Args:
+            rule: The descriptive dotted rule name of the finding.
+            message: The message of the finding.
+            path: The project file the finding concerns.
+            line: The line of the reference.
+            details: Evidence for renderers and JSON; ``None`` records none.
+            suggestion: The fix for this occurrence, if any.
+        """
         finding = Finding(
             rule,
             message,

@@ -43,14 +43,17 @@ from tests.support import ProjectTestCase
 
 
 def selection(*codes: str) -> CheckSelection:
+    """Return a check selection that selects only ``codes``."""
     return CheckSelection(select=codes)
 
 
 def codes(findings: list[Finding]) -> set[str]:
+    """Return the codes of ``findings``, leaving out findings without a code."""
     return {finding.code for finding in findings if finding.code is not None}
 
 
 def configured_manuscript() -> Settings:
+    """Return settings that configure manuscript class, package, abstract and author policies."""
     return Settings(
         manuscript=ManuscriptOptions(
             expected_document_class="article",
@@ -88,6 +91,7 @@ def configured_manuscript() -> Settings:
 
 
 def configured_artwork() -> PdfArtworkOptions:
+    """Return artwork options that configure printer mark detection in one trim region."""
     region = PdfRegion("Figure", 1, 5, 5, 95, 95)
     return PdfArtworkOptions(
         detect_printer_marks=True,
@@ -114,6 +118,7 @@ def configured_artwork() -> PdfArtworkOptions:
 
 
 def configured_pdf_details() -> PdfCheckOptions:
+    """Return PDF check options with a section budget and a minimum text size configured."""
     return PdfCheckOptions(
         section_budgets=(PdfSectionBudget("Body", 1, 1, 2),),
         min_text_size_pt=10,
@@ -141,7 +146,10 @@ def configured_pdf_details() -> PdfCheckOptions:
 
 
 class CheckPolicyTests(ProjectTestCase):
+    """Tests of the opt-in policies that check selection switches off, and of what it keeps."""
+
     def setUp(self) -> None:
+        """Write a manuscript with metadata, an abstract and one citation, and its bibliography."""
         super().setUp()
         self.main = self.root / "main.tex"
         self.main.write_text(
@@ -640,7 +648,7 @@ class CheckPolicyMapTests(unittest.TestCase):
         self.assertIsNone(ROOT_CHECKS["TEX101"]["expected_document_class"])
 
     def test_disabled_values_equal_the_defaults_except_for_checks_that_run_by_default(self) -> None:
-        """Each table row clears a field to the value its option class defaults to."""
+        """Check that each table row clears a field to the value its option class defaults to."""
         from latexprep import check_policy
 
         defaults = Settings().top_level_values()

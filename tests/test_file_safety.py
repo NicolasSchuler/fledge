@@ -1,3 +1,5 @@
+"""Bounded and refused file reads, and the wording of byte counts."""
+
 from __future__ import annotations
 
 import os
@@ -14,6 +16,8 @@ from tests.support import ProjectTestCase
 
 
 class ByteCountTextTests(unittest.TestCase):
+    """How :func:`byte_count_text` writes a number of bytes."""
+
     def test_counts_are_written_in_the_largest_exact_binary_unit(self) -> None:
         self.assertEqual(byte_count_text(256 * MIB), "256 MiB")
         self.assertEqual(byte_count_text(MIB + MIB // 2), "1.5 MiB")
@@ -23,6 +27,8 @@ class ByteCountTextTests(unittest.TestCase):
 
 
 class BoundedReadTests(ProjectTestCase):
+    """Size limits and the refusal of special files, directories and links when reading."""
+
     def test_a_file_at_the_limit_is_read_whole_and_one_byte_more_is_refused(self) -> None:
         large = self.root / "large.tex"
         large.write_bytes(b"x" * 2048)

@@ -20,6 +20,18 @@ RESOURCE_CLASSES: tuple[ResourceClass, ...] = get_args(ResourceClass)
 
 @dataclass
 class Lease:
+    """One granted reservation, active until its operation ends.
+
+    Attributes:
+        name: The operation's name.
+        cpu: The reserved CPU units.
+        memory_mb: The reserved memory in MiB.
+        kind: The tool class whose concurrency limit the lease counts against, if any.
+        owner: The task that holds the lease.
+        queue_seconds: How long the operation waited for the reservation.
+        active: Whether the reservation is still held.
+    """
+
     name: str
     cpu: int
     memory_mb: int
@@ -34,7 +46,17 @@ class ResourceBudget:
 
     Reservations are conservative estimates. Runtime observes aggregate RSS and
     temporary bytes separately; this class does not claim an OS-hard memory cap.
-    ``cpu_slots`` is the ``jobs`` setting: CPU units shared by every operation.
+    Leases are granted in the order they were requested. Construction raises
+    ``PreparationError`` for a limit that is not a positive integer or a coordinator
+    reservation that does not fit the memory budget.
+
+    Attributes:
+        cpu_slots: The ``jobs`` setting: CPU units shared by every operation.
+        memory_mb: The memory budget in MiB.
+        build_jobs: How many builds may hold a lease at once.
+        render_jobs: How many renders may hold a lease at once.
+        coordinator_memory_mb: The memory in MiB reserved for the parent process.
+        available_memory_mb: The memory in MiB that leases share.
     """
 
     def __init__(
@@ -77,10 +99,22 @@ class ResourceBudget:
 
     @property
     def current_lease(self) -> Lease | None:
+        """The active lease that the calling task holds, or ``None``."""
         lease = self._active.get()
         return lease if lease and lease.active and lease.owner is asyncio.current_task() else None
 
     def validate(self, *, cpu: int, memory_mb: int, kind: ResourceClass | None = None) -> None:
+        """Check that a reservation is well formed and fits the whole budget on its own.
+
+        Args:
+            cpu: The CPU units to reserve.
+            memory_mb: The memory to reserve in MiB.
+            kind: The tool class, if any.
+
+        Raises:
+            PreparationError: A value is not an integer, the reservation is below one unit
+                or exceeds the capacity, or ``kind`` is unknown.
+        """
         if type(cpu) is not int or type(memory_mb) is not int:
             raise PreparationError("Resource reservations must be integers")
         if not (1 <= cpu <= self.cpu_slots and 1 <= memory_mb <= self.available_memory_mb):
@@ -93,6 +127,7 @@ class ResourceBudget:
             raise PreparationError(f"Unknown resource class: {kind}")
 
     def _fits(self, cpu: int, memory_mb: int, kind: ResourceClass | None) -> bool:
+        """Return whether a reservation fits beside the held ones and within its class limit."""
         return (
             self._used_cpu + cpu <= self.cpu_slots
             and self._used_memory + memory_mb <= self.available_memory_mb
@@ -108,6 +143,25 @@ class ResourceBudget:
         memory_mb: int = DEFAULT_LEASE_MEMORY_MB,
         kind: ResourceClass | None = None,
     ):
+        """Hold a reservation for the duration of the ``async with`` block.
+
+        The caller waits until every earlier request is granted and the reservation fits.
+        Leaving the block releases the reservation without suspension, so repeated
+        cancellation cannot leak it, and records the operation for :meth:`statistics`.
+
+        Args:
+            name: The operation's name in the statistics.
+            cpu: The CPU units to reserve.
+            memory_mb: The memory to reserve in MiB.
+            kind: The tool class whose concurrency limit applies, if any.
+
+        Yields:
+            The granted lease.
+
+        Raises:
+            PreparationError: The reservation is invalid (see :meth:`validate`), or the
+                caller already holds an active lease.
+        """
         self.validate(cpu=cpu, memory_mb=memory_mb, kind=kind)
         inherited = self._active.get()
         if inherited is not None and inherited.active:
@@ -160,12 +214,18 @@ class ResourceBudget:
 
             # Condition notification needs its lock, but cleanup must not be interruptible.
             async def notify() -> None:
+                """Wake every waiting request under the condition's lock."""
                 async with self._condition:
                     self._condition.notify_all()
 
             await complete_despite_cancellation(notify())
 
     def statistics(self) -> dict[str, object]:
+        """Summarize the budget, its peak and current use, and every finished operation.
+
+        Returns:
+            Plain data for the report, with the operations sorted by name.
+        """
         # Report keys name the settings: ``jobs`` is the CPU slot count.
         return {
             "jobs": self.cpu_slots,

@@ -1,8 +1,8 @@
-"""Literal release metadata of the class and package files a build loaded.
+r"""Literal release metadata of the class and package files a build loaded.
 
 A build reads classes and packages from the project and from the TeX distribution. This
 module records each one's name, where it lives and the release its own header declares
-(``\\ProvidesPackage`` and its expl3 forms), by reading the first bytes as text. Nothing
+(``\ProvidesPackage`` and its expl3 forms), by reading the first bytes as text. Nothing
 is executed or expanded, and a header that is conditional, repeated or inside a
 definition declares nothing. Which files a build read is ``build_dependencies``'s work;
 policies over the result are ``build_checks``'s.
@@ -35,7 +35,7 @@ PackageOrigin = Literal["project", "toolchain"]
 
 
 def parse_declared_date(value: str) -> date | None:
-    """A LaTeX release date such as 2025/01/31; ``None`` when absent or invalid."""
+    """Parse a LaTeX release date such as 2025/01/31; ``None`` when absent or invalid."""
     if not _DECLARED_DATE.fullmatch(value):
         return None
     try:
@@ -46,7 +46,15 @@ def parse_declared_date(value: str) -> date | None:
 
 @dataclass(frozen=True, slots=True)
 class LoadedPackage:
-    """A class or package file the build read, with its literal declared release."""
+    """A class or package file the build read, with its literal declared release.
+
+    Attributes:
+        name: The file name, such as ``article.cls``.
+        path: The path relative to the project for a project file, else the path as given.
+        origin: Whether the file belongs to the project or to the TeX distribution.
+        declared_date: The release date the header declares, as written, or ``None``.
+        declared_version: The version that follows the date in the header, or ``None``.
+    """
 
     name: str
     path: str
@@ -56,12 +64,28 @@ class LoadedPackage:
 
 
 class _Release(NamedTuple):
+    """The release a header declares.
+
+    Attributes:
+        date: The date as written, such as 2025/01/31.
+        version: The word that follows the date, or ``None``.
+    """
+
     date: str
     version: str | None
 
 
 def read_loaded_package(path: Path, project: Path) -> LoadedPackage:
-    """Record bounded literal header metadata, never execute package source."""
+    """Record bounded literal header metadata, never execute package source.
+
+    Args:
+        path: The class or package file the build read.
+        project: The project folder; a file inside it belongs to the project, any other
+            file to the toolchain.
+
+    Returns:
+        The package, with the release its header declares if the header establishes one.
+    """
     local = path.is_relative_to(project)
     package = LoadedPackage(
         name=path.name,
@@ -75,6 +99,16 @@ def read_loaded_package(path: Path, project: Path) -> LoadedPackage:
 
 
 def _declared_release(path: Path) -> _Release | None:
+    """Read the release that the header of ``path`` declares, if it establishes one.
+
+    Only the first ``_MAX_PACKAGE_HEADER_BYTES`` are read, with literals masked. The header
+    must hold exactly one declaration, at top level and preceded by nothing but top-level
+    ``NeedsTeXFormat`` commands, and it must name the file's own stem.
+
+    Returns:
+        The release, or ``None`` when the file cannot be read or its header establishes
+        none.
+    """
     try:
         with path.open("rb") as stream:
             header = stream.read(_MAX_PACKAGE_HEADER_BYTES).decode("utf-8", errors="replace")

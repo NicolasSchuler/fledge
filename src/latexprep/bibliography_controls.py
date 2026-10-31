@@ -1,6 +1,6 @@
-"""Which bibliography backend a build's fresh control files require.
+r"""Which bibliography backend a build's fresh control files require.
 
-BibTeX leaves a ``\\bibdata`` line in the ``.aux`` file and Biber a ``.bcf`` control
+BibTeX leaves a ``\bibdata`` line in the ``.aux`` file and Biber a ``.bcf`` control
 file. Reading them as literal text shows which backend the document needs, without
 running either one: this is evidence of a requirement, not proof that a backend ran.
 A control file that is linked, too large, malformed or declares an entity is reported
@@ -30,6 +30,14 @@ ObservedBackend = Literal["bibtex", "biber"]
 
 @dataclass(frozen=True, slots=True)
 class BibliographyControl:
+    """One control file that shows a backend requirement.
+
+    Attributes:
+        path: The control file, relative to the build's output directory.
+        backend: The backend the file requires.
+        evidence: The kind of control file: a Biber ``bcf`` or a BibTeX ``aux``.
+    """
+
     path: str
     backend: ObservedBackend
     evidence: Literal["bcf", "aux"]
@@ -37,13 +45,24 @@ class BibliographyControl:
 
 @dataclass(frozen=True, slots=True)
 class BibliographyEvidence:
-    """Backends that fresh control files require; this does not assert a backend ran."""
+    """Backends that fresh control files require; this does not assert a backend ran.
+
+    Attributes:
+        observed_backends: The required backends, sorted.
+        control_files: The control files that show a requirement.
+        uncertainty: Why control evidence was skipped or not trusted, one reason each.
+    """
 
     observed_backends: tuple[ObservedBackend, ...]
     control_files: tuple[BibliographyControl, ...]
     uncertainty: tuple[str, ...]
 
     def to_details(self) -> dict[str, object]:
+        """Return the evidence as report details, with a note on what it covers.
+
+        Returns:
+            The backends, the control files, the uncertainty and the coverage note.
+        """
         return {
             "observed_backends": list(self.observed_backends),
             "control_files": [asdict(control) for control in self.control_files],
@@ -53,7 +72,19 @@ class BibliographyEvidence:
 
 
 def read_bibliography_evidence(output: Path, limit: int) -> BibliographyEvidence:
-    """Read fresh backend control files; this does not assert a backend ran."""
+    """Read fresh backend control files; this does not assert a backend ran.
+
+    A ``.bcf`` beside an ``.aux`` of the same stem shows Biber, so that ``.aux`` is not
+    read as BibTeX evidence. A control file that is linked, too large, malformed or
+    declares an entity becomes an uncertainty instead of evidence.
+
+    Args:
+        output: The build's output directory, searched recursively.
+        limit: The largest number of bytes all control files may hold together.
+
+    Returns:
+        The required backends, the control files that show them and the uncertainty.
+    """
     backends: set[ObservedBackend] = set()
     controls: list[BibliographyControl] = []
     uncertainty: list[str] = []
@@ -102,6 +133,16 @@ def read_bibliography_evidence(output: Path, limit: int) -> BibliographyEvidence
 
 
 def _require_biber_control(text: str) -> None:
+    """Accept only a ``.bcf`` text without declarations whose root is a control file.
+
+    Args:
+        text: The text of the ``.bcf`` file.
+
+    Raises:
+        PreparationError: The text declares a DOCTYPE or an entity, or its root element
+            is not ``controlfile``.
+        xml.etree.ElementTree.ParseError: The text is not well-formed XML.
+    """
     if _BCF_DECLARATION.search(text):
         raise PreparationError("BCF declarations are unsupported")
     document = ET.fromstring(text)
@@ -110,6 +151,18 @@ def _require_biber_control(text: str) -> None:
 
 
 def _declares_bibtex_data(text: str) -> bool:
+    """Return whether an ``.aux`` text declares BibTeX data with ``bibdata``.
+
+    Args:
+        text: The text of the ``.aux`` file.
+
+    Returns:
+        ``True`` when the text has at least one ``bibdata`` declaration.
+
+    Raises:
+        PreparationError: A ``bibdata`` declaration has no argument or an empty one.
+        ParseLimitExceeded: The text exceeds the lexer's limits.
+    """
     commands = scan_source_commands(text)
     resources = [command for command in commands if command.name == "bibdata"]
     if any(not command.arguments or not command.arguments[0].value for command in resources):

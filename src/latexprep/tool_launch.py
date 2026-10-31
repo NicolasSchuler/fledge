@@ -35,17 +35,30 @@ _STATE_DIRECTORIES = ("tmp", "config", "cache", "texmf", "texmf-config", "texmf-
 
 
 class ToolEnvironment(NamedTuple):
-    """The variables a tool runs with, and the directory that holds its writable state."""
+    """The environment of one tool command.
+
+    Attributes:
+        variables: The variables the tool runs with; nothing else is in its environment.
+        state_directory: The fresh per-command directory that holds the tool's temporary,
+            configuration and cache locations.
+    """
 
     variables: dict[str, str]
     state_directory: Path
 
 
 def sandbox_refusal(stderr: str) -> bool:
-    """Whether a backend reported that it could not apply its isolation.
+    """Return whether a backend reported that it could not apply its isolation.
 
     Seatbelt names its failures inside a longer line; Bubblewrap prefixes every
     message it prints itself (such as a refused user namespace) with ``bwrap:``.
+
+    Args:
+        stderr: The standard error output of the sandboxed command.
+
+    Returns:
+        ``True`` when ``stderr`` starts with the Bubblewrap prefix after leading whitespace
+        or contains one of the refusal markers.
     """
     return stderr.lstrip().startswith(_BUBBLEWRAP_PREFIX) or any(
         marker in stderr for marker in _REFUSAL_MARKERS
@@ -53,10 +66,22 @@ def sandbox_refusal(stderr: str) -> bool:
 
 
 def with_ulimits(command: list[str], *, max_file_bytes: int, timeout_seconds: int) -> list[str]:
-    """``command`` behind a shell that lowers core, file-size, CPU and descriptor limits.
+    """Return ``command`` behind a shell that lowers core, file-size, CPU and descriptor limits.
 
     The shell script is fixed and trusted; the command's own arguments are only ever
-    passed on as arguments, never interpreted as shell source.
+    passed on as arguments, never interpreted as shell source. Core files are disabled
+    and the descriptor limit is ``OPEN_FILE_LIMIT``. The shell is ``/bin/bash`` where it
+    exists, because the file-size argument is computed in the 1024-byte units bash uses,
+    and ``/bin/sh`` otherwise.
+
+    Args:
+        command: The argv of the tool.
+        max_file_bytes: The largest file the tool may write, in bytes; the limit is set in
+            whole KiB, rounded down.
+        timeout_seconds: The CPU time limit, in seconds.
+
+    Returns:
+        The argv that runs the limit shell, which then replaces itself with ``command``.
     """
     script = (
         'ulimit -c 0 || exit 125; ulimit -f "$1" || exit 125; '
@@ -81,9 +106,10 @@ def with_ulimits(command: list[str], *, max_file_bytes: int, timeout_seconds: in
 
 
 def tool_state_directory(workspace: Path) -> Path:
-    """Where ``create_tool_environment`` keeps the state of the commands run in ``workspace``.
+    """Return the directory that holds the state of the commands run in ``workspace``.
 
-    Tools write their own files there, for example the font cache luaotfload keeps under
+    :func:`create_tool_environment` creates each command's state directory there. Tools
+    write their own files there, for example the font cache luaotfload keeps under
     ``TEXMFVAR``, and read them back; the TeX recorder lists such reads as inputs.
     """
     return workspace / ".tool-state"
@@ -97,6 +123,16 @@ def create_tool_environment(
     Nothing is inherited from the caller. The state directory (``.tool-state/invocation-*``)
     holds the tool's temporary, configuration and cache locations; the caller removes it
     when the command ends, because a later command must never find an earlier one's files.
+    When ``context`` names a TeX Live root, the TeX search variables point into it.
+
+    Args:
+        workspace: The tool's workspace, under which the state directory is created.
+        context: The toolchain whose search paths become ``PATH`` and whose resource roots
+            locate TeX Live.
+        source_date_epoch: The value of ``SOURCE_DATE_EPOCH`` for reproducible output.
+
+    Returns:
+        The tool's variables and its new state directory.
     """
     container = tool_state_directory(workspace)
     container.mkdir(exist_ok=True)

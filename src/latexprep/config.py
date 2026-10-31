@@ -80,7 +80,20 @@ _PDF_METADATA_SOURCES = ("title", "author")
 
 
 def _bibliography_edit_tables(value: object) -> object:
-    """TOML has no null: named edit tables express absent fields explicitly."""
+    """Turn the named field-edit tables of ``bibliography_transform`` into edit tuples.
+
+    TOML has no null: named edit tables express absent fields explicitly.
+
+    Returns:
+        ``value`` with each table row of ``field_edits`` as a ``(key, field, expected,
+        replacement)`` tuple; any other value is returned unchanged.
+
+    Raises:
+        PreparationError: A field-edit table lacks ``key`` or ``field``, has other keys,
+            does not choose exactly one of ``expected`` and ``expected_absent = true`` or
+            of ``replacement`` and ``remove = true``, or gives either flag a value other
+            than true.
+    """
     if not isinstance(value, dict) or not isinstance(value.get("field_edits"), list):
         return value
     rows = []
@@ -113,6 +126,58 @@ class Settings:
     top-level keys, as do ``formatting_options.wrap_length`` and ``tab_size``.
     ``author_records`` and ``bbl_checks`` are written inside the ``structure_checks`` and
     ``submission_checks`` tables (see ``SHARED_TABLES``), and reports record them there.
+    Construction raises ``SettingsError`` when an option group is not a settings table, a
+    value is invalid, or two settings conflict.
+
+    Attributes:
+        FIELD_BOUNDS: The bounds :func:`validate_scalars` applies to the numeric settings.
+        checks: The check selection.
+        structure_checks: The options of the structure checks.
+        author_records: The options of the per-author field checks.
+        metadata_privacy: The options of the image metadata privacy check.
+        formatting_options: The formatting options.
+        source_transforms: The options of the source transformations.
+        bibliography_transform: The options of the bibliography transformation.
+        rendered_pdf_artwork: The artwork policy for the rendered document.
+        included_figure_artwork: The artwork policy for each included PDF figure.
+        reporting: The review decisions and reporting options.
+        workflow: The workflow options, including ``workflow.documents``.
+        package: The options of the package contents.
+        bibliography_checks: The options of the bibliography checks.
+        build_checks: The options of the build checks.
+        manuscript_checks: The options of the manuscript checks.
+        online_checks: The options of the online checks.
+        pdf_checks: The options of the configured PDF checks.
+        submission_checks: The options of the submission checks.
+        bbl_checks: The options of the ``.bbl`` checks.
+        manuscript: The manuscript constraints.
+        pdf: The PDF inspection constraints.
+        match_source_pdf_metadata: The source-document fields (``title``, ``author``)
+            that a PDF property must match.
+        main: The main file, or ``None``.
+        layout: The package layout.
+        engine: The TeX engine.
+        bibliography_backend: The bibliography tool, or ``auto``.
+        apply_formatting: Whether preparation applies the formatting (``--format``).
+        normalize_doi: Whether preparation normalizes DOIs.
+        cleanup: Whether preparation removes debris (``--no-cleanup`` turns it off).
+        jobs: The shared CPU slots.
+        build_jobs: How many builds may overlap.
+        render_jobs: How many page-pair renderers may run at once.
+        memory_mb: The memory shared by all running tools, in MiB.
+        build_memory_mb: The memory of one build command, in MiB.
+        timeout_seconds: The time limit of one tool command, in seconds.
+        job_timeout_seconds: The deadline of the whole job, in seconds.
+        max_temporary_bytes: The temporary data the whole job may hold, in bytes.
+        source_date_epoch: A fixed source date for the builds, in seconds since the
+            epoch, or ``None``.
+        max_files: How many files and folders together an import may hold.
+        max_bytes: The fallback of the two byte limits below.
+        max_import_bytes: The combined size of an import, or ``None`` for ``max_bytes``.
+        max_generated_file_bytes: The size of any one file a tool writes or opens, or ``None``
+            for ``max_bytes``.
+        max_depth: How many folder levels an import may hold.
+        max_pages: The page limit of the document, or ``None``.
     """
 
     FIELD_BOUNDS: ClassVar[dict[str, Bounds]] = {
@@ -142,7 +207,6 @@ class Settings:
     bibliography_transform: BibliographyTransformOptions = field(
         default_factory=BibliographyTransformOptions
     )
-    # Artwork policies for the rendered document and, separately, each included PDF figure.
     rendered_pdf_artwork: PdfArtworkOptions = field(default_factory=PdfArtworkOptions)
     included_figure_artwork: PdfArtworkOptions = field(default_factory=PdfArtworkOptions)
     reporting: ReportingOptions = field(default_factory=ReportingOptions)
@@ -197,6 +261,12 @@ class Settings:
         self._validate_combinations()
 
     def _validate_combinations(self) -> None:
+        """Reject settings that contradict each other.
+
+        Raises:
+            SettingsError: Two settings conflict, or a byte or memory limit leaves too
+                little room for another; ``settings`` names those at fault.
+        """
         if self.workflow.documents and self.main is not None:
             raise SettingsError(
                 "Choose workflow.documents or one main, not both", ("workflow", "main")
@@ -248,7 +318,7 @@ class Settings:
         return self.max_generated_file_bytes
 
     def to_dict(self) -> dict[str, object]:
-        """The settings in their TOML layout, as reports record them.
+        """Return the settings in their TOML layout, as reports record them.
 
         A configured ``online_contact_email`` is replaced by a placeholder: it is a personal
         address that a shared report, HTML file or diagnostics bundle must not carry.
@@ -272,7 +342,7 @@ class Settings:
         }
 
     def top_level_values(self) -> dict[str, object]:
-        """Every top-level TOML setting with its value; a table maps to its option object."""
+        """List every top-level TOML setting with its value; a table maps to its option object."""
         values = {
             item.name: getattr(self, item.name)
             for item in fields(self)
@@ -283,7 +353,14 @@ class Settings:
         return values
 
     def with_top_level_values(self, updates: Mapping[str, object]) -> Settings:
-        """A copy with top-level TOML settings replaced, as ``top_level_values`` names them."""
+        """Return a copy with top-level TOML settings replaced.
+
+        Args:
+            updates: The new values, named as ``top_level_values`` names them.
+
+        Returns:
+            The copy.
+        """
         changes: dict[str, Any] = {
             name: value for name, value in updates.items() if name not in _TOP_LEVEL_FIELDS
         }
@@ -336,7 +413,7 @@ SETTING_NAMES: frozenset[str] = frozenset(
 
 
 def toml_table(group: str) -> str:
-    """The TOML table in which a settings file writes the option group ``group``."""
+    """Name the TOML table in which a settings file writes the option group ``group``."""
     return SHARED_TABLES.get(group, group)
 
 
@@ -352,6 +429,16 @@ def effective_settings(settings: Settings) -> Settings:
 def _unknown_settings_error(
     unknown: list[str], known: frozenset[str], path: Path | None
 ) -> RequestError:
+    """Build the error for unknown settings, suggesting the closest valid names.
+
+    Args:
+        unknown: The unknown names.
+        known: The valid top-level settings.
+        path: The settings file, which the message names, or ``None``.
+
+    Returns:
+        The error; its next step lists every valid setting when a name has no suggestion.
+    """
     guesses = closest_names(unknown, known)
     where = f" in {path}" if path is not None else ""
     message = f"Unknown setting(s){where}: " + with_suggestions(unknown, guesses)
@@ -373,7 +460,14 @@ def _layer_preset(preset: dict[str, object], selected: dict[str, object]) -> dic
 
 
 def _current_names(values: Mapping[str, object]) -> dict[str, Any]:
-    """Accept each former setting name as an alias of its replacement, but not both."""
+    """Accept each former setting name as an alias of its replacement, but not both.
+
+    Returns:
+        The values under their current names.
+
+    Raises:
+        SettingsError: A setting is given under both names.
+    """
     result: dict[str, Any] = {}
     for name, value in values.items():
         current = RENAMED_SETTINGS.get(name, name)
@@ -385,11 +479,17 @@ def _current_names(values: Mapping[str, object]) -> dict[str, Any]:
 
 
 def _as_written(error: SettingsError, written: Mapping[str, str]) -> SettingsError:
-    """``error`` naming each renamed setting as the settings file spells it.
+    """Rename each renamed setting in ``error`` as the settings file spells it.
 
-    ``written`` maps a current setting name to the former name the file uses. Validation
-    works with current names, so without this a file with ``[pdf_artwork]`` would be
-    told about ``rendered_pdf_artwork``, a key it never wrote.
+    Validation works with current names, so without this a file with ``[pdf_artwork]``
+    would be told about ``rendered_pdf_artwork``, a key it never wrote.
+
+    Args:
+        error: The error of validation.
+        written: The former name the file uses, by current setting name.
+
+    Returns:
+        The error with the former names, or ``error`` itself when nothing was renamed.
     """
     if not written:
         return error
@@ -401,7 +501,18 @@ def _as_written(error: SettingsError, written: Mapping[str, str]) -> SettingsErr
 
 
 def _line_format(values: dict[str, Any], table: object) -> dict[str, Any]:
-    """Top-level wrap_length and tab_size, which belong to the formatting options."""
+    """Take the top-level wrap_length and tab_size, which belong to the formatting options.
+
+    Args:
+        values: The top-level values; the two settings are removed from them.
+        table: The ``formatting_options`` table as written.
+
+    Returns:
+        The two settings that were given.
+
+    Raises:
+        SettingsError: ``table`` sets either of them.
+    """
     if isinstance(table, dict) and (nested := sorted(set(_FORMATTING_KEYS) & set(table))):
         raise SettingsError(
             f"Set {', '.join(nested)} at the top level, not in formatting_options",
@@ -413,7 +524,16 @@ def _line_format(values: dict[str, Any], table: object) -> dict[str, Any]:
 def _build_settings(values: Mapping[str, Any], path: Path | None) -> Settings:
     """Construct Settings from TOML-layout values that use only current names.
 
-    ``values`` is left unchanged; the keys are consumed from a copy.
+    Args:
+        values: The values; left unchanged, because the keys are consumed from a copy.
+        path: The settings file, from whose directory relative file references are
+            resolved, or ``None``.
+
+    Returns:
+        The validated settings.
+
+    Raises:
+        SettingsError: A value is invalid.
     """
     remaining = dict(values)
     line_format = _line_format(remaining, remaining.get("formatting_options"))
@@ -453,6 +573,7 @@ def _resolve_relative_paths(settings: Settings, directory: Path) -> Settings:
     """Resolve file references in a settings file from that file's directory."""
 
     def resolved(name: str) -> str:
+        """Resolve ``name``, after expanding a leading ``~``, against ``directory``."""
         return str((directory / Path(name).expanduser()).resolve())
 
     workflow, submission = settings.workflow, settings.submission_checks
@@ -484,6 +605,25 @@ def _settings_from_values(
     path: Path | None,
     preset: str | None,
 ) -> Settings:
+    """Validate settings from the values of a file, a preset and overrides.
+
+    The file values override the preset, and the overrides that are not ``None`` override
+    both. Former setting names are accepted, and an error names each setting as the file
+    spells it.
+
+    Args:
+        values: The raw values of the settings file.
+        overrides: Values from the command line or the API; ``None`` means not given.
+        path: The settings file, or ``None``.
+        preset: The preset to start from, or ``None``.
+
+    Returns:
+        The validated settings.
+
+    Raises:
+        RequestError: A setting is unknown.
+        SettingsError: A value is invalid or a setting is given under two names.
+    """
     selected = _current_names(values)
     if preset is not None:
         selected = _layer_preset(_current_names(preset_values(preset)), selected)
@@ -511,13 +651,41 @@ def _settings_from_values(
 def load_settings(
     path: Path | None, overrides: Mapping[str, object], *, preset: str | None = None
 ) -> Settings:
-    """Layer an optional preset, then one selected file, then non-None CLI/API overrides."""
+    """Layer an optional preset, then one selected file, then non-``None`` CLI/API overrides.
+
+    Args:
+        path: The selected settings file, or ``None``.
+        overrides: Values from the command line or the API; ``None`` means not given.
+        preset: The preset to start from, or ``None``.
+
+    Returns:
+        The validated settings.
+
+    Raises:
+        RequestError: The file does not exist, or a setting is unknown.
+        SettingsError: A value is invalid.
+        PreparationError: The file cannot be read or is not valid TOML.
+    """
     values = read_settings_file(path) if path is not None else {}
     return _settings_from_values(values, overrides, path=path, preset=preset)
 
 
 def parse_settings_text(text: str, path: Path) -> Settings:
-    """Validate settings text as ``load_settings`` would read it from the file ``path``."""
+    """Validate settings text as ``load_settings`` would read it from the file ``path``.
+
+    Args:
+        text: The TOML text.
+        path: The settings file the text stands for; relative file references are
+            resolved from its directory.
+
+    Returns:
+        The validated settings.
+
+    Raises:
+        PreparationError: The text is not valid TOML.
+        RequestError: A setting is unknown.
+        SettingsError: A value is invalid.
+    """
     try:
         values = tomllib.loads(text)
     except tomllib.TOMLDecodeError as error:

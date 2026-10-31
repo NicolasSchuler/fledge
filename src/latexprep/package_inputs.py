@@ -34,10 +34,12 @@ _RULE = "package.dependencies"
 class InputEvidence:
     """What is known about the files one build needs.
 
-    ``observed`` are the inputs the build recorded; ``None`` means no complete trace
-    exists, which is different from an empty set. ``explicit`` are files the settings ask
-    to keep. ``generated_reads`` are the names of generated bibliography files the build
-    read, which decide whether a supplied copy is kept.
+    Attributes:
+        observed: The inputs the build recorded; ``None`` means no complete trace exists,
+            which is different from an empty set.
+        explicit: The files the settings ask to keep.
+        generated_reads: The names of generated bibliography files the build read, which
+            decide whether a supplied copy is kept.
     """
 
     observed: Set[str] | None
@@ -48,8 +50,11 @@ class InputEvidence:
 class InputSelectionResult(NamedTuple):
     """The outcome of selecting inputs: what was left out, what was found, and why.
 
-    ``inventory`` has a row for every project file, with the reasons it was selected or
-    left out. It is empty when nothing was selected.
+    Attributes:
+        changes: An exclusion for every project file that was left out.
+        findings: The findings of the selection.
+        inventory: A row for every project file, with the reasons it was selected or left
+            out. It is empty when nothing was selected.
     """
 
     changes: list[Change]
@@ -58,13 +63,21 @@ class InputSelectionResult(NamedTuple):
 
 
 def generated_bibliography_inputs(root: Path, main: str, generated_reads: Set[str]) -> set[str]:
-    """Supplied <main>.bbl and <main>.run.xml beside the main file that the build consumed.
+    """Find the supplied <main>.bbl and <main>.run.xml beside the main file that the build read.
 
     The build regenerates these files in its output directory, so the recorder
     shows that a file of the same name was read rather than the supplied copy.
     A supplied copy is retained only when this build read one with its name,
     so a stale file from an unrelated configuration does not ship. Links and
     non-regular files are never retained.
+
+    Args:
+        root: The project folder.
+        main: The main file, relative to ``root``.
+        generated_reads: The names of the generated bibliography files the build read.
+
+    Returns:
+        The supplied copies to retain, relative to ``root``.
     """
     main_path = PurePosixPath(main)
     read = {PurePosixPath(name).name for name in generated_reads}
@@ -78,6 +91,7 @@ def generated_bibliography_inputs(root: Path, main: str, generated_reads: Set[st
 
 
 def _missing_trace() -> InputSelectionResult:
+    """Return the result of a build without a complete trace: one error, nothing selected."""
     return InputSelectionResult(
         [],
         [
@@ -94,7 +108,7 @@ def _missing_trace() -> InputSelectionResult:
 
 
 def _graph_advisories(analysis: SourceAnalysis) -> list[Finding]:
-    """Findings that say the literal graph is incomplete, as advice rather than errors.
+    """Return findings that say the literal graph is incomplete, as advice rather than errors.
 
     Recorded inputs are direct evidence of what this build read, so an incomplete literal
     graph only widens the selection; the exact archive rebuild still verifies the result.
@@ -121,7 +135,15 @@ def _graph_advisories(analysis: SourceAnalysis) -> list[Finding]:
 
 
 def _input_problem(root: Path, name: str) -> str | None:
-    """Why ``name`` cannot be copied as an input, or ``None`` when it can."""
+    """Say why ``name`` cannot be copied as an input, or return ``None`` when it can.
+
+    Args:
+        root: The project folder.
+        name: The input, relative to ``root``.
+
+    Returns:
+        The reason, such as "does not exist in the project", or ``None``.
+    """
     if not is_relative_posix_path(name):
         return "has a name that is not a plain project-relative path"
     path = root / name
@@ -135,7 +157,15 @@ def _input_problem(root: Path, name: str) -> str | None:
 
 
 def _unusable_inputs(root: Path, included: Set[str]) -> list[Finding]:
-    """An error for every input that is missing, not a plain name, linked or not a file."""
+    """Return an error for every input that is missing, not a plain name, linked or not a file.
+
+    Args:
+        root: The project folder.
+        included: The selected inputs, relative to ``root``.
+
+    Returns:
+        The errors, in the order of the input names.
+    """
     findings = []
     for name in sorted(included):
         cancellation_point()
@@ -155,6 +185,13 @@ def _unusable_inputs(root: Path, included: Set[str]) -> list[Finding]:
 
 
 def _copy_inputs(root: Path, destination: Path, included: Set[str]) -> None:
+    """Copy the selected inputs into ``destination``, which must not exist yet.
+
+    Args:
+        root: The project folder.
+        destination: The folder to create and copy into.
+        included: The selected inputs, relative to ``root``.
+    """
     destination.mkdir()
     for name in sorted(included):
         cancellation_point()
@@ -169,6 +206,18 @@ def _selection_finding(
     evidence: InputEvidence,
     bibliography: Set[str],
 ) -> Finding:
+    """Return the finding that sums up a successful selection.
+
+    Args:
+        included: The selected inputs.
+        omitted: The number of project files that were left out.
+        evidence: The evidence of the selection; its explicit files go into the details.
+        bibliography: The supplied generated bibliography files retained beyond the
+            recorded and explicit inputs.
+
+    Returns:
+        A passed info finding.
+    """
     retained_bibliography = (
         f" Retained the generated bibliography {', '.join(sorted(bibliography))} for services "
         "that compile without BibTeX or Biber."
@@ -204,6 +253,15 @@ def select_package_inputs(
     inputs are direct evidence. The caller must reject error findings; no
     partially selected destination is made on failure. The subsequent exact
     archive rebuild remains required.
+
+    Args:
+        root: The project folder.
+        destination: The new folder to copy the selected inputs into.
+        main: The main file, relative to ``root``.
+        evidence: What is known about the files the build needs.
+
+    Returns:
+        The files left out, the findings, and the inventory of every project file.
     """
     observed = evidence.observed
     if observed is None or main not in observed:

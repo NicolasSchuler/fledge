@@ -15,12 +15,30 @@ from .path_safety import contained_relative_name, lexically_escapes
 
 @dataclass(frozen=True, slots=True)
 class _LogRule:
+    """A log pattern and the finding it produces.
+
+    Attributes:
+        rule: The rule name of the finding.
+        pattern: The compiled expression that a log message must match.
+        severity: The severity of the finding.
+    """
+
     rule: str
     pattern: re.Pattern[str]
     severity: Severity
 
 
 def _rule(rule: str, pattern: str, severity: Severity) -> _LogRule:
+    """Build a log rule whose pattern matches regardless of case.
+
+    Args:
+        rule: The rule name of the finding.
+        pattern: The regular expression a log message must match.
+        severity: The severity of the finding.
+
+    Returns:
+        The rule with its pattern compiled.
+    """
     return _LogRule(rule, re.compile(pattern, re.IGNORECASE), severity)
 
 
@@ -62,9 +80,15 @@ _MAX_MESSAGE_CHARS = 2000
 
 
 def read_bounded(path: Path, limit: int) -> tuple[str, bool]:
-    """The first ``limit`` bytes of a regular, unlinked log as text, and whether that is all.
+    """Read the first ``limit`` bytes of a regular, unlinked log as text.
 
-    A missing, linked or unreadable log reads as empty and incomplete.
+    Args:
+        path: The log file.
+        limit: The largest number of bytes to read.
+
+    Returns:
+        The text, decoded as UTF-8 with replacement characters, and whether it is the
+        whole log. A missing, linked or unreadable log reads as empty and incomplete.
     """
     try:
         data = read_file_prefix(path, limit + 1)
@@ -74,7 +98,16 @@ def read_bounded(path: Path, limit: int) -> tuple[str, bool]:
 
 
 def log_tail(log: str, *, lines: int = 60, max_characters: int = 8000) -> str:
-    """Keep the closing log lines that explain a failure; reports redact centrally."""
+    """Keep the closing log lines that explain a failure; reports redact centrally.
+
+    Args:
+        log: The log text.
+        lines: The largest number of closing lines to keep.
+        max_characters: The largest number of closing characters to keep.
+
+    Returns:
+        The last ``lines`` lines, cut to their last ``max_characters`` characters.
+    """
     return "\n".join(log.splitlines()[-lines:])[-max_characters:]
 
 
@@ -84,7 +117,20 @@ def log_findings(
     project: Path | None = None,
     cwd: Path | None = None,
 ) -> list[Finding]:
-    """One finding per distinct rule and message; paths only when the log names them."""
+    """Report one finding per distinct rule and message; paths only when the log names them.
+
+    Args:
+        log: The text of the final-pass log.
+        main: The main document, recorded in each finding's details; without ``project``
+            and ``cwd``, a relative compiler filename is read relative to its directory.
+        project: The project root that a compiler filename must lie under to become the
+            finding's path.
+        cwd: The directory the compiler ran in, against which relative compiler filenames
+            are resolved when ``project`` is given too.
+
+    Returns:
+        The findings, in log order.
+    """
     if project is not None:
         project = project.resolve()
     findings: list[Finding] = []
@@ -98,6 +144,7 @@ def log_findings(
 
 
 def _log_messages(log: str) -> Iterator[str]:
+    """Yield every stripped log line, joined with the next line when TeX continues there."""
     lines = log.splitlines()
     for index, line in enumerate(lines):
         message = line.strip()
@@ -109,6 +156,20 @@ def _log_messages(log: str) -> Iterator[str]:
 def _log_finding(
     rule: _LogRule, message: str, main: str, project: Path | None, cwd: Path | None
 ) -> Finding:
+    """Build the finding for one log message that ``rule`` matched.
+
+    Args:
+        rule: The matching rule.
+        message: The log message, cut to ``_MAX_MESSAGE_CHARS`` characters in the finding.
+        main: The main document, recorded in the details.
+        project: The project root, passed to :func:`_source_path`.
+        cwd: The directory the compiler ran in, passed to :func:`_source_path`.
+
+    Returns:
+        The finding, with the input line, compiler location and box overflow in its
+        details when the message names them, and a path and line only when the compiler
+        location is a project source.
+    """
     details: dict[str, object] = {"document": main}
     source_path: str | None = None
     source_line: int | None = None
@@ -133,7 +194,19 @@ def _log_finding(
 
 
 def _source_path(filename: Path, main: str, project: Path | None, cwd: Path | None) -> str | None:
-    """The project-relative source a compiler diagnostic names, if it is one."""
+    """Return the project-relative source a compiler diagnostic names, if it is one.
+
+    Args:
+        filename: The file the diagnostic names.
+        main: The main document; without ``project`` and ``cwd``, a relative ``filename``
+            is read relative to its directory.
+        project: The project root.
+        cwd: The directory the compiler ran in.
+
+    Returns:
+        The POSIX path relative to the project, or ``None`` when the file lies outside it,
+        or when ``filename`` is absolute and ``project`` or ``cwd`` is missing.
+    """
     if project is not None and cwd is not None:
         return contained_relative_name(
             project, filename if filename.is_absolute() else cwd / filename

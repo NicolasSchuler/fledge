@@ -53,7 +53,12 @@ _RENDER_SIZE_SLACK_PIXELS: Final = 1
 
 
 class PageGeometry(NamedTuple):
-    """Every page size in points, and the pages whose frame rendered measurements must skip."""
+    """Every page size in points, and the pages whose frame rendered measurements must skip.
+
+    Attributes:
+        sizes: The width and height of every page, in points.
+        misaligned_frame_pages: The pages whose frame rendered measurements must skip.
+    """
 
     sizes: Sequence[tuple[float, float]]
     misaligned_frame_pages: frozenset[int]
@@ -65,7 +70,17 @@ def figure_regions(
     *,
     whole_pages_by_default: bool,
 ) -> tuple[PdfRegion, ...]:
-    """The regions to measure: the configured ones, else every whole page of an input figure."""
+    """Return the regions to measure: the configured ones, else every whole page of a figure.
+
+    Args:
+        options: The artwork options.
+        sizes: The width and height of every page, in points.
+        whole_pages_by_default: Whether every whole page is a region when none is
+            configured, as for an input figure.
+
+    Returns:
+        The regions.
+    """
     if options.figure_regions or not whole_pages_by_default:
         return options.figure_regions
     return tuple(
@@ -74,6 +89,7 @@ def figure_regions(
 
 
 def _render_matches(actual: tuple[int, int], expected: tuple[int, int]) -> bool:
+    """Return whether a render's pixel size is the expected one, up to Poppler's rounding."""
     return all(
         abs(found - wanted) <= _RENDER_SIZE_SLACK_PIXELS
         for found, wanted in zip(actual, expected, strict=True)
@@ -82,7 +98,17 @@ def _render_matches(actual: tuple[int, int], expected: tuple[int, int]) -> bool:
 
 @dataclass(frozen=True, slots=True)
 class _RenderedFigures:
-    """What every rendered artwork page of one inspection shares."""
+    """What every rendered artwork page of one inspection shares.
+
+    Attributes:
+        regions: The figure regions to measure.
+        region_rules: The configured rules measured on figure regions.
+        misaligned_frame_pages: The pages whose frame cannot be aligned.
+        options: The artwork options.
+        limits: The work bounds of the measurements.
+        preview_directory: Where the grayscale previews are written.
+        max_file_bytes: The largest file a render or preview may be.
+    """
 
     regions: tuple[PdfRegion, ...]
     region_rules: tuple[ArtworkRule, ...]
@@ -94,7 +120,14 @@ class _RenderedFigures:
 
 
 class GrayPage(NamedTuple):
-    """A rendered grayscale page with its size in points, to map pixels back to the page."""
+    """A rendered grayscale page with its size in points, to map pixels back to the page.
+
+    Attributes:
+        page: The 1-based page number.
+        image: The grayscale render.
+        width_pt: The width of the page, in points.
+        height_pt: The height of the page, in points.
+    """
 
     page: int
     image: RasterImage
@@ -103,7 +136,16 @@ class GrayPage(NamedTuple):
 
 
 class RegionInk(NamedTuple):
-    """Ink measured within one figure region of a rendered page."""
+    """Ink measured within one figure region of a rendered page.
+
+    Attributes:
+        ink_pixels: The number of ink pixels in the region.
+        edge_ink_pixels: The number of ink pixels in the band along the region's boundary.
+        outside_content_box_ratio: The share of the region outside the ink bounding box; 1
+            when the region holds no ink.
+        content_bounds_pt: The ink bounding box in points, or ``None`` when the region holds
+            no ink.
+    """
 
     ink_pixels: int
     edge_ink_pixels: int
@@ -114,7 +156,17 @@ class RegionInk(NamedTuple):
 def region_ink(
     raster: GrayPage, ink: InkMask, pixels: PixelBox, options: PdfArtworkOptions
 ) -> RegionInk:
-    """Ink count, boundary ink and the ink bounding box within a pixel rectangle."""
+    """Measure the ink count, boundary ink and the ink bounding box within a pixel rectangle.
+
+    Args:
+        raster: The rendered page.
+        ink: The ink mask of the page.
+        pixels: The rectangle, as (left, top, right, bottom) pixels.
+        options: The artwork options, which give the width of the boundary band.
+
+    Returns:
+        The ink of the rectangle.
+    """
     left, top, right, bottom = pixels
     width, height = ink.width, ink.height
     band = options.figure_edge_band_pt or 0
@@ -144,6 +196,17 @@ def region_ink(
 def _whitespace_finding(
     limit: float, where: str, ink: RegionInk, details: dict[str, object]
 ) -> Finding:
+    """Compare the whitespace around the ink of a figure region with ``limit``.
+
+    Args:
+        limit: The largest share of the region that may lie outside the ink box.
+        where: The region and its page, as the message names them.
+        ink: The ink of the region.
+        details: The details that every finding of the region shares.
+
+    Returns:
+        The finding, with a violation when the whitespace exceeds ``limit``.
+    """
     over = ink.outside_content_box_ratio > limit
     if not ink.ink_pixels:
         outcome = f"{where} has no content against the configured background"
@@ -168,6 +231,17 @@ def _whitespace_finding(
 def _edge_ink_finding(
     band: float, where: str, ink: RegionInk, details: dict[str, object]
 ) -> Finding:
+    """Report ink in the band along the boundary of a figure region.
+
+    Args:
+        band: The width of the band, in points.
+        where: The region and its page, as the message names them.
+        ink: The ink of the region.
+        details: The details that every finding of the region shares.
+
+    Returns:
+        The finding, with a violation when ink lies in the band.
+    """
     if ink.edge_ink_pixels:
         message = (
             f"Ink touches the outer {band:g} pt border of {where} "
@@ -191,6 +265,17 @@ def _edge_ink_finding(
 def _region_findings(
     figures: _RenderedFigures, raster: GrayPage, region: PdfRegion, ink: RegionInk
 ) -> list[Finding]:
+    """Return the configured whitespace and edge ink findings of one figure region.
+
+    Args:
+        figures: What every rendered page shares.
+        raster: The rendered page.
+        region: The figure region.
+        ink: The ink of the region.
+
+    Returns:
+        The findings, whitespace first.
+    """
     options = figures.options
     details: dict[str, object] = {
         "page": raster.page,
@@ -213,6 +298,18 @@ def _region_findings(
 
 
 def _grayscale_preview_finding(figures: _RenderedFigures, raster: GrayPage) -> Finding:
+    """Write the grayscale preview of a rendered page as a PNG and report it.
+
+    Args:
+        figures: What every rendered page shares, including the preview directory.
+        raster: The rendered page.
+
+    Returns:
+        The finding, which lists the preview as an artifact.
+
+    Raises:
+        PreparationError: The encoded preview is larger than the file limit.
+    """
     preview = figures.preview_directory / f"page-{raster.page}.png"
     preview.parent.mkdir(exist_ok=True)
     # Copy validated bytes while this operation still owns its render lease.
@@ -234,7 +331,7 @@ def _grayscale_preview_finding(figures: _RenderedFigures, raster: GrayPage) -> F
 
 
 def _pixel_rectangle(region: PdfRegion, raster: GrayPage) -> PixelBox:
-    """The pixels that cover a region of the rendered page, rounding outwards."""
+    """Return the pixels that cover a region of the rendered page, rounding outwards."""
     width, height = raster.image.width, raster.image.height
     return (
         math.floor(region.left_pt * width / raster.width_pt),
@@ -247,6 +344,16 @@ def _pixel_rectangle(region: PdfRegion, raster: GrayPage) -> PixelBox:
 def _unavailable_for_rules(
     rules: Sequence[ArtworkRule], error: Exception, **details: object
 ) -> list[Finding]:
+    """Report each of ``rules`` as unavailable evidence with the same cause.
+
+    Args:
+        rules: The rules that could not be measured.
+        error: The cause.
+        **details: Details added to every finding, if any.
+
+    Returns:
+        One warning per rule.
+    """
     return [
         unavailable_finding(rule, error, severity="warning", details=details if details else None)
         for rule in rules
@@ -261,6 +368,22 @@ def _rendered_page_findings(
     size: tuple[float, float],
     expected: tuple[int, int],
 ) -> list[Finding]:
+    """Measure the figure regions of one rendered page, and keep its preview if configured.
+
+    Args:
+        path: The grayscale render.
+        figures: What every rendered page shares.
+        page: The 1-based page number.
+        size: The width and height of the page, in points.
+        expected: The pixel size the render should have.
+
+    Returns:
+        The findings of the page.
+
+    Raises:
+        PreparationError: The render is invalid, its size disagrees with the page geometry,
+            or the preview is too large.
+    """
     image = read_measurement_raster(path, channels=1, max_file_bytes=figures.max_file_bytes)
     if not _render_matches((image.width, image.height), expected):
         raise PreparationError("Artwork render dimensions disagree with page geometry")
@@ -310,6 +433,18 @@ async def _rendered_page(
     size: tuple[float, float],
     rendered_rules: Sequence[ArtworkRule],
 ) -> list[Finding]:
+    """Render one page in gray and measure it; a failure makes every rendered rule unavailable.
+
+    Args:
+        session: The PDF tool session that renders the page.
+        figures: What every rendered page shares.
+        page: The 1-based page number.
+        size: The width and height of the page, in points.
+        rendered_rules: The rules that need the render.
+
+    Returns:
+        The findings of the page.
+    """
     expected = measurement_raster_size(size, figures.options.raster_dpi)
     try:
         if exceeds_measurement_raster(expected):
@@ -330,7 +465,16 @@ async def _rendered_page(
 def _unmeasurable_region_findings(
     regions: Sequence[PdfRegion], pages: int, region_rules: Sequence[ArtworkRule]
 ) -> list[Finding]:
-    """Unavailable evidence for a policy without regions, and for regions beyond the document."""
+    """Report a policy without regions, and regions beyond the document, as unavailable evidence.
+
+    Args:
+        regions: The figure regions.
+        pages: The number of pages in the document.
+        region_rules: The configured rules measured on figure regions.
+
+    Returns:
+        The unavailable findings.
+    """
     result: list[Finding] = []
     if not regions:
         result.extend(
@@ -357,7 +501,21 @@ async def inspect_rendered_figures(
     regions: tuple[PdfRegion, ...],
     limits: ArtworkLimits,
 ) -> list[Finding]:
-    """Whitespace, edge ink and grayscale previews of the pages that hold figure regions."""
+    """Measure whitespace and edge ink of figure regions, and make grayscale previews.
+
+    Only the pages that hold figure regions are rendered, unless grayscale previews are
+    configured, which render every page.
+
+    Args:
+        session: The PDF tool session that renders the pages.
+        geometry: The page sizes and the pages whose frame must be skipped.
+        options: The artwork options.
+        regions: The figure regions to measure.
+        limits: The work bounds of the measurements.
+
+    Returns:
+        The findings of every rendered page, after those of regions that cannot be measured.
+    """
     sizes = geometry.sizes
     configured = configured_artwork_rules(options)
     region_rules = tuple(rule for rule in configured if rule in REGION_RULES)
@@ -398,7 +556,19 @@ async def inspect_rendered_figures(
 def _pixel_region(
     region: PdfRegion, size: tuple[float, float], raster: tuple[int, int]
 ) -> PixelBox:
-    """The pixels whose full area lies within a contrast patch."""
+    """Return the pixels whose full area lies within a contrast patch.
+
+    Args:
+        region: The patch.
+        size: The width and height of the page, in points.
+        raster: The width and height of the render, in pixels.
+
+    Returns:
+        The pixel rectangle.
+
+    Raises:
+        PreparationError: The patch lies outside the page or holds no whole pixel.
+    """
     if not contains((0, 0, *size), region.box, 0):
         raise PreparationError("Contrast sample region lies outside the rendered page")
     left = math.ceil(region.left_pt * raster[0] / size[0])
@@ -411,7 +581,12 @@ def _pixel_region(
 
 
 class ContrastBounds(NamedTuple):
-    """The lowest and highest contrast ratio the patch colours allow."""
+    """The lowest and highest contrast ratio the patch colours allow.
+
+    Attributes:
+        minimum: The lowest contrast ratio.
+        maximum: The highest contrast ratio.
+    """
 
     minimum: float
     maximum: float
@@ -420,7 +595,7 @@ class ContrastBounds(NamedTuple):
 def _contrast_interval(
     foreground: tuple[float, float], background: tuple[float, float]
 ) -> ContrastBounds:
-    """Contrast-ratio bounds from the luminance ranges (low, high) of two patches."""
+    """Compute contrast-ratio bounds from the luminance ranges (low, high) of two patches."""
     low_fg, high_fg = foreground
     low_bg, high_bg = background
     minimum = 1.0
@@ -436,11 +611,13 @@ def _contrast_interval(
 
 
 def _luminance(rgb: tuple[int, ...]) -> float:
+    """Return the relative luminance of an 8-bit RGB colour."""
     red, green, blue = (value / EIGHT_BIT_MAXIMUM for value in rgb)
     return relative_luminance((red, green, blue))
 
 
 def _sample_unavailable(sample: PdfContrastSample, page: int, error: Exception) -> Finding:
+    """Report a contrast sample on ``page`` as unavailable evidence, caused by ``error``."""
     return unavailable_finding(
         ArtworkRule.RENDERED_SAMPLE_CONTRAST,
         error,
@@ -452,6 +629,18 @@ def _sample_unavailable(sample: PdfContrastSample, page: int, error: Exception) 
 def _contrast_message(
     sample: PdfContrastSample, page: int, bounds: ContrastBounds, spread: int, *, uniform: bool
 ) -> str:
+    """Word the message of a contrast sample's finding.
+
+    Args:
+        sample: The contrast sample.
+        page: The page of the sample.
+        bounds: The contrast ratios the patch colours allow.
+        spread: The largest channel spread of the two patches.
+        uniform: Whether both patches stay within the allowed spread.
+
+    Returns:
+        The message.
+    """
     required = f"{sample.minimum_ratio:g}:1"
     where = f"Sample '{sample.name}' on page {page}"
     lowest, highest = bounds
@@ -481,6 +670,17 @@ def _sample_contrast_finding(
     image: RasterImage,
     boxes: tuple[PixelBox, PixelBox],
 ) -> Finding:
+    """Measure the contrast between the foreground and background patch of a sample.
+
+    Args:
+        sample: The contrast sample.
+        page: The page of the sample.
+        image: The RGB render of the page.
+        boxes: The pixel rectangles of the foreground and background patch.
+
+    Returns:
+        The finding, with a violation when even the highest possible ratio is too low.
+    """
     colors = [channel_extrema(image, box) for box in boxes]
     spreads = [
         max(high - low for low, high in zip(minimum, maximum, strict=True))
@@ -520,7 +720,16 @@ def _sample_contrast_finding(
 
 @dataclass(frozen=True, slots=True)
 class _ContrastPage:
-    """The contrast samples of one page and the render they are measured on."""
+    """The contrast samples of one page and the render they are measured on.
+
+    Attributes:
+        page: The 1-based page number.
+        size: The width and height of the page, in points.
+        expected: The pixel size the render should have.
+        samples: The contrast samples on the page.
+        max_file_bytes: The largest render file accepted.
+        max_pixel_visits: The most patch pixels examined on the page.
+    """
 
     page: int
     size: tuple[float, float]
@@ -531,6 +740,18 @@ class _ContrastPage:
 
 
 def _rendered_contrast_findings(path: Path, job: _ContrastPage) -> list[Finding]:
+    """Measure every contrast sample of a page on its RGB render.
+
+    Args:
+        path: The RGB render.
+        job: The page and its samples.
+
+    Returns:
+        One finding per sample; a sample that cannot be measured is unavailable evidence.
+
+    Raises:
+        PreparationError: The render is invalid or its size disagrees with the page geometry.
+    """
     image = read_measurement_raster(path, channels=3, max_file_bytes=job.max_file_bytes)
     dimensions = (image.width, image.height)
     if not _render_matches(dimensions, job.expected):
@@ -556,6 +777,16 @@ def _rendered_contrast_findings(path: Path, job: _ContrastPage) -> list[Finding]
 async def _contrast_page(
     session: PdfToolSession, job: _ContrastPage, options: PdfArtworkOptions
 ) -> list[Finding]:
+    """Render one page in RGB and measure its samples; a failure makes them all unavailable.
+
+    Args:
+        session: The PDF tool session that renders the page.
+        job: The page and its samples.
+        options: The artwork options, which give the resolution.
+
+    Returns:
+        One finding per sample.
+    """
     try:
         if exceeds_measurement_raster(job.expected):
             raise PreparationError("Contrast render exceeds bounded raster dimensions")
@@ -576,10 +807,21 @@ async def inspect_sample_contrast(
     options: PdfArtworkOptions,
     limits: ArtworkLimits,
 ) -> list[Finding]:
-    """Contrast of each explicit foreground/background patch pair, page by page."""
+    """Measure the contrast of each explicit foreground/background patch pair, page by page.
+
+    Args:
+        session: The PDF tool session that renders the pages.
+        geometry: The page sizes and the pages whose frame must be skipped.
+        options: The artwork options, which list the contrast samples.
+        limits: The work bounds of the measurements.
+
+    Returns:
+        One finding per sample.
+    """
     sizes = geometry.sizes
 
     def measurable(page: int) -> bool:
+        """Return whether ``page`` exists and its frame can be aligned."""
         return page <= len(sizes) and page not in geometry.misaligned_frame_pages
 
     result = [

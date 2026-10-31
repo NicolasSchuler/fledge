@@ -1,3 +1,5 @@
+"""The option validation kit: the ``require_*`` checks, scalar validation, reading, suggestions."""
+
 from __future__ import annotations
 
 import re
@@ -34,7 +36,10 @@ from latexprep.option_config import (
 
 
 class KitTestCase(unittest.TestCase):
+    """A test case with assertions that a check accepts or rejects values for the setting ``x``."""
+
     def assert_accepts(self, check: Callable[[object], None], values: list[object]) -> None:
+        """Assert that ``check`` accepts every value of ``values``, each in its own subtest."""
         for value in values:
             with self.subTest(accepted=value):
                 check(value)
@@ -42,6 +47,16 @@ class KitTestCase(unittest.TestCase):
     def assert_rejects(
         self, check: Callable[[object], None], values: list[object], message: str
     ) -> None:
+        """Assert that ``check`` rejects every value of ``values`` with ``message``.
+
+        Each value runs in its own subtest and must raise a :class:`SettingsError` that
+        names the setting ``x``.
+
+        Args:
+            check: The check, called with one value.
+            values: The values to reject.
+            message: The exact message of every rejection.
+        """
         for value in values:
             with self.subTest(rejected=value), self.assertRaises(SettingsError) as raised:
                 check(value)
@@ -50,6 +65,8 @@ class KitTestCase(unittest.TestCase):
 
 
 class RequireIntTests(KitTestCase):
+    """:func:`require_int`: limits, their wording, and ``None`` only on request."""
+
     def test_limits_decide_the_wording_and_the_accepted_values(self) -> None:
         cases: tuple[tuple[dict[str, int], list[object], list[object], str], ...] = (
             ({"minimum": 1}, [1, 40], [0, -3], "x must be a positive integer"),
@@ -76,6 +93,8 @@ class RequireIntTests(KitTestCase):
 
 
 class RequireNumberTests(KitTestCase):
+    """:func:`require_number`: limits, their wording, and ``None`` only on request."""
+
     def test_limits_decide_the_wording_and_the_accepted_values(self) -> None:
         cases: tuple[tuple[dict[str, object], list[object], list[object], str], ...] = (
             (
@@ -121,6 +140,8 @@ class RequireNumberTests(KitTestCase):
 
 
 class RequireChoiceTests(KitTestCase):
+    """:func:`require_choice`: membership, the order of choices, types, and ``None`` on request."""
+
     def test_a_value_must_be_one_of_the_choices_in_the_order_given(self) -> None:
         check = partial(require_choice, "x", choices=("pdflatex", "xelatex", "lualatex"))
         self.assert_accepts(check, ["pdflatex", "lualatex"])
@@ -145,6 +166,8 @@ class RequireChoiceTests(KitTestCase):
 
 
 class RequireTextTests(KitTestCase):
+    """:func:`require_text`: empty text, NUL, message shape, length, blanks and ``None``."""
+
     def test_text_must_be_nonempty_and_free_of_nul(self) -> None:
         check = partial(require_text, "x")
         self.assert_accepts(check, ["a", " padded ", "ünï"])
@@ -175,6 +198,8 @@ class RequireTextTests(KitTestCase):
 
 
 class RequireUniqueStringsTests(KitTestCase):
+    """:func:`require_unique_strings`: distinct entries, whitespace, limits, choices and formats."""
+
     def test_a_tuple_of_distinct_nonempty_strings_is_accepted(self) -> None:
         check = partial(require_unique_strings, "x")
         self.assert_accepts(check, [(), ("a",), ("a", "b")])
@@ -233,10 +258,18 @@ class RequireUniqueStringsTests(KitTestCase):
 
 @dataclass(frozen=True)
 class Record:
+    """A record type for :func:`require_records`.
+
+    Attributes:
+        page: A page number, by which the tests tell records apart.
+    """
+
     page: int
 
 
 class RequireRecordsTests(KitTestCase):
+    """:func:`require_records`: the record type, the count limit and distinct records."""
+
     def test_a_tuple_of_records_is_accepted(self) -> None:
         check = partial(require_records, "x", record_type=Record)
         self.assert_accepts(check, [(), (Record(1), Record(1))])
@@ -259,6 +292,8 @@ class RequireRecordsTests(KitTestCase):
 
 
 class RequirePairsTests(KitTestCase):
+    """:func:`require_pairs`: each item checked with its index path, repeats and the count limit."""
+
     def test_every_item_is_checked_with_its_index_path(self) -> None:
         check = partial(
             require_pairs,
@@ -294,6 +329,8 @@ class RequirePairsTests(KitTestCase):
 
 
 class RequireIntegersAndNumbersTests(KitTestCase):
+    """:func:`require_integers` and :func:`require_numbers`: each index, and fixed counts."""
+
     def test_each_integer_is_checked_with_its_index(self) -> None:
         require_integers("pages", (1, 5), minimum=1)
         for values, message in (
@@ -325,6 +362,25 @@ class RequireIntegersAndNumbersTests(KitTestCase):
 
 @dataclass(frozen=True)
 class Sample:
+    """An options class with a field of every scalar kind, validated by :func:`validate_scalars`.
+
+    Construction raises ``SettingsError`` when a scalar field does not match its annotation
+    or bounds.
+
+    Attributes:
+        FIELD_BOUNDS: The bounds :func:`validate_scalars` applies to ``count``, ``gray``,
+            ``share`` and ``seconds``.
+        flag: A boolean.
+        count: An integer from 1 to 5.
+        gray: An eight-bit value, or ``None``.
+        share: A number greater than 0 and at most 1.
+        seconds: A positive integer.
+        mode: ``"fast"`` or ``"slow"``.
+        maybe_mode: ``"a"``, ``"b"`` or ``None``.
+        label: A text.
+        names: A tuple of strings.
+    """
+
     FIELD_BOUNDS: ClassVar[dict[str, Bounds]] = {
         "count": Bounds(1, 5),
         "gray": EIGHT_BIT_VALUE,
@@ -347,6 +403,8 @@ class Sample:
 
 
 class ValidateScalarsTests(unittest.TestCase):
+    """:func:`validate_scalars` checks each field against its annotation and bounds."""
+
     def test_defaults_and_valid_values_are_accepted(self) -> None:
         Sample()
         Sample(flag=True, count=5, gray=0, share=1, seconds=1, mode="slow", maybe_mode="b")
@@ -376,7 +434,13 @@ class ValidateScalarsTests(unittest.TestCase):
 
 
 def default_option_groups() -> list[tuple[str, object]]:
-    """Every option dataclass of Settings that can be built from its defaults."""
+    """List every option dataclass of :class:`Settings` that can be built from its defaults.
+
+    The ``checks`` group is left out, and ``Settings.workflow.comparison`` is added.
+
+    Returns:
+        A (name, default instance) pair for ``Settings`` itself and for each option group.
+    """
     groups: list[tuple[str, object]] = [("Settings", Settings())]
     for name, kind in get_type_hints(Settings).items():
         if isinstance(kind, type) and is_dataclass(kind) and name != "checks":
@@ -386,7 +450,10 @@ def default_option_groups() -> list[tuple[str, object]]:
 
 
 class EveryOptionGroupValidatesItsScalarsTests(unittest.TestCase):
-    """A scalar field that a class forgot to validate would accept a value of the wrong type."""
+    """Every scalar field of every option group rejects a value of the wrong type.
+
+    A scalar field that a class forgot to validate would accept a value of the wrong type.
+    """
 
     def test_wrong_types_are_rejected_for_every_scalar_field(self) -> None:
         wrong = {"boolean": 1, "integer": True, "number": "1", "choice": 12345}
@@ -408,6 +475,14 @@ class EveryOptionGroupValidatesItsScalarsTests(unittest.TestCase):
 
 
 def _scalar_tag(annotation: object) -> str | None:
+    """Classify ``annotation`` as one of the scalar kinds the wrong-type test covers.
+
+    An optional annotation (``X | None``) is classified by ``X``.
+
+    Returns:
+        ``"boolean"``, ``"integer"``, ``"number"`` or ``"choice"`` (a ``Literal``), or
+        ``None`` for any other annotation, including a union of several types.
+    """
     if get_origin(annotation) in {Union, types.UnionType}:
         variants = [arg for arg in get_args(annotation) if arg is not type(None)]
         if len(variants) != 1:
@@ -425,6 +500,8 @@ def _scalar_tag(annotation: object) -> str | None:
 
 
 class ReadOptionsTests(unittest.TestCase):
+    """:func:`read_options`: error wording and location, lists, unknown keys and instances."""
+
     def test_a_wrongly_typed_value_still_states_the_allowed_range(self) -> None:
         for value in ("high", 9, 0, True, 2.5):
             with self.subTest(value=value), self.assertRaises(SettingsError) as raised:
@@ -488,6 +565,8 @@ class ReadOptionsTests(unittest.TestCase):
 
 
 class ReadTopLevelOptionsTests(unittest.TestCase):
+    """:func:`read_top_level_options`: each key is its own location, and errors keep names."""
+
     def test_each_key_is_its_own_location(self) -> None:
         self.assertEqual(read_top_level_options(Sample, {"count": 3, "names": ["a"]}).names, ("a",))
         for values, message, names in (
@@ -518,6 +597,8 @@ class ReadTopLevelOptionsTests(unittest.TestCase):
 
 
 class SuggestionTests(unittest.TestCase):
+    """:func:`closest_names` and :func:`with_suggestions` for unknown setting names."""
+
     def test_the_closest_known_name_is_suggested_only_when_one_resembles(self) -> None:
         known = ["max_pages", "jobs", "engine"]
         self.assertEqual(closest_names(["max_pagse", "zzz"], known), {"max_pagse": "max_pages"})

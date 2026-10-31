@@ -25,7 +25,12 @@ from .citation_graph import (
 
 
 class EntryId(NamedTuple):
-    """Where an entry starts: its document's project-relative path and character offset."""
+    """Where an entry starts: its document's project-relative path and character offset.
+
+    Attributes:
+        path: The project-relative path of the document that holds the entry.
+        offset: The character offset at which the entry starts.
+    """
 
     path: str
     offset: int
@@ -33,34 +38,54 @@ class EntryId(NamedTuple):
 
 @dataclass(frozen=True, slots=True)
 class LocatedEntry:
-    """A keyed entry and the document that holds it."""
+    """A keyed entry and the document that holds it.
+
+    Attributes:
+        document: The document that holds the entry.
+        entry: The keyed entry.
+    """
 
     document: BibDocument
     entry: Entry
 
     @property
     def identity(self) -> EntryId:
+        """The document path and start offset that identify the entry."""
         return EntryId(self.document.path, self.entry.start)
 
 
 def located_entries(documents: Iterable[BibDocument]) -> list[LocatedEntry]:
-    """Every keyed entry of ``documents`` with the document that holds it."""
+    """List every keyed entry of ``documents`` with the document that holds it."""
     return [LocatedEntry(document, entry) for document in documents for entry in document.entries]
 
 
 @dataclass(frozen=True, slots=True)
 class EntryIndex:
-    """Keys, aliases and literal relationships of a set of entries."""
+    """Keys, aliases and literal relationships of a set of entries.
+
+    Attributes:
+        entries: The indexed entries.
+        keys: Every key and ``ids`` alias, mapped to the entries it identifies.
+        relationships: The keys that each entry's relationship fields name, by the
+            entry's identity; entry-set members point back to their set.
+        uncertainties: Ambiguous keys, unresolved targets and dynamic key fields.
+    """
 
     entries: list[LocatedEntry]
-    # Every key and ids alias, mapped to the entries it identifies.
     keys: dict[str, list[LocatedEntry]]
-    # Keys each entry's relationship fields name; entry-set members point back to their set.
     relationships: dict[EntryId, set[str]]
     uncertainties: list[Uncertainty]
 
     def reachable(self, graph: CitationGraph) -> set[EntryId]:
-        """Identities reached from the graph's citations, \\nocite{*} and relationships."""
+        r"""Collect the identities reached from the graph's citations, \nocite{*} and relationships.
+
+        Args:
+            graph: The citations whose keys start the search.
+
+        Returns:
+            The identities of every entry a citation, ``\nocite{*}`` or a chain of
+            relationships from a reached entry reaches.
+        """
         queue: deque[LocatedEntry] = deque(self.entries if graph.nocite_all else [])
         for citation in graph.citations:
             queue.extend(self.keys.get(citation.key, []))
@@ -84,7 +109,16 @@ def _read_key_fields(
     list[tuple[str, list[str]]],
     list[str],
 ]:
-    """Keys and aliases, relationship targets and entry sets, with what cannot be read."""
+    """Read keys and aliases, relationship targets and entry sets, with what cannot be read.
+
+    Args:
+        references: The entries to read.
+
+    Returns:
+        The entries each key or ``ids`` alias names, the relationship targets of each
+        entry, the ``entryset`` keys with their members, and the reasons why a dynamic
+        key field could not be read.
+    """
     keys: dict[str, list[LocatedEntry]] = defaultdict(list)
     relationships: dict[EntryId, set[str]] = defaultdict(set)
     sets: list[tuple[str, list[str]]] = []
@@ -113,6 +147,15 @@ def _read_key_fields(
 def _ambiguities(
     keys: dict[str, list[LocatedEntry]], relationships: dict[EntryId, set[str]]
 ) -> list[str]:
+    """Describe the keys that name several entries and the relationship targets no key names.
+
+    Args:
+        keys: The entries that each key or alias names.
+        relationships: The relationship targets of each entry.
+
+    Returns:
+        One reason for every ambiguous key or alias and every unresolved target.
+    """
     reasons = [
         f"Citation key or alias {key!r} identifies multiple entries"
         for key, targets in keys.items()
@@ -128,7 +171,18 @@ def _ambiguities(
 
 
 def index_entries(references: list[LocatedEntry]) -> EntryIndex:
-    """Index ``references`` by key and alias; ambiguity and dynamic fields become uncertainties."""
+    """Index ``references`` by key and alias; ambiguity and dynamic fields become uncertainties.
+
+    Entry-set members also point back to their set, so a cited member keeps its set and
+    siblings from being called unused.
+
+    Args:
+        references: The entries to index.
+
+    Returns:
+        The index of the entries' keys, aliases and relationships, with its
+        uncertainties bounded.
+    """
     keys, relationships, sets, reasons = _read_key_fields(references)
     reasons.extend(_ambiguities(keys, relationships))
     # A backend may render a set when one member is cited. Retaining both

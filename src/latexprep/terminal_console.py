@@ -25,6 +25,9 @@ class _TrailingBlankStripper:
     at a terminal cannot see that, but redirected output carries it into files, diffs and
     pipes. Blanks held back at the end of a chunk are written once the next chunk shows
     that the line goes on.
+
+    Args:
+        stream: The stream that receives the stripped text.
     """
 
     def __init__(self, stream: IO[str]) -> None:
@@ -33,15 +36,29 @@ class _TrailingBlankStripper:
 
     @property
     def encoding(self) -> str:
+        """The encoding of the wrapped stream, or ``utf-8`` when it names none."""
         return getattr(self._stream, "encoding", None) or "utf-8"
 
     def fileno(self) -> int:
+        """Return the file descriptor of the wrapped stream."""
         return self._stream.fileno()
 
     def isatty(self) -> bool:
+        """Return whether the wrapped stream is an open terminal."""
         return _is_terminal(self._stream)
 
     def write(self, text: str) -> int:
+        """Write ``text`` without the blanks that end its lines.
+
+        Blanks at the end of ``text`` are held back until the next chunk shows whether its
+        line goes on.
+
+        Args:
+            text: The chunk to write.
+
+        Returns:
+            The length of ``text``, as if all of it had been written.
+        """
         accepted = len(text)
         text = _TRAILING_BLANKS.sub("", self._pending + text)
         stripped = text.rstrip(" \t")
@@ -50,10 +67,12 @@ class _TrailingBlankStripper:
         return accepted
 
     def flush(self) -> None:
+        """Flush the wrapped stream; blanks held back stay pending."""
         self._stream.flush()
 
 
 def _is_terminal(stream: IO[str]) -> bool:
+    """Return whether ``stream`` is a terminal; a closed stream is not."""
     try:
         return stream.isatty()
     except ValueError:  # a closed stream
@@ -70,11 +89,16 @@ class _ReportConsole(Console):
     """
 
     def on_broken_pipe(self) -> None:
+        """Raise the broken pipe to the command instead of ending the process.
+
+        Raises:
+            BrokenPipeError: Always, so the command keeps its own exit code.
+        """
         raise BrokenPipeError
 
 
 def stdout_console() -> Console:
-    """The console for the final report on standard output.
+    """Return the console for the final report on standard output.
 
     When standard output is not a terminal the report carries no trailing blanks.
     """
@@ -87,5 +111,5 @@ def stdout_console() -> Console:
 
 
 def stderr_console() -> Console:
-    """The console for progress and other messages on standard error."""
+    """Return the console for progress and other messages on standard error."""
     return Console(stderr=True, markup=False, highlight=False)

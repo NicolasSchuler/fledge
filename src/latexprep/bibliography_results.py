@@ -31,7 +31,21 @@ def located_finding(
     suggestion: str | None = None,
     details: dict[str, object] | None = None,
 ) -> Finding:
-    """A finding at the line of ``offset`` in ``document``."""
+    """Build a finding at the line of ``offset`` in ``document``.
+
+    Args:
+        document: The document the finding points into.
+        rule: The finding's rule.
+        message: The finding's message.
+        offset: The character offset whose line the finding names.
+        severity: The finding's severity.
+        status: The finding's status.
+        suggestion: What the user could do, if anything.
+        details: Further details for the report.
+
+    Returns:
+        The finding, located at the document's path and the line of ``offset``.
+    """
     return Finding(
         rule,
         message,
@@ -45,7 +59,11 @@ def located_finding(
 
 
 def syntax_finding(document: BibDocument) -> Finding | None:
-    """The error finding for the syntax problem that stopped ``document``, if any."""
+    """Build the error finding for the syntax problem that stopped ``document``, if any.
+
+    Returns:
+        The finding, or ``None`` when the document has no syntax error.
+    """
     problem = document.syntax_error
     if problem is None:
         return None
@@ -70,7 +88,22 @@ def item_finding(
     incomplete: bool = False,
     details: dict[str, object] | None = None,
 ) -> Finding:
-    """A ``bibliography.<rule>`` finding about ``reference``; a passed one is only info."""
+    """Build a ``bibliography.<rule>`` finding about ``reference``; a passed one is only info.
+
+    Args:
+        rule: The rule name that follows ``bibliography.``.
+        message: The finding's message.
+        status: The finding's status.
+        reference: The entry the finding is about, whose key, type, path and line the
+            finding records; ``None`` for a finding about no single entry.
+        severity: The finding's severity unless the status is "passed".
+        evidence: The kind of evidence behind the finding.
+        incomplete: Whether the finding is marked incomplete.
+        details: Further details, to which the entry's key and type are added.
+
+    Returns:
+        The finding.
+    """
     data = dict(details or {})
     if reference:
         data.update({"entry": reference.entry.key, "entry_type": reference.entry.entry_type})
@@ -89,14 +122,28 @@ def item_finding(
 
 @dataclass(frozen=True, slots=True)
 class ReportScope:
-    """What the coverage and field findings describe; repeated in each summary's details."""
+    """What the coverage and field findings describe; repeated in each summary's details.
+
+    Attributes:
+        description: A description of the scope.
+        documents: The documents in scope.
+        resources: The bibliography resources in scope.
+    """
 
     description: str
     documents: tuple[str, ...]
     resources: tuple[str, ...]
 
     def details(self, **extra: object) -> dict[str, object]:
-        """The scope details; ``extra`` adds keys or replaces values in place."""
+        """Build the scope details; ``extra`` adds keys or replaces values in place.
+
+        Args:
+            **extra: Keys to add to the details or values to replace.
+
+        Returns:
+            The scope, its documents and resources, and the notes that source expansion
+            was not performed and the network not used, updated by ``extra``.
+        """
         return {
             "scope": self.description,
             "documents": list(self.documents),
@@ -109,7 +156,14 @@ class ReportScope:
 
 @dataclass(frozen=True, slots=True)
 class SummarySpec:
-    """The rule and wording of one check's summary; ``details`` replaces the scope's."""
+    """The rule and wording of one check's summary; ``details`` replaces the scope's.
+
+    Attributes:
+        rule: The summary's rule name, which follows ``bibliography.``.
+        description: The check's name that begins the summary message.
+        severity: The severity of an inconclusive summary.
+        details: The details that replace the scope's, or ``None`` to use the scope's.
+    """
 
     rule: str
     description: str
@@ -125,11 +179,16 @@ class ResultCollector:
     inconclusive with the same reason. The source checks report that error;
     repeating it once per bibliography check buries it, so such summaries become
     one note. Summaries with any other uncertainty, and every per-item finding, stay.
+
+    Attributes:
+        scope: What the findings describe, repeated in each summary's details.
+        findings: The findings in report order, without the held-back summaries.
+        restated: The held-back summaries that only restate reported source errors, with
+            the uncertainty messages each lists.
     """
 
     scope: ReportScope
     findings: list[Finding] = field(default_factory=list)
-    # Held-back summaries with the uncertainty messages each lists.
     restated: list[tuple[Finding, list[str]]] = field(default_factory=list)
 
     def summarize(
@@ -139,7 +198,18 @@ class ResultCollector:
         checked: int,
         uncertainties: list[Uncertainty],
     ) -> None:
-        """Add a check's item findings and its summary for ``checked`` supported items."""
+        """Add a check's item findings and its summary for ``checked`` supported items.
+
+        An uncertain check gets an inconclusive summary, held back when every uncertainty
+        was already reported. Otherwise a check with item findings gets no summary, one
+        that checked nothing a not-applicable one, and any other a passed one.
+
+        Args:
+            spec: The rule, wording and details of the summary.
+            items: The check's per-item findings.
+            checked: The number of supported items the check inspected.
+            uncertainties: What kept the check from being complete.
+        """
         base = self.scope.details() if spec.details is None else spec.details
         self.findings.extend(items)
         if uncertainties:
@@ -181,7 +251,12 @@ class ResultCollector:
             )
 
     def report(self) -> list[Finding]:
-        """The findings, with the restated summaries replaced by one note."""
+        """Collect the findings, with the restated summaries replaced by one note.
+
+        Returns:
+            The findings in report order, followed by the note when any summary was
+            held back.
+        """
         if not self.restated:
             return self.findings
         codes = list(dict.fromkeys(summary.code or summary.rule for summary, _ in self.restated))

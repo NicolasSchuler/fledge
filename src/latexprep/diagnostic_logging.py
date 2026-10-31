@@ -29,12 +29,18 @@ PACKAGE_LOGGER_NAME = __name__.partition(".")[0]
 
 
 def safe_diagnostic_text(text: str, labels: dict[str, str] | None = None) -> str:
-    """``text`` that is safe to print: no credentials, no local directories, no escapes.
+    """Make ``text`` safe to print: no credentials, no local directories, no escapes.
 
     Credentials (including URL query tokens) are redacted, this machine's home and temporary
-    directories are shown generically, and terminal control characters are removed. A text
-    too large to scan safely is withheld whole. ``labels`` replaces the directories to
-    generalize; it defaults to those of this machine.
+    directories are shown generically, and terminal control characters are removed.
+
+    Args:
+        text: The text to make safe.
+        labels: The directories to generalize, each with its generic label; it defaults to
+            those of this machine.
+
+    Returns:
+        The safe text. A text too large to scan safely is withheld whole.
     """
     return sanitize_terminal_text(scrub_local_paths(redact_data(text), labels))
 
@@ -45,6 +51,10 @@ class ConciseFormatter(logging.Formatter):
     A record above DEBUG also names its level, so a limit that stopped a tool stands out.
     The text of a record's exception, with its traceback, follows the line. The result is
     made safe to print here, on a copy, so the record itself stays as the logger made it.
+
+    Args:
+        labels: The directories to generalize, each with its generic label; those of this
+            machine when ``None``.
     """
 
     def __init__(self, labels: dict[str, str] | None = None) -> None:
@@ -52,6 +62,11 @@ class ConciseFormatter(logging.Formatter):
         self._labels = local_directory_labels() if labels is None else labels
 
     def format(self, record: logging.LogRecord) -> str:
+        """Format ``record`` as one line that is safe to print.
+
+        Returns:
+            The line, followed by the text of the record's exception when it has one.
+        """
         module = record.name.removeprefix(f"{PACKAGE_LOGGER_NAME}.")
         level = f" [{record.levelname.lower()}]" if record.levelno > logging.DEBUG else ""
         text = f"+{record.relativeCreated / 1000:.3f}s {module}{level}: {record.getMessage()}"
@@ -65,6 +80,10 @@ class _DebugHandler(logging.Handler):
 
     Looking ``sys.stderr`` up per record, as ``print`` does, keeps the handler correct when a
     test runner or embedding program replaces the stream after the command started.
+
+    Args:
+        stream: The stream to write to, or ``None`` for whatever ``sys.stderr`` is when a
+            record arrives.
     """
 
     def __init__(self, stream: TextIO | None) -> None:
@@ -72,6 +91,10 @@ class _DebugHandler(logging.Handler):
         self._stream = stream
 
     def emit(self, record: logging.LogRecord) -> None:
+        """Write the formatted record and a newline, then flush the stream.
+
+        A closed or broken stream goes to ``handleError`` instead of stopping the command.
+        """
         try:
             stream = self._stream or sys.stderr
             stream.write(self.format(record) + "\n")
@@ -86,6 +109,13 @@ def debug_logging(stream: TextIO | None = None) -> Generator[None]:
 
     The package logger returns to its earlier level and handlers on exit. A nested use
     while another is active changes nothing: the outermost one owns the handler.
+
+    Args:
+        stream: The stream to write to, or ``None`` for whatever ``sys.stderr`` is when a
+            record arrives.
+
+    Yields:
+        Nothing; the records are shown while the context is active.
     """
     package = logging.getLogger(PACKAGE_LOGGER_NAME)
     if any(isinstance(handler, _DebugHandler) for handler in package.handlers):

@@ -23,6 +23,19 @@ from tests.support import live_test
 
 
 class ProbeRunner(ToolRunner):
+    """A runner whose every command waits for ``release`` and then returns ``response``.
+
+    Version probes through it can be held open, so tests can observe concurrent and cancelled
+    probes.
+
+    Attributes:
+        calls: The number of commands run.
+        entered: Set once a command has started.
+        release: Set by the test to let waiting commands return.
+        response: The result every command returns.
+        owner: The task that ran the latest command, or ``None`` before the first.
+    """
+
     def __init__(self) -> None:
         super().__init__(source_date_epoch=123, toolchain=FixtureToolchain(Path("/tools")))
         self.calls = 0
@@ -42,6 +55,10 @@ class ProbeRunner(ToolRunner):
         readonly_inputs: tuple[Path, ...] = (),
         memory_mb: int | None = None,
     ) -> CommandResult:
+        """Count the command, record its task and return ``response`` once ``release`` is set.
+
+        The arguments are those of :meth:`CommandRunner.run`; the double ignores them.
+        """
         self.calls += 1
         self.owner = asyncio.current_task()
         self.entered.set()
@@ -50,11 +67,20 @@ class ProbeRunner(ToolRunner):
 
 
 class VersionAndInputTests(unittest.IsolatedAsyncioTestCase):
+    """Version probes, the source date epoch, frozen inputs and the Seatbelt grants of a runner.
+
+    A version probe runs once per command and flags, publishes only a successful result and
+    returns detached metadata; a frozen input is an exact snapshot that the sandbox grants as a
+    literal path, and the workspace is the only writable leaf.
+    """
+
     async def asyncSetUp(self) -> None:
+        """Create a temporary directory as ``self.root``."""
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name).resolve()
 
     async def asyncTearDown(self) -> None:
+        """Remove the temporary directory."""
         self.temporary.cleanup()
 
     async def test_concurrent_version_probe_runs_once_and_returns_detached_metadata(self) -> None:

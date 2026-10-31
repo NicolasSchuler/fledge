@@ -15,13 +15,26 @@ from tests.support import ProjectTestCase
 
 
 class BibliographyFilesTests(ProjectTestCase):
+    """Tests of discovering and reading ``.bib`` files within budgets, with typed problems."""
+
     def write(self, name: str, content: str | bytes = "@misc{k}\n") -> Path:
+        """Write a file below ``root``, by default holding one ``@misc`` entry."""
         return super().write(name, content)
 
     def read(self, *names: str, **budget):
+        """Read the declared bibliographies below ``root``.
+
+        Args:
+            *names: The declared bibliography files.
+            **budget: The fields of the ``BibliographyBudget``.
+
+        Returns:
+            What ``read_declared_bibliographies`` loaded.
+        """
         return read_declared_bibliographies(self.root, names, BibliographyBudget(**budget))
 
     def kinds(self, load) -> list[tuple[str | None, ProblemKind]]:
+        """Return the file name and the kind of every problem of ``load``."""
         return [(problem.name, problem.kind) for problem in load.problems]
 
     def test_files_are_read_in_name_order_and_an_invalid_one_is_still_returned(self):

@@ -35,11 +35,14 @@ _FORMAT_MARKER = re.compile(r"^%\s*(?:tex-fmt|fmt|fledge|latex-prep)\s*:\s*(off|
 
 
 class ProtectedSpans(NamedTuple):
-    """The merged ``(start, end)`` offsets to keep, and whether finding them was uncertain.
+    """The text a tool must keep, and whether finding it was uncertain.
 
-    It is uncertain when a literal region is never closed or the formatter markers do
-    not pair up (an ``on`` without an ``off``, a second ``off``, or an ``off`` never
-    turned on), because then the extent of the protected text is a guess.
+    Attributes:
+        spans: The merged ``(start, end)`` offsets to keep.
+        uncertain: Whether finding the spans was uncertain: a literal region is never
+            closed or the formatter markers do not pair up (an ``on`` without an ``off``, a
+            second ``off``, or an ``off`` never turned on), because then the extent of the
+            protected text is a guess.
     """
 
     spans: list[tuple[int, int]]
@@ -49,10 +52,17 @@ class ProtectedSpans(NamedTuple):
 def _directive_and_fenced_spans(
     text: str, comments: list[tuple[int, int]]
 ) -> tuple[list[tuple[int, int]], bool]:
-    """Directive comments, and ranges between ``tex-fmt: off`` and ``on`` markers.
+    """Find directive comments, and ranges between ``tex-fmt: off`` and ``on`` markers.
 
-    The second value is true when the markers are unbalanced. A range left open runs to
-    the end of the text.
+    A range left open runs to the end of the text.
+
+    Args:
+        text: The TeX source.
+        comments: The ``(start, end)`` offsets of the comments in ``text``, in order.
+
+    Returns:
+        The ``(start, end)`` spans of the directive comments and fenced ranges, unmerged,
+        and a flag that is true when the markers are unbalanced.
     """
     spans: list[tuple[int, int]] = []
     off: int | None = None
@@ -77,7 +87,17 @@ def _directive_and_fenced_spans(
 
 
 def _license_spans(text: str, comments: list[tuple[int, int]]) -> list[tuple[int, int]]:
-    """Whole contiguous comment blocks in which any line carries licensing text."""
+    """Return whole contiguous comment blocks in which any line carries licensing text.
+
+    Comments separated only by whitespace belong to one block.
+
+    Args:
+        text: The TeX source.
+        comments: The ``(start, end)`` offsets of the comments in ``text``, in order.
+
+    Returns:
+        The ``(start, end)`` span of each block, from its first comment to its last.
+    """
     blocks: list[list[tuple[int, int]]] = []
     for comment in comments:
         if blocks and text[blocks[-1][-1][1] : comment[0]].strip() == "":
@@ -92,9 +112,16 @@ def _license_spans(text: str, comments: list[tuple[int, int]]) -> list[tuple[int
 
 
 def protected_spans(text: str, scan: RegionScan | None = None) -> ProtectedSpans:
-    """Literal regions, formatter-off ranges and directive/license comment blocks.
+    """Find literal regions, formatter-off ranges and directive/license comment blocks.
 
-    ``scan`` is ``source_regions(text)`` when the caller already has it.
+    Args:
+        text: The TeX source.
+        scan: ``source_regions(text)`` when the caller already has it; ``None`` scans
+            ``text`` here.
+
+    Returns:
+        The merged spans to keep; they are uncertain when a literal region is unclosed or
+        the formatter markers are unbalanced.
     """
     regions, unclosed = scan if scan is not None else source_regions(text)
     literals = [(region.start, region.end) for region in regions if region.kind == "literal"]

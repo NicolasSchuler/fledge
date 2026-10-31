@@ -26,6 +26,17 @@ class Task:
 
     A composite task (see ``composite``) composes other leased operations and holds
     no reservation of its own.
+
+    Attributes:
+        name: The unique task name, stored as a plain string.
+        run: Starts the operation; its result becomes the task's value.
+        needs_success_of: The tasks that must succeed first.
+        waits_for: The tasks that must finish first.
+        cpu: The CPU units to reserve.
+        memory_mb: The memory to reserve in MiB.
+        kind: The tool class whose concurrency limit applies, if any.
+        is_success: Decides from the value whether the task succeeded; without it every
+            value counts as success.
     """
 
     name: str
@@ -56,7 +67,18 @@ class Task:
         waits_for: tuple[str, ...] = (),
         is_success: Callable[[Any], bool] | None = None,
     ) -> Self:
-        """A task whose operations lease their own resources, so it reserves none itself."""
+        """Create a task whose operations lease their own resources, so it reserves none itself.
+
+        Args:
+            name: The unique task name.
+            run: Starts the operation.
+            needs_success_of: The tasks that must succeed first.
+            waits_for: The tasks that must finish first.
+            is_success: Decides from the value whether the task succeeded.
+
+        Returns:
+            The task, which reserves no CPU and no memory.
+        """
         return cls(
             name,
             run,
@@ -74,11 +96,20 @@ class Task:
 
     @property
     def dependencies(self) -> tuple[str, ...]:
+        """Every task that must finish first, including those that must succeed."""
         return (*self.needs_success_of, *self.waits_for)
 
 
 class TaskStatus(StrEnum):
-    """How a scheduled task ended; serialized as its string value in stage records."""
+    """How a scheduled task ended; serialized as its string value in stage records.
+
+    Attributes:
+        SUCCEEDED: The task ran and its value counts as success.
+        FAILED: The task raised an ordinary error, or its value does not count as success.
+        BLOCKED: A task that had to succeed first did not.
+        CANCELLED: The task was cancelled while queued or running, or before its
+            prerequisites completed.
+    """
 
     SUCCEEDED = "succeeded"
     FAILED = "failed"
@@ -88,6 +119,19 @@ class TaskStatus(StrEnum):
 
 @dataclass
 class TaskResult:
+    """The result of one scheduled task.
+
+    Attributes:
+        name: The task's name.
+        status: How the task ended.
+        value: What the task's operation returned.
+        error: The error type and message, or why the task did not succeed.
+        elapsed_seconds: How long the task ran.
+        queue_seconds: How long the task waited for its reservation.
+        blocked_by: The failed prerequisites of a blocked result.
+        defect_frames: The traceback frames of a task that failed by a defect.
+    """
+
     name: str
     status: TaskStatus
     value: Any = None
@@ -103,16 +147,34 @@ class TaskResult:
 
     @property
     def succeeded(self) -> bool:
+        """Whether the task succeeded."""
         return self.status is TaskStatus.SUCCEEDED
 
 
 @dataclass
 class Scheduler:
+    """Runs tasks in dependency order under a shared resource budget.
+
+    Attributes:
+        budget: The budget that admits every task that is not composite.
+        progress: Receives a message when a task starts, ends or is cancelled.
+        on_result: Receives each task's result when it is recorded.
+    """
+
     budget: ResourceBudget
     progress: Callable[[str], None] = field(default=lambda _message: None)
     on_result: Callable[[TaskResult], None] = field(default=lambda _result: None)
 
     def _validate(self, tasks: list[Task]) -> dict[str, Task]:
+        """Check the tasks and index them by name.
+
+        Returns:
+            The tasks, keyed by name.
+
+        Raises:
+            PreparationError: Two tasks share a name, a reservation is invalid, a
+                dependency is unknown, or the dependencies form a cycle.
+        """
         by_name = {task.name: task for task in tasks}
         if len(by_name) != len(tasks):
             raise PreparationError("Duplicate scheduler task name")
@@ -135,6 +197,11 @@ class Scheduler:
         return by_name
 
     async def _invoke(self, task: Task) -> TaskResult:
+        """Run the operation of ``task`` and judge its value with ``is_success``.
+
+        Returns:
+            A succeeded or failed result, without times.
+        """
         logger.debug("task %s: start", task.name)
         self.progress(f"Starting {task.name}")
         value = await task.run()
@@ -147,7 +214,14 @@ class Scheduler:
         )
 
     async def _run_task(self, task: Task) -> TaskResult:
-        """Run one task under its reservation; an ordinary error becomes a failed result."""
+        """Run one task under its reservation; an ordinary error becomes a failed result.
+
+        Returns:
+            The result with its elapsed and queue times.
+
+        Raises:
+            asyncio.CancelledError: The task was cancelled.
+        """
         started = time.monotonic()
         queue_seconds = 0.0
         try:
@@ -202,6 +276,13 @@ class Scheduler:
         Every task gets exactly one result, passed to ``on_result`` when it is recorded.
         A cancellation (or any other ``BaseException``) stops the running tasks, records
         the unfinished ones as cancelled and propagates once all of them have stopped.
+
+        Returns:
+            Every task's result, keyed by task name in sorted order.
+
+        Raises:
+            PreparationError: Two tasks share a name, a reservation is invalid, a
+                dependency is unknown, or the dependencies form a cycle.
         """
         execution = _Execution(self._validate(tasks), self._run_task, self.on_result)
         try:
@@ -215,7 +296,17 @@ class Scheduler:
 
 
 class _Execution:
-    """The state of one ``Scheduler.execute`` call: waiting, running and finished tasks."""
+    """The state of one ``Scheduler.execute`` call: waiting, running and finished tasks.
+
+    Args:
+        run_task: Runs one task to its result.
+        on_result: Receives each task's result when it is recorded.
+
+    Attributes:
+        pending: The tasks that have neither started nor been blocked, by name.
+        running: The running tasks, by their asyncio task.
+        results: The recorded results, by task name.
+    """
 
     def __init__(
         self,
@@ -230,11 +321,13 @@ class _Execution:
         self.results: dict[str, TaskResult] = {}
 
     def _record(self, result: TaskResult) -> None:
+        """Record the first result of a task and pass it to ``on_result``; ignore later ones."""
         if result.name not in self.results:
             self.results[result.name] = result
             self._on_result(result)
 
     def _ready(self, task: Task) -> bool:
+        """Return whether every dependency of ``task`` has a result."""
         return all(dependency in self.results for dependency in task.dependencies)
 
     def start_ready(self) -> None:
@@ -262,7 +355,11 @@ class _Execution:
                 self.running[asyncio.create_task(self._run_task(task))] = task
 
     async def collect_completed(self) -> None:
-        """Wait for at least one running task to finish and record the finished ones."""
+        """Wait for at least one running task to finish and record the finished ones.
+
+        Raises:
+            PreparationError: Nothing runs and no pending task can become ready.
+        """
         if self.running:
             completed, _ = await asyncio.wait(self.running, return_when=asyncio.FIRST_COMPLETED)
             for future in sorted(completed, key=lambda item: self.running[item].name):

@@ -38,7 +38,19 @@ from tests.support import ProjectTestCase, live_test
 
 
 class SampledRunner(LifecycleRunner):
-    """A runner whose process table, and so its memory accounting, the test scripts."""
+    """A runner whose process table, and so its memory accounting, the test scripts.
+
+    Attributes:
+        budget: The shared job budget that admits commands, passed to :class:`LifecycleRunner`.
+        allow_sample: Set by the test to let samples proceed; every sample waits for it.
+        parent_rss_mb: The resident memory reported for this process, in MiB.
+        group_rss_mb: The resident memory reported for the leader of each active command's
+            process group, in MiB.
+        group_processes: The number of processes reported in each active command's group.
+        sample_owners: The tasks that took samples.
+        unavailable: Whether sampling raises :class:`PreparationError`, as if process accounting
+            were unavailable.
+    """
 
     def __init__(self, budget: ResourceBudget) -> None:
         self.allow_sample = asyncio.Event()
@@ -55,6 +67,17 @@ class SampledRunner(LifecycleRunner):
         )
 
     async def sample_processes(self) -> list[ProcessSample]:
+        """Return the scripted process table once ``allow_sample`` is set.
+
+        The table holds this process with ``parent_rss_mb`` and, for every active command, a group
+        leader with ``group_rss_mb`` and ``group_processes - 1`` further members that use no memory.
+
+        Returns:
+            The scripted process samples.
+
+        Raises:
+            PreparationError: ``unavailable`` is set.
+        """
         await self.allow_sample.wait()
         self.sample_owners.add(asyncio.current_task())
         if self.unavailable:
@@ -69,6 +92,8 @@ class SampledRunner(LifecycleRunner):
 
 
 class StorageWalkTests(ProjectTestCase):
+    """Storage measurement: one walk per sample, and the size and entry limits of each workspace."""
+
     def test_one_walk_measures_the_tree_and_checks_every_workspace(self) -> None:
         quiet, noisy = self.root / "quiet", self.root / "noisy"
         (quiet / "nested").mkdir(parents=True)
@@ -101,7 +126,10 @@ class StorageWalkTests(ProjectTestCase):
 
 
 class ProcessListingTests(unittest.IsolatedAsyncioTestCase):
+    """Process listing: its launch, the message for a missing tool, and a failing monitor."""
+
     def monitor(self) -> ResourceMonitor:
+        """Return a resource monitor with the Seatbelt sandbox and a 1024 MiB memory limit."""
         return ResourceMonitor(SeatbeltSandbox(), ResourceStatistics(1024, None))
 
     async def test_process_listing_runs_detached_and_without_input(self) -> None:
@@ -147,7 +175,16 @@ class ProcessListingTests(unittest.IsolatedAsyncioTestCase):
 
 
 class SharedMonitorTests(unittest.IsolatedAsyncioTestCase):
+    """The job monitor that a runner's commands share, exercised with real Perl child processes.
+
+    The monitor counts the parent's memory, enforces the memory cap of each command's lease, the
+    process count of each group and the job's disk ceiling, runs storage walks off the event loop,
+    reports unavailable accounting, and reaps children when a scope closes or a run is cancelled;
+    contract violations are defects, not expected failures.
+    """
+
     async def asyncSetUp(self) -> None:
+        """Create a temporary ``self.root`` and find Perl, skipping the test without it."""
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name).resolve()
         perl = shutil.which("perl")
@@ -156,9 +193,19 @@ class SharedMonitorTests(unittest.IsolatedAsyncioTestCase):
         self.perl = perl
 
     async def asyncTearDown(self) -> None:
+        """Remove the temporary directory."""
         self.temporary.cleanup()
 
     async def wait_groups(self, runner: ToolRunner, count: int) -> None:
+        """Wait until ``runner`` monitors exactly ``count`` commands.
+
+        Args:
+            runner: The runner whose monitor is polled.
+            count: The number of active commands to wait for.
+
+        Raises:
+            TimeoutError: The count is not reached within three seconds.
+        """
         async with asyncio.timeout(3):
             while len(runner.monitor.active_commands) != count:
                 await asyncio.sleep(0.005)
@@ -166,6 +213,18 @@ class SharedMonitorTests(unittest.IsolatedAsyncioTestCase):
     async def sleeping_command(
         self, runner: ToolRunner, name: str, memory_mb: int, command_memory_mb: int | None = None
     ) -> CommandResult:
+        """Run a 30-second Perl ``sleep`` in a new workspace under a lease of ``memory_mb``.
+
+        Args:
+            runner: The runner, which must have a budget.
+            name: The name of the lease and of the workspace directory under the test root.
+            memory_mb: The memory of the lease, in MiB.
+            command_memory_mb: The memory cap passed to the command, in MiB, or ``None`` for no cap
+                of its own.
+
+        Returns:
+            The result of the command.
+        """
         workspace = self.root / name
         workspace.mkdir()
         assert runner.budget is not None

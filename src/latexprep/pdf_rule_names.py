@@ -13,6 +13,62 @@ from enum import StrEnum
 
 
 class PdfRule(StrEnum):
+    """The names of the ``pdf.*`` rules, grouped by the module that reports them.
+
+    Attributes:
+        SECTION_PAGE_BUDGET: Section page budgets.
+        RENDERED_TEXT_SIZE: Reported rendered text size.
+        PRINTABLE_TEXT_BOUNDS: Printable text bounds.
+        TEXT_OVERLAP: Text overlap candidates.
+        SPARSE_PAGES: Sparse rendered page candidates.
+        REQUIRED_METADATA: Required PDF metadata.
+        METADATA_AGREEMENT: Expected PDF metadata agreement.
+        TAGGING_PRESENCE: PDF tagging presence.
+        DOCUMENT_LANGUAGE: PDF language declaration.
+        ANNOTATION_POLICY: PDF annotation type policy.
+        ACTION_POLICY: PDF action-name candidates.
+        INCLUDED_FIGURE_FONTS: Included PDF figure fonts.
+        STROKE_WIDTH: Transformed PDF stroke width.
+        COLOR_SPACE_POLICY: Rendering color-space policy.
+        ASSUMED_TEXT_CONTRAST: Text contrast against supplied background.
+        GRAYSCALE_SEPARATION: Grayscale color separation candidates.
+        PAGE_LIMIT: Total PDF page limit.
+        PAGE_DIMENSIONS: Expected PDF page dimensions.
+        PAGE_SIZE_CONSISTENCY: Consistent PDF page dimensions.
+        IMAGE_RESOLUTION: Minimum effective image resolution.
+        FONT_EMBEDDING: Embedded PDF fonts.
+        TYPE3_FONTS: Type 3 PDF fonts.
+        ENCRYPTION_POLICY: PDF encryption.
+        FORMS_POLICY: PDF forms.
+        JAVASCRIPT_POLICY: PDF JavaScript.
+        ATTACHMENTS_POLICY: Embedded PDF attachments.
+        EXPECTED_HEADINGS: Explicit rendered heading expectations.
+        TABLE_STRUCTURE: Tagged table row and cell structure.
+        LINK_STRUCTURE: Link tag and annotation associations.
+        FIGURE_ALTERNATIVE_TEXT: Nonempty tagged Figure alternative text.
+        STRUCTURE_REFERENCES: Structure tree and marked-content reference integrity.
+        PAGES: The page count.
+        METADATA: The document properties.
+        PAGE_GEOMETRY: The page dimensions and boxes.
+        ENCRYPTED: Whether the PDF is encrypted.
+        FORM: Whether the PDF holds a form.
+        JAVASCRIPT: Whether the PDF holds JavaScript.
+        FONTS: The font resources and which are not embedded.
+        TEXT: Whether every page has extractable text.
+        ATTACHMENTS: The embedded files.
+        IMAGES: The raster placements.
+        ANNOTATION_MEDIA_SCOPE: That annotations and active media are not inspected.
+        TOOLS: The versions of the PDF tools.
+        INSPECTION_UNAVAILABLE: The inspection could not run.
+        GEOMETRY_UNAVAILABLE: The page geometry could not be read.
+        FONTS_UNAVAILABLE: The font inventory could not be read.
+        TEXT_UNAVAILABLE: The text could not be extracted.
+        ATTACHMENTS_UNAVAILABLE: The embedded files could not be listed.
+        IMAGES_UNAVAILABLE: The raster placements could not be listed.
+        ARTWORK_INPUT_SCOPE: Whether the included PDF figures measured for artwork are the
+            complete set.
+    """
+
     # Configured measurements (pdf_checks).
     SECTION_PAGE_BUDGET = "pdf.section_page_budget"
     RENDERED_TEXT_SIZE = "pdf.rendered_text_size"

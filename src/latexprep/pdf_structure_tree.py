@@ -34,7 +34,16 @@ _STANDARD_ROLES = frozenset(
 
 @dataclass
 class StructureElement:
-    """One structure element: its object, resolved role, parent and children by index."""
+    """One structure element: its object, resolved role, parent and children by index.
+
+    Attributes:
+        reference: The element's object reference, or ``None`` for a direct dictionary.
+        role: The resolved role name, such as ``/Table``.
+        data: The element's dictionary.
+        parent: The index of the parent element, or ``None`` directly below the root.
+        page: The object reference of the element's page, if known.
+        children: The indexes of the child elements.
+    """
 
     reference: str | None
     role: str
@@ -45,7 +54,14 @@ class StructureElement:
 
 
 class MarkedContent(NamedTuple):
-    """A marked-content item (by id) that an element owns on a page, in a stream or not."""
+    """A marked-content item (by id) that an element owns on a page, in a stream or not.
+
+    Attributes:
+        owner: The index of the element that owns the item.
+        page: The object reference of the page, if known.
+        stream: The object reference of the content stream (``/Stm``), if one is named.
+        mcid: The marked-content id.
+    """
 
     owner: int
     page: str | None
@@ -54,7 +70,13 @@ class MarkedContent(NamedTuple):
 
 
 class ObjectReference(NamedTuple):
-    """An element's reference to another object (an annotation, say) on a page."""
+    """An element's reference to another object (an annotation, say) on a page.
+
+    Attributes:
+        owner: The index of the element that owns the reference.
+        page: The object reference of the page, if known.
+        target: The referenced object (``/Obj``).
+    """
 
     owner: int
     page: str | None
@@ -65,9 +87,22 @@ class StructureTree:
     """A PDF's tagged structure tree and parent tree, read from qpdf's object data.
 
     ``read`` walks the tree within fixed bounds; anything cyclic, repeated, excessively
-    deep or malformed raises ``PreparationError``. Problems that leave the tree readable
-    (a wrong parent link, say) accumulate in ``problems`` for the checks to report, and
-    constructs the checks do not interpret accumulate in ``uncertainty``.
+    deep or malformed raises ``PreparationError``. Construction raises it as well when
+    the structure root or the page inventory is malformed.
+
+    Attributes:
+        objects: The qpdf object graph.
+        root_reference: The object reference of the structure root, or ``None``.
+        root: The structure root dictionary.
+        pages: The page number, from 1, of each page object reference.
+        roles: The role map.
+        elements: The structure elements in traversal order.
+        content: The marked-content items the elements own.
+        object_references: The object references the elements own.
+        problems: Problems that leave the tree readable (a wrong parent link, say), for
+            the checks to report.
+        uncertainty: Constructs the checks do not interpret.
+        parents: The entries of the parent number tree, by key.
     """
 
     def __init__(self, objects: QpdfObjectGraph):
@@ -97,13 +132,30 @@ class StructureTree:
 
     @classmethod
     def read(cls, objects: QpdfObjectGraph) -> Self:
-        """The structure tree of ``objects`` with its elements, content and parent tree."""
+        """Read the structure tree of ``objects`` with its elements, content and parent tree.
+
+        Returns:
+            The tree.
+
+        Raises:
+            PreparationError: The tree is cyclic, repeated, excessively deep, oversized or
+                malformed.
+        """
         tree = cls(objects)
         tree._visit(tree.root.get("/K", []), None, None, 0)
         tree.parents = tree._parent_tree(tree.root.get("/ParentTree"))
         return tree
 
     def _role(self, value: object) -> str:
+        """Resolve a role through the role map; a nonstandard result adds an uncertainty.
+
+        Returns:
+            The role name, such as ``/Table``.
+
+        Raises:
+            PreparationError: The mapping is cyclic or excessively deep, or yields no role
+                name.
+        """
         role = self.objects.resolve(value)
         seen = set()
         while isinstance(role, str) and role in self.roles:
@@ -118,6 +170,18 @@ class StructureTree:
         return role
 
     def _visit(self, raw: object, parent: int | None, page: str | None, depth: int) -> None:
+        """Visit one child of the tree: a list, a marked-content id or a dictionary.
+
+        Args:
+            raw: The child, possibly an object reference.
+            parent: The index of the owning element, or ``None`` at the root.
+            page: The inherited page reference.
+            depth: The nesting depth.
+
+        Raises:
+            PreparationError: The traversal exceeds its bounds, an object repeats, or the
+                child has an unsupported type.
+        """
         cancellation_point()
         self._steps += 1
         if self._steps > MAX_STRUCTURE_ITEMS or depth > MAX_PDF_NESTING_LEVELS:
@@ -139,6 +203,7 @@ class StructureTree:
             raise PreparationError("PDF structure child is not a supported element or content item")
 
     def _visit_content_id(self, mcid: int, parent: int | None, page: str | None) -> None:
+        """Record a marked-content id, or a problem if it is negative or has no owner."""
         if parent is None or mcid < 0:
             self.problems.append({"reason": "MCID has no structural owner or is negative"})
         else:
@@ -152,6 +217,7 @@ class StructureTree:
         page: str | None,
         depth: int,
     ) -> None:
+        """Visit a marked-content reference, an object reference or a structure element."""
         declared_page = value.get("/Pg", page)
         page = declared_page if isinstance(declared_page, str) else None
         kind = value.get("/Type")
@@ -168,6 +234,7 @@ class StructureTree:
     def _visit_marked_content_reference(
         self, value: dict[str, object], parent: int | None, page: str | None
     ) -> None:
+        """Record a marked-content reference, or a problem if it lacks a valid id or owner."""
         mcid = self.objects.resolve(value.get("/MCID"))
         stream = value.get("/Stm")
         if parent is None or type(mcid) is not int or mcid < 0:
@@ -185,6 +252,7 @@ class StructureTree:
         page: str | None,
         depth: int,
     ) -> None:
+        """Record a structure element, check its parent link and visit its children."""
         role = self._role(value.get("/S"))
         if "/NS" in value:
             self.uncertainty.add("PDF namespace-specific structure roles are not interpreted")
@@ -202,6 +270,15 @@ class StructureTree:
         self._visit(value.get("/K", []), index, page, depth + 1)
 
     def _parent_tree(self, raw: object) -> dict[int, object]:
+        """Read the parent number tree within the traversal and entry bounds.
+
+        Returns:
+            The entries by key; empty when the PDF has no parent tree.
+
+        Raises:
+            PreparationError: The tree is cyclic, malformed, too deep or too large, or has
+                invalid or duplicate keys.
+        """
         if raw is None:
             return {}
         result: dict[int, object] = {}
@@ -238,12 +315,22 @@ class StructureTree:
         return result
 
     def parent_entry(self, container: dict[str, object], name: str) -> object:
+        """Look up the parent tree entry that a key of ``container`` names.
+
+        Args:
+            container: The dictionary that holds the key.
+            name: The name of the key.
+
+        Returns:
+            The resolved entry, or ``None`` when the key is missing, invalid or unknown.
+        """
         key = self.objects.resolve(container.get(name))
         if type(key) is not int or key < 0 or key not in self.parents:
             return None
         return self.objects.resolve(self.parents[key])
 
     def location(self, index: int) -> dict[str, object]:
+        """Describe where element ``index`` is: its object, role and page number."""
         element = self.elements[index]
         return {
             "object": element.reference,

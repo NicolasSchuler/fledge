@@ -1,3 +1,5 @@
+"""Tests of the comment marker patterns and of the category a comment matches first."""
+
 from __future__ import annotations
 
 import unittest
@@ -6,6 +8,8 @@ from latexprep.comment_markers import MarkerCategory, marker_pattern, matching_c
 
 
 class MarkerPatternTests(unittest.TestCase):
+    """Tests of the text that ``marker_pattern`` matches for each marker category."""
+
     def test_edit_markers_are_whole_words_and_uncertainty_marks_are_double_question_marks(
         self,
     ) -> None:
@@ -59,6 +63,12 @@ class MarkerPatternTests(unittest.TestCase):
 
 
 class MatchingCategoryTests(unittest.TestCase):
+    """Tests of ``matching_category``: precedence, no match, and the category labels.
+
+    Attributes:
+        CATEGORIES: The categories in the order the tests pass them.
+    """
+
     CATEGORIES = (
         MarkerCategory.REVIEW_CORRESPONDENCE,
         MarkerCategory.DISTRIBUTION_RESTRICTION,

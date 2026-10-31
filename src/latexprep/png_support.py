@@ -36,7 +36,14 @@ MIN_PNG_BYTES = 57
 
 
 class PngHeader(NamedTuple):
-    """The fields of an IHDR chunk that observations need."""
+    """The fields of an IHDR chunk that observations need.
+
+    Attributes:
+        width: The image width in pixels.
+        height: The image height in pixels.
+        bit_depth: The bits per sample or palette index.
+        color_type: The PNG colour type code.
+    """
 
     width: int
     height: int
@@ -45,13 +52,19 @@ class PngHeader(NamedTuple):
 
 
 class PngChunk(NamedTuple):
-    """One checksum-verified chunk: its four-byte type and its payload."""
+    """One checksum-verified chunk: its four-byte type and its payload.
+
+    Attributes:
+        kind: The four-byte chunk type, such as ``b"IHDR"``.
+        data: The chunk payload.
+    """
 
     kind: bytes
     data: bytes
 
 
 def _chunk(kind: bytes, payload: bytes) -> bytes:
+    """Frame ``payload`` as a chunk of type ``kind`` with its length and checksum."""
     return (
         struct.pack(">I", len(payload))
         + kind
@@ -61,7 +74,16 @@ def _chunk(kind: bytes, payload: bytes) -> bytes:
 
 
 def encode_gray_png(width: int, height: int, pixels: bytes) -> bytes:
-    """Encode already validated 8-bit grayscale pixels without another dependency."""
+    """Encode already validated 8-bit grayscale pixels without another dependency.
+
+    Args:
+        width: The image width in pixels.
+        height: The image height in pixels.
+        pixels: One byte per pixel, row by row, ``width`` bytes per row.
+
+    Returns:
+        The PNG file.
+    """
     rows = b"".join(b"\0" + pixels[y * width : (y + 1) * width] for y in range(height))
     return (
         PNG_SIGNATURE
@@ -72,7 +94,20 @@ def encode_gray_png(width: int, height: int, pixels: bytes) -> bytes:
 
 
 def png_dimensions(data: bytes, *, max_dimension: int, max_pixels: int) -> tuple[int, int]:
-    """Validate the framing and dimensions of internally rendered PNG bytes."""
+    """Validate the framing and dimensions of internally rendered PNG bytes.
+
+    Args:
+        data: The PNG file.
+        max_dimension: The largest width or height accepted.
+        max_pixels: The largest number of pixels accepted.
+
+    Returns:
+        The width and height.
+
+    Raises:
+        PreparationError: The data is not a complete PNG image, or a dimension is zero or
+            exceeds a limit.
+    """
     if (
         len(data) < MIN_PNG_BYTES
         or not data.startswith(PNG_SIGNATURE + _IHDR_CHUNK_START)
@@ -89,10 +124,20 @@ def iter_png_chunks(data: bytes, *, max_chunks: int) -> Iterator[PngChunk]:
     """Yield every chunk of a complete PNG file, ending with its IEND chunk.
 
     Each chunk is yielded only after its length and checksum are verified, so a
-    consumer sees exactly the chunks before a structural defect. The walk raises
-    ``PreparationError`` for a wrong signature, more than ``max_chunks`` chunks, a
-    truncated or oversized chunk, a bad checksum, an IEND chunk that is not empty or
-    is followed by more bytes, and a file that ends without an IEND chunk.
+    consumer sees exactly the chunks before a structural defect.
+
+    Args:
+        data: The whole PNG file.
+        max_chunks: The largest number of chunks accepted.
+
+    Yields:
+        Each verified chunk in file order.
+
+    Raises:
+        PreparationError: The signature is wrong, the file has more than ``max_chunks``
+            chunks, a chunk is truncated or oversized or has a bad checksum, the IEND
+            chunk is not empty or is followed by more bytes, or the file ends without an
+            IEND chunk.
     """
     if not data.startswith(PNG_SIGNATURE):
         raise PreparationError("PNG signature is invalid")
@@ -121,10 +166,13 @@ def iter_png_chunks(data: bytes, *, max_chunks: int) -> Iterator[PngChunk]:
 
 
 def read_png_header(data: bytes) -> PngHeader | None:
-    """The IHDR fields at the start of ``data``, or None if it is not a PNG header.
+    """Read the IHDR fields at the start of ``data``.
 
     Only the signature and the first chunk's type and length are checked, so a file
     prefix long enough to hold the IHDR chunk is enough.
+
+    Returns:
+        The fields, or ``None`` if ``data`` does not start with a PNG header.
     """
     header_end = len(PNG_SIGNATURE) + 8 + _IHDR_DATA_BYTES
     if len(data) < header_end or not data.startswith(PNG_SIGNATURE + _IHDR_CHUNK_START):

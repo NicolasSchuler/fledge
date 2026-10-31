@@ -58,16 +58,24 @@ _SCOPE = (
 
 @functools.cache
 def _hook_template() -> str:
-    """The hook in loaded_options_hook.tex, application-owned TeX only."""
+    """Read the hook in loaded_options_hook.tex, application-owned TeX only, once."""
     return resources.files("latexprep").joinpath(_HOOK_RESOURCE).read_text(encoding="ascii")
 
 
 @dataclass(frozen=True, slots=True)
 class LoadedOptionsProbe:
-    """A staged option hook: its random token, where it and its output are, and its bytes.
+    r"""A staged option hook: its random token, where it and its output are, and its bytes.
 
-    ``hook_bytes`` and ``staged_bytes`` (the main file with the hook's ``\\input``
-    prepended) are kept so the evidence can be refused if either changed during the build.
+    ``hook_bytes`` and ``staged_bytes`` are kept so the evidence can be refused if either
+    changed during the build.
+
+    Attributes:
+        token: The random hexadecimal token that the hook's records must carry.
+        hook: The hook file in the workspace, outside the project copy.
+        sidecar: The file the hook writes its records to.
+        main: The instrumented main file of the project copy.
+        hook_bytes: The bytes written to ``hook``.
+        staged_bytes: The main file with the hook's ``\input`` prepended.
     """
 
     token: str
@@ -79,7 +87,24 @@ class LoadedOptionsProbe:
 
 
 def stage_loaded_options(project: Path, main: str, work: Path) -> LoadedOptionsProbe:
-    """Add a line-neutral hook only to the existing disposable project copy."""
+    r"""Add a line-neutral hook only to the existing disposable project copy.
+
+    The hook is written into ``work``, and an ``\input`` of it is prepended to the main
+    file after any UTF-8 byte order mark, without adding a line.
+
+    Args:
+        project: The disposable project copy.
+        main: The main file, relative to ``project``.
+        work: The workspace that receives the hook.
+
+    Returns:
+        The staged probe.
+
+    Raises:
+        PreparationError: The main file is too large, or the hook would not lie outside
+            the project copy.
+        OSError: The main file cannot be read or written, or is not a regular file.
+    """
     main_path = project / main
     try:
         original = read_regular_file(main_path, _MAX_MAIN_BYTES)
@@ -109,7 +134,15 @@ def stage_loaded_options(project: Path, main: str, work: Path) -> LoadedOptionsP
 
 @dataclass(frozen=True, slots=True)
 class PackageOptions:
-    """One class or package's kernel option lists, with its recorder origin once joined."""
+    """One class or package's kernel option lists, with its recorder origin once joined.
+
+    Attributes:
+        name: The class or package file name.
+        options: The normalized option list.
+        raw_options: The raw option list.
+        path: The recorded path, once joined with the recorder.
+        origin: Where the recorded file comes from, once joined with the recorder.
+    """
 
     name: str
     options: str
@@ -120,7 +153,15 @@ class PackageOptions:
 
 @dataclass(frozen=True, slots=True)
 class KernelOptions:
-    """Post-document kernel option registers of one build."""
+    """Post-document kernel option registers of one build.
+
+    Attributes:
+        engine: The engine that ran the hook.
+        format_date: The declared date of the LaTeX format.
+        global_class_options: The global class options.
+        unused_options: The kernel's list of unused options.
+        packages: The option lists of each loaded class and package.
+    """
 
     engine: Engine
     format_date: str
@@ -131,16 +172,23 @@ class KernelOptions:
 
 @dataclass(frozen=True, slots=True)
 class LoadedOptionsEvidence:
-    """Kernel options joined with recorder origins, or why they are unavailable."""
+    """Kernel options joined with recorder origins, or why they are unavailable.
+
+    Attributes:
+        kernel: The joined kernel options, or ``None`` when they are unavailable.
+        uncertainty: Why the options are unavailable.
+    """
 
     kernel: KernelOptions | None = None
     uncertainty: str = ""
 
     @property
     def complete(self) -> bool:
+        """Whether the kernel options were established."""
         return self.kernel is not None
 
     def details(self) -> dict[str, object]:
+        """Render the evidence as report details, with its scope when it is complete."""
         kernel = self.kernel
         if kernel is None:
             return {"coverage_complete": False, "uncertainty": [self.uncertainty]}
@@ -155,6 +203,14 @@ class LoadedOptionsEvidence:
         }
 
     def finding(self, main: str) -> Finding:
+        """Report the evidence as a ``build.loaded_options`` finding.
+
+        Args:
+            main: The main file the finding names.
+
+        Returns:
+            A passed finding for complete evidence, else an inconclusive error.
+        """
         if self.kernel is None:
             return Finding(
                 "build.loaded_options",
@@ -176,7 +232,20 @@ class LoadedOptionsEvidence:
 
 
 def decode_native_string(value: str, engine: Engine) -> str:
-    """Decode a hook field of hexadecimal character units as ``engine`` reports them."""
+    """Decode a hook field of hexadecimal character units as ``engine`` reports them.
+
+    Args:
+        value: Eight uppercase hexadecimal digits per character unit.
+        engine: The engine that wrote the field; pdfTeX reports UTF-8 bytes, XeTeX and
+            LuaTeX report code points.
+
+    Returns:
+        The decoded text.
+
+    Raises:
+        PreparationError: The field is oversized or malformed, or holds units that are
+            not text.
+    """
     width = _HEX_DIGITS_PER_UNIT
     if (
         len(value) > width * _MAX_FIELD_UNITS
@@ -200,13 +269,41 @@ def decode_native_string(value: str, engine: Engine) -> str:
 
 
 def _tagged_value(row: str, tag: str, engine: Engine, reordered: str) -> str:
+    """Decode the value of a record that must carry ``tag``.
+
+    Args:
+        row: The record, ``tag|value``.
+        tag: The expected tag.
+        engine: The engine that wrote the record.
+        reordered: The error message when the record carries another tag.
+
+    Returns:
+        The decoded value.
+
+    Raises:
+        PreparationError: The record carries another tag, or its value is malformed.
+    """
     if not row.startswith(tag + "|"):
         raise PreparationError(reordered)
     return decode_native_string(row.removeprefix(tag + "|"), engine)
 
 
 def parse_kernel_options(text: str, token: str, engine: Engine) -> KernelOptions:
-    """Read the option records a build's hook wrote, which must carry this build's ``token``."""
+    """Read the option records a build's hook wrote, which must carry this build's ``token``.
+
+    Args:
+        text: The records the hook wrote.
+        token: The token of this build's hook.
+        engine: The engine of this build.
+
+    Returns:
+        The kernel option registers, without recorder origins.
+
+    Raises:
+        PreparationError: The records are incomplete, reordered, duplicated, from another
+            build or engine, report an unsupported or too old format, or name no document
+            class.
+    """
     rows = text.splitlines()
     if not rows or rows[0] != f"START|{token}" or rows[-1] != f"END|{token}":
         raise PreparationError("Complete current-build option start/end markers are absent")
@@ -250,10 +347,12 @@ def parse_kernel_options(text: str, token: str, engine: Engine) -> KernelOptions
 
 
 def loaded_options_unavailable(reason: str, main: str) -> Finding:
+    """Report the option inventory as inconclusive for ``reason``, naming ``main``."""
     return LoadedOptionsEvidence(uncertainty=reason).finding(main)
 
 
 def _unchanged_regular_file(path: Path, expected: bytes) -> bool:
+    """Return whether ``path`` is a regular file, not a link, that holds exactly ``expected``."""
     info = path.lstat()
     return (
         stat.S_ISREG(info.st_mode)
@@ -266,8 +365,13 @@ def _unchanged_regular_file(path: Path, expected: bytes) -> bool:
 class BuildEvidence:
     """What the final build and its file recorder established, to join with the kernel's report.
 
-    ``packages`` and ``recorder_inputs`` are what the recorder saw; ``max_bytes`` bounds the
-    option file the build wrote.
+    Attributes:
+        engine: The engine of the build.
+        packages: The loaded classes and packages the recorder saw.
+        recorder_inputs: The input files the recorder saw.
+        recorder_complete: Whether the recorder evidence is complete.
+        build_complete: Whether the build completed successfully.
+        max_bytes: The bound on the option file the build wrote.
     """
 
     engine: Engine
@@ -279,7 +383,18 @@ class BuildEvidence:
 
 
 def _require_fresh_evidence(probe: LoadedOptionsProbe, build: BuildEvidence) -> None:
-    """Raise unless the build, recorder, hook and sidecar are complete and unchanged."""
+    """Raise unless the build, recorder, hook and sidecar are complete and unchanged.
+
+    Args:
+        probe: The staged hook of this build.
+        build: What the build and its recorder established.
+
+    Raises:
+        PreparationError: The build or recorder is incomplete, the recorder did not see
+            the hook, the hook or main file changed, or the sidecar is not a bounded
+            regular file.
+        OSError: A file cannot be examined.
+    """
     if not build.build_complete or not build.recorder_complete:
         raise PreparationError("A successful build and complete recorder are required")
     if probe.hook not in build.recorder_inputs:
@@ -294,7 +409,20 @@ def _require_fresh_evidence(probe: LoadedOptionsProbe, build: BuildEvidence) -> 
 
 
 def _join_recorded_packages(kernel: KernelOptions, build: BuildEvidence) -> KernelOptions:
-    """Attach each recorded path and origin to the kernel's package of the same name."""
+    """Attach each recorded path and origin to the kernel's package of the same name.
+
+    Args:
+        kernel: The kernel option registers.
+        build: The recorder evidence of the build.
+
+    Returns:
+        The kernel options with recorded paths and origins.
+
+    Raises:
+        PreparationError: A package has several recorded paths, the kernel and recorder
+            name different packages, or a control sequence remains in a normalized option
+            list.
+    """
     recorded = {package.name: package for package in build.packages}
     if len(recorded) != len(build.packages):
         raise PreparationError("Multiple recorder paths make a package origin ambiguous")
@@ -312,7 +440,16 @@ def _join_recorded_packages(kernel: KernelOptions, build: BuildEvidence) -> Kern
 def collect_loaded_options(
     probe: LoadedOptionsProbe, build: BuildEvidence
 ) -> LoadedOptionsEvidence:
-    """Require fresh complete evidence and a one-to-one recorder/kernel graph."""
+    """Require fresh complete evidence and a one-to-one recorder/kernel graph.
+
+    Args:
+        probe: The staged hook of this build.
+        build: What the build and its recorder established.
+
+    Returns:
+        The joined kernel options, or the reason they are unavailable; a read failure
+        or malformed evidence is never raised.
+    """
     try:
         _require_fresh_evidence(probe, build)
         kernel = parse_kernel_options(

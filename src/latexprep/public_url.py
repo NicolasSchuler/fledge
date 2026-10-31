@@ -65,7 +65,15 @@ _SPECIAL_IPV4_NETWORKS = tuple(
 
 @dataclass(frozen=True)
 class Target:
-    """A validated request target: its normalized URL, host, port and request path."""
+    """A validated request target: its normalized URL, host, port and request path.
+
+    Attributes:
+        url: The normalized URL without credentials or fragment.
+        scheme: ``http`` or ``https``.
+        host: The lowercase ASCII host name or IP address, without a trailing dot.
+        port: The scheme's standard port.
+        path: The percent-encoded request path with its query, if any.
+    """
 
     url: str
     scheme: str
@@ -75,11 +83,15 @@ class Target:
 
 
 def _query_pairs(query: str) -> list[tuple[str, str]]:
+    """Split ``query`` into key-value pairs; ``;`` separates like ``&`` and blanks are kept."""
     return parse_qsl(query.replace(";", "&"), keep_blank_values=True)
 
 
 def redact_url(value: str) -> str:
-    """``value`` without credentials, fragment and secret-looking query values."""
+    """Return ``value`` without credentials, fragment and secret-looking query values.
+
+    A value that cannot be parsed becomes a fixed placeholder.
+    """
     try:
         parts = urlsplit(value)
         host = parts.hostname or "invalid-target"
@@ -98,7 +110,15 @@ def redact_url(value: str) -> str:
 
 
 def require_public_ip(value: str) -> str:
-    """``value`` as a normalized address, if it is globally routable; otherwise a failure."""
+    """Normalize ``value`` as an IP address that must be globally routable.
+
+    Returns:
+        The normalized address.
+
+    Raises:
+        NetworkFailure: ``value`` is not an IP address, or the address is private, local,
+            reserved, multicast, special-use or carries a scope id.
+    """
     try:
         address = ipaddress.ip_address(value)
     except ValueError as error:
@@ -132,6 +152,11 @@ def require_public_ip(value: str) -> str:
 
 
 def _require_clean_text(url: str) -> None:
+    """Refuse a URL that is too long or holds whitespace, control characters or backslashes.
+
+    Raises:
+        NetworkFailure: The URL is not clean text.
+    """
     if (
         not isinstance(url, str)
         or len(url) > _MAX_URL_CHARACTERS
@@ -144,6 +169,11 @@ def _require_clean_text(url: str) -> None:
 
 
 def _require_no_credentials(parts: SplitResult) -> None:
+    """Refuse a URL with a user name, a password or a secret-looking query key.
+
+    Raises:
+        NetworkFailure: The URL carries credentials.
+    """
     if parts.username is not None or parts.password is not None:
         raise NetworkFailure(
             FetchOutcome.UNSAFE_TARGET, "Credential-bearing URLs are never requested"
@@ -156,6 +186,7 @@ def _require_no_credentials(parts: SplitResult) -> None:
 
 
 def _is_dns_name(host: str) -> bool:
+    """Return whether ``host`` is a dotted name of valid DNS labels within the length limit."""
     return (
         "." in host
         and len(host) <= _MAX_HOST_CHARACTERS
@@ -164,7 +195,20 @@ def _is_dns_name(host: str) -> bool:
 
 
 def _public_host(hostname: str, parts: SplitResult) -> tuple[str, int]:
-    """The ASCII host and the port of ``parts``; ValueError if only a non-public one is named."""
+    """Return the ASCII host and the port of ``parts`` if both may be requested.
+
+    Args:
+        hostname: The host that ``parts`` names.
+        parts: The split URL.
+
+    Returns:
+        The lowercase ASCII host without a trailing dot, and the port.
+
+    Raises:
+        NetworkFailure: The host is a reserved or local DNS name or a non-public address.
+        ValueError: The port is not the scheme's standard port, or the host is neither a
+            DNS name nor an IP address.
+    """
     host = hostname.encode("idna").decode("ascii").lower().rstrip(".")
     if host.endswith(_RESERVED_SUFFIXES):
         raise NetworkFailure(
@@ -185,7 +229,15 @@ def _public_host(hostname: str, parts: SplitResult) -> tuple[str, int]:
 
 
 def parse_public_url(url: str) -> Target:
-    """Validate ``url`` for a request, or raise a ``NetworkFailure`` that says why not."""
+    """Validate ``url`` for a request, or raise a ``NetworkFailure`` that says why not.
+
+    Returns:
+        The validated target.
+
+    Raises:
+        NetworkFailure: The URL is not a clean public HTTP or HTTPS URL on its scheme's
+            standard port, or it carries credentials.
+    """
     _require_clean_text(url)
     try:
         parts = urlsplit(url)

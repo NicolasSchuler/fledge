@@ -72,10 +72,16 @@ _AUTHOR_SEPARATOR = re.compile(r"\\and\b")
 
 
 def _author_initials(document: ExpandedDocument) -> frozenset[str]:
-    """Initials, in capitals, that the literal ``\\author`` names can be abbreviated to.
+    r"""Return the initials, in capitals, that the literal ``\author`` names can be abbreviated to.
 
     A run of two or three consecutive words, in either order, and the first and last word
     of each name give one set of initials. Names that are not literal text give none.
+
+    Args:
+        document: The expanded document whose ``\author`` commands are read.
+
+    Returns:
+        The initials of every literal author name.
     """
     initials: set[str] = set()
     for command in document.commands:
@@ -94,10 +100,18 @@ def _author_initials(document: ExpandedDocument) -> frozenset[str]:
 
 
 def _private_marker(comment: str, author_initials: frozenset[str] = frozenset()) -> str | None:
-    """The private-note category of one comment, or ``None`` for ordinary comments.
+    r"""Return the private-note category of one comment, or ``None`` for ordinary comments.
 
     Capital letters before a colon only count as an author's note when they are the
-    initials of a literal ``\\author`` name; acronyms such as ``MLP:`` are ordinary.
+    initials of a literal ``\author`` name; acronyms such as ``MLP:`` are ordinary.
+
+    Args:
+        comment: The text of the comment.
+        author_initials: The initials of the literal author names.
+
+    Returns:
+        The marker category's value, ``"author-initials note"`` for a note headed by an
+        author's initials, or ``None`` for an ordinary comment.
     """
     category = matching_category(comment, _PRIVATE_MARKER_CATEGORIES)
     if category is not None:
@@ -107,11 +121,23 @@ def _private_marker(comment: str, author_initials: frozenset[str] = frozenset())
 
 
 def _label(location: Location) -> str:
+    """Return the report label of a location in the expanded document."""
     return location_label(location.as_dict())
 
 
 def _package_positions(document: ExpandedDocument) -> dict[str, tuple[int, Location]]:
-    """First unconditional literal preamble declaration of each package name."""
+    """Return the first unconditional literal preamble declaration of each package name.
+
+    Declarations at a nonzero group depth, inside a conditional or inside a definition
+    are skipped, and the scan stops at the start of the document body.
+
+    Args:
+        document: The expanded document to scan.
+
+    Returns:
+        For each package name, the offset of its first declaration in the expanded text and
+        the location of that offset.
+    """
     definitions = definition_spans(document.text, document.commands)
     positions: dict[str, tuple[int, Location]] = {}
     for command in document.commands:
@@ -131,6 +157,16 @@ def _package_positions(document: ExpandedDocument) -> dict[str, tuple[int, Locat
 
 
 def _hyperref_order(document: ExpandedDocument) -> list[Finding]:
+    """Report packages declared before hyperref that must be loaded after it.
+
+    Args:
+        document: The expanded document whose preamble is scanned.
+
+    Returns:
+        One failed finding per package declared too early, one passed finding when every
+        such package follows hyperref, or no finding when hyperref or all of those packages
+        are absent.
+    """
     positions = _package_positions(document)
     if "hyperref" not in positions or not set(_AFTER_HYPERREF) & set(positions):
         return []
@@ -177,6 +213,15 @@ def _hyperref_order(document: ExpandedDocument) -> list[Finding]:
 
 
 def _figures(graph: SourceGraph, selected: set[str]) -> list[str]:
+    r"""Return the targets of the ``\includegraphics`` references that selected sources make.
+
+    Args:
+        graph: The literal source graph.
+        selected: The names of the sources whose references count.
+
+    Returns:
+        The figure names, sorted and without repeats.
+    """
     return sorted(
         {
             target
@@ -187,6 +232,15 @@ def _figures(graph: SourceGraph, selected: set[str]) -> list[str]:
 
 
 def _eps_finding(figures: list[str], main: str) -> list[Finding]:
+    """Report the EPS and PS figures among the included figures.
+
+    Args:
+        figures: The names of the included figures.
+        main: The main file, the finding's path when several figures are listed.
+
+    Returns:
+        A note naming the EPS and PS figures, or no finding when there are none.
+    """
     eps = [name for name in figures if PurePosixPath(name).suffix.lower() in {".eps", ".ps"}]
     if not eps:
         return []
@@ -208,7 +262,19 @@ def _eps_finding(figures: list[str], main: str) -> list[Finding]:
 def _private_marker_matches(
     root: Path, author_initials: frozenset[str]
 ) -> tuple[list[dict[str, object]], list[str]]:
-    """Comments with private-note markers in the shipped sources, and why the scan is partial."""
+    """Find comments with private-note markers in the shipped sources, and why the scan is partial.
+
+    Only files with a TeX root suffix are read, within one byte budget, and the scan stops
+    after ``MAX_SCAN_MATCHES`` matches.
+
+    Args:
+        root: The project root whose files are scanned.
+        author_initials: The initials of the literal author names.
+
+    Returns:
+        The matches, each with its path, line and marker category, and the issues that
+        made the scan incomplete.
+    """
     files, issues = inventory_files(root)
     matches: list[dict[str, object]] = []
     budget = ByteBudget()
@@ -233,6 +299,16 @@ def _private_marker_matches(
 
 
 def _private_markers(root: Path, author_initials: frozenset[str]) -> Finding:
+    """Report the private-note markers in the TeX comments of the shipped sources.
+
+    Args:
+        root: The project root whose files are scanned.
+        author_initials: The initials of the literal author names.
+
+    Returns:
+        A failed finding listing the markers, an inconclusive one when there are none but
+        the scan is incomplete, or a passed one.
+    """
     matches, issues = _private_marker_matches(root, author_initials)
     details: dict[str, object] = {
         "matches": matches,
@@ -286,8 +362,22 @@ def check_submission_readiness(
 ) -> list[Finding]:
     """Run default advisories and the readiness policies configured in ``bbl_options``.
 
-    ``required_color_space`` comes from the figure artwork settings. ``analysed`` shares
-    the source analysis of the same root and main file with other checks.
+    Only the private-comment scan runs when the project has no main file.
+
+    Args:
+        root: The project root to check.
+        main: The main file as the caller named it; ``None`` selects the single document root.
+        bbl_options: The shipped-bibliography policies.
+        required_color_space: The colour space raster figures must use, from the figure
+            artwork settings, or ``None`` for no colour-space policy.
+        analysed: The source analysis of the same root and main file, shared with other
+            checks, or ``None`` to analyse here.
+
+    Returns:
+        The findings of the advisories and the configured policies.
+
+    Raises:
+        PreparationError: ``required_color_space`` is neither ``'rgb'`` nor ``'cmyk'``.
     """
     if required_color_space is not None and required_color_space not in FIGURE_COLOR_SPACES:
         raise PreparationError("required_color_space must be 'rgb' or 'cmyk'")

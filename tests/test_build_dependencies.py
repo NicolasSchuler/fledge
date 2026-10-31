@@ -1,3 +1,10 @@
+"""Tests of the submission dependencies read from the TeX recorder and the latexmk database.
+
+``collect_submission_dependencies`` ships the original project inputs a build read and
+nothing generated or from the toolchain; missing, linked, malformed, inconsistent or
+oversized evidence fails closed.
+"""
+
 from __future__ import annotations
 
 import unittest
@@ -22,6 +29,20 @@ def rule(
     generated: tuple[str, ...] = (),
     rewritten: tuple[str, ...] = (),
 ) -> str:
+    """Return one rule of a latexmk database (``.fdb_latexmk``).
+
+    Args:
+        name: The name of the rule, such as ``pdflatex``.
+        source: The source file of the rule.
+        destination: The destination file of the rule, listed first among its generated files.
+        inputs: The path and producing rule of each input; an empty producer for none.
+        generated: The files the rule generates besides ``destination``.
+        rewritten: The files the rule rewrites before reading them.
+
+    Returns:
+        The text of the rule: its header line, its inputs, and its generated and rewritten
+        files.
+    """
     return (
         f'["{name}"] 1 "{source}" "{destination}" "main" 1 0\n'
         + "".join(f'  "{path}" 1 10 {"0" * 32} "{producer}"\n' for path, producer in inputs)
@@ -33,7 +54,13 @@ def rule(
 
 
 class SubmissionDependenciesTests(ProjectTestCase):
+    """Tests of ``collect_submission_dependencies`` on written recorder and database files."""
+
     def setUp(self) -> None:
+        """Create the source, build copy, output and toolchain directories and build evidence.
+
+        The evidence records a pdflatex build of ``article/main.tex`` into ``output/main.pdf``.
+        """
         super().setUp()
         self.source = self.root / "source"
         self.project = self.root / "work/project"
@@ -49,6 +76,7 @@ class SubmissionDependenciesTests(ProjectTestCase):
         self.evidence()
 
     def original(self, name: str) -> None:
+        """Write ``name`` with the same content into the source and into the build copy."""
         for root in (self.source, self.project):
             path = root / name
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -63,6 +91,16 @@ class SubmissionDependenciesTests(ProjectTestCase):
         extra_rules: str = "",
         producers: dict[str, str] | None = None,
     ) -> None:
+        """Write the recorder trace and the latexmk database of a build of ``main.tex``.
+
+        Args:
+            inputs: The files the build read besides ``main.tex``, relative to its working
+                directory.
+            generated: The files the build wrote besides the PDF.
+            rewritten: The files the pdflatex rule rewrote before reading them.
+            extra_rules: Database rules written before the pdflatex rule.
+            producers: The rule that produced each input, by input path.
+        """
         names = ("main.tex", *inputs)
         self.fls.write_text(
             f"PWD {self.cwd}\n"
@@ -89,6 +127,16 @@ class SubmissionDependenciesTests(ProjectTestCase):
         max_bytes: int = 2_097_152,
         tool_state: Path | None = None,
     ):
+        """Collect the submission dependencies of the build from its evidence.
+
+        Args:
+            complete: Whether the recorder is reported complete.
+            max_bytes: The byte limit of reading the recorder trace and of the collection.
+            tool_state: The tool state directory of the build, if any.
+
+        Returns:
+            The collected dependencies.
+        """
         layout = BuildLayout(self.source, self.project.parent, self.project, self.output, self.cwd)
         return collect_submission_dependencies(
             DependencyRequest(
@@ -104,6 +152,11 @@ class SubmissionDependenciesTests(ProjectTestCase):
         )
 
     def assert_incomplete(self, fragment: str = "") -> None:
+        """Assert that collecting yields no inputs and is reported incomplete.
+
+        Args:
+            fragment: Text that the reported uncertainty must contain.
+        """
         result = self.collect()
         self.assertIsNone(result.inputs, result)
         self.assertFalse(result.to_details()["complete"])
@@ -160,7 +213,9 @@ class SubmissionDependenciesTests(ProjectTestCase):
         self.assertEqual(result.generated_reads, {"main.aux", "main.bbl", "article/rebuilt.dat"})
 
     def test_tool_state_the_build_wrote_and_read_back_is_a_toolchain_input(self):
-        """luaotfload writes its font cache under the build's tool state (``TEXMFVAR``) and
+        """Count a font cache the build wrote and read back as toolchain evidence.
+
+        luaotfload writes its font cache under the build's tool state (``TEXMFVAR``) and
         reads it back, and the TeX recorder lists that read. The cache is toolchain evidence,
         not an input outside the declared paths, so a LuaLaTeX build's evidence is complete.
         """

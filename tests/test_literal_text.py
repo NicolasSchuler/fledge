@@ -1,3 +1,5 @@
+"""Literal text of LaTeX arguments: math, citations, references, placeholders and bounds."""
+
 from __future__ import annotations
 
 import time
@@ -14,6 +16,8 @@ LINEAR_TIME_LIMIT_SECONDS = 1.0
 
 
 class LiteralTextTests(unittest.TestCase):
+    """:func:`scan_literal_text`, :func:`plain_argument_text` and :func:`is_placeholder_text`."""
+
     def test_a_stray_dollar_before_many_commands_is_scanned_in_linear_time(self) -> None:
         value = "The price is 5$ and see " + "text \\cite{a} \\emph{b} " * STRAY_DOLLAR_REPEATS
         started = time.perf_counter()

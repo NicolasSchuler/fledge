@@ -40,6 +40,14 @@ from .workflow_rules import RULES as WORKFLOW_RULES
 
 
 def _catalogue(*families: tuple[Rule, ...]) -> tuple[Rule, ...]:
+    """Join the rule families into one catalogue.
+
+    Returns:
+        Every rule, family by family in the given order.
+
+    Raises:
+        RuntimeError: A code, rule name or former name occurs more than once.
+    """
     rules = tuple(rule for family in families for rule in family)
     duplicates = [
         value
@@ -144,12 +152,20 @@ OPERATIONAL_RULE_NAMES = frozenset(
 
 
 def code_for(name: str) -> str | None:
+    """Return the check code for a rule name or former name, or ``None`` if none is listed."""
     rule = BY_NAME.get(name)
     return rule.code if rule is not None else None
 
 
 def get_rule(code: str) -> Rule:
-    """The check with this code (in any case), or with this rule name or former name."""
+    """Look up the check with this code (in any case), or with this rule name or former name.
+
+    Returns:
+        The check.
+
+    Raises:
+        ValueError: No check has this code or name.
+    """
     rule = BY_CODE.get(code.upper()) or BY_NAME.get(code)
     if rule is None:
         raise ValueError(f"Unknown check code {code!r}; run 'fledge rules' to list checks")

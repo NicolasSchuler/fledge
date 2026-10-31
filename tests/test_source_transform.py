@@ -1,3 +1,5 @@
+"""Planning source transformations: comment removal, input merging and bibliography inlining."""
+
 from __future__ import annotations
 
 import unittest
@@ -11,7 +13,21 @@ from tests.support import ProjectTestCase
 
 
 class SourceTransformTests(ProjectTestCase):
+    """Plans of comment removal, input merging and bibliography inlining.
+
+    A plan proposes no edit when the sources exceed the lexical bounds, cannot be parsed or form an
+    incomplete graph; a combined proposal is atomic, and invalid options are rejected.
+    """
+
     def plan(self, **options):
+        """Plan the transformations of ``main.tex`` in the test project.
+
+        Args:
+            **options: The fields of the :class:`SourceTransformOptions` to use.
+
+        Returns:
+            The transformation plan.
+        """
         return plan_source_transforms(self.root, "main.tex", SourceTransformOptions(**options))
 
     def test_exceeding_the_lexical_bounds_blocks_every_transformation(self) -> None:

@@ -29,6 +29,7 @@ from tests.support import controlled_backends
 
 
 def project(root: Path) -> None:
+    """Create the directory ``root`` holding a minimal article ``main.tex``."""
     root.mkdir()
     (root / "main.tex").write_text(
         "\\documentclass{article}\n\\begin{document}\nHello.\\end{document}\n"
@@ -36,6 +37,21 @@ def project(root: Path) -> None:
 
 
 async def build(tree, main, work, engine, runner, **_options):
+    """Write a fixture PDF and report a successful build, as a controlled build backend.
+
+    Args:
+        tree: The project tree to build; ignored.
+        main: The main file, recorded as the only project and submission input.
+        work: The work directory, which must not exist yet; the PDF is written into it.
+        engine: The TeX engine; ignored.
+        runner: The tool runner; ignored.
+        **_options: Further build options; ignored.
+
+    Returns:
+        A namespace with the fields of a successful build result: the PDF ``work/built.pdf``,
+        ``main`` as the only recorded and submission input, no findings, default tools and an
+        empty command.
+    """
     work.mkdir()
     pdf = work / "built.pdf"
     pdf.write_bytes(b"%PDF-1.4\ncontrolled orchestration fixture\n")
@@ -52,6 +68,13 @@ async def build(tree, main, work, engine, runner, **_options):
 
 
 class ParallelWorkflowTests(unittest.IsolatedAsyncioTestCase):
+    """Concurrent tasks of whole jobs and the barrier before publication.
+
+    The cases cover branches that overlap and all finish before publication, cancellation and
+    job deadlines that drain every task and publish nothing, failed and crashed tasks and how
+    the report records them, rollbacks that fail, and resource limits that block publication.
+    """
+
     async def test_cancellation_during_publication_removes_only_new_output(self):
         report = Report("prepare")
         copytree = shutil.copytree
@@ -431,6 +454,8 @@ class ParallelWorkflowTests(unittest.IsolatedAsyncioTestCase):
 
 
 class FormattingApplicationTests(unittest.TestCase):
+    """:func:`apply_contents` checks every precondition before it writes the first source file."""
+
     def test_all_preconditions_checked_before_first_source_write(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -102,8 +102,12 @@ _PARSE_LIMIT_DESCRIPTIONS: dict[ParseLimit, str] = {
 class ParseLimitExceeded(Exception):
     """The lexical subset cannot establish bounded, complete argument spans.
 
-    ``reason`` names the limit and ``offset`` is the character offset in the scanned
-    text where it was reached, so a caller can report the line.
+    The message describes the limit and the character offset at which it was reached.
+
+    Attributes:
+        reason: The name of the limit that was reached.
+        offset: The character offset in the scanned text where the limit was reached, so a
+            caller can report the line.
     """
 
     def __init__(self, reason: ParseLimit, offset: int = 0) -> None:
@@ -114,14 +118,25 @@ class ParseLimitExceeded(Exception):
 
 @dataclass(frozen=True, slots=True)
 class Argument:
-    """A brace or bracket group; ``start`` and ``end`` delimit ``value`` inside the delimiters."""
+    """A brace or bracket group of the scanned text.
+
+    Attributes:
+        start: The offset at which ``value`` begins, just inside the opening delimiter.
+        end: The offset just after ``value``, that of the closing delimiter.
+        value: The text inside the delimiters.
+    """
 
     start: int
     end: int
     value: str
 
     def stripped(self) -> Argument:
-        """The value without surrounding whitespace, with offsets that still match it."""
+        """Return the value without surrounding whitespace, with offsets that still match it.
+
+        Returns:
+            A new argument whose ``value`` is stripped and whose ``start`` and ``end`` delimit
+            the stripped value in the scanned text.
+        """
         start = self.start + len(self.value) - len(self.value.lstrip())
         value = self.value.strip()
         return Argument(start, start + len(value), value)
@@ -133,6 +148,14 @@ class Command:
 
     The lexer cannot know a command's signature, so every following brace group
     is recorded as a possible argument and every bracket group as a possible option.
+
+    Attributes:
+        name: The control-sequence name without the backslash.
+        start: The offset of the backslash.
+        line: The 1-based line of the backslash.
+        depth: The number of brace groups open at the command, never below zero.
+        arguments: The brace groups that follow the command, in order.
+        options: The bracket groups that follow the command, in order.
     """
 
     name: str
@@ -148,17 +171,43 @@ class Command:
         return self.start + len(self.name) + 1
 
     def begins(self, environment: str, *, exact: bool = False) -> bool:
-        """Whether this is ``\\begin{environment}``.
+        r"""Return whether this is ``\begin{environment}``.
 
-        Spaces around the name inside the braces are ignored unless ``exact`` is set.
+        Args:
+            environment: The environment name to compare with the first argument.
+            exact: Whether spaces around the name inside the braces count; they are ignored
+                unless it is set.
+
+        Returns:
+            ``True`` when the command is ``\begin`` and its first argument names
+            ``environment``.
         """
         return self.name == "begin" and self._names_environment(environment, exact=exact)
 
     def ends(self, environment: str, *, exact: bool = False) -> bool:
-        """Whether this is ``\\end{environment}``; ``exact`` as for :meth:`begins`."""
+        r"""Return whether this is ``\end{environment}``; ``exact`` as for :meth:`begins`.
+
+        Args:
+            environment: The environment name to compare with the first argument.
+            exact: Whether spaces around the name inside the braces count.
+
+        Returns:
+            ``True`` when the command is ``\end`` and its first argument names ``environment``.
+        """
         return self.name == "end" and self._names_environment(environment, exact=exact)
 
     def _names_environment(self, environment: str, *, exact: bool) -> bool:
+        """Return whether the command's first argument is the name ``environment``.
+
+        A command without arguments names no environment.
+
+        Args:
+            environment: The environment name to compare with.
+            exact: Whether to compare the argument as written instead of stripped of spaces.
+
+        Returns:
+            ``True`` when the first argument equals ``environment``.
+        """
         if not self.arguments:
             return False
         value = self.arguments[0].value
@@ -171,7 +220,11 @@ RegionKind = Literal["comment", "literal"]
 class Region(NamedTuple):
     """A comment from ``%`` to the end of its line, or a verbatim-like literal span.
 
-    A comment's ``end`` excludes the line terminator, including a carriage return.
+    Attributes:
+        start: The offset at which the region begins.
+        end: The offset just after the region; a comment's ``end`` excludes the line
+            terminator, including a carriage return.
+        kind: ``"comment"`` or ``"literal"``.
     """
 
     start: int
@@ -180,20 +233,46 @@ class Region(NamedTuple):
 
 
 class RegionScan(NamedTuple):
+    """The comment and literal regions of a text, and the literal regions that never close.
+
+    Attributes:
+        regions: The comment and literal regions, in the order they occur.
+        unclosed: The offsets of the literal regions without a closing delimiter; they
+            extend to the end of the text (or line), so later commands cannot be inspected
+            reliably.
+    """
+
     regions: list[Region]
-    # Offsets of literal regions without a closing delimiter; they extend to the
-    # end of the text (or line), so later commands cannot be inspected reliably.
     unclosed: list[int]
 
 
 def skip_space(text: str, pos: int) -> int:
+    """Return the first offset at or after ``pos`` that is not whitespace.
+
+    Args:
+        text: The text to scan.
+        pos: The offset to start at.
+
+    Returns:
+        The offset of the first non-whitespace character, or the text's length.
+    """
     while pos < len(text) and text[pos].isspace():
         pos += 1
     return pos
 
 
 def skip_trivia(text: str, pos: int) -> int:
-    """Skip whitespace and whole comment lines."""
+    """Skip whitespace and whole comment lines.
+
+    Args:
+        text: The text to scan.
+        pos: The offset to start at.
+
+    Returns:
+        The offset of the first character that is not whitespace and does not start a
+        comment, or the text's length. A comment is skipped up to and including its line
+        feed.
+    """
     while True:
         pos = skip_space(text, pos)
         if pos < len(text) and text[pos] == "%":
@@ -204,7 +283,15 @@ def skip_trivia(text: str, pos: int) -> int:
 
 
 def _brace_depth_after(char: str, depth: int) -> int:
-    """The brace nesting depth once ``char`` has been read, for bracket groups."""
+    """Return the brace nesting depth once ``char`` has been read, for bracket groups.
+
+    Args:
+        char: The character just read.
+        depth: The brace nesting depth before ``char``.
+
+    Returns:
+        ``depth`` plus one after ``{``, minus one after ``}``, and unchanged otherwise.
+    """
     if char == "{":
         return depth + 1
     if char == "}":
@@ -220,10 +307,21 @@ def read_group(
     *,
     limit: int = MAX_ARGUMENT_CHARS,
 ) -> Argument | None:
-    """Read a balanced group starting at ``pos``; ``None`` if absent, unclosed or oversized.
+    """Read a balanced group starting at ``pos``.
 
-    A group longer than ``limit`` characters counts as oversized. A bracket group
-    ignores brackets nested inside braces, as in ``[{a]}]``.
+    A bracket group ignores brackets nested inside braces, as in ``[{a]}]``.
+
+    Args:
+        text: The text to read from.
+        pos: The offset of the opening delimiter.
+        opening: The character that opens the group.
+        closing: The character that closes the group.
+        limit: The largest number of characters the group may span; a longer group counts
+            as oversized.
+
+    Returns:
+        The group with its value and offsets, or ``None`` if it is absent, unclosed or
+        oversized.
     """
     if pos >= len(text) or text[pos] != opening:
         return None
@@ -250,20 +348,46 @@ def read_group(
 
 
 def _is_url_path_form(text: str, pos: int) -> bool:
-    """Whether the argument after ``\\path`` at ``pos`` is the url package's literal form."""
+    r"""Return whether the argument after ``\path`` at ``pos`` is the url package's literal form.
+
+    That form opens with ``{`` or ``|`` after any whitespace and comment lines.
+
+    Args:
+        text: The text to scan.
+        pos: The offset just after ``\path``.
+
+    Returns:
+        ``True`` when the first character after the whitespace and comments is ``{`` or
+        ``|``.
+    """
     opener = skip_trivia(text, pos)
     return opener < len(text) and text[opener] in _URL_PATH_OPENERS
 
 
 class _LiteralEnd(NamedTuple):
-    """Where a verbatim-like region ends, and whether it was closed by its own delimiter."""
+    """The end of a verbatim-like region.
+
+    Attributes:
+        end: The offset just after the region.
+        closed: Whether the region was closed by its own delimiter.
+    """
 
     end: int
     closed: bool
 
 
 def _verbatim_environment(text: str, pos: int) -> _LiteralEnd | None:
-    """The end of a verbatim environment whose ``\\begin`` command ends at ``pos``, if it is one."""
+    r"""Find the end of a verbatim environment whose ``\begin`` command ends at ``pos``.
+
+    Args:
+        text: The text to scan.
+        pos: The offset just after the ``\begin`` control sequence.
+
+    Returns:
+        Where the environment ends (after its ``\end``) and whether it was closed; an
+        unclosed one runs to the end of the text. ``None`` when the command does not begin
+        a verbatim environment.
+    """
     environment = read_group(text, skip_trivia(text, pos))
     closing_pattern = _VERBATIM_END.get(environment.value.strip()) if environment else None
     if environment is None or closing_pattern is None:
@@ -273,7 +397,16 @@ def _verbatim_environment(text: str, pos: int) -> _LiteralEnd | None:
 
 
 def _skip_verbatim_options(text: str, pos: int, command: str) -> int:
-    """Skip the optional argument (and a ``\\mintinline`` language) before a literal argument."""
+    r"""Skip the optional argument (and a ``\mintinline`` language) before a literal argument.
+
+    Args:
+        text: The text to scan.
+        pos: The offset after the command name and its star, if any.
+        command: The name of the command whose argument follows.
+
+    Returns:
+        The offset at which the literal argument is expected.
+    """
     cursor = skip_trivia(text, pos)
     option = read_group(text, cursor, "[", "]")
     if option:
@@ -286,9 +419,20 @@ def _skip_verbatim_options(text: str, pos: int, command: str) -> int:
 
 
 def _verbatim_command(text: str, name: str, pos: int) -> _LiteralEnd | None:
-    """The end of the literal argument of ``\\verb``, ``\\url`` and kin, whose name ends at ``pos``.
+    r"""Find the end of the literal argument of ``\verb``, ``\url`` and kin.
 
-    The argument is braced, or runs to the next copy of its first character on the line.
+    The argument is braced, or runs to the next copy of its first character on the line;
+    ``\verb`` takes only the delimited form.
+
+    Args:
+        text: The text to scan.
+        name: The name of the command.
+        pos: The offset at which the command's name ends.
+
+    Returns:
+        Where the argument ends and whether it was closed; an unclosed argument runs to
+        the end of the text (braced) or of the line (delimited). ``None`` when no argument
+        follows, because the text ends or whitespace comes next.
     """
     cursor = pos + 1 if text.startswith("*", pos) else pos
     if name != "verb":
@@ -304,7 +448,17 @@ def _verbatim_command(text: str, name: str, pos: int) -> _LiteralEnd | None:
 
 
 def _literal_after(text: str, name: str, pos: int) -> _LiteralEnd | None:
-    """The literal region that the control sequence ``name``, ending at ``pos``, opens, if any."""
+    """Find the literal region that the control sequence ``name``, ending at ``pos``, opens.
+
+    Args:
+        text: The text to scan.
+        name: The control-sequence name without the backslash.
+        pos: The offset just after the control sequence.
+
+    Returns:
+        Where the region ends and whether it was closed, or ``None`` when ``name`` opens no
+        literal region here.
+    """
     if name == "begin":
         return _verbatim_environment(text, pos)
     if name in _VERBATIM_COMMANDS and (name != "path" or _is_url_path_form(text, pos)):
@@ -313,7 +467,16 @@ def _literal_after(text: str, name: str, pos: int) -> _LiteralEnd | None:
 
 
 def _line_end(text: str, pos: int) -> int:
-    """The offset of the line break that ends the line holding ``pos``, or the text's end."""
+    """Return the offset of the line break that ends the line holding ``pos``, or the text's end.
+
+    Args:
+        text: The text to scan.
+        pos: An offset on the line.
+
+    Returns:
+        The offset of the next line break at or after ``pos``, or ``len(text)`` when there
+        is none.
+    """
     end = text.find("\n", pos)
     return len(text) if end < 0 else end
 
@@ -347,7 +510,15 @@ def source_regions(text: str) -> RegionScan:
 
 
 def blank_regions(text: str, regions: Iterable[Region]) -> str:
-    """Replace every character inside ``regions`` except line breaks with a space."""
+    """Replace every character inside ``regions`` except line breaks with a space.
+
+    Args:
+        text: The text to blank.
+        regions: The regions to blank, with offsets into ``text``.
+
+    Returns:
+        ``text`` with the regions blanked; offsets and line breaks are unchanged.
+    """
     buffer = list(text)
     for start, end, _ in regions:
         buffer[start:end] = [char if char in "\r\n" else " " for char in buffer[start:end]]
@@ -360,10 +531,19 @@ def mask_literals(text: str) -> str:
 
 
 def _has_blank_line(text: str, start: int, end: int, comments: Sequence[int]) -> bool:
-    """Whether ``text[start:end]``, a gap of whitespace, contains a blank line.
+    """Return whether ``text[start:end]``, a gap of whitespace, contains a blank line.
 
     A blank line ends a paragraph. A line that only held a comment does not: the
     comment swallows its line break, so TeX reads straight through it.
+
+    Args:
+        text: The text that holds the gap.
+        start: The offset at which the gap begins.
+        end: The offset just after the gap.
+        comments: The sorted offsets at which the comments of the original text begin.
+
+    Returns:
+        ``True`` when a line that starts and ends inside the gap holds no comment.
     """
     line_start = text.find("\n", start, end) + 1
     if line_start == 0:
@@ -377,32 +557,69 @@ def _has_blank_line(text: str, start: int, end: int, comments: Sequence[int]) ->
 
 
 def _unreadable_group_reason(text: str, pos: int) -> ParseLimit:
-    """Why the brace group at ``pos`` cannot be read: longer than the bound, or never closed."""
+    """Return why the brace group at ``pos`` cannot be read: longer than the bound, or never closed.
+
+    Args:
+        text: The text that holds the group.
+        pos: The offset of the opening brace.
+
+    Returns:
+        ``"oversized_group"`` when the group closes once the bound is lifted, otherwise
+        ``"unclosed_group"``.
+    """
     return "oversized_group" if read_group(text, pos, limit=len(text)) else "unclosed_group"
 
 
 def comment_starts(regions: Iterable[Region]) -> list[int]:
-    """The sorted offsets at which the comments among ``regions`` begin."""
+    """Return the sorted offsets at which the comments among ``regions`` begin."""
     return [region.start for region in regions if region.kind == "comment"]
 
 
 def _bare_input_name(masked: str, pos: int) -> list[Argument]:
-    """The file name of ``\\input name``, written without braces, as a one-item argument list."""
+    r"""Return the file name of ``\input name``, written without braces, as a one-item list.
+
+    Args:
+        masked: The literal-masked text.
+        pos: The offset just after ``\input``.
+
+    Returns:
+        The name as the only argument, or an empty list when no name follows.
+    """
     start = skip_space(masked, pos)
     match = _BARE_INPUT_NAME.match(masked, start)
     return [Argument(start, match.end(), match.group())] if match else []
 
 
 class _Groups(NamedTuple):
+    """The groups that follow a command.
+
+    Attributes:
+        arguments: The brace groups, in order.
+        options: The bracket groups, in order.
+    """
+
     arguments: list[Argument]
     options: list[Argument]
 
 
 def _read_following_groups(masked: str, cursor: int, comments: Sequence[int]) -> _Groups:
-    """The brace groups (arguments) and bracket groups (options) that follow a command.
+    """Read the brace groups (arguments) and bracket groups (options) that follow a command.
 
     Reading stops at a paragraph break (see ``_has_blank_line``), at text that opens no
-    group, or after ``_MAX_GROUPS_PER_COMMAND`` groups.
+    group, or after ``_MAX_GROUPS_PER_COMMAND`` groups. An unmatched bracket is ordinary
+    text and only ends the command's groups.
+
+    Args:
+        masked: The literal-masked text.
+        cursor: The offset just after the command name and its star, if any.
+        comments: The sorted offsets of the comments blanked to produce ``masked``.
+
+    Returns:
+        The arguments and options, each in order.
+
+    Raises:
+        ParseLimitExceeded: A brace group that follows the command is unclosed or longer
+            than the bound, which leaves every later argument span unreadable.
     """
     arguments: list[Argument] = []
     options: list[Argument] = []
@@ -434,13 +651,20 @@ def _read_following_groups(masked: str, cursor: int, comments: Sequence[int]) ->
 def scan_commands(masked: str, comments: Sequence[int] = ()) -> list[Command]:
     """Return the commands of literal-masked text with their following groups.
 
-    ``comments`` are the sorted offsets of the comments blanked to produce
-    ``masked``. Without them a line that held only a comment is taken for a blank
-    line, which ends argument scanning.
+    Without ``comments`` a line that held only a comment is taken for a blank line, which
+    ends argument scanning.
 
-    Raises ``ParseLimitExceeded`` when an unbalanced brace leaves later argument
-    spans unreadable, the arguments exceed their bounded total size, or the text
-    holds more than ``MAX_COMMANDS`` commands.
+    Args:
+        masked: The text with its comments and literal regions blanked.
+        comments: The sorted offsets of the comments blanked to produce ``masked``.
+
+    Returns:
+        The commands in the order they occur.
+
+    Raises:
+        ParseLimitExceeded: An unbalanced brace leaves later argument spans unreadable, the
+            arguments exceed their bounded total size, or the text holds more than
+            ``MAX_COMMANDS`` commands.
     """
     result: list[Command] = []
     depth = pos = 0
@@ -482,14 +706,30 @@ def scan_commands(masked: str, comments: Sequence[int] = ()) -> list[Command]:
 def scan_source_commands(text: str) -> list[Command]:
     """Return the commands of source text, masking its comments and literal regions first.
 
-    Raises ``ParseLimitExceeded`` as :func:`scan_commands` does.
+    Args:
+        text: The TeX source.
+
+    Returns:
+        The commands in the order they occur.
+
+    Raises:
+        ParseLimitExceeded: As :func:`scan_commands` raises it.
     """
     regions = source_regions(text).regions
     return scan_commands(blank_regions(text, regions), comment_starts(regions))
 
 
 def split_argument_items(argument: Argument, *, comma_separated: bool = True) -> list[Argument]:
-    """Return the stripped items of a comma-separated argument, or the whole stripped argument."""
+    """Return the stripped items of a comma-separated argument, or the whole stripped argument.
+
+    Args:
+        argument: The argument to split.
+        comma_separated: Whether to split the argument at commas; otherwise it is returned
+            whole.
+
+    Returns:
+        The items, each stripped and with offsets that still match it.
+    """
     if not comma_separated:
         return [argument.stripped()]
     items: list[Argument] = []
@@ -512,7 +752,10 @@ def merge_spans(spans: Iterable[tuple[int, int]]) -> list[tuple[int, int]]:
 
 
 def command_end(command: Command) -> int:
-    """The offset just after a command's last recorded argument or option."""
+    """Return the offset just after a command's last recorded argument or option.
+
+    A command without arguments or options ends at the end of its name.
+    """
     return max(
         (argument.end + 1 for argument in (*command.arguments, *command.options)),
         default=command.name_end,
@@ -520,7 +763,21 @@ def command_end(command: Command) -> int:
 
 
 def _definition_end(text: str, command: Command) -> int:
-    """Return the offset after a definition's name, parameters and replacement body."""
+    r"""Return the offset after a definition's name, parameters and replacement body.
+
+    A command outside ``DEFINITION_COMMANDS`` ends at :func:`command_end`. For the
+    primitive-style definitions in it, the defined name (two names for ``\let`` and
+    ``\futurelet``) and a braced body that opens on the same line are included.
+
+    Args:
+        text: The text the command was scanned from.
+        command: The definition command.
+
+    Returns:
+        The offset just after the braced body when one opens on the same line and closes,
+        otherwise just after the last defined name read, or :func:`command_end` for a
+        command outside ``DEFINITION_COMMANDS``.
+    """
     stop = command_end(command)
     if command.name not in DEFINITION_COMMANDS:
         return stop
@@ -543,7 +800,16 @@ def _definition_end(text: str, command: Command) -> int:
 
 
 def definition_spans(text: str, commands: Sequence[Command]) -> list[tuple[int, int]]:
-    """Return merged offset ranges covering definition commands and their bodies."""
+    """Return merged offset ranges covering definition commands and their bodies.
+
+    Args:
+        text: The text the commands were scanned from.
+        commands: The commands of ``text``; those in ``MACRO_DEFINITION_COMMANDS`` count.
+
+    Returns:
+        The merged ``(start, end)`` ranges, from each definition command to the end of its
+        body.
+    """
     return merge_spans(
         (command.start, _definition_end(text, command))
         for command in commands
@@ -552,11 +818,18 @@ def definition_spans(text: str, commands: Sequence[Command]) -> list[tuple[int, 
 
 
 def conditional_spans(commands: list[Command]) -> list[tuple[int, int]]:
-    """Return offset ranges enclosed by primitive-style ``\\if…`` … ``\\fi`` conditionals.
+    r"""Return offset ranges enclosed by primitive-style ``\if…`` … ``\fi`` conditionals.
 
-    A conditional name defined by ``\\newif`` or ``\\def`` is not itself executed,
-    and an opener without a matching ``\\fi`` (such as a branch-taking package
+    A conditional name defined by ``\newif`` or ``\def`` is not itself executed,
+    and an opener without a matching ``\fi`` (such as a branch-taking package
     conditional) is ignored rather than extended to the end of the file.
+
+    Args:
+        commands: The commands of a text, in order.
+
+    Returns:
+        The merged ``(start, end)`` ranges, from the offset of an ``\if…`` to the offset of
+        its ``\fi``.
     """
     spans: list[tuple[int, int]] = []
     stack: list[int] = []
@@ -589,27 +862,59 @@ def conditional_spans(commands: list[Command]) -> list[tuple[int, int]]:
 def _span_starting_at_or_before(
     spans: Sequence[tuple[int, int]], offset: int
 ) -> tuple[int, int] | None:
+    """Return the last span that starts at or before ``offset``.
+
+    Args:
+        spans: Merged, sorted ``(start, end)`` spans.
+        offset: The offset to look up.
+
+    Returns:
+        The span, or ``None`` when every span starts after ``offset``.
+    """
     index = bisect.bisect_right(spans, (offset, float("inf"))) - 1
     return spans[index] if index >= 0 else None
 
 
 def in_conditional(spans: Sequence[tuple[int, int]], offset: int) -> bool:
-    """Whether ``offset`` lies strictly inside one of the merged ``conditional_spans``.
+    r"""Return whether ``offset`` lies strictly inside one of the merged ``conditional_spans``.
 
-    The opening ``\\if…`` (at a span's start) and the closing ``\\fi`` (at its end)
+    The opening ``\if…`` (at a span's start) and the closing ``\fi`` (at its end)
     are outside, so only enclosed commands count as conditional.
+
+    Args:
+        spans: The merged spans from :func:`conditional_spans`.
+        offset: The offset to test.
+
+    Returns:
+        ``True`` when ``start < offset < end`` for one of the spans.
     """
     span = _span_starting_at_or_before(spans, offset)
     return span is not None and span[0] < offset < span[1]
 
 
 def in_half_open_span(spans: Sequence[tuple[int, int]], offset: int) -> bool:
-    """Whether ``start <= offset < end`` for one of the merged ``spans``."""
+    """Return whether ``start <= offset < end`` for one of the merged ``spans``.
+
+    Args:
+        spans: Merged, sorted ``(start, end)`` spans.
+        offset: The offset to test.
+
+    Returns:
+        ``True`` when one of the spans holds ``offset``, its end excluded.
+    """
     span = _span_starting_at_or_before(spans, offset)
     return span is not None and span[0] <= offset < span[1]
 
 
 def in_closed_span(spans: Sequence[tuple[int, int]], offset: int) -> bool:
-    """Whether ``start <= offset <= end`` for one of the merged ``spans``."""
+    """Return whether ``start <= offset <= end`` for one of the merged ``spans``.
+
+    Args:
+        spans: Merged, sorted ``(start, end)`` spans.
+        offset: The offset to test.
+
+    Returns:
+        ``True`` when one of the spans holds ``offset``, its end included.
+    """
     span = _span_starting_at_or_before(spans, offset)
     return span is not None and span[0] <= offset <= span[1]

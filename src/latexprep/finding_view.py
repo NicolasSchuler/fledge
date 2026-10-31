@@ -27,8 +27,15 @@ from .task_findings import TASK_DETAIL, blocked_prerequisites
 class RenderOptions:
     """What a rendering lists in addition to unresolved findings.
 
-    Terminal, compact and CI output honor ``show_passed``; ``show_diff`` and
-    ``show_files`` apply to the terminal report. JSON and HTML list everything.
+    JSON and HTML list everything.
+
+    Attributes:
+        show_passed: Whether passed results and scope disclaimers are listed as well;
+            terminal, compact and CI output honor it.
+        show_diff: Whether every change is listed with its diff; the terminal report
+            honors it.
+        show_files: Whether every file of each package is listed; the terminal report
+            honors it.
     """
 
     show_passed: bool = False
@@ -47,6 +54,7 @@ ALWAYS_LISTED_RULES = frozenset({"online.sharing"})
 
 
 def _hidden_by_default(finding: Finding) -> bool:
+    """Return whether ``finding`` is listed only on request."""
     # Passed results and scope disclaimers are counted but listed only on request.
     if finding.rule in ALWAYS_LISTED_RULES:
         return False
@@ -54,7 +62,7 @@ def _hidden_by_default(finding: Finding) -> bool:
 
 
 def size_label(value: object) -> str:
-    """A byte count in binary units, or "not measured" when none was recorded."""
+    """Format a byte count in binary units, or "not measured" when none was recorded."""
     if not isinstance(value, int) or isinstance(value, bool) or value < 0:
         return "not measured"
     if value < 1024:
@@ -86,10 +94,24 @@ _EVIDENCE_NAME_KEYS = ("name", "key", "reference", "label", "doi", "reason")
 
 
 def _clipped(text: str, limit: int) -> str:
+    """Shorten ``text`` to ``limit`` characters, ending in an ellipsis when it was cut."""
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
 def _evidence_label(item: object, *, pages: bool) -> str | None:
+    """Name one evidence item in a few words.
+
+    A mapping is named by its file and line and its page, by its reason and page when it
+    has no file, or else by the first of ``_EVIDENCE_NAME_KEYS`` it holds.
+
+    Args:
+        item: The evidence item: a number, a text or a mapping.
+        pages: Whether a number is a page number.
+
+    Returns:
+        The label, clipped to ``_EVIDENCE_LABEL_CHARS`` characters, or ``None`` when the item
+        names nothing.
+    """
     label: object = None
     if isinstance(item, bool):
         return None
@@ -123,10 +145,14 @@ def _evidence_label(item: object, *, pages: bool) -> str | None:
 
 
 def evidence_excerpt(finding: Finding) -> str:
-    """A short, display-only excerpt of recorded evidence for an unresolved finding.
+    """Excerpt the recorded evidence of an unresolved finding, for display only.
 
     Only the first few items of the first populated list among a fixed set of
     detail keys are summarized; the caller must sanitize the text for its medium.
+
+    Returns:
+        The distinct item labels joined by commas, with a count of the items left out,
+        or an empty string for a passed finding or one without such evidence.
     """
     if finding.status == "passed":
         return ""
@@ -149,11 +175,22 @@ def evidence_excerpt(finding: Finding) -> str:
 
 
 def _title(finding: Finding) -> str:
+    """Return the rule's title, or a readable form of the rule name of an unknown rule."""
     definition = BY_NAME.get(finding.rule)
     return definition.title if definition else finding.rule.replace("_", " ").replace(".", " / ")
 
 
 def _location(finding: Finding, stages: tuple[str, ...]) -> str:
+    """Describe where a finding is: document, file and line or input line, page and stages.
+
+    Args:
+        finding: The finding to locate; one without a path is in ``project``.
+        stages: The stages its identical copies came from; without them, the finding's
+            own stage is named.
+
+    Returns:
+        The location text.
+    """
     location = finding.path or "project"
     if document := finding.document:
         location = f"{document}: {location}"
@@ -172,6 +209,7 @@ def _location(finding: Finding, stages: tuple[str, ...]) -> str:
 
 
 def _priority(finding: Finding) -> int:
+    """Rank a finding for display: failed errors, other errors, warnings, notes, then passes."""
     if finding.status == "passed":
         return 4
     if finding.severity == "error":
@@ -180,6 +218,7 @@ def _priority(finding: Finding) -> int:
 
 
 def _identity(finding: Finding) -> tuple[object, ...]:
+    """Return what makes copies of a finding from different stages identical."""
     # The same result re-checked at another stage (baseline, transformed, archive
     # rebuild or final sources) is one issue for a reader; JSON keeps every stage.
     # Copies with different evidence or review decisions stay apart, so no result
@@ -206,18 +245,27 @@ def _identity(finding: Finding) -> tuple[object, ...]:
 
 
 class StagedFinding(NamedTuple):
-    """A distinct finding and the stages its identical copies came from, if several."""
+    """A distinct finding and the stages its identical copies came from, if several.
+
+    Attributes:
+        finding: The finding that represents the group.
+        stages: The stages of the copies; empty for a single copy or a group with an
+            unstaged copy.
+    """
 
     finding: Finding
     stages: tuple[str, ...]
 
 
 def merge_stage_copies(findings: Iterable[Finding]) -> list[StagedFinding]:
-    """One entry per distinct finding with the stages its identical copies came from.
+    """Merge identical copies of a finding into one entry with the stages they came from.
 
     A copy without a stage (the initial source analysis) represents the group and
     later identical re-checks are omitted; otherwise the stages are listed in the
     order the job reached them.
+
+    Returns:
+        One entry per distinct finding, in the order the groups first appear.
     """
     groups: dict[tuple[object, ...], list[Finding]] = {}
     for finding in findings:
@@ -234,7 +282,12 @@ def merge_stage_copies(findings: Iterable[Finding]) -> list[StagedFinding]:
 
 
 def not_run_summaries(report: RedactedReport) -> list[str]:
-    """One line per failed prerequisite instead of one note per task it prevented."""
+    """Summarise skipped tasks as one line per failed prerequisite, not one per task.
+
+    Returns:
+        One line for each document and set of failed prerequisites, naming the tasks
+        they prevented.
+    """
     groups: dict[tuple[str, tuple[str, ...]], list[str]] = {}
     for finding in report.findings:
         if prerequisites := blocked_prerequisites(finding):
@@ -254,7 +307,10 @@ def not_run_summaries(report: RedactedReport) -> list[str]:
 
 
 def result_counts(report: RedactedReport) -> str:
-    """The one-line tally of errors, warnings and unresolved or passed results."""
+    """Tally the errors, warnings and unresolved or passed results in one line.
+
+    Identical copies from different stages count once.
+    """
     findings = [entry.finding for entry in merge_stage_copies(report.findings)]
     errors = sum(item.severity == "error" and item.status != "passed" for item in findings)
     warnings = sum(item.severity == "warning" and item.status != "passed" for item in findings)
@@ -272,14 +328,14 @@ def result_counts(report: RedactedReport) -> str:
 
 
 def change_summary(report: RedactedReport) -> str:
-    """The changes counted by kind, most frequent first: ``exclude: 3, move: 1``."""
+    """Count the changes by kind, most frequent first: ``exclude: 3, move: 1``."""
     kinds = Counter(change.kind for change in report.changes)
     ordered = sorted(kinds.items(), key=lambda item: (-item[1], item[0]))
     return ", ".join(f"{kind}: {count}" for kind, count in ordered)
 
 
 def selection_description(selection: CheckSelectionRecord | None) -> str | None:
-    """What the check selection restricts, or None when every check was selected."""
+    """Describe what the check selection restricts, or ``None`` when every check was selected."""
     if selection is None or (selection.select == ("ALL",) and not selection.ignore):
         return None
     return (
@@ -292,8 +348,19 @@ def selection_description(selection: CheckSelectionRecord | None) -> str | None:
 class FindingView:
     """Unescaped display text for one finding; each renderer escapes it for its medium.
 
-    ``code`` is the check code, or the rule name of an uncoded diagnostic. Empty
-    ``evidence``, ``next_step`` and ``review`` texts are omitted from output.
+    Empty ``evidence``, ``next_step`` and ``review`` texts are omitted from output.
+
+    Attributes:
+        finding: The finding shown.
+        code: The check code, or the rule name of an uncoded diagnostic.
+        title: The rule's title.
+        location: Where the finding is, with its document, page and stages.
+        message: The finding's message.
+        evidence: An excerpt of the recorded evidence.
+        next_step: What to do next.
+        review: The marker of a review decision that applies to the finding.
+        status_label: The status as readers see it, such as ``not checked``.
+        stages: The stages the finding's identical copies came from.
     """
 
     finding: Finding
@@ -309,6 +376,7 @@ class FindingView:
 
     @classmethod
     def from_finding(cls, finding: Finding, stages: tuple[str, ...] = ()) -> FindingView:
+        """Derive the display text of ``finding``, whose identical copies came from ``stages``."""
         return cls(
             finding=finding,
             code=finding.code or finding.rule,
@@ -324,12 +392,18 @@ class FindingView:
 
 
 def finding_views(report: RedactedReport, *, show_hidden: bool) -> list[FindingView]:
-    """One view per distinct finding, the most urgent first.
+    """Build one view per distinct finding, the most urgent first.
 
-    Passed results and scope disclaimers are listed only with ``show_hidden``, except
-    the notices in ``ALWAYS_LISTED_RULES``.
     Tasks that never started because a prerequisite failed are left to
     :func:`not_run_summaries`.
+
+    Args:
+        report: The redacted report.
+        show_hidden: Whether passed results and scope disclaimers are listed; the
+            notices in ``ALWAYS_LISTED_RULES`` are listed regardless.
+
+    Returns:
+        The views, ordered by urgency and then by the report's order of findings.
     """
     order = {id(item): index for index, item in enumerate(report.sorted_findings())}
     entries = merge_stage_copies(

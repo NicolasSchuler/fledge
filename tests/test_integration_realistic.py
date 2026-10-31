@@ -22,6 +22,8 @@ EPOCH = 1_700_000_000
 
 
 def _png() -> bytes:
+    """Return a valid PNG of one RGB pixel."""
+
     def chunk(kind: bytes, data: bytes) -> bytes:
         payload = kind + data
         return struct.pack(">I", len(data)) + payload + struct.pack(">I", zlib.crc32(payload))
@@ -35,7 +37,7 @@ def _png() -> bytes:
 
 
 def _pdf() -> bytes:
-    """A minimal one-page vector PDF with a correct cross-reference table."""
+    """Return a minimal one-page vector PDF with a correct cross-reference table."""
     stream = b"0 0 1 rg 0 0 20 20 re f"
     objects = [
         b"<< /Type /Catalog /Pages 2 0 R >>",
@@ -102,7 +104,15 @@ BIBLIOGRAPHY = """@book{knuth1984,
 
 @live_test("Set FLEDGE_RUN_INTEGRATION=1 for live TeX checks")
 class RealisticProjectTests(unittest.IsolatedAsyncioTestCase):
+    """``check`` and ``prepare`` of a paper with a template class and ordinary constructs."""
+
     def setUp(self) -> None:
+        """Write the paper: a local class, an interval, matching figures and a spare ``.bib``.
+
+        The figures are a PDF and a PNG of the same name; ``old/`` holds a backup copy of the
+        bibliography, and ``figures`` holds a macOS ``Icon`` file whose name ends in a
+        carriage return.
+        """
         temporary = tempfile.TemporaryDirectory(prefix="fledge-realistic-")
         self.addCleanup(temporary.cleanup)
         self.base = Path(temporary.name).resolve()
@@ -121,6 +131,11 @@ class RealisticProjectTests(unittest.IsolatedAsyncioTestCase):
         )
 
     def problems(self, report: Report) -> list[tuple[str | None, str, str, str]]:
+        """List the errors of ``report`` that did not pass, for assertion messages.
+
+        Returns:
+            The code, rule, status and message of each such finding.
+        """
         return [
             (item.code, item.rule, item.status, item.message)
             for item in report.findings

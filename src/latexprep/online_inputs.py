@@ -1,9 +1,9 @@
-"""What an online check may send: bibliography entries and source links, bounded.
+r"""What an online check may send: bibliography entries and source links, bounded.
 
 This module owns the choice of inputs for the online checks. Entries come from the
 bibliography resources that the selected literal source graph declares (or, without a
 document root, every local .bib file), and links from configured addresses and the
-literal ``\\url``, ``\\nolinkurl`` and ``\\href`` commands of the same graph. Only the
+literal ``\url``, ``\nolinkurl`` and ``\href`` commands of the same graph. Only the
 bounded literal values a lookup needs are kept, never a whole file. Whatever could not
 be inspected is returned as a gap, so that a check can say its coverage is incomplete
 instead of looking complete. It makes no request.
@@ -52,9 +52,16 @@ _URL_LITERAL = re.compile(r"\\(?:url|nolinkurl)\b")
 class Reference:
     """One bibliography entry or link as far as an online check may use it.
 
-    ``values`` holds the literal field values without braces (None where a field is
-    repeated, a macro or markup); ``author_text`` keeps the author list as written, braces
-    included, because they mark names that stay whole.
+    Attributes:
+        key: The entry's citation key, or a label for a link.
+        path: The file the entry or link was read from, or ``None`` for a configured link.
+        line: The line of the entry or link, or ``None``.
+        kind: The entry type, or ``url`` for a link.
+        values: The literal field values without braces (``None`` where a field is repeated, a
+            macro or markup).
+        doi: The entry's DOI when it is unique and well formed, else ``None``.
+        author_text: The author list as written, braces included, because they mark names
+            that stay whole.
     """
 
     key: str
@@ -67,7 +74,13 @@ class Reference:
 
 
 class OnlineInputs(NamedTuple):
-    """The entries and links to check, and the reasons why some inputs were not read."""
+    """The entries and links to check, and the reasons why some inputs were not read.
+
+    Attributes:
+        references: The bibliography entries to check.
+        links: The configured and literal source links to check.
+        gaps: The sorted, distinct reasons why some inputs were not read.
+    """
 
     references: list[Reference]
     links: list[Reference]
@@ -75,7 +88,17 @@ class OnlineInputs(NamedTuple):
 
 
 def _bibliography_names(root: Path, inspection: SourceGraph, gaps: list[str]) -> list[str]:
-    """The selected graph's declared resources, or every .bib file without a document root."""
+    """Name the selected graph's declared resources, or every .bib file without a document root.
+
+    Args:
+        root: The project root.
+        inspection: The selected source graph.
+        gaps: Receives the reasons why some resources could not be resolved.
+
+    Returns:
+        The bibliography files to read, or an empty list when a document root declares
+        no resolvable resource.
+    """
     resources, resource_reasons = (
         resource_declarations(inspection, reachable_sources(inspection))
         if inspection.main
@@ -95,7 +118,16 @@ def _bibliography_names(root: Path, inspection: SourceGraph, gaps: list[str]) ->
 
 
 def entry_reference(document: BibDocument, entry: Entry) -> Reference:
-    """The bounded literal values a lookup may share; a repeated field becomes unknown."""
+    """Extract the bounded literal values a lookup may share; a repeated field becomes unknown.
+
+    Args:
+        document: The bibliography file that holds the entry.
+        entry: The entry to read.
+
+    Returns:
+        The entry as a reference; its DOI is kept only when it is unique and matches
+        ``DOI_PATTERN``.
+    """
     values: dict[str, str | None] = {}
     doi = None
     author_text = None
@@ -127,6 +159,17 @@ def entry_reference(document: BibDocument, entry: Entry) -> Reference:
 
 
 def _bibliography_references(root: Path, names: list[str], gaps: list[str]) -> list[Reference]:
+    """Read the entries of the named bibliography files, up to ``MAX_REFERENCES``.
+
+    Args:
+        root: The project root.
+        names: The bibliography files to read.
+        gaps: Receives the read problems, files with incomplete syntax and an exceeded
+            entry bound.
+
+    Returns:
+        The entries of the valid files, in file and source order.
+    """
     budget = BibliographyBudget(max_file_bytes=MAX_BIB_BYTES, max_total_bytes=MAX_INPUT_BYTES)
     load = read_declared_bibliographies(root, names, budget)
     gaps.extend(problem.message for problem in load.problems)
@@ -145,7 +188,7 @@ def _bibliography_references(root: Path, names: list[str], gaps: list[str]) -> l
 
 
 def _link_commands(text: str) -> list[Command]:
-    """The commands of ``text`` with its comments blanked and its \\url arguments readable."""
+    r"""Scan the commands of ``text`` with its comments blanked and its \url arguments readable."""
     regions = source_regions(text).regions
     kept = [
         region
@@ -158,7 +201,17 @@ def _link_commands(text: str) -> list[Command]:
 def _source_links(
     inspection: SourceGraph, options: OnlineOptions, gaps: list[str]
 ) -> list[Reference]:
-    """Configured and literal source URLs, up to the link bound."""
+    """Collect configured and literal source URLs, up to the link bound.
+
+    Args:
+        inspection: The selected source graph, whose visited sources are scanned.
+        options: The online options, which list the configured links.
+        gaps: Receives the reasons why link coverage is incomplete.
+
+    Returns:
+        The configured links first, then the literal source links in file and source
+        order.
+    """
     links = [
         Reference(f"configured link {index}", None, None, "url", {"url": url})
         for index, url in enumerate(options.online_replication_urls, 1)
@@ -197,9 +250,21 @@ def collect_inputs(
 ) -> OnlineInputs:
     """Read the entries and links that the selected online checks would send.
 
-    Raises ``PreparationError`` when ``root`` is not a directory. Everything else that
-    cannot be read becomes a gap. ``analysed`` shares the source analysis of the same
-    root and main file with other checks.
+    Everything that cannot be read, apart from ``root`` itself, becomes a gap.
+
+    Args:
+        root: The project root.
+        main: The main file as the caller named it; ``None`` selects the single document
+            root.
+        options: The online options, which decide whether entries and links are read.
+        analysed: The source analysis of the same root and main file, shared with other
+            checks.
+
+    Returns:
+        The entries, the links and the gaps.
+
+    Raises:
+        PreparationError: ``root`` is not a directory.
     """
     require_directory(root, "Online reference input")
     gaps: list[str] = []

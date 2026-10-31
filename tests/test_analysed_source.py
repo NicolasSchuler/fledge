@@ -79,7 +79,15 @@ del CLEAN_PAPER["figures/unused.png"]
 
 
 class _CountingGraphBuilds:
-    """Counts ``SourceGraph.build`` calls while patched in, and keeps what each was asked."""
+    """Counts ``SourceGraph.build`` calls while patched in, and keeps what each was asked.
+
+    Args:
+        delay: The seconds each call sleeps before the real build, so that concurrent
+            callers overlap.
+
+    Attributes:
+        calls: The root, main file and scope of every build, in order.
+    """
 
     def __init__(self, delay: float = 0.0) -> None:
         self.calls: list[tuple[Path, str | None, str]] = []
@@ -89,6 +97,7 @@ class _CountingGraphBuilds:
         self._patch = patch.object(SourceGraph, "build", side_effect=self._build)
 
     def _build(self, root, main, *, scope="project"):
+        """Record the call, wait ``delay`` seconds and return the real build."""
         with self._lock:
             self.calls.append((root, main, scope))
         time.sleep(self._delay)
@@ -102,11 +111,15 @@ class _CountingGraphBuilds:
         self._patch.stop()
 
     def project_scope(self) -> list[tuple[Path, str | None]]:
+        """Return the root and main file of every build of the project scope."""
         return [(root, main) for root, main, scope in self.calls if scope == "project"]
 
 
 class AnalysedSourceTests(unittest.TestCase):
+    """Tests of one shared analysis: lazy single builds, reuse limits, caching, equal results."""
+
     def setUp(self) -> None:
+        """Write the paper into a temporary directory as ``self.root``."""
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = write_project(Path(self.temporary.name).resolve() / "paper", PAPER)
@@ -187,7 +200,10 @@ class AnalysedSourceTests(unittest.TestCase):
         self.assertEqual(first.graph.main, "main.tex")
 
     def checks(self):
-        """Each check that takes a shared analysis, as a function of that analysis (or None)."""
+        """Return each check that takes a shared analysis, by name.
+
+        Each is a function of that analysis (or ``None``).
+        """
         root = self.root
         authors = AuthorRecordOptions(required_author_fields=("email", "affiliation"))
         return {
@@ -291,6 +307,8 @@ class AnalysedSourceTests(unittest.TestCase):
 
 
 class PdfCheckSharingTests(unittest.IsolatedAsyncioTestCase):
+    """Tests that the configured PDF checks reuse a shared source analysis."""
+
     async def test_source_metadata_and_figure_checks_share_one_graph(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory).resolve()
@@ -339,6 +357,7 @@ class JobSharingTests(unittest.IsolatedAsyncioTestCase):
     """A whole job builds one graph per project root and main file, whatever the checks."""
 
     def settings(self, **overrides) -> Settings:
+        """Return settings that enable many source checks, with ``overrides`` added."""
         return Settings(
             main="main.tex",
             layout="preserve",
@@ -353,6 +372,17 @@ class JobSharingTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def run_job_with(self, command: str, settings: Settings, source: Path, out: Path):
+        """Run a job with controlled backends whose builds report every project file as read.
+
+        Args:
+            command: The job command, such as ``inspect`` or ``prepare``.
+            settings: The settings of the job.
+            source: The project directory.
+            out: The output directory, used only by ``prepare``.
+
+        Returns:
+            The report of the job.
+        """
         request = JobRequest(command, source, settings, out if command == "prepare" else None)
         passed = AsyncMock(return_value=[])
 
@@ -368,6 +398,7 @@ class JobSharingTests(unittest.IsolatedAsyncioTestCase):
             return await run_job(request, backends=backends)
 
     def comparable(self, report):
+        """Return the findings of ``report`` in a form that compares independent of order."""
         return sorted(repr(finding) for finding in report.findings)
 
     async def test_inspect_builds_one_graph_and_matches_unshared_analysis(self) -> None:

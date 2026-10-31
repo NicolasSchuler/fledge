@@ -1,3 +1,5 @@
+"""Staging a document: selecting its inputs, applying planned edits and flattening its sources."""
+
 from __future__ import annotations
 
 import tempfile
@@ -14,12 +16,25 @@ from latexprep.workflow_options import DocumentOptions
 
 
 class StagingTests(unittest.TestCase):
+    """Staging a document's inputs, writing planned contents and applying the source edits in order.
+
+    An unsafe input is named with the way out, contents are written only after every precondition
+    holds, a blocked edit stops the edits after it, and the preserved layout ships the selected
+    sources as they are.
+    """
+
     def setUp(self) -> None:
+        """Create a temporary base directory that is removed after the test."""
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.base = Path(self.temporary.name)
 
     def project(self) -> Path:
+        """Create a snapshot whose ``paper/main.tex`` holds only a document class line.
+
+        Returns:
+            The snapshot directory.
+        """
         snapshot = self.base / "snapshot"
         (snapshot / "paper").mkdir(parents=True)
         (snapshot / "paper" / "main.tex").write_text("\\documentclass{article}\n")

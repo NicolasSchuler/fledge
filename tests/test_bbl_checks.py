@@ -9,6 +9,8 @@ from latexprep.bbl_checks import Backend, bbl_keys
 
 
 class BblKeysTests(unittest.TestCase):
+    """Tests of ``bbl_keys`` and ``Backend`` on BibTeX and biblatex ``.bbl`` text."""
+
     def test_bibtex_bibitems_give_their_keys_with_or_without_a_label(self):
         text = (
             "\\begin{thebibliography}{9}\n"

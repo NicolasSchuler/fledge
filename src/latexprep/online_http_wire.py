@@ -39,14 +39,30 @@ _BODY_LIMIT_MESSAGE = "Metadata response exceeded its byte limit"
 
 @dataclass(frozen=True)
 class Response:
-    """A parsed response; header names are lower-case and the body is empty unless read."""
+    """A parsed response; header names are lower-case and the body is empty unless read.
+
+    Attributes:
+        status: The status code.
+        headers: The header names and values, in the order received.
+        body: The body, or empty when it was not read.
+    """
 
     status: int
     headers: tuple[tuple[str, str], ...] = ()
     body: bytes = b""
 
     def header(self, name: str) -> str | None:
-        """The value of header ``name``; a repeated single-valued header is malformed."""
+        """Look up the value of header ``name``; a repeated single-valued header is malformed.
+
+        Args:
+            name: The header name, compared without regard to case.
+
+        Returns:
+            The first value of the header, or ``None`` when it is absent.
+
+        Raises:
+            NetworkFailure: A location, content-length or transfer-encoding header repeats.
+        """
         values = [value for key, value in self.headers if key.lower() == name.lower()]
         if len(values) > 1 and name.lower() in _SINGLE_VALUED_HEADERS:
             raise NetworkFailure(FetchOutcome.MALFORMED, "Ambiguous HTTP response headers")
@@ -54,7 +70,16 @@ class Response:
 
 
 def build_request(method: str, target: Target, user_agent: str) -> bytes:
-    """The request for ``target`` as ASCII bytes; the connection is closed after one reply."""
+    """Encode the request for ``target`` as ASCII bytes; the connection is closed after one reply.
+
+    Args:
+        method: The request method, ``GET`` or ``HEAD``.
+        target: The host and path to request; an IPv6 host is bracketed in ``Host``.
+        user_agent: The ``User-Agent`` header value.
+
+    Returns:
+        The request head, which asks for JSON preferred and an uncompressed body.
+    """
     authority = f"[{target.host}]" if ":" in target.host else target.host
     request = (
         f"{method} {target.path} HTTP/1.1\r\nHost: {authority}\r\n"
@@ -66,7 +91,14 @@ def build_request(method: str, target: Target, user_agent: str) -> bytes:
 
 
 async def _read_status(reader: asyncio.StreamReader) -> tuple[int, int]:
-    """The status code and the byte length of the status line."""
+    """Read the status line.
+
+    Returns:
+        The status code and the byte length of the status line.
+
+    Raises:
+        NetworkFailure: The status line is invalid or longer than its bound.
+    """
     line = await reader.readline()
     match = _STATUS_LINE.fullmatch(line)
     if match is None or len(line) > _MAX_STATUS_LINE_BYTES:
@@ -75,7 +107,19 @@ async def _read_status(reader: asyncio.StreamReader) -> tuple[int, int]:
 
 
 async def _read_headers(reader: asyncio.StreamReader, used: int) -> tuple[tuple[str, str], ...]:
-    """The header block; ``used`` bytes of the head budget are already spent."""
+    """Read the header block; ``used`` bytes of the head budget are already spent.
+
+    Args:
+        reader: The stream positioned after the status line.
+        used: The bytes of the head budget already spent on the status line.
+
+    Returns:
+        The headers with lower-case names and stripped values, in the order received.
+
+    Raises:
+        NetworkFailure: A header is invalid, or the block is incomplete or exceeds the
+            bound on bytes or headers.
+    """
     headers: list[tuple[str, str]] = []
     size = used
     while True:
@@ -94,11 +138,32 @@ async def _read_headers(reader: asyncio.StreamReader, used: int) -> tuple[tuple[
 
 
 async def _read_head(reader: asyncio.StreamReader) -> Response:
+    """Read the status line and headers of one response, without its body.
+
+    Returns:
+        The response head, with an empty body.
+
+    Raises:
+        NetworkFailure: The status line or the headers are malformed or over a bound.
+    """
     status, used = await _read_status(reader)
     return Response(status, await _read_headers(reader, used))
 
 
 async def _read_chunked(reader: asyncio.StreamReader, limit: int) -> bytes:
+    """Read a chunked body of at most ``limit`` bytes.
+
+    Args:
+        reader: The stream positioned at the first chunk-size line.
+        limit: The largest accepted body.
+
+    Returns:
+        The joined chunks.
+
+    Raises:
+        NetworkFailure: A chunk-size line or chunk ending is invalid, or the body would
+            exceed ``limit``.
+    """
     payload = bytearray()
     while True:
         line = await reader.readline()
@@ -115,12 +180,37 @@ async def _read_chunked(reader: asyncio.StreamReader, limit: int) -> bytes:
 
 
 async def _read_declared_length(reader: asyncio.StreamReader, length: str, limit: int) -> bytes:
+    """Read a body of the declared ``Content-Length``.
+
+    Args:
+        reader: The stream positioned at the body.
+        length: The ``Content-Length`` value.
+        limit: The largest accepted body.
+
+    Returns:
+        The body.
+
+    Raises:
+        NetworkFailure: The length is not a decimal number or exceeds ``limit``.
+    """
     if not re.fullmatch(r"\d+", length) or int(length) > limit:
         raise NetworkFailure(FetchOutcome.RESPONSE_LIMIT, _BODY_LIMIT_MESSAGE)
     return await reader.readexactly(int(length))
 
 
 async def _read_until_close(reader: asyncio.StreamReader, limit: int) -> bytes:
+    """Read a body without declared framing until the server closes the connection.
+
+    Args:
+        reader: The stream positioned at the body.
+        limit: The largest accepted body.
+
+    Returns:
+        The body.
+
+    Raises:
+        NetworkFailure: The body exceeds ``limit``.
+    """
     payload = bytearray()
     while chunk := await reader.read(min(IO_CHUNK_BYTES, limit + 1 - len(payload))):
         payload.extend(chunk)
@@ -130,6 +220,20 @@ async def _read_until_close(reader: asyncio.StreamReader, limit: int) -> bytes:
 
 
 async def _read_body(reader: asyncio.StreamReader, head: Response, limit: int) -> bytes:
+    """Read the body with the framing that the head declares.
+
+    Args:
+        reader: The stream positioned at the body.
+        head: The response head, whose headers declare the encoding and framing.
+        limit: The largest accepted body.
+
+    Returns:
+        The body.
+
+    Raises:
+        NetworkFailure: The body is compressed, its framing conflicts or is unsupported,
+            or it is malformed or exceeds ``limit``.
+    """
     if head.header("content-encoding") not in {None, "identity"}:
         raise NetworkFailure(
             FetchOutcome.MALFORMED, "Compressed metadata responses are unsupported"
@@ -149,10 +253,18 @@ async def _read_body(reader: asyncio.StreamReader, head: Response, limit: int) -
 async def read_response(reader: asyncio.StreamReader, *, head_only: bool, limit: int) -> Response:
     """Read the final response; interim 1xx answers are skipped.
 
-    The body is read only when it is wanted (``head_only`` is false) and the status is
-    2xx, in at most ``limit`` bytes; a larger body is refused rather than truncated.
-    Raises ``NetworkFailure`` for a response that is malformed or over a bound, and
-    ``asyncio.IncompleteReadError`` when the connection ends early.
+    Args:
+        reader: The stream of the connection.
+        head_only: Whether to skip the body; it is read only when this is false and the
+            status is 2xx.
+        limit: The largest accepted body; a larger body is refused rather than truncated.
+
+    Returns:
+        The final response, with its body when it was read.
+
+    Raises:
+        NetworkFailure: The response is malformed or over a bound.
+        asyncio.IncompleteReadError: The connection ends early.
     """
     head = await _read_head(reader)
     interim = 0

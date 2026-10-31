@@ -45,7 +45,7 @@ COLOR_OPERATIONS = frozenset(
 
 
 def pdfinfo_fields(output: str) -> dict[str, str]:
-    """The ``key: value`` lines of pdfinfo output, split at each line's first colon."""
+    """Read the ``key: value`` lines of pdfinfo output, split at each line's first colon."""
     return {
         key.strip(): value.strip()
         for key, value in (line.split(":", 1) for line in output.splitlines() if ":" in line)
@@ -53,7 +53,18 @@ def pdfinfo_fields(output: str) -> dict[str, str]:
 
 
 def page_count(fields: dict[str, str], maximum: int = MAX_INSPECTION_PAGES) -> int:
-    """The page count of pdfinfo ``fields``, which must lie between 1 and ``maximum``."""
+    """Read the page count of pdfinfo ``fields``, which must lie between 1 and ``maximum``.
+
+    Args:
+        fields: The pdfinfo fields.
+        maximum: The largest page count accepted.
+
+    Returns:
+        The page count.
+
+    Raises:
+        PreparationError: The count is missing, not an integer or out of range.
+    """
     try:
         pages = int(fields["Pages"])
     except (KeyError, ValueError) as error:
@@ -64,7 +75,15 @@ def page_count(fields: dict[str, str], maximum: int = MAX_INSPECTION_PAGES) -> i
 
 
 def pdfinfo_properties(output: str) -> dict[str, str]:
-    """pdfinfo fields whose compared keys and page count are unambiguous."""
+    """Read the pdfinfo fields, requiring unambiguous compared keys and page count.
+
+    Returns:
+        The fields, as :func:`pdfinfo_fields` reads them.
+
+    Raises:
+        PreparationError: A metadata field, ``Pages`` or ``Tagged`` occurs more than
+            once, or the page count is invalid.
+    """
     fields = pdfinfo_fields(output)
     keys = [line.split(":", 1)[0].strip() for line in output.splitlines() if ":" in line]
     if any(keys.count(key) != 1 for key in (*METADATA_FIELDS, "Pages", "Tagged") if key in keys):
@@ -74,7 +93,15 @@ def pdfinfo_properties(output: str) -> dict[str, str]:
 
 
 def require_rendered_pages(pages: int, subject: str = "Rendered comparison") -> None:
-    """Refuse a render of more pages than ``MAX_RENDERED_PAGES``; ``subject`` names the check."""
+    """Refuse a render of more pages than ``MAX_RENDERED_PAGES``; ``subject`` names the check.
+
+    Args:
+        pages: The number of pages to render.
+        subject: The check named in the error.
+
+    Raises:
+        PreparationError: ``pages`` exceeds the limit.
+    """
     if pages > MAX_RENDERED_PAGES:
         raise PreparationError(
             f"{subject} supports at most {MAX_RENDERED_PAGES} pages; this PDF has {pages}"
@@ -82,7 +109,19 @@ def require_rendered_pages(pages: int, subject: str = "Rendered comparison") -> 
 
 
 def parse_page_sizes(output: str, pages: int) -> list[tuple[float, float]]:
-    """Every page size in points from ``pdfinfo -box`` output; geometry only, no render limits."""
+    """Read every page size in points from ``pdfinfo -box`` output; no render limits apply.
+
+    Args:
+        output: The ``pdfinfo -box`` output.
+        pages: The number of pages.
+
+    Returns:
+        The width and height of each page, in page order.
+
+    Raises:
+        PreparationError: A row repeats or holds invalid numbers, a page has no size, or
+            a size is not positive, not finite or larger than ``MAX_PAGE_DIMENSION_PT``.
+    """
     sizes: dict[int, tuple[float, float]] = {}
     for match in re.finditer(
         r"^Page\s+(?:(\d+)\s+)?size:\s*([\d.eE+-]+)\s+x\s+([\d.eE+-]+)\s+pts",
@@ -110,12 +149,22 @@ def parse_page_sizes(output: str, pages: int) -> list[tuple[float, float]]:
 
 
 def split_text_pages(text: str, pages: int) -> list[str]:
-    """The pages of pdftotext output, split at its form feeds.
+    """Split pdftotext output into its pages at the form feeds.
 
     pdftotext ends every page with a form feed, so a complete extraction holds exactly
-    ``pages`` of them and nothing but whitespace after the last. Anything else lost or
-    gained a page boundary and is refused. The pages keep their line ends as extracted;
-    ``normalized_text_pages`` is the variant that also canonicalizes them.
+    ``pages`` of them and nothing but whitespace after the last. The pages keep their line
+    ends as extracted; ``normalized_text_pages`` is the variant that also canonicalizes
+    them.
+
+    Args:
+        text: The pdftotext output.
+        pages: The number of pages.
+
+    Returns:
+        The text of each page, in page order.
+
+    Raises:
+        PreparationError: The output lost or gained a page boundary.
     """
     extracted = text.split("\f")
     if len(extracted) != pages + 1 or extracted[-1].strip():
@@ -124,13 +173,24 @@ def split_text_pages(text: str, pages: int) -> list[str]:
 
 
 def normalized_text_pages(text: str, pages: int) -> list[str]:
-    """``split_text_pages`` with canonical line ends (LF) and no trailing blanks on a line.
+    """Split pages as ``split_text_pages`` does, with LF line ends and no trailing blanks.
 
     Pages compared between two PDFs, or tested for emptiness, go through this form so the
     producer's line-end convention and trailing spaces never register as differences.
+
+    Args:
+        text: The pdftotext output.
+        pages: The number of pages.
+
+    Returns:
+        The canonical text of each page, in page order.
+
+    Raises:
+        PreparationError: The output lost or gained a page boundary.
     """
 
     def canonical(page: str) -> str:
+        """Use LF line ends and strip trailing spaces and tabs from every line."""
         lines = page.replace("\r\n", "\n").replace("\r", "\n").split("\n")
         return "\n".join(line.rstrip(" \t") for line in lines)
 
@@ -138,14 +198,33 @@ def normalized_text_pages(text: str, pages: int) -> list[str]:
 
 
 class PageFrames(NamedTuple):
-    """Pages whose coordinate frame adapters cannot align, and every page size."""
+    """Pages whose coordinate frame adapters cannot align, and every page size.
+
+    Attributes:
+        unsupported_pages: The numbers of the pages whose frame cannot be aligned.
+        sizes: The width and height of each page in points, in page order.
+    """
 
     unsupported_pages: set[int]
     sizes: list[tuple[float, float]]
 
 
 def page_frames(output: str, pages: int) -> PageFrames:
-    """Reject coordinate frames that the Poppler XML adapter cannot align reliably."""
+    """Reject coordinate frames that the Poppler XML adapter cannot align reliably.
+
+    A page is supported only when it is unrotated, its crop box equals its media box and
+    that box starts at the origin.
+
+    Args:
+        output: The ``pdfinfo -box`` output.
+        pages: The number of pages.
+
+    Returns:
+        The unsupported pages and every page size.
+
+    Raises:
+        PreparationError: A box has an unrecognized format or the page sizes are invalid.
+    """
     rotations: dict[int, int] = {}
     boxes: dict[int, dict[str, tuple[float, ...]]] = {}
     for line in output.splitlines():
@@ -168,7 +247,19 @@ def page_frames(output: str, pages: int) -> PageFrames:
 
 
 def inventory_rows(output: str, header: Sequence[str], tool: str) -> list[str]:
-    """Data rows of a Poppler inventory table after validating its complete header."""
+    """Return the data rows of a Poppler inventory table after validating its header.
+
+    Args:
+        output: The tool's output.
+        header: The expected column names.
+        tool: The tool's name, for the error.
+
+    Returns:
+        The nonblank rows below the header and its dashed rule.
+
+    Raises:
+        PreparationError: The header or its rule is missing or different.
+    """
     lines = output.splitlines()
     if len(lines) < 2 or lines[0].split() != header or re.fullmatch(r"[-\s]+", lines[1]) is None:
         raise PreparationError(f"{tool} did not return a recognized complete inventory header")
@@ -177,7 +268,18 @@ def inventory_rows(output: str, header: Sequence[str], tool: str) -> list[str]:
 
 @dataclass(frozen=True, slots=True)
 class PdfFont:
-    """One row of the pdffonts inventory."""
+    """One row of the pdffonts inventory.
+
+    Attributes:
+        name: The font name.
+        font_type: The font type cell, such as ``Type 1C``.
+        encoding: The encoding cell.
+        embedded: Whether the font is embedded.
+        subset: Whether the font is a subset.
+        unicode_map: Whether the font has a Unicode map.
+        object_number: The object number of the font.
+        generation: The generation number of the font object.
+    """
 
     name: str
     font_type: str
@@ -190,10 +292,11 @@ class PdfFont:
 
     @property
     def is_type3(self) -> bool:
+        """Whether the font is a Type 3 font."""
         return is_type3(self.font_type)
 
     def to_report(self) -> dict[str, object]:
-        """The font as a report detail, under the names the report has always used."""
+        """Return the font as a report detail, under the names the report has always used."""
         return {
             "name": self.name,
             "type": self.font_type,
@@ -207,7 +310,14 @@ class PdfFont:
 
 
 def font_inventory(output: str) -> list[PdfFont]:
-    """The fonts of pdffonts output; an unrecognized header or row refuses the whole table."""
+    """Read the fonts of pdffonts output; an unrecognized header or row refuses the table.
+
+    Returns:
+        One font per row, in inventory order.
+
+    Raises:
+        PreparationError: The header or a row is not recognized.
+    """
     inventory: list[PdfFont] = []
     for line in inventory_rows(
         output, "name type encoding emb sub uni object ID".split(), "pdffonts"
@@ -233,12 +343,18 @@ def font_inventory(output: str) -> list[PdfFont]:
 
 
 def is_type3(font_type: str) -> bool:
-    """Shared Type 3 test for pdffonts type cells; spacing and case are not significant."""
+    """Return whether a pdffonts type cell names Type 3; spacing and case do not matter."""
     return re.fullmatch(r"Type\s*3", font_type, re.IGNORECASE) is not None
 
 
 class FontPolicyOutcome(NamedTuple):
-    """The fonts of one inventory that break each font policy, in inventory order."""
+    """The fonts of one inventory that break each font policy, in inventory order.
+
+    Attributes:
+        nonembedded: The fonts that are not embedded.
+        type3: The Type 3 fonts.
+        violations: The fonts that break an enabled policy.
+    """
 
     nonembedded: list[PdfFont]
     type3: list[PdfFont]
@@ -254,6 +370,15 @@ def evaluate_font_policy(
     The single definition of a violating font for the manuscript PDF, where the policies
     are separate findings that each read their own list, and for input figures, which
     report the fonts breaking any enabled policy.
+
+    Args:
+        inventory: The fonts to check.
+        require_embedded: Whether every font must be embedded.
+        forbid_type3: Whether Type 3 fonts are forbidden.
+
+    Returns:
+        The nonembedded fonts, the Type 3 fonts and the fonts that break an enabled
+        policy.
     """
     nonembedded = [font for font in inventory if not font.embedded]
     type3 = [font for font in inventory if font.is_type3]
@@ -266,7 +391,19 @@ def evaluate_font_policy(
 
 
 def parse_tool_xml(output: str, root_name: str) -> ET.Element:
-    """The root of tool XML that declares no entities and holds at most ``MAX_PARSED_NODES``."""
+    """Parse tool XML that declares no entities and holds at most ``MAX_PARSED_NODES``.
+
+    Args:
+        output: The XML text.
+        root_name: The tag the root element must have.
+
+    Returns:
+        The root element.
+
+    Raises:
+        PreparationError: The XML declares entities or an internal subset, is malformed
+            or too deep, has another root, or holds too many elements.
+    """
     # xml.etree is safe here without defusedxml (the project depends on nothing but click and
     # rich). Entity expansion ("billion laughs") and external entities both need an <!ENTITY>
     # declaration, and a declaration can only sit in a DOCTYPE internal subset or in an
@@ -289,14 +426,31 @@ def parse_tool_xml(output: str, root_name: str) -> ET.Element:
 
 
 class TracedDocument(NamedTuple):
-    """A MuPDF trace and its page elements with validated page numbers."""
+    """A MuPDF trace and its page elements with validated page numbers.
+
+    Attributes:
+        root: The root element of the trace.
+        pages: Each page number with its page element, in order.
+    """
 
     root: ET.Element
     pages: list[tuple[int, ET.Element]]
 
 
 def parse_mupdf_trace(output: str, pages: int) -> TracedDocument:
-    """Require every page exactly once and in order."""
+    """Parse a MuPDF trace, requiring every page exactly once and in order.
+
+    Args:
+        output: The trace XML.
+        pages: The number of pages.
+
+    Returns:
+        The trace with each page number and its page element.
+
+    Raises:
+        PreparationError: The XML is not an acceptable trace, or a page number is
+            invalid, missing, repeated or out of order.
+    """
     root = parse_tool_xml(output, "document")
     traced = root.findall("page")
     try:

@@ -39,12 +39,50 @@ _PACKAGE_FILENAME_TEXT = partial(
 
 
 def _require_declared_date(name: str, value: object) -> None:
+    """Check that a setting holds a declared release date.
+
+    Args:
+        name: The setting name, for the error.
+        value: The value to check.
+
+    Raises:
+        SettingsError: The value is not a string date written YYYY-MM-DD or YYYY/MM/DD.
+    """
     if not isinstance(value, str) or parse_declared_date(value) is None:
         raise SettingsError(f"{name} must be a date written YYYY-MM-DD or YYYY/MM/DD", (name,))
 
 
 @dataclass(frozen=True)
 class BuildCheckOptions:
+    """The opt-in checks over build evidence and their explicit policies.
+
+    Construction raises ``SettingsError`` when a value has the wrong type or is out of
+    bounds, a filename is not a literal .sty or .cls name or is repeated, a date is not
+    written YYYY-MM-DD or YYYY/MM/DD, a package is both required and forbidden, or a
+    required package is missing from the allowlist.
+
+    Attributes:
+        FIELD_BOUNDS: The bounds :func:`validate_scalars` applies to
+            ``overfull_tolerance_pt`` and ``expected_texlive_year``.
+        overfull_tolerance_pt: The largest overfull box allowed, in TeX points, or
+            ``None`` to skip the tolerance check.
+        inventory_loaded_packages: Whether to report every class and package file the
+            build recorder observed.
+        inventory_loaded_options: Whether the options of loaded packages are inventoried;
+            a build that collected no option evidence then gets an unavailable finding.
+        allowed_loaded_packages: The class and package filenames the build may load, or
+            ``None`` for no allowlist.
+        forbidden_loaded_packages: The class and package filenames the build must not
+            load.
+        required_loaded_packages: The class and package filenames the build must load.
+        minimum_package_dates: Pairs of a class or package filename and the earliest
+            release date its header may declare.
+        check_local_package_shadows: Whether to look up a system counterpart of every
+            loaded local class or package.
+        expected_texlive_year: The TeX Live release the build should use, or ``None`` to
+            only record the distribution.
+    """
+
     FIELD_BOUNDS: ClassVar[dict[str, Bounds]] = {
         "overfull_tolerance_pt": NONNEGATIVE_NUMBER,
         "expected_texlive_year": Bounds(MIN_TEXLIVE_YEAR, MAX_TEXLIVE_YEAR),
@@ -96,7 +134,17 @@ class BuildCheckOptions:
 def _finding(
     rule: str, message: str, status: Status, *, details: dict[str, Any] | None = None
 ) -> Finding:
-    """A configured build policy result; anything but a pass blocks as an error."""
+    """Build a configured build policy result; anything but a pass blocks as an error.
+
+    Args:
+        rule: The rule name.
+        message: The message.
+        status: The status; ``passed`` gives an informational finding.
+        details: The details, or ``None`` for none.
+
+    Returns:
+        The finding.
+    """
     return Finding(
         rule,
         message,
@@ -107,7 +155,15 @@ def _finding(
 
 
 class _UnresolvedAfterTeXError(NamedTuple):
-    """A log warning that only means "not resolved yet" once a TeX error stopped the build."""
+    """A log warning that only means "not resolved yet" once a TeX error stopped the build.
+
+    Attributes:
+        rule: The rule of the log warning.
+        noun: The capitalised word that names what was not resolved, for messages.
+        keys_field: The details entry that lists the unresolved keys.
+        key_pattern: The expression whose first group is the key in a log message.
+        unreached: What the build stopped before, the end of the qualified message.
+    """
 
     rule: str
     noun: str
@@ -135,13 +191,21 @@ _UNRESOLVED_AFTER_TEX_ERROR = (
 
 
 def qualify_citation_findings(findings: list[Finding], *, build_succeeded: bool) -> list[Finding]:
-    """Build-log findings, with citation and reference warnings qualified after a TeX error.
+    """Qualify the citation and reference warnings of build-log findings after a TeX error.
 
     TeX reports every citation and cross-reference as undefined until a later
     pass has read the bibliography backend's output and the .aux labels. When
     the build stopped on a TeX error (BLD009), those warnings say nothing about
     whether the keys are defined, so each kind becomes one inconclusive result
     that points at the error.
+
+    Args:
+        findings: The build-log findings.
+        build_succeeded: Whether the build succeeded; a successful build is left alone.
+
+    Returns:
+        A new list of the findings, in which each kind of failed warning is merged into
+        one inconclusive warning when the build failed with a failed TeX error.
     """
     findings = list(findings)
     stopped = not build_succeeded and any(
@@ -155,6 +219,16 @@ def qualify_citation_findings(findings: list[Finding], *, build_succeeded: bool)
 
 
 def _merge_unresolved(findings: list[Finding], kind: _UnresolvedAfterTeXError) -> list[Finding]:
+    """Replace the failed warnings of one kind with one inconclusive warning.
+
+    Args:
+        findings: The build-log findings.
+        kind: The kind of warning to merge.
+
+    Returns:
+        The findings with the merged warning, which lists the keys and log messages, in
+        place of the first failed warning; unchanged when none failed.
+    """
     unresolved = [item for item in findings if item.rule == kind.rule and item.status == "failed"]
     if not unresolved:
         return findings
@@ -202,6 +276,16 @@ def check_tex_distribution(
     The observation is informational. Only an explicit expected TeX Live year turns
     a different or unidentified distribution into an advisory; unavailable version
     evidence stays inconclusive and never passes that policy.
+
+    Args:
+        result: The build whose engine version banner is read.
+        options: The build check options, of which ``expected_texlive_year`` applies;
+            ``None`` for the defaults.
+
+    Returns:
+        The finding: inconclusive when the banner is missing or names no TeX Live or
+        MiKTeX release, failed when the release differs from the expected year, and
+        passed otherwise.
     """
     options = options or BuildCheckOptions()
     expected = options.expected_texlive_year
@@ -258,6 +342,17 @@ def check_tex_distribution(
 def check_build_details(
     result: BuildResult, options: BuildCheckOptions | None = None
 ) -> list[Finding]:
+    """Run the configured checks that need only the build result.
+
+    Args:
+        result: The finished build.
+        options: The build check options; ``None`` for the defaults, which run no check.
+
+    Returns:
+        In this order and as configured: the unavailable loaded-option evidence, the
+        overfull tolerance, the package inventory, the loaded package policy and one
+        finding per minimum package date.
+    """
     options = options or BuildCheckOptions()
     findings: list[Finding] = []
     if options.inventory_loaded_options and not any(
@@ -283,10 +378,22 @@ def check_build_details(
 
 
 def _recorder_complete(result: BuildResult) -> bool:
+    """Return whether the build succeeded with a complete recorder trace."""
     return result.recorder_complete and result.success
 
 
 def _overfull_tolerance(result: BuildResult, threshold: float) -> Finding:
+    """Compare every overfull box in the final log with the tolerance.
+
+    Args:
+        result: The finished build.
+        threshold: The largest overflow allowed, in TeX points.
+
+    Returns:
+        A failed finding when a box exceeds ``threshold``; otherwise inconclusive when a
+        box has no measurement or the log is incomplete, and passed when neither holds.
+        The details list every measurement.
+    """
     overflows = [finding for finding in result.findings if finding.rule == "build.overfull_box"]
     unreadable = any("overflow_pt" not in finding.details for finding in overflows)
     log_complete = result.success and not any(
@@ -322,6 +429,15 @@ def _overfull_tolerance(result: BuildResult, threshold: float) -> Finding:
 
 
 def _package_inventory(result: BuildResult) -> Finding:
+    """Report every class and package file the build recorder observed.
+
+    Args:
+        result: The finished build.
+
+    Returns:
+        An informational finding, passed when the recorder trace is complete and
+        inconclusive otherwise.
+    """
     names = {package.name for package in result.loaded_packages}
     return Finding(
         "build.package_inventory",
@@ -337,6 +453,17 @@ def _package_inventory(result: BuildResult) -> Finding:
 
 
 def _loaded_package_policy(result: BuildResult, options: BuildCheckOptions) -> Finding:
+    """Apply the forbidden, allowed and required package sets to the observed packages.
+
+    Args:
+        result: The finished build.
+        options: The build check options that hold the package sets.
+
+    Returns:
+        A failed finding for a forbidden or disallowed package, even in a partial build;
+        otherwise inconclusive without a complete recorder trace, failed when a required
+        package was not observed, and passed when all hold.
+    """
     complete = _recorder_complete(result)
     names = {package.name for package in result.loaded_packages}
     forbidden = sorted(names & set(options.forbidden_loaded_packages))
@@ -369,6 +496,18 @@ def _loaded_package_policy(result: BuildResult, options: BuildCheckOptions) -> F
 
 
 def _package_date(result: BuildResult, name: str, minimum: str) -> Finding:
+    """Compare the declared release date of one loaded package with a minimum.
+
+    Args:
+        result: The finished build.
+        name: The class or package filename.
+        minimum: The earliest date allowed, as configured.
+
+    Returns:
+        An inconclusive finding unless the recorder trace is complete and the loaded
+        files of that name declare exactly one readable date; otherwise failed when the
+        date is earlier than ``minimum`` and passed when it is not.
+    """
     observed = {
         parse_declared_date(package.declared_date or "")
         for package in result.loaded_packages
@@ -400,7 +539,20 @@ def _package_date(result: BuildResult, name: str, minimum: str) -> Finding:
 async def check_local_package_shadows(
     result: BuildResult, work: Path, runner: CommandRunner, *, budget: ResourceBudget | None = None
 ) -> list[Finding]:
-    """Resolve system counterparts from an empty sandboxed directory, never user cwd."""
+    """Resolve system counterparts from an empty sandboxed directory, never user cwd.
+
+    Args:
+        result: The finished build, whose loaded project classes and packages are looked
+            up.
+        work: The directory that receives a new lookup folder per package.
+        runner: The runner of ``kpsewhich``.
+        budget: The resource budget whose CPU slots bound the concurrent lookups; one at
+            a time when ``None``.
+
+    Returns:
+        One finding per local file name, or one finding alone: inconclusive without a
+        complete recorder trace, or passed when no local class or package was loaded.
+    """
     if not _recorder_complete(result):
         return [
             _finding(
@@ -417,6 +569,7 @@ async def check_local_package_shadows(
         return [_finding(_SHADOW_RULE, "No local class/package files were loaded.", "passed")]
 
     async def inspect(name: str) -> Finding:
+        """Look up one local file name; a name several loaded files share is inconclusive."""
         packages = by_name[name]
         if len(packages) > 1:
             # One lookup cannot tell which of several same-named local files a
@@ -434,7 +587,22 @@ async def check_local_package_shadows(
 
 
 async def _system_lookup(name: str, leaf: Path, runner: CommandRunner) -> list[str]:
-    """The system paths ``kpsewhich`` finds for ``name``; empty when it finds none."""
+    """Return the system paths ``kpsewhich`` finds for ``name``; empty when it finds none.
+
+    Args:
+        name: The class or package filename.
+        leaf: A new directory in which the version probe and the lookup each get their
+            own folder.
+        runner: The runner of ``kpsewhich``.
+
+    Returns:
+        One absolute path, or no path when ``kpsewhich`` finds none.
+
+    Raises:
+        PreparationError: The lookup did not complete within its limits, exited with a
+            status other than 0 or 1, or returned several paths or a relative one.
+        OSError: A lookup folder cannot be created.
+    """
     (leaf / "version").mkdir()
     await runner.tool_version(["kpsewhich", "--version"], leaf / "version")
     command_work = leaf / "lookup"
@@ -458,6 +626,17 @@ async def _system_lookup(name: str, leaf: Path, runner: CommandRunner) -> list[s
 async def _local_package_shadow(
     package: LoadedPackage, work: Path, runner: CommandRunner
 ) -> Finding:
+    """Report whether a loaded local class or package shadows a system file.
+
+    Args:
+        package: The loaded local file.
+        work: The directory that receives the new lookup folder named after the file.
+        runner: The runner of ``kpsewhich``.
+
+    Returns:
+        A passed finding when no system counterpart exists, a failed warning when one
+        does, and an inconclusive finding when the lookup fails.
+    """
     leaf = work / package.name
     leaf.mkdir(parents=True)
     try:

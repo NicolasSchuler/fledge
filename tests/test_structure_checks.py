@@ -1,3 +1,5 @@
+"""Author records, the structure check options and the structure tree of a tagged PDF."""
+
 from __future__ import annotations
 
 import json
@@ -22,6 +24,16 @@ from tests.pdf_fakes import DetailRunner
 
 
 def structured_pdf_objects() -> dict[str, object]:
+    """Return the qpdf JSON of a one-page tagged PDF.
+
+    The structure tree holds a document element with a table (one row with a header cell), a
+    figure with alternative text and a link element tied to the page's URI annotation; the parent
+    tree maps the page's marked content and the annotation back to their elements.
+
+    Returns:
+        The document in the layout of qpdf's JSON version 2.
+    """
+
     def entry(value: dict[str, object]) -> dict[str, object]:
         return {"value": value}
 
@@ -82,11 +94,31 @@ def structured_pdf_objects() -> dict[str, object]:
 
 
 def object_value(document: dict[str, object], number: int) -> dict[str, object]:
+    """Return the value of object ``number`` (generation 0) in a qpdf JSON ``document``.
+
+    The value is the dictionary held in ``document``, so editing it changes the document.
+    """
     return document["qpdf"][1][f"obj:{number} 0 R"]["value"]
 
 
 class AuthorRecordTests(unittest.TestCase):
+    """Author record checks, and how the structure check options are read.
+
+    Each author needs its own required fields; grouped and dynamic records are inconclusive; and
+    the author record and structure options form separate, validated groups of one table.
+    """
+
     def check(self, preamble: str, options: AuthorRecordOptions | None = None):
+        """Check the author records of an article whose preamble ends with ``preamble``.
+
+        Args:
+            preamble: Text placed after the document class line.
+            options: The check options, or ``None`` to require an affiliation and an email for every
+                author.
+
+        Returns:
+            The findings of :func:`check_author_records`.
+        """
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "main.tex").write_text(
@@ -265,7 +297,15 @@ class AuthorRecordTests(unittest.TestCase):
 
 
 class PdfStructureTests(unittest.IsolatedAsyncioTestCase):
+    """Inspecting the structure tree of a tagged PDF with :func:`inspect_pdf_structure`.
+
+    Heading expectations, table rows and cells, link tags and their annotations, figure
+    alternative text and structure references are checked; missing or malformed structure and
+    missing tools are never passes, and the tree is read in a worker thread under a shared lease.
+    """
+
     async def asyncSetUp(self) -> None:
+        """Write a placeholder ``document.pdf`` to a temporary folder; reset the check count."""
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
         self.pdf = self.root / "document.pdf"
@@ -273,9 +313,23 @@ class PdfStructureTests(unittest.IsolatedAsyncioTestCase):
         self.count = 0
 
     async def asyncTearDown(self) -> None:
+        """Remove the temporary directory."""
         self.temporary.cleanup()
 
     async def check(self, options: StructureOptions, document=None, **outputs):
+        """Inspect the test PDF through a :class:`DetailRunner` with ``options``.
+
+        The runner reports one page, the text ``2 Methods`` and the qpdf JSON ``document``;
+        each call uses a new inspection directory.
+
+        Args:
+            options: The structure check options.
+            document: The qpdf JSON to report, or ``None`` for :func:`structured_pdf_objects`.
+            **outputs: Further tool outputs for the :class:`DetailRunner`.
+
+        Returns:
+            The findings of :func:`inspect_pdf_structure`.
+        """
         self.count += 1
         runner = DetailRunner(
             info="Pages: 1\n",

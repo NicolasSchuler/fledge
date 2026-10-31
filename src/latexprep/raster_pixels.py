@@ -46,7 +46,16 @@ _MAX_TOLERANCE = 255
 
 @dataclass(frozen=True, slots=True)
 class RasterImage:
-    """Interleaved 8-bit channels, row by row from the top-left pixel."""
+    """Interleaved 8-bit channels, row by row from the top-left pixel.
+
+    Construction raises ``ValueError`` when ``data`` does not match the dimensions.
+
+    Attributes:
+        width: The width in pixels.
+        height: The height in pixels.
+        channels: 1 for grayscale, 3 for RGB.
+        data: The ``width * height * channels`` samples.
+    """
 
     width: int
     height: int
@@ -73,6 +82,21 @@ def read_pnm_raster(
     The file size, the header and the dimensions are validated against the limits
     (``max_pixels`` never exceeds ``MAX_RASTER_PIXELS``) before the pixels are read, and
     the pixel data must fill the file exactly.
+
+    Args:
+        path: The renderer's output file.
+        channels: 1 for a PGM page, 3 for a PPM page.
+        max_pixels: The largest number of pixels accepted.
+        max_dimension: The largest width or height accepted.
+        max_file_bytes: A further limit on the file size, if any.
+
+    Returns:
+        The page.
+
+    Raises:
+        PreparationError: The file is missing, a link, a special file, too large or
+            unreadable, its header is unsupported, its dimensions are invalid or
+            oversized, or its pixel data does not fill it exactly.
     """
     pixel_limit = min(max_pixels, MAX_RASTER_PIXELS)
     size_limit = channels * pixel_limit + _HEADER_ALLOWANCE
@@ -109,6 +133,16 @@ def read_pnm_raster(
 
 
 def _clamped(box: PixelBox, width: int, height: int) -> PixelBox | None:
+    """Clamp ``box`` to an image of ``width`` by ``height`` pixels.
+
+    Args:
+        box: The rectangle to clamp.
+        width: The image width in pixels.
+        height: The image height in pixels.
+
+    Returns:
+        The clamped box, or ``None`` when it is empty.
+    """
     left, top, right, bottom = (
         max(box[0], 0),
         max(box[1], 0),
@@ -122,8 +156,12 @@ def _clamped(box: PixelBox, width: int, height: int) -> PixelBox | None:
 class InkMask:
     """Which pixels of a grayscale image differ from the background by a threshold.
 
-    A pixel is ink when ``abs(value - background) >= difference``. ``mask`` holds one
-    byte per pixel, 1 for ink and 0 otherwise.
+    A pixel is ink when ``abs(value - background) >= difference``.
+
+    Attributes:
+        width: The width in pixels.
+        height: The height in pixels.
+        mask: One byte per pixel, 1 for ink and 0 otherwise.
     """
 
     width: int
@@ -132,13 +170,26 @@ class InkMask:
 
     @classmethod
     def from_gray(cls, image: RasterImage, background: int, difference: int) -> InkMask:
+        """Mark the ink of a grayscale image.
+
+        Args:
+            image: The grayscale image.
+            background: The background gray level.
+            difference: The smallest distance from ``background`` that counts as ink.
+
+        Returns:
+            The ink mask of ``image``.
+
+        Raises:
+            ValueError: ``image`` is not grayscale.
+        """
         if image.channels != 1:
             raise ValueError("Ink is measured on grayscale images")
         table = bytes(1 if abs(value - background) >= difference else 0 for value in range(256))
         return cls(image.width, image.height, image.data.translate(table))
 
     def count(self, box: PixelBox | None = None) -> int:
-        """The ink pixels in ``box``, or in the whole image."""
+        """Count the ink pixels in ``box``, or in the whole image when it is ``None``."""
         if box is None:
             return self.mask.count(1)
         clamped = _clamped(box, self.width, self.height)
@@ -152,7 +203,11 @@ class InkMask:
         return total
 
     def bounds(self, box: PixelBox) -> PixelBox | None:
-        """The smallest box holding all ink in ``box``, or None when it has no ink."""
+        """Find the smallest box holding all ink in ``box``.
+
+        Returns:
+            The box, or ``None`` when ``box`` holds no ink.
+        """
         clamped = _clamped(box, self.width, self.height)
         if clamped is None:
             return None
@@ -171,9 +226,16 @@ class InkMask:
 
 
 def channel_extrema(image: RasterImage, box: PixelBox) -> tuple[tuple[int, ...], tuple[int, ...]]:
-    """The per-channel minimum and maximum values within ``box``.
+    """Find the per-channel minimum and maximum values within ``box``.
 
     An empty box yields the neutral extrema: 255 for every minimum and 0 for every maximum.
+
+    Args:
+        image: The image to measure.
+        box: The rectangle to measure.
+
+    Returns:
+        The minima and the maxima, one value per channel each.
     """
     channels = image.channels
     minima, maxima = [255] * channels, [0] * channels
@@ -193,25 +255,34 @@ def channel_extrema(image: RasterImage, box: PixelBox) -> tuple[tuple[int, ...],
 
 @lru_cache(maxsize=4)
 def _lane_constants(pixels: int) -> tuple[int, int]:
-    """A 1 in every 16-bit lane, and a 512 (bit 9) in every lane, for ``pixels`` lanes."""
+    """Return a 1 in every 16-bit lane, and a 512 (bit 9) in every lane, for ``pixels`` lanes."""
     ones = int.from_bytes(b"\x01\x00" * pixels, "little")
     return ones, ones << 9
 
 
 def _widen(samples: bytes) -> int:
-    """One 16-bit little-endian lane per sample byte, as a single big integer."""
+    """Widen each sample byte into a 16-bit little-endian lane of a single big integer."""
     lanes = bytearray(2 * len(samples))
     lanes[::2] = samples
     return int.from_bytes(lanes, "little")
 
 
 def _changed_in_chunk(left: bytes, right: bytes, channels: int, tolerance: int) -> int:
-    """Pixels where any channel differs by more than ``tolerance``, computed lane-wise.
+    """Count the pixels where any channel differs by more than ``tolerance``, lane-wise.
 
     With ``x`` and ``y`` the 8-bit samples in 16-bit lanes, ``x + 256 - y + (255 - tolerance)``
     reaches 512 exactly when ``x - y > tolerance``, and never exceeds 766, so bit 9 of each
     lane flags that direction (the swapped subtraction flags the other) without any carry
     into a neighbouring lane. A pixel changed when any channel flags either direction.
+
+    Args:
+        left: The interleaved samples of some pixels in one image.
+        right: The interleaved samples of the same pixels in the other image.
+        channels: The number of channels per pixel.
+        tolerance: The largest channel difference that does not count as a change.
+
+    Returns:
+        The number of changed pixels.
     """
     ones, mark = _lane_constants(len(left) // channels)
     bias, margin = ones << 8, ones * (_MAX_TOLERANCE - tolerance)
@@ -223,7 +294,19 @@ def _changed_in_chunk(left: bytes, right: bytes, channels: int, tolerance: int) 
 
 
 def count_changed_pixels(left: RasterImage, right: RasterImage, tolerance: int) -> int:
-    """The pixels where some channel differs by more than ``tolerance`` (0 to 255)."""
+    """Count the pixels where some channel differs by more than ``tolerance`` (0 to 255).
+
+    Args:
+        left: One raster.
+        right: The other raster, of the same shape.
+        tolerance: The largest channel difference that does not count as a change.
+
+    Returns:
+        The number of changed pixels; 0 when ``tolerance`` is 255.
+
+    Raises:
+        ValueError: The rasters differ in shape, or ``tolerance`` is outside 0 to 255.
+    """
     if (left.width, left.height, left.channels) != (right.width, right.height, right.channels):
         raise ValueError("Changed pixels are counted between rasters of the same shape")
     if not 0 <= tolerance <= _MAX_TOLERANCE:

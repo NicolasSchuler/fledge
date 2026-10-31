@@ -1,3 +1,5 @@
+"""Tests of the parallel capacity, limit and reproducibility settings and their validation."""
+
 from __future__ import annotations
 
 import tempfile
@@ -9,6 +11,8 @@ from latexprep.errors import PreparationError
 
 
 class ParallelConfigTests(unittest.TestCase):
+    """Tests of the parallel capacity and limit settings and of ``source_date_epoch``."""
+
     def test_parallel_defaults_preserve_small_fan_out_and_explicit_job_limits(self):
         settings = load_settings(None, {})
         self.assertEqual(settings.jobs, 2)

@@ -1,11 +1,11 @@
-"""Shipped generated bibliography (.bbl): presence, citation coverage and biblatex format.
+r"""Shipped generated bibliography (.bbl): presence, citation coverage and biblatex format.
 
 Most venues run BibTeX or Biber themselves, so a missing .bbl is only a scope note
 unless the user requires one. Coverage and format checks run only when configured,
 and their missing evidence is inconclusive, not a pass. No source is modified.
 
-This module owns reading the keys out of a generated .bbl (BibTeX's ``\\bibitem`` form
-and biblatex's ``\\entry`` form), the checks that compare them with the citations of
+This module owns reading the keys out of a generated .bbl (BibTeX's ``\bibitem`` form
+and biblatex's ``\entry`` form), the checks that compare them with the citations of
 the selected manuscript, and their options, ``BblOptions``, which a settings file writes
 in the ``[submission_checks]`` table. The .bib files themselves are read by
 ``bibtex_syntax``.
@@ -50,7 +50,11 @@ _BBL_FORMAT_VERSION = re.compile(r"[0-9]{1,4}(?:\.[0-9]{1,4}){0,3}")
 
 
 def validate_bbl_format_version(value: object) -> None:
-    """Reject a biblatex .bbl format version that is not a short dotted number, or ``None``."""
+    """Reject a biblatex .bbl format version that is not a short dotted number, or ``None``.
+
+    Raises:
+        SettingsError: ``value`` is neither ``None`` nor a short dotted number.
+    """
     require_text(
         "biblatex_bbl_format_version",
         value,
@@ -62,7 +66,18 @@ def validate_bbl_format_version(value: object) -> None:
 
 @dataclass(frozen=True)
 class BblOptions:
-    """Which checks of the shipped .bbl run: presence, citation coverage and biblatex format."""
+    """Which checks of the shipped .bbl run: presence, citation coverage and biblatex format.
+
+    Construction raises ``SettingsError`` when a flag is not a boolean or the format
+    version is malformed.
+
+    Attributes:
+        check_bbl_coverage: Whether to compare the shipped .bbl's keys with the citations.
+        require_bbl: Whether a missing .bbl fails instead of being a scope note.
+        biblatex_bbl_format_version: The biblatex .bbl format version the target service
+            expects, as on the second line of a biblatex .bbl; ``None`` skips the format
+            check.
+    """
 
     check_bbl_coverage: bool = False
     require_bbl: bool = False
@@ -74,7 +89,12 @@ class BblOptions:
 
 
 class Backend(StrEnum):
-    """The bibliography backend a document uses; the values are the reported strings."""
+    """The bibliography backend a document uses; the values are the reported strings.
+
+    Attributes:
+        BIBTEX: BibTeX, whose .bbl lists ``bibitem`` entries.
+        BIBLATEX: biblatex, whose .bbl lists ``entry`` records.
+    """
 
     BIBTEX = "bibtex"
     BIBLATEX = "biblatex"
@@ -87,7 +107,15 @@ class Backend(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class _Plan:
-    """What a document's bibliography declarations imply about its .bbl."""
+    """What a document's bibliography declarations imply about its .bbl.
+
+    Attributes:
+        main: The main file.
+        expected: The .bbl named after the main file, beside it.
+        bib: The literal .bib resources the document declares, sorted.
+        backend: The backend the declarations imply.
+        present: Whether the expected .bbl is among the project's files.
+    """
 
     main: str
     expected: str
@@ -97,7 +125,12 @@ class _Plan:
 
 
 class BblKeys(NamedTuple):
-    """The keys a .bbl defines and the backend whose form it has."""
+    """The keys a .bbl defines and the backend whose form it has.
+
+    Attributes:
+        keys: The defined keys, including biblatex key aliases.
+        backend: The backend whose form the .bbl has.
+    """
 
     keys: set[str]
     backend: Backend
@@ -106,6 +139,16 @@ class BblKeys(NamedTuple):
 def _first_declaration(
     graph: SourceGraph, selected: set[str], names: set[str]
 ) -> tuple[str | None, int | None]:
+    """Find the first command in ``names``, searching the main file before the others.
+
+    Args:
+        graph: The literal source graph.
+        selected: The selected sources to search.
+        names: The command names to look for.
+
+    Returns:
+        The source and line of the first such command, or ``None`` for both.
+    """
     for name in sorted(selected, key=lambda item: (item != graph.main, item)):
         for command in commands_before_end(graph.sources[name]):
             if command.name in names:
@@ -114,6 +157,15 @@ def _first_declaration(
 
 
 def _uses_biblatex(graph: SourceGraph, selected: set[str]) -> bool:
+    """Return whether a selected source declares an ``addbibresource`` or loads biblatex.
+
+    Args:
+        graph: The literal source graph.
+        selected: The selected sources to search.
+
+    Returns:
+        ``True`` when the document uses biblatex.
+    """
     for name in selected:
         for command in commands_before_end(graph.sources[name]):
             if command.name == "addbibresource":
@@ -126,7 +178,15 @@ def _uses_biblatex(graph: SourceGraph, selected: set[str]) -> bool:
 
 
 def _skip_label(text: str, cursor: int) -> int:
-    """The offset after the optional ``[label]``; its brackets and braces may nest."""
+    """Skip the optional ``[label]`` that starts at ``cursor``; its brackets and braces may nest.
+
+    Args:
+        text: The text of the .bbl.
+        cursor: The offset of the opening bracket.
+
+    Returns:
+        The offset after the label, or after at most ``_MAX_LABEL_CHARACTERS`` characters.
+    """
     depth = brackets = 0
     limit = min(len(text), cursor + _MAX_LABEL_CHARACTERS)
     while cursor < limit:
@@ -143,13 +203,14 @@ def _skip_label(text: str, cursor: int) -> int:
 
 
 def _skip_space(text: str, cursor: int) -> int:
+    """Return the offset of the first character at or after ``cursor`` that is not a space."""
     while cursor < len(text) and text[cursor].isspace():
         cursor += 1
     return cursor
 
 
 def _bibitem_keys(text: str) -> set[str]:
-    """Keys of BibTeX ``\\bibitem[label]{key}``; the label may contain nested brackets."""
+    r"""Read the keys of BibTeX ``\bibitem[label]{key}``; the label may contain nested brackets."""
     keys: set[str] = set()
     for match in _BIBITEM.finditer(text):
         cancellation_point()
@@ -163,7 +224,7 @@ def _bibitem_keys(text: str) -> set[str]:
 
 
 def bbl_keys(text: str) -> BblKeys:
-    """The keys defined by the text of a .bbl, read in the form its backend writes."""
+    """Read the keys defined by the text of a .bbl, in the form its backend writes."""
     if "\\datalist" in text or _ENTRY_START.search(text):
         keys = set(_ENTRY_KEY.findall(text))
         keys.update(_KEY_ALIAS.findall(text))
@@ -172,7 +233,15 @@ def bbl_keys(text: str) -> BblKeys:
 
 
 def _read_bbl(root: Path, expected: str) -> str | None:
-    """The text of the shipped .bbl, or None when it is a link, special, not UTF-8 or too big."""
+    """Read the text of the shipped .bbl.
+
+    Args:
+        root: The project root.
+        expected: The .bbl path relative to ``root``.
+
+    Returns:
+        The text, or ``None`` when the file is a link, special, not UTF-8 or too big.
+    """
     try:
         return read_regular_file(root / expected, MAX_SOURCE_BYTES).decode("utf-8")
     except (OSError, UnicodeDecodeError):
@@ -180,6 +249,16 @@ def _read_bbl(root: Path, expected: str) -> str | None:
 
 
 def _unreadable(rule: str, expected: str, **details: object) -> Finding:
+    """Report that the shipped .bbl could not be read, as an inconclusive error.
+
+    Args:
+        rule: The rule of the finding.
+        expected: The .bbl path, which the finding names.
+        **details: The finding's details.
+
+    Returns:
+        The inconclusive finding.
+    """
     return Finding(
         rule,
         f"{expected} is unreadable, linked, not UTF-8 or over the scan limit.",
@@ -193,7 +272,24 @@ def _unreadable(rule: str, expected: str, **details: object) -> Finding:
 def check_bbl(
     root: Path, graph: SourceGraph, selected: set[str], options: BblOptions
 ) -> list[Finding]:
-    """Check the .bbl named after the main file; ``graph`` must have a selected main."""
+    """Check the .bbl named after the main file.
+
+    The presence check always runs when the document declares a literal .bib resource;
+    coverage and format run only when ``options`` ask for them.
+
+    Args:
+        root: The project root that holds the shipped files.
+        graph: The literal source graph; it must have a selected main file.
+        selected: The selected sources.
+        options: The checks to run.
+
+    Returns:
+        The findings of the checks, or the not-applicable results of the requested
+        checks when no literal .bib resource is declared.
+
+    Raises:
+        ValueError: ``graph`` has no selected main file.
+    """
     main = graph.main
     if main is None:
         raise ValueError("The .bbl checks need a source graph with a selected main file.")
@@ -213,6 +309,15 @@ def check_bbl(
 
 
 def _without_bib(main: str, options: BblOptions) -> list[Finding]:
+    """Report each requested coverage or format check as not applicable without a .bib.
+
+    Args:
+        main: The main file, which the findings name.
+        options: The checks the user asked for.
+
+    Returns:
+        One not-applicable finding per requested check.
+    """
     unchecked = []
     if options.check_bbl_coverage:
         unchecked.append((_COVERAGE_RULE, "shipped .bbl coverage"))
@@ -231,6 +336,7 @@ def _without_bib(main: str, options: BblOptions) -> list[Finding]:
 
 
 def _missing_bbl_consequence(*, require_bbl: bool) -> str:
+    """Explain what a missing .bbl means, and how to require one when it is not required."""
     if require_bbl:
         return (
             "Services that compile without running BibTeX or Biber, such as arXiv, would "
@@ -244,6 +350,19 @@ def _missing_bbl_consequence(*, require_bbl: bool) -> str:
 
 
 def _presence(graph: SourceGraph, selected: set[str], plan: _Plan, options: BblOptions) -> Finding:
+    """Report whether the expected .bbl is shipped.
+
+    A missing .bbl fails only when ``options`` require one; otherwise it is a scope note.
+
+    Args:
+        graph: The literal source graph, whose files are the shipped set.
+        selected: The selected sources, searched for the first bibliography declaration.
+        plan: What the declarations imply about the .bbl.
+        options: Whether a .bbl is required.
+
+    Returns:
+        The presence finding.
+    """
     others = sorted(
         name for name in graph.files if name.lower().endswith(".bbl") and name != plan.expected
     )
@@ -290,6 +409,16 @@ def _presence(graph: SourceGraph, selected: set[str], plan: _Plan, options: BblO
 
 
 def _format_without_bbl(plan: _Plan, details: dict[str, object]) -> Finding:
+    """Report the format check when no .bbl is shipped.
+
+    Args:
+        plan: What the declarations imply about the .bbl.
+        details: The finding's details.
+
+    Returns:
+        A not-applicable finding for a BibTeX document, otherwise an inconclusive one
+        that names the presence rule as the blocker.
+    """
     if plan.backend is not Backend.BIBLATEX:
         return Finding(
             _FORMAT_RULE,
@@ -314,6 +443,18 @@ def _format_without_bbl(plan: _Plan, details: dict[str, object]) -> Finding:
 
 
 def _format_of(expected: str, text: str, target: str, details: dict[str, object]) -> Finding:
+    """Compare the format version on the second line of a .bbl with ``target``.
+
+    Args:
+        expected: The .bbl path, which the finding names.
+        text: The text of the .bbl.
+        target: The format version the target service expects.
+        details: The finding's details; the version found is added to them.
+
+    Returns:
+        A not-applicable finding when biblatex did not write the file, an inconclusive
+        one when line 2 has no readable version, and otherwise a passed or failed one.
+    """
     lines = [line.rstrip() for line in text.splitlines()[:2]]
     if not lines or lines[0] != _BIBLATEX_BBL_SIGNATURE:
         return Finding(
@@ -361,6 +502,16 @@ def _format_of(expected: str, text: str, target: str, details: dict[str, object]
 
 
 def _bbl_format(root: Path, plan: _Plan, target: str) -> Finding:
+    """Check the biblatex format version of the shipped .bbl.
+
+    Args:
+        root: The project root that holds the shipped files.
+        plan: What the declarations imply about the .bbl.
+        target: The format version the target service expects.
+
+    Returns:
+        The format finding.
+    """
     details: dict[str, object] = {
         "bbl": plan.expected,
         "target_version": target,
@@ -375,6 +526,7 @@ def _bbl_format(root: Path, plan: _Plan, target: str) -> Finding:
 
 
 def _coverage_not_measured(plan: _Plan) -> Finding:
+    """Report that coverage was not measured because no .bbl is shipped."""
     # The presence rule reports the missing file itself; this result only
     # records that coverage could not be measured, so it does not block on its own.
     blocked_by = code_for(_BBL_RULE)
@@ -391,6 +543,17 @@ def _coverage_not_measured(plan: _Plan) -> Finding:
 
 
 def _coverage(root: Path, graph: SourceGraph, plan: _Plan) -> Finding:
+    """Check that the shipped .bbl defines every literal citation key.
+
+    Args:
+        root: The project root that holds the shipped files.
+        graph: The literal source graph whose citations are compared.
+        plan: What the declarations imply about the .bbl.
+
+    Returns:
+        The coverage finding: failed for missing keys, inconclusive while citations
+        remain uncertain, otherwise passed.
+    """
     expected = plan.expected
     if not plan.present:
         return _coverage_not_measured(plan)

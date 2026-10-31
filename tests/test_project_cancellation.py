@@ -15,6 +15,8 @@ from latexprep.cancellation import run_in_thread
 
 
 class ArchiveCancellationTests(unittest.IsolatedAsyncioTestCase):
+    """Cancelling archive creation while a file is being copied."""
+
     async def test_cancel_during_file_copy_skips_later_files_and_removes_partial_archive(self):
         started, release = threading.Event(), threading.Event()
         opened = []

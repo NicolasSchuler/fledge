@@ -76,6 +76,22 @@ def _reference_finding(
     suggestion: str | None = None,
     **details: object,
 ) -> Finding:
+    """Build a finding about one entry or link, located where it was read.
+
+    Args:
+        rule: The rule of the finding.
+        reference: The entry or link; its path and line locate the finding.
+        message: The message of the finding.
+        status: The status of the finding.
+        severity: The severity of the finding.
+        evidence: The kind of evidence behind the finding.
+        incomplete: Whether the evidence is incomplete.
+        suggestion: What to do next, or ``None``.
+        **details: Further details, after the entry's ``citation_key``.
+
+    Returns:
+        The finding.
+    """
     return Finding(
         rule,
         message,
@@ -91,11 +107,12 @@ def _reference_finding(
 
 
 def _input_unavailable(rule: str, reference: Reference, message: str) -> Finding:
-    """The finding for an entry whose input cannot be used; no request was made for it."""
+    """Report an entry whose input cannot be used; no request was made for it."""
     return _reference_finding(rule, reference, message, outcome="input_unavailable")
 
 
 def _fetch_details(result: Fetch) -> dict[str, Any]:
+    """Describe how a fetch ended, as finding details."""
     return {
         "outcome": result.outcome.value,
         "url": result.url,
@@ -166,17 +183,26 @@ _NEXT_STEPS: dict[FetchOutcome, str] = {
 
 
 def _outcome_label(outcome: FetchOutcome) -> str:
+    """Name a fetch outcome in words."""
     return _OUTCOME_LABELS.get(outcome) or outcome.replace("_", " ")
 
 
 def _fetch_summary(subject: str, result: Fetch) -> str:
-    """``subject``, the outcome in words and, in parentheses, the reason when one is known."""
+    """Summarize a fetch: ``subject``, the outcome in words and the reason when one is known.
+
+    Args:
+        subject: What was fetched, which starts the summary.
+        result: How the fetch ended.
+
+    Returns:
+        The summary, with the reason in parentheses.
+    """
     text = f"{subject}: {_outcome_label(result.outcome)}"
     return f"{text} ({result.message.rstrip('.')})" if result.message else text
 
 
 def _outcome_suggestion(result: Fetch) -> str | None:
-    """What to do about an outcome that is not a verdict on the link or record itself."""
+    """Suggest what to do about an outcome that is not a verdict on the link or record itself."""
     if result.outcome is FetchOutcome.UNSAFE_TARGET:
         return (
             f"{result.message or 'This address cannot be requested'}. Correct the address if "
@@ -194,6 +220,17 @@ _LINK_STATUS: dict[FetchOutcome, Status] = {
 
 
 async def _health(client: OnlineClient, reference: Reference, rule: str, url: str) -> Finding:
+    """Check that ``url`` is available; only available, not found and gone are verdicts.
+
+    Args:
+        client: The online client.
+        reference: The entry or link the URL belongs to.
+        rule: The rule of the finding.
+        url: The URL to ask.
+
+    Returns:
+        The finding, with a suggestion when the result is inconclusive.
+    """
     result = await client.fetch(url)
     status = _LINK_STATUS.get(result.outcome, "inconclusive")
     return _reference_finding(
@@ -214,14 +251,24 @@ async def _health(client: OnlineClient, reference: Reference, rule: str, url: st
 def _unusable_reply(
     fetched: Fetch, reason: str, outcome: FetchOutcome = FetchOutcome.MALFORMED
 ) -> Fetch:
-    """``fetched`` re-labelled as a reply that cannot be used, with the reason."""
+    """Relabel ``fetched`` as a reply that cannot be used, with the reason."""
     return replace(fetched, outcome=outcome, message=reason)
 
 
 async def _crossref_reply(
     client: OnlineClient, url: str, parse: Callable[[bytes], _Reply]
 ) -> tuple[_Reply | None, Fetch]:
-    """Fetch ``url`` and parse the reply; None with the failed fetch when it cannot be used."""
+    """Fetch ``url`` and parse the reply; ``None`` with the failed fetch when it cannot be used.
+
+    Args:
+        client: The online client.
+        url: The Crossref URL to fetch with a body.
+        parse: Reads the reply body; it raises ``CrossrefReplyError`` for an unusable one.
+
+    Returns:
+        The parsed reply, or ``None``, and the fetch, relabelled when the reply could not
+        be parsed.
+    """
     fetched = await client.fetch(url, want_body=True)
     if fetched.outcome != FetchOutcome.AVAILABLE or fetched.response is None:
         return None, fetched
@@ -232,6 +279,16 @@ async def _crossref_reply(
 
 
 def _unavailable(rule: str, reference: Reference, fetched: Fetch) -> Finding:
+    """Report a Crossref lookup that gave no usable reply, with a suggestion.
+
+    Args:
+        rule: The rule of the finding.
+        reference: The entry that was looked up.
+        fetched: The failed fetch.
+
+    Returns:
+        An inconclusive warning; no metadata conclusion is drawn.
+    """
     suggestion = _outcome_suggestion(fetched)
     if fetched.outcome in {FetchOutcome.NOT_FOUND, FetchOutcome.GONE}:
         suggestion = (
@@ -251,7 +308,17 @@ def _unavailable(rule: str, reference: Reference, fetched: Fetch) -> Finding:
 async def _crossref_work(
     client: OnlineClient, reference: Reference
 ) -> tuple[CrossrefWork | None, Fetch]:
-    """The Crossref record of the reference's DOI, or None with the failed fetch."""
+    """Fetch the Crossref record of the reference's DOI, or ``None`` with the failed fetch.
+
+    A record of a different DOI counts as an identifier mismatch.
+
+    Args:
+        client: The online client.
+        reference: The entry whose DOI is looked up.
+
+    Returns:
+        The record, or ``None``, and the fetch.
+    """
     if not reference.doi:
         return None, Fetch(FetchOutcome.INPUT_UNAVAILABLE, "")
     work, fetched = await _crossref_reply(client, work_url(reference.doi), parse_work_reply)
@@ -268,6 +335,7 @@ async def _crossref_work(
 
 
 async def _check_doi_resolution(client: OnlineClient, reference: Reference) -> Finding:
+    """Check that the entry's DOI resolves through doi.org; an unusable DOI is not requested."""
     if reference.doi:
         return await _health(client, reference, "online.doi_resolution", doi_url(reference.doi))
     return _input_unavailable(
@@ -278,6 +346,15 @@ async def _check_doi_resolution(client: OnlineClient, reference: Reference) -> F
 
 
 def _quoted(values: list[str], *, others: bool = False) -> str:
+    """Quote values for a message, shortened to ``_MAX_QUOTED_CHARS`` characters.
+
+    Args:
+        values: The values, joined with commas.
+        others: Whether to add ``and others``, for a truncated author list.
+
+    Returns:
+        The quoted text.
+    """
     text = ", ".join(values) if len(values) > 1 else (values[0] if values else "")
     if others:
         text += " and others"
@@ -287,6 +364,7 @@ def _quoted(values: list[str], *, others: bool = False) -> str:
 
 
 def _difference(name: str, comparison: MetadataComparison) -> str:
+    """Describe one differing field with the entry's and Crossref's value."""
     row = comparison.fields[name]
     return (
         f"{name}: the entry has {_quoted(row.local, others=row.local_truncated)}"
@@ -295,7 +373,7 @@ def _difference(name: str, comparison: MetadataComparison) -> str:
 
 
 def _differences(comparison: MetadataComparison) -> str:
-    """The first differing fields with the entry's and Crossref's value of each."""
+    """List the first differing fields with the entry's and Crossref's value of each."""
     fields = comparison.mismatched
     listed = [_difference(name, comparison) for name in fields[:_MAX_LISTED_DIFFERENCES]]
     if len(fields) > _MAX_LISTED_DIFFERENCES:
@@ -311,6 +389,7 @@ _METADATA_STATUS: dict[str, Status] = {
 
 
 def _metadata_message(key: str, comparison: MetadataComparison) -> str:
+    """Describe the outcome of a metadata comparison for the entry ``key``."""
     if comparison.outcome == "mismatch":
         return (
             f"Entry {key!r} differs from its Crossref record ({_differences(comparison)}). "
@@ -325,6 +404,17 @@ def _metadata_message(key: str, comparison: MetadataComparison) -> str:
 
 
 def _metadata_finding(reference: Reference, work: CrossrefWork, source: str) -> Finding:
+    """Compare an entry with its Crossref record and report the agreement.
+
+    Args:
+        reference: The entry.
+        work: The Crossref record of its DOI.
+        source: The URL the record came from.
+
+    Returns:
+        The heuristic ``online.metadata`` finding: failed on a difference, inconclusive
+        when a field cannot be compared.
+    """
     comparison = compare_work(reference, work)
     status = _METADATA_STATUS[comparison.outcome]
     return _reference_finding(
@@ -349,6 +439,16 @@ def _metadata_finding(reference: Reference, work: CrossrefWork, source: str) -> 
 
 
 def _check_metadata(reference: Reference, work: CrossrefWork | None, fetched: Fetch) -> Finding:
+    """Report the metadata agreement, or why there is no record to compare with.
+
+    Args:
+        reference: The entry.
+        work: The Crossref record of its DOI, or ``None``.
+        fetched: The fetch of the record.
+
+    Returns:
+        The ``online.metadata`` finding.
+    """
     if work is not None:
         return _metadata_finding(reference, work, fetched.url)
     if reference.doi:
@@ -362,16 +462,31 @@ def _check_metadata(reference: Reference, work: CrossrefWork | None, fetched: Fe
 
 
 class _Ranked(NamedTuple):
+    """One search candidate and how similar its title is to the entry's.
+
+    Attributes:
+        candidate: The Crossref search result.
+        similarity: The title similarity, from 0 to 1, rounded to three places.
+    """
+
     candidate: CrossrefCandidate
     similarity: float
 
 
 class _Search(NamedTuple):
+    """The ranked candidates of a title search, and the fetch that returned them.
+
+    Attributes:
+        ranked: The candidates, most similar first.
+        fetched: The fetch of the search.
+    """
+
     ranked: list[_Ranked]
     fetched: Fetch
 
 
 def _candidate_row(ranked: _Ranked) -> dict[str, Any]:
+    """Describe one candidate as a row of finding details."""
     candidate = ranked.candidate
     return {
         "doi": candidate.doi,
@@ -384,6 +499,7 @@ def _candidate_row(ranked: _Ranked) -> dict[str, Any]:
 
 
 def _candidate_list(ranked: list[_Ranked]) -> str:
+    """List the first few candidates with their title and similarity, for a message."""
     listed = [
         f"{item.candidate.doi} ({_quoted([item.candidate.titles[0]])}, "
         f"title match {item.similarity:.0%})"
@@ -399,8 +515,16 @@ async def _search(
 ) -> _Search | Finding:
     """Search Crossref for the entry's title: the ranked candidates, or the finding saying why not.
 
-    A candidate is dropped when ``only_types`` is given and its type is not among them, or
-    when it is the entry's own DOI.
+    Args:
+        client: The online client.
+        reference: The entry, whose literal title is searched for.
+        rule: The rule of a finding that explains why there are no candidates.
+        only_types: The record types to keep, or ``None`` for every type. A candidate is
+            dropped when its type is not among them, or when it is the entry's own DOI.
+
+    Returns:
+        The candidates, most similar first, with the fetch; or a finding when the entry
+        has no usable title or the reply is unusable.
     """
     title = reference.values.get("title")
     if not title or len(title) > _MAX_TITLE_CHARACTERS:
@@ -433,6 +557,18 @@ async def _search(
 def _candidates_finding(
     rule: str, reference: Reference, search: _Search, status: Status, text: str
 ) -> Finding:
+    """Report the candidates of a search, which never confirm identity.
+
+    Args:
+        rule: The rule of the finding.
+        reference: The entry searched for.
+        search: The ranked candidates and the fetch.
+        status: The status of the finding.
+        text: The message of the finding.
+
+    Returns:
+        The heuristic finding, with every candidate in its details.
+    """
     ranked = search.ranked
     outcome = "ambiguous_candidates" if len(ranked) > 1 else "candidate" if ranked else "no_match"
     return _reference_finding(
@@ -452,6 +588,7 @@ def _candidates_finding(
 
 
 def _no_candidate_text(key: str) -> str:
+    """Say that the bounded search for the entry ``key`` found no candidate."""
     return (
         f"Entry {key!r}: Crossref returned no candidate in the bounded search; "
         "this does not establish absence."
@@ -459,6 +596,17 @@ def _no_candidate_text(key: str) -> str:
 
 
 async def _check_missing_doi(client: OnlineClient, reference: Reference) -> Finding:
+    """Search for a DOI that an entry without one may have.
+
+    One candidate fails the check, several leave it inconclusive, and none passes it.
+
+    Args:
+        client: The online client.
+        reference: The entry without a DOI.
+
+    Returns:
+        The ``online.missing_doi`` finding.
+    """
     rule = "online.missing_doi"
     search = await _search(client, reference, rule, only_types=None)
     if isinstance(search, Finding):
@@ -475,6 +623,15 @@ async def _check_missing_doi(client: OnlineClient, reference: Reference) -> Find
 
 
 async def _published_candidates(client: OnlineClient, reference: Reference) -> Finding:
+    """Search for published versions of a preprint among journal, proceedings and chapters.
+
+    Args:
+        client: The online client.
+        reference: The preprint entry.
+
+    Returns:
+        The ``online.published_version`` finding, inconclusive when there are candidates.
+    """
     rule = "online.published_version"
     search = await _search(client, reference, rule, only_types=_PUBLISHED_TYPES)
     if isinstance(search, Finding):
@@ -493,6 +650,18 @@ async def _published_candidates(client: OnlineClient, reference: Reference) -> F
 async def _check_published_version(
     client: OnlineClient, reference: Reference, work: CrossrefWork | None, fetched: Fetch
 ) -> Finding:
+    """Report a published version that Crossref declares, else search for candidates.
+
+    Args:
+        client: The online client.
+        reference: The preprint entry.
+        work: The Crossref record of its DOI, or ``None``.
+        fetched: The fetch of the record.
+
+    Returns:
+        The ``online.published_version`` finding: failed for a declared version,
+        inconclusive when the record is unusable or unavailable, else the search result.
+    """
     rule = "online.published_version"
     versions = work.published_versions if work else []
     if versions is None:
@@ -527,6 +696,7 @@ async def _check_published_version(
 
 
 def _notice_list(reply: NoticeReply) -> str:
+    """List the first few notices of a reply by kind and DOI, for a message."""
     notices = reply.notices
     listed = [f"{item.kind} notice {item.notice_doi}" for item in notices[:_MAX_LISTED_ITEMS]]
     if len(notices) > _MAX_LISTED_ITEMS:
@@ -535,6 +705,16 @@ def _notice_list(reply: NoticeReply) -> str:
 
 
 async def _check_notices(client: OnlineClient, reference: Reference) -> Finding:
+    """Look up correction and retraction notices for the entry's DOI.
+
+    Args:
+        client: The online client.
+        reference: The entry.
+
+    Returns:
+        The ``online.notices`` finding: failed when notices exist, inconclusive when the
+        reply was truncated or unusable, passed when Crossref returned none.
+    """
     rule = "online.notices"
     doi = reference.doi
     if not doi:
@@ -585,6 +765,7 @@ async def _check_notices(client: OnlineClient, reference: Reference) -> Finding:
 
 
 async def _check_reference_link(client: OnlineClient, reference: Reference) -> Finding:
+    """Check that the entry's literal URL is available; an unusable URL is not requested."""
     value = reference.values["url"]
     if value:
         return await _health(client, reference, "online.reference_link", value)
@@ -596,6 +777,7 @@ async def _check_reference_link(client: OnlineClient, reference: Reference) -> F
 
 
 def _is_preprint(reference: Reference) -> bool:
+    """Return whether the entry looks like a preprint by its type, archive, URL or note."""
     return (
         reference.kind in _PREPRINT_KINDS
         or (reference.values.get("archiveprefix") or "").casefold() == "arxiv"
@@ -628,13 +810,19 @@ async def _check_reference(client: OnlineClient, reference: Reference) -> list[F
 
 
 class _Job(NamedTuple):
-    """One unit of work: an entry to check, or a source link to probe."""
+    """One unit of work: an entry to check, or a source link to probe.
+
+    Attributes:
+        reference: The entry or link.
+        is_link: Whether it is a source link.
+    """
 
     reference: Reference
     is_link: bool
 
 
 async def _run_job(client: OnlineClient, job: _Job) -> list[Finding]:
+    """Probe a source link, or run the selected checks for an entry."""
     if job.is_link:
         url = str(job.reference.values["url"])
         return [await _health(client, job.reference, "online.replication_link", url)]
@@ -645,7 +833,7 @@ async def _run_job(client: OnlineClient, job: _Job) -> list[Finding]:
 
 
 def _offline_findings(enabled: list[str]) -> list[Finding]:
-    """One skipped finding per selected check: network permission was not given."""
+    """Report each selected check as skipped because network permission was not given."""
     return [
         Finding(
             rule,
@@ -660,6 +848,7 @@ def _offline_findings(enabled: list[str]) -> list[Finding]:
 
 
 def _sharing_finding(enabled: list[str]) -> Finding:
+    """State what the selected checks share with which services."""
     return Finding(
         "online.sharing",
         "Explicit online checks share DOI identifiers, URL destinations and bibliography titles "
@@ -678,7 +867,17 @@ def _sharing_finding(enabled: list[str]) -> Finding:
 def _coverage_findings(
     enabled: list[str], findings: list[Finding], gaps: list[str]
 ) -> list[Finding]:
-    """Per selected check: say that its input was incomplete, or that it had nothing to check."""
+    """Say for each selected check that its input was incomplete, or that it had nothing to check.
+
+    Args:
+        enabled: The selected checks.
+        findings: The findings of the checks so far.
+        gaps: The reasons some inputs were not read.
+
+    Returns:
+        One inconclusive finding per check when inputs are missing, else one skipped
+        finding per check that produced no finding.
+    """
     extra: list[Finding] = []
     for rule in enabled:
         if gaps:
@@ -705,6 +904,7 @@ def _coverage_findings(
 
 
 def _request_summary(client: OnlineClient) -> Finding:
+    """Report how many requests were made, against the budget."""
     return Finding(
         "online.requests",
         "Bounded online requests completed; observations are time-specific.",
@@ -725,7 +925,21 @@ async def _collect(
     budget: ResourceBudget | None,
     analysed: AnalysedSource | None,
 ) -> OnlineInputs:
-    """Read the entries and links off the event loop, under a share of the job's budget."""
+    """Read the entries and links off the event loop, under a share of the job's budget.
+
+    Args:
+        root: The project root.
+        main: The main file, or ``None``.
+        options: The online options.
+        budget: The job's resource budget, or ``None``.
+        analysed: The shared source analysis, or ``None``.
+
+    Returns:
+        The entries, links and gaps.
+
+    Raises:
+        PreparationError: ``root`` is not a directory.
+    """
     reservation = (
         budget.lease("collect online reference inputs", memory_mb=_INPUT_COLLECTION_MEMORY_MB)
         if budget
@@ -738,6 +952,16 @@ async def _collect(
 async def _run_checks(
     client: OnlineClient, inputs: OnlineInputs, budget: ResourceBudget | None
 ) -> list[Finding]:
+    """Run the checks of every entry and link, a bounded number at a time.
+
+    Args:
+        client: The online client.
+        inputs: The entries and links.
+        budget: The job's resource budget, whose CPU slots also bound the concurrency.
+
+    Returns:
+        The findings, entries first, in input order.
+    """
     options = client.options
     jobs = [_Job(reference, False) for reference in inputs.references]
     jobs += [_Job(link, True) for link in inputs.links]
@@ -759,18 +983,33 @@ async def check_online_references(
     transport: Transport | None = None,
     analysed: AnalysedSource | None = None,
 ) -> list[Finding]:
-    """Opt-in only: share DOI/URL identifiers and titles, never whole source files.
+    """Run the selected online checks; opt-in only, sharing identifiers and titles, never files.
 
-    Entries come from the bibliography resources the selected literal source graph
-    declares, so spare copies outside the manuscript spend no request; a directory
-    without any document root falls back to every local .bib file. Source links use
-    the same selected graph. Transport availability and metadata agreement are
-    separate checks. A request failure is advisory/inconclusive, never a fabricated
-    metadata match, and the bounded request budget is reported with the findings.
+    Only DOI/URL identifiers and titles are shared, never whole source files. Entries come
+    from the bibliography resources the selected literal source graph declares, so spare
+    copies outside the manuscript spend no request; a directory without any document root
+    falls back to every local .bib file. Source links use the same selected graph.
+    Transport availability and metadata agreement are separate checks. A request failure
+    is advisory/inconclusive, never a fabricated metadata match, and the bounded request
+    budget is reported with the findings.
 
-    ``resolver`` and ``transport`` replace name resolution and the network exchange,
-    so that tests run the checks without a network. ``analysed`` shares the source analysis
-    of the same root and main file with other checks.
+    Args:
+        root: The project root.
+        main: The main file, or ``None`` to select the single document root.
+        options: The online options; without network permission every selected check is
+            reported as skipped.
+        budget: The job's resource budget, or ``None``.
+        resolver: Replaces name resolution, so that tests run without a network.
+        transport: Replaces the network exchange, so that tests run without a network.
+        analysed: The source analysis of the same root and main file, shared with other
+            checks.
+
+    Returns:
+        The findings sorted by path, line, rule and message, or an empty list when no
+        check is selected.
+
+    Raises:
+        PreparationError: ``root`` is not a directory.
     """
     enabled = options.selected_rules
     if not options.online:

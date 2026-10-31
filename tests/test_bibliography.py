@@ -20,12 +20,24 @@ from latexprep.findings import Finding
 
 
 class BibliographyTests(unittest.TestCase):
+    """Regression tests of bounded bibliography parsing, DOI normalization and integrity checks."""
+
     def setUp(self) -> None:
+        """Create a temporary directory as ``self.root``."""
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)
 
     def write(self, source: str | bytes, name: str = "references.bib") -> Path:
+        """Write ``source`` (UTF-8 for text) below ``root``, creating parent directories.
+
+        Args:
+            source: The text or bytes of the file.
+            name: The path of the file relative to ``root``.
+
+        Returns:
+            The path of the written file.
+        """
         path = self.root / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(source.encode("utf-8") if isinstance(source, str) else source)
@@ -297,6 +309,14 @@ class BibliographyTests(unittest.TestCase):
         self.assertNotIn("16777216", finding.message)
 
     def macro_findings(self, body: str) -> list[Finding]:
+        r"""Check a ``main.tex`` that cites ``k`` for undefined bibliography macros.
+
+        Args:
+            body: The text that follows ``\cite{k}`` in the document.
+
+        Returns:
+            The ``bibliography.undefined_macro`` findings of ``check_bibliography_integrity``.
+        """
         self.write(
             "\\documentclass{article}\n\\begin{document}\\cite{k}\n" + body + "\n\\end{document}\n",
             "main.tex",

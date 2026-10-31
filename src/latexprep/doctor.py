@@ -47,7 +47,18 @@ _PDF_EVIDENCE_RULES = frozenset({"pdf.pages", "pdf.text", "compare.text", "compa
 
 
 class ToolInventory(TypedDict):
-    """What doctor learned about one tool; this is the entry of ``Report.tools``."""
+    """What doctor learned about one tool; this is the entry of ``Report.tools``.
+
+    Attributes:
+        installed: Whether the tool is on ``PATH``.
+        executable: Where the tool was found, or where it ran from once its version was
+            verified; ``None`` when it is missing.
+        required: Whether the run must find the tool.
+        version_verified: Whether the tool printed its version under restricted execution.
+        exercised: Whether a passed stage used the tool.
+        version: The version lines the tool printed, once verified.
+        version_arguments: The arguments that printed the version, once verified.
+    """
 
     installed: bool
     executable: str | None
@@ -60,7 +71,18 @@ class ToolInventory(TypedDict):
 
 @dataclass
 class _DoctorRun:
-    """Everything one diagnostic run shares: where it writes, what it runs with, what it saw."""
+    """Everything one diagnostic run shares: where it writes, what it runs with, what it saw.
+
+    Attributes:
+        report: The report the run fills in.
+        root: The run's workspace.
+        settings: The settings the run diagnoses.
+        runner: Runs the tools under restricted execution.
+        budget: The resource budget that grants build leases.
+        emit: Receives short status messages.
+        required: The tools the run must find.
+        tools: What the run learned about each tool.
+    """
 
     report: Report
     root: Path
@@ -72,7 +94,7 @@ class _DoctorRun:
     tools: dict[str, ToolInventory]
 
     def ready(self, names: set[str]) -> bool:
-        """Whether every tool is installed and, apart from biber, has a verified version."""
+        """Return whether every tool is installed and, apart from biber, has a verified version."""
         return all(
             self.tools[name]["installed"]
             and (name == "biber" or self.tools[name]["version_verified"])
@@ -80,17 +102,33 @@ class _DoctorRun:
         )
 
     def mark_exercised(self, names: set[str]) -> None:
+        """Mark the tools that a passed stage used."""
         for name in names:
             self.tools[name]["exercised"] = True
 
     def add_stage(self, name: str, status: StageStatus) -> None:
+        """Record a stage and its status in the report."""
         self.report.stages.append({"name": name, "status": status})
 
     def skip_stage(self, name: str) -> None:
+        """Record a stage as skipped."""
         self.add_stage(name, "skipped")
 
     def record_stage(self, name: str, findings: list[Finding], *, required: bool = True) -> bool:
-        """Treat absent setup evidence as a blocker, or as an advisory for optional stages."""
+        """Treat absent setup evidence as a blocker, or as an advisory for optional stages.
+
+        Every finding that failed, was inconclusive or was skipped, other than a scope
+        disclaimer, fails the stage and becomes a ``doctor.fixture_failed`` finding; a
+        passed stage adds a ``doctor.fixture_passed`` finding instead.
+
+        Args:
+            name: The stage.
+            findings: The findings of the stage's operations.
+            required: Whether a failure is an error rather than a warning.
+
+        Returns:
+            Whether the stage passed.
+        """
         bad = [
             item
             for item in findings
@@ -115,7 +153,17 @@ class _DoctorRun:
 
 
 def _failed_fixture_finding(stage: str, item: Finding, *, required: bool) -> Finding:
-    """The doctor finding for a failing result of a built-in fixture stage."""
+    """Build the doctor finding for a failing result of a built-in fixture stage.
+
+    Args:
+        stage: The stage.
+        item: The failing result.
+        required: Whether the stage is required; an optional stage reports a warning that
+            says only papers that need its tools are affected.
+
+    Returns:
+        A ``doctor.fixture_failed`` finding with the status of ``item``.
+    """
     advisory = "" if required else " Only papers that need this stage's tools are affected."
     return Finding(
         "doctor.fixture_failed",
@@ -129,7 +177,11 @@ def _failed_fixture_finding(stage: str, item: Finding, *, required: bool) -> Fin
 
 
 def diagnostic_engines(settings: Settings) -> tuple[Engine, ...]:
-    """Exercise every distinct engine selected for configured documents."""
+    """List every distinct engine selected for configured documents, so each is exercised.
+
+    Returns:
+        The engines in sorted order; only ``settings.engine`` without configured documents.
+    """
     return tuple(
         sorted(
             {document.engine or settings.engine for document in settings.workflow.documents}
@@ -139,7 +191,7 @@ def diagnostic_engines(settings: Settings) -> tuple[Engine, ...]:
 
 
 def _build_tool_names(engine: Engine, backend: str | None = None) -> set[str]:
-    """The tools one build with ``engine`` runs, and the bibliography ``backend`` if any."""
+    """List the tools one build with ``engine`` runs, and the bibliography ``backend`` if any."""
     names = {"latexmk", engine}
     if engine == "xelatex":
         names.add("xdvipdfmx")
@@ -149,7 +201,11 @@ def _build_tool_names(engine: Engine, backend: str | None = None) -> set[str]:
 
 
 def selected_tools(settings: Settings) -> tuple[set[str], set[str]]:
-    """The tools a diagnostic run must find, and the optional ones the settings select."""
+    """List the tools a diagnostic run must find, and the optional ones the settings select.
+
+    Returns:
+        The required tools, and the optional tools that are not required.
+    """
     required = set(_PDF_PIPELINE_TOOLS)
     for engine in diagnostic_engines(settings):
         required |= _build_tool_names(engine)
@@ -177,6 +233,7 @@ def selected_tools(settings: Settings) -> tuple[set[str], set[str]]:
 
 
 def _version_command(name: str) -> list[str]:
+    """Return the command that makes the tool ``name`` print its version."""
     if name == "latexmk":
         return [name, "-norc", "-v"]
     if name in PDF_TOOLS:
@@ -185,6 +242,11 @@ def _version_command(name: str) -> list[str]:
 
 
 def _fixture(source: Path, backend: str) -> None:
+    """Write the built-in fixture into the new directory ``source``.
+
+    For ``bibtex`` and ``biber`` the document cites a reference in that backend's style,
+    and every backend other than ``auto`` adds the reference file.
+    """
     source.mkdir()
     document = _DOCUMENT
     if backend == "bibtex":
@@ -202,7 +264,7 @@ def _fixture(source: Path, backend: str) -> None:
 
 
 def _execution_metadata(settings: Settings) -> dict[str, object]:
-    """What this run is, for ``Report.execution``; the run adds its statistics at the end."""
+    """Describe this run for ``Report.execution``; the run adds its statistics at the end."""
     return {
         "engines": list(diagnostic_engines(settings)),
         "manuscript_compiled": False,
@@ -216,7 +278,16 @@ def _execution_metadata(settings: Settings) -> dict[str, object]:
 def _survey_tools(
     report: Report, required: set[str], optional: set[str]
 ) -> dict[str, ToolInventory]:
-    """Which tools are installed, with a finding for each missing one."""
+    """Find which tools are installed, with a finding for each missing one.
+
+    Args:
+        report: The report that receives the inventory and the findings.
+        required: The tools the run must find; a missing one is an error.
+        optional: The optional tools; a missing one is a warning.
+
+    Returns:
+        The inventory of every tool, by name.
+    """
     tools: dict[str, ToolInventory] = {}
     for name in sorted(required | optional):
         executable = shutil.which(name)
@@ -257,6 +328,7 @@ def _record_version(inventory: ToolInventory, version: ToolVersion) -> None:
 
 
 def _deadline_finding(settings: Settings) -> Finding:
+    """Build the finding for a run that exceeded the job deadline."""
     return Finding(
         "execution.deadline",
         f"Setup diagnostics exceeded the {settings.job_timeout_seconds}-second job deadline.",
@@ -267,6 +339,7 @@ def _deadline_finding(settings: Settings) -> Finding:
 
 
 def _execution_unavailable_finding(error: Exception) -> Finding:
+    """Build the finding for a run that local execution could not complete."""
     return Finding(
         "doctor.execution_unavailable",
         f"Setup diagnostics could not complete: {error}",
@@ -278,6 +351,7 @@ def _execution_unavailable_finding(error: Exception) -> Finding:
 
 
 def _resource_failure_finding(failure: str) -> Finding:
+    """Build the finding for a resource limit, or its accounting, that failed."""
     return Finding(
         "execution.resources",
         f"Setup diagnostics could not satisfy the runtime resource checks: {failure}",
@@ -292,7 +366,22 @@ def _resource_failure_finding(failure: str) -> Finding:
 async def run_doctor(
     settings: Settings | None = None, *, progress: Callable[[str], None] | None = None
 ) -> Report:
-    """Diagnose selected setup; never read or compile a user's manuscript."""
+    """Diagnose selected setup; never read or compile a user's manuscript.
+
+    A missed deadline, a local execution failure and a resource failure are findings in
+    the report.
+
+    Args:
+        settings: The settings whose tools and engines are diagnosed; the defaults when
+            ``None``.
+        progress: Receives short status messages.
+
+    Returns:
+        The sanitized report.
+
+    Raises:
+        asyncio.CancelledError: The run was cancelled.
+    """
     settings = settings or Settings()
     report = Report("doctor", scope="setup diagnostics with a built-in fixture")
     report.settings = settings.to_dict()
@@ -335,7 +424,11 @@ async def run_doctor(
 
 
 async def _probe_sandbox(run: _DoctorRun) -> bool:
-    """Start a built-in command under restricted execution; False if the sandbox refuses."""
+    """Start a built-in command under restricted execution.
+
+    Returns:
+        Whether the command ran; ``False`` when the sandbox refuses.
+    """
     run.emit("Testing restricted execution with a built-in command")
     work = run.root / "sandbox"
     work.mkdir()
@@ -369,7 +462,7 @@ async def _probe_sandbox(run: _DoctorRun) -> bool:
 
 
 async def _verify_tool_versions(run: _DoctorRun) -> None:
-    """Ask each installed tool for its version under restricted execution."""
+    """Ask each installed tool, apart from biber, for its version under restricted execution."""
     for name, inventory in run.tools.items():
         if not inventory["installed"] or name == "biber":
             # Biber needs the runtime's sealed toolchain preparation during build.
@@ -425,10 +518,20 @@ async def _diagnose_formatting(run: _DoctorRun, source: Path) -> None:
 async def _build_fixture(
     run: _DoctorRun, source: Path, engine: Engine, backend: BibliographyBackend, label: str
 ) -> tuple[BuildResult, list[Finding]]:
-    """Build the fixture in ``source`` under a build lease; returns the result and its findings.
+    """Build the fixture in ``source`` under a build lease.
 
     A build that produced no PDF always carries a blocking finding, even if the build
     reported none.
+
+    Args:
+        run: The diagnostic run.
+        source: The fixture's directory.
+        engine: The TeX engine.
+        backend: The bibliography backend.
+        label: Names the lease and the build directory.
+
+    Returns:
+        The build result and its findings.
     """
     async with run.budget.lease(
         f"doctor {label}", memory_mb=run.settings.build_memory_mb, kind="build"
@@ -455,7 +558,16 @@ async def _build_fixture(
 
 
 async def _compile_stage(run: _DoctorRun, source: Path, engine: Engine) -> Path | None:
-    """Compile the fixture with ``engine``; returns the PDF if the stage passed."""
+    """Compile the fixture with ``engine``.
+
+    Args:
+        run: The diagnostic run.
+        source: The fixture's directory.
+        engine: The TeX engine.
+
+    Returns:
+        The PDF if the stage passed, otherwise ``None``.
+    """
     backend = run.settings.bibliography_backend
     tools = _build_tool_names(engine, None if backend == "auto" else backend)
     stage = f"{engine}: compilation"

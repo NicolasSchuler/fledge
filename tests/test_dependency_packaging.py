@@ -23,6 +23,8 @@ from tests.support import RecordedBuild, controlled_backends, directory_contents
 
 
 class GeneratedBibliographyInputTests(unittest.TestCase):
+    """Which generated bibliography files the build read count as package inputs."""
+
     def test_only_regular_files_beside_the_main_file_with_its_name_are_retained(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -48,7 +50,10 @@ class GeneratedBibliographyInputTests(unittest.TestCase):
 
 
 class DependencyPackagingTests(unittest.IsolatedAsyncioTestCase):
+    """Which files a ``prepare`` job ships, and when missing build evidence blocks it."""
+
     async def asyncSetUp(self) -> None:
+        """Create a temporary base directory with an empty ``input`` project folder."""
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.base = Path(self.temporary.name)
@@ -56,11 +61,29 @@ class DependencyPackagingTests(unittest.IsolatedAsyncioTestCase):
         self.source.mkdir()
 
     def write(self, path: str, value: str | bytes) -> None:
+        """Write a file of the source project, creating its parent directories.
+
+        Args:
+            path: The path of the file relative to the source project.
+            value: The contents; text is encoded as UTF-8.
+        """
         destination = self.source / path
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(value.encode() if isinstance(value, str) else value)
 
     async def prepare(self, settings: Settings, build: RecordedBuild, name: str = "out"):
+        """Run a ``prepare`` job on the source project with a recorded build.
+
+        Asserts that the job leaves the source project unchanged.
+
+        Args:
+            settings: The settings of the job.
+            build: The recorded build that stands in for TeX.
+            name: The name of the output directory in the base directory.
+
+        Returns:
+            The report of the job and the path of its output directory.
+        """
         original = directory_contents(self.source)
         output = self.base / name
         backends = controlled_backends(build=build.__call__)
@@ -71,6 +94,16 @@ class DependencyPackagingTests(unittest.IsolatedAsyncioTestCase):
         return report, output
 
     def archive_contents(self, output: Path, document: str | None = None) -> dict[str, bytes]:
+        """Read every file entry of a published ``submission.zip``.
+
+        Args:
+            output: The output directory of the job.
+            document: The subdirectory of one document's package, or ``None`` for an
+                archive directly in ``output``.
+
+        Returns:
+            The bytes of each file entry by its archive name; directories are left out.
+        """
         root = output if document is None else output / document
         with zipfile.ZipFile(root / "submission.zip") as archive:
             return {
@@ -80,9 +113,16 @@ class DependencyPackagingTests(unittest.IsolatedAsyncioTestCase):
             }
 
     def assert_released(self, report) -> None:
+        """Assert that the outcome of ``report`` released the package."""
         self.assertIn(report.outcome, {"passed", "passed_with_advisories"}, report.findings)
 
     def assert_dependency_blocked(self, report, output: Path) -> None:
+        """Assert that a mandatory ``package.dependencies`` error blocked the job.
+
+        Args:
+            report: The report of the job.
+            output: The output directory, which must not exist.
+        """
         self.assertEqual(report.outcome, "blocked", report.findings)
         self.assertFalse(output.exists())
         self.assertEqual(report.artifacts, {})

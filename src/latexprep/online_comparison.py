@@ -24,7 +24,14 @@ MetadataOutcome = Literal["mismatch", "incomplete", "agreement"]
 
 
 def normalized_text(value: str) -> str:
-    """``value`` as lowercase words: markup, entities, accents and punctuation removed."""
+    """Reduce ``value`` to lowercase words: markup, entities, accents and punctuation removed.
+
+    Args:
+        value: The text to normalize.
+
+    Returns:
+        The words of ``value``, casefolded and separated by single spaces.
+    """
     return " ".join(
         re.findall(
             r"\w+",
@@ -34,7 +41,15 @@ def normalized_text(value: str) -> str:
 
 
 def _family_matches(name: FamilyName, remote: str) -> bool:
-    """Whether the Crossref family name equals the bibliography's, with or without particles."""
+    """Return whether the Crossref family name equals the bibliography's, with or without particles.
+
+    Args:
+        name: The family name from the bibliography entry.
+        remote: The family name from the Crossref record.
+
+    Returns:
+        ``True`` when a normalized spelling of one side equals one of the other.
+    """
     local_forms = {normalized_text(spelling) for spelling in name.spellings()}
     remote_name = FamilyName(remote, remote)
     remote_forms = {normalized_text(spelling) for spelling in remote_name.spellings()}
@@ -42,7 +57,17 @@ def _family_matches(name: FamilyName, remote: str) -> bool:
 
 
 def _authors_agree(authors: AuthorList, remote: list[str]) -> bool:
-    """Same family names in order; a list ending in ``and others`` need match only its prefix."""
+    """Return whether both author lists have the same family names in order.
+
+    A list ending in ``and others`` need match only its prefix.
+
+    Args:
+        authors: The entry's parsed author list.
+        remote: The family names of the Crossref record.
+
+    Returns:
+        ``True`` when every family name matches its counterpart.
+    """
     names = authors.names
     if authors.truncated:
         if len(names) > len(remote):
@@ -55,18 +80,29 @@ def _authors_agree(authors: AuthorList, remote: list[str]) -> bool:
 
 @dataclass(frozen=True, slots=True)
 class FieldComparison:
-    """One compared field: both sides as lists of strings, and whether they agree."""
+    """One compared field: both sides as lists of strings, and whether they agree.
+
+    Attributes:
+        local: The values of the bibliography entry.
+        remote: The values of the Crossref record.
+        matches: Whether the two sides agree.
+        local_truncated: Only for authors: the entry's list ends in ``and others``.
+    """
 
     local: list[str]
     remote: list[str]
     matches: bool
-    # Only for authors: the entry's list ends in ``and others``.
     local_truncated: bool = False
 
 
 @dataclass(slots=True)
 class MetadataComparison:
-    """The fields that could be compared, and those with no comparable value on a side."""
+    """The fields that could be compared, and those with no comparable value on a side.
+
+    Attributes:
+        fields: The compared fields by name, in comparison order.
+        unmeasured: The names of the fields with no comparable value on a side.
+    """
 
     fields: dict[str, FieldComparison] = field(default_factory=dict)
     unmeasured: list[str] = field(default_factory=list)
@@ -78,13 +114,18 @@ class MetadataComparison:
 
     @property
     def outcome(self) -> MetadataOutcome:
-        """A disagreement outranks missing values, which outrank agreement."""
+        """The overall outcome: a disagreement outranks missing values, which outrank agreement."""
         if self.mismatched:
             return "mismatch"
         return "incomplete" if self.unmeasured else "agreement"
 
     def as_details(self) -> dict[str, dict[str, Any]]:
-        """The comparison as the report records it."""
+        """Render the comparison as the report records it.
+
+        Returns:
+            Both sides and whether they match, per compared field; the authors row also
+            records ``local_truncated``.
+        """
         details: dict[str, dict[str, Any]] = {}
         for name, row in self.fields.items():
             details[name] = {"local": row.local, "remote": row.remote, "matches": row.matches}
@@ -94,11 +135,23 @@ class MetadataComparison:
 
 
 def _single(value: str | None) -> list[str]:
+    """Wrap a non-empty value in a list; ``None`` or an empty string gives an empty list."""
     return [value] if value else []
 
 
 def compare_work(reference: Reference, work: CrossrefWork) -> MetadataComparison:
-    """Compare ``reference`` with ``work``; a field missing on either side is unmeasured."""
+    """Compare ``reference`` with ``work``; a field missing on either side is unmeasured.
+
+    The authors come from the entry's raw author text when it has one, else from its
+    ``author`` value; the venue is the ``journal``, else the ``booktitle``.
+
+    Args:
+        reference: The bibliography entry.
+        work: The Crossref record of the entry's DOI.
+
+    Returns:
+        The compared fields and the unmeasured ones.
+    """
     text = reference.author_text
     if text is None:
         text = reference.values.get("author")

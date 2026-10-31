@@ -36,13 +36,29 @@ class PreviewLimitError(PreparationError):
 
 
 def preview_dimensions(data: bytes) -> tuple[int, int]:
-    """Validate the framing and dimensions of internally rendered preview PNG bytes."""
+    """Validate the framing and dimensions of internally rendered preview PNG bytes.
+
+    Returns:
+        The width and height of the image.
+
+    Raises:
+        PreparationError: The bytes are not a complete PNG image within the raster limits.
+    """
     return png_dimensions(data, max_dimension=MAX_RASTER_DIMENSION, max_pixels=MAX_RASTER_PIXELS)
 
 
 @dataclass(slots=True)
 class PreviewSide:
-    """The preview of one side of a page pair: whether the page exists and its image."""
+    """The preview of one side of a page pair: whether the page exists and its image.
+
+    Attributes:
+        present: Whether the page exists on this side.
+        dimensions_pt: The size of the page in points, or ``None`` when unknown.
+        status: How far the preview of this side got.
+        image_id: The stored image, or ``None``.
+        error: Why the side has no image, or ``None``.
+        pixels: The width and height of the image, or ``None``.
+    """
 
     present: bool
     dimensions_pt: tuple[float, float] | None
@@ -52,6 +68,7 @@ class PreviewSide:
     pixels: tuple[int, int] | None = None
 
     def to_report(self) -> dict[str, object]:
+        """Return the side as a report dictionary; ``error`` and ``pixels`` only when set."""
         row: dict[str, object] = {
             "present": self.present,
             "dimensions_pt": None if self.dimensions_pt is None else list(self.dimensions_pt),
@@ -67,7 +84,22 @@ class PreviewSide:
 
 @dataclass(slots=True)
 class PreviewPage:
-    """What changed on one affected page, and the preview of each side."""
+    """What changed on one affected page, and the preview of each side.
+
+    Attributes:
+        page: The page number.
+        text_changed: Whether the text changed, or ``None`` when it was not compared.
+        rendering_changed: Whether the rendering changed, or ``None`` when it is unknown.
+        text_only: Whether the text changed while the rendering and page size did not.
+        page_dimensions_changed: Whether the page size changed, or ``None`` when unknown.
+        page_count_changed: Whether the page is missing on one side.
+        within_render_tolerance: Whether the rendering difference is within the tolerances,
+            or ``None`` when it was not measured.
+        left: The preview of the left side.
+        right: The preview of the right side.
+        status: How far the preview of the pair got.
+        omission_reason: Why the pair was omitted, or ``None``.
+    """
 
     page: int
     text_changed: bool | None
@@ -82,10 +114,12 @@ class PreviewPage:
     omission_reason: str | None = None
 
     def sides(self) -> Iterator[tuple[str, PreviewSide]]:
+        """Yield each side with its name, left first."""
         yield "left", self.left
         yield "right", self.right
 
     def to_report(self) -> dict[str, object]:
+        """Return the page as a report dictionary; ``omission_reason`` only when set."""
         row: dict[str, object] = {
             "page": self.page,
             "text_changed": self.text_changed,
@@ -109,6 +143,12 @@ class PdfPreviewStore:
 
     Limits apply across all comparisons, including failed capture attempts.
     ``summary()`` contains descriptors only and remains safe after scratch cleanup.
+    Construction raises ``PreparationError`` when a limit is not a nonnegative integer.
+
+    Attributes:
+        max_page_pairs: The most page pairs previewed across all comparisons.
+        max_total_bytes: The most image bytes stored across all comparisons.
+        images: The stored PNG images, by image id.
     """
 
     max_page_pairs: int = DEFAULT_MAX_PAGE_PAIRS
@@ -127,12 +167,22 @@ class PdfPreviewStore:
             raise PreparationError("PDF preview limits must be non-negative integers")
 
     def for_comparison(self, stage: str, document: str | None = None) -> PdfPreviewCollector:
+        """Start the preview collector of one comparison, which ``summary`` then includes.
+
+        Args:
+            stage: The stage of the comparison.
+            document: The document compared, or ``None``.
+
+        Returns:
+            The collector.
+        """
         collector = PdfPreviewCollector(self, stage, document)
         self._comparisons.append(collector)
         return collector
 
     @property
     def remaining_bytes(self) -> int:
+        """The image bytes still available."""
         return self.max_total_bytes - self._image_bytes
 
     @asynccontextmanager
@@ -142,13 +192,27 @@ class PdfPreviewStore:
             yield
 
     def reserve_page(self) -> int | None:
-        """The next preview slot, or None once the page or byte limit is reached."""
+        """Reserve the next preview slot; ``None`` once the page or byte limit is reached."""
         if self._selected >= self.max_page_pairs or self.remaining_bytes < MIN_PNG_BYTES:
             return None
         self._selected += 1
         return self._selected
 
     def add_image(self, slot: int, side: str, data: bytes) -> str:
+        """Store the validated PNG image of one side of a page pair.
+
+        Args:
+            slot: The preview slot of the page pair.
+            side: The side, ``left`` or ``right``.
+            data: The PNG image.
+
+        Returns:
+            The image id.
+
+        Raises:
+            PreviewLimitError: The image exceeds the remaining bytes.
+            PreparationError: ``data`` is not a valid preview PNG.
+        """
         preview_dimensions(data)
         if len(data) > self.remaining_bytes:
             raise PreviewLimitError("The shared PDF preview byte limit was reached")
@@ -158,10 +222,11 @@ class PdfPreviewStore:
         return image_id
 
     def summary(self) -> dict[str, object]:
-        """The descriptors of every comparison, with counts of page pairs by outcome."""
+        """Return the descriptors of every comparison, with counts of page pairs by outcome."""
         pages = [page for comparison in self._comparisons for page in comparison.pages]
 
         def count(status: PreviewStatus) -> int:
+            """Count the page pairs whose preview ended with ``status``."""
             return sum(page.status == status for page in pages)
 
         return {
@@ -180,7 +245,16 @@ class PdfPreviewStore:
 
 @dataclass
 class PdfPreviewCollector:
-    """A comparison's descriptors and access to the shared asset budget."""
+    """A comparison's descriptors and access to the shared asset budget.
+
+    Attributes:
+        store: The shared preview budget.
+        stage: The stage of the comparison.
+        document: The document compared, or ``None``.
+        pages: The descriptor of every affected page.
+        error: Why the comparison has no previews, or ``None``.
+        finished: Whether the comparison has finished selecting and capturing pages.
+    """
 
     store: PdfPreviewStore
     stage: str
@@ -190,10 +264,18 @@ class PdfPreviewCollector:
     finished: bool = False
 
     def unavailable(self, message: str) -> None:
+        """Record why the comparison has no previews, and finish it."""
         self.error = message
         self.finished = True
 
     def _status(self) -> str:
+        """Return the overall status of the comparison's previews.
+
+        Returns:
+            ``incomplete`` before the comparison finishes, ``unavailable`` after an error,
+            ``unchanged`` without affected pages, else the status of every page or
+            ``partial``.
+        """
         statuses = {page.status for page in self.pages}
         if not self.finished:
             return "incomplete"
@@ -204,6 +286,7 @@ class PdfPreviewCollector:
         return next(iter(statuses)) if len(statuses) == 1 else "partial"
 
     def summary(self) -> dict[str, object]:
+        """Return the comparison's status, counts and page descriptors as a report dictionary."""
         return {
             "stage": self.stage,
             "document": self.document,

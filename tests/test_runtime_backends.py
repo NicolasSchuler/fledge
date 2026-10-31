@@ -1,3 +1,11 @@
+"""Tool runtimes and backends: resource grants, sandboxes, the Biber toolchain and bibliographies.
+
+TeX Live and Homebrew installations grant only their own directories, the process table
+parsers refuse malformed listings, the Bubblewrap sandbox mounts only what a command needs, a
+universal Biber image is split and sealed in-process, and builds prepare and check the
+bibliography backend that the sources ask for.
+"""
+
 from __future__ import annotations
 
 import json
@@ -37,6 +45,12 @@ _BCF = (
 
 
 class TeXLiveRuntimeTests(unittest.TestCase):
+    """Resource grants and TeX lookup variables for TeX Live distribution directories.
+
+    A full or basic distribution directory (``2026``, ``2026basic``) grants its whole tree and
+    sets the ``TEXMF*`` variables; any other directory name grants only the executable.
+    """
+
     def test_full_and_basic_distributions_have_scoped_resources_and_tex_lookup(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory).resolve()
@@ -88,6 +102,8 @@ class TeXLiveRuntimeTests(unittest.TestCase):
 
 
 class ProcessTableTests(unittest.TestCase):
+    """Process group listings, and the process columns and tool grants of each sandbox."""
+
     def test_group_rows_are_read_as_listed_and_malformed_listings_are_refused(self) -> None:
         samples = parse_group_rows(b"  10  10  2048\n  11  10   512\ntoo few\n")
         self.assertEqual(samples, [ProcessSample(10, 10, 2048), ProcessSample(11, 10, 512)])
@@ -104,6 +120,13 @@ class ProcessTableTests(unittest.TestCase):
 
 
 class HomebrewRuntimeTests(unittest.TestCase):
+    """Resource grants for Homebrew packages, derived from their install receipts.
+
+    A package grants the runtime dependencies its receipt declares, including an upgraded alias
+    under ``opt``, but never the prefix, the Cellar or a dependency link that leads elsewhere; a
+    receipt that is not a JSON object grants only the package itself.
+    """
+
     def test_declared_upgraded_nss_alias_is_granted_without_broad_homebrew_reads(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             prefix = Path(directory).resolve()
@@ -154,7 +177,10 @@ class HomebrewRuntimeTests(unittest.TestCase):
 
 
 class LinuxSandboxTests(unittest.IsolatedAsyncioTestCase):
+    """The Bubblewrap sandbox on Linux: mounts, refusals, process accounting and a live check."""
+
     async def asyncSetUp(self) -> None:
+        """Create a temporary workspace and a Perl tool context with declared system paths."""
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name).resolve()
         self.workspace = self.root / "workspace"
@@ -167,6 +193,7 @@ class LinuxSandboxTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def asyncTearDown(self) -> None:
+        """Remove the temporary directory."""
         self.temporary.cleanup()
 
     def sandbox_command(
@@ -176,6 +203,21 @@ class LinuxSandboxTests(unittest.IsolatedAsyncioTestCase):
         context: ToolContext | None = None,
         workspace: Path | None = None,
     ) -> list[str]:
+        """Build the Bubblewrap command line that would run ``perl -v`` through ``runner``.
+
+        The runner gets a :class:`BubblewrapSandbox`, ``bwrap`` is found at ``/usr/bin/bwrap`` and
+        the toolchain reports ``context`` for the tool. Refusals of the sandbox propagate.
+
+        Args:
+            runner: The runner whose private ``_sandbox_command`` builds the command; its sandbox is
+                replaced.
+            inputs: The read-only inputs to grant.
+            context: The tool context to report, or ``None`` for the one ``asyncSetUp`` built.
+            workspace: The writable workspace, or ``None`` for the test's workspace.
+
+        Returns:
+            The wrapped command line.
+        """
         runner.sandbox = BubblewrapSandbox()
         with (
             patch("latexprep.sandbox.shutil.which", return_value="/usr/bin/bwrap"),
@@ -313,6 +355,16 @@ class ToolIsolationTests(unittest.IsolatedAsyncioTestCase):
 
     @staticmethod
     def universal(entries: tuple[tuple[int, bytes], ...], *, wide: bool = False) -> bytes:
+        """Build a Mach-O universal container that holds ``entries``.
+
+        Args:
+            entries: Pairs of CPU type and slice image, in container order.
+            wide: Whether to use the 64-bit layout (magic ``0xCAFEBABF``) instead of the 32-bit one
+                (``0xCAFEBABE``).
+
+        Returns:
+            The container: its header, one architecture record per entry, then the images.
+        """
         width = 32 if wide else 20
         records = payload = b""
         start = 8 + len(entries) * width
@@ -437,6 +489,14 @@ class ToolIsolationTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ControlBuildRunner(FakeBuildRunner):
+    """A fake build runner that also writes bibliography control files and can lack one tool.
+
+    Attributes:
+        controls: File contents by name, relative to the workspace's ``output`` directory, that
+            every build writes after the faked latexmk output.
+        unavailable: The tool whose commands raise :class:`ToolUnavailableError`, or ``None``.
+    """
+
     def __init__(self, controls: dict[str, str], unavailable: str | None = None) -> None:
         super().__init__()
         self.controls = controls
@@ -451,6 +511,18 @@ class ControlBuildRunner(FakeBuildRunner):
         readonly_inputs: tuple[Path, ...] = (),
         memory_mb: int | None = None,
     ) -> CommandResult:
+        """Fake a command and, for a build, write the control files.
+
+        The arguments are those of :meth:`CommandRunner.run`. A last argument ending in ``.tex``
+        marks a build, whose control files go to the ``output`` directory of ``workspace``;
+        ``readonly_inputs`` and ``memory_mb`` are not passed on to the faked run.
+
+        Returns:
+            The result of :meth:`FakeBuildRunner.run`.
+
+        Raises:
+            ToolUnavailableError: ``argv[0]`` is the tool named by ``unavailable``.
+        """
         if argv[0] == self.unavailable:
             raise ToolUnavailableError(
                 f"Required tool is unavailable: {self.unavailable}", self.unavailable
@@ -465,7 +537,12 @@ class ControlBuildRunner(FakeBuildRunner):
 
 
 class UnpreparedBiberRunner(ControlBuildRunner):
-    """Acts like macOS, where Biber runs only after its toolchain copy is prepared."""
+    """Acts like macOS, where Biber runs only after its toolchain copy is prepared.
+
+    Attributes:
+        controls: The control files every build writes, as for :class:`ControlBuildRunner`.
+        prepared: Whether :meth:`prepare_biber` has run.
+    """
 
     def __init__(self, controls: dict[str, str]) -> None:
         super().__init__(controls)
@@ -473,16 +550,33 @@ class UnpreparedBiberRunner(ControlBuildRunner):
 
     @property
     def biber_needs_preparation(self) -> bool:
+        """Whether Biber still needs its toolchain copy, true until :meth:`prepare_biber` runs."""
         return not self.prepared
 
     async def prepare_biber(self, root: Path) -> Path | None:
+        """Count the preparation and mark Biber as prepared without copying anything.
+
+        Args:
+            root: Accepted for the interface and not used.
+
+        Returns:
+            ``None``, as no toolchain copy is made.
+        """
         self.biber_preparations += 1
         self.prepared = True
         return None
 
 
 class DeferredBiberTests(unittest.IsolatedAsyncioTestCase):
+    """Deferred Biber preparation under the automatic bibliography strategy.
+
+    A host that must prepare Biber before running it prepares it only when the sources may use
+    biblatex, when its toolchain copy is already ready, or when a fresh ``.bcf`` from a deferred
+    build asks for Biber; the biblatex hint reads only TeX sources.
+    """
+
     async def asyncSetUp(self) -> None:
+        """Create a temporary ``source`` folder whose ``main.tex`` names a bibliography."""
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
         self.source = self.root / "source"
@@ -490,10 +584,15 @@ class DeferredBiberTests(unittest.IsolatedAsyncioTestCase):
         (self.source / "main.tex").write_text("\\bibliography{references}\n")
 
     async def asyncTearDown(self) -> None:
+        """Remove the temporary directory."""
         self.temporary.cleanup()
 
     @staticmethod
     def build_rules(runner: FakeBuildRunner) -> list[str]:
+        """Return the ``-e`` rules argument of each build command ``runner`` recorded, in order.
+
+        A build command is one whose last argument ends in ``.tex``.
+        """
         builds = [command for command in runner.commands if command[-1].endswith(".tex")]
         return [command[command.index("-e") + 1] for command in builds]
 
@@ -563,7 +662,15 @@ class DeferredBiberTests(unittest.IsolatedAsyncioTestCase):
 
 
 class BibliographyBackendTests(unittest.IsolatedAsyncioTestCase):
+    """Bibliography backend selection, Biber preparation and the checks of control files.
+
+    The requested backend (``bibtex``, ``biber`` or ``auto``) must match the fresh control files,
+    the other backend is blocked, and an unavailable or unpreparable tool is reported as
+    inconclusive instead of raising.
+    """
+
     async def asyncSetUp(self) -> None:
+        """Create a ``source`` folder with a placeholder ``main.tex``; reset the build count."""
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
         self.source = self.root / "source"
@@ -572,9 +679,20 @@ class BibliographyBackendTests(unittest.IsolatedAsyncioTestCase):
         self.build_count = 0
 
     async def asyncTearDown(self) -> None:
+        """Remove the temporary directory."""
         self.temporary.cleanup()
 
     async def build(self, backend: str, controls: dict[str, str], unavailable: str | None = None):
+        """Build ``main.tex`` in a fresh directory with a :class:`ControlBuildRunner`.
+
+        Args:
+            backend: The requested ``bibliography_backend``.
+            controls: The control files the runner writes, as for :class:`ControlBuildRunner`.
+            unavailable: The tool the runner reports as unavailable, or ``None``.
+
+        Returns:
+            The build result and the runner that ran it.
+        """
         self.build_count += 1
         runner = ControlBuildRunner(controls, unavailable)
         result = await build_project(

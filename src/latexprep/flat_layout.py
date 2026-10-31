@@ -53,24 +53,42 @@ _IDENTITY_SUFFIXES = frozenset({".sty", ".cls", ".bst", ".bbl"})
 
 
 class NamePriority(IntEnum):
-    """Who keeps a plain name when files collide; the lower value is served first."""
+    """Who keeps a plain name when files collide; the lower value is served first.
 
-    # The main file, a class, style or bibliography, or a file with an explicit override.
+    Attributes:
+        REQUIRED: The main file, a class, style or bibliography, or a file with an explicit
+            override.
+        UNIQUE: A file whose sanitized name no other file shares.
+        QUALIFIED: A file that shares its name with another, so its directories join the
+            name.
+    """
+
     REQUIRED = 0
-    # A file whose sanitized name no other file shares.
     UNIQUE = 1
-    # A file that shares its name with another, so its directories join the name.
     QUALIFIED = 2
 
 
 class _Candidate(NamedTuple):
+    """The name one file would like, and how strongly it claims it.
+
+    Attributes:
+        priority: How strongly the file claims the name.
+        path: The file's original path.
+        name: The flat name it would like.
+    """
+
     priority: NamePriority
     path: str
     name: str
 
 
 class FlatNames(NamedTuple):
-    """The flat name of every file that received one, and what naming found wrong."""
+    """The flat name of every file that received one, and what naming found wrong.
+
+    Attributes:
+        mapping: The flat name of every file that received one, by original path.
+        findings: What naming found wrong, and the result of any filename overrides.
+    """
 
     mapping: dict[str, str]
     findings: list[Finding]
@@ -80,8 +98,12 @@ class FlatNames(NamedTuple):
 class FlattenPlan:
     """A proposed flat layout: where each file goes, new contents, and what to review.
 
-    ``contents`` keys are original paths. ``mapping`` is diagnostic only while any
-    finding is an error.
+    Attributes:
+        mapping: The flat name of each file, by original path; diagnostic only while any
+            finding is an error.
+        contents: The rewritten contents, keyed by original path.
+        findings: What to review.
+        changes: The rewrites and moves the plan makes.
     """
 
     mapping: dict[str, str] = field(default_factory=dict)
@@ -91,11 +113,23 @@ class FlattenPlan:
 
 
 class _Rewrites(NamedTuple):
+    """The sources whose file references were rewritten, and the changes that records.
+
+    Attributes:
+        contents: The rewritten contents, keyed by original path.
+        changes: One rewrite change, with its diff, per rewritten source.
+    """
+
     contents: dict[str, bytes]
     changes: list[Change]
 
 
 def _split_name(value: str) -> tuple[str, str]:
+    """Split a name into its stem and its extension.
+
+    A suffix longer than ``_MAX_SUFFIX_BYTES`` bytes is part of the stem, so the
+    extension is empty, as it is for a name without a suffix.
+    """
     suffix = PurePosixPath(value).suffix
     # Long apparent extensions are ordinary truncatable name text. Use the
     # same rule after sanitization, which can itself create a long suffix.
@@ -105,6 +139,20 @@ def _split_name(value: str) -> tuple[str, str]:
 
 
 def _fit_name(stem: str, ending: str) -> str:
+    """Truncate ``stem`` so that it and ``ending`` fit the portable filename byte budget.
+
+    A character that the byte limit splits is dropped.
+
+    Args:
+        stem: The name before its ending.
+        ending: The extension, with any counter before it, which is kept whole.
+
+    Returns:
+        The truncated stem followed by ``ending``.
+
+    Raises:
+        PreparationError: ``ending`` alone exceeds the budget.
+    """
     available = _MAX_FILENAME_BYTES - len(ending.encode("utf-8"))
     if available < 0:
         raise PreparationError("A filename suffix exceeds the portable filename byte budget.")
@@ -114,6 +162,13 @@ def _fit_name(stem: str, ending: str) -> str:
 
 
 def _safe_name(value: str) -> str:
+    """Make a portable filename from ``value``.
+
+    The name is NFC-normalized, every character other than a word character, dot or
+    hyphen becomes a hyphen, and leading and trailing spaces and dots are stripped (an
+    empty result becomes ``file``). A reserved device name gains a ``file-`` prefix, and
+    the result is truncated to the byte budget.
+    """
     value = unicodedata.normalize("NFC", value)
     value = re.sub(r"[^\w.\-]", "-", value, flags=re.UNICODE).strip(" .") or "file"
     if value.split(".")[0].upper() in _RESERVED_NAMES:
@@ -122,6 +177,7 @@ def _safe_name(value: str) -> str:
 
 
 def _with_counter(value: str, count: int) -> str:
+    """Insert ``-`` and the collision counter ``count`` before the extension of ``value``."""
     stem, suffix = _split_name(value)
     return _fit_name(stem, f"-{count}" + suffix)
 
@@ -132,7 +188,17 @@ def _override_findings(
     overrides: tuple[tuple[str, str], ...],
     requested: dict[str, str],
 ) -> list[Finding]:
-    """What is wrong with the requested filename overrides, if anything."""
+    """Find what is wrong with the requested filename overrides, if anything.
+
+    Args:
+        files: The project's files.
+        fixed: The files whose names are part of a contract.
+        overrides: The requested overrides, as pairs of file and destination.
+        requested: The same overrides by file; shorter when a file has several.
+
+    Returns:
+        One error per problem; none when every override is valid.
+    """
     known = set(files)
     findings: list[Finding] = []
     if len(requested) != len(overrides):
@@ -175,7 +241,18 @@ def _override_findings(
 def _name_candidates(
     files: list[str], fixed: set[str], requested: dict[str, str], findings: list[Finding]
 ) -> list[_Candidate]:
-    """The name each file would like, and how strongly; unsanitizable identities are reported."""
+    """Propose the name each file would like, and how strongly.
+
+    Args:
+        files: The files to name.
+        fixed: The files whose names are part of a contract.
+        requested: The requested overrides, by file.
+        findings: Receives an error for every fixed name that cannot be sanitized without
+            changing it.
+
+    Returns:
+        One candidate per file.
+    """
     groups: dict[str, list[str]] = defaultdict(list)
     for name in files:
         groups[path_comparison_key(_safe_name(PurePosixPath(name).name))].append(name)
@@ -212,6 +289,15 @@ def _assign_unique_names(
     """Give each candidate its name, or the next free one by counter.
 
     Two required names that collide are an error: neither may be renamed.
+
+    Args:
+        candidates: The names the files would like.
+        requested: The requested overrides, by file; a collision that involves one is
+            reported as an override problem.
+        findings: Receives an error for every collision of required names.
+
+    Returns:
+        The flat name of every candidate that received one, by original path.
     """
     mapping: dict[str, str] = {}
     used: dict[str, str] = {}
@@ -253,6 +339,15 @@ def flat_filenames(
     explicit override replaces a name; two required names that collide are an error.
     Other files take their sanitized name when it is unique, else their directories
     joined into it, with a counter added if names still collide.
+
+    Args:
+        files: The project-relative paths of the files.
+        main: The main file.
+        filename_overrides: Requested flat names, as pairs of file and destination.
+
+    Returns:
+        The flat names, and the findings about naming; valid overrides add a passed
+        ``flatten.filename_overrides`` finding.
     """
     names = list(files)
     fixed = {
@@ -278,6 +373,10 @@ def flat_filenames(
 
 
 def _replacement(target: str, command: str, mapping: dict[str, str]) -> str:
+    """Return the flat name that replaces a reference to ``target`` made by ``command``.
+
+    A command that adds its default suffix itself receives the name without it.
+    """
     output = mapping[target]
     if command in {"include", "bibliography", *TOOLCHAIN_FILE_COMMANDS}:
         (suffix,) = DEFAULT_SUFFIXES_BY_FILE_COMMAND[command]
@@ -287,7 +386,10 @@ def _replacement(target: str, command: str, mapping: dict[str, str]) -> str:
 
 
 def _translate_uncertainties(graph: SourceGraph) -> list[Finding]:
-    """Every gap in the graph as a flat-layout error: what cannot be followed cannot be moved."""
+    """Report every gap in the graph as a flat-layout error.
+
+    What cannot be followed cannot be moved.
+    """
     return [
         Finding(
             "flatten.unsupported_source",
@@ -305,7 +407,10 @@ def _translate_uncertainties(graph: SourceGraph) -> list[Finding]:
 
 
 def _check_roots(graph: SourceGraph) -> list[Finding]:
-    """A flat package holds one document; a second root cannot share the top level."""
+    """Report other document roots, which cannot share the top level with this one.
+
+    A flat package holds one document.
+    """
     other_roots = graph.other_roots(include_subfiles=False)
     if not other_roots:
         return []
@@ -323,7 +428,7 @@ def _check_roots(graph: SourceGraph) -> list[Finding]:
 
 
 def _check_unvisited_sources(graph: SourceGraph) -> list[Finding]:
-    """Sources the walk never reached that still name files: their directory is unknown."""
+    """Report sources the walk never reached that still name files: their directory is unknown."""
     return [
         Finding(
             "flatten.unresolved_context",
@@ -344,7 +449,17 @@ def _check_unvisited_sources(graph: SourceGraph) -> list[Finding]:
 
 
 def _check_system_shadowing(graph: SourceGraph, mapping: dict[str, str]) -> list[Finding]:
-    """A relocated file that would take the name of a class or style TeX loads from its install."""
+    """Report relocated files that would shadow a class or style TeX loads from its install.
+
+    Args:
+        graph: The literal source graph, whose references to the toolchain's classes and
+            styles are checked.
+        mapping: The flat name of each file, by original path.
+
+    Returns:
+        One error per unresolved class or style reference that a relocated file would
+        shadow.
+    """
     findings = []
     for reference in graph.system_references:
         shadows = [
@@ -369,7 +484,7 @@ def _check_system_shadowing(graph: SourceGraph, mapping: dict[str, str]) -> list
 
 
 def _check_companions(mapping: dict[str, str]) -> list[Finding]:
-    """A graphics sidecar (``.bb``, ``.xbb``) must keep sharing its image's base name."""
+    """Check that a graphics sidecar (``.bb``, ``.xbb``) keeps sharing its image's base name."""
     findings = []
     for name, output in mapping.items():
         if not name.endswith((".bb", ".xbb")):
@@ -395,7 +510,15 @@ def _check_companions(mapping: dict[str, str]) -> list[Finding]:
 
 
 def _rewrite_sources(graph: SourceGraph, mapping: dict[str, str]) -> _Rewrites:
-    """Rewrite each literal file reference, and each search path, to the flat names."""
+    """Rewrite each literal file reference, and each search path, to the flat names.
+
+    Args:
+        graph: The literal source graph.
+        mapping: The flat name of each file, by original path.
+
+    Returns:
+        The sources whose text changed, and a rewrite change with a diff for each.
+    """
     edits: dict[str, dict[tuple[int, int], str]] = defaultdict(dict)
     for location, reference in graph.references.items():
         if reference.target in mapping:
@@ -431,6 +554,7 @@ def _rewrite_sources(graph: SourceGraph, mapping: dict[str, str]) -> _Rewrites:
 
 
 def _move_changes(mapping: dict[str, str]) -> list[Change]:
+    """List a move for every file whose flat name differs from its path."""
     return [
         Change(
             name,
@@ -451,9 +575,18 @@ def plan_flatten(
 ) -> FlattenPlan:
     """Return a reviewable flat map and rewritten bytes; never mutate the project.
 
-    ``contents`` keys are original paths. Error findings make the plan unusable;
-    partial mappings are diagnostic only. Caller-owned staging and rebuilt-PDF
-    verification remain required, including for a plan without error findings.
+    Error findings make the plan unusable; partial mappings are diagnostic only.
+    Caller-owned staging and rebuilt-PDF verification remain required, including for a
+    plan without error findings.
+
+    Args:
+        root: The project directory.
+        main: The main file.
+        filename_overrides: Requested flat names, as pairs of file and destination.
+
+    Returns:
+        The plan, whose ``contents`` keys are original paths. Without a main source it
+        holds only the findings of the source graph and its lint.
     """
     graph = SourceGraph.build(root, main)
     findings = [*graph.findings, *lint_sources(graph)]

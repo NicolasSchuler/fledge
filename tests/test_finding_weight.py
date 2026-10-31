@@ -11,6 +11,8 @@ from latexprep.uncertainty_reasons import CONDITIONAL_FLOW, context_reasons, gro
 
 
 class WeightTests(unittest.TestCase):
+    """The severity that each weight gives to each check status."""
+
     def test_a_pass_is_always_information(self) -> None:
         for weight in (POLICY, DIRECT_POLICY, ADVISORY, NOTE):
             with self.subTest(weight=weight):
@@ -41,7 +43,18 @@ class WeightTests(unittest.TestCase):
 
 
 class ContextReasonTests(unittest.TestCase):
+    """The standard reasons that a declaration inside a group or a conditional is uncertain."""
+
     def reasons(self, source: str, noun: str = "heading") -> list[str]:
+        r"""Return the context reasons of the first ``\section`` command in ``source``.
+
+        Args:
+            source: The LaTeX source to scan.
+            noun: The noun that names the declaration in the reasons.
+
+        Returns:
+            The reasons that :func:`context_reasons` gives for the command.
+        """
         commands = scan_commands(source)
         target = next(command for command in commands if command.name == "section")
         return context_reasons(target, conditional_spans(commands), noun)

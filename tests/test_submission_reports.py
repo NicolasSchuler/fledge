@@ -30,6 +30,20 @@ from tests.support import (
 
 
 def captured_difference(store, stage="baseline versus prepared", document=None, *, collector=None):
+    """Record one captured page pair whose text changed but whose rendering did not.
+
+    Both sides are one-pixel PNG images of a letter-size page, and the collector is marked
+    finished.
+
+    Args:
+        store: The preview store that makes the collector when ``collector`` is ``None``.
+        stage: The comparison stage of a new collector.
+        document: The document of a new collector, or ``None``.
+        collector: The collector to record into, or ``None`` for a new one from ``store``.
+
+    Returns:
+        The collector.
+    """
     collector = collector or store.for_comparison(stage, document)
     slot = collector.store.reserve_page()
     assert slot is not None
@@ -62,7 +76,15 @@ def captured_difference(store, stage="baseline versus prepared", document=None, 
 
 
 class PreparationInventoryTests(AsyncProjectTestCase):
+    """The package inventory and scratch cleanup of a preparation run.
+
+    A verified inventory has exact ZIP sizes and flat names, a dry run claims neither the final
+    layout nor a verified ZIP, a missing build trace releases nothing, documents have their own
+    inventories, and a blocked comparison keeps its preview images after scratch cleanup.
+    """
+
     async def asyncSetUp(self):
+        """Write a paper with one included section and unused notes, and record its contents."""
         self.source = self.root / "paper"
         (self.source / "sections").mkdir(parents=True)
         (self.source / "main.tex").write_text(
@@ -75,6 +97,22 @@ class PreparationInventoryTests(AsyncProjectTestCase):
     async def prepare(
         self, *, settings=None, dry_run=False, trace=True, previews=None, compare=None
     ):
+        """Prepare the test paper with a recorded build and return the report.
+
+        The test fails if the preparation changed the source directory.
+
+        Args:
+            settings: The settings, or ``None`` for the defaults with ``main.tex`` as the main file.
+            dry_run: Whether to prepare without an output directory.
+            trace: Whether each build traces ``main.tex`` and ``sections/body.tex`` as its project
+                inputs; without a trace a build reports none.
+            previews: The PDF preview store, or ``None``.
+            compare: The side effect of the PDF comparison, or ``None`` for a comparison without
+                findings.
+
+        Returns:
+            The report of the job.
+        """
         selected = {"main.tex", "sections/body.tex"} if trace else None
         build = RecordedBuild({"main.tex": (selected,) * 4})
         backends = controlled_backends(
@@ -187,6 +225,8 @@ class PreparationInventoryTests(AsyncProjectTestCase):
 
 
 class ReportOutputTests(unittest.TestCase):
+    """Report output: credential redaction, HTML escaping and preview images, and clean CLI JSON."""
+
     def test_default_import_capacity_retains_inventory_and_redacts_late_credentials(self):
         secret = "ghp_" + "Ab12" * 10
         report = Report("prepare", outcome=Outcome.PASSED, scope=f"A prior occurrence: {secret}")

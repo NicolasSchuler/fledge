@@ -46,7 +46,14 @@ _ORTHOGONALITY_TOLERANCE = 1e-6
 
 
 def _simple_rgb(node: ET.Element) -> Rgb | None:
-    """Interpret only opaque DeviceRGB/Gray values under an explicit sRGB assumption."""
+    """Interpret only opaque DeviceRGB/Gray values under an explicit sRGB assumption.
+
+    Returns:
+        The colour as sRGB components from 0 to 1, or ``None`` for any other colour.
+
+    Raises:
+        PreparationError: The alpha or a colour component is not a finite number.
+    """
     if finite_number(node.get("alpha", "1")) != 1:
         return None
     values = tuple(finite_number(value) for value in node.get("color", "").split())
@@ -60,16 +67,30 @@ def _simple_rgb(node: ET.Element) -> Rgb | None:
 
 
 class _Stroke(NamedTuple):
-    """One stroke operation's width as written, and as placed when that is measurable."""
+    """One stroke operation's width as written, and as placed when that is measurable.
 
-    # None for hairlines (their width depends on the output device) and for transforms
-    # that scale the axes unequally (their width depends on the path direction).
+    Attributes:
+        effective_width: The width after placement, in points; ``None`` for hairlines (their
+            width depends on the output device) and for transforms that scale the axes
+            unequally (their width depends on the path direction).
+        source_width: The width as written.
+        transform: The six numbers of the stroke's transform.
+    """
+
     effective_width: float | None
     source_width: float
     transform: list[float]
 
 
 def _stroke_measurement(node: ET.Element) -> _Stroke:
+    """Measure one stroke operation's width as written and as placed.
+
+    Returns:
+        The stroke's widths and transform.
+
+    Raises:
+        PreparationError: The width or the transform is missing or invalid.
+    """
     width = finite_number(node.get("linewidth"))
     transform = [finite_number(value) for value in node.get("transform", "").split()]
     if len(transform) != 6 or width < 0:
@@ -87,6 +108,18 @@ def _stroke_measurement(node: ET.Element) -> _Stroke:
 
 
 def _stroke_width_finding(trace: TracedDocument, minimum: float) -> Finding:
+    """Compare the placed width of every stroke with ``minimum``.
+
+    Args:
+        trace: The MuPDF trace.
+        minimum: The thinnest stroke allowed, in points.
+
+    Returns:
+        An advisory finding, incomplete when a stroke cannot be measured or there is none.
+
+    Raises:
+        PreparationError: A stroke has no valid width or transform.
+    """
     strokes: list[object] = []
     uncertain = False
     count = 0
@@ -123,6 +156,15 @@ def _stroke_width_finding(trace: TracedDocument, minimum: float) -> Finding:
 
 
 def _color_space_finding(trace: TracedDocument, allowed: Sequence[str]) -> Finding:
+    """Compare the colour-space name of every painted operation with ``allowed``.
+
+    Args:
+        trace: The MuPDF trace.
+        allowed: The colour-space names that rendering may use.
+
+    Returns:
+        The finding, incomplete when an operation names no colour space or there is none.
+    """
     colors: list[object] = []
     uncertain = False
     count = 0
@@ -153,7 +195,13 @@ def _color_space_finding(trace: TracedDocument, allowed: Sequence[str]) -> Findi
 
 @dataclass(slots=True)
 class _TextContrast:
-    """The text operations compared with the assumed background."""
+    """The text operations compared with the assumed background.
+
+    Attributes:
+        violations: The text operations whose contrast is too low.
+        measured: The number of text operations compared.
+        uncertain: Whether some text could not be compared, or the trace blends.
+    """
 
     violations: list[object] = field(default_factory=list)
     measured: int = 0
@@ -163,7 +211,20 @@ class _TextContrast:
 def _measure_text_contrast(
     trace: TracedDocument, minimum: float, background: Rgb, *, uncertain: bool
 ) -> _TextContrast:
-    """Compare each text operation's opaque color with the supplied background."""
+    """Compare each text operation's opaque color with the supplied background.
+
+    Args:
+        trace: The MuPDF trace.
+        minimum: The lowest contrast ratio allowed.
+        background: The assumed uniform background.
+        uncertain: Whether the result starts uncertain, as when the trace blends.
+
+    Returns:
+        The comparison.
+
+    Raises:
+        PreparationError: A colour component is not a finite number.
+    """
     result = _TextContrast(uncertain=uncertain)
     background_luminance = relative_luminance(background)
     for number, page in trace.pages:
@@ -185,18 +246,36 @@ def _measure_text_contrast(
 
 @dataclass(slots=True)
 class _PagePalettes:
-    """The distinct opaque colors of each page, in page order, each sorted."""
+    """The distinct opaque colors of each page, in page order, each sorted.
+
+    Attributes:
+        pages: The page number and the sorted colours of every page.
+        uncertain: Whether some colours could not be kept or interpreted, or the trace
+            blends.
+    """
 
     pages: list[tuple[int, list[Rgb]]] = field(default_factory=list)
     uncertain: bool = False
 
     @property
     def entries(self) -> int:
+        """The number of colours across all pages."""
         return sum(len(colors) for _, colors in self.pages)
 
 
 def _page_palettes(trace: TracedDocument, *, uncertain: bool) -> _PagePalettes:
-    """Collect each page's painted colors, capped at ``MAX_PAGE_PALETTE_COLORS``."""
+    """Collect each page's painted colors, capped at ``MAX_PAGE_PALETTE_COLORS``.
+
+    Args:
+        trace: The MuPDF trace.
+        uncertain: Whether the result starts uncertain, as when the trace blends.
+
+    Returns:
+        The palettes.
+
+    Raises:
+        PreparationError: A colour component is not a finite number.
+    """
     result = _PagePalettes(uncertain=uncertain)
     for number, page in trace.pages:
         palette: set[Rgb] = set()
@@ -214,7 +293,12 @@ def _page_palettes(trace: TracedDocument, *, uncertain: bool) -> _PagePalettes:
 
 @dataclass(slots=True)
 class _PairScan:
-    """How many color pairs were compared, and whether more existed than the cap allows."""
+    """How many color pairs were compared, and whether more existed than the cap allows.
+
+    Attributes:
+        compared: The number of pairs compared.
+        capped: Whether more pairs existed than the cap allows.
+    """
 
     compared: int = 0
     capped: bool = False
@@ -223,8 +307,19 @@ class _PairScan:
 def _close_pairs(
     palettes: _PagePalettes, minimum_difference: float, scan: _PairScan
 ) -> Iterator[tuple[int, Rgb, Rgb, float]]:
-    """Yield ``(page, first, second, luminance difference)`` for each pair closer than
-    ``minimum_difference``, comparing at most ``MAX_PAIR_CHECKS`` pairs overall."""
+    """Yield each pair of colours of a page whose luminance is closer than allowed.
+
+    At most ``MAX_PAIR_CHECKS`` pairs are compared overall.
+
+    Args:
+        palettes: The distinct colours of each page.
+        minimum_difference: The smallest luminance difference allowed.
+        scan: Counts the compared pairs and records whether the cap was reached.
+
+    Yields:
+        ``(page, first, second, luminance difference)`` for each pair closer than
+        ``minimum_difference``.
+    """
     for number, colors in palettes.pages:
         luminances = [(color, relative_luminance(color)) for color in colors]
         for (first, first_luminance), (second, second_luminance) in combinations(luminances, 2):
@@ -238,11 +333,12 @@ def _close_pairs(
 
 
 def _has_compositing(trace: TracedDocument) -> bool:
-    """Whether any operation blends: nominal colors then say little about visible ones."""
+    """Return whether any operation blends: nominal colors then say little about visible ones."""
     return any(node.tag in _COMPOSITING_TAGS for node in trace.root.iter())
 
 
 def _text_contrast_finding(options: PdfCheckOptions, contrast: _TextContrast) -> Finding:
+    """Report the text colours that contrast too little with the assumed background."""
     return heuristic_finding(
         PdfRule.ASSUMED_TEXT_CONTRAST,
         "Compared opaque text colors with the supplied background.",
@@ -260,6 +356,16 @@ def _text_contrast_finding(options: PdfCheckOptions, contrast: _TextContrast) ->
 
 
 def _separation_finding(palettes: _PagePalettes, minimum_difference: float) -> Finding:
+    """Report the pairs of colours of a page whose nominal luminance is too close.
+
+    Args:
+        palettes: The distinct colours of each page.
+        minimum_difference: The smallest luminance difference allowed.
+
+    Returns:
+        An advisory finding with samples of the close pairs, incomplete when the palettes
+        are uncertain or empty or the comparisons were capped.
+    """
     scan = _PairScan()
     samples: list[object] = []
     total = 0
@@ -287,6 +393,10 @@ def _separation_finding(palettes: _PagePalettes, minimum_difference: float) -> F
 
 
 def _contrast_findings(trace: TracedDocument, options: PdfCheckOptions) -> list[Finding]:
+    """Return the configured text contrast and grayscale separation findings.
+
+    A trace with an operation that blends makes both findings uncertain.
+    """
     result: list[Finding] = []
     compositing = _has_compositing(trace)
     if options.min_text_contrast is not None:
@@ -303,6 +413,19 @@ def _contrast_findings(trace: TracedDocument, options: PdfCheckOptions) -> list[
 
 
 def _trace_findings(output: str, pages: int, options: PdfCheckOptions) -> list[Finding]:
+    """Parse the MuPDF trace and return the configured paint findings.
+
+    Args:
+        output: The trace output of mutool.
+        pages: The number of pages of the PDF.
+        options: The PDF check options.
+
+    Returns:
+        The findings: stroke width, colour space, text contrast and grayscale separation.
+
+    Raises:
+        PreparationError: The trace cannot be parsed or holds an invalid measurement.
+    """
     trace = parse_mupdf_trace(output, pages)
     result: list[Finding] = []
     if options.min_stroke_width_pt is not None:
@@ -316,7 +439,17 @@ def _trace_findings(output: str, pages: int, options: PdfCheckOptions) -> list[F
 async def measure_paint_trace(
     session: PdfToolSession, pages: int, options: PdfCheckOptions, rules: Collection[str]
 ) -> list[Finding]:
-    """The configured paint measurements; each of ``rules`` is inconclusive if mutool fails."""
+    """Measure the configured paint findings; each of ``rules`` is inconclusive if mutool fails.
+
+    Args:
+        session: The PDF tool session that runs mutool.
+        pages: The number of pages of the PDF.
+        options: The PDF check options.
+        rules: The configured paint rules.
+
+    Returns:
+        The findings.
+    """
     return await ToolMeasurement(
         "trace",
         mupdf_trace_argv(pages),

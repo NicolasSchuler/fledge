@@ -1,3 +1,5 @@
+"""Submission checks: anonymity, secrets, private comments, file policy and deliverables."""
+
 from __future__ import annotations
 
 import json
@@ -21,17 +23,43 @@ from tests.support import ProjectTestCase
 
 
 class SubmissionTests(ProjectTestCase):
+    """Each submission check, its options and limits, and the messages it reports.
+
+    The messages state counts, locations and limits but never echo identity terms or credentials,
+    and an incomplete file inventory makes a check inconclusive instead of claiming missing files.
+    """
+
     def setUp(self) -> None:
+        """Write a one-line article as the project's ``main.tex``."""
         super().setUp()
         self.write("main.tex", r"\documentclass{article}\begin{document}Results.\end{document}")
 
     def result(
         self, rule: str, options: SubmissionOptions, limits: ScanLimits = DEFAULT_SCAN_LIMITS
     ) -> Finding:
+        """Run the submission checks on the test project and return the finding of ``rule``.
+
+        Args:
+            rule: The rule whose finding to return.
+            options: The submission options.
+            limits: The scan limits.
+
+        Returns:
+            The first finding of ``rule``.
+        """
         findings = check_submission(self.root, "main.tex", options, limits=limits)
         return next(item for item in findings if item.rule == rule)
 
     def incomplete(self, rule: str, options: SubmissionOptions) -> Finding:
+        """Return the finding of ``rule`` when the file inventory reports an unreadable directory.
+
+        Args:
+            rule: The rule whose finding to return.
+            options: The submission options.
+
+        Returns:
+            The first finding of ``rule``.
+        """
         with patch(
             "latexprep.submission_checks.inventory_files",
             return_value=({}, ["Unreadable directory."]),

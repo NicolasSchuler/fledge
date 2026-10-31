@@ -22,6 +22,8 @@ from tests.support import live_test
 
 
 def write_png(path: Path, rgb: bytes) -> None:
+    """Write a valid 1 x 1 RGB PNG to ``path`` whose one pixel has the color bytes ``rgb``."""
+
     def chunk(kind: bytes, data: bytes) -> bytes:
         payload = kind + data
         return struct.pack(">I", len(data)) + payload + struct.pack(">I", zlib.crc32(payload))
@@ -36,6 +38,13 @@ def write_png(path: Path, rgb: bytes) -> None:
 
 @live_test("Set FLEDGE_RUN_INTEGRATION=1 for live restricted-tool integration checks")
 class LiveIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    """Live runs of a nested example paper and of confined processes, with no tool doubles.
+
+    The paper's sources, bibliography, images, formatting and ZIP rebuild go through the
+    real tools; a confined process can neither read nor write outside its workspace nor
+    connect to the network.
+    """
+
     async def test_nested_sources_bibliography_images_formatting_and_zip_rebuild(self):
         with tempfile.TemporaryDirectory(prefix="latex-prep-live-") as directory:
             base = Path(directory).resolve()

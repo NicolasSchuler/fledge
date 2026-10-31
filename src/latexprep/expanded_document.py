@@ -1,6 +1,6 @@
-"""The selected literal source graph read as one expanded document.
+r"""The selected literal source graph read as one expanded document.
 
-Literal inputs are spliced in source order up to ``\\end{document}``, so checks can
+Literal inputs are spliced in source order up to ``\end{document}``, so checks can
 scan commands across file boundaries and still report the original file and line
 of every offset. Nothing is executed: macros stay unexpanded, and every gap in the
 literal graph is recorded as uncertainty instead of being guessed.
@@ -43,7 +43,10 @@ CONTENT_INPUT_COMMANDS = frozenset({"input", "include", *IMPORT_COMMANDS})
 
 
 def commands_before_end(source: ParsedSource) -> list[Command]:
-    """Commands up to a top-level ``\\end{document}`` or ``\\endinput``, the latter included."""
+    r"""Collect the commands up to a top-level ``\end{document}`` or ``\endinput``.
+
+    The ``\endinput`` is included in the result.
+    """
     result: list[Command] = []
     for command in source.commands:
         if command.ends("document") and command.depth == 0:
@@ -58,7 +61,10 @@ def commands_before_end(source: ParsedSource) -> list[Command]:
 
 
 def _active_locations(graph: SourceGraph) -> set[ArgumentLocation]:
-    """Where the visited files name a file before their ``\\end{document}`` or ``\\endinput``."""
+    r"""Locate the file names that the visited files give before their end.
+
+    A file ends at its top-level ``\end{document}`` or ``\endinput``.
+    """
     locations: set[ArgumentLocation] = set()
     for name in graph.visited:
         for command in commands_before_end(graph.sources[name]):
@@ -73,7 +79,15 @@ def _active_locations(graph: SourceGraph) -> set[ArgumentLocation]:
 
 
 def reachable_sources(graph: SourceGraph, kinds: Container[str] | None = None) -> set[str]:
-    """Sources the main file reaches through active file commands, optionally of ``kinds``."""
+    """Find the sources the main file reaches through active file commands.
+
+    Args:
+        graph: The literal source graph.
+        kinds: The file commands to follow, or ``None`` for every file command.
+
+    Returns:
+        The reached sources that the graph visited, the main file included.
+    """
     active = _active_locations(graph)
     reads: dict[str, set[str]] = defaultdict(set)
     for location, reference in graph.references.items():
@@ -89,13 +103,18 @@ def reachable_sources(graph: SourceGraph, kinds: Container[str] | None = None) -
 
 
 class Location(NamedTuple):
-    """A source file and 1-based line; the line is unknown when nothing was expanded."""
+    """A source file and 1-based line; the line is unknown when nothing was expanded.
+
+    Attributes:
+        path: The source file, or ``None``.
+        line: The 1-based line, or ``None``.
+    """
 
     path: str | None
     line: int | None
 
     def as_dict(self) -> dict[str, object]:
-        """The location as report details."""
+        """Return the location as report details."""
         return {"path": self.path, "line": self.line}
 
 
@@ -103,9 +122,13 @@ class Location(NamedTuple):
 class SourceSegment:
     """Where a span of the expanded text was copied from.
 
-    ``start`` and ``end`` bound the span in the expanded text; ``path`` and ``line`` name the
-    file and 1-based line it starts on, and ``source_start`` is its offset in that file's
-    masked text (which has the same offsets as its raw text).
+    Attributes:
+        start: Where the span starts in the expanded text.
+        end: Where the span ends in the expanded text.
+        path: The file the span was copied from.
+        line: The 1-based line of ``path`` that the span starts on.
+        source_start: The span's offset in that file's masked text (which has the same
+            offsets as its raw text).
     """
 
     start: int
@@ -117,17 +140,29 @@ class SourceSegment:
 
 @dataclass(frozen=True, slots=True)
 class ExpandedDocument:
-    """Masked literal text of the selected graph, its commands, and their source locations."""
+    """Masked literal text of the selected graph, its commands, and their source locations.
+
+    Attributes:
+        graph: The literal source graph.
+        selected: The sources the main file reaches.
+        text: The masked literal text.
+        commands: The commands of ``text``.
+        segments: Where each span of ``text`` was copied from.
+        graph_uncertainty: Source-graph gaps: missing inputs, unparsable files,
+            bounded-limit stops.
+        presence_uncertainty: Graph gaps plus conditional control flow, which can add or
+            remove any declaration and therefore defeats every claim that something is
+            absent.
+        conditionals: The spans of conditional control flow in ``text``.
+        body_start: Where the document body starts in ``text``.
+    """
 
     graph: SourceGraph
     selected: set[str]
     text: str
     commands: list[Command]
     segments: list[SourceSegment]
-    # Source-graph gaps: missing inputs, unparsable files, bounded-limit stops.
     graph_uncertainty: list[str]
-    # Graph gaps plus conditional control flow, which can add or remove any
-    # declaration and therefore defeats every claim that something is absent.
     presence_uncertainty: list[str]
     conditionals: list[tuple[int, int]]
     # Offset just after \begin{document}; zero when the document has no body opener.
@@ -137,7 +172,11 @@ class ExpandedDocument:
     _newlines: list[int] = field(repr=False)
 
     def location(self, offset: int) -> Location:
-        """The original file and line of an offset in the expanded text."""
+        """Find the original file and line of an offset in the expanded text.
+
+        Returns:
+            The location; the main file without a line when nothing was expanded.
+        """
         if not self.segments:
             return Location(self.graph.main, None)
         index = max(0, bisect_right(self._segment_starts, offset) - 1)
@@ -150,11 +189,11 @@ class ExpandedDocument:
         return Location(segment.path, line)
 
     def located(self, offset: int, **details: object) -> dict[str, object]:
-        """Report details for an offset: its path and line followed by ``details``."""
+        """Build report details for an offset: its path and line followed by ``details``."""
         return {**self.location(offset).as_dict(), **details}
 
     def between(self, start: int, end: int) -> list[Command]:
-        """Commands that start inside ``[start, end)``."""
+        """List the commands that start inside ``[start, end)``."""
         return self.commands[
             bisect_left(self._command_starts, start) : bisect_left(self._command_starts, end)
         ]
@@ -162,13 +201,24 @@ class ExpandedDocument:
 
 @dataclass
 class _Splice:
-    """Accumulates the expanded text while following literal inputs depth first."""
+    """Accumulates the expanded text while following literal inputs depth first.
+
+    Attributes:
+        graph: The literal source graph.
+        uncertainty: The gaps noted so far.
+        chunks: The pieces of the expanded text.
+        segments: Where each piece was copied from.
+        comment_starts: Offsets in the expanded text of the comments blanked in the copied
+            sources.
+        size: The length of the expanded text so far.
+        events: The commands counted against ``MAX_COMMANDS``.
+        stopped: Whether the end of the document was reached.
+    """
 
     graph: SourceGraph
     uncertainty: list[str]
     chunks: list[str] = field(default_factory=list)
     segments: list[SourceSegment] = field(default_factory=list)
-    # Offsets in the expanded text of the comments blanked in the copied sources.
     comment_starts: list[int] = field(default_factory=list)
     size: int = 0
     events: int = 0
@@ -178,7 +228,18 @@ class _Splice:
     def append(
         self, value: str, path: str, line: int, source_start: int, comments: Sequence[int] = ()
     ) -> None:
-        """Add ``value``, copied from ``path`` at ``source_start``; ``comments`` lie within it."""
+        """Add ``value``, copied from ``path`` at ``source_start``; ``comments`` lie within it.
+
+        Args:
+            value: The text to add; empty text adds nothing.
+            path: The file it was copied from.
+            line: The 1-based line of ``path`` that it starts on.
+            source_start: Its offset in the masked text of ``path``.
+            comments: The offsets of the blanked comments within ``value``.
+
+        Raises:
+            ParseLimitExceeded: The expanded text would exceed ``MAX_TOTAL_SOURCE_BYTES``.
+        """
         if not value:
             return
         if self.size + len(value) > MAX_TOTAL_SOURCE_BYTES:
@@ -191,7 +252,17 @@ class _Splice:
         self.size += len(value)
 
     def _inclusion_target(self, path: str, command: Command) -> str | None:
-        """The file a ``\\input``-like command splices in, or ``None`` after noting why not."""
+        r"""Find the file that an ``\input``-like command splices in.
+
+        Syntax that follows the file argument is noted as uncertainty.
+
+        Args:
+            path: The file that holds the command.
+            command: The inclusion command.
+
+        Returns:
+            The file, or ``None`` after noting why there is none.
+        """
         index = file_argument_index(command.name)
         if command.depth or len(command.arguments) <= index:
             self.uncertainty.append(f"{path}: nonliteral or grouped inclusion")
@@ -208,19 +279,34 @@ class _Splice:
         return resolved.target
 
     def _count_command(self, command: Command) -> None:
-        """Count a command against the budget shared by every file being spliced."""
+        """Count a command against the budget shared by every file being spliced.
+
+        Raises:
+            ParseLimitExceeded: More than ``MAX_COMMANDS`` commands were counted.
+        """
         self.events += 1
         if self.events > MAX_COMMANDS:
             raise ParseLimitExceeded("command_count", command.start)
 
     def _note_unclear_endinput(self, path: str, source: ParsedSource, command: Command) -> None:
-        """Record that ``\\endinput`` stops this file where the text after it is not plain."""
+        r"""Record that ``\endinput`` stops this file where the text after it is not plain."""
         suffix = source.masked[command_end(command) :].split("\n", 1)[0]
         if command.depth or suffix.strip():
             self.uncertainty.append(f"{path}: unresolved endinput context")
 
     def expand(self, path: str, stack: tuple[str, ...]) -> None:
-        """Append the masked text of ``path`` up to its end, splicing in each literal input."""
+        """Append the masked text of ``path`` up to its end, splicing in each literal input.
+
+        A cycle, excessive depth or a source that was not inspected is noted as
+        uncertainty instead.
+
+        Args:
+            path: The file to expand.
+            stack: The files being expanded around ``path``, outermost first.
+
+        Raises:
+            ParseLimitExceeded: The expanded text or its commands exceed their bounds.
+        """
         cancellation_point()
         if path in stack or len(stack) >= MAX_INPUT_DEPTH:
             self.uncertainty.append("cyclic or excessively deep literal input graph")
@@ -263,7 +349,7 @@ class _Splice:
 
 
 def _end_of_inclusion(source: ParsedSource, command: Command) -> int:
-    """Where the masked text resumes after an input command.
+    """Find where the masked text resumes after an input command.
 
     The shared lexer records subsequent groups as possible arguments. Input has only one:
     later groups and bare-input terminators are preserved.
@@ -275,7 +361,7 @@ def _end_of_inclusion(source: ParsedSource, command: Command) -> int:
 
 
 def _document_end(source: ParsedSource) -> Command | None:
-    """The top-level ``\\end{document}`` of a source, if it has one."""
+    r"""Find the top-level ``\end{document}`` of a source, if it has one."""
     return next(
         (command for command in source.commands if command.ends("document") and not command.depth),
         None,
@@ -292,7 +378,7 @@ _NON_CONTENT_FILE_COMMANDS = frozenset(
 
 
 def unresolved_non_content_file(finding: Finding) -> bool:
-    """Whether ``finding`` reports a figure or bibliography file that cannot be found."""
+    """Return whether ``finding`` reports a figure or bibliography file that cannot be found."""
     return (
         finding.rule in _UNRESOLVED_FILE_RULES
         and finding.details.get("command") in _NON_CONTENT_FILE_COMMANDS
@@ -300,11 +386,12 @@ def unresolved_non_content_file(finding: Finding) -> bool:
 
 
 def _graph_gaps(graph: SourceGraph, selected: set[str]) -> list[str]:
-    """The gaps in the spliced text: every unresolved ``source.*`` finding in scope.
+    """List the gaps in the spliced text: every unresolved ``source.*`` finding in scope.
 
     That is a superset of ``INCOMPLETE_GRAPH_RULES``, which names only the findings that make
     the dependency graph incomplete; other unresolved findings, such as an unsupported
-    search-path form, are gaps here as well.
+    search-path form, are gaps here as well. A main source outside ``selected`` and subfile
+    targets are gaps too, and missing figure or bibliography files are not.
     """
     gaps = []
     if graph.main not in selected:
@@ -326,7 +413,17 @@ def _graph_gaps(graph: SourceGraph, selected: set[str]) -> list[str]:
 def expand_document(
     root: Path, main: str | None, graph: SourceGraph | None = None
 ) -> ExpandedDocument:
-    """Expand the selected literal graph; reuse ``graph`` when the caller already built it."""
+    """Expand the selected literal graph; reuse ``graph`` when the caller already built it.
+
+    Args:
+        root: The project directory.
+        main: The main file, or ``None``.
+        graph: The literal source graph of ``root`` and ``main``, if already built.
+
+    Returns:
+        The expanded document. When a parsing limit is exceeded, it has no commands and
+        its uncertainty says why.
+    """
     graph = graph or SourceGraph.build(root, main)
     selected = reachable_sources(graph)
     splice = _Splice(graph, _graph_gaps(graph, selected))
@@ -370,7 +467,17 @@ def expand_document(
 
 @dataclass
 class EnvironmentRegion:
-    """The body of one literal environment, the commands in it, and why it may be unclear."""
+    """The body of one literal environment, the commands in it, and why it may be unclear.
+
+    Attributes:
+        kind: The environment's name.
+        command: The command that opens the environment.
+        start: Where the body starts in the expanded text.
+        end: Where the body ends: at the closing command, or at the end of the text when
+            there is none.
+        commands: The commands in the body.
+        uncertainty: Why the region may be unclear.
+    """
 
     kind: str
     command: Command
@@ -386,7 +493,17 @@ def _open_region(
     environment: str,
     enclosing: list[EnvironmentRegion],
 ) -> EnvironmentRegion:
-    """Start the region of a ``\\begin`` and mark it and the open region as nested."""
+    r"""Start the region of a ``\begin`` and mark it and the open region as nested.
+
+    Args:
+        document: The expanded document.
+        command: The ``\begin`` command.
+        environment: The environment's name.
+        enclosing: The regions still open, innermost last.
+
+    Returns:
+        The region, which reaches the end of the text until its end is found.
+    """
     region = EnvironmentRegion(environment, command, command_end(command), len(document.text))
     if command.depth:
         region.uncertainty.append("environment declared inside a group or macro argument")
@@ -399,10 +516,17 @@ def _open_region(
 def environment_regions(
     document: ExpandedDocument, kinds: Container[str]
 ) -> tuple[list[EnvironmentRegion], list[str]]:
-    """Environments named in ``kinds``, in source order, and delimiter problems.
+    """Find the environments named in ``kinds``, in source order, and delimiter problems.
 
     A region's uncertainty covers its own structure (grouping, nesting, a missing
     end) and enclosing conditional control flow, not unknown constructs inside it.
+
+    Args:
+        document: The expanded document.
+        kinds: The environment names to find.
+
+    Returns:
+        The regions in source order, and the delimiter problems.
     """
     result: list[EnvironmentRegion] = []
     stack: list[EnvironmentRegion] = []

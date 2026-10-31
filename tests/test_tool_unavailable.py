@@ -1,3 +1,5 @@
+"""Missing tools: the error, the build finding and the explanation of a missing TeX toolchain."""
+
 from __future__ import annotations
 
 import tempfile
@@ -24,6 +26,8 @@ _PACKAGES = {
 
 
 class MissingToolErrorTests(unittest.TestCase):
+    """The error for a missing tool: the tool it names and the package that provides it."""
+
     def test_the_error_names_the_tool_without_message_parsing(self) -> None:
         with patch("latexprep.toolchain.shutil.which", return_value=None):
             with self.assertRaises(ToolUnavailableError) as raised:
@@ -62,7 +66,10 @@ class MissingToolErrorTests(unittest.TestCase):
 
 
 class BuildFindingTests(unittest.IsolatedAsyncioTestCase):
+    """How a build records an unavailable execution, and which errors it lets through."""
+
     async def asyncSetUp(self) -> None:
+        """Create a ``source`` folder with a placeholder ``main.tex``; reset the build count."""
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
         self.source = self.root / "source"
@@ -71,11 +78,30 @@ class BuildFindingTests(unittest.IsolatedAsyncioTestCase):
         self.builds = 0
 
     async def asyncTearDown(self) -> None:
+        """Remove the temporary directory."""
         self.temporary.cleanup()
 
     async def build(self, error: Exception):
+        """Build the test project with a runner whose every command raises ``error``.
+
+        Each call uses a new build directory. Errors that the build does not turn into findings
+        propagate.
+
+        Args:
+            error: The exception every command raises.
+
+        Returns:
+            The build result.
+        """
+
         class RaisingRunner(FakeBuildRunner):
+            """A fake build runner whose every command raises ``error``."""
+
             async def run(self, *args, **options):
+                """Raise ``error`` whatever the command.
+
+                The arguments are those of :meth:`CommandRunner.run`.
+                """
                 raise error
 
         self.builds += 1
@@ -102,8 +128,19 @@ class BuildFindingTests(unittest.IsolatedAsyncioTestCase):
 
 
 class MissingToolchainExplanationTests(unittest.TestCase):
+    """Explaining a missing TeX toolchain from a finding's details, never from its message."""
+
     @staticmethod
     def unavailable(tool: str | None, message: str | None = None) -> Finding:
+        """Return an inconclusive ``build.execution_unavailable`` error finding.
+
+        Args:
+            tool: The tool recorded in the details, or ``None`` for empty details.
+            message: The message, or ``None`` for the standard message about ``tool``.
+
+        Returns:
+            The finding.
+        """
         return Finding(
             "build.execution_unavailable",
             message or f"Required tool is unavailable: {tool}. Install it explicitly.",

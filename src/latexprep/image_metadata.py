@@ -35,15 +35,29 @@ from .redaction import redact_secrets
 
 @dataclass(frozen=True, slots=True)
 class ImageScanLimits:
-    """Size bounds of one image scan; the defaults suit ordinary manuscripts."""
+    """Size bounds of one image scan; the defaults suit ordinary manuscripts.
+
+    Attributes:
+        max_images: The largest number of images scanned.
+        max_image_bytes: The largest size of one image file, in bytes.
+        max_total_image_bytes: The largest size of every image of the project together, in
+            bytes.
+        max_block_bytes: The largest size of one metadata block after inflating it, in
+            bytes.
+        max_image_metadata_bytes: The largest size of the decoded text of one image, in
+            UTF-8 bytes.
+        max_total_metadata_bytes: The largest size of the decoded text of every image
+            together, in UTF-8 bytes.
+        max_matches: The largest number of matches kept in the report.
+    """
 
     max_images: int = 2000
-    max_image_bytes: int = 32 * MIB  # one image file
-    max_total_image_bytes: int = 128 * MIB  # every image of the project together
-    max_block_bytes: int = MIB  # one metadata block, after inflating it
-    max_image_metadata_bytes: int = 4 * MIB  # decoded text of one image
-    max_total_metadata_bytes: int = 4 * MIB  # decoded text of every image together
-    max_matches: int = 200  # matches kept in the report
+    max_image_bytes: int = 32 * MIB
+    max_total_image_bytes: int = 128 * MIB
+    max_block_bytes: int = MIB
+    max_image_metadata_bytes: int = 4 * MIB
+    max_total_metadata_bytes: int = 4 * MIB
+    max_matches: int = 200
 
 
 # A legitimate image holds far fewer of each; a hostile one is cut off at these counts.
@@ -134,6 +148,12 @@ class _MetadataText:
 
     Limitations bound the scope of a negative result; unlike an error they do not make the
     surrounding scan unusable.
+
+    Attributes:
+        limits: The bounds of the scan.
+        entries: Each decoded text with the channel it came from.
+        limitations: The distinct descriptions of the skipped blocks.
+        size: The UTF-8 bytes of decoded text so far.
     """
 
     def __init__(self, limits: ImageScanLimits) -> None:
@@ -143,6 +163,15 @@ class _MetadataText:
         self.size = 0
 
     def append(self, channel: str, text: str) -> None:
+        """Record one decoded text entry.
+
+        Args:
+            channel: The metadata channel the text came from.
+            text: The decoded text.
+
+        Raises:
+            PreparationError: The image's decoded text or entry count exceeds its limit.
+        """
         self.size += len(text.encode("utf-8"))
         if (
             self.size > self.limits.max_image_metadata_bytes
@@ -152,6 +181,14 @@ class _MetadataText:
         self.entries.append((channel, text))
 
     def limit(self, reason: str) -> None:
+        """Record a deliberately skipped block once.
+
+        Args:
+            reason: What was skipped.
+
+        Raises:
+            PreparationError: Too many distinct blocks were skipped to report.
+        """
         if reason not in self.limitations:
             if len(self.limitations) >= _MAX_REPORTED_LIMITATIONS:
                 raise PreparationError("Skipped metadata blocks exceed the reporting limit")
@@ -159,7 +196,20 @@ class _MetadataText:
 
 
 def _inflate(data: bytes, limit: int) -> bytes:
-    """Inflate a complete zlib stream whose output stays within ``limit`` bytes."""
+    """Inflate a complete zlib stream whose output stays within ``limit`` bytes.
+
+    Args:
+        data: The compressed stream.
+        limit: The largest inflated size, in bytes.
+
+    Returns:
+        The inflated bytes.
+
+    Raises:
+        PreparationError: The stream is incomplete, has trailing data, or inflates past
+            ``limit``.
+        zlib.error: The stream is damaged.
+    """
     decoder = zlib.decompressobj()
     result = decoder.decompress(data, limit + 1)
     if len(result) > limit or not decoder.eof or decoder.unused_data:
@@ -168,7 +218,7 @@ def _inflate(data: bytes, limit: int) -> bytes:
 
 
 def _decoded_text(raw: bytes) -> str:
-    """Text of a metadata field whose encoding is not declared: UTF-8 if valid, else Latin-1.
+    """Decode a metadata field whose encoding is not declared: UTF-8 if valid, else Latin-1.
 
     Cameras and editors store non-ASCII names in either encoding. Latin-1 gives every byte a
     character, so an accented name cannot make the whole image unreadable to the scan.
@@ -183,18 +233,35 @@ def _decoded_text(raw: bytes) -> str:
 
 
 class _IfdEntry(NamedTuple):
-    """One 12-byte image file directory entry, with its value located but not yet copied."""
+    """One 12-byte image file directory entry, with its value located but not yet copied.
+
+    Attributes:
+        tag: The field's tag.
+        kind: The field's TIFF type.
+        count: The number of values.
+        length: The bytes of the value.
+        value_start: Where the value lives in the block.
+        field_offset: Where the entry's own 4-byte value/offset field lives.
+    """
 
     tag: int
     kind: int
     count: int
-    length: int  # bytes of the value
-    value_start: int  # where the value lives in the block
-    field_offset: int  # where the entry's own 4-byte value/offset field lives
+    length: int
+    value_start: int
+    field_offset: int
 
 
 class _ExifReader:
-    """Walks the directories of one TIFF-structured EXIF block, bounds-checking every read."""
+    """Walks the directories of one TIFF-structured EXIF block, bounds-checking every read.
+
+    Construction raises ``PreparationError`` for an unsupported byte order or TIFF header.
+
+    Attributes:
+        data: The EXIF block.
+        result: Receives the decoded text and the skipped blocks.
+        byte_order: The block's byte order.
+    """
 
     def __init__(self, data: bytes, result: _MetadataText) -> None:
         if len(data) < _TIFF_HEADER_BYTES or data[:2] not in {b"II", b"MM"}:
@@ -206,11 +273,29 @@ class _ExifReader:
             raise PreparationError("Unsupported EXIF TIFF header")
 
     def integer(self, offset: int, size: int) -> int:
+        """Read an unsigned integer in the block's byte order.
+
+        Args:
+            offset: Where the integer starts in the block.
+            size: Its width in bytes.
+
+        Returns:
+            The integer.
+
+        Raises:
+            PreparationError: The integer lies outside the block.
+        """
         if offset < 0 or offset + size > len(self.data):
             raise PreparationError("EXIF offset is outside the metadata block")
         return int.from_bytes(self.data[offset : offset + size], self.byte_order)
 
     def read(self) -> None:
+        """Walk every directory and its subdirectories, recording the text fields.
+
+        Raises:
+            PreparationError: The directories are cyclic, hold too many entries, or have
+                an entry or value outside the block.
+        """
         pending = [self.integer(4, 4)]
         seen: set[int] = set()
         total = 0
@@ -231,7 +316,15 @@ class _ExifReader:
             pending.append(self.integer(offset + 2 + _IFD_ENTRY_BYTES * entries, 4))
 
     def _entry(self, offset: int) -> _IfdEntry:
-        """Read and validate the entry at ``offset``; its value is copied only when used."""
+        """Read and validate the entry at ``offset``; its value is copied only when used.
+
+        Returns:
+            The entry, with its value located in the block.
+
+        Raises:
+            PreparationError: The entry has an unsupported type, an oversized value, or a
+                value outside the block.
+        """
         tag, kind, count = (
             self.integer(offset, 2),
             self.integer(offset + 2, 2),
@@ -250,9 +343,20 @@ class _ExifReader:
         return _IfdEntry(tag, kind, count, length, start, field_offset)
 
     def _value(self, entry: _IfdEntry) -> bytes:
+        """Copy an entry's value out of the block."""
         return self.data[entry.value_start : entry.value_start + entry.length]
 
     def _record(self, entry: _IfdEntry, pending: list[int]) -> None:
+        """Record one entry: a subdirectory, a skipped MakerNote, or a supported text field.
+
+        Args:
+            entry: The directory entry.
+            pending: The directory offsets still to walk; a subdirectory pointer is added.
+
+        Raises:
+            PreparationError: A subdirectory pointer is malformed, or the decoded text
+                exceeds its limit.
+        """
         tag, kind = entry.tag, entry.kind
         if tag in _SUBDIRECTORY_TAGS:
             if kind != _KIND_LONG or entry.count != 1:
@@ -295,11 +399,21 @@ class _ExifReader:
 
 
 def _exif_channel(tag: int, *, prefix: str = "EXIF") -> str:
+    """Name the channel of an EXIF tag, by the tag's known name where it has one."""
     name = _EXIF_TAG_NAMES.get(tag)
     return f"{prefix} {name} ({tag:#06x})" if name else f"{prefix} tag {tag:#06x}"
 
 
 def _read_exif(data: bytes, result: _MetadataText) -> None:
+    """Record the text fields of one TIFF-structured EXIF block.
+
+    Args:
+        data: The EXIF block.
+        result: Receives the decoded text and the skipped blocks.
+
+    Raises:
+        PreparationError: The block is malformed or exceeds a limit.
+    """
     _ExifReader(data, result).read()
 
 
@@ -307,12 +421,25 @@ def _read_exif(data: bytes, result: _MetadataText) -> None:
 
 
 def _iptc_channel(dataset: int) -> str:
+    """Name the channel of an IPTC application-record dataset, with its known name."""
     name = _IPTC_DATASET_NAMES.get(dataset)
     return f"JPEG IPTC 2:{dataset:03d}" + (f" ({name})" if name else "")
 
 
 def _read_iptc(data: bytes, result: _MetadataText) -> None:
-    """Record simple IPTC IIM application-record text datasets."""
+    """Record simple IPTC IIM application-record text datasets.
+
+    A dataset outside the supported layout, with an extended length, truncated or not
+    UTF-8 text, is recorded as a limitation.
+
+    Args:
+        data: The IPTC-NAA resource.
+        result: Receives the decoded text and the skipped blocks.
+
+    Raises:
+        PreparationError: The block holds too many datasets, or the decoded text exceeds
+            its limit.
+    """
     cursor = 0
     datasets = 0
     while cursor < len(data):
@@ -344,7 +471,19 @@ def _read_iptc(data: bytes, result: _MetadataText) -> None:
 
 
 def _read_photoshop(contents: bytes, result: _MetadataText) -> None:
-    """Walk 8BIM image resources and inspect only the IPTC-NAA resource."""
+    """Walk 8BIM image resources and inspect only the IPTC-NAA resource.
+
+    A block outside the supported layout, or an oversized or truncated resource, is
+    recorded as a limitation.
+
+    Args:
+        contents: The APP13 segment's data.
+        result: Receives the decoded text and the skipped blocks.
+
+    Raises:
+        PreparationError: The block holds too many resources, or the IPTC datasets exceed
+            a limit.
+    """
     if not contents.startswith(_PHOTOSHOP_HEADER):
         result.limit("JPEG APP13 block outside the supported Photoshop layout")
         return
@@ -382,7 +521,19 @@ def _read_photoshop(contents: bytes, result: _MetadataText) -> None:
 
 
 def _read_png_text(kind: bytes, contents: bytes, result: _MetadataText) -> None:
-    """Record one tEXt, zTXt or iTXt chunk; compressed text is inflated within the limit."""
+    """Record one tEXt, zTXt or iTXt chunk; compressed text is inflated within the limit.
+
+    Args:
+        kind: The chunk type.
+        contents: The chunk data.
+        result: Receives the decoded text.
+
+    Raises:
+        PreparationError: The compression is unsupported, or inflating or the decoded
+            text exceeds its limit.
+        ValueError: The chunk is malformed or its text is not in the declared encoding.
+        zlib.error: Compressed text is damaged.
+    """
     limit = result.limits.max_block_bytes
     key, remaining = contents.split(b"\0", 1)
     if kind == b"tEXt":
@@ -411,6 +562,20 @@ def _read_png_text(kind: bytes, contents: bytes, result: _MetadataText) -> None:
 
 
 def _png_metadata(data: bytes, limits: ImageScanLimits) -> _MetadataText:
+    """Decode the text and EXIF chunks of one PNG file.
+
+    Args:
+        data: The PNG file.
+        limits: The bounds of the scan.
+
+    Returns:
+        The decoded text and skipped blocks.
+
+    Raises:
+        PreparationError: The file or a metadata block is malformed or exceeds a limit.
+        ValueError: A text chunk is malformed.
+        zlib.error: Compressed text is damaged.
+    """
     result = _MetadataText(limits)
     for chunk in iter_png_chunks(data, max_chunks=_MAX_PNG_CHUNKS):
         if chunk.kind not in {b"tEXt", b"zTXt", b"iTXt", b"eXIf"}:
@@ -428,17 +593,32 @@ def _png_metadata(data: bytes, limits: ImageScanLimits) -> _MetadataText:
 
 
 class _JpegSegment(NamedTuple):
+    """One length-prefixed JPEG segment.
+
+    Attributes:
+        marker: The marker byte that follows ``0xFF``.
+        contents: The segment's data, without its length field.
+    """
+
     marker: int
     contents: bytes
 
 
 def _segment_length(data: bytes, cursor: int) -> int:
-    """The length field at ``cursor``, which counts its own two bytes."""
+    """Read the length field at ``cursor``, which counts its own two bytes."""
     return int.from_bytes(data[cursor : cursor + _SEGMENT_LENGTH_BYTES], "big")
 
 
 def _require_complete_scan_start(data: bytes, cursor: int) -> None:
-    """Check that a start-of-scan header fits the file, which ends with an end-of-image marker."""
+    """Check that a start-of-scan header fits the file, which ends with an end-of-image marker.
+
+    Args:
+        data: The JPEG file.
+        cursor: Where the header's length field starts.
+
+    Raises:
+        PreparationError: The header is truncated or the file does not end properly.
+    """
     if cursor + _SEGMENT_LENGTH_BYTES > len(data):
         raise PreparationError("JPEG scan header is truncated")
     length = _segment_length(data, cursor)
@@ -451,7 +631,19 @@ def _require_complete_scan_start(data: bytes, cursor: int) -> None:
 
 
 def _length_prefixed_segment(data: bytes, cursor: int, marker: int) -> _JpegSegment:
-    """The segment of ``marker`` whose length field is at ``cursor``; raises if it is cut off."""
+    """Read the segment of ``marker`` whose length field is at ``cursor``.
+
+    Args:
+        data: The JPEG file.
+        cursor: Where the segment's length field starts.
+        marker: The segment's marker byte.
+
+    Returns:
+        The segment.
+
+    Raises:
+        PreparationError: The marker stands alone, or the segment is cut off.
+    """
     if (
         marker in {0x00, _MARKER_SOI}
         or _MARKER_RST_FIRST <= marker <= _MARKER_RST_LAST
@@ -468,9 +660,17 @@ def _iter_jpeg_segments(data: bytes) -> Iterator[_JpegSegment]:
     """Yield each length-prefixed segment before the first scan; every defect is named.
 
     The walk ends successfully at the end-of-image marker or after validating the start of
-    the first scan, and raises for any structural defect, trailing data or a missing end.
-    ``submission_readiness_checks`` reads colour from a bounded prefix with a lenient walker
-    instead, so the two walkers deliberately stay separate.
+    the first scan. ``submission_readiness_checks`` reads colour from a bounded prefix with
+    a lenient walker instead, so the two walkers deliberately stay separate.
+
+    Args:
+        data: The JPEG file.
+
+    Yields:
+        Each segment before the first scan, in file order.
+
+    Raises:
+        PreparationError: A structural defect, trailing data or a missing end.
     """
     if not data.startswith(_JPEG_SOI):
         raise PreparationError("JPEG signature is invalid")
@@ -500,7 +700,18 @@ def _iter_jpeg_segments(data: bytes) -> Iterator[_JpegSegment]:
 
 
 def _read_app1(contents: bytes, result: _MetadataText) -> None:
-    """Record an APP1 segment: EXIF, XMP or extended XMP."""
+    """Record an APP1 segment: EXIF, XMP or extended XMP.
+
+    Extended XMP is matched per chunk only, which is recorded as a limitation.
+
+    Args:
+        contents: The APP1 segment's data.
+        result: Receives the decoded text and the skipped blocks.
+
+    Raises:
+        PreparationError: The segment holds other APP1 metadata, is malformed, or exceeds
+            a limit.
+    """
     if contents.startswith(_EXIF_APP1_PREFIX):
         _read_exif(contents[len(_EXIF_APP1_PREFIX) :], result)
     elif contents.startswith(_XMP_APP1_PREFIX):
@@ -517,6 +728,18 @@ def _read_app1(contents: bytes, result: _MetadataText) -> None:
 
 
 def _jpeg_metadata(data: bytes, limits: ImageScanLimits) -> _MetadataText:
+    """Decode the comments, APP1 and APP13 segments of one JPEG file before its first scan.
+
+    Args:
+        data: The JPEG file.
+        limits: The bounds of the scan.
+
+    Returns:
+        The decoded text and skipped blocks.
+
+    Raises:
+        PreparationError: The file or a metadata segment is malformed or exceeds a limit.
+    """
     result = _MetadataText(limits)
     for segment in _iter_jpeg_segments(data):
         if segment.marker == _MARKER_COMMENT:
@@ -532,7 +755,7 @@ def _jpeg_metadata(data: bytes, limits: ImageScanLimits) -> _MetadataText:
 
 
 def _unreadable_reason(error: Exception) -> str:
-    """Why an image's metadata could not be read, without quoting file contents or paths.
+    """Explain why an image's metadata could not be read, without quoting contents or paths.
 
     Parser rejections are fixed text; other errors may quote file contents or paths, so they
     are described by kind only.
@@ -549,7 +772,7 @@ def _unreadable_reason(error: Exception) -> str:
 
 
 def _first_problem(issues: Sequence[Mapping[str, str]]) -> str:
-    """The first scan problem with its image path, and how many others there are."""
+    """Describe the first scan problem with its redacted image path, and count the others."""
     first = issues[0]
     where = f"{redact_secrets(first['path'])}: " if "path" in first else ""
     others = len(issues) - 1
@@ -558,7 +781,19 @@ def _first_problem(issues: Sequence[Mapping[str, str]]) -> str:
 
 @dataclass
 class _ProjectScan:
-    """What a scan has found so far across the images of one project."""
+    """What a scan has found so far across the images of one project.
+
+    Attributes:
+        limits: The bounds of the scan.
+        terms: The normalized identity terms.
+        matches: The image, channel and 1-based term index of each match kept.
+        match_output_limited: Whether matches beyond ``limits.max_matches`` were dropped.
+        issues: The problems that leave the scan incomplete.
+        limitations: The skipped vendor blocks of each image.
+        scanned: The images scanned.
+        image_bytes: The bytes of the images read so far.
+        metadata_bytes: The decoded metadata bytes so far.
+    """
 
     limits: ImageScanLimits
     terms: list[str]
@@ -571,7 +806,21 @@ class _ProjectScan:
     metadata_bytes: int = 0
 
     def scan_image(self, name: str, path: Path) -> bool:
-        """Scan one image; False when a project-wide limit ends the scan."""
+        """Scan one image; ``False`` when a project-wide limit ends the scan.
+
+        Args:
+            name: The project-relative path of the image, under which matches are reported.
+            path: The image file.
+
+        Returns:
+            ``True`` when the scan may continue with the next image.
+
+        Raises:
+            PreparationError: The image's metadata is malformed or exceeds a limit.
+            OSError: The file is unreadable, not a regular file or too large.
+            ValueError: A metadata text is malformed.
+            zlib.error: Compressed metadata is damaged.
+        """
         data = read_regular_file(path, self.limits.max_image_bytes)
         self.image_bytes += len(data)
         if self.image_bytes > self.limits.max_total_image_bytes:
@@ -594,6 +843,14 @@ class _ProjectScan:
         return True
 
     def _match(self, name: str, channel: str, value: str) -> None:
+        """Record each identity term that a decoded text contains.
+
+        Args:
+            name: The project-relative path of the image.
+            channel: The metadata channel of the text.
+            value: The decoded text, compared after character-reference decoding and
+                normalization.
+        """
         # XMP may encode names with numeric/predefined XML character references.
         # Decode text only; never evaluate entities or fetch XML resources.
         normalized = normalize_for_matching(html.unescape(value))
@@ -609,7 +866,15 @@ class _ProjectScan:
 def _candidate_images(
     files: Mapping[str, Path], limits: ImageScanLimits
 ) -> tuple[list[tuple[str, Path]], list[dict[str, str]]]:
-    """The images to scan, at most ``limits.max_images``, and the issue if some were left out."""
+    """Select the images to scan, at most ``limits.max_images``.
+
+    Args:
+        files: The project's files by project-relative path.
+        limits: The bounds of the scan.
+
+    Returns:
+        The PNG and JPEG images to scan, and the issue if some were left out.
+    """
     selected = [
         (name, path)
         for name, path in files.items()
@@ -623,7 +888,16 @@ def _candidate_images(
 
 
 def _image_scan_message(scan: _ProjectScan, status: str, selected: int) -> str:
-    """The outcome of the image scan; a pass states what was and was not covered."""
+    """Describe the outcome of the image scan; a pass states what was and was not covered.
+
+    Args:
+        scan: The finished scan.
+        status: The status of the finding.
+        selected: The number of images selected for the scan.
+
+    Returns:
+        The message of the finding.
+    """
     match status:
         case "failed":
             message = (
@@ -657,7 +931,21 @@ def _image_scan_message(scan: _ProjectScan, status: str, selected: int) -> str:
 def check_image_metadata(
     root: Path, options: MetadataPrivacyOptions, limits: ImageScanLimits | None = None
 ) -> list[Finding]:
-    """Search supported image metadata without decoding pixels or echoing private values."""
+    """Search supported image metadata without decoding pixels or echoing private values.
+
+    An image that cannot be read makes the result inconclusive unless an identity term
+    was found in another image, which fails it; the scan continues with the next image
+    until a project-wide limit ends it.
+
+    Args:
+        root: The project directory.
+        options: The privacy options, which list the identity terms.
+        limits: The bounds of the scan; the defaults when ``None``.
+
+    Returns:
+        One ``privacy.image_metadata`` finding, or an empty list when no identity terms
+        are configured.
+    """
     if not options.image_identity_terms:
         return []
     limits = limits or ImageScanLimits()

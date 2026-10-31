@@ -48,7 +48,14 @@ _ROOT_SELECTION_RULES = frozenset({ROOT_AMBIGUOUS_RULE, ROOT_MISSING_RULE})
 
 
 class InputSelection(NamedTuple):
-    """The inputs copied for preparation, with the selection's changes and evidence."""
+    """The inputs copied for preparation, with the selection's changes and evidence.
+
+    Attributes:
+        root: The folder the selected inputs were copied to.
+        changes: The changes the selection made.
+        findings: The findings of the selection.
+        inventory: The package inventory rows of the selection.
+    """
 
     root: Path
     changes: list[Change]
@@ -58,7 +65,12 @@ class InputSelection(NamedTuple):
 
 @dataclass(frozen=True, slots=True)
 class PackageLayout:
-    """The files that make up a package: their root, and how flattening renamed them."""
+    """The files that make up a package: their root, and how flattening renamed them.
+
+    Attributes:
+        root: The folder that holds the package files.
+        path_mapping: The package name of each source file a flattening renamed.
+    """
 
     root: Path
     # Source-to-package names of a flattening; empty for the preserved layout.
@@ -66,7 +78,19 @@ class PackageLayout:
 
 
 class TaskReporter:
-    """Writes the results of one document's run into its report."""
+    """A writer that puts the results of one document's run into its report.
+
+    Args:
+        settings: The settings of the document, which builds are checked against.
+        source_root: The original project root, which the package inventory reads missing
+            source sizes from.
+        main: The main file as the caller named it, or ``None`` when main selection runs.
+        document_name: The configured name of the document, which the package inventory
+            uses instead of the main file when it is given.
+
+    Attributes:
+        report: The report the results are written into.
+    """
 
     def __init__(
         self,
@@ -86,7 +110,15 @@ class TaskReporter:
         self._selections: list[list[InventoryRow]] = []
 
     def collect(self, result: TaskResult) -> None:
-        """Report a finished task: its stage record, and its findings or its failure."""
+        """Report a finished task: its stage record, and its findings or its failure.
+
+        A finished baseline build is recorded as a build, and the result of input selection
+        as a selection; a task blocked by a failed prerequisite gets a skipped finding, a
+        failed task an inconclusive one.
+
+        Args:
+            result: The result of the finished task.
+        """
         if result.name == TaskName.BASELINE_BUILD and result.value is not None:
             self.record_build(
                 result.value,
@@ -107,6 +139,13 @@ class TaskReporter:
             self._collect_findings(result)
 
     def _record_stage(self, result: TaskResult) -> None:
+        """Append the stage record of a task: its name, status and timing.
+
+        The baseline build has one stage name whether it finished or crashed.
+
+        Args:
+            result: The result of the task.
+        """
         # The baseline build has one stage name whether it finished or crashed.
         name = BASELINE_STAGE if result.name == TaskName.BASELINE_BUILD else result.name
         self.report.stages.append(
@@ -119,6 +158,15 @@ class TaskReporter:
         )
 
     def _collect_findings(self, result: TaskResult) -> None:
+        """Add the findings of a task that succeeded to the report.
+
+        Source-check findings enter untagged, without the root-selection findings when main
+        selection already reported them. Bibliography and manuscript check findings also enter
+        untagged; every other task tags its findings with its own name.
+
+        Args:
+            result: The result of the task.
+        """
         if result.name == TaskName.SOURCE_CHECKS:
             findings = result.value.findings
             if self._main is None:
@@ -131,6 +179,14 @@ class TaskReporter:
             record_findings(self.report, result.value, result.name)
 
     def _collect_input_selection(self, selection: InputSelection) -> None:
+        """Record the changes, inventory and findings of the preparation input selection.
+
+        The inventory is incomplete when the selection's findings block preparation, and
+        proposed otherwise.
+
+        Args:
+            selection: The inputs the selection copied, with its changes and evidence.
+        """
         self.report.changes.extend(selection.changes)
         self._selections.append(selection.inventory)
         # Record the inventory from this selection's evidence, without duplicating findings.
@@ -138,7 +194,12 @@ class TaskReporter:
         record_findings(self.report, selection.findings, TaskName.SELECT_PREPARATION_INPUTS.value)
 
     def record_selection(self, selected: InputSelectionResult, stage: str) -> None:
-        """Record a selection's changes and findings under ``stage``; keep its inventory."""
+        """Record a selection's changes and findings under ``stage``; keep its inventory.
+
+        Args:
+            selected: The result of the input selection.
+            stage: The stage name the findings are tagged with.
+        """
         self.report.changes.extend(selected.changes)
         self._selections.append(selected.inventory)
         record_findings(self.report, selected.findings, stage)
@@ -149,7 +210,14 @@ class TaskReporter:
         layout: PackageLayout | None = None,
         archive: Path | None = None,
     ) -> None:
-        """Describe the package contents so far; ``layout`` and ``archive`` once they exist."""
+        """Describe the package contents so far; ``layout`` and ``archive`` once they exist.
+
+        Args:
+            status: The status of the package inventory.
+            layout: The files of the package and how flattening renamed them, or ``None``
+                before they exist.
+            archive: The package archive, or ``None`` before it exists.
+        """
         self.report.package_contents = [
             assemble_package_inventory(
                 selections=self._selections,
@@ -168,7 +236,21 @@ class TaskReporter:
     def record_build(
         self, result: BuildResult, stage: str, *, elapsed_seconds: float, queue_seconds: float
     ) -> bool:
-        """Record a build's findings, tools, timing and stage; return whether it built a PDF."""
+        """Record a build's findings, tools, timing and stage.
+
+        The TeX distribution is checked once per document, at the baseline build, unless the
+        toolchain is missing. A build that produced no PDF gets an inconclusive ``build.<stage>``
+        finding, unless a missing toolchain already explains it.
+
+        Args:
+            result: The result of the build.
+            stage: The stage name of the build, which tags its findings.
+            elapsed_seconds: How long the build ran.
+            queue_seconds: How long the build waited before it started.
+
+        Returns:
+            Whether the build succeeded and produced a PDF.
+        """
         report, settings = self.report, self._settings
         findings = explain_missing_toolchain(
             qualify_citation_findings(result.findings, build_succeeded=result.success),
@@ -207,12 +289,20 @@ class TaskReporter:
 
 
 def _failed_build_details(result: BuildResult, findings: list[Finding]) -> dict[str, object]:
-    """The log tail of a failed build, unless one of its findings already carries it.
+    """Return the log tail of a failed build, unless one of its findings already carries it.
 
     ``build.failed`` and ``build.missing_pdf`` attach the tail when latexmk exits with an
     error or leaves no PDF. When latexmk exits normally and error-level log findings
     fail the build, no finding does, so the stage's own finding carries it: the report
     promises a failed build's finding the last lines of the TeX log, once.
+
+    Args:
+        result: The result of the failed build.
+        findings: The findings recorded for the build.
+
+    Returns:
+        The details with the ``log_tail`` entry, or no details when the build has no log or
+        a finding already carries the tail.
     """
     if not result.log or any("log_tail" in finding.details for finding in findings):
         return {}

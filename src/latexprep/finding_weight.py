@@ -19,14 +19,20 @@ from .findings import EvidenceKind, Severity, Status
 
 
 class Weight(NamedTuple):
-    """The severity a check reports for each way it can fail, and how direct its evidence is."""
+    """The severity a check reports for each way it can fail, and how direct its evidence is.
+
+    Attributes:
+        failed: The severity of a ``failed`` result.
+        inconclusive: The severity of an ``inconclusive`` result.
+        evidence_kind: How direct the evidence of the check family is.
+    """
 
     failed: Severity
     inconclusive: Severity
     evidence_kind: EvidenceKind
 
     def severity(self, status: Status) -> Severity:
-        """``info`` for a pass, otherwise the severity this weight gives that outcome."""
+        """Return ``info`` for a pass, otherwise the severity this weight gives that outcome."""
         if status == "passed":
             return "info"
         return self.inconclusive if status == "inconclusive" else self.failed

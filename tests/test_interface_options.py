@@ -15,6 +15,8 @@ from tests.support import minimal_project
 
 
 class InterfaceExtensionTests(unittest.TestCase):
+    """Settings-table edits, offline outputs and nested configuration through the interfaces."""
+
     def test_toml_field_edit_tables_can_add_or_remove_with_explicit_preconditions(self):
         with tempfile.TemporaryDirectory() as directory:
             config = Path(directory) / "settings.toml"

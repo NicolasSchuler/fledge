@@ -21,18 +21,39 @@ from latexprep.review_policy import (
 
 
 class _Elements(HTMLParser):
+    """Every start tag of a rendered page and the attributes they carry.
+
+    Attributes:
+        tags: The name of every start tag, in document order.
+        attributes: The name and value of every attribute of those tags, in document order.
+    """
+
     def __init__(self):
         super().__init__()
         self.tags = []
         self.attributes = []
 
     def handle_starttag(self, tag, attrs):
+        """Record ``tag`` and its ``attrs``."""
         self.tags.append(tag)
         self.attributes.extend(attrs)
 
 
 class RenderTests(unittest.TestCase):
+    """Escaping, redaction, evidence and review reasons in the HTML report and CI annotations."""
+
     def report(self):
+        """Return a blocked report that carries an injection payload in its text fields.
+
+        The payload closes a ``pre`` element and adds a script and a remote image. It is the
+        scope, the main document, the suggestion and the path and reason of the change, and it
+        starts the finding message and the diff; the finding path holds a script of its own. A
+        synthetic secret appears in a setting, the finding message and the diff, and the PDF
+        artifact points at a remote URL.
+
+        Returns:
+            The secret, the payload and the report.
+        """
         secret = "SyntheticCredential_1234"
         payload = '</pre><script>alert(1)</script><img src="https://attacker.invalid" onerror="x">'
         report = Report(
@@ -361,7 +382,15 @@ class RenderTests(unittest.TestCase):
 
 
 class _Structure(HTMLParser):
-    """The landmark, title, heading and table structure of a rendered page."""
+    """The landmark, title, heading and table structure of a rendered page.
+
+    Attributes:
+        title: The text of the ``title`` element.
+        mains: The number of ``main`` elements.
+        captions: The number of ``caption`` elements.
+        table_headers: The attributes of every ``th`` element, in document order.
+        tables: The number of ``table`` elements.
+    """
 
     def __init__(self):
         super().__init__()
@@ -373,6 +402,12 @@ class _Structure(HTMLParser):
         self._in_title = False
 
     def handle_starttag(self, tag, attrs):
+        """Count a ``main``, ``table`` or ``caption`` tag, keep ``th`` attributes, enter a title.
+
+        Args:
+            tag: The name of the tag.
+            attrs: The name and value of each attribute of the tag.
+        """
         if tag == "title":
             self._in_title = True
         elif tag == "main":
@@ -385,16 +420,28 @@ class _Structure(HTMLParser):
             self.table_headers.append(dict(attrs))
 
     def handle_endtag(self, tag):
+        """Leave the title when ``tag`` closes it."""
         if tag == "title":
             self._in_title = False
 
     def handle_data(self, data):
+        """Append ``data`` to the title while inside the ``title`` element."""
         if self._in_title:
             self.title += data
 
 
 class HtmlPageStructureTests(unittest.TestCase):
+    """The landmarks, title, tables and stylesheet of the HTML report page."""
+
     def report(self, **fields):
+        """Return a ``prepare`` report with advisories and one rewritten file with a diff.
+
+        Args:
+            **fields: Further fields of the :class:`Report`.
+
+        Returns:
+            The report.
+        """
         return Report(
             "prepare",
             outcome=Outcome.PASSED_WITH_ADVISORIES,
@@ -411,6 +458,7 @@ class HtmlPageStructureTests(unittest.TestCase):
         )
 
     def structure(self, report):
+        """Render ``report`` as HTML and return the parsed structure of the page."""
         parser = _Structure()
         parser.feed(render_html(report))
         return parser

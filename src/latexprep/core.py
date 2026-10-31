@@ -57,7 +57,12 @@ from .task_findings import has_task_defect
 
 
 class _Destinations(NamedTuple):
-    """Validated new directories for the bundle and for explicit previews."""
+    """Validated new directories for the bundle and for explicit previews.
+
+    Attributes:
+        output: The directory of the bundle, or ``None``.
+        previews: The directory of explicit previews, or ``None``.
+    """
 
     output: Path | None
     previews: Path | None
@@ -66,7 +71,15 @@ class _Destinations(NamedTuple):
 def _record_settings(request: JobRequest, report: Report) -> Settings:
     """Record the requested and effective settings and the check selection in the report.
 
-    Returns the effective settings, which the job runs with.
+    The effective settings are recorded only when they differ from the requested ones,
+    and a document command also records the opt-in areas left unchecked.
+
+    Args:
+        request: The request, which holds the requested settings.
+        report: The report to record in.
+
+    Returns:
+        The effective settings, which the job runs with.
     """
     settings = request.settings
     report.settings = settings.to_dict()
@@ -90,7 +103,7 @@ def _record_settings(request: JobRequest, report: Report) -> Settings:
 
 
 def _runs_documents(request: JobRequest, settings: Settings) -> bool:
-    """Whether the configured ``workflow.documents`` apply to this command.
+    """Return whether the configured ``workflow.documents`` apply to this command.
 
     The single-purpose commands (``bib``, ``fmt``, ``pdf``) work on the input as
     a whole and ignore the document list.
@@ -99,6 +112,7 @@ def _runs_documents(request: JobRequest, settings: Settings) -> bool:
 
 
 def _grayscale_previews(settings: Settings) -> bool:
+    """Return whether either artwork setting asks for grayscale previews."""
     return (
         settings.rendered_pdf_artwork.grayscale_preview
         or settings.included_figure_artwork.grayscale_preview
@@ -106,7 +120,14 @@ def _grayscale_previews(settings: Settings) -> bool:
 
 
 def _validate_destinations(request: JobRequest) -> _Destinations:
-    """The new output directories of the request, which must not overlap each other."""
+    """Validate the new output directories of the request, which must not overlap each other.
+
+    Returns:
+        The validated directories; each is ``None`` when the request names none.
+
+    Raises:
+        RequestError: The preview output is the output, or one lies inside the other.
+    """
     output = (
         validate_destination(request.source, request.output, "output")
         if request.output is not None
@@ -135,7 +156,21 @@ def _validate_destinations(request: JobRequest) -> _Destinations:
 
 
 def _validate_request(request: JobRequest, settings: Settings) -> _Destinations:
-    """Reject a request that cannot succeed, before any workspace or tool exists."""
+    """Reject a request that cannot succeed, before any workspace or tool exists.
+
+    Args:
+        request: The request to validate.
+        settings: The effective settings.
+
+    Returns:
+        The validated output directories.
+
+    Raises:
+        RequestError: The output directories overlap; grayscale previews have no
+            directory to be saved in; ``prepare`` has no output directory and is not a dry
+            run; a reference PDF is given while ``workflow.documents`` is configured; or
+            the reference PDF does not exist.
+    """
     destinations = _validate_destinations(request)
     if (
         _grayscale_previews(settings)
@@ -169,6 +204,7 @@ def _validate_request(request: JobRequest, settings: Settings) -> _Destinations:
 
 
 def _record_execution(report: Report, execution: JobExecution, request: JobRequest) -> None:
+    """Record the job's statistics, tool versions and preview summary, and sort its stages."""
     report.execution = {**report.execution, **execution.statistics()}
     report.tools.update(
         {name: version.to_report() for name, version in execution.runner.tool_versions.items()}
@@ -181,7 +217,13 @@ def _record_execution(report: Report, execution: JobExecution, request: JobReque
 def _block_on_resource_failure(report: Report, execution: JobExecution) -> bool:
     """Block the job when a runtime resource limit or its accounting failed.
 
-    Returns whether the job was blocked.
+    Args:
+        report: The report, which receives an ``execution.resources`` error and a blocked
+            outcome.
+        execution: The job's execution, whose runner records resource failures.
+
+    Returns:
+        Whether the job was blocked.
     """
     resource_failure = execution.runner.statistics().resource_exceeded
     if not resource_failure:
@@ -200,10 +242,17 @@ def _block_on_resource_failure(report: Report, execution: JobExecution) -> bool:
 
 
 async def _run_command(context: JobContext, report: Report) -> JobOutput:
-    """Run the requested command; the package or packages it verified, if any.
+    """Run the requested command.
 
     The only dispatch on the command. The single-purpose commands fill the report and
     verify nothing; the document commands also return what is ready to publish.
+
+    Args:
+        context: The job.
+        report: The report that the command fills in.
+
+    Returns:
+        The package or packages the command verified, if any.
     """
     request = context.request
     match request.command:
@@ -221,7 +270,7 @@ async def _run_command(context: JobContext, report: Report) -> JobOutput:
 
 
 def _is_publishable(outputs: JobOutput, report: Report, settings: Settings) -> bool:
-    """Whether the job produced something verified that publication may write."""
+    """Return whether the job produced something verified that publication may write."""
     if isinstance(outputs, VerifiedPackage):
         return True
     return (
@@ -239,7 +288,22 @@ def _export_previews(
     *,
     publishable: bool,
 ) -> PreviewPlan:
-    """Plan the exported preview paths and point findings and artifacts at them."""
+    """Plan the exported preview paths and point findings and artifacts at them.
+
+    Previews go to the explicit preview directory, otherwise into ``previews`` in the
+    output directory when the job produced something publishable.
+
+    Args:
+        report: The report whose findings and artifacts are pointed at the previews.
+        outputs: What the job verified; the reports of document packages are pointed at
+            the previews too.
+        work: The job's workspace.
+        destinations: The validated output directories.
+        publishable: Whether publication may write what the job produced.
+
+    Returns:
+        The planned previews; none without a directory to export them to.
+    """
     previews: PreviewPlan = ()
     if destinations.previews is not None:
         previews = plan_previews(report, work, destinations.previews)
@@ -253,7 +317,14 @@ def _export_previews(
 
 
 def _bundle_directory(destinations: _Destinations) -> Path:
-    """The output directory a verified package is published into."""
+    """Return the output directory a verified package is published into.
+
+    Returns:
+        The output directory.
+
+    Raises:
+        PreparationError: No output directory was given.
+    """
     if destinations.output is None:
         raise PreparationError("A verified package was produced but no output directory was given")
     return destinations.output
@@ -267,7 +338,20 @@ def _publish(
     outputs: JobOutput,
     previews: PreviewPlan,
 ) -> None:
-    """Publish everything verified as one transaction; a failure leaves no new output."""
+    """Publish everything verified as one transaction; a failure leaves no new output.
+
+    Previews go into the bundle only without an explicit preview directory, and are not
+    published to that directory when publication refused the package. A failure also
+    clears the report's artifacts.
+
+    Args:
+        report: The report, which records the published artifacts.
+        context: The job.
+        destinations: The validated output directories.
+        execution: The job's execution, whose deadline is checked while publishing.
+        outputs: What the job verified.
+        previews: The planned previews.
+    """
     request, settings, emit = context.request, context.settings, context.emit
     preview_output = destinations.previews
     # Previews go into the bundle only without an explicit preview directory.
@@ -326,12 +410,25 @@ async def run_job(
 ) -> Report:
     """Run one job and return its sanitized report.
 
-    ``progress`` receives short status messages. Pass ``report`` to keep a handle on the
-    report while the job runs: a cancelled job marks it cancelled and re-raises.
-    ``backends`` replaces how documents are built, inspected and compared (the default
-    drives the real tools). Raises ``PreparationError`` (a ``RequestError`` when it names a
-    next step) for a request that cannot succeed; every other outcome, including a missed
-    deadline, is in the report.
+    Every outcome other than a request that cannot succeed, including a missed deadline,
+    is in the report.
+
+    Args:
+        request: The job to run.
+        progress: Receives short status messages.
+        report: A report to fill in; pass one to keep a handle on the report while the
+            job runs.
+        backends: Replaces how documents are built, inspected and compared (the default
+            drives the real tools).
+
+    Returns:
+        The sanitized report.
+
+    Raises:
+        PreparationError: The request cannot succeed; a ``RequestError`` when it names a
+            next step.
+        asyncio.CancelledError: The job was cancelled; the report is marked cancelled
+            first.
     """
     emit = progress or (lambda _message: None)
     report = report if report is not None else Report(request.command.value)

@@ -1,4 +1,4 @@
-"""Making untrusted text harmless for one output channel.
+r"""Making untrusted text harmless for one output channel.
 
 File names, source excerpts and tool output reach the terminal, HTML reports, CI
 annotation lines and one-line messages. Each channel treats control characters
@@ -19,7 +19,7 @@ decision of which characters are unsafe, :func:`is_unsafe_character`.
     A message that must stay on one line. Shows every unsafe character, newlines
     and tabs included, as an escape.
 
-An unsafe character is shown as a visible ``\\uXXXX`` (``\\UXXXXXXXX`` beyond the
+An unsafe character is shown as a visible ``\uXXXX`` (``\UXXXXXXXX`` beyond the
 basic plane) escape wherever a channel does not drop it.
 """
 
@@ -37,7 +37,7 @@ _NEWLINE_AND_TAB = "\n\t"
 
 
 def is_unsafe_character(char: str) -> bool:
-    """Whether a character can hide, reorder or corrupt displayed text.
+    """Return whether a character can hide, reorder or corrupt displayed text.
 
     That is every Unicode "other" character: C0 and C1 controls, format characters
     such as right-to-left overrides, lone surrogates (what an undecodable file name
@@ -47,18 +47,26 @@ def is_unsafe_character(char: str) -> bool:
 
 
 def is_control_character(char: str) -> bool:
-    """Whether a character is a C0 or C1 control, DEL included."""
+    """Return whether a character is a C0 or C1 control, DEL included."""
     return unicodedata.category(char) == "Cc"
 
 
 def visible_escape(char: str) -> str:
-    """The ``\\uXXXX`` or ``\\UXXXXXXXX`` escape that shows ``char`` literally."""
+    r"""Return the ``\uXXXX`` or ``\UXXXXXXXX`` escape that shows ``char`` literally."""
     code = ord(char)
     return f"\\u{code:04x}" if code <= 0xFFFF else f"\\U{code:08x}"
 
 
 def _show_unsafe(value: str, keep: str = "") -> str:
-    """``value`` with each unsafe character not in ``keep`` replaced by its escape."""
+    """Return ``value`` with each unsafe character not in ``keep`` replaced by its escape.
+
+    Args:
+        value: The text to make visible.
+        keep: Unsafe characters to leave as they are.
+
+    Returns:
+        The text with those characters replaced by their visible escapes.
+    """
     return "".join(
         visible_escape(char) if is_unsafe_character(char) and char not in keep else char
         for char in value
@@ -66,11 +74,11 @@ def _show_unsafe(value: str, keep: str = "") -> str:
 
 
 def sanitize_terminal_text(value: str) -> str:
-    """Remove escape sequences and control characters, keeping newlines and tabs.
+    r"""Remove escape sequences and control characters, keeping newlines and tabs.
 
     Other unsafe characters (for example right-to-left overrides that can reorder a
     displayed path, or a lone surrogate that no terminal encoding can print) are
-    shown as ``\\uXXXX`` escapes.
+    shown as ``\uXXXX`` escapes.
     """
     # File names and diagnostics are untrusted text, never terminal escape commands.
     value = _OPERATING_SYSTEM_COMMAND.sub("", value)
@@ -95,8 +103,16 @@ def escape_annotation_text(value: str, *, property_value: bool = False) -> str:
     """Escape text for a GitHub Actions workflow command message or property value.
 
     ``%``, carriage returns, newlines and the other ASCII controls are percent-encoded,
-    so injected text cannot start a second command; with ``property_value`` the
-    property separators ``:`` and ``,`` are encoded as well.
+    so injected text cannot start a second command. Other unsafe characters are shown as
+    visible escapes.
+
+    Args:
+        value: The text to escape.
+        property_value: Whether the text is a property value, whose separators ``:`` and
+            ``,`` are percent-encoded as well.
+
+    Returns:
+        The escaped text, on one physical line.
     """
     reserved = "%:," if property_value else "%"
     return "".join(

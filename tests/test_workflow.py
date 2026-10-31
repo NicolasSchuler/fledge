@@ -33,6 +33,13 @@ from tests.support import controlled_backends, sectioned_project
 
 
 class WorkflowTests(unittest.IsolatedAsyncioTestCase):
+    """Whole jobs through :func:`run_job`, with a controlled build backend where one builds.
+
+    The cases cover identical bundles from serial and parallel runs, blocked runs that release
+    no output, the diagnostics a failed baseline build keeps, the ``bib`` command, which skips
+    root discovery and the reference PDF, and main-file selection before any tool runs.
+    """
+
     async def test_flat_bundle_from_exact_extraction_and_serial_equivalence(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
@@ -153,10 +160,12 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(any(item.rule == "source.edit_marker" for item in result.findings))
 
     async def test_failed_baseline_finding_carries_the_log_tail_when_no_other_finding_does(self):
-        """docs/reports.md: a failed build's finding carries the last lines of the TeX log.
-        When latexmk exits normally and error-level log findings fail the build, no finding
-        of the build has the tail, so build.baseline carries it; when build.failed already
-        does, build.baseline does not repeat it."""
+        """Check that a failed build's finding carries the last lines of the TeX log.
+
+        docs/reports.md promises this. When latexmk exits normally and error-level log findings
+        fail the build, no finding of the build has the tail, so ``build.baseline`` carries it;
+        when ``build.failed`` already does, ``build.baseline`` does not repeat it.
+        """
         log = "log line\n! Emergency stop."
         latexmk_failed = Finding(
             "build.failed",
@@ -242,7 +251,22 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
 
 
 class PublicationLimitTests(unittest.TestCase):
+    """Preview plans from :func:`plan_previews`: numbering, the size limit and the workspace.
+
+    Repeated images are numbered once in order; an image over the size limit or outside the
+    job's workspace is refused.
+    """
+
     def preview_report(self, *artifacts: Path) -> Report:
+        """Build a ``check`` report whose only finding is a passed grayscale preview.
+
+        Args:
+            *artifacts: The preview images the finding lists, as strings, in its
+                ``artifacts`` detail.
+
+        Returns:
+            The report.
+        """
         return Report(
             "check",
             findings=[
@@ -299,6 +323,13 @@ class PublicationLimitTests(unittest.TestCase):
 
 
 class OutputTransactionTests(unittest.TestCase):
+    """Rollback and commit of :class:`OutputTransaction` around the publication of output.
+
+    A rollback removes what it can, names what stays behind in the messages and the report, and
+    announces itself only when something was created; :func:`publish_documents` refuses an
+    unverified document before it creates a directory.
+    """
+
     def test_rollback_removes_every_directory_even_when_one_cannot_be_removed(self):
         remove = shutil.rmtree
         with tempfile.TemporaryDirectory() as directory:
@@ -385,6 +416,12 @@ class OutputTransactionTests(unittest.TestCase):
 
 
 class CliTests(unittest.TestCase):
+    """The JSON output and error exit of the command line, and :func:`validate_destination`.
+
+    JSON output carries no progress and leaves the input unchanged, an invalid configuration
+    ends with a JSON error, and an existing or contained output path is rejected with advice.
+    """
+
     def test_json_has_no_progress_and_original_input_is_unchanged(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)

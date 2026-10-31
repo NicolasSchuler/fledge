@@ -34,7 +34,16 @@ R = TypeVar("R")
 
 
 class JobCommand(StrEnum):
-    """The job an interface requests; each value is the command name in reports."""
+    """The job an interface requests; each value is the command name in reports.
+
+    Attributes:
+        INSPECT: Check sources and bibliography without running TeX.
+        CHECK: Build the PDF and check the sources and the PDF.
+        PREPARE: Create a verified submission copy of the paper.
+        BIBLIOGRAPHY: Bibliography checks, named ``bib``.
+        FORMAT: Check tex-fmt formatting without changing any file, named ``fmt``.
+        PDF: Check a PDF without its source project.
+    """
 
     INSPECT = "inspect"
     CHECK = "check"
@@ -52,6 +61,26 @@ PREVIEW_COMMANDS = frozenset({JobCommand.CHECK, JobCommand.PDF, JobCommand.PREPA
 
 @dataclass(frozen=True)
 class JobRequest:
+    """What an interface asks of one job: the command, its input, settings and destinations.
+
+    Construction raises ``PreparationError`` when the command is unknown; interfaces may
+    pass the command's string value, which construction converts.
+
+    Attributes:
+        command: The job to run.
+        source: The input the job reads: a project, or the PDF of a standalone PDF check.
+        settings: The settings of the job.
+        output: The directory a ``prepare`` job publishes to, or ``None``.
+        dry_run: Whether a ``prepare`` job only plans its changes and publishes nothing.
+        reference_pdf: A supplied PDF to compare the built or inspected PDF with, or
+            ``None``.
+        preview_output: The directory that receives page previews, or ``None``.
+        pdf_previews: The store that collects page previews, or ``None`` when no previews
+            were requested.
+        document_name: The configured name of the document when the request is one
+            document of a multi-document job, else ``None``.
+    """
+
     command: JobCommand
     source: Path
     settings: Settings
@@ -79,6 +108,11 @@ class DocumentBackends:
     a document, inspecting a PDF and comparing two PDFs. Each takes and returns what the
     function it defaults to does, so a controlled replacement needs no patching of module
     globals. ``run_job`` accepts one and hands it to every stage and document of the job.
+
+    Attributes:
+        build: Builds a document; defaults to :func:`build_project`.
+        inspect_pdf: Inspects a built PDF; defaults to :func:`inspect_pdf`.
+        compare_pdfs: Compares two PDFs; defaults to :func:`compare_pdfs`.
     """
 
     build: Callable[..., Awaitable[BuildResult]] = build_project
@@ -88,12 +122,20 @@ class DocumentBackends:
 
 @dataclass(frozen=True, slots=True)
 class JobContext:
-    """What every stage of one job reads; ``settings`` are the effective settings.
+    """What every stage of one job reads.
 
-    ``sources`` holds the source analysis of each project root the job's checks read, so
-    that checks of the same sources share one graph. A document of a multi-document job
-    has its own context and so its own analyses. ``backends`` are the operations that
-    drive real tools.
+    A document of a multi-document job has its own context and so its own analyses.
+
+    Attributes:
+        request: The request the job runs.
+        settings: The effective settings.
+        work: The job's private working directory.
+        runner: The restricted tool runner of the job.
+        budget: The resource budget that leases are taken from.
+        emit: Reports a progress message.
+        sources: The source analysis of each project root the job's checks read, so that
+            checks of the same sources share one graph.
+        backends: The operations that drive real tools.
     """
 
     request: JobRequest
@@ -108,7 +150,17 @@ class JobContext:
     async def thread_operation(
         self, name: str, function: Callable[P, R], /, *args: P.args, **kwargs: P.kwargs
     ) -> R:
-        """Run a blocking reader or writer in a worker thread under a default lease."""
+        """Run a blocking reader or writer in a worker thread under a default lease.
+
+        Args:
+            name: The name of the lease, which also names the operation.
+            function: The blocking function to run.
+            *args: The positional arguments of ``function``.
+            **kwargs: The keyword arguments of ``function``.
+
+        Returns:
+            What ``function`` returns.
+        """
         async with self.budget.lease(name):
             return await run_in_thread(function, *args, **kwargs)
 
@@ -121,13 +173,30 @@ class JobContext:
         return self.request.pdf_previews is not None
 
     def previews(self, stage: str) -> PdfPreviewCollector | None:
-        """A preview collector for one PDF comparison when previews were requested."""
+        """Open a preview collector for one PDF comparison when previews were requested.
+
+        Args:
+            stage: The comparison the previews belong to.
+
+        Returns:
+            The collector, labelled with the document name, or ``None`` when no previews
+            were requested.
+        """
         store = self.request.pdf_previews
         return None if store is None else store.for_comparison(stage, self.request.document_name)
 
 
 def pdf_check_settings(settings: Settings) -> PdfCheckSettings:
-    """The options of the configured PDF checks."""
+    """Gather the options of the configured PDF checks from the settings.
+
+    Identity terms reach the PDF privacy check only while ``PRV002`` is enabled.
+
+    Args:
+        settings: The effective settings.
+
+    Returns:
+        The options of the PDF check pipeline.
+    """
     privacy = settings.submission_checks
     if not settings.checks.enabled("PRV002"):
         # Source and rendered-PDF identity policies share terms but have separate codes.
@@ -151,7 +220,18 @@ async def import_input(
     operation: str = "import project",
     directory: str = "import",
 ) -> ImportedProject:
-    """Import a separate snapshot of the input; its findings and changes enter the report."""
+    """Import a separate snapshot of the input; its findings and changes enter the report.
+
+    Args:
+        context: The job context, whose request names the input and whose settings bound
+            the import.
+        report: The report that receives the import's findings and changes.
+        operation: The name of the lease the import runs under.
+        directory: The folder under the job's working directory that receives the snapshot.
+
+    Returns:
+        The imported project.
+    """
     imported = await context.thread_operation(
         operation,
         import_project,

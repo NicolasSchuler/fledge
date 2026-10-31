@@ -55,7 +55,15 @@ _EDIT_COMMANDS = {
 
 @dataclass
 class SourceAnalysis:
-    """What source inspection found for one project: roots, main file, findings, reads."""
+    """What source inspection found for one project: roots, main file, findings, reads.
+
+    Attributes:
+        roots: The literal document roots.
+        main: The selected main file, if any.
+        findings: The findings of the graph and of lint.
+        dependencies: The files the selected document reads.
+        complete: Whether the graph of the selected document is complete.
+    """
 
     roots: list[str]
     main: str | None
@@ -70,6 +78,9 @@ def discover_roots(root: Path) -> list[str]:
 
     Full analysis reports skipped-source diagnostics. This preflight performs no
     dependency lookup and never chooses between multiple plausible entry points.
+
+    Returns:
+        The project-relative paths of the roots.
     """
     roots: list[str] = []
     for name, path in project_files(root).items():
@@ -88,7 +99,11 @@ def discover_roots(root: Path) -> list[str]:
 
 
 def _manuscript_sources(graph: SourceGraph) -> Iterator[tuple[str, ParsedSource]]:
-    """The sources lint reads: authored manuscript text, from the visited files if a main is set."""
+    """Yield the sources lint reads: authored manuscript text, visited from a main if one is set.
+
+    Yields:
+        The project path and the parsed source of each file.
+    """
     for name, source in graph.sources.items():
         if graph.main and name not in graph.visited:
             continue
@@ -98,7 +113,15 @@ def _manuscript_sources(graph: SourceGraph) -> Iterator[tuple[str, ParsedSource]
 
 
 def _edit_findings(name: str, source: ParsedSource) -> list[Finding]:
-    """Editing markers in the active text and commands that print editing markup."""
+    """Report editing markers in the active text and commands that print editing markup.
+
+    Args:
+        name: The project path of the source.
+        source: The parsed source.
+
+    Returns:
+        One heuristic finding per marker and per editing command.
+    """
     findings = [
         Finding(
             "source.edit_marker",
@@ -124,7 +147,7 @@ def _edit_findings(name: str, source: ParsedSource) -> list[Finding]:
 
 
 def _defined_labels(source: ParsedSource) -> list[tuple[str, int]]:
-    """The literal labels a source defines, with their lines."""
+    """List the literal labels a source defines, with their lines."""
     labels = []
     for command in source.commands:
         if command.name == "label" and command.arguments:
@@ -135,7 +158,7 @@ def _defined_labels(source: ParsedSource) -> list[tuple[str, int]]:
 
 
 def _referenced_labels(source: ParsedSource) -> list[tuple[str, int]]:
-    """The literal labels a source refers to, with their lines."""
+    """List the literal labels a source refers to, with their lines."""
     references = []
     for command in source.commands:
         if command.name in REFERENCE_COMMANDS and command.arguments:
@@ -150,6 +173,14 @@ def _referenced_labels(source: ParsedSource) -> list[tuple[str, int]]:
 
 
 def _duplicate_label_findings(labels: dict[str, list[tuple[str, int]]]) -> list[Finding]:
+    """Report every definition of a label that is defined more than once.
+
+    Args:
+        labels: The path and line of each definition, by label.
+
+    Returns:
+        One finding per definition of a repeated label, listing all its locations.
+    """
     return [
         Finding(
             "source.duplicate_label",
@@ -171,7 +202,7 @@ def _duplicate_label_findings(labels: dict[str, list[tuple[str, int]]]) -> list[
 
 
 def lint_sources(graph: SourceGraph) -> list[Finding]:
-    """Heuristic manuscript findings: editing markers, duplicate labels, unresolved references.
+    """Find heuristic manuscript issues: editing markers, duplicate labels, unresolved references.
 
     With a selected main file, only sources visited from it are checked.
     """
@@ -205,9 +236,19 @@ def analyze_sources(
 ) -> SourceAnalysis:
     """Inspect a selected root and report literal dependencies without editing files.
 
-    ``analysed`` shares the source analysis of the same root and main file with other
-    checks; without one the graph is built here. The result holds copies of the graph's
-    roots and dependencies, so a shared graph stays unchanged by whoever edits them.
+    The result holds copies of the graph's roots and dependencies, so a shared graph
+    stays unchanged by whoever edits them. Uncertainties in files outside the selected
+    document's graph are left out.
+
+    Args:
+        root: The project folder.
+        main: The selected main file, if any.
+        analysed: Shares the source analysis of the same root and main file with other
+            checks; without one the graph is built here.
+
+    Returns:
+        The analysis; it is complete when the main file was visited, no uncertainty
+        within its graph remains and no finding is an error.
     """
     graph = reuse_or_analyse(root, main, analysed).graph
     # Every source file is read to discover roots, but a selected document is not
@@ -237,6 +278,14 @@ def analyze_selected_sources(root: Path, main: str) -> SourceAnalysis:
 
     Dependencies and completeness describe the supported literal subset. Runtime
     input evidence and isolated rebuild verification remain necessary for packaging.
+
+    Args:
+        root: The project folder.
+        main: The explicit main file.
+
+    Returns:
+        The analysis; it is complete when the main file was visited, the graph has no
+        uncertainty and no finding is an error.
     """
     graph = SourceGraph.build(root, main, scope="selected")
     findings = [*graph.findings, *lint_sources(graph)]

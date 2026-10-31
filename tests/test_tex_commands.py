@@ -1,3 +1,5 @@
+"""The shared TeX command tables: source suffixes, math markers, definitions and citations."""
+
 from __future__ import annotations
 
 import unittest
@@ -20,6 +22,8 @@ from latexprep.tex_commands import (
 
 
 class SuffixTests(unittest.TestCase):
+    """The suffix sets of root files, manuscript text and TeX sources."""
+
     def test_each_suffix_set_extends_the_one_before(self) -> None:
         self.assertEqual(ROOT_SUFFIXES, {".tex", ".ltx", ".latex"})
         self.assertLess(ROOT_SUFFIXES, MANUSCRIPT_SUFFIXES)
@@ -36,6 +40,8 @@ class SuffixTests(unittest.TestCase):
 
 
 class MathTests(unittest.TestCase):
+    """The patterns of math delimiters and math markers."""
+
     def test_delimiters_are_unescaped_dollars_and_the_four_control_symbols(self) -> None:
         for text in ("a $b", r"\(", r"\)", r"\[", r"\]"):
             with self.subTest(text=text):
@@ -61,6 +67,8 @@ class MathTests(unittest.TestCase):
 
 
 class DefinitionTests(unittest.TestCase):
+    """The tables of definition commands: primitives, command definitions and their union."""
+
     def test_primitive_and_command_definitions_are_disjoint_parts_of_the_macro_definitions(
         self,
     ) -> None:
@@ -88,6 +96,8 @@ class DefinitionTests(unittest.TestCase):
 
 
 class CitationTests(unittest.TestCase):
+    """The tables of citation commands and their capitalised forms."""
+
     def test_nocite_adds_a_key_without_printing_a_citation(self) -> None:
         self.assertNotIn("nocite", PRINTED_CITATION_COMMANDS)
         self.assertEqual(CITATION_COMMANDS, PRINTED_CITATION_COMMANDS | {"nocite"})

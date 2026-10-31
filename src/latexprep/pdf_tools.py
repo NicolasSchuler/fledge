@@ -66,12 +66,12 @@ _DOCUMENT_NAME = "document"
 
 
 def pdf_tool_version_argv(tool: str) -> list[str]:
-    """The command that prints the version of one of the ``PDF_TOOLS``."""
+    """Return the command that prints the version of one of the ``PDF_TOOLS``."""
     return [tool, _VERSION_ARGUMENTS.get(tool, "-v")]
 
 
 def pdf_input(name: str) -> str:
-    """The argument a session replaces with the read-only path of a frozen input."""
+    """Return the argument a session replaces with the read-only path of a frozen input."""
     return f"@{name}@"
 
 
@@ -83,7 +83,7 @@ DOCUMENT = pdf_input(_DOCUMENT_NAME)
 
 
 def pdfinfo_argv(document: str = DOCUMENT) -> list[str]:
-    """Document properties, with ISO 8601 dates and UTF-8 text.
+    """Build the ``pdfinfo`` command for document properties, with ISO 8601 dates and UTF-8 text.
 
     Every PDF check shares this form. The parsers split each line at its first colon,
     which an ISO date does not move, and Poppler writes UTF-8 whatever the locale.
@@ -92,20 +92,25 @@ def pdfinfo_argv(document: str = DOCUMENT) -> list[str]:
 
 
 def page_boxes_argv(pages: int, document: str = DOCUMENT) -> list[str]:
+    """Build the ``pdfinfo`` command for the page boxes of pages 1 to ``pages``."""
     return ["pdfinfo", "-box", "-f", "1", "-l", str(pages), document]
 
 
 def layout_text_argv(document: str = DOCUMENT) -> list[str]:
+    """Build the ``pdftotext`` command that prints the UTF-8 text in its page layout."""
     return ["pdftotext", "-enc", "UTF-8", "-layout", document, "-"]
 
 
 def font_inventory_argv(document: str = DOCUMENT) -> list[str]:
+    """Build the ``pdffonts`` command that lists the fonts of the document."""
     return ["pdffonts", document]
 
 
 def text_geometry_argv(document: str = DOCUMENT) -> list[str]:
-    """Poppler XML text boxes: ``-i`` excludes image extraction, ``-nomerge`` keeps
-    smaller text boxes apart."""
+    """Build the ``pdftohtml`` command that prints Poppler's XML text boxes.
+
+    ``-i`` excludes image extraction, and ``-nomerge`` keeps smaller text boxes apart.
+    """
     return [
         "pdftohtml",
         "-xml",
@@ -122,18 +127,32 @@ def text_geometry_argv(document: str = DOCUMENT) -> list[str]:
 
 
 def attachment_list_argv(document: str = DOCUMENT) -> list[str]:
+    """Build the ``pdfdetach`` command that lists the embedded files."""
     return ["pdfdetach", "-list", document]
 
 
 def image_list_argv(document: str = DOCUMENT) -> list[str]:
+    """Build the ``pdfimages`` command that lists the images."""
     return ["pdfimages", "-list", document]
 
 
 def render_page_argv(
     page: int, dpi: int, raster: Literal["gray", "rgb", "png"], document: str = DOCUMENT
 ) -> list[str]:
-    """Render one page as a single file named ``raster_filename(raster)`` in the working
-    directory: 8-bit PGM (gray), PPM (rgb) or PNG."""
+    """Build the ``pdftoppm`` command that renders one page.
+
+    The page becomes a single file named ``raster_filename(raster)`` in the working
+    directory: 8-bit PGM (gray), PPM (rgb) or PNG.
+
+    Args:
+        page: The page to render, from 1.
+        dpi: The resolution in dots per inch.
+        raster: The raster format.
+        document: The input argument.
+
+    Returns:
+        The command.
+    """
     options, _ = _RASTER_FORMATS[raster]
     return [
         "pdftoppm",
@@ -151,12 +170,12 @@ def render_page_argv(
 
 
 def raster_filename(raster: Literal["gray", "rgb", "png"]) -> str:
-    """The file ``render_page_argv`` writes in a command's working directory."""
+    """Return the file name ``render_page_argv`` writes in a command's working directory."""
     return _RASTER_FORMATS[raster][1]
 
 
 def qpdf_objects_argv() -> list[str]:
-    """qpdf JSON v2 object and page data without stream contents."""
+    """Build the ``qpdf`` command for JSON v2 object and page data without stream contents."""
     return [
         "qpdf",
         "--json=2",
@@ -168,10 +187,14 @@ def qpdf_objects_argv() -> list[str]:
 
 
 def qpdf_decoded_objects_argv(references: Iterable[str]) -> list[str]:
-    """qpdf JSON v2 data for the selected indirect objects, with decoded inline streams.
+    """Build the ``qpdf`` command for JSON v2 data of selected objects, with decoded streams.
 
-    ``references`` are indirect references such as ``12 0 R``; only they are decoded, so
-    image pixels and font files are never expanded.
+    Args:
+        references: Indirect references such as ``12 0 R``; only they are decoded, inline,
+            so image pixels and font files are never expanded.
+
+    Returns:
+        The command.
     """
     selectors = [
         "--json-object=" + ",".join(reference.split()[:2]) for reference in sorted(references)
@@ -188,13 +211,28 @@ def qpdf_decoded_objects_argv(references: Iterable[str]) -> list[str]:
 
 
 def mupdf_trace_argv(pages: int) -> list[str]:
+    """Build the ``mutool trace`` command for pages 1 to ``pages``."""
     return ["mutool", "trace", DOCUMENT, f"1-{pages}"]
 
 
 async def freeze_pdf_inputs(
     work: Path, documents: Mapping[str, Path], runner: CommandRunner, budget: ResourceBudget | None
 ) -> tuple[Path, dict[str, Path]]:
-    """Copy regular PDF inputs into a new workspace; return it resolved with the copies."""
+    """Copy regular PDF inputs into a new workspace; return it resolved with the copies.
+
+    Args:
+        work: The new workspace.
+        documents: The PDF inputs, by name.
+        runner: Freezes the inputs; its file size limit applies to them.
+        budget: Admits the copying, if any.
+
+    Returns:
+        The resolved workspace and the frozen copy of each input, by name.
+
+    Raises:
+        PreparationError: ``work`` exists, or an input is not a regular file, is too large
+            or has no PDF header.
+    """
     async with (
         budget.lease(f"{work.name}: freeze PDF inputs", memory_mb=DEFAULT_LEASE_MEMORY_MB)
         if budget is not None
@@ -228,6 +266,16 @@ _TOOL_ERROR_REPORT = re.compile(r"\berror(?: \(\d+\))?:", re.IGNORECASE)
 
 
 def _require_complete(result: CommandResult, tool: str) -> None:
+    """Refuse the result of a command that failed, hit a limit or reported an error.
+
+    Args:
+        result: The command's result.
+        tool: The tool's name, as the error mentions it.
+
+    Raises:
+        PreparationError: The command did not complete normally, or the tool reported
+            damaged or incomplete input.
+    """
     if (reason := result.failure_reason(tool)) is not None:
         raise PreparationError(reason)
     if _TOOL_ERROR_REPORT.search(result.stderr):
@@ -238,7 +286,12 @@ def _require_complete(result: CommandResult, tool: str) -> None:
 
 @dataclass(frozen=True, slots=True)
 class _Measured:
-    """A completed measurement and the version of the tool that produced it."""
+    """A completed measurement and the version of the tool that produced it.
+
+    Attributes:
+        result: The command's result.
+        version: The tool's version.
+    """
 
     result: CommandResult
     version: ToolVersion
@@ -251,12 +304,17 @@ class MeasurementMemo:
     A memo is retained for as long as a session (or the views of a shared session) can
     ask for its results. It holds the stdout and stderr of each distinct argument list,
     each bounded by the runner's output limit, and ``clear`` releases all of it.
+
+    Attributes:
+        results: The completed measurements, by argument list.
+        locks: One lock per argument list.
     """
 
     results: dict[tuple[str, ...], _Measured] = field(default_factory=dict)
     locks: dict[tuple[str, ...], asyncio.Lock] = field(default_factory=dict)
 
     def clear(self) -> None:
+        """Release every remembered measurement and lock."""
         self.results.clear()
         self.locks.clear()
 
@@ -267,6 +325,14 @@ class PdfToolSession:
 
     An argument equal to ``pdf_input(name)`` is replaced by the frozen copy of that
     input, which is the only read-only file the command may access.
+
+    Attributes:
+        work: The directory below which each command gets its own new directory.
+        inputs: The frozen copy of each input, by name.
+        runner: Runs the tools.
+        budget: Admits the commands, if any.
+        versions: The version of each tool this session ran or relied on.
+        memo: The remembered measurements.
     """
 
     work: Path
@@ -288,15 +354,35 @@ class PdfToolSession:
         runner: CommandRunner,
         budget: ResourceBudget | None,
     ) -> Self:
+        """Freeze the documents into the new ``work`` and open a session over them.
+
+        Args:
+            work: The new workspace.
+            documents: The PDF inputs, by name.
+            runner: Runs the tools.
+            budget: Admits the commands, if any.
+
+        Returns:
+            The session.
+
+        Raises:
+            PreparationError: An input cannot be frozen (see :func:`freeze_pdf_inputs`).
+        """
         work, inputs = await freeze_pdf_inputs(work, documents, runner, budget)
         return cls(work, inputs, runner, budget)
 
     def view(self, work: Path) -> PdfToolSession:
-        """The same frozen inputs and remembered measurements, with their own directory.
+        """Open a view with the same frozen inputs and remembered measurements.
 
         Commands write below ``work`` and ``versions`` lists only the tools this view ran
         or relied on, so a check group reports its own tools however many groups share
         the measurements. ``work`` must not exist yet; a command creates it.
+
+        Returns:
+            The view.
+
+        Raises:
+            PreparationError: ``work`` already exists.
         """
         if work.exists():
             raise PreparationError("PDF checks require a new, separate workspace")
@@ -309,6 +395,16 @@ class PdfToolSession:
         memory_mb: int = DEFAULT_LEASE_MEMORY_MB,
         kind: Literal["render"] | None = None,
     ) -> AbstractAsyncContextManager[object]:
+        """Reserve budget for one operation of this session, if there is a budget.
+
+        Args:
+            label: Names the operation, after the session's directory.
+            memory_mb: The memory to reserve in MiB.
+            kind: ``render`` for a render, which counts against its class limit.
+
+        Returns:
+            The lease, or a context that reserves nothing.
+        """
         if self.budget is None:
             return nullcontext()
         return self.budget.lease(f"{self.work.name}: {label}", memory_mb=memory_mb, kind=kind)
@@ -319,6 +415,19 @@ class PdfToolSession:
         """Run one tool; the caller already holds a reservation that covers it.
 
         Each probe and command gets its own writable tool-state directory.
+
+        Args:
+            name: The command's directory below ``work``.
+            argv: The command; an argument ``pdf_input(name)`` becomes the frozen copy of
+                that input.
+            memory_mb: A memory limit for the command in MiB, if any.
+
+        Returns:
+            What the command printed and how it ended.
+
+        Raises:
+            PreparationError: The tool gave no usable version, or the command did not
+                complete normally or reported damaged input.
         """
         arguments = {pdf_input(key): path for key, path in self.inputs.items()}
         inputs = tuple(dict.fromkeys(arguments[arg] for arg in argv if arg in arguments))
@@ -342,7 +451,10 @@ class PdfToolSession:
         return result
 
     async def run(self, name: str, argv: Sequence[str]) -> CommandResult:
-        """Run one tool under its own small reservation and return its output."""
+        """Run one tool under its own small reservation and return its output.
+
+        The arguments and exceptions are those of :meth:`run_without_lease`.
+        """
         async with self.lease(f"PDF {name}"):
             return await self.run_without_lease(name, argv)
 
@@ -366,9 +478,20 @@ class PdfToolSession:
         deterministic, read-only commands belong here; renders and anything that writes
         use ``run`` or ``render_page``.
 
-        ``in_thread`` runs ``parse`` in a worker thread, still inside the lease: parsing
-        that walks a large document then neither blocks the event loop nor ignores a
-        cancellation, because ``cancellation_point`` reaches it there.
+        Args:
+            name: The measurement's name, also its command directory.
+            argv: The read-only command.
+            parse: Turns the command's result into the measurement.
+            in_thread: Runs ``parse`` in a worker thread, still inside the lease: parsing
+                that walks a large document then neither blocks the event loop nor ignores
+                a cancellation, because ``cancellation_point`` reaches it there.
+
+        Returns:
+            What ``parse`` returns.
+
+        Raises:
+            PreparationError: The command did not complete normally, reported damaged
+                input or printed more than the output limit.
         """
         key = tuple(argv)
         memo = self.memo
@@ -394,7 +517,24 @@ class PdfToolSession:
         *,
         raster: Literal["gray", "rgb"],
     ) -> _T:
-        """Render one page of the document and parse the raster file in a worker thread."""
+        """Render one page of the document and parse the raster file in a worker thread.
+
+        The raster file is removed afterwards, partial output included.
+
+        Args:
+            name: The render's name, also its command directory.
+            page: The page to render, from 1.
+            dpi: The resolution in dots per inch.
+            parse: Reads the raster file.
+            raster: The raster format.
+
+        Returns:
+            What ``parse`` returns.
+
+        Raises:
+            PreparationError: The render did not complete normally, reported damaged
+                input or printed more than the output limit.
+        """
         argv = render_page_argv(page, dpi, raster)
         path = self.work / name / "command" / raster_filename(raster)
         async with self.lease(name, memory_mb=MEASUREMENT_RENDER_MEMORY_MB, kind="render"):
@@ -409,9 +549,15 @@ class PdfToolSession:
                 path.unlink(missing_ok=True)
 
     def tool_versions(self) -> dict[str, object]:
+        """Return the version of each tool this session ran or relied on, as report data."""
         return {name: self.versions[name].to_report() for name in sorted(self.versions)}
 
     def _require_bounded_output(self, result: CommandResult) -> None:
+        """Refuse a result whose standard output exceeds the runner's output limit.
+
+        Raises:
+            PreparationError: The output exceeds the limit.
+        """
         if len(result.stdout.encode("utf-8")) > self.runner.limits.max_output_bytes:
             raise PreparationError("PDF measurement exceeds the diagnostic output limit")
 
@@ -424,11 +570,25 @@ async def open_pdf_session(
     *,
     default_to_runner_budget: bool = True,
 ) -> PdfToolSession:
-    """One frozen document.
+    """Open a session over one frozen document.
 
     Configured measurements default to the runner's budget when none is supplied, so
     their commands stay admitted and bounded. The basic inspection passes
     ``default_to_runner_budget=False`` and runs under exactly the supplied budget.
+
+    Args:
+        pdf: The document.
+        work: The new workspace.
+        runner: Runs the tools.
+        budget: Admits the commands, if any.
+        default_to_runner_budget: Whether to use the runner's budget when ``budget`` is
+            ``None``.
+
+    Returns:
+        The session.
+
+    Raises:
+        PreparationError: The document cannot be frozen.
     """
     if default_to_runner_budget:
         budget = budget or runner.budget
@@ -453,6 +613,14 @@ class SharedPdfSession:
     of each distinct read-only command, each capped by the runner's output limit (parsed
     results are not kept). A pipeline run releases the session when its groups are done or
     cancelled (use it as a context manager); renders are never remembered.
+
+    Args:
+        work: The new workspace that the first view freezes the PDF into.
+        runner: Runs the tools.
+        budget: Admits the commands, if any.
+
+    Attributes:
+        pdf: The shared PDF.
     """
 
     def __init__(
@@ -474,15 +642,40 @@ class SharedPdfSession:
         self.release()
 
     async def view(self, pdf: Path, work: Path) -> PdfToolSession:
-        """A session over the shared frozen ``pdf`` that writes below the new ``work``.
+        """Return a session over the shared frozen ``pdf`` that writes below the new ``work``.
 
-        Raises the failure to freeze the PDF (``PreparationError`` or ``OSError``).
+        Args:
+            pdf: The PDF the caller expects; it must be the shared one.
+            work: The new working directory of the view.
+
+        Returns:
+            The view.
+
+        Raises:
+            PreparationError: The PDF could not be frozen, now or for an earlier view, or
+                ``work`` already exists.
+            OSError: The PDF could not be frozen.
+            ValueError: ``pdf`` is not the shared PDF.
+            RuntimeError: The session was released.
         """
         if pdf != self.pdf:
             raise ValueError("The shared PDF session belongs to a different PDF")
         return (await self._open()).view(work)
 
     async def _open(self) -> PdfToolSession:
+        """Freeze the PDF on first use and return the session that the views share.
+
+        A failure to freeze is remembered; a cancelled opening removes the workspace it
+        created and is not remembered.
+
+        Returns:
+            The shared session.
+
+        Raises:
+            PreparationError: The PDF could not be frozen, now or earlier.
+            OSError: The PDF could not be frozen.
+            RuntimeError: The session was released.
+        """
         async with self._lock:
             if self._released:
                 raise RuntimeError("The shared PDF session was released")
@@ -514,9 +707,23 @@ class SharedPdfSession:
 async def gather_measurements(
     operations: Sequence[Callable[[], Awaitable[_T]]], budget: ResourceBudget | None
 ) -> list[_T | PreparationError]:
-    """Keep completed evidence when a sibling fails, and drain on cancellation."""
+    """Keep completed evidence when a sibling fails, and drain on cancellation.
+
+    The operations run concurrently within the budget's CPU slots, one at a time without
+    a budget. A ``PreparationError`` or ``OSError`` takes the place of its operation's
+    result; any other exception cancels the other operations and propagates.
+
+    Args:
+        operations: The measurements to run.
+        budget: Supplies the CPU slots, if any.
+
+    Returns:
+        Each operation's result, or its ``PreparationError`` or ``OSError`` converted to a
+        plain ``PreparationError``, in the given order.
+    """
 
     async def measure(operation: Callable[[], Awaitable[_T]]) -> _T | PreparationError:
+        """Run one operation; return a ``PreparationError`` or ``OSError`` as a plain one."""
         try:
             return await operation()
         except (PreparationError, OSError) as error:
@@ -531,7 +738,13 @@ async def gather_measurements(
 
 @dataclass(frozen=True, slots=True)
 class PdfPreflight:
-    """A frozen document whose pdfinfo properties and page count are established."""
+    """A frozen document whose pdfinfo properties and page count are established.
+
+    Attributes:
+        session: The session over the frozen document.
+        fields: The pdfinfo properties.
+        pages: The page count.
+    """
 
     session: PdfToolSession
     fields: dict[str, str]
@@ -548,10 +761,26 @@ class PdfPreflight:
         default_to_runner_budget: bool = True,
         session: SharedPdfSession | None = None,
     ) -> Self:
-        """Freeze ``pdf`` and read its properties; raises when either cannot be established.
+        """Freeze ``pdf`` and read its properties.
 
         With a shared ``session`` the frozen PDF, runner and budget are the shared ones and
         the properties may already be remembered; ``work`` is this caller's own directory.
+
+        Args:
+            pdf: The document.
+            work: The new workspace of this caller.
+            runner: Runs the tools.
+            budget: Admits the commands, if any.
+            default_to_runner_budget: As for :func:`open_pdf_session`.
+            session: A shared session for ``pdf``, if any.
+
+        Returns:
+            The preflighted document.
+
+        Raises:
+            PreparationError: The PDF cannot be frozen, or its properties or page count
+                cannot be established.
+            OSError: The PDF cannot be frozen.
         """
         if session is None:
             opened = await open_pdf_session(
@@ -576,11 +805,24 @@ async def preflight_pdf(
     suggestion: str = EVIDENCE_LIMITATION_SUGGESTION,
     session: SharedPdfSession | None = None,
 ) -> PdfPreflight | list[Finding]:
-    """The preflighted document, or each rule of ``rules`` as unavailable evidence.
+    """Preflight the document, or report each rule of ``rules`` as unavailable evidence.
 
     Without a readable document, page count and unambiguous properties no configured
-    measurement has anything to measure, so none of them may pass. A failure arrives as
-    the list of unavailable findings the caller returns as its result.
+    measurement has anything to measure, so none of them may pass.
+
+    Args:
+        pdf: The document.
+        work: The new workspace.
+        runner: Runs the tools.
+        budget: Admits the commands, if any.
+        rules: The configured rules that need the document.
+        default_to_runner_budget: As for :func:`open_pdf_session`.
+        suggestion: The suggestion of each unavailable finding.
+        session: A shared session for ``pdf``, if any.
+
+    Returns:
+        The preflighted document, or on failure the list of unavailable findings the
+        caller returns as its result.
     """
     try:
         return await PdfPreflight.open(
@@ -602,6 +844,13 @@ class ToolMeasurement:
     Every check family describes its commands this way and runs them with ``run`` (or
     ``run_tool_measurements``), so a command that fails, is cut off or prints something
     unreadable leaves each of its rules inconclusive in the same way.
+
+    Attributes:
+        name: The measurement's name, also its command directory.
+        argv: The read-only command.
+        rules: The rules the command's output feeds.
+        evaluate: Turns the command's result into findings.
+        suggestion: The suggestion of each unavailable finding.
     """
 
     name: str
@@ -611,8 +860,12 @@ class ToolMeasurement:
     suggestion: str = EVIDENCE_LIMITATION_SUGGESTION
 
     async def run(self, session: PdfToolSession) -> list[Finding]:
-        """The findings of ``evaluate`` over the command's output, or one unavailable
-        finding for each of ``rules``. Evaluation runs in a worker thread."""
+        """Measure through ``session`` and evaluate the output in a worker thread.
+
+        Returns:
+            The findings of ``evaluate`` over the command's output, or one unavailable
+            finding for each of ``rules``.
+        """
         return await findings_or_unavailable(
             self.rules,
             partial(session.measure, self.name, self.argv, self.evaluate, in_thread=True),
@@ -623,7 +876,15 @@ class ToolMeasurement:
 async def run_tool_measurements(
     session: PdfToolSession, measurements: Sequence[ToolMeasurement]
 ) -> list[list[Finding]]:
-    """Run measurements concurrently, within the session's CPU slots, in the given order."""
+    """Run measurements concurrently, within the session's CPU slots, in the given order.
+
+    Args:
+        session: The session that runs the commands.
+        measurements: The measurements to run.
+
+    Returns:
+        The findings of each measurement, in the given order.
+    """
     slots = session.budget.cpu_slots if session.budget is not None else 1
     return await bounded_map(
         measurements, lambda measurement: measurement.run(session), limit=slots

@@ -17,7 +17,10 @@ from tests.support import MINIMAL_DOCUMENT, controlled_backends, fake_build, wri
 
 
 class PackageOptionTests(unittest.IsolatedAsyncioTestCase):
+    """Included files ship whatever checks are selected, follow flat names, and are exact paths."""
+
     async def asyncSetUp(self) -> None:
+        """Create a project with ``main.tex``, a data file and an unrelated note."""
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.base = Path(temporary.name)
@@ -31,6 +34,16 @@ class PackageOptionTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def prepare(self, settings: Settings) -> zipfile.ZipFile:
+        """Prepare the project with a fake build and open the published ZIP.
+
+        The outcome must publish, and the archive is closed when the test ends.
+
+        Args:
+            settings: The settings of the job.
+
+        Returns:
+            The published ``submission.zip``.
+        """
         backends = controlled_backends(build=fake_build)
         report = await run_job(
             JobRequest("prepare", self.source, settings, self.base / "out"), backends=backends

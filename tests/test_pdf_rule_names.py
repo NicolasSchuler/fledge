@@ -54,6 +54,8 @@ RULE_NAMING_MODULES = (
 
 
 class RuleNameTests(unittest.TestCase):
+    """The ``PdfRule`` names: catalogued or operational, well formed, never string literals."""
+
     def test_every_name_is_catalogued_or_declared_operational(self) -> None:
         undeclared = [
             rule.value
@@ -84,16 +86,27 @@ class RuleNameTests(unittest.TestCase):
 
 
 class EmittedRuleTests(AsyncProjectTestCase):
+    """The rules that the PDF check families emit on controlled tool output are known."""
+
     async def asyncSetUp(self) -> None:
+        """Write a placeholder ``document.pdf`` into the project root."""
         self.pdf = self.root / "document.pdf"
         self.pdf.write_bytes(b"%PDF-fixture")
         self.counter = 0
 
     def work(self) -> Path:
+        """Return a new, not yet created work directory path below the project root."""
         self.counter += 1
         return self.root / f"work-{self.counter}"
 
     def assert_names_known(self, findings: list[Finding]) -> set[str]:
+        """Assert that every ``pdf.*`` rule of ``findings`` is a known, declared rule.
+
+        A known rule is a member of ``PdfRule`` that is catalogued or declared operational.
+
+        Returns:
+            The ``pdf.*`` rules of ``findings``.
+        """
         rules = {finding.rule for finding in findings if finding.rule.startswith("pdf.")}
         known = {rule.value for rule in PdfRule}
         self.assertEqual(sorted(rules - known), [])

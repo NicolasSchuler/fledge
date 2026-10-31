@@ -48,7 +48,17 @@ _PAINT_OPERATORS: Final = frozenset("S s f F f* B B* b b*".split())
 
 
 def _program_tokens(data: bytes) -> list[str]:
-    """Tokenize a conservative stream subset without treating string payloads as operators."""
+    """Tokenize a conservative stream subset without treating string payloads as operators.
+
+    Tokenizing stops after a ``BI`` operator, whose binary payload is not parsed.
+
+    Returns:
+        The tokens, ending with ``BI`` if the program has one.
+
+    Raises:
+        PreparationError: The program holds a string, a dictionary or an unsupported
+            token, or exceeds the token limit.
+    """
     text = data.decode("latin1")
     tokens: list[str] = []
     index = 0
@@ -80,13 +90,20 @@ def _program_tokens(data: bytes) -> list[str]:
 
 
 class GlyphPaint(NamedTuple):
-    """What a glyph program paints, and whether part of it could not be classified."""
+    """What a glyph program paints, and whether part of it could not be classified.
+
+    Attributes:
+        raster: Whether the program paints an image.
+        vector: Whether the program paints a vector shape.
+        incomplete: Whether part of the program could not be classified.
+    """
 
     raster: bool = False
     vector: bool = False
     incomplete: bool = False
 
     def merged(self, other: GlyphPaint) -> GlyphPaint:
+        """Combine two classifications; each flag is set when either one sets it."""
         return GlyphPaint(
             self.raster or other.raster,
             self.vector or other.vector,
@@ -95,6 +112,7 @@ class GlyphPaint(NamedTuple):
 
     @property
     def classification(self) -> str:
+        """The paint as ``mixed``, ``bitmap``, ``vector`` or ``empty``."""
         if self.raster and self.vector:
             return "mixed"
         return "bitmap" if self.raster else "vector" if self.vector else "empty"
@@ -105,21 +123,39 @@ _UNCLASSIFIED = GlyphPaint(incomplete=True)
 
 @dataclass(slots=True)
 class _TokenAllowance:
-    """Glyph-program tokens still permitted across one Type 3 inventory."""
+    """Glyph-program tokens still permitted across one Type 3 inventory.
+
+    Attributes:
+        remaining: The tokens still permitted.
+    """
 
     remaining: int = _MAX_TOKENS_PER_DOCUMENT
 
 
 @dataclass(frozen=True, slots=True)
 class _Document:
-    """The qpdf object graph of one inventory and the token allowance its programs share."""
+    """The qpdf object graph of one inventory and the token allowance its programs share.
+
+    Attributes:
+        objects: The qpdf object graph.
+        allowance: The token allowance the programs share.
+    """
 
     objects: QpdfObjectGraph
     allowance: _TokenAllowance
 
 
 def _program_tokens_within(document: _Document, reference: str) -> list[str] | None:
-    """Tokens of an unfiltered inline program stream, or None when it is unreadable."""
+    """Tokenize an unfiltered inline program stream within the shared token allowance.
+
+    Args:
+        document: The object graph and the token allowance, which the tokens use up.
+        reference: The program's object reference.
+
+    Returns:
+        The tokens, or ``None`` when the stream is unreadable, filtered, too large or
+        unsupported, or exhausts the allowance.
+    """
     entry = document.objects.objects.get("obj:" + reference)
     if not isinstance(entry, dict) or not isinstance(entry.get("stream"), dict):
         return None
@@ -148,6 +184,18 @@ def _glyph_program(
     resources: object,
     seen: frozenset[str] = frozenset(),
 ) -> GlyphPaint:
+    """Classify what a glyph program or Form XObject paints.
+
+    Args:
+        document: The object graph and the token allowance.
+        reference: The program's object reference.
+        resources: The resources that ``Do`` operands are looked up in.
+        seen: The programs whose classification encloses this one.
+
+    Returns:
+        The paint. A program that is not a reference, repeats, nests too deeply, finds
+        the allowance spent or cannot be read is unclassified.
+    """
     if (
         not is_object_reference(reference)
         or reference in seen
@@ -180,7 +228,18 @@ def _glyph_program(
 def _xobject_paint(
     document: _Document, name: str, resources: object, seen: frozenset[str]
 ) -> GlyphPaint:
-    """What the XObject called ``name`` (the operand of a ``Do`` operator) paints."""
+    """Classify what the XObject called ``name`` (the operand of a ``Do`` operator) paints.
+
+    Args:
+        document: The object graph and the token allowance.
+        name: The XObject's resource name.
+        resources: The resources the name is looked up in.
+        seen: The programs whose classification encloses this call.
+
+    Returns:
+        The paint: raster for an image, the classification of a Form XObject's program,
+        and unclassified for anything else.
+    """
     if not name.startswith("/"):
         return _UNCLASSIFIED
     objects = document.objects
@@ -198,6 +257,18 @@ def _xobject_paint(
 
 
 def _type3_finding(objects: QpdfObjectGraph, *, forbid_bitmap: bool) -> Finding:
+    """Inventory and classify every reachable Type 3 glyph program.
+
+    Args:
+        objects: The object graph with the decoded programs.
+        forbid_bitmap: Whether a program that paints an image is a violation.
+
+    Returns:
+        The Type 3 finding, with an inventory of at most ``MAX_SAMPLES`` programs.
+
+    Raises:
+        PreparationError: The fonts hold more than ``_MAX_GLYPH_PROGRAMS`` programs.
+    """
     fonts = [item for item in objects.reachable_dictionaries() if item.get("/Subtype") == "/Type3"]
     inventory: list[object] = []
     violations: list[object] = []
@@ -246,7 +317,18 @@ def _type3_finding(objects: QpdfObjectGraph, *, forbid_bitmap: bool) -> Finding:
 def _type3_message(
     violations: list[object], glyphs: int, fonts: int, *, uncertain: bool, forbid_bitmap: bool
 ) -> str:
-    """The outcome of the Type 3 inspection in the researcher's terms."""
+    """Describe the outcome of the Type 3 inspection in the researcher's terms.
+
+    Args:
+        violations: The programs that paint a forbidden image.
+        glyphs: The number of programs inspected.
+        fonts: The number of Type 3 fonts.
+        uncertain: Whether some programs could not be classified.
+        forbid_bitmap: Whether bitmap glyphs are forbidden.
+
+    Returns:
+        The finding's message.
+    """
     if violations:
         return (
             f"Type 3 glyph programs that paint bitmap images: {len(violations)} of {glyphs}. "
@@ -267,6 +349,20 @@ def _decoded_type3_finding(
     references: set[str],
     forbid_bitmap: bool,
 ) -> Finding:
+    """Merge the decoded programs into ``objects`` and classify them.
+
+    Args:
+        execution: The result of the qpdf command that decoded the programs.
+        objects: The object graph without stream data.
+        references: The programs and Form XObjects that were decoded.
+        forbid_bitmap: Whether a program that paints an image is a violation.
+
+    Returns:
+        The Type 3 finding.
+
+    Raises:
+        PreparationError: qpdf did not return every selected program.
+    """
     failure = "qpdf did not return every selected glyph/Form program"
     decoded = parse_qpdf_json_v2(execution.stdout, failure).objects
     for reference in references:
@@ -278,11 +374,14 @@ def _decoded_type3_finding(
 
 
 def _glyph_program_references(objects: QpdfObjectGraph) -> set[str]:
-    """References of every reachable Type 3 glyph program, then of every Form XObject.
+    """Collect the references of every reachable Type 3 glyph program, then of every Form XObject.
 
     Form programs are included for supported nested ``Do`` calls. Image pixels and
     font-file streams are never requested: decoding every PDF stream can expand a small
     image-heavy paper far beyond the diagnostic output budget.
+
+    Returns:
+        The references; empty, without any Form XObject, when there is no glyph program.
     """
     references: set[str] = set()
     for font in objects.reachable_dictionaries():
@@ -308,7 +407,20 @@ def _glyph_program_references(objects: QpdfObjectGraph) -> set[str]:
 async def inspect_type3_glyphs(
     session: PdfToolSession, pages: int, *, forbid_bitmap: bool
 ) -> Finding:
-    """Classify the painting of the document's declared Type 3 glyph programs."""
+    """Classify the painting of the document's declared Type 3 glyph programs.
+
+    Args:
+        session: The session over the frozen document.
+        pages: The number of pages.
+        forbid_bitmap: Whether a program that paints an image is a violation.
+
+    Returns:
+        The Type 3 finding.
+
+    Raises:
+        PreparationError: The object data cannot be read, or too many programs would be
+            decoded.
+    """
     objects = await session.measure(
         "glyph-objects",
         qpdf_objects_argv(),

@@ -20,11 +20,24 @@ PixelBox = tuple[int, int, int, int]
 
 
 def gray_image(width: int, height: int, values: bytes) -> RasterImage:
+    """Return a one-channel image of the given size whose pixels are ``values``."""
     return RasterImage(width, height, 1, values)
 
 
 def reference_ink(image: RasterImage, background: int, difference: int, box: PixelBox):
-    """The ink pixels of a box, as (x, y) pairs, by the per-pixel definition."""
+    """Return the ink pixels of a box, as (x, y) pairs, by the per-pixel definition.
+
+    A pixel is ink when its value differs from ``background`` by at least ``difference``.
+
+    Args:
+        image: A one-channel image.
+        background: The background value.
+        difference: The smallest difference from the background that counts as ink.
+        box: The left, top, right and bottom pixel bounds; right and bottom are exclusive.
+
+    Returns:
+        The ink pixels, row by row.
+    """
     left, top, right, bottom = box
     return [
         (x, y)
@@ -35,12 +48,34 @@ def reference_ink(image: RasterImage, background: int, difference: int, box: Pix
 
 
 def random_box(rng: random.Random, width: int, height: int) -> PixelBox:
+    """Return a random box within an image of the given size; it may be empty.
+
+    Args:
+        rng: The source of randomness.
+        width: The image width.
+        height: The image height.
+
+    Returns:
+        The left, top, right and bottom pixel bounds.
+    """
     left, right = sorted(rng.randint(0, width) for _ in range(2))
     top, bottom = sorted(rng.randint(0, height) for _ in range(2))
     return left, top, right, bottom
 
 
 def random_gray(rng: random.Random, width: int, height: int, *, sparse: bool) -> RasterImage:
+    """Return a random one-channel image of the given size.
+
+    Args:
+        rng: The source of randomness.
+        width: The image width.
+        height: The image height.
+        sparse: Whether the image is white apart from at most six random pixels, instead of
+            random throughout.
+
+    Returns:
+        The image.
+    """
     if sparse:
         # Mostly background with a few ink pixels, including whole blank rows and columns.
         data = bytearray([255]) * (width * height)
@@ -52,6 +87,8 @@ def random_gray(rng: random.Random, width: int, height: int, *, sparse: bool) ->
 
 
 class InkMaskTests(unittest.TestCase):
+    """The ink mask's counts and bounds against the per-pixel definition."""
+
     def test_counts_and_bounds_match_the_per_pixel_definition(self) -> None:
         rng = random.Random(20240601)
         for case in range(400):
@@ -100,6 +137,8 @@ class InkMaskTests(unittest.TestCase):
 
 
 class ChannelExtremaTests(unittest.TestCase):
+    """The per-channel minima and maxima of a box against a per-pixel reference."""
+
     def test_extrema_match_a_per_pixel_reference(self) -> None:
         rng = random.Random(7)
         for case in range(300):
@@ -125,8 +164,20 @@ class ChannelExtremaTests(unittest.TestCase):
 
 
 class ChangedPixelTests(unittest.TestCase):
+    """The count of changed pixels between two images against a per-pixel reference."""
+
     @staticmethod
     def reference(left: RasterImage, right: RasterImage, tolerance: int) -> int:
+        """Count the pixels in which some channel differs by more than ``tolerance``.
+
+        Args:
+            left: The first image.
+            right: The second image, with the same shape as ``left``.
+            tolerance: The largest channel difference that does not count as a change.
+
+        Returns:
+            The number of changed pixels.
+        """
         channels = left.channels
         return sum(
             any(
@@ -207,7 +258,10 @@ class ChangedPixelTests(unittest.TestCase):
 
 
 class PnmReaderTests(ProjectTestCase):
+    """Reading PGM and PPM pages within their size and dimension limits."""
+
     def write(self, name: str, data: bytes) -> Path:
+        """Write ``data`` as the file ``name`` in the project root and return its path."""
         path = self.root / name
         path.write_bytes(data)
         return path

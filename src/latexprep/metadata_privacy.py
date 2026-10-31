@@ -46,11 +46,17 @@ _ALLOWED_WHITESPACE: Final = "\r\n\t"
 
 
 class FieldTarget(NamedTuple):
-    """Where a selected field lives in the source and in the final PDF."""
+    r"""Where a selected field lives in the source and in the final PDF.
 
-    command: str | None = None  # a TeX command such as \author
-    hyperref_key: str | None = None  # a key inside \hypersetup{...}
-    pdf_property: str | None = None  # the PDF document-information property it sets
+    Attributes:
+        command: A TeX command such as ``\author``, without its backslash.
+        hyperref_key: A key inside ``\hypersetup{...}``.
+        pdf_property: The PDF document-information property the field sets.
+    """
+
+    command: str | None = None
+    hyperref_key: str | None = None
+    pdf_property: str | None = None
 
 
 FIELD_TARGETS: Final[dict[str, FieldTarget]] = {
@@ -66,12 +72,22 @@ FIELD_TARGETS: Final[dict[str, FieldTarget]] = {
 
 
 def normalize_for_matching(value: str) -> str:
-    """Compatibility-fold, casefold and collapse whitespace, for comparing text to a term."""
+    """Compatibility-fold, casefold and collapse whitespace, for comparing text to a term.
+
+    Args:
+        value: The text to normalize.
+
+    Returns:
+        The NFKC-normalized, casefolded text with runs of whitespace as single spaces.
+    """
     return " ".join(unicodedata.normalize("NFKC", value).casefold().split())
 
 
 def is_literal_metadata_text(value: str) -> bool:
-    """Whether ``value`` is plain text: no TeX specials and no control characters but line ends."""
+    """Return whether ``value`` is plain text: no TeX specials and no unsafe characters.
+
+    Line ends and tabs are the only control characters allowed.
+    """
     return not any(char in value for char in _TEX_SPECIAL_CHARACTERS) and not any(
         is_unsafe_character(char) and char not in _ALLOWED_WHITESPACE for char in value
     )
@@ -82,6 +98,15 @@ class MetadataEdit:
     """One explicit replacement of a metadata declaration in a TeX source file.
 
     The edit applies only when the declaration holds ``expected_before`` exactly.
+    Construction raises ``SettingsError`` when the path is not a safe relative TeX
+    manuscript path, the field is not supported, or either text is not bounded plain
+    literal text.
+
+    Attributes:
+        path: The project-relative path of the TeX source file.
+        field: The metadata field to replace.
+        expected_before: The exact text the declaration must hold.
+        replacement: The text that replaces it.
     """
 
     path: str
@@ -113,16 +138,17 @@ class MetadataEdit:
 
     @property
     def target(self) -> FieldTarget:
+        """Where the field lives in the source and in the final PDF."""
         return FIELD_TARGETS[self.field]
 
     @property
     def command(self) -> str | None:
-        """The TeX command that declares the field, or None for a hyperref key."""
+        """The TeX command that declares the field, or ``None`` for a hyperref key."""
         return self.target.command
 
     @property
     def hyperref_key(self) -> str | None:
-        """The ``\\hypersetup`` key that declares the field, or None for a command."""
+        r"""The ``\hypersetup`` key that declares the field, or ``None`` for a command."""
         return self.target.hyperref_key
 
     @property
@@ -139,7 +165,16 @@ class MetadataEdit:
 
 @dataclass(frozen=True)
 class MetadataPrivacyOptions:
-    """Selected source edits, and the identity terms that image metadata must not contain."""
+    """Selected source edits, and the identity terms that image metadata must not contain.
+
+    Construction raises ``SettingsError`` when the edits or terms are invalid, too many or
+    repeated (two edits of the same field in the same file count as repeated), and
+    ``PreparationError`` when edits of one PDF property select different replacements.
+
+    Attributes:
+        edits: The selected source metadata edits, at most one per file and field.
+        image_identity_terms: The identity terms that image metadata must not contain.
+    """
 
     edits: tuple[MetadataEdit, ...] = ()
     image_identity_terms: tuple[str, ...] = ()

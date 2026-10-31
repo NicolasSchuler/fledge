@@ -30,10 +30,24 @@ _FILE_SUFFIXES = frozenset(
 
 
 def _constant(node: ast.AST) -> str | None:
+    """Return the value of ``node`` if it is a string constant, otherwise ``None``."""
     return node.value if isinstance(node, ast.Constant) and isinstance(node.value, str) else None
 
 
 def _names_in(node: ast.AST, families: set[str]) -> Iterator[str]:
+    """Yield the rule names that ``node`` itself carries.
+
+    A string constant counts when it is shaped like a rule name of a known family and does
+    not end in a file suffix. The first argument of a ``Finding(...)`` call counts when it is
+    a string constant, whatever its family.
+
+    Args:
+        node: The syntax node to inspect; its children are not visited.
+        families: The known rule families, the part of a name before its dot.
+
+    Yields:
+        Each rule name found in ``node``.
+    """
     value = _constant(node)
     if value is not None and _RULE_NAME.fullmatch(value):
         family, _, tail = value.partition(".")
@@ -48,9 +62,15 @@ def _names_in(node: ast.AST, families: set[str]) -> Iterator[str]:
 
 
 def emitted_rule_names(package: Path) -> dict[str, list[str]]:
-    """The rule names the modules of ``package`` carry, each with the modules that name it.
+    """Collect the rule names the modules of ``package`` carry.
 
     The ``*_rules.py`` modules are the catalogue itself and are not scanned.
+
+    Args:
+        package: The directory of the package whose modules are scanned.
+
+    Returns:
+        Each rule name with the file names of the modules that name it.
     """
     families = {name.partition(".")[0] for name in (*BY_NAME, *OPERATIONAL_RULE_NAMES)}
     found: dict[str, list[str]] = {}
@@ -64,7 +84,15 @@ def emitted_rule_names(package: Path) -> dict[str, list[str]]:
 
 
 def undeclared(names: dict[str, list[str]]) -> dict[str, list[str]]:
-    """The names that are neither catalogued nor declared operational."""
+    """Select the names that are neither catalogued nor declared operational.
+
+    Args:
+        names: Rule names with the modules that name them, as from
+            :func:`emitted_rule_names`.
+
+    Returns:
+        The entries of ``names`` whose name is in neither place.
+    """
     return {
         name: modules
         for name, modules in names.items()
@@ -73,6 +101,8 @@ def undeclared(names: dict[str, list[str]]) -> dict[str, list[str]]:
 
 
 class EmittedRuleNameTests(unittest.TestCase):
+    """The scan of emitted rule names against the catalogue and the operational names."""
+
     def test_every_emitted_name_is_catalogued_or_declared_operational(self) -> None:
         self.assertEqual(undeclared(emitted_rule_names(PACKAGE)), {})
 

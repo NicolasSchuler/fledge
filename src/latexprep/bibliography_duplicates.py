@@ -29,11 +29,30 @@ _MAX_FUZZY_TEXT = 2_000
 
 
 def normalized_text(value: str) -> str:
+    """Normalize ``value`` for comparison.
+
+    The text is NFKC-normalized and case-folded, and its runs of letters and digits are
+    joined with single spaces, so punctuation, underscores and spacing do not count.
+
+    Args:
+        value: The text to normalize.
+
+    Returns:
+        The normalized text.
+    """
     value = unicodedata.normalize("NFKC", value).casefold()
     return " ".join(re.findall(r"[^\W_]+", value, re.UNICODE))
 
 
 class _FuzzyCandidate(NamedTuple):
+    """An entry that takes part in the title comparison.
+
+    Attributes:
+        reference: The entry and the document it is in.
+        title: The normalized literal title.
+        doi: The entry's DOI identifier, or ``None`` when it has none or not exactly one.
+    """
+
     reference: LocatedEntry
     title: str
     doi: str | None
@@ -42,7 +61,19 @@ class _FuzzyCandidate(NamedTuple):
 def _fuzzy_candidates(
     references: list[LocatedEntry], uncertainties: list[Uncertainty]
 ) -> dict[tuple[str, str], list[_FuzzyCandidate]]:
-    """Entries with literal title, author and year, grouped by normalized author and year."""
+    """Group the entries with literal title, author and year by normalized author and year.
+
+    The year falls back to the ``date`` field and is grouped by its first four digits.
+    At most ``_MAX_FUZZY_ENTRIES`` entries are read.
+
+    Args:
+        references: The entries to group.
+        uncertainties: Extended in place with each entry that lacks supported evidence
+            and an excess of entries.
+
+    Returns:
+        The candidates by normalized author and year.
+    """
     groups: dict[tuple[str, str], list[_FuzzyCandidate]] = defaultdict(list)
     for index, reference in enumerate(references):
         cancellation_point()
@@ -80,7 +111,14 @@ def _fuzzy_candidates(
 def _candidate_pairs(
     groups: dict[tuple[str, str], list[_FuzzyCandidate]],
 ) -> Iterator[tuple[_FuzzyCandidate, _FuzzyCandidate]]:
-    """Each earlier candidate with each later one of the same group."""
+    """Pair each earlier candidate with each later one of the same group.
+
+    Args:
+        groups: The candidates by normalized author and year.
+
+    Yields:
+        The earlier and the later candidate of each pair.
+    """
     for group in groups.values():
         for index, current in enumerate(group):
             for previous in group[:index]:
@@ -93,8 +131,18 @@ def find_fuzzy_duplicates(
     options: BibliographyOptions,
     results: ResultCollector,
 ) -> None:
-    """Report entries whose normalized title is close to an earlier entry's with the same
-    author and year, and summarize the search."""
+    """Report entries whose title is close to an earlier entry's, and summarize the search.
+
+    Only entries with the same normalized author and year are compared. Pairs that share
+    a DOI are left to the exact DOI check, and at most ``_MAX_FUZZY_PAIRS`` pairs are
+    compared.
+
+    Args:
+        references: The entries to compare.
+        uncertainties: The gaps that already weaken the search.
+        options: The similarity threshold.
+        results: The collector that receives the findings and the summary.
+    """
     uncertain = list(uncertainties)
     findings: list[Finding] = []
     comparisons = 0

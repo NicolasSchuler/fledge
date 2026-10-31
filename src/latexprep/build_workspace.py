@@ -21,22 +21,41 @@ from .project import import_project
 
 @dataclass(frozen=True, slots=True)
 class BuildLayout:
-    """Where one build lives: the resolved source, its new workspace and the paths inside."""
+    """Where one build lives: the resolved source, its new workspace and the paths inside.
+
+    Attributes:
+        source: The resolved source directory.
+        work: The new workspace directory.
+        project: The copy of the source inside ``work`` that latexmk reads and may write
+            into.
+        output: The folder inside ``work`` where latexmk writes the log, the recorder
+            trace and the PDF.
+        cwd: The directory of the main file inside ``project``, where latexmk runs.
+    """
 
     source: Path
     work: Path
     project: Path
     output: Path
-    # The directory of the main file inside ``project``, where latexmk runs.
     cwd: Path
 
 
 def prepare_layout(source: Path, main: str, work: Path, max_total_bytes: int) -> BuildLayout:
     """Create ``work`` as a new workspace holding a bounded copy of ``source``.
 
-    ``max_total_bytes`` caps the combined size of the copied files; see ``copy_source``.
-    Raises ``PreparationError`` when ``main`` is not in the source, when ``work`` exists
-    or lies inside the source, or when the copy exceeds a limit or meets a link.
+    Args:
+        source: The project directory to copy; it is resolved first.
+        main: The main file, relative to ``source``.
+        work: The workspace directory to create.
+        max_total_bytes: The cap on the combined size of the copied files; see
+            ``copy_source``.
+
+    Returns:
+        The layout of the new workspace.
+
+    Raises:
+        PreparationError: ``main`` is not in the source, ``work`` exists or lies inside
+            the source, or the copy exceeds a limit or meets a link.
     """
     source = source.resolve(strict=True)
     if not (source / main).is_file():
@@ -55,9 +74,13 @@ def prepare_layout(source: Path, main: str, work: Path, max_total_bytes: int) ->
 def copy_source(source: Path, destination: Path, max_total_bytes: int) -> None:
     """Import a bounded project snapshot into a disposable writable build copy.
 
-    ``max_total_bytes`` is the import budget of the copy: it caps the combined size of
-    every imported file rather than the size of any single one. Callers pass
-    ``RuntimeLimits.max_copy_bytes``, the job's import byte limit, not the per-file limit.
+    Args:
+        source: The project directory to import.
+        destination: The directory that receives the copy.
+        max_total_bytes: The import budget of the copy: it caps the combined size of
+            every imported file rather than the size of any single one. Callers pass
+            ``RuntimeLimits.max_copy_bytes``, the job's import byte limit, not the
+            per-file limit.
     """
     limits = ImportLimits(
         max_files=MAX_WORKSPACE_ENTRIES,

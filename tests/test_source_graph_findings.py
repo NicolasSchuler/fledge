@@ -28,8 +28,20 @@ SELECTION_ERRORS = frozenset(
 
 
 class SourceGraphFindingTests(ProjectTestCase):
+    """Each source-graph finding in the catalogue, produced by a small project."""
+
     def report(self, rule: str, main: str | None = "main.tex") -> Finding:
-        """The one finding of ``rule`` that the analysis of the project reports."""
+        """Return the one finding of ``rule`` that the analysis of the project reports.
+
+        The test fails unless there is exactly one such finding and it has a check code.
+
+        Args:
+            rule: The rule whose finding is expected.
+            main: The main file to analyse, or ``None`` to select the single document root.
+
+        Returns:
+            The finding.
+        """
         found = [item for item in analyze_sources(self.root, main).findings if item.rule == rule]
         self.assertEqual(len(found), 1, found)
         self.assertIsNotNone(found[0].code, rule)
@@ -115,7 +127,14 @@ class SourceGraphFindingTests(ProjectTestCase):
 
 
 class SourceGraphSelectionTests(unittest.TestCase):
+    """Check selection for the source-graph rules, whose codes start with ``TEX3``.
+
+    Only advisories about how a reference was written can be ignored; ignoring the whole family
+    keeps every gap in the graph.
+    """
+
     def graph_rules(self) -> list[Rule]:
+        """Return the catalogued source-graph rules: those whose code starts with ``TEX3``."""
         return [rule for rule in RULES if rule.code.startswith("TEX3")]
 
     def test_only_advisories_about_how_a_reference_was_written_are_selectable(self) -> None:

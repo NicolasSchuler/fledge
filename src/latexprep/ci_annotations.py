@@ -16,14 +16,35 @@ from .text_safety import escape_annotation_text
 def render_ci_annotations(
     report: Report, *, options: RenderOptions = DEFAULT_RENDER_OPTIONS
 ) -> str:
-    """GitHub Actions annotations; each untrusted finding occupies one physical line."""
+    """Render a report as GitHub Actions annotations.
+
+    The report is redacted first, and each untrusted finding occupies one physical line.
+
+    Args:
+        report: The report to render.
+        options: The render options; ``show_passed`` also shows the hidden findings.
+
+    Returns:
+        The annotation commands, one per line.
+    """
     return render_redacted_ci_annotations(redact_report(report), options=options)
 
 
 def render_redacted_ci_annotations(
     public: RedactedReport, *, options: RenderOptions = DEFAULT_RENDER_OPTIONS
 ) -> str:
-    """Annotations for a report that was already redacted."""
+    """Render a report that was already redacted as GitHub Actions annotations.
+
+    A finding under review or one that passed becomes a notice; the summaries of the
+    checks that did not run follow as notices too.
+
+    Args:
+        public: The redacted report.
+        options: The render options; ``show_passed`` also shows the hidden findings.
+
+    Returns:
+        The annotation commands, one per line.
+    """
     lines = []
     for view in finding_views(public, show_hidden=options.show_passed):
         finding = view.finding

@@ -32,7 +32,25 @@ from .workflow_options import DocumentOptions
 
 
 def stage_document(snapshot: Path, destination: Path, document: DocumentOptions) -> Path:
-    """Materialize one explicit file selection from an already validated import."""
+    """Materialize one explicit file selection from an already validated import.
+
+    A file is selected when ``document.include`` is empty or one of its patterns matches
+    the file's path relative to the document's source directory.
+
+    Args:
+        snapshot: The imported project.
+        destination: The directory to create and copy the selected files into.
+        document: The document whose source directory, include patterns and main file
+            decide the selection.
+
+    Returns:
+        ``destination``.
+
+    Raises:
+        PreparationError: The source directory is missing or outside the snapshot, a
+            selected input is a link or leads outside the source directory, an include
+            pattern matched no file, or the selection lacks the document's main file.
+    """
     source = snapshot / document.source_directory
     if not source.is_dir() or not is_contained(snapshot, source):
         raise PreparationError(f"Missing or external source_directory for document {document.name}")
@@ -74,7 +92,15 @@ def stage_document(snapshot: Path, destination: Path, document: DocumentOptions)
 
 
 def inline_bibliography_files(settings: Settings) -> set[str]:
-    """The bibliography that inlining reads, which must stay in the staged copy."""
+    """Return the bibliography that inlining reads, which must stay in the staged copy.
+
+    Args:
+        settings: The settings whose source transformations name the bibliography.
+
+    Returns:
+        The project path of the bibliography to inline, or an empty set when none is
+        selected.
+    """
     name = settings.source_transforms.inline_bibliography
     return {name} if name else set()
 
@@ -82,7 +108,21 @@ def inline_bibliography_files(settings: Settings) -> set[str]:
 def apply_contents(
     root: Path, contents: dict[str, bytes], *, originals: dict[str, bytes] | None = None
 ) -> None:
-    """Write proposed file contents after validating every target and precondition."""
+    """Write proposed file contents after validating every target and precondition.
+
+    No file is written until every target has been validated.
+
+    Args:
+        root: The directory that holds the files.
+        contents: The new bytes of each file, by path relative to ``root``.
+        originals: The bytes each file had when its edit was planned; when given, a file
+            whose bytes differ is not written.
+
+    Raises:
+        PreparationError: ``originals`` does not cover exactly the files of ``contents``, a
+            target is not a regular file inside ``root``, or a file changed after its edit
+            was planned.
+    """
     targets: list[tuple[Path, bytes]] = []
     if originals is not None and set(contents) != set(originals):
         raise PreparationError(
@@ -102,7 +142,13 @@ def apply_contents(
 
 
 class _StagedEdit(NamedTuple):
-    """One planned transformation; ``apply`` runs only when its findings do not block."""
+    """One planned transformation; ``apply`` runs only when its findings do not block.
+
+    Attributes:
+        changes: The changes the transformation proposes.
+        findings: The findings of planning the transformation.
+        apply: Writes the planned transformation into the staged copy.
+    """
 
     changes: list[Change]
     findings: list[Finding]
@@ -110,6 +156,15 @@ class _StagedEdit(NamedTuple):
 
 
 def _metadata_edit(prepared: Path, settings: Settings) -> _StagedEdit:
+    """Plan the metadata sanitization of the staged copy.
+
+    Args:
+        prepared: The staged copy.
+        settings: The settings whose metadata privacy options apply.
+
+    Returns:
+        The planned edit, which checks the original bytes before writing.
+    """
     plan = plan_metadata_sanitization(prepared, settings.metadata_privacy)
     return _StagedEdit(
         plan.changes,
@@ -119,19 +174,57 @@ def _metadata_edit(prepared: Path, settings: Settings) -> _StagedEdit:
 
 
 def _bibliography_edit(prepared: Path, main: str, settings: Settings) -> _StagedEdit:
+    """Plan the bibliography transformation of the staged copy.
+
+    Args:
+        prepared: The staged copy.
+        main: The project path of the main file.
+        settings: The settings whose bibliography transformation options apply.
+
+    Returns:
+        The planned edit.
+    """
     contents, changes, findings = plan_bibliography(prepared, main, settings.bibliography_transform)
     return _StagedEdit(changes, findings, lambda: apply_contents(prepared, contents))
 
 
 def _doi_edit(prepared: Path, main: str) -> _StagedEdit:
+    """Plan the DOI normalization of the staged copy's bibliography.
+
+    Args:
+        prepared: The staged copy.
+        main: The project path of the main file.
+
+    Returns:
+        The planned edit.
+    """
     contents, changes, findings = normalize_dois(prepared, main)
     return _StagedEdit(changes, findings, lambda: apply_contents(prepared, contents))
 
 
 def _source_edit(prepared: Path, main: str, settings: Settings, retained: set[str]) -> _StagedEdit:
+    """Plan the source transformations of the staged copy.
+
+    Args:
+        prepared: The staged copy.
+        main: The project path of the main file.
+        settings: The settings whose source transformation options apply.
+        retained: The files shipped although the build does not read them; a merged input
+            among them is not removed.
+
+    Returns:
+        The planned edit.
+    """
     plan = plan_source_transforms(prepared, main, settings.source_transforms)
 
     def apply() -> None:
+        """Write the planned contents and remove the merged inputs that are not retained.
+
+        Raises:
+            PreparationError: The removal plan lacks the original bytes of a removal, a file
+                to remove is no longer a regular file inside the staged copy or changed after
+                the removal was planned, or :func:`apply_contents` rejects the contents.
+        """
         if set(plan.removal_originals) != plan.removals:
             raise PreparationError("Source removal plan lacks complete preconditions")
         for name, original in plan.removal_originals.items():
@@ -152,7 +245,20 @@ def _source_edit(prepared: Path, main: str, settings: Settings, retained: set[st
 def _staged_edits(
     prepared: Path, main: str, settings: Settings, retained: set[str]
 ) -> Iterator[_StagedEdit]:
-    """Plan each selected edit just before it is applied: later plans read the earlier results."""
+    """Plan each selected edit just before it is applied: later plans read the earlier results.
+
+    The order is metadata sanitization, the bibliography transformation, DOI
+    normalization when ``settings.normalize_doi`` is set, then the source transformations.
+
+    Args:
+        prepared: The staged copy.
+        main: The project path of the main file.
+        settings: The settings that select and configure the edits.
+        retained: The files shipped although the build does not read them.
+
+    Yields:
+        Each planned edit.
+    """
     yield _metadata_edit(prepared, settings)
     yield _bibliography_edit(prepared, main, settings)
     if settings.normalize_doi:
@@ -163,9 +269,17 @@ def _staged_edits(
 def _apply_edits(
     edits: Iterator[_StagedEdit], changes: list[Change], findings: list[Finding]
 ) -> bool:
-    """Apply the edits in order, collecting their changes and findings; whether all applied.
+    """Apply the edits in order, collecting their changes and findings.
 
     A blocked edit is reported but not applied, and later edits are not planned.
+
+    Args:
+        edits: The planned edits, planned lazily as the iterator advances.
+        changes: The list that receives every reported edit's changes.
+        findings: The list that receives every reported edit's findings.
+
+    Returns:
+        Whether all edits applied.
     """
     for edit in edits:
         findings.extend(edit.findings)
@@ -178,7 +292,13 @@ def _apply_edits(
 
 @dataclass(frozen=True, slots=True)
 class TransformOutcome:
-    """The staged copy after the selected transformations, and what they changed or found."""
+    """The staged copy after the selected transformations, and what they changed or found.
+
+    Attributes:
+        prepared: The staged copy.
+        changes: The cleanup exclusions and the changes of the reported edits.
+        findings: The findings of the reported edits.
+    """
 
     prepared: Path
     changes: list[Change]
@@ -193,7 +313,23 @@ def transform_sources(
     dependencies: set[str],
     retained: set[str],
 ) -> TransformOutcome:
-    """Copy the snapshot to staging, remove debris and apply the selected edits in order."""
+    """Copy the snapshot to staging, remove debris and apply the selected edits in order.
+
+    Debris is removed only when ``settings.cleanup`` is set. When every edit applies, the
+    exclusions of retained files are dropped from the changes, since those files stay.
+
+    Args:
+        snapshot: The imported project, which is never modified.
+        work: The job workspace; the staged copy is created as its ``prepared`` directory.
+        main: The project path of the main file.
+        settings: The settings that select the cleanup and the edits.
+        dependencies: The inputs the build observed, which cleanup keeps.
+        retained: The files shipped although the build does not read them, which cleanup
+            and source transformations keep.
+
+    Returns:
+        The staged copy with the changes and findings of the transformations.
+    """
     prepared = work / "prepared"
     shutil.copytree(snapshot, prepared)
     changes: list[Change] = []
@@ -221,7 +357,15 @@ def transform_sources(
 
 @dataclass(frozen=True, slots=True)
 class FlattenOutcome:
-    """The shipped sources, flattened when the flat layout is selected."""
+    """The shipped sources, flattened when the flat layout is selected.
+
+    Attributes:
+        root: The directory that holds the shipped sources.
+        main: The main file's path within ``root``.
+        changes: The changes the flattening proposes.
+        findings: The findings of planning the flattening.
+        path_mapping: The flat name of each shipped file.
+    """
 
     root: Path
     main: str
@@ -232,7 +376,20 @@ class FlattenOutcome:
 
 
 def flatten_sources(shipment: Path, work: Path, main: str, settings: Settings) -> FlattenOutcome:
-    """Move every shipped file to the top level when ``layout = "flat"``."""
+    """Move every shipped file to the top level when ``layout = "flat"``.
+
+    A blocked flattening leaves the sources where they are and reports its findings.
+
+    Args:
+        shipment: The directory that holds the shipped sources.
+        work: The job workspace; the flattened copy is created as its ``flat`` directory.
+        main: The project path of the main file.
+        settings: The settings that select the layout and the filename overrides.
+
+    Returns:
+        The flattened sources, or the unchanged ``shipment`` when the layout is not flat or
+        the flattening is blocked.
+    """
     if settings.layout != "flat":
         return FlattenOutcome(shipment, main, [], [], {})
     flatten = plan_flatten(

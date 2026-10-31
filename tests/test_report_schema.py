@@ -21,7 +21,10 @@ SCHEMA = Path(__file__).resolve().parents[1] / "docs" / "_static" / "report.sche
 
 
 class ReportSchemaTests(unittest.TestCase):
+    """The schema's fields and enumerations match a written report and the code."""
+
     def setUp(self) -> None:
+        """Load the published schema and write a blocked report with one finding and change."""
         self.schema = json.loads(SCHEMA.read_text(encoding="utf-8"))
         report = Report(
             "check",
@@ -77,6 +80,7 @@ class SchemaValidatorTests(unittest.TestCase):
     """The small validator behind the report-conformance test checks what it claims to."""
 
     def violations(self, instance: object, schema: dict[str, object]) -> list[str]:
+        """Return the violations of ``schema`` that the validator finds in ``instance``."""
         return schema_violations(instance, schema)
 
     def test_types_include_unions_and_exclude_booleans_from_numbers(self) -> None:

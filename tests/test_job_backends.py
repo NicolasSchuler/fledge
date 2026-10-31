@@ -24,6 +24,8 @@ from tests.support import (
 
 
 class DocumentBackendsTests(unittest.TestCase):
+    """The default :class:`DocumentBackends` drive the real tools and cannot be swapped."""
+
     def test_the_defaults_are_the_operations_that_drive_the_real_tools(self) -> None:
         backends = DocumentBackends()
         self.assertIs(backends.build, build_project)
@@ -36,6 +38,8 @@ class DocumentBackendsTests(unittest.TestCase):
 
 
 class ControlledBackendsTests(AsyncProjectTestCase):
+    """Defaults of :func:`controlled_backends` and the values, exceptions and functions it takes."""
+
     async def test_defaults_build_successfully_and_find_nothing(self) -> None:
         backends = controlled_backends()
         result = await backends.build(
@@ -68,6 +72,8 @@ class ControlledBackendsTests(AsyncProjectTestCase):
 
 
 class JobBackendsTests(AsyncProjectTestCase):
+    """A job builds, inspects and compares PDFs through the backends it is given."""
+
     async def test_a_check_builds_once_and_inspects_the_pdf_it_built(self) -> None:
         source = self.root / "input"
         minimal_project(source)

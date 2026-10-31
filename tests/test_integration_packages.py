@@ -18,6 +18,8 @@ from tests.support import live_test
 
 @live_test("Enable FLEDGE_RUN_INTEGRATION for real restricted TeX tools")
 class LiveRemainingWorkflowTests(unittest.IsolatedAsyncioTestCase):
+    """Independent flat packages with bibliography transforms and source cleanup."""
+
     async def test_two_independent_flat_packages_with_bibliography_and_source_cleanup(self):
         with tempfile.TemporaryDirectory(prefix="latex-prep-remaining-") as directory:
             base = Path(directory).resolve()

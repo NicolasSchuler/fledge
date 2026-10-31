@@ -61,21 +61,32 @@ _FRAME_PAYLOAD_BYTES = 6
 
 
 class JpegColor(NamedTuple):
-    """The colour family of a JPEG frame and the Adobe transform flag, when either is known."""
+    """The colour family of a JPEG frame and the Adobe transform flag, when either is known.
+
+    Attributes:
+        family: ``gray``, ``rgb`` or ``cmyk`` from the frame's component count, or ``None``.
+        adobe_transform: The colour transform recorded in an Adobe APP14 segment, or ``None``.
+    """
 
     family: str | None
     adobe_transform: int | None
 
 
 class FigureColor(NamedTuple):
-    """The measured colour family of one raster figure."""
+    """The measured colour family of one raster figure.
+
+    Attributes:
+        path: The figure's project-relative name.
+        color_space: The measured family: ``gray``, ``rgb`` or ``cmyk``.
+        adobe_transform: The Adobe APP14 colour transform of a JPEG, if one is recorded.
+    """
 
     path: str
     color_space: str
     adobe_transform: int | None = None
 
     def as_dict(self) -> dict[str, object]:
-        """The measurement as report details."""
+        """Return the measurement as report details."""
         record: dict[str, object] = {"path": self.path, "color_space": self.color_space}
         if self.adobe_transform is not None:
             record["adobe_transform"] = self.adobe_transform
@@ -83,17 +94,23 @@ class FigureColor(NamedTuple):
 
 
 def png_color_family(data: bytes) -> str | None:
-    """``gray``, ``rgb`` or ``None`` from the IHDR colour type at the start of a PNG."""
+    """Read ``gray``, ``rgb`` or ``None`` from the IHDR colour type at the start of a PNG."""
     header = read_png_header(data)
     return None if header is None else _PNG_COLOR_FAMILIES.get(header.color_type)
 
 
 def jpeg_color_family(data: bytes) -> JpegColor:
-    """The colour family from the frame's component count, and the Adobe APP14 transform.
+    """Read the colour family from the frame's component count, and the Adobe APP14 transform.
 
     This walker reads a bounded file prefix and stops quietly at the first segment
     it cannot follow. The image-metadata scan in ``metadata_privacy`` walks whole
     files strictly and names each structural defect, so the two stay separate.
+
+    Args:
+        data: The start of a JPEG file.
+
+    Returns:
+        The family and transform; either is ``None`` when the walk did not reach it.
     """
     if not data.startswith(_JPEG_SIGNATURE):
         return JpegColor(None, None)
@@ -131,7 +148,17 @@ def jpeg_color_family(data: bytes) -> JpegColor:
 
 
 def _measure(root: Path, name: str, suffix: str) -> FigureColor | str:
-    """The colour record of one raster figure, or the reason it cannot be read."""
+    """Measure the colour family of one raster figure.
+
+    Args:
+        root: The project directory.
+        name: The figure's project-relative name.
+        suffix: The figure's lower-case suffix; ``.png`` is read as PNG, anything else as
+            JPEG.
+
+    Returns:
+        The colour record, or the reason the figure cannot be read.
+    """
     try:
         data = read_file_prefix(root / name, _MAX_IMAGE_HEADER_BYTES)
     except OSError:
@@ -152,6 +179,7 @@ def _finding(
     path: str,
     details: dict[str, object],
 ) -> Finding:
+    """Build a colour space finding, weighted as a policy judged from bytes read directly."""
     return Finding(
         _RULE,
         message,
@@ -166,7 +194,22 @@ def _finding(
 def color_space_finding(
     root: Path, graph: SourceGraph, figures: list[str], required: str, main: str
 ) -> Finding:
-    """Compare each literal raster figure's colour family with ``required``."""
+    """Compare each literal raster figure's colour family with ``required``.
+
+    Grayscale satisfies either family. Vector figures are listed as not applicable, and
+    a figure that cannot be read, or an uncertain figure graph, leaves the check
+    inconclusive.
+
+    Args:
+        root: The project directory.
+        graph: The literal source graph, whose uncertainties make the result inconclusive.
+        figures: The project-relative names of the literal figures.
+        required: The required family, ``rgb`` or ``cmyk``.
+        main: The main file, the path of a finding that names no single figure.
+
+    Returns:
+        One ``figure.color_space`` finding that failed, was inconclusive or passed.
+    """
     violations: list[FigureColor] = []
     measured: list[FigureColor] = []
     vector: list[str] = []

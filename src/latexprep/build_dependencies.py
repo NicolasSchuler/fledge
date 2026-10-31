@@ -40,6 +40,15 @@ _RECORDER_KINDS = frozenset({"PWD", "INPUT", "OUTPUT"})
 
 
 class _DatabaseSection(Enum):
+    """The part of latexmk's rule database that the reader is in.
+
+    Attributes:
+        START: Before the first rule.
+        SOURCES: The inputs of the current rule, after its header line.
+        GENERATED: The files the current rule generates, after ``(generated)``.
+        REWRITTEN: The files the current rule rewrites, after ``(rewritten before read)``.
+    """
+
     START = auto()
     SOURCES = auto()
     GENERATED = auto()
@@ -48,6 +57,17 @@ class _DatabaseSection(Enum):
 
 @dataclass
 class _LatexmkRule:
+    """One rule of latexmk's database, as far as it has been read.
+
+    Attributes:
+        name: The rule name, such as the engine.
+        source: The rule's source file as written.
+        destination: The rule's destination file as written.
+        inputs: Each input file as written, with the name of the rule that produces it,
+            empty when no rule does.
+        generated: The files listed as generated or rewritten, as written.
+    """
+
     name: str
     source: str
     destination: str
@@ -56,7 +76,13 @@ class _LatexmkRule:
 
 
 class RecordedPath(NamedTuple):
-    """A recorder path as written, and as an absolute path from the build directory."""
+    """A recorder path as written, and as an absolute path from the build directory.
+
+    Attributes:
+        recorded: The path as the recorder wrote it, without TeX's quotes.
+        absolute: The path made absolute against the build directory and normalised
+            lexically.
+    """
 
     recorded: str
     absolute: Path
@@ -66,9 +92,12 @@ class RecordedPath(NamedTuple):
 class RecorderTrace:
     """The TeX recorder (.fls) of one build, read once.
 
-    ``inputs`` keeps the recorded order. ``defect`` names the first deviation from
-    complete, well-formed evidence: the paths still describe what the build read,
-    but they cannot establish the files needed for a submission.
+    Attributes:
+        inputs: The paths of the INPUT rows, in the recorded order.
+        outputs: The absolute paths of the OUTPUT rows.
+        defect: The first deviation from complete, well-formed evidence, or ``None``. With a
+            defect the paths still describe what the build read, but they cannot
+            establish the files needed for a submission.
     """
 
     inputs: tuple[RecordedPath, ...]
@@ -80,8 +109,18 @@ class RecorderTrace:
 class SubmissionDependencies:
     """The original project inputs a submission needs, or why they cannot be established.
 
-    ``inputs`` is ``None`` when the evidence is incomplete, and ``uncertainty`` then
-    says what is missing or inconsistent.
+    Attributes:
+        inputs: The project-relative original inputs, or ``None`` when the evidence is
+            incomplete.
+        rules: The names of the latexmk rules consulted.
+        generated_inputs: The number of inputs that were generated files or written by the
+            build's own tooling.
+        toolchain_inputs: The number of inputs read from the toolchain or the build's tool
+            state.
+        uncertainty: When ``inputs`` is ``None``, what is missing or inconsistent.
+        generated_reads: The generated files the build read, relative to the output
+            directory or project that holds them, for example ``main.bbl`` written by
+            BibTeX or Biber.
     """
 
     inputs: set[str] | None
@@ -89,12 +128,15 @@ class SubmissionDependencies:
     generated_inputs: int = 0
     toolchain_inputs: int = 0
     uncertainty: tuple[str, ...] = ()
-    # Generated files the build read, relative to the output directory or project
-    # that holds them (for example main.bbl written by BibTeX or Biber).
     generated_reads: frozenset[str] = frozenset()
 
     def to_details(self) -> dict[str, object]:
-        """The report entry: what was consulted, and the counts or the uncertainty."""
+        """Build the report entry: what was consulted, and the counts or the uncertainty.
+
+        Returns:
+            The report entry; the rules, project inputs and counts appear only when the
+            evidence is complete.
+        """
         details: dict[str, object] = {
             "complete": self.inputs is not None,
             "evidence": ["TeX recorder", "latexmk dependency database"],
@@ -113,25 +155,50 @@ class SubmissionDependencies:
 
 @dataclass(frozen=True, slots=True)
 class DependencyRequest:
-    """One finished build, as ``collect_submission_dependencies`` needs to see it."""
+    """One finished build, as ``collect_submission_dependencies`` needs to see it.
+
+    Attributes:
+        layout: Where the build lived.
+        main: The main file, relative to the project.
+        engine: The TeX engine, which names the primary output and the latexmk rule.
+        recorder: The build's recorder trace, or ``None``.
+        recorder_complete: Whether the build's checks accepted ``recorder`` as complete.
+        resource_roots: The directories the toolchain may read from; an input below one
+            counts as a toolchain input.
+        max_bytes: The most bytes read from latexmk's rule database.
+        owned_inputs: The files the build's own tooling wrote; reading one counts as a
+            generated input.
+        tool_state: Where the runner kept the state of this build's tools, or ``None``.
+            What they wrote there and read back, such as the font cache of luaotfload, is
+            not part of the submission: an input below it counts as a toolchain input.
+    """
 
     layout: BuildLayout
     main: str
     engine: Engine
-    # The recorder trace, and whether the build's checks accepted it as complete.
     recorder: RecorderTrace | None
     recorder_complete: bool
-    # Directories the toolchain may read from, and inputs the build's own tooling wrote.
     resource_roots: tuple[Path, ...]
     max_bytes: int
     owned_inputs: tuple[Path, ...] = ()
-    # Where the runner kept the state of this build's tools. What they wrote there and
-    # read back, such as the font cache of luaotfload, is not part of the submission.
     tool_state: Path | None = None
 
 
 def _read_owned_bytes(path: Path, root: Path, max_bytes: int) -> bytes:
-    """Read at most ``max_bytes`` of a regular file reached through no link below ``root``."""
+    """Read at most ``max_bytes`` of a regular file reached through no link below ``root``.
+
+    Args:
+        path: The file to read.
+        root: The directory from which no link may lead to ``path``.
+        max_bytes: The most bytes the file may hold.
+
+    Returns:
+        The contents of the file.
+
+    Raises:
+        PreparationError: The file is missing, linked, not regular or unreadable, or holds
+            more than ``max_bytes``.
+    """
     if not is_link_free_regular_file(root, path):
         raise PreparationError(f"{path.name} is missing or is not an owned regular file")
     try:
@@ -143,6 +210,21 @@ def _read_owned_bytes(path: Path, root: Path, max_bytes: int) -> bytes:
 
 
 def _read_evidence_lines(path: Path, root: Path, max_bytes: int) -> list[str]:
+    """Read an owned evidence file as UTF-8 lines.
+
+    Args:
+        path: The file to read.
+        root: The directory from which no link may lead to ``path``.
+        max_bytes: The most bytes the file may hold.
+
+    Returns:
+        The lines of the file, without line breaks.
+
+    Raises:
+        PreparationError: The file cannot be read as by :func:`_read_owned_bytes`, is
+            empty, has an incomplete final line or holds more than ``_MAX_ROWS`` lines.
+        UnicodeDecodeError: The file is not UTF-8.
+    """
     data = _read_owned_bytes(path, root, max_bytes)
     if not data or not data.endswith(b"\n"):
         raise PreparationError(f"{path.name} is empty or has an incomplete final line")
@@ -153,35 +235,79 @@ def _read_evidence_lines(path: Path, root: Path, max_bytes: int) -> list[str]:
 
 
 def _unchecked_absolute_path(value: str, cwd: Path) -> Path:
+    """Make a recorded path absolute against ``cwd`` without checking its spelling.
+
+    Args:
+        value: The path as recorded.
+        cwd: The directory a relative path is read from.
+
+    Returns:
+        The absolute, lexically normalised path.
+    """
     path = Path(value)
     # Normalised lexically: a recorded path is never resolved through links.
     return Path(os.path.normpath(path if path.is_absolute() else cwd / path))
 
 
 def _absolute_path(value: str, cwd: Path) -> Path:
+    """Make a recorded path absolute against ``cwd`` once its spelling is checked.
+
+    Args:
+        value: The path as recorded.
+        cwd: The directory a relative path is read from.
+
+    Returns:
+        The absolute, lexically normalised path.
+
+    Raises:
+        PreparationError: The path is empty, longer than ``_MAX_PATH_CHARS`` characters
+            or contains a control character.
+    """
     if not value or len(value) > _MAX_PATH_CHARS or any(ord(char) < 32 for char in value):
         raise PreparationError("Dependency evidence contains an invalid or oversized path")
     return _unchecked_absolute_path(value, cwd)
 
 
 class _FirstDefect:
-    """Remembers the first deviation from complete, well-formed evidence."""
+    """Remembers the first deviation from complete, well-formed evidence.
+
+    Attributes:
+        problem: The first problem noted, or ``None``.
+    """
 
     def __init__(self) -> None:
         self.problem: str | None = None
 
     def note(self, problem: str) -> None:
+        """Record ``problem`` unless an earlier one is already recorded."""
         self.problem = self.problem or problem
 
 
 class _RecorderRow(NamedTuple):
+    """One recorder line, split into its kind and path.
+
+    Attributes:
+        kind: ``PWD``, ``INPUT`` or ``OUTPUT``.
+        value: The path as written, without TeX's quotes.
+        absolute: The path made absolute against the build directory.
+    """
+
     kind: str
     value: str
     absolute: Path
 
 
 def _unquoted(value: str, number: int, defects: _FirstDefect) -> str:
-    """A recorder path without the quotes TeX adds around names that contain spaces."""
+    """Strip the quotes TeX adds around recorder paths that contain spaces.
+
+    Args:
+        value: The path as written in the recorder.
+        number: The line number, for the defect message.
+        defects: Where an unbalanced or empty quoted path is noted.
+
+    Returns:
+        The path without quotes; an unbalanced quote is stripped as well.
+    """
     if not (value.startswith('"') or value.endswith('"')):
         return value
     if len(value) < 3 or not (value.startswith('"') and value.endswith('"')):
@@ -193,7 +319,20 @@ def _unquoted(value: str, number: int, defects: _FirstDefect) -> str:
 def _parse_recorder_row(
     row: str, number: int, cwd: Path, defects: _FirstDefect
 ) -> _RecorderRow | None:
-    """One recorder line as kind, path and absolute path; ``None`` for a line to skip."""
+    """Parse one recorder line as kind, path and absolute path.
+
+    A path that fails the checks of :func:`_absolute_path` is noted as a defect and
+    still made absolute.
+
+    Args:
+        row: The recorder line.
+        number: The line number, for defect messages.
+        cwd: The build directory that relative paths are read from.
+        defects: Where malformed lines and paths are noted.
+
+    Returns:
+        The parsed line, or ``None`` for a malformed line to skip.
+    """
     kind, separator, value = row.partition(" ")
     if not separator or kind not in _RECORDER_KINDS:
         defects.note(f"Malformed TeX recorder record at line {number}")
@@ -212,6 +351,20 @@ def read_recorder_trace(path: Path, root: Path, cwd: Path, max_bytes: int) -> Re
 
     Every INPUT row is kept even when the trace is malformed, so build checks
     still see what was read; the first defect withholds submission evidence.
+
+    Args:
+        path: The recorder file.
+        root: The directory from which no link may lead to ``path``.
+        cwd: The build directory: relative paths are read from it, and the recorded
+            working directory must match it.
+        max_bytes: The most bytes the recorder may hold.
+
+    Returns:
+        The trace, with the first defect it shows.
+
+    Raises:
+        PreparationError: The file is absent, linked, not regular, unreadable or larger
+            than ``max_bytes``.
     """
     data = _read_owned_bytes(path, root, max_bytes)
     defects = _FirstDefect()
@@ -242,7 +395,19 @@ def read_recorder_trace(path: Path, root: Path, cwd: Path, max_bytes: int) -> Re
 
 
 def _rule_from_header(header: re.Match[str], rules: list[_LatexmkRule]) -> _LatexmkRule:
-    """The rule a database header line starts, if it is a new rule that ran successfully."""
+    """Start the rule a database header line names, if it is a new rule that ran successfully.
+
+    Args:
+        header: The match of the header line.
+        rules: The rules read so far.
+
+    Returns:
+        The new rule, without inputs or generated files yet.
+
+    Raises:
+        PreparationError: The name repeats, ``_MAX_RULES`` rules were already read, the
+            rule's last run did not succeed, or it has no source or destination.
+    """
     name, run_time, source, destination, _base, _check_time, last_result = header.groups()
     if any(rule.name == name for rule in rules) or len(rules) >= _MAX_RULES:
         raise PreparationError("Dependency database contains duplicate or too many rules")
@@ -256,7 +421,21 @@ def _rule_from_header(header: re.Match[str], rules: list[_LatexmkRule]) -> _Late
 def _read_rule_row(
     rule: _LatexmkRule, section: _DatabaseSection, row: str, number: int
 ) -> _DatabaseSection:
-    """Apply one line inside a rule to it, and return the section the next line is in."""
+    """Apply one line inside a rule to it, and return the section the next line is in.
+
+    Args:
+        rule: The rule the line belongs to; it receives the input or generated file.
+        section: The section the line is in.
+        row: The stripped line.
+        number: The line number, for error messages.
+
+    Returns:
+        The section the next line is in.
+
+    Raises:
+        PreparationError: The line is malformed for its section, or an input has a size
+            below -1.
+    """
     match section:
         case _DatabaseSection.SOURCES if row == "(generated)":
             return _DatabaseSection.GENERATED
@@ -277,7 +456,17 @@ def _read_rule_row(
 
 
 def _check_rule_graph(rules: list[_LatexmkRule], section: _DatabaseSection) -> None:
-    """Every rule has inputs, and every producer an input names is a rule of the database."""
+    """Check that every rule has inputs and every producer an input names is a rule.
+
+    Args:
+        rules: The rules of the database.
+        section: The section the last line was in; only a complete rewritten section
+            ends the database.
+
+    Raises:
+        PreparationError: There are no rules, the last rule is incomplete, a rule has no
+            inputs, or an input names a producer that is not a rule of the database.
+    """
     if not rules or section is not _DatabaseSection.REWRITTEN:
         raise PreparationError("Dependency database lacks complete rule sections")
     names = {rule.name for rule in rules}
@@ -290,6 +479,18 @@ def _check_rule_graph(rules: list[_LatexmkRule], section: _DatabaseSection) -> N
 
 
 def _parse_latexmk_database(rows: list[str]) -> list[_LatexmkRule]:
+    """Parse the lines of a version 4 latexmk rule database.
+
+    Args:
+        rows: The lines of the database; there is at least one.
+
+    Returns:
+        The rules in database order.
+
+    Raises:
+        PreparationError: The database has another version, a record is malformed or
+            incomplete, or a rule or the rule graph fails its checks.
+    """
     if rows[0] != "# Fdb version 4":
         raise PreparationError("Only latexmk dependency database version 4 is supported")
     rules: list[_LatexmkRule] = []
@@ -311,13 +512,28 @@ def _parse_latexmk_database(rows: list[str]) -> list[_LatexmkRule]:
 
 @dataclass(slots=True)
 class _ObservedPaths:
-    """Absolute paths the build read and the paths it generated, built up from the evidence."""
+    """Absolute paths the build read and the paths it generated, built up from the evidence.
+
+    Attributes:
+        inputs: The absolute paths the build read.
+        generated: The absolute paths the build generated.
+    """
 
     inputs: set[Path]
     generated: set[Path]
 
 
 class _ClassifiedInputs(NamedTuple):
+    """The inputs of a build, sorted by where they came from.
+
+    Attributes:
+        project_inputs: The original project files, relative to the project.
+        generated_reads: The generated files read, relative to the project or the output
+            folder that holds them.
+        generated_count: The number of generated or tool-written inputs.
+        toolchain_count: The number of inputs below a toolchain or tool-state directory.
+    """
+
     project_inputs: set[str]
     generated_reads: set[str]
     generated_count: int
@@ -325,13 +541,24 @@ class _ClassifiedInputs(NamedTuple):
 
 
 def _expected_primary(request: DependencyRequest) -> Path:
-    """The file the engine writes first: ``.xdv`` for XeLaTeX, ``.pdf`` otherwise."""
+    """Return the file the engine writes first: ``.xdv`` for XeLaTeX, ``.pdf`` otherwise."""
     suffix = ".xdv" if request.engine == "xelatex" else ".pdf"
     return request.layout.output / (Path(request.main).stem + suffix)
 
 
 def _verify_primary_output(request: DependencyRequest) -> _ObservedPaths:
-    """Check the recorder shows the main file read and the primary output written."""
+    """Check the recorder shows the main file read and the primary output written.
+
+    Args:
+        request: The finished build.
+
+    Returns:
+        The recorder's inputs and outputs, as the start of the observed paths.
+
+    Raises:
+        PreparationError: The recorder evidence is missing, incomplete or defective, or
+            it does not show the main file read or the primary output written.
+    """
     recorder = request.recorder
     if recorder is None or not request.recorder_complete:
         raise PreparationError("The selected build has no complete TeX recorder evidence")
@@ -346,7 +573,20 @@ def _verify_primary_output(request: DependencyRequest) -> _ObservedPaths:
 
 
 def _read_primary_rule(request: DependencyRequest) -> list[_LatexmkRule]:
-    """Read latexmk's rule database and check its engine rule is this build's main to PDF."""
+    """Read latexmk's rule database and check its engine rule is this build's main to PDF.
+
+    Args:
+        request: The finished build.
+
+    Returns:
+        Every rule of the database.
+
+    Raises:
+        PreparationError: The database cannot be read or parsed, or its engine rule does
+            not take the main file to the expected primary output or does not record
+            reading the main file.
+        UnicodeDecodeError: The database is not UTF-8.
+    """
     layout = request.layout
     stem = Path(request.main).stem
     main_path = layout.project / request.main
@@ -368,7 +608,19 @@ def _read_primary_rule(request: DependencyRequest) -> list[_LatexmkRule]:
 def _merge_rule_evidence(
     request: DependencyRequest, rules: list[_LatexmkRule], observed: _ObservedPaths
 ) -> None:
-    """Add every rule's sources, inputs and outputs to what the recorder showed."""
+    """Add every rule's sources, inputs and outputs to what the recorder showed.
+
+    An input that a rule produces counts as generated.
+
+    Args:
+        request: The finished build.
+        rules: The rules of latexmk's database.
+        observed: The paths seen so far; updated in place.
+
+    Raises:
+        PreparationError: A rule's generated files lack its destination, the main file
+            counts as generated, or a path fails the checks of :func:`_absolute_path`.
+    """
     cwd = request.layout.cwd
     for rule in rules:
         observed.inputs.add(_absolute_path(rule.source, cwd))
@@ -390,8 +642,18 @@ def _classify_inputs(request: DependencyRequest, observed: _ObservedPaths) -> _C
 
     The build's own tool state counts as toolchain: the font cache luaotfload writes
     under ``TEXMFVAR`` and reads back is neither an original input nor a generated
-    file to ship. An input that is none of these, or an original that is missing or
-    linked, makes the evidence unusable.
+    file to ship.
+
+    Args:
+        request: The finished build.
+        observed: Every path the build read and generated.
+
+    Returns:
+        The original project inputs, the generated files read and the counts.
+
+    Raises:
+        PreparationError: An input is none of these, or an original is missing or
+            linked, which makes the evidence unusable.
     """
     layout = request.layout
     roots = tuple(root.resolve() for root in request.resource_roots)
@@ -431,7 +693,18 @@ def _classify_inputs(request: DependencyRequest, observed: _ObservedPaths) -> _C
 
 
 def collect_submission_dependencies(request: DependencyRequest) -> SubmissionDependencies:
-    """Return the original project inputs of a build, or ``None`` with an actionable uncertainty."""
+    """Return the original project inputs of a build, or ``None`` with an actionable uncertainty.
+
+    Any error from reading or checking the evidence becomes the uncertainty; nothing is
+    raised for it.
+
+    Args:
+        request: The finished build.
+
+    Returns:
+        The dependencies, with the rules consulted and the counts, or without inputs and
+        with the reason when the evidence cannot establish them.
+    """
     try:
         observed = _verify_primary_output(request)
         rules = _read_primary_rule(request)

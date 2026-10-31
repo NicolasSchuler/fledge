@@ -223,6 +223,12 @@ class _FledgeCommand(click.Command):
     """Split long option lists into common and advanced help sections."""
 
     def format_options(self, ctx: click.Context, formatter: click.HelpFormatter) -> None:
+        """Write the option help; with an advanced option, in common and advanced sections.
+
+        Args:
+            ctx: The context of the command.
+            formatter: The help formatter that receives the sections.
+        """
         common, advanced = [], []
         for parameter in self.get_params(ctx):
             record = parameter.get_help_record(ctx)
@@ -239,7 +245,12 @@ class _FledgeCommand(click.Command):
 
 @contextmanager
 def _usage_exit_code() -> Generator[None]:
-    """Report invalid command-line syntax with an exit code no outcome uses."""
+    """Report invalid command-line syntax with an exit code no outcome uses.
+
+    Raises:
+        click.UsageError: A usage error raised inside the block, re-raised with
+            ``USAGE_EXIT_CODE`` as its exit code.
+    """
     try:
         yield
     except click.UsageError as error:
@@ -249,13 +260,26 @@ def _usage_exit_code() -> Generator[None]:
 
 
 class _InternalFailure(click.ClickException):
-    """A defect outside every command's own guard: one plain line and the error exit code."""
+    """A defect outside every command's own guard: one plain line and the error exit code.
+
+    Attributes:
+        exit_code: The exit code of the error outcome.
+    """
 
     exit_code = Outcome.ERROR.exit_code
 
 
 def _internal_failure(error: Exception, during: str = "") -> _InternalFailure:
-    """The plain message for a defect; ``--debug`` or FLEDGE_DEBUG=1 also prints its traceback."""
+    """Make the plain message for a defect; ``--debug`` or FLEDGE_DEBUG=1 also prints its traceback.
+
+    Args:
+        error: The unexpected error.
+        during: Text appended to the error type in the message, such as
+            ``" while writing the report"``.
+
+    Returns:
+        The exception to show, with the error exit code.
+    """
     print_debug_traceback(error)
     return _InternalFailure(
         f"Internal error ({type(error).__name__}){during}. This is a defect in Fledge, not in "
@@ -265,16 +289,45 @@ def _internal_failure(error: Exception, during: str = "") -> _InternalFailure:
 
 
 class _FledgeGroup(click.Group):
-    """Parsing the group's options and invoking a command both report usage errors."""
+    """Parsing the group's options and invoking a command both report usage errors.
+
+    Attributes:
+        command_class: The class of the commands of the group, which splits their help
+            into common and advanced options.
+        group_class: ``type``, so that subgroups use this class too.
+    """
 
     command_class = _FledgeCommand
     group_class = type
 
     def make_context(self, *args: Any, **kwargs: Any) -> click.Context:
+        """Parse the options of the group, reporting usage errors with ``USAGE_EXIT_CODE``.
+
+        Args:
+            *args: The positional arguments of ``click.Group.make_context``.
+            **kwargs: The keyword arguments of ``click.Group.make_context``.
+
+        Returns:
+            The new context.
+        """
         with _usage_exit_code():
             return super().make_context(*args, **kwargs)
 
     def invoke(self, ctx: click.Context) -> Any:
+        """Invoke the selected command, turning an unguarded defect into an internal failure.
+
+        Usage errors are reported with ``USAGE_EXIT_CODE``. Click's own exceptions, exits
+        and aborts and a broken pipe pass through unchanged.
+
+        Args:
+            ctx: The context of the group.
+
+        Returns:
+            What the command returned.
+
+        Raises:
+            _InternalFailure: The command raised any other exception.
+        """
         with _usage_exit_code():
             try:
                 return super().invoke(ctx)
@@ -305,6 +358,12 @@ def cli() -> None:
 
 @cli.result_callback()
 def _exit(result: int | None, **_kwargs) -> None:
+    """Exit with the code that the command returned, or 0 when it returned none.
+
+    Args:
+        result: The exit code that the command returned.
+        **_kwargs: The parameters of the group, unused.
+    """
     click.get_current_context().exit(result or 0)
 
 
@@ -456,7 +515,51 @@ def rule_command(code: str, *, json_output: bool) -> int:
 
 @dataclass(kw_only=True, slots=True)
 class CommandOptions:
-    """The options of a job command; options another command lacks keep their defaults."""
+    """The options of a job command; options another command lacks keep their defaults.
+
+    An option that sets a setting and is ``None`` leaves that setting alone; see
+    :meth:`setting_overrides`.
+
+    Attributes:
+        command: The job command.
+        source: The input: a source folder or ZIP file, or a PDF for ``pdf check``.
+        config: The value of ``--config``.
+        isolated: Whether ``--isolated`` was given.
+        json_output: Whether ``--json`` was given.
+        output_format: The value of ``--output-format``.
+        html_report: The value of ``--html-report``.
+        preview_output: The value of ``--preview-output``.
+        diagnostics: The value of ``--diagnostics``.
+        report: The value of ``--json-report``.
+        quiet: Whether ``--quiet`` was given.
+        show_passed: Whether ``--show-passed`` was given.
+        show_files: Whether ``--show-files`` was given.
+        jobs: The value of ``--jobs``.
+        build_jobs: The value of ``--build-jobs``.
+        render_jobs: The value of ``--render-jobs``.
+        job_timeout_seconds: The value of ``--job-timeout-seconds``.
+        timeout_seconds: The value of ``--timeout-seconds``.
+        select_checks: The selectors given with ``--select``.
+        ignore_checks: The selectors given with ``--ignore``.
+        preset: The value of ``--preset``.
+        online: ``True`` for ``--online``, ``False`` for ``--offline``, ``None`` when neither was
+            given.
+        main: The value of ``--main``.
+        engine: The value of ``--engine``.
+        bibliography_backend: The value of ``--bibliography-backend``.
+        reference_pdf: The value of ``--reference-pdf``.
+        max_pages: The value of ``--max-pages``.
+        output: The value of ``--output``.
+        layout: The value of ``--layout``.
+        apply_formatting: ``True`` for ``--format``, ``False`` for ``--no-format``, ``None`` when
+            neither was given.
+        normalize_doi: ``True`` for ``--normalize-doi``, ``False`` for ``--no-normalize-doi``,
+            ``None`` when neither was given.
+        cleanup: ``True`` for ``--cleanup``, ``False`` for ``--no-cleanup``, ``None`` when neither
+            was given.
+        dry_run: Whether ``--dry-run`` was given.
+        diff: Whether ``--diff`` was given.
+    """
 
     command: JobCommand
     source: Path
@@ -494,13 +597,28 @@ class CommandOptions:
     diff: bool = False
 
     def setting_overrides(self) -> dict[str, object]:
-        """The settings given on the command line; an omitted option leaves its setting alone."""
+        """Collect the settings given on the command line.
+
+        An omitted option leaves its setting alone.
+
+        Returns:
+            The value of each given option that sets the top-level setting of the same
+            name, by setting name.
+        """
         return {
             name: value for name in _SETTING_OPTIONS if (value := getattr(self, name)) is not None
         }
 
     def output_choice(self) -> OutputFormat:
-        """The format of the final report; ``--json`` and ``--output-format`` must agree."""
+        """Choose the format of the final report.
+
+        Returns:
+            JSON for ``--json``, otherwise the ``--output-format`` choice, which defaults
+            to the terminal format.
+
+        Raises:
+            click.UsageError: ``--json`` and ``--output-format`` do not agree.
+        """
         if not self.json_output:
             return OutputFormat(self.output_format or OutputFormat.TERMINAL)
         if self.output_format not in {None, "json"}:
@@ -515,6 +633,18 @@ _SETTING_FLAGS = {"apply_formatting": "--format"}
 
 
 def _check_input_and_outputs(options: CommandOptions, files: ReportFiles) -> None:
+    """Check that the input exists and that the output destinations are distinct.
+
+    Args:
+        options: The options of the command.
+        files: The requested report files; they are discarded when two destinations are
+            the same.
+
+    Raises:
+        RequestError: The input does not exist.
+        PreparationError: Two of the output, JSON, HTML and diagnostics destinations are
+            the same.
+    """
     source = options.source
     if not source.exists() and not source.is_symlink():
         raise RequestError(
@@ -542,7 +672,19 @@ def settings_suggestion(
     config_path: Path | None,
     preset: str | None,
 ) -> str:
-    """Name where each setting at fault in a validation error was supplied."""
+    """Name where each setting at fault in a validation error was supplied.
+
+    Args:
+        names: The settings at fault.
+        overrides: The settings given on the command line.
+        config_path: The settings file in use, if any.
+        preset: The preset in use, if any.
+
+    Returns:
+        A next step that names the command-line option, settings file or preset of each
+        setting at fault; when none can be named, one that asks to correct the settings
+        file or the options.
+    """
     sources = []
     for name in names:
         if name in overrides:
@@ -562,7 +704,20 @@ def settings_suggestion(
 
 
 def _load_command_settings(options: CommandOptions, report: Report) -> Settings:
-    """Layer the preset, the selected settings file and the command-line options."""
+    """Layer the preset, the selected settings file and the command-line options.
+
+    ``--select``, ``--ignore`` and ``--online``/``--offline`` are applied last.
+
+    Args:
+        options: The options of the command.
+        report: The report that records where the settings came from.
+
+    Returns:
+        The settings of the job.
+
+    Raises:
+        RequestError: A setting or a check selector is invalid.
+    """
     overrides = options.setting_overrides()
     config_path = resolve_config_path(options.source, options.config, isolated=options.isolated)
     record_settings_source(
@@ -602,6 +757,18 @@ def _run(
     pdf_previews: PdfPreviewStore | None,
     report: Report,
 ) -> Report:
+    """Run the job with progress messages on stderr.
+
+    Args:
+        options: The options of the command.
+        settings: The settings of the job.
+        pdf_previews: The store of page previews for an HTML report, or ``None`` when no
+            HTML report is wanted.
+        report: The report that the job fills in.
+
+    Returns:
+        The finished report.
+    """
     request = JobRequest(
         options.command,
         options.source,
@@ -623,7 +790,21 @@ def _deliver_report(
     options: CommandOptions,
     pdf_previews: PdfPreviewStore | None,
 ) -> int:
-    """Save the requested report files, print the final report and return the exit code."""
+    """Save the requested report files, print the final report and return the exit code.
+
+    A reader that closes stdout early does not change the exit code; a defect while the
+    report is written ends in the error exit code.
+
+    Args:
+        report: The finished report.
+        files: The report files to save.
+        output_format: The format of the printed report.
+        options: The options of the command, which choose what the printed report shows.
+        pdf_previews: The page previews for an HTML report, if any.
+
+    Returns:
+        The exit code of the outcome of the report, or the error exit code after a defect.
+    """
     preview_images = pdf_previews.images if pdf_previews else None
     try:
         public, rendered = save_reports(report, files, preview_images)
@@ -653,7 +834,12 @@ def _deliver_report(
 
 
 def _interrupted_report_message(report: Report) -> str:
-    """What to tell a person who stopped the command while the final report was written."""
+    """Compose the message for an interruption while the final report was written.
+
+    Returns:
+        The message, which says whether the verified output was already published and
+        stays in place.
+    """
     if report.artifacts:
         return (
             "Cancelled while writing the report; the verified output was already published "
@@ -663,6 +849,23 @@ def _interrupted_report_message(report: Report) -> str:
 
 
 def _execute(command: JobCommand, arguments: dict[str, Any]) -> int:
+    """Run a job command and deliver its report.
+
+    Once the options are checked, a failure or cancellation is recorded in the report
+    instead of escaping; an interruption while the report is delivered ends in the
+    cancelled exit code.
+
+    Args:
+        command: The job command.
+        arguments: The options that Click parsed, by parameter name.
+
+    Returns:
+        The exit code.
+
+    Raises:
+        click.UsageError: ``--config`` was combined with ``--isolated``, or ``--json``
+            does not agree with ``--output-format``.
+    """
     options = CommandOptions(command=command, **arguments)
     reject_config_with_isolated(options.config, isolated=options.isolated)
     output_format = options.output_choice()
@@ -708,6 +911,14 @@ def main(argv: list[str] | None = None) -> int:
 
     Whatever goes wrong, the code is never one that means success: a defect is exit
     code 4, the same as any other error.
+
+    Args:
+        argv: The command-line arguments without the program name; ``None`` reads them from
+            ``sys.argv``.
+
+    Returns:
+        The exit code; 130 when the user cancelled, and 0 when the reader closed stdout
+        after the command had finished.
     """
     try:
         return cli.main(args=argv, prog_name="fledge", standalone_mode=False) or 0

@@ -53,7 +53,7 @@ SECOND_ARGUMENT_FILE_COMMANDS = frozenset({*IMPORT_COMMANDS, "DTLloaddb", "input
 
 
 def file_argument_index(command_name: str) -> int:
-    """The index of the argument that names the file: after the directory, if there is one."""
+    """Return the index of the argument naming the file: after the directory, if there is one."""
     return 1 if command_name in SECOND_ARGUMENT_FILE_COMMANDS else 0
 
 
@@ -92,5 +92,5 @@ SUPPORTED_FONT_COMMANDS = frozenset({"setmainfont", "setsansfont", "setmonofont"
 
 
 def is_literal_text(value: str) -> bool:
-    """Whether ``value`` is nonempty and free of TeX syntax that could change its meaning."""
+    """Return whether ``value`` is nonempty and free of TeX syntax that could change its meaning."""
     return bool(value) and not any(char in value for char in "\\{}#$^~&%\n\r\x00")

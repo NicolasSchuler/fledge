@@ -39,7 +39,18 @@ SUBMISSION_TEXT_SCHEMA_VERSION = 1
 def _read_fields(
     source: Path, main: str | None, config: Path | None, *, isolated: bool
 ) -> dict[str, SubmissionField]:
-    """Import the project into a temporary folder and read its submission fields."""
+    """Import the project into a temporary folder and read its submission fields.
+
+    Args:
+        source: The project folder or ZIP archive to import.
+        main: The main file named on the command line, or ``None`` to use the settings.
+        config: The configuration file named on the command line, or ``None`` to discover
+            one.
+        isolated: Whether to skip the search for a settings file.
+
+    Returns:
+        The submission fields by name, as :func:`read_submission_text` reads them.
+    """
     settings = load_settings(resolve_config_path(source, config, isolated=isolated), {"main": main})
     with TemporaryDirectory(prefix="fledge-submission-text-") as temporary:
         limits = ImportLimits.from_settings(settings)
@@ -48,7 +59,7 @@ def _read_fields(
 
 
 def _print_fields(fields: dict[str, SubmissionField]) -> None:
-    """The preview: each field with its status, candidates and review notes."""
+    """Print the preview: each field with its status, candidates and review notes."""
     console = stdout_console()
     for name, value in fields.items():
         console.print(Text(f"{name.capitalize()} ({value.status})", style="bold"))
@@ -60,7 +71,16 @@ def _print_fields(fields: dict[str, SubmissionField]) -> None:
 
 
 def _print_one_field(name: str, fields: dict[str, SubmissionField]) -> None:
-    """Print a ready field as one line; otherwise explain on stderr and exit as blocked."""
+    """Print a ready field as one line; otherwise explain on stderr and exit as blocked.
+
+    Args:
+        name: The name of the field to print.
+        fields: The submission fields by name.
+
+    Raises:
+        click.exceptions.Exit: The field is not ready; the exit code is that of
+            ``Outcome.BLOCKED``.
+    """
     selected = fields[name]
     if selected.status == "ready":
         click.echo(selected.draft)

@@ -41,7 +41,34 @@ _T = TypeVar("_T")
 
 
 class TaskName(StrEnum):
-    """Scheduled job tasks; each value is also the stage name in reports."""
+    """Scheduled job tasks; each value is also the stage name in reports.
+
+    Attributes:
+        SOURCE_CHECKS: The source analysis.
+        BIBLIOGRAPHY_CHECKS: The bibliography integrity checks.
+        BIBLIOGRAPHY_COVERAGE: The bibliography coverage and field checks.
+        MANUSCRIPT_DETAILS: The manuscript policy checks.
+        IMAGE_METADATA_PRIVACY: The image metadata privacy check.
+        AUTHOR_FIELDS: The per-author field checks.
+        SOURCE_SUBMISSION_CHECKS: The privacy and bundle checks of the original sources.
+        ONLINE_REFERENCES: The online reference checks of the original sources.
+        MANUSCRIPT_CHECKS: The manuscript checks, which need a selected main file.
+        SUBMISSION_READINESS: The submission-readiness advisories.
+        BASELINE_BUILD: The build of the unchanged sources.
+        BASELINE_CONFIGURED_PDF_CHECKS: The configured PDF checks of the baseline PDF.
+        BASELINE_PACKAGE_SHADOWS: The local package shadow check of the baseline build.
+        BASELINE_PDF_INSPECTION: The inspection of the baseline PDF.
+        REFERENCE_VERSUS_BASELINE: The comparison of the supplied PDF with the baseline.
+        SELECT_PREPARATION_INPUTS: The selection of the inputs that preparation copies.
+        FINAL_SOURCE_CHECKS: The source checks of the fresh archive extraction.
+        FINAL_ONLINE_REFERENCES: The online reference checks of the fresh extraction.
+        PREPARED_VERSUS_ARCHIVE: The comparison of the prepared PDF with the PDF rebuilt
+            from the archive.
+        FINAL_PDF_INSPECTION: The inspection of the rebuilt PDF.
+        FINAL_CONFIGURED_PDF_CHECKS: The configured PDF checks of the rebuilt PDF.
+        FINAL_SUBMISSION_CHECKS: The submission checks of the fresh extraction.
+        REFERENCE_VERSUS_ARCHIVE: The comparison of the supplied PDF with the rebuilt PDF.
+    """
 
     SOURCE_CHECKS = "source checks"
     BIBLIOGRAPHY_CHECKS = "bibliography checks"
@@ -74,7 +101,20 @@ BASELINE_STAGE = "baseline"
 
 
 async def build_document(context: JobContext, tree: Path, main: str, directory: str) -> BuildResult:
-    """Build ``main`` from ``tree`` in the new workspace directory ``directory``."""
+    """Build ``main`` from ``tree`` in the new workspace directory ``directory``.
+
+    The build uses the job's backend, settings and runner, and ignores the build log
+    checks that the settings disable.
+
+    Args:
+        context: The job.
+        tree: The source tree to build.
+        main: The main file to build.
+        directory: The name of the workspace directory, under the job's work directory.
+
+    Returns:
+        The build result.
+    """
     settings = context.settings
     return await context.backends.build(
         tree,
@@ -99,7 +139,19 @@ async def compare_documents(
     *,
     options: ComparisonOptions | None = None,
 ) -> list[Finding]:
-    """Compare two PDFs in ``directory``, collecting previews for ``stage`` when requested."""
+    """Compare two PDFs in ``directory``, collecting previews for ``stage`` when requested.
+
+    Args:
+        context: The job, whose backend compares the PDFs.
+        left: The first PDF.
+        right: The second PDF.
+        directory: The name of the workspace directory, under the job's work directory.
+        stage: The stage whose previews are collected.
+        options: The comparison options passed to the backend.
+
+    Returns:
+        The findings of the comparison.
+    """
     return await context.backends.compare_pdfs(
         left,
         right,
@@ -112,6 +164,7 @@ async def compare_documents(
 
 
 def source_submission_options(settings: Settings) -> SubmissionOptions:
+    """Return the submission options for source checks; identity terms only while PRV001 runs."""
     options = settings.submission_checks
     # Source and rendered-PDF identity policies share terms but have separate codes.
     return options if settings.checks.enabled("PRV001") else replace(options, identity_terms=())
@@ -120,7 +173,16 @@ def source_submission_options(settings: Settings) -> SubmissionOptions:
 def prepared_submission_options(
     settings: Settings, path_mapping: Mapping[str, str]
 ) -> SubmissionOptions:
-    """Submission options for the shipped sources, with paths in their flattened names."""
+    """Return the submission options for the shipped sources, with paths in their flattened names.
+
+    Args:
+        settings: The job settings.
+        path_mapping: The flattened name of each original path; the required deliverables
+            and template references are renamed with it, and names it lacks are kept.
+
+    Returns:
+        The options of :func:`source_submission_options` with the renamed paths.
+    """
     return replace(
         source_submission_options(settings),
         required_deliverables=tuple(
@@ -137,7 +199,17 @@ def prepared_submission_options(
 def source_readiness_findings(
     root: Path, main: str | None, settings: Settings, analysed: AnalysedSource | None = None
 ) -> list[Finding]:
-    """The submission-readiness advisories of the sources under ``root``."""
+    """Check the sources under ``root`` for the submission-readiness advisories.
+
+    Args:
+        root: The source tree.
+        main: The main file, or ``None``.
+        settings: The job settings.
+        analysed: The shared source analysis, if there is one.
+
+    Returns:
+        The findings of the readiness checks.
+    """
     return check_submission_readiness(
         root,
         main,
@@ -148,7 +220,14 @@ def source_readiness_findings(
 
 
 def _selected_main(main: str | None) -> str:
-    """The main file for a check that is scheduled only once a main file was selected."""
+    """Return the main file for a check that is scheduled only once a main file was selected.
+
+    Returns:
+        ``main``.
+
+    Raises:
+        PreparationError: No main file was selected.
+    """
     if main is None:
         raise PreparationError("This check needs a selected main file")
     return main
@@ -158,13 +237,16 @@ def _selected_main(main: str | None) -> str:
 class SourceCheck:
     """One check of a document's sources, run on the original and again on the final copy.
 
-    ``run`` receives the source analysis shared by every check of the same root and main
-    file, as its last argument.
+    Attributes:
+        task: The task, which is also the stage name in reports.
+        run: The check, called with the root, the main file, the settings and the source
+            analysis shared by every check of the same root and main file.
+        needs_main: Whether the check needs a selected main file; on the original sources
+            it is scheduled only after a main file was selected.
     """
 
     task: TaskName
     run: Callable[[Path, str | None, Settings, AnalysedSource], list[Finding]]
-    # Scheduled on the original sources only after a main file was selected.
     needs_main: bool = False
 
 
@@ -215,7 +297,17 @@ _SOURCE_CHECKS = (
 def _final_source_findings(
     root: Path, main: str, settings: Settings, analysed: AnalysedSource
 ) -> list[Finding]:
-    """Re-evaluate the actual shipped sources after all transformations."""
+    """Re-evaluate the actual shipped sources after all transformations.
+
+    Args:
+        root: The extracted sources.
+        main: The main file.
+        settings: The job settings.
+        analysed: The shared source analysis.
+
+    Returns:
+        The findings of the source analysis, followed by those of every source check.
+    """
     findings = list(analyze_sources(root, main, analysed=analysed).findings)
     for check in _SOURCE_CHECKS:
         findings.extend(check.run(root, main, settings, analysed))
@@ -223,7 +315,11 @@ def _final_source_findings(
 
 
 def _original_submission_options(settings: Settings, command: JobCommand) -> SubmissionOptions:
-    """The submission policy for the original sources of ``command``."""
+    """Return the submission policy for the original sources of ``command``.
+
+    For ``prepare``, the filename, extension and deliverable constraints are dropped,
+    because they target the transformed output.
+    """
     submission = source_submission_options(settings)
     if command is JobCommand.PREPARE:
         # These constraints target the transformed output, which may rename or remove files.
@@ -248,6 +344,16 @@ def _in_thread_with_analysis(
 
     The analysis is the one the job shares for this root and main file, so concurrent
     checks of the same sources build their graph once.
+
+    Args:
+        context: The job, which shares the analysis.
+        function: The check to run.
+        root: The source tree.
+        main: The main file, or ``None``.
+        *arguments: Further arguments for ``function``.
+
+    Returns:
+        An awaitable of the result of ``function``.
     """
     return run_in_thread(function, root, main, *arguments, analysed=context.sources.get(root, main))
 
@@ -255,14 +361,34 @@ def _in_thread_with_analysis(
 def _run_source_check(
     context: JobContext, check: SourceCheck, root: Path, main: str | None
 ) -> Awaitable[list[Finding]]:
-    """Run one source check in a worker thread on the job's shared analysis of ``root``."""
+    """Run one source check in a worker thread on the job's shared analysis of ``root``.
+
+    Args:
+        context: The job, which shares the analysis and supplies the settings.
+        check: The source check.
+        root: The source tree.
+        main: The main file, or ``None``.
+
+    Returns:
+        An awaitable of the check's findings.
+    """
     return run_in_thread(check.run, root, main, context.settings, context.sources.get(root, main))
 
 
 def _online_references(
     context: JobContext, root: Path, main: str | None
 ) -> Awaitable[list[Finding]]:
-    """The online reference checks of the sources under ``root``, sharing their analysis."""
+    """Check the online references of the sources under ``root``, sharing their analysis.
+
+    Args:
+        context: The job, which shares the analysis and supplies the online options and
+            the budget.
+        root: The source tree.
+        main: The main file, or ``None``.
+
+    Returns:
+        An awaitable of the findings.
+    """
     return check_online_references(
         root,
         main,
@@ -275,7 +401,18 @@ def _online_references(
 def _configured_pdf_checks(
     context: JobContext, pdf: Path, root: Path, main: str, directory: str
 ) -> Awaitable[list[Finding]]:
-    """The configured PDF checks of ``pdf``, with expected values read from ``root``."""
+    """Run the configured PDF checks of ``pdf``, with expected values read from ``root``.
+
+    Args:
+        context: The job.
+        pdf: The PDF to check.
+        root: The source tree that the expected values are read from.
+        main: The main file.
+        directory: The name of the workspace directory, under the job's work directory.
+
+    Returns:
+        An awaitable of the findings.
+    """
     return inspect_configured_pdf_checks(
         pdf,
         root,
@@ -291,7 +428,20 @@ def _configured_pdf_checks(
 def source_analysis_tasks(
     context: JobContext, snapshot: Callable[[], Path], main: str | None
 ) -> list[Task]:
-    """Source, bibliography, manuscript and privacy checks of ``snapshot()``."""
+    """Build the source, bibliography, manuscript and privacy check tasks of ``snapshot()``.
+
+    Checks that need a main file are left out without one. The online reference checks
+    are included unless the job prepares a package for real, which checks them once on
+    the final extraction instead.
+
+    Args:
+        context: The job.
+        snapshot: Returns the source tree to check; it is called when a task starts.
+        main: The main file, or ``None``.
+
+    Returns:
+        The tasks.
+    """
     request, settings = context.request, context.settings
     tasks = [
         Task(
@@ -330,6 +480,10 @@ def source_analysis_tasks(
 
 
 def baseline_build_task(context: JobContext, source: Path, main: str) -> Task:
+    """Build the task that builds ``main`` from ``source`` in the ``baseline`` directory.
+
+    The task holds a build lease and succeeds only when the build succeeded with a PDF.
+    """
     return Task(
         TaskName.BASELINE_BUILD,
         lambda: build_document(context, source, main, "baseline"),
@@ -347,10 +501,26 @@ def baseline_pdf_tasks(
     main: str,
     reference: Path | None,
 ) -> list[Task]:
-    """Checks of the successful baseline build and its PDF."""
+    """Build the tasks that check the successful baseline build and its PDF.
+
+    Each task starts only after the baseline build succeeded. The package shadow check
+    and the comparison with a reference PDF are included only when they apply.
+
+    Args:
+        context: The job.
+        baseline: Returns the baseline build result.
+        baseline_pdf: Returns the baseline PDF.
+        snapshot: Returns the source tree of the baseline.
+        main: The main file.
+        reference: The PDF the researcher supplied for comparison, or ``None``.
+
+    Returns:
+        The tasks.
+    """
     settings, work, runner, budget = context.settings, context.work, context.runner, context.budget
 
     def after_baseline(name: TaskName, run: Callable[[], Awaitable[object]]) -> Task:
+        """Make a composite task that starts only after the baseline build succeeded."""
         return Task.composite(name, run, needs_success_of=(TaskName.BASELINE_BUILD,))
 
     tasks = [
@@ -401,11 +571,19 @@ def baseline_pdf_tasks(
 
 @dataclass(frozen=True, slots=True)
 class FinalExtraction:
-    """The fresh extraction of the archive, and the PDFs its verification compares."""
+    """The fresh extraction of the archive, and the PDFs its verification compares.
+
+    Attributes:
+        root: The directory of the extraction.
+        main: The main file.
+        staged_pdf: The PDF of the prepared sources.
+        final_pdf: The PDF rebuilt from the extraction.
+        submission: The submission policy for the extracted sources.
+        reference: The PDF the researcher supplied for comparison, or ``None``.
+    """
 
     root: Path
     main: str
-    # The PDF of the prepared sources, and the PDF rebuilt from the extraction.
     staged_pdf: Path
     final_pdf: Path
     submission: SubmissionOptions
@@ -413,12 +591,12 @@ class FinalExtraction:
 
 
 def final_verification_tasks(context: JobContext, extraction: FinalExtraction) -> list[Task]:
-    """Checks of the fresh archive extraction and its rebuilt PDF."""
+    """Build the tasks that check the fresh archive extraction and its rebuilt PDF."""
     return [*_final_source_tasks(context, extraction), *_final_pdf_tasks(context, extraction)]
 
 
 def _final_source_tasks(context: JobContext, extraction: FinalExtraction) -> list[Task]:
-    """Checks of the extracted sources."""
+    """Build the tasks that check the extracted sources."""
     root, main, settings = extraction.root, extraction.main, context.settings
     return [
         Task(
@@ -439,7 +617,12 @@ def _final_source_tasks(context: JobContext, extraction: FinalExtraction) -> lis
 
 
 def _final_pdf_tasks(context: JobContext, extraction: FinalExtraction) -> list[Task]:
-    """Checks of the rebuilt PDF, and its comparison with the prepared and reference PDFs."""
+    """Build the tasks that check the rebuilt PDF.
+
+    The PDF is compared with the prepared PDF and, when one was supplied, with the
+    reference PDF; when previews are collected one at a time, the reference comparison
+    waits for the other.
+    """
     settings, work, runner, budget = context.settings, context.work, context.runner, context.budget
     root, main, final_pdf = extraction.root, extraction.main, extraction.final_pdf
     tasks = [

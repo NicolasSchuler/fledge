@@ -40,9 +40,12 @@ _STYLE_COMMENT = re.compile(r"%[^\n]*")
 class StyleMacros:
     """The string macros the BibTeX style in use is known to define.
 
-    ``unread`` names the styles whose definitions are not available here, so any
-    macro they might define stays uncertain. ``unknown`` means no document names
-    a style at all, as in a bibliography-only directory.
+    Attributes:
+        macros: The macro names the styles are known to define.
+        unread: The styles whose definitions are not available here, so any macro they
+            might define stays uncertain.
+        unknown: Whether no document names a style at all, as in a bibliography-only
+            directory.
     """
 
     macros: frozenset[str] = frozenset()
@@ -55,7 +58,11 @@ class StyleMacros:
         return self.unknown or bool(self.unread)
 
     def explanation(self) -> str:
-        """Why an undefined macro may still be fine, naming the style when it is known."""
+        """Explain why an undefined macro may still be fine, naming the style when it is known.
+
+        Returns:
+            A clause naming the unread styles, or any style when none is named.
+        """
         if self.unread:
             styles = ", ".join(repr(name) for name in self.unread)
             return f"the bibliography style {styles} may define it"
@@ -63,9 +70,16 @@ class StyleMacros:
 
 
 def style_macros(root: Path, styles: list[StyleReference] | None) -> StyleMacros:
-    """Macros of the styles ``styles`` name: project .bst files are read, standard ones known.
+    """Collect the macros of the named styles: project .bst files are read, standard ones known.
 
-    ``styles`` is None when no document could be read to find them.
+    Args:
+        root: The project directory that the local style files are relative to.
+        styles: The styles the documents name, or ``None`` when no document could be read
+            to find them.
+
+    Returns:
+        The known macros, the styles that could not be read or are not standard, and
+        whether the styles are unknown altogether.
     """
     if styles is None:
         return StyleMacros(unknown=True)
@@ -88,7 +102,7 @@ def style_macros(root: Path, styles: list[StyleReference] | None) -> StyleMacros
 
 
 def _read_style(path: Path) -> set[str] | None:
-    """The macro names a .bst file defines, or None when the file cannot be read."""
+    """Read the macro names a .bst file defines, or ``None`` when the file cannot be read."""
     try:
         text = read_regular_file(path, _MAX_STYLE_BYTES).decode("utf-8", errors="replace")
     except OSError:

@@ -22,12 +22,19 @@ GENERATED_SOURCE_SUFFIXES = (".pdf_tex", ".eps_tex", ".pstex_t")
 
 
 def path_comparison_key(value: str) -> str:
-    """Key under which paths collide on case-insensitive or normalizing file systems."""
+    """Return the key under which paths collide on case-insensitive or normalizing systems."""
     return unicodedata.normalize("NFC", value).casefold()
 
 
 def project_files(root: Path) -> dict[str, Path]:
-    """Map every project-relative POSIX path (files and links) to its path, in stable order."""
+    """Map every project-relative POSIX path (files and links) to its path, in stable order.
+
+    Returns:
+        The path of each file and link below ``root``, keyed by its POSIX path.
+
+    Raises:
+        PreparationError: ``root`` is not a directory.
+    """
     if not root.is_dir():
         raise PreparationError(f"Source project is not a directory: {root}")
     return {
@@ -41,7 +48,7 @@ def project_files(root: Path) -> dict[str, Path]:
 
 
 def known_path_index(names: Iterable[str]) -> set[str]:
-    """Every path suffix and directory prefix of ``names``.
+    """Collect every path suffix and directory prefix of ``names``.
 
     For cheap "could this name a project file anywhere" tests before a lookup
     context is established: ``a/b/c.tex`` contributes ``a/b/c.tex``, ``b/c.tex``,
@@ -56,7 +63,15 @@ def known_path_index(names: Iterable[str]) -> set[str]:
 
 
 def is_parsed_source(name: str, path: Path) -> bool:
-    """Whether the graph reads this file: TeX source, generated TeX, or a link to learn of."""
+    """Return whether the graph reads this file: TeX source, generated TeX, or a link to learn of.
+
+    Args:
+        name: The project-relative POSIX path of the file.
+        path: The file's path on disk.
+
+    Returns:
+        ``True`` for a link or a file with a parsed or generated source suffix.
+    """
     return (
         path.is_symlink()
         or path.suffix.lower() in PARSED_SUFFIXES

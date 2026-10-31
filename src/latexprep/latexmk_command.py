@@ -29,16 +29,28 @@ MAX_LATEXMK_PASSES = 5
 
 @dataclass(frozen=True, slots=True)
 class BiberPlan:
-    """Whether this build defers Biber, and the preparation note it reports."""
+    """Whether this build defers Biber, and the preparation note it reports.
+
+    Attributes:
+        deferred: Whether Biber is replaced by a failing internal command for this build.
+        note: The preparation note the build reports, or ``None``.
+    """
 
     deferred: bool
     note: str | None
 
 
 def latexmk_command(engine: Engine, main: str, layout: BuildLayout, rules: str) -> list[str]:
-    """The argv that builds ``main`` with ``engine``, writing everything into the output folder.
+    """Build the argv that compiles ``main`` with ``engine`` into the output folder.
 
-    ``rules`` is the configuration from ``controlled_rules``.
+    Args:
+        engine: The TeX engine, which selects the latexmk mode.
+        main: The main file; only its file name is passed, relative to the working folder.
+        layout: The build's working and output folders.
+        rules: The configuration from ``controlled_rules``.
+
+    Returns:
+        The latexmk argv, which writes everything into the output folder.
     """
     return [
         "latexmk",
@@ -59,7 +71,18 @@ def latexmk_command(engine: Engine, main: str, layout: BuildLayout, rules: str) 
 
 
 def controlled_rules(backend: BibliographyBackend, biber: BiberPlan, biber_executable: str) -> str:
-    """The Perl configuration for ``-e``: fixed settings and the bibliography backend gates."""
+    """Write the Perl configuration for ``-e``: fixed settings and the bibliography gates.
+
+    Args:
+        backend: The selected bibliography backend; any choice but ``auto`` blocks the
+            other backend.
+        biber: Whether Biber is deferred for this build.
+        biber_executable: The application-generated path of the prepared Biber, used when
+            Biber may run.
+
+    Returns:
+        The configuration as one line of Perl.
+    """
     # Static trusted configuration overrides no imported rc, rules, or environment.
     rules = (
         f"$max_repeat={MAX_LATEXMK_PASSES}; $bibtex_use=1; "

@@ -42,7 +42,15 @@ _URL_SCHEME = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*:")
 
 
 class SystemReference(NamedTuple):
-    """A class, package or style reference left for the TeX toolchain to resolve."""
+    """A class, package or style reference left for the TeX toolchain to resolve.
+
+    Attributes:
+        path: The project file the reference appears in.
+        command: The command that makes the reference.
+        reference: The name as the command writes it.
+        basename: The file name TeX looks for: ``reference`` with the command's default
+            suffix when it has none.
+    """
 
     path: str
     command: Command
@@ -52,7 +60,13 @@ class SystemReference(NamedTuple):
 
 @dataclass(frozen=True, slots=True)
 class Reference:
-    """The file name a command writes: its text, the file it appears in, and the command."""
+    """The file name a command writes: its text, the file it appears in, and the command.
+
+    Attributes:
+        value: The file name as the command writes it.
+        path: The project file the command appears in.
+        command: The command that names the file.
+    """
 
     value: str
     path: str
@@ -61,12 +75,15 @@ class Reference:
 
 @dataclass(frozen=True, slots=True)
 class LookupScope:
-    """The directories a lookup may start from.
+    r"""The directories a lookup may start from.
 
-    ``base`` overrides the compilation directory (an ``\\import`` target, a font
-    ``Path``). ``search`` is the graphics search path and ``context`` the directories of
-    the files entered so far, innermost first. ``subfiles_loaded`` says whether the
-    ``subfiles`` package is in force, which changes where a bibliography is read from.
+    Attributes:
+        search: The graphics search path.
+        context: The directories of the files entered so far, innermost first.
+        base: The directory that overrides the compilation directory (an ``\import``
+            target, a font ``Path``), if any.
+        subfiles_loaded: Whether the ``subfiles`` package is in force, which changes where a
+            bibliography is read from.
     """
 
     search: tuple[str, ...] = ()
@@ -79,9 +96,11 @@ class LookupScope:
 class ProjectTree:
     """The project files a lookup may find, and what to do when a candidate is a link.
 
-    ``cwd`` is the compilation directory, relative to the project root. ``on_link`` is
-    called with the name of every linked file the lookup passes over, so the graph can
-    report that it was skipped.
+    Attributes:
+        files: The project files by project-relative name.
+        cwd: The compilation directory, relative to the project root.
+        on_link: Called with the name of every linked file the lookup passes over, so the
+            graph can report that it was skipped.
     """
 
     files: Mapping[str, Path]
@@ -91,7 +110,12 @@ class ProjectTree:
 
 @dataclass(frozen=True, slots=True)
 class Resolution:
-    """The outcome of one lookup: the file found, or a toolchain reference, or neither."""
+    """The outcome of one lookup: the file found, or a toolchain reference, or neither.
+
+    Attributes:
+        target: The project file found, if any.
+        system: The reference left to the toolchain, if any.
+    """
 
     target: str | None = None
     system: SystemReference | None = None
@@ -100,10 +124,19 @@ class Resolution:
 def project_path(
     reference: Reference, tree: ProjectTree, findings: GraphFindings, *, base: str | None = None
 ) -> str | None:
-    """The project-relative path ``reference`` names, under ``base`` or the compilation directory.
+    """Return the project-relative path ``reference`` names, under a base directory.
 
     Records an error and returns ``None`` for an absolute, URL-like or user-specific path
     and for one that climbs out of the project.
+
+    Args:
+        reference: The file name and the command that writes it.
+        tree: The project files; its ``cwd`` is the default base directory.
+        findings: Where an external path is recorded as an error.
+        base: The directory the name is joined to; ``None`` uses the compilation directory.
+
+    Returns:
+        The normalized project-relative path, or ``None`` after a reported error.
     """
     value = reference.value
     if value.startswith(("/", "\\\\", "~")) or _URL_SCHEME.match(value):
@@ -133,7 +166,24 @@ def project_path(
 def _lookup_bases(
     reference: Reference, scope: LookupScope, tree: ProjectTree, findings: GraphFindings
 ) -> list[str] | None:
-    """Every project path the name may mean, in TeX's order; ``None`` after a reported error."""
+    r"""Return every project path the name may mean, in TeX's order.
+
+    A ``\subfile``, and a ``\bibliography`` while ``subfiles`` is loaded, start from the
+    innermost entered directory unless the scope sets a base. Commands that search from
+    each enclosing directory add those paths, and ``\includegraphics`` adds the graphics
+    search path.
+
+    Args:
+        reference: The file name and the command that writes it.
+        scope: The directories the lookup may start from.
+        tree: The project files and the compilation directory.
+        findings: Where an external path (an error) or a name that is not literal (an
+            uncertainty) is recorded.
+
+    Returns:
+        The project paths without suffixes, or ``None`` after a reported error or
+        uncertainty.
+    """
     name = reference.command.name
     base = scope.base
     if (
@@ -173,11 +223,19 @@ def _lookup_bases(
 
 
 def candidate_paths(command_name: str, paths: list[str], suffixes: tuple[str, ...]) -> list[str]:
-    """The files TeX tries for ``paths``: per path its default suffixes, then the bare name.
+    r"""Return the files TeX tries for ``paths``: per path its default suffixes, then the bare name.
 
-    ``\\include`` always appends ``.tex``; a name that already has a suffix is tried as
+    ``\include`` always appends ``.tex``; a name that already has a suffix is tried as
     written. The order is TeX's lookup order: base paths first, then declared search
     directories, and the extensions a command tries within one directory.
+
+    Args:
+        command_name: The name of the command, without the backslash.
+        paths: The project paths the name may mean, in TeX's order.
+        suffixes: The default suffixes of the command, in the order TeX tries them.
+
+    Returns:
+        The candidate files in lookup order; repeats are kept.
     """
     candidates: list[str] = []
     for path in paths:
@@ -192,7 +250,17 @@ def candidate_paths(command_name: str, paths: list[str], suffixes: tuple[str, ..
 
 
 def existing_files(candidates: list[str], tree: ProjectTree) -> list[str]:
-    """The candidates that are project files, without repeats; links are skipped and reported."""
+    """Return the candidates that are project files, without repeats.
+
+    Links are skipped and reported through ``tree.on_link``.
+
+    Args:
+        candidates: The candidate files in lookup order.
+        tree: The project files and the callback for links.
+
+    Returns:
+        The candidates that are regular project files, in lookup order.
+    """
     found: list[str] = []
     for candidate in candidates:
         if candidate not in tree.files or candidate in found:
@@ -205,7 +273,15 @@ def existing_files(candidates: list[str], tree: ProjectTree) -> list[str]:
 
 
 def _report_ambiguity(reference: Reference, found: list[str], findings: GraphFindings) -> None:
-    """Note that several files match, and which one TeX's lookup order selects."""
+    """Note that several files match, and which one TeX's lookup order selects.
+
+    The note is a passed heuristic warning, recorded with ``findings.add``.
+
+    Args:
+        reference: The file name and the command that writes it.
+        found: The matching project files in lookup order; the first is selected.
+        findings: Where the note is recorded.
+    """
     findings.add(
         Finding(
             "source.ambiguous_dependency",
@@ -231,7 +307,15 @@ def _report_ambiguity(reference: Reference, found: list[str], findings: GraphFin
 def _report_missing(
     reference: Reference, candidates: list[str], tree: ProjectTree, findings: GraphFindings
 ) -> None:
-    """Report a file that does not exist: a case-only mismatch, or one absent altogether."""
+    """Report a file that does not exist: a case-only mismatch, or one absent altogether.
+
+    Args:
+        reference: The file name and the command that writes it.
+        candidates: The files the lookup tried, in order.
+        tree: The project files, searched for names that differ only in case or Unicode
+            normalization.
+        findings: Where the error is recorded.
+    """
     command = reference.command
     keys = {path_comparison_key(candidate) for candidate in candidates}
     mismatches = sorted(path for path in tree.files if path_comparison_key(path) in keys)
@@ -267,6 +351,16 @@ def resolve_reference(
     A found file is returned as ``target``. A class, package or style that is not in the
     project and has no directory is left to the toolchain and returned as ``system``.
     Anything else is recorded in ``findings`` and returns an empty ``Resolution``.
+    Several matching files are noted as an ambiguity and the first in lookup order wins.
+
+    Args:
+        reference: The file name and the command that writes it.
+        scope: The directories the lookup may start from.
+        tree: The project files, the compilation directory and the callback for links.
+        findings: Where problems with the reference are recorded.
+
+    Returns:
+        The file found, the toolchain reference, or an empty ``Resolution``.
     """
     paths = _lookup_bases(reference, scope, tree, findings)
     if paths is None:

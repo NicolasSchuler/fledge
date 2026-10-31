@@ -9,6 +9,8 @@ from latexprep.public_url import parse_public_url, redact_url, require_public_ip
 
 
 class PublicAddressTests(unittest.TestCase):
+    """Which IP addresses count as public, and how they are returned."""
+
     def test_private_local_reserved_and_transition_addresses_are_refused(self):
         for address in (
             "10.0.0.1",
@@ -46,6 +48,8 @@ class PublicAddressTests(unittest.TestCase):
 
 
 class ParsePublicUrlTests(unittest.TestCase):
+    """Parsing a URL into a request target, and the reason for each refusal."""
+
     def test_a_public_url_is_normalized_for_the_request(self):
         target = parse_public_url("HTTPS://Example.ORG./a b?q=1#frag".replace(" ", "%20"))
         self.assertEqual(
@@ -85,6 +89,8 @@ class ParsePublicUrlTests(unittest.TestCase):
 
 
 class RedactUrlTests(unittest.TestCase):
+    """Showing a URL without its credentials, fragment and secret values."""
+
     def test_credentials_fragment_and_secret_values_are_removed(self):
         redacted = redact_url("https://user:SECRET@example.org:8443/p?id=1&token=SECRET&a=b#frag")
         self.assertEqual(redacted, "https://example.org:8443/p?id=1&token=%5Bredacted%5D&a=b")

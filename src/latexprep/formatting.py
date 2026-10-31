@@ -50,7 +50,21 @@ _ABSOLUTE_PATH = re.compile(r"(?<![\w.~-])/(?:[\w.@+~-]+/)*[\w.@+~-]*")
 
 @dataclass(frozen=True)
 class FormattingOptions:
-    """How tex-fmt is run and judged: exclusions, blank-line policy, wrap length, tab size."""
+    """How tex-fmt is run and judged: exclusions, blank-line policy, wrap length, tab size.
+
+    Construction raises ``SettingsError`` when a value is invalid, ``exclude`` repeats an
+    entry, or an ``exclude`` entry is not a glob pattern relative to the project.
+
+    Attributes:
+        FIELD_BOUNDS: The bounds :func:`validate_scalars` applies to ``wrap_length`` and
+            ``tab_size``.
+        exclude: Glob patterns, relative to the project, of sources not to format.
+        blank_lines: The blank-line policy: ``formatter`` leaves blank lines to tex-fmt,
+            ``preserve`` rejects a proposal that moves a paragraph separator, and
+            ``collapse`` keeps one blank line of every unprotected run.
+        wrap_length: The line length tex-fmt wraps at (``--wraplen``).
+        tab_size: The indentation width tex-fmt uses (``--tabsize``).
+    """
 
     FIELD_BOUNDS: ClassVar[dict[str, Bounds]] = {
         "wrap_length": Bounds(MIN_WRAP_LENGTH),
@@ -77,7 +91,13 @@ class FormattingOptions:
 
 @dataclass(frozen=True, slots=True)
 class FormatterContext:
-    """What every file's formatting shares: the tool, how to run it, and the options."""
+    """What every file's formatting shares: the tool, how to run it, and the options.
+
+    Attributes:
+        executable: The tex-fmt executable.
+        runner: Runs tex-fmt.
+        options: The formatting options.
+    """
 
     executable: str
     runner: CommandRunner
@@ -88,9 +108,12 @@ class FormatterContext:
 class FormatJob:
     """One file to format.
 
-    ``relative`` is its name in the project, ``workspace`` the private directory for its
-    tex-fmt passes (a file's workspace cannot contain another file's), and ``size`` its
-    size in bytes when it was admitted.
+    Attributes:
+        path: The file.
+        relative: Its name in the project.
+        workspace: The private directory for its tex-fmt passes (a file's workspace cannot
+            contain another file's).
+        size: Its size in bytes when it was admitted.
     """
 
     path: Path
@@ -100,12 +123,19 @@ class FormatJob:
 
 
 class _SourceFile(NamedTuple):
+    """A source file selected for formatting.
+
+    Attributes:
+        path: The file.
+        relative: Its project-relative POSIX name.
+    """
+
     path: Path
     relative: str
 
 
 def _lines_with_blank_state(text: str) -> Iterator[tuple[str, bool]]:
-    """Each line, and whether it is blank outside every protected span."""
+    """Yield each line, and whether it is blank outside every protected span."""
     spans = protected_spans(text).spans
     offset = 0
     for line in text.splitlines(keepends=True):
@@ -150,7 +180,15 @@ def _paragraph_separators(text: str) -> tuple[tuple[str, int], ...]:
 
 @dataclass
 class FormattingResult:
-    """Proposed formatting: new bytes with the originals they came from, changes, findings."""
+    """Proposed formatting: new bytes with the originals they came from, changes, findings.
+
+    Attributes:
+        contents: The proposed bytes, by project-relative name.
+        changes: The reviewable changes.
+        findings: The findings of the formatting.
+        tools: The tex-fmt version, as reports record it.
+        originals: The original bytes each proposal was computed from.
+    """
 
     contents: dict[str, bytes] = field(default_factory=dict)
     changes: list[Change] = field(default_factory=list)
@@ -160,6 +198,11 @@ class FormattingResult:
 
 
 def _format_memory_mb(source_bytes: int, runner: CommandRunner) -> int:
+    """Estimate the memory, in MiB, to reserve for formatting a source of ``source_bytes``.
+
+    The estimate covers the formatter and buffers for the source and for the most output
+    the runner allows.
+    """
     output_bytes = runner.limits.max_output_bytes
     return (
         _FORMATTER_MEMORY_MB
@@ -168,16 +211,25 @@ def _format_memory_mb(source_bytes: int, runner: CommandRunner) -> int:
 
 
 def _unformattable(rule: str, message: str, relative: str) -> Finding:
+    """Build an inconclusive error that keeps the file ``relative`` from being formatted."""
     return Finding(rule, message, severity="error", status="inconclusive", path=relative)
 
 
 def _formatter_failure(result: CommandResult, subject: str, limits: RuntimeLimits) -> str:
-    """Why tex-fmt did not complete: its exit status and the first line of its message.
+    """Explain why tex-fmt did not complete: its exit status and the first line of its message.
 
     The message is shortened and local paths in it are replaced, so findings do not
     carry the workspace layout or long source excerpts (``CommandResult.failure_reason``
     quotes stderr as it is). A tool a limit stopped is explained by ``failure_reason``,
     with the value of the limit it exceeded.
+
+    Args:
+        result: The result of the tex-fmt command.
+        subject: Names the pass in the explanation.
+        limits: The limits the command ran under.
+
+    Returns:
+        The explanation.
     """
     if result.returncode and result.within_limits:
         first_line = next((line.strip() for line in result.stderr.splitlines() if line.strip()), "")
@@ -191,9 +243,19 @@ def _formatter_failure(result: CommandResult, subject: str, limits: RuntimeLimit
 async def _tex_fmt(
     context: FormatterContext, command: list[str], workspace: Path, subject: str
 ) -> str:
-    """One tex-fmt pass over the workspace copy, with the blank-line policy applied.
+    """Run one tex-fmt pass over the workspace copy, with the blank-line policy applied.
 
-    ``subject`` names the pass in the error raised when tex-fmt does not complete.
+    Args:
+        context: What every file's formatting shares.
+        command: The tex-fmt command line.
+        workspace: The file's private workspace.
+        subject: Names the pass in the error raised when tex-fmt does not complete.
+
+    Returns:
+        The formatted text.
+
+    Raises:
+        PreparationError: tex-fmt did not complete normally.
     """
     result = await context.runner.run(
         command, cwd=workspace, workspace=workspace, memory_mb=_FORMATTER_MEMORY_MB
@@ -206,13 +268,31 @@ async def _tex_fmt(
 
 
 class _Passes(NamedTuple):
-    # The first pass's output, and whether a second pass left it unchanged.
+    """The outcome of formatting a file twice.
+
+    Attributes:
+        text: The first pass's output, after the blank-line policy.
+        stable: Whether a second pass left it unchanged.
+    """
+
     text: str
     stable: bool
 
 
 async def _run_passes(job: FormatJob, context: FormatterContext, original: bytes) -> _Passes:
-    """Format a private copy of the file twice; the second pass checks the first is stable."""
+    """Format a private copy of the file twice; the second pass checks the first is stable.
+
+    Args:
+        job: The file to format.
+        context: What every file's formatting shares.
+        original: The file's bytes.
+
+    Returns:
+        The first pass's text, and whether the second pass left it unchanged.
+
+    Raises:
+        PreparationError: A tex-fmt pass did not complete normally.
+    """
     job.workspace.mkdir(parents=True, exist_ok=False)
     target = job.workspace / job.path.name
     target.write_bytes(original)
@@ -235,6 +315,14 @@ async def _run_passes(job: FormatJob, context: FormatterContext, original: bytes
 
 
 def _read_original(job: FormatJob) -> bytes:
+    """Read the file's bytes, which must not have grown since it was admitted.
+
+    Returns:
+        The file's bytes.
+
+    Raises:
+        PreparationError: The file is larger than when it was admitted.
+    """
     with job.path.open("rb") as stream:
         original = stream.read(job.size + 1)
     if len(original) > job.size:
@@ -243,7 +331,7 @@ def _read_original(job: FormatJob) -> bytes:
 
 
 def _unprotectable_findings(relative: str, options: FormattingOptions) -> list[Finding]:
-    """The findings for a file whose protected regions cannot be delimited."""
+    """List the findings for a file whose protected regions cannot be delimited."""
     findings = [
         _unformattable(
             "source.format_protected",
@@ -264,7 +352,22 @@ def _unprotectable_findings(relative: str, options: FormattingOptions) -> list[F
 
 
 async def _format_file(job: FormatJob, context: FormatterContext) -> FormattingResult:
-    """Format one file and judge the result; raise ``PreparationError`` if tex-fmt fails."""
+    """Format one file and judge the result.
+
+    A file that is not UTF-8, or whose protected regions cannot be delimited, is not
+    formatted. A proposal is kept only when it is stable, leaves protected regions
+    unchanged, satisfies the blank-line policy and differs from the original.
+
+    Args:
+        job: The file to format.
+        context: What every file's formatting shares.
+
+    Returns:
+        The file's proposal, if any, and its findings.
+
+    Raises:
+        PreparationError: tex-fmt fails, or the file grew after it was admitted.
+    """
     result = FormattingResult()
     relative, options = job.relative, context.options
     original = _read_original(job)
@@ -328,7 +431,21 @@ def _accept_protected_regions(
     relative: str,
     result: FormattingResult,
 ) -> bool:
-    """Record whether protected literal regions survived formatting unchanged."""
+    """Record whether protected literal regions survived formatting unchanged.
+
+    Nothing is recorded when neither text has a protected region and the formatted
+    text's regions are not uncertain.
+
+    Args:
+        text: The original text.
+        regions: The protected spans of ``text``.
+        updated_text: The formatted text.
+        relative: The file's name in the project.
+        result: Receives the finding.
+
+    Returns:
+        Whether the regions survived unchanged.
+    """
     proposed = protected_spans(updated_text)
     unchanged = not proposed.uncertain and [text[start:end] for start, end in regions] == [
         updated_text[start:end] for start, end in proposed.spans
@@ -356,7 +473,20 @@ def _accept_blank_lines(
     relative: str,
     result: FormattingResult,
 ) -> bool:
-    """Record whether the configured blank-line policy holds for the proposal."""
+    """Record whether the configured blank-line policy holds for the proposal.
+
+    The ``formatter`` policy always holds and records nothing.
+
+    Args:
+        text: The original text.
+        updated_text: The formatted text.
+        options: The formatting options, which name the policy.
+        relative: The file's name in the project.
+        result: Receives the finding.
+
+    Returns:
+        Whether the policy holds.
+    """
     if options.blank_lines == "formatter":
         return True
     satisfied = options.blank_lines == "collapse" or (
@@ -379,7 +509,16 @@ def _accept_blank_lines(
 def _exclusion_finding(
     files: list[_SourceFile], excluded: set[str], patterns: tuple[str, ...]
 ) -> Finding:
-    """Whether every exclusion pattern matched a source file, and which files it removed."""
+    """Report whether every exclusion pattern matched a source file, and which files it removed.
+
+    Args:
+        files: Every source file before the exclusions.
+        excluded: The names of the files the patterns removed.
+        patterns: The exclusion patterns.
+
+    Returns:
+        A passed finding, or a warning that names the patterns that match nothing.
+    """
     unmatched = [
         pattern
         for pattern in patterns
@@ -397,12 +536,19 @@ def _exclusion_finding(
 
 
 class _Selection(NamedTuple):
+    """The source files to format, and the finding about the exclusions.
+
+    Attributes:
+        files: The files no exclusion pattern removes.
+        exclusion: The finding about the exclusion patterns, or ``None`` without patterns.
+    """
+
     files: list[_SourceFile]
     exclusion: Finding | None
 
 
 def _select_sources(source: Path, options: FormattingOptions) -> _Selection:
-    """The TeX documents under ``source`` that no exclusion pattern removes.
+    """Select the TeX documents under ``source`` that no exclusion pattern removes.
 
     The exclusion finding is present exactly when the options list patterns.
     """
@@ -423,7 +569,11 @@ def _select_sources(source: Path, options: FormattingOptions) -> _Selection:
 
 
 def _unusable_selection(files: list[_SourceFile]) -> Finding | None:
-    """The finding that stops formatting: a linked source, or nothing left to format."""
+    """Report what stops formatting: a linked source, or nothing left to format.
+
+    Returns:
+        The finding, or ``None`` when formatting can go ahead.
+    """
     linked = [file.relative for file in files if file.path.is_symlink()]
     if linked:
         return Finding(
@@ -444,7 +594,11 @@ def _unusable_selection(files: list[_SourceFile]) -> Finding | None:
 
 
 def _failure_text(error: OSError | PreparationError) -> str:
-    """What went wrong with one file, without the temporary workspace an OS error would name."""
+    """Describe what went wrong with one file.
+
+    An OS error is described by its reason only, without the temporary workspace it would
+    name.
+    """
     if isinstance(error, OSError):
         cause = (error.strerror or type(error).__name__).lower()
         return f"The file could not be read or written while formatting ({cause})"
@@ -454,7 +608,17 @@ def _failure_text(error: OSError | PreparationError) -> str:
 async def _format_admitted(
     file: _SourceFile, work: Path, context: FormatterContext, budget: ResourceBudget | None
 ) -> FormattingResult:
-    """Format one file within the size limit and, when a budget is set, its memory lease."""
+    """Format one file within the size limit and, when a budget is set, its memory lease.
+
+    Args:
+        file: The file to format.
+        work: The directory that holds every file's workspace.
+        context: What every file's formatting shares.
+        budget: The resource budget that grants the memory lease, or ``None``.
+
+    Returns:
+        The file's result; a file too large, or a failure, becomes an inconclusive error.
+    """
     try:
         size = file.path.stat().st_size
         if size > MAX_SOURCE_BYTES:
@@ -493,6 +657,7 @@ async def _format_all(
     """Format every file, in parallel up to the budget's CPU slots, else one after another."""
 
     async def worker(file: _SourceFile) -> FormattingResult:
+        """Format one file."""
         return await _format_admitted(file, work, context, budget)
 
     if budget is None:
@@ -536,10 +701,21 @@ async def format_project(
 ) -> FormattingResult:
     """Propose tex-fmt formatting for the TeX documents under ``source``; write nothing there.
 
-    ``work`` must not exist: it holds the tool-version probe and one private workspace per
-    file. A tex-fmt that is missing, a linked source, or a failure on any file yields
-    findings and no proposals. With a ``budget`` files are formatted in parallel, each
-    holding a memory lease; without one they run in turn.
+    A tex-fmt that is missing, a linked source, or a failure on any file yields findings
+    and no proposals.
+
+    Args:
+        source: The project directory.
+        work: A directory that must not exist: it holds the tool-version probe and one
+            private workspace per file.
+        runner: Runs tex-fmt.
+        options: The formatting options.
+        budget: With a budget, files are formatted in parallel, each holding a memory
+            lease; without one they run in turn.
+
+    Returns:
+        The proposals with their original bytes, the changes, the findings and the
+        tex-fmt version.
     """
     result = FormattingResult()
     selection = _select_sources(source, options)

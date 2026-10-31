@@ -24,7 +24,10 @@ NESTED = {
 
 
 class SourceSegmentTests(unittest.TestCase):
+    """The segments of an expanded document and the source offsets they record."""
+
     def setUp(self) -> None:
+        """Write the nested project ``NESTED`` into a temporary directory."""
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = write_project(Path(self.temporary.name), NESTED)

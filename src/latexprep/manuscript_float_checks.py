@@ -33,7 +33,12 @@ from .uncertainty_reasons import grouped_reason
 
 
 class _FloatRule(NamedTuple):
-    """One float policy: its rule and title, and the template of its failure summary."""
+    """One float policy: its rule and title, and the template of its failure summary.
+
+    Attributes:
+        policy: The rule name, title and weight of the policy.
+        failure: The ``str.format`` template of the failure summary.
+    """
 
     policy: Policy
     # {count} is the number of violations; {floats}, {labels} and {figures} are counts
@@ -70,22 +75,35 @@ _FLOAT_RULES = (_CAPTIONS, _LABELS, _LABEL_ORDER, _REFERENCES, _REFERENCE_ORDER,
 
 @dataclass(slots=True)
 class _FloatRecord:
-    """What the source shows about one figure or table environment."""
+    """What the source shows about one figure or table environment.
+
+    Attributes:
+        location: Where the environment begins.
+        kind: ``figure`` or ``table``, without a star.
+        confirmed: ``False`` when the float's own region could not be interpreted.
+        source_offset: The offset of the environment's opening command.
+        captions: Each caption's location and plain text.
+        labels: The float's literal labels, in source order.
+        first_reference_offset: The offset of the first external reference to one of the
+            labels, or ``None``.
+        misplaced_labels: Labels that precede the float's first caption, as reported
+            violations.
+        described: Whether a figure has a nonempty, non-placeholder Description; ``None`` for
+            tables.
+    """
 
     location: Location
     kind: str
-    # False when the float's own region could not be interpreted.
     confirmed: bool
     source_offset: int
     captions: list[dict[str, object]]
     labels: list[str]
     first_reference_offset: int | None
-    # Labels that precede the float's first caption, as reported violations.
     misplaced_labels: list[dict[str, object]]
-    # Whether a figure has a nonempty, non-placeholder Description; None for tables.
     described: bool | None
 
     def summary(self) -> dict[str, object]:
+        """Render where the float is and what kind it is, as report details."""
         return {
             **self.location.as_dict(),
             "kind": self.kind,
@@ -94,6 +112,7 @@ class _FloatRecord:
         }
 
     def details(self) -> dict[str, object]:
+        """Render the summary with the captions, labels and first reference offset."""
         return {
             **self.summary(),
             "captions": self.captions,
@@ -104,7 +123,17 @@ class _FloatRecord:
 
 @dataclass
 class _FloatScan:
-    """Reads each float region while collecting per-rule interpretation gaps."""
+    """Reads each float region while collecting per-rule interpretation gaps.
+
+    Attributes:
+        document: The expanded document.
+        floats: The float regions to read.
+        uncertainty: The interpretation gaps collected for each float rule.
+        first_references: The offset of the first external reference to each label.
+        label_counts: How often each literal label occurs in the whole document.
+        labels_seen: The float labels read so far.
+        records: One record per float read, in order.
+    """
 
     document: ExpandedDocument
     floats: list[EnvironmentRegion]
@@ -117,10 +146,17 @@ class _FloatScan:
     records: list[_FloatRecord] = field(default_factory=list)
 
     def note(self, reasons: Iterable[str], *rules: _FloatRule) -> None:
+        """Record interpretation gaps against each of the given rules.
+
+        Args:
+            reasons: The gaps to record.
+            *rules: The rules whose results the gaps affect.
+        """
         for rule in rules:
             self.uncertainty[rule].extend(reasons)
 
     def run(self) -> None:
+        """Count the labels and first references, then read every float into a record."""
         self.label_counts.update(
             command.arguments[0].value.strip()
             for command in self.document.commands
@@ -132,6 +168,10 @@ class _FloatScan:
             self.records.append(self._record(region))
 
     def _collect_first_references(self) -> None:
+        """Record the first offset of each label referenced outside every float.
+
+        A grouped or nonliteral reference is a gap for both reference rules.
+        """
         float_spans = merge_spans((region.command.start, region.end) for region in self.floats)
         for command in self.document.commands:
             if command.name not in REFERENCE_COMMANDS:
@@ -146,6 +186,14 @@ class _FloatScan:
                 self.first_references.setdefault(argument.value, argument.start)
 
     def _record(self, region: EnvironmentRegion) -> _FloatRecord:
+        """Read one float region into a record.
+
+        Args:
+            region: The float region, with its own interpretation gaps.
+
+        Returns:
+            What the source shows about the float.
+        """
         # A float whose own region could not be interpreted contributes reasons,
         # never violations: an unexpanded construct inside it may be the caption,
         # label or description that appears to be missing.
@@ -174,6 +222,14 @@ class _FloatScan:
         )
 
     def _read_captions(self, captions: list[Command]) -> list[dict[str, object]]:
+        """Read the captions of one float, noting what is unclear about them.
+
+        Args:
+            captions: The float's caption commands.
+
+        Returns:
+            Each caption's location and plain text.
+        """
         data = []
         for command in captions:
             value, unknown = plain_argument_text(command)
@@ -188,7 +244,19 @@ class _FloatScan:
     def _read_labels(
         self, region: EnvironmentRegion, first_caption_end: int | None, *, confirmed: bool
     ) -> tuple[list[str], list[dict[str, object]]]:
-        """The float's literal labels, and those placed before its first caption."""
+        """Read the float's literal labels, and those placed before its first caption.
+
+        Args:
+            region: The float region.
+            first_caption_end: The offset just past the first caption, or ``None`` when
+                the float has none.
+            confirmed: Whether the region could be interpreted; only then are misplaced
+                labels reported.
+
+        Returns:
+            The literal labels in source order, and the located labels that precede the
+            first caption.
+        """
         kind = region.kind.rstrip("*")
         labels: list[str] = []
         misplaced: list[dict[str, object]] = []
@@ -221,6 +289,7 @@ class _FloatScan:
         return labels, misplaced
 
     def _described(self, region: EnvironmentRegion) -> bool:
+        """Return whether a figure has a nonempty, non-placeholder Description."""
         descriptions = [command for command in region.commands if command.name == "Description"]
         if len(descriptions) > 1:
             self.note(["multiple descriptions within one figure"], _DESCRIPTIONS)
@@ -235,6 +304,17 @@ class _FloatScan:
 
 
 def _float_violations(records: list[_FloatRecord]) -> dict[_FloatRule, list[dict[str, object]]]:
+    """Collect the violations of every float rule from the records.
+
+    Only confirmed floats are violations. Figures and tables are each checked for first
+    references out of source order.
+
+    Args:
+        records: The records of every float, in source order.
+
+    Returns:
+        The violations of each float rule.
+    """
     confirmed = [record for record in records if record.confirmed]
     out_of_order: list[dict[str, object]] = []
     for kind in ("figure", "table"):
@@ -269,6 +349,7 @@ def _float_violations(records: list[_FloatRecord]) -> dict[_FloatRule, list[dict
 
 
 def _enabled_rules(options: ManuscriptCheckOptions) -> list[_FloatRule]:
+    """List the float rules that the options switch on, in reporting order."""
     return [
         rule
         for rule, selected in (
@@ -284,7 +365,16 @@ def _enabled_rules(options: ManuscriptCheckOptions) -> list[_FloatRule]:
 
 
 def float_checks(reading: Reading, options: ManuscriptCheckOptions) -> list[Finding]:
-    """One finding per float policy that is switched on."""
+    """Run the float policies that are switched on.
+
+    Args:
+        reading: The expanded document.
+        options: The ``require_float_*``, ``check_float_*`` and
+            ``require_figure_descriptions`` switches.
+
+    Returns:
+        One finding per float policy that is switched on.
+    """
     enabled = _enabled_rules(options)
     if not enabled:
         return []

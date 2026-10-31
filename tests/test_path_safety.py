@@ -1,3 +1,5 @@
+"""Path safety: relative-path rules and their options, containment, and each caller's rules."""
+
 from __future__ import annotations
 
 import posixpath
@@ -27,7 +29,11 @@ from latexprep.workflow_options import DocumentOptions, PackageOptions
 
 
 class RelativePathAlwaysRefusedTests(unittest.TestCase):
-    """Rules no option relaxes: such a name can never be inside an imported project."""
+    """Rules no option relaxes: such a name can never be inside an imported project.
+
+    Attributes:
+        OPTION_SETS: The option sets under which every rule is checked.
+    """
 
     OPTION_SETS = (
         {},
@@ -78,6 +84,8 @@ class RelativePathAlwaysRefusedTests(unittest.TestCase):
 
 
 class NormalizedOptionTests(unittest.TestCase):
+    """The ``normalized`` and ``allow_current`` options of the relative-path rules."""
+
     def test_normalized_spelling_is_the_default(self) -> None:
         for value in ("a//b", "./a", "a/./b", "a/", ".", "./", "a/."):
             with self.subTest(value=value):
@@ -103,7 +111,18 @@ class NormalizedOptionTests(unittest.TestCase):
 
 
 class CharacterLevelTests(unittest.TestCase):
+    """The ``characters`` levels, each refusing more than the one before."""
+
     def accepted(self, value: str, characters: str) -> bool:
+        """Return whether :func:`is_relative_posix_path` accepts ``value`` at a character level.
+
+        Args:
+            value: The path to check.
+            characters: The character level, such as ``"literal"``.
+
+        Returns:
+            Whether the path is accepted.
+        """
         return is_relative_posix_path(value, characters=characters)  # type: ignore[arg-type]
 
     def test_each_level_refuses_what_the_previous_levels_refuse_and_more(self) -> None:
@@ -131,6 +150,12 @@ class CharacterLevelTests(unittest.TestCase):
 
 
 class ComponentPatternTests(unittest.TestCase):
+    """The ``component_pattern`` option: every segment must match it completely.
+
+    Attributes:
+        PATTERN: The pattern of a segment: ASCII letters, digits, ``_``, ``.`` and ``-``.
+    """
+
     PATTERN = re.compile(r"[A-Za-z0-9_.-]+")
 
     def test_every_segment_must_match_completely(self) -> None:
@@ -147,6 +172,8 @@ class ComponentPatternTests(unittest.TestCase):
 
 
 class LexicalEscapeTests(unittest.TestCase):
+    """:func:`lexically_escapes` for normalized paths that climb out of the project."""
+
     def test_a_normalized_path_that_climbs_out_escapes(self) -> None:
         self.assertTrue(lexically_escapes(".."))
         self.assertTrue(lexically_escapes("../x"))
@@ -158,7 +185,13 @@ class LexicalEscapeTests(unittest.TestCase):
 
 
 class ContainmentTests(unittest.TestCase):
+    """Containment on disk: links, paths that climb out, regular files and resolved names."""
+
     def setUp(self) -> None:
+        """Create a project with ``main.tex`` and ``sub/part.tex``, and an outside folder.
+
+        The outside folder holds ``secret.tex``.
+        """
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         base = Path(self.temporary.name).resolve()
@@ -255,6 +288,15 @@ class CallerRuleTests(unittest.TestCase):
     """The option set each caller passes, seen through the caller's own public entry point."""
 
     def accepts(self, build, accepted: list[str], refused: list[str]) -> None:
+        """Assert that ``build`` accepts every value of ``accepted`` and refuses ``refused``.
+
+        Each value runs in its own subtest; a refusal must raise :class:`PreparationError`.
+
+        Args:
+            build: The caller's entry point, called with one value.
+            accepted: The values it must accept.
+            refused: The values it must refuse.
+        """
         for value in accepted:
             with self.subTest(accepted=value):
                 build(value)
@@ -336,7 +378,10 @@ class CallerRuleTests(unittest.TestCase):
 
 
 class NamesProjectFileTests(unittest.TestCase):
+    """:func:`names_project_file`: a typed path may be redundant but must name a project file."""
+
     def setUp(self) -> None:
+        """Create a snapshot folder that holds ``paper/main.tex``."""
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.snapshot = Path(self.temporary.name)

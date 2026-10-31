@@ -38,7 +38,15 @@ class InvalidValueSyntax(ValueError):
 
 @dataclass(frozen=True)
 class FieldSpan:
-    """One field with the offsets of its name end, value and trailing comma."""
+    """One field with the offsets of its name end, value and trailing comma.
+
+    Attributes:
+        field: The parsed field.
+        name_end: The offset just after the field name.
+        value_start: The offset where the first value atom starts, delimiters included.
+        value_end: The offset just after the last value atom, delimiters included.
+        comma: The offset of the comma after the value, or ``None`` when there is none.
+    """
 
     field: Field
     name_end: int
@@ -49,7 +57,16 @@ class FieldSpan:
 
 @dataclass(frozen=True)
 class EntrySpan:
-    """One entry with the offsets of its key, comma, fields and closing delimiter."""
+    """One entry with the offsets of its key, comma, fields and closing delimiter.
+
+    Attributes:
+        entry: The parsed entry.
+        key_start: The offset where the citation key starts.
+        key_end: The offset just after the citation key.
+        comma: The offset of the comma after the key, or ``None`` when there is none.
+        fields: The layout of every field, in source order.
+        closing: The offset of the entry's closing delimiter.
+    """
 
     entry: Entry
     key_start: int
@@ -65,7 +82,19 @@ class EntrySpan:
 
 
 def layout_entry(document: BibDocument, entry: Entry) -> EntrySpan:
-    """Locate the delimiters of ``entry``; raises :class:`UnsupportedLayout` if it has none."""
+    """Locate the delimiters of ``entry``.
+
+    Args:
+        document: The parsed file that holds the entry.
+        entry: The entry to lay out.
+
+    Returns:
+        The offsets of the entry's key, comma, fields and closing delimiter.
+
+    Raises:
+        UnsupportedLayout: The entry has no supported literal key, or a field name has
+            unsupported syntax.
+    """
     text = document.text
     match = _ENTRY_HEADER.match(text, entry.start)
     if match is None:
@@ -93,7 +122,17 @@ def layout_entry(document: BibDocument, entry: Entry) -> EntrySpan:
 
 
 def retained_comments(text: str, start: int, end: int, fields: tuple[Field, ...]) -> str:
-    """The percent comments between ``start`` and ``end`` that lie outside the value atoms."""
+    """Collect the percent comments between ``start`` and ``end`` outside the value atoms.
+
+    Args:
+        text: The text of the .bib file.
+        start: The offset where the search starts.
+        end: The offset where the search stops.
+        fields: The fields whose value atoms, delimiters included, are skipped.
+
+    Returns:
+        The comments in order, each with its line break when it has one inside the range.
+    """
     protected = {atom.outer_start: atom.outer_end for item in fields for atom in item.atoms}
     result: list[str] = []
     position = start
@@ -111,25 +150,54 @@ def retained_comments(text: str, start: int, end: int, fields: tuple[Field, ...]
 
 
 def field_removal(document: BibDocument, span: FieldSpan) -> TextEdit:
-    """Remove a field and its comma, keeping the comments inside it."""
+    """Remove a field and its comma, keeping the comments inside it.
+
+    Args:
+        document: The parsed file that holds the field.
+        span: The layout of the field.
+
+    Returns:
+        The edit that replaces the field and its comma with the comments inside them.
+    """
     start = span.field.start
     end = span.comma + 1 if span.comma is not None else span.value_end
     return TextEdit(start, end, retained_comments(document.text, start, end, (span.field,)))
 
 
 def entry_removal(document: BibDocument, span: EntrySpan) -> TextEdit:
-    """Remove a whole entry, keeping the comments inside it."""
+    """Remove a whole entry, keeping the comments inside it.
+
+    Args:
+        document: The parsed file that holds the entry.
+        span: The layout of the entry.
+
+    Returns:
+        The edit that replaces the entry with the comments inside it.
+    """
     start, end = span.entry.start, span.end
     return TextEdit(start, end, retained_comments(document.text, start, end, span.entry.fields))
 
 
 def newline_style(text: str) -> str:
-    """The file's line ending: CRLF when the text has any, else LF."""
+    """Choose the file's line ending: CRLF when the text has any, else LF."""
     return "\r\n" if "\r\n" in text else "\n"
 
 
 def value_expression(value: str, wrapper: str = "{") -> str:
-    """``value`` wrapped in braces or quotes, if that parses back as exactly ``value``."""
+    """Wrap ``value`` in braces or quotes, if that parses back as exactly ``value``.
+
+    Args:
+        value: The intended field value.
+        wrapper: The opening delimiter; ``{`` closes with a brace, anything else with a
+            double quote.
+
+    Returns:
+        The wrapped value.
+
+    Raises:
+        InvalidValueSyntax: The wrapped value does not parse back as a single literal
+            equal to ``value``.
+    """
     closing = "}" if wrapper == "{" else '"'
     expression = wrapper + value + closing
     test = parse_bibtex("replacement", "@misc{key, value=" + expression + "}")

@@ -34,15 +34,38 @@ from tests.pdf_fakes import (
 
 
 def region(name: str = "Figure", *, left: float = 0, right: float = 100) -> PdfRegion:
+    """Return a region on page 1 that spans from the top at 0 to the bottom at 100 points.
+
+    Args:
+        name: The name of the region in findings.
+        left: The left edge in points.
+        right: The right edge in points.
+
+    Returns:
+        The region.
+    """
     return PdfRegion(name, 1, left, 0, right, 100)
 
 
 def image(*, matrix: str = "100 0 0 100 0 0", width: int = 300, height: int = 300) -> str:
+    """Return the mutool trace markup of an opaque image.
+
+    Args:
+        matrix: The transformation matrix of the image.
+        width: The width of the image in pixels.
+        height: The height of the image in pixels.
+
+    Returns:
+        A ``fill_image`` element.
+    """
     return f'<fill_image transform="{matrix}" width="{width}" height="{height}" alpha="1"/>'
 
 
 class RenderedArtworkTests(unittest.IsolatedAsyncioTestCase):
+    """Artwork rules that render pages: previews, render caps, sample contrast, cancellation."""
+
     async def asyncSetUp(self) -> None:
+        """Create a temporary folder that holds a placeholder ``figure.pdf``."""
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
         self.pdf = self.root / "figure.pdf"
@@ -50,9 +73,15 @@ class RenderedArtworkTests(unittest.IsolatedAsyncioTestCase):
         self.sequence = 0
 
     async def asyncTearDown(self) -> None:
+        """Remove the temporary folder."""
         self.temporary.cleanup()
 
     def work(self) -> Path:
+        """Name a new work folder for one inspection; the folder is not created.
+
+        Returns:
+            ``artwork-<n>`` in the temporary folder, where ``n`` counts the calls from 1.
+        """
         self.sequence += 1
         return self.root / f"artwork-{self.sequence}"
 
@@ -62,17 +91,47 @@ class RenderedArtworkTests(unittest.IsolatedAsyncioTestCase):
         runner: ArtworkRunner | None = None,
         limits: ArtworkLimits | None = None,
     ):
+        """Inspect the artwork of the PDF in a new work folder.
+
+        Args:
+            options: The artwork checks to run.
+            runner: The PDF tool double, or ``None`` for a default :class:`ArtworkRunner`.
+            limits: The artwork limits, or ``None`` for the defaults.
+
+        Returns:
+            The findings of the inspection.
+        """
         return await inspect_pdf_artwork(
             self.pdf, self.work(), runner or ArtworkRunner(), options=options, limits=limits
         )
 
     async def status_for(self, options: PdfArtworkOptions, expected: str, runner: ArtworkRunner):
+        """Inspect the PDF and assert that there is one finding, with the status ``expected``.
+
+        Args:
+            options: The artwork checks to run.
+            expected: The status the finding must have.
+            runner: The PDF tool double.
+
+        Returns:
+            The one finding.
+        """
         findings = await self.check(options, runner)
         self.assertEqual(len(findings), 1, findings)
         self.assertEqual(findings[0].status, expected, findings)
         return findings[0]
 
     async def status(self, options: PdfArtworkOptions, expected: str, **values: object):
+        """Inspect the PDF as :meth:`status_for` does, with an :class:`ArtworkRunner`.
+
+        Args:
+            options: The artwork checks to run.
+            expected: The status the finding must have.
+            **values: Tool outputs that replace the defaults of the runner.
+
+        Returns:
+            The one finding.
+        """
         return await self.status_for(options, expected, ArtworkRunner(**values))
 
     async def test_grayscale_preview_retains_validated_artifact_and_rejects_partial_output(

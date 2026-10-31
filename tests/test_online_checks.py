@@ -37,7 +37,13 @@ from .online_support import crossref_work as metadata
 
 
 class OnlineCheckTests(unittest.IsolatedAsyncioTestCase):
+    """Every online check with a fake transport and resolver: requests, outcomes, messages."""
+
     async def asyncSetUp(self):
+        """Create a temporary project whose ``main.tex`` declares ``references.bib``.
+
+        :meth:`reference` writes the bibliography itself.
+        """
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
         self.bib = self.root / "references.bib"
@@ -48,15 +54,39 @@ class OnlineCheckTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def asyncTearDown(self):
+        """Remove the temporary project."""
         self.temporary.cleanup()
 
     def reference(self, extra="doi={10.1234/example}", kind="article", author="Smith, Ada"):
+        """Write ``references.bib`` with the one entry ``key``.
+
+        The entry has a title, ``author``, the year 2024 and a journal.
+
+        Args:
+            extra: Further fields of the entry, in BibTeX syntax.
+            kind: The entry type.
+            author: The value of the ``author`` field.
+        """
         self.bib.write_text(
             f"@{kind}{{key, title={{A reference title}}, author={{{author}}}, "
             f"year={{2024}}, journal={{Example Journal}}, {extra}}}\n"
         )
 
     async def run_check(self, selected, answer, rule, code):
+        """Run the online checks with a fake transport and return the finding of ``rule``.
+
+        The finding must have ``code`` and an outcome, every request must go to the public
+        address, and the bibliography must stay unchanged.
+
+        Args:
+            selected: The online options to run with.
+            answer: The fake transport's answers, as :class:`FakeTransport` takes them.
+            rule: The rule of the finding to return.
+            code: The code that finding must have.
+
+        Returns:
+            The finding of ``rule``, every finding, and every request the transport saw.
+        """
         original = self.bib.read_bytes() if self.bib.exists() else None
         transport = FakeTransport(answer)
         findings = await check_online_references(

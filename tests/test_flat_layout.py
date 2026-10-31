@@ -13,7 +13,13 @@ from tests.support import ProjectTestCase
 
 
 class FlatLayoutTests(ProjectTestCase):
+    """Flat layout plans: renamed files, rewritten references, collisions and advice."""
+
     def assert_usable(self, plan) -> None:
+        """Assert that ``plan`` has no blocking finding and maps no two files to one name.
+
+        Names that differ only in case count as one name.
+        """
         self.assertFalse(
             has_blockers(plan.findings),
             [finding for finding in plan.findings if finding.severity == "error"],
@@ -182,6 +188,18 @@ class FlatLayoutTests(ProjectTestCase):
         )
 
     def finding(self, findings, rule: str):
+        """Return the first of ``findings`` whose rule is ``rule``.
+
+        Args:
+            findings: The findings to search.
+            rule: The rule name to find.
+
+        Returns:
+            The first matching finding.
+
+        Raises:
+            StopIteration: No finding has the rule.
+        """
         return next(item for item in findings if item.rule == rule)
 
     def test_advice_names_the_layout_setting_only_where_it_applies(self) -> None:

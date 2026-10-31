@@ -28,7 +28,10 @@ from tests.support import (
 
 
 class CheckSelectionWorkflowTests(AsyncProjectTestCase):
+    """Tests that check selection changes what runs and the outcome, never the release guards."""
+
     async def asyncSetUp(self):
+        """Write a minimal project into ``self.source``."""
         self.source = self.root / "source"
         minimal_project(self.source)
 

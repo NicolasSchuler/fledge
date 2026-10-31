@@ -31,16 +31,25 @@ _AREA_LABELS = {
 
 
 def not_checked_areas(configured_codes: Collection[str]) -> list[NotCheckedArea]:
-    """Opt-in checks outside ``configured_codes``, the codes a run's settings activate.
+    """List the opt-in checks outside ``configured_codes``, the codes a run's settings activate.
 
-    Pass ``check_policy.configured_opt_in_codes`` of the effective settings. The
-    first entries name the major areas; the final ``other_opt_in_checks`` entry
+    The first entries name the major areas; the final ``other_opt_in_checks`` entry
     lists the remaining unconfigured opt-in codes. A check disabled by check
     selection is reported here too, because it did not run either.
+
+    Args:
+        configured_codes: The codes the run's settings activate; pass
+            ``check_policy.configured_opt_in_codes`` of the effective settings.
+
+    Returns:
+        One entry for each major area none of whose checks is configured, then at most one
+        entry for the other unconfigured opt-in checks, each with the settings that enable
+        its checks.
     """
     activation = opt_in_activation()
 
     def setting_names(codes: Sequence[str]) -> tuple[str, ...]:
+        """Name the settings that activate ``codes``, each once, as ``table.name`` or ``name``."""
         return tuple(
             dict.fromkeys(
                 name if group is None else f"{toml_table(group)}.{name}"
@@ -72,11 +81,16 @@ def not_checked_areas(configured_codes: Collection[str]) -> list[NotCheckedArea]
 def not_checked_summary(
     areas: Sequence[NotCheckedArea], config_path: str | None = None
 ) -> str | None:
-    """One line naming unconfigured opt-in areas and how to enable them.
+    """Write one line naming unconfigured opt-in areas and how to enable them.
 
-    ``config_path`` is the settings file this run loaded, if any (the report's
-    ``execution.config_path``). The ``fledge init`` hint is only offered when no
-    settings file was used.
+    Args:
+        areas: The unconfigured areas, as :func:`not_checked_areas` lists them.
+        config_path: The settings file this run loaded, if any (the report's
+            ``execution.config_path``). The ``fledge init`` hint is only offered when no
+            settings file was used.
+
+    Returns:
+        The line, or ``None`` when ``areas`` names nothing.
     """
     labels = [area.label for area in areas if area.area != OTHER_OPT_IN_AREA]
     others = next((area.codes for area in areas if area.area == OTHER_OPT_IN_AREA), ())

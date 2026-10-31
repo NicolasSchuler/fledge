@@ -33,11 +33,15 @@ logger = logging.getLogger(__name__)
 class AnalysedSource:
     """The literal source graph of ``root`` and ``main``, and its expanded document.
 
-    ``main`` is the main file as the caller named it (``None`` selects the project's single
-    document root). The graph is built on first use of :attr:`graph` and the expanded
-    document on first use of :attr:`expanded`; threads that ask at the same time wait for
-    the one build instead of repeating it. A build that fails (an unreadable root, a
-    cancelled job) is not remembered, so the next caller tries again.
+    The graph is built on first use of :attr:`graph` and the expanded document on first
+    use of :attr:`expanded`; threads that ask at the same time wait for the one build
+    instead of repeating it. A build that fails (an unreadable root, a cancelled job) is
+    not remembered, so the next caller tries again.
+
+    Attributes:
+        root: The project root whose files the analysis reads.
+        main: The main file as the caller named it; ``None`` selects the project's single
+            document root.
     """
 
     __slots__ = ("_expanded", "_expansion_lock", "_graph", "_graph_lock", "main", "root")
@@ -86,15 +90,35 @@ class AnalysedSource:
         return document
 
     def covers(self, root: Path, main: str | None) -> bool:
-        """Whether this analysis describes ``main`` of the project at ``root``."""
+        """Return whether this analysis describes ``main`` of the project at ``root``.
+
+        Args:
+            root: The project root to compare with.
+            main: The main file to compare with, as the caller names it.
+
+        Returns:
+            ``True`` when both the root and the main file are the ones analysed.
+        """
         return self.root == root and self.main == main
 
 
 def reuse_or_analyse(root: Path, main: str | None, shared: AnalysedSource | None) -> AnalysedSource:
-    """``shared`` when a caller passed one, otherwise a new analysis of ``main`` under ``root``.
+    """Return ``shared`` when a caller passed one, otherwise a new analysis.
 
     A shared analysis of another root or main file would silently describe the wrong
     project, so it is refused instead of used.
+
+    Args:
+        root: The project root to analyse.
+        main: The main file as the caller named it; ``None`` selects the single document
+            root.
+        shared: An analysis the caller already holds, or ``None``.
+
+    Returns:
+        ``shared``, or a new, not yet built analysis of ``main`` under ``root``.
+
+    Raises:
+        ValueError: ``shared`` describes another root or main file.
     """
     if shared is None:
         return AnalysedSource(root, main)
@@ -119,7 +143,18 @@ class AnalysedSourceCache:
         self._analyses: dict[tuple[Path, str | None], AnalysedSource] = {}
 
     def get(self, root: Path, main: str | None) -> AnalysedSource:
-        """The shared analysis of ``main`` under ``root``; nothing is read until it is used."""
+        """Return the shared analysis of ``main`` under ``root``, creating it on first request.
+
+        Nothing is read until the analysis is used.
+
+        Args:
+            root: The project root to analyse.
+            main: The main file as the caller named it; ``None`` selects the single
+                document root.
+
+        Returns:
+            The one analysis this cache holds for ``root`` and ``main``.
+        """
         with self._lock:
             analysis = self._analyses.get((root, main))
             if analysis is None:

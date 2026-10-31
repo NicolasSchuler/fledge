@@ -24,7 +24,14 @@ from tests.support import controlled_backends, fake_build, minimal_project
 
 
 class MultiDocumentTests(unittest.IsolatedAsyncioTestCase):
+    """Multi-document jobs: own builds and archives, one release for all, and configuration."""
+
     async def asyncSetUp(self):
+        """Create a project with two documents and the settings that configure both.
+
+        ``paper`` builds ``main.tex`` and ``supplement`` builds ``extra.tex``, each from its
+        own folder.
+        """
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.base = Path(self.temporary.name)
@@ -203,7 +210,13 @@ class MultiDocumentTests(unittest.IsolatedAsyncioTestCase):
 
 
 class BaselineStabilityTests(unittest.IsolatedAsyncioTestCase):
+    """Repeated baseline builds: differences, comparison tolerances and recorded stages."""
+
     async def asyncSetUp(self):
+        """Create a one-document project and settings with two baseline runs.
+
+        The comparison tolerates a channel difference of 1 and changes in 1% of the pixels.
+        """
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.base = Path(self.temporary.name)

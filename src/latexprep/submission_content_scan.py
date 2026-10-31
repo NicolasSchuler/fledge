@@ -98,7 +98,13 @@ _CANCELLATION_STRIDE_LINES = 256
 
 
 class SecretMatch(NamedTuple):
-    """A credential-shaped value found in text: where it starts, its kind and the value."""
+    """A credential-shaped value found in text.
+
+    Attributes:
+        offset: Where the value starts in the text.
+        kind: The kind of the value, as ``SECRET_PATTERNS`` names it.
+        value: The value itself.
+    """
 
     offset: int
     kind: str
@@ -106,7 +112,20 @@ class SecretMatch(NamedTuple):
 
 
 def find_secrets(text: str, limit: int) -> list[SecretMatch]:
-    """The first ``limit`` credential-shaped values in ``text``, in the order patterns find them."""
+    """Return the first ``limit`` credential-shaped values in ``text``.
+
+    The values are in the order patterns find them: each pattern of ``SECRET_PATTERNS`` is
+    applied in turn, and known example credentials of templates and documentation are
+    skipped.
+
+    Args:
+        text: The text to search.
+        limit: The most values to return.
+
+    Returns:
+        The values found, each with its offset and kind. A value is the pattern's ``secret``
+        group when it has one, else the whole match.
+    """
     result: list[SecretMatch] = []
     for kind, pattern in SECRET_PATTERNS:
         cancellation_point()
@@ -121,12 +140,24 @@ def find_secrets(text: str, limit: int) -> list[SecretMatch]:
 
 
 def _fold(value: str) -> str:
+    """Return ``value`` percent-decoded, NFKC-normalized and case-folded for matching."""
     return unicodedata.normalize("NFKC", unquote(value)).casefold()
 
 
 @lru_cache(maxsize=16)
 def _term_patterns(terms: tuple[str, ...], matching: str) -> tuple[re.Pattern[str], ...]:
-    """Compile folded terms once; word mode requires non-alphanumeric (or no) neighbours."""
+    """Compile folded terms once; word mode requires non-alphanumeric (or no) neighbours.
+
+    Underscores and punctuation separate words; a term's start or end that is not
+    alphanumeric needs no separator.
+
+    Args:
+        terms: The identity terms.
+        matching: ``"word"`` for whole-word matching; any other value matches substrings.
+
+    Returns:
+        One pattern per term, in the order of ``terms``.
+    """
     patterns = []
     for term in terms:
         folded = _fold(term)
@@ -141,20 +172,39 @@ def _term_patterns(terms: tuple[str, ...], matching: str) -> tuple[re.Pattern[st
 
 
 def term_matches(text: str, options: SubmissionOptions) -> list[int]:
-    """The 1-based indexes of the identity terms that occur in ``text``."""
+    """Return the 1-based indexes of the identity terms that occur in ``text``.
+
+    Args:
+        text: The text to search; it is folded as the terms are.
+        options: The submission options with the identity terms and their matching mode.
+
+    Returns:
+        The indexes of the matching terms, in ascending order.
+    """
     folded = _fold(text)
     patterns = _term_patterns(options.identity_terms, options.identity_term_matching)
     return [index for index, pattern in enumerate(patterns, 1) if pattern.search(folded)]
 
 
 def term_rule_description(options: SubmissionOptions) -> str:
-    """How identity terms are matched, in words for a scope sentence."""
+    """Return how identity terms are matched, in words for a scope sentence."""
     if options.identity_term_matching == "word":
         return "case-insensitive whole-word terms bounded by non-alphanumeric characters"
     return "case-insensitive literal substrings"
 
 
 def _line_channel(value: str, line: int, comment_lines: set[int]) -> str:
+    """Return the channel of one line: ``"url"``, ``"comment"`` or ``"text"``.
+
+    Args:
+        value: The text of the line; one that holds an ``http://`` or ``https://`` URL is a
+            ``"url"`` line.
+        line: The 1-based line number.
+        comment_lines: The numbers of the lines that hold a TeX comment.
+
+    Returns:
+        The channel of the line.
+    """
     if re.search(r"https?://", value):
         return "url"
     return "comment" if line in comment_lines else "text"
@@ -162,17 +212,24 @@ def _line_channel(value: str, line: int, comment_lines: set[int]) -> str:
 
 @dataclass(slots=True)
 class _Matches:
-    """Matches of one scan rule; scans stop adding once the reported limit is reached."""
+    """Matches of one scan rule; scans stop adding once the reported limit is reached.
+
+    Attributes:
+        limit: The most matches the rule reports.
+        items: The matches collected so far.
+    """
 
     limit: int
     items: list[dict[str, object]] = field(default_factory=list)
 
     @property
     def room(self) -> int:
+        """The number of matches that can still be added before the limit."""
         return self.limit - len(self.items)
 
     @property
     def has_room(self) -> bool:
+        """Whether another match can be added."""
         return self.room > 0
 
     def extend_until_full(self, items: Iterable[dict[str, object]]) -> None:
@@ -185,7 +242,15 @@ class _Matches:
 
 @dataclass(slots=True)
 class _ContentRule:
-    """One filename and text-content scan rule of ``check_submission``."""
+    """One filename and text-content scan rule of ``check_submission``.
+
+    Attributes:
+        rule: The rule name of the finding.
+        enabled: Whether the options select the rule.
+        matches: The matches the rule has collected.
+        advisory: Whether the finding has the advisory weight.
+        lexical: Whether the rule's scan depends on the TeX lexical regions.
+    """
 
     rule: str
     enabled: bool
@@ -197,7 +262,26 @@ class _ContentRule:
 
 
 class ContentScan:
-    """One pass over every supplied file shared by the identity, secret and note scans."""
+    """One pass over every supplied file shared by the identity, secret and note scans.
+
+    Args:
+        inventory_issues: The reasons the file inventory is incomplete; they start
+            ``issues``.
+
+    Attributes:
+        options: The submission options that select the rules.
+        limits: The limits of the scans.
+        issues: The reasons every rule's scan is incomplete, starting with the inventory's.
+        lexical_issues: The reasons the scans of the lexical rules are incomplete.
+        budget: The byte budget that every text read counts against.
+        secret_values: The distinct secret values seen, up to ``limits.max_matches``.
+        identity_terms: The configured identity-term rule.
+        identity_hints: The identity-hint rule.
+        secrets: The secret rule.
+        private_comments: The private-comment rule.
+        shell_escape: The shell-escape rule.
+        rules: Every rule, in the order the findings are reported.
+    """
 
     def __init__(
         self, options: SubmissionOptions, inventory_issues: list[str], limits: ScanLimits
@@ -211,6 +295,17 @@ class ContentScan:
         self.secret_values: set[str] = set()
 
         def rule(name: str, *, enabled: bool, advisory: bool, lexical: bool) -> _ContentRule:
+            """Return a rule with an empty match list bounded by ``limits.max_matches``.
+
+            Args:
+                name: The rule name of the finding.
+                enabled: Whether the options select the rule.
+                advisory: Whether the finding has the advisory weight.
+                lexical: Whether the rule's scan depends on the TeX lexical regions.
+
+            Returns:
+                The rule.
+            """
             matches = _Matches(limits.max_matches)
             return _ContentRule(name, enabled, matches, advisory=advisory, lexical=lexical)
 
@@ -250,7 +345,18 @@ class ContentScan:
         )
 
     def scan(self, name: str, path: Path) -> None:
-        """Read one file by name and, when it is a text file, by content."""
+        """Read one file by name and, when it is a text file, by content.
+
+        The file name is always matched against identity terms and searched for secrets. The
+        content is read only when some rule is enabled and the file has a text extension or
+        is named ``.env``; a file that cannot be read as UTF-8 within the budget is an issue.
+        Comments of TeX files are checked for private notes, and their active source feeds
+        the lexical rules.
+
+        Args:
+            name: The project path of the file.
+            path: The file to read.
+        """
         if self.identity_terms.enabled and self.identity_terms.matches.has_room:
             # Every term in one filename is kept, so the list may pass the limit slightly.
             self.identity_terms.matches.items.extend(
@@ -288,6 +394,11 @@ class ContentScan:
             self._active_source(name, text)
 
     def _filename_secrets(self, name: str) -> None:
+        """Collect the secrets in a file name for redaction and, when enabled, as matches.
+
+        Args:
+            name: The project path of the file.
+        """
         limit = self.limits.max_matches
         for _, kind, value in find_secrets(name, limit):
             if len(self.secret_values) < limit:
@@ -298,6 +409,14 @@ class ContentScan:
                 )
 
     def _text_secrets(self, name: str, text: str) -> None:
+        """Collect the secrets in a file's text for redaction and, when enabled, as matches.
+
+        No text is searched once ``limits.max_matches`` secret values have been collected.
+
+        Args:
+            name: The project path of the file.
+            text: The text of the file.
+        """
         limit = self.limits.max_matches
         secrets = find_secrets(text, limit) if len(self.secret_values) < limit else []
         self.secret_values.update(
@@ -312,6 +431,17 @@ class ContentScan:
     def _identity_lines(
         self, name: str, text: str, comment_lines: set[int]
     ) -> Iterable[dict[str, object]]:
+        """Yield the identity-term matches of each line of ``text``.
+
+        Args:
+            name: The project path of the file.
+            text: The text of the file.
+            comment_lines: The numbers of the lines that hold a TeX comment.
+
+        Yields:
+            One match per term found on a line, with the path, line, channel and 1-based term
+            index.
+        """
         for line, value in enumerate(text.splitlines(), 1):
             if line % _CANCELLATION_STRIDE_LINES == 0:
                 cancellation_point()
@@ -324,7 +454,14 @@ class ContentScan:
                 }
 
     def _active_source(self, name: str, text: str) -> None:
-        """Hints and shell-escape preflight read active TeX outside literal regions."""
+        """Scan active TeX outside literal regions for identity hints and shell-escape constructs.
+
+        An unclosed literal region leaves the scans of the lexical rules incomplete.
+
+        Args:
+            name: The project path of the file.
+            text: The text of the file.
+        """
         regions, unclosed = source_regions(text)
         masked = blank_regions(text, regions)
         if unclosed:
@@ -339,7 +476,10 @@ class ContentScan:
                 )
 
     def findings(self) -> list[Finding]:
-        """One finding per enabled rule."""
+        """Return one finding per enabled rule.
+
+        The lexical issues apply only to the lexical rules.
+        """
         scope = (
             "All supplied filenames and supported UTF-8 text files, "
             "including other document roots; "

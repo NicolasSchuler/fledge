@@ -57,12 +57,33 @@ SOURCE_LINK_CHECK = "online_replication_links"
 
 
 def option_maximum(option: str) -> int:
-    """The largest value ``option`` accepts, for messages that say how to raise it."""
+    """Return the largest value ``option`` accepts, for messages that say how to raise it."""
     return OPTION_BOUNDS[option][1]
 
 
 class FetchOutcome(StrEnum):
-    """How one bounded request ended; the values are the reported outcome strings."""
+    """How one bounded request ended; the values are the reported outcome strings.
+
+    Attributes:
+        AVAILABLE: The server answered with a 2xx status.
+        AUTHENTICATION_REQUIRED: The server answered 401.
+        ACCESS_DENIED: The server answered 403.
+        NOT_FOUND: The server answered 404.
+        GONE: The server answered 410.
+        RATE_LIMITED: The server answered 429, asking for fewer requests.
+        UNAVAILABLE: Another error status, or the provider or network could not be reached.
+        UNSAFE_TARGET: The request or a redirect led to a target that may not be contacted.
+        MALFORMED: The reply could not be used.
+        RESPONSE_LIMIT: The reply was larger than ``online_max_response_bytes``.
+        REQUEST_LIMIT: The job's request budget was spent before this request.
+        REDIRECT_LOOP: A redirect leads back to an address already visited.
+        REDIRECT_LIMIT: The redirects exceeded ``online_max_redirects``.
+        TIMEOUT: The provider did not answer in time.
+        HOST_UNRESOLVED: The host name could not be resolved.
+        TLS_FAILURE: The secure connection failed.
+        IDENTIFIER_MISMATCH: The reply concerns a different identifier than the one asked for.
+        INPUT_UNAVAILABLE: The entry's input cannot be used, so no request was made.
+    """
 
     AVAILABLE = "available"
     AUTHENTICATION_REQUIRED = "authentication_required"
@@ -100,6 +121,31 @@ class OnlineOptions:
     product User-Agent. It never enters a finding, detail or report field. The report
     records the setting as ``CONTACT_EMAIL_PLACEHOLDER`` when an address is set, so a
     shared report, HTML file or diagnostics bundle shows that one was used but not whose.
+
+    Construction raises ``SettingsError`` when a setting has the wrong type or lies outside
+    its bounds, the replication links are not distinct nonempty strings or are too many, or
+    the contact address is not one simple email address.
+
+    Attributes:
+        FIELD_BOUNDS: The bounds :func:`validate_scalars` applies to the integer limits and
+            the provider interval.
+        online: Whether network access is allowed; it selects no check.
+        online_doi_resolution: Whether the ``online.doi_resolution`` check is selected.
+        online_metadata: Whether the ``online.metadata`` check is selected.
+        online_missing_doi: Whether the ``online.missing_doi`` check is selected.
+        online_published_versions: Whether the ``online.published_version`` check is selected.
+        online_notices: Whether the ``online.notices`` check is selected.
+        online_reference_links: Whether the ``online.reference_link`` check is selected.
+        online_replication_links: Whether the ``online.replication_link`` check is selected;
+            it reads configured and source links instead of bibliography entries.
+        online_replication_urls: The configured links of the replication link check.
+        online_contact_email: The contact address for Crossref's polite pool, or ``None``.
+        online_max_requests: The request budget of the whole job.
+        online_timeout_seconds: The request timeout, in seconds.
+        online_max_redirects: The most redirects one request follows.
+        online_max_response_bytes: The largest reply accepted, in bytes.
+        online_jobs: How many references and links are checked at once, at most.
+        online_provider_interval_seconds: The seconds between requests to one provider.
     """
 
     FIELD_BOUNDS: ClassVar[dict[str, Bounds]] = {
@@ -148,7 +194,7 @@ class OnlineOptions:
         return f"{PRODUCT} (mailto:{email})" if email else DEFAULT_USER_AGENT
 
     def user_agent_for(self, host: str) -> str:
-        """The User-Agent for ``host``: the contact address goes to Crossref's API alone."""
+        """Return the User-Agent for ``host``: the contact address goes to Crossref's API alone."""
         return self.user_agent if host == CROSSREF_HOST else DEFAULT_USER_AGENT
 
     @property
@@ -163,7 +209,14 @@ class OnlineOptions:
 
 
 class NetworkFailure(Exception):
-    """A bounded, redacted failure; never contains provider bodies or credentials."""
+    """A bounded, redacted failure; never contains provider bodies or credentials.
+
+    Args:
+        message: Why the request cannot continue; it becomes the exception's text.
+
+    Attributes:
+        outcome: How the request ended.
+    """
 
     def __init__(self, outcome: FetchOutcome, message: str) -> None:
         super().__init__(message)

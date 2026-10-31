@@ -29,7 +29,20 @@ from functools import cache
 
 
 class MarkerCategory(StrEnum):
-    """One kind of marker; the value is the label reported for it."""
+    """One kind of marker; the value is the label reported for it.
+
+    Attributes:
+        EDIT_MARKER: ``TODO``, ``FIXME`` and ``XXX``.
+        TO_BE_DETERMINED: ``TBD``.
+        UNCERTAINTY_MARK: ``??``.
+        REVIEW_CORRESPONDENCE: Phrases written for reviewers or editors, such as
+            "reviewer 2".
+        DISTRIBUTION_RESTRICTION: Phrases that restrict distribution, such as "do not
+            submit".
+        PRIVATE_NOTE: Phrases that mark a private note, such as "note to self".
+        PRIVACY_KEYWORD: Single words, such as ``private``, that make a comment a candidate
+            for removal.
+    """
 
     EDIT_MARKER = "edit marker"
     TO_BE_DETERMINED = "to be determined"
@@ -72,13 +85,33 @@ _CATEGORY_SOURCES: dict[MarkerCategory, str] = {
 
 @cache
 def marker_pattern(*categories: MarkerCategory, ignore_case: bool = True) -> re.Pattern[str]:
-    """One pattern that matches any marker of the given categories."""
+    """Compile one pattern that matches any marker of the given categories.
+
+    Args:
+        *categories: The categories whose markers the pattern matches.
+        ignore_case: Whether matching is case-insensitive, the default for comments.
+            Manuscript text is matched case-sensitively, and only with the
+            unfinished-text categories.
+
+    Returns:
+        The compiled pattern, cached for each combination of arguments.
+    """
     flags = re.IGNORECASE if ignore_case else 0
     return re.compile("|".join(_CATEGORY_SOURCES[category] for category in categories), flags)
 
 
 def matching_category(text: str, categories: tuple[MarkerCategory, ...]) -> MarkerCategory | None:
-    """The first of ``categories``, in the order given, that has a marker in ``text``."""
+    """Find the first of ``categories``, in the order given, that has a marker in ``text``.
+
+    Matching is case-insensitive.
+
+    Args:
+        text: The text to search.
+        categories: The categories to try, in order.
+
+    Returns:
+        The first matching category, or ``None`` when none matches.
+    """
     return next(
         (category for category in categories if marker_pattern(category).search(text)), None
     )

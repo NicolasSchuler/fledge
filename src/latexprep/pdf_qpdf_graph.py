@@ -20,12 +20,17 @@ _OBJECT_REFERENCE = re.compile(r"[0-9]+ [0-9]+ R")
 
 
 def is_object_reference(value: object) -> TypeGuard[str]:
-    """An indirect qpdf object reference such as ``12 0 R``."""
+    """Return whether ``value`` is an indirect qpdf object reference such as ``12 0 R``."""
     return isinstance(value, str) and _OBJECT_REFERENCE.fullmatch(value) is not None
 
 
 class QpdfJson(NamedTuple):
-    """The object table of a qpdf JSON v2 document, and its page list (empty unless requested)."""
+    """The object table of a qpdf JSON v2 document, and its page list (empty unless requested).
+
+    Attributes:
+        objects: The object table, by key.
+        pages: The page list, empty unless requested.
+    """
 
     objects: dict[str, Any]
     pages: list[Any]
@@ -35,8 +40,18 @@ def parse_qpdf_json_v2(output: str, failure: str, *, pages: int | None = None) -
     """Validate the envelope of qpdf ``--json=2`` output and return its object table.
 
     The envelope is the format version, the ``qpdf`` entry holding the header and the
-    objects, and, when ``pages`` is given, a page list of exactly that length. Any
-    deviation raises ``PreparationError(failure)``: the caller names what it needed.
+    objects, and, when ``pages`` is given, a page list of exactly that length.
+
+    Args:
+        output: The qpdf output.
+        failure: The message of the error, in which the caller names what it needed.
+        pages: The length the page list must have, or ``None`` to read no page list.
+
+    Returns:
+        The object table and the page list.
+
+    Raises:
+        PreparationError: The envelope deviates in any way; the message is ``failure``.
     """
     try:
         document = json.loads(output)
@@ -59,7 +74,20 @@ def parse_qpdf_json_v2(output: str, failure: str, *, pages: int | None = None) -
 
 
 class QpdfObjectGraph:
-    """qpdf JSON v2 object access with bounded, cycle-aware reference traversal."""
+    """qpdf JSON v2 object access with bounded, cycle-aware reference traversal.
+
+    Construction raises ``PreparationError`` when the object data is incomplete, holds more
+    than ``MAX_PARSED_NODES`` objects or lacks a valid catalog.
+
+    Args:
+        output: The ``qpdf --json=2`` output to parse.
+        pages: The number of entries the page list must have.
+
+    Attributes:
+        objects: The object table, by key.
+        pages: The page list.
+        root: The document catalog.
+    """
 
     def __init__(self, output: str, pages: int):
         document = parse_qpdf_json_v2(
@@ -77,6 +105,17 @@ class QpdfObjectGraph:
             raise PreparationError("qpdf object data lacks a valid catalog")
 
     def lookup(self, key: str) -> object:
+        """Return the value of an object, or the dictionary of a stream object.
+
+        Args:
+            key: The key in the object table, such as ``trailer`` or ``obj:12 0 R``.
+
+        Returns:
+            The value.
+
+        Raises:
+            PreparationError: The object is missing or malformed.
+        """
         try:
             entry = self.objects[key]
             value = entry["value"] if "value" in entry else entry["stream"]["dict"]
@@ -85,6 +124,18 @@ class QpdfObjectGraph:
         return value
 
     def resolve(self, value: object) -> object:
+        """Follow indirect references from ``value`` to a direct object.
+
+        Args:
+            value: A value, which may be an indirect reference.
+
+        Returns:
+            The direct object; a value that is not a reference is returned as it is.
+
+        Raises:
+            PreparationError: The chain of references is cyclic or too long, or an object is
+                missing or malformed.
+        """
         seen: set[str] = set()
         while is_object_reference(value):
             if value in seen or len(seen) > MAX_PDF_NESTING_LEVELS:
@@ -94,12 +145,29 @@ class QpdfObjectGraph:
         return value
 
     def dictionary(self, value: object) -> dict[str, object]:
+        """Resolve ``value`` to a dictionary.
+
+        Returns:
+            The dictionary.
+
+        Raises:
+            PreparationError: ``value`` cannot be resolved or is not a dictionary.
+        """
         value = self.resolve(value)
         if not isinstance(value, dict):
             raise PreparationError("qpdf contains an unexpected non-dictionary object")
         return value
 
     def reachable_dictionaries(self) -> list[dict[str, object]]:
+        """Collect every dictionary reachable from the catalog, visiting each object once.
+
+        Returns:
+            The dictionaries, the catalog first.
+
+        Raises:
+            PreparationError: The traversal exceeds its node or depth bound, or an object
+                cannot be resolved.
+        """
         pending: list[tuple[object, int]] = [(self.root, 0)]
         references: set[str] = set()
         result = []

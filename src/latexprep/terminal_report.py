@@ -49,19 +49,38 @@ OUTCOME_STYLES: dict[Outcome, str] = {
 
 
 def one_line(value: str) -> str:
-    """``value`` sanitized for the terminal, with line breaks and tabs shown as ``\\n``, ``\\t``."""
+    r"""Sanitize ``value`` for the terminal, with line breaks and tabs shown as escapes.
+
+    Carriage returns, line feeds and tabs become ``\r``, ``\n`` and ``\t``, so the value
+    stays on one line.
+
+    Args:
+        value: The untrusted text to show.
+
+    Returns:
+        The sanitized one-line text.
+    """
     return (
         sanitize_terminal_text(value).replace("\r", "\\r").replace("\n", "\\n").replace("\t", "\\t")
     )
 
 
 def _finding_style(finding: Finding) -> str:
+    """Return the Rich style of a finding: green when it passed, else by its severity."""
     if finding.status == "passed":
         return "green"
     return {"error": "red", "warning": "yellow", "info": "cyan"}.get(finding.severity, "cyan")
 
 
 def _detail(console: Console, label: str, value: str, *, style: str = "") -> None:
+    """Print one indented ``label: value`` line, with ``value`` sanitized for the terminal.
+
+    Args:
+        console: The console to print on.
+        label: The label, printed in cyan.
+        value: The untrusted text after the label.
+        style: The Rich style of the value.
+    """
     line = Text()
     line.append(f"{label}: ", style="cyan")
     line.append(sanitize_terminal_text(value), style=style)
@@ -69,6 +88,16 @@ def _detail(console: Console, label: str, value: str, *, style: str = "") -> Non
 
 
 def _measured_total(files: list[dict], field: str) -> str:
+    """Return the total of one size field over package files, as a size label.
+
+    Args:
+        files: The per-file records of a package inventory.
+        field: The name of the size field to add up.
+
+    Returns:
+        The size label of the total, or ``"not measured"`` when a file lacks a non-negative
+        integer value for ``field``.
+    """
     total = 0
     for item in files:
         value = item.get(field)
@@ -79,7 +108,7 @@ def _measured_total(files: list[dict], field: str) -> str:
 
 
 def _package_files(package: dict[str, object]) -> list[dict]:
-    """The per-file records of a package inventory entry that are well-formed."""
+    """Return the per-file records of a package inventory entry that are well-formed."""
     entries = package.get("files", [])
     return [item for item in entries if isinstance(item, dict)] if isinstance(entries, list) else []
 
@@ -91,7 +120,17 @@ def _print_package_summary(
     style: str,
     console: Console,
 ) -> None:
-    """The title, counts, sizes and renamed files of one package inventory."""
+    """Print the title, counts, sizes and renamed files of one package inventory.
+
+    The largest compressed entries follow, and a note when the inventory is not verified.
+
+    Args:
+        package: The package inventory entry of the report.
+        files: The well-formed per-file records of the entry.
+        status: The status of the inventory.
+        style: The Rich style of the status.
+        console: The console to print on.
+    """
     included = [item for item in files if item.get("status") == "included"]
     excluded = [item for item in files if item.get("status") == "excluded"]
     console.print()
@@ -135,7 +174,12 @@ def _print_package_summary(
 
 
 def _print_package_files(files: list[dict], console: Console) -> None:
-    """Every file of a package inventory with its status, sizes and inclusion reasons."""
+    """Print every file of a package inventory with its status, sizes and inclusion reasons.
+
+    Args:
+        files: The well-formed per-file records of a package inventory.
+        console: The console to print on.
+    """
     console.print(Text("  Files:", style="cyan"))
     for item in files:
         file_status = str(item.get("status", "unknown"))
@@ -153,6 +197,15 @@ def _print_package_files(files: list[dict], console: Console) -> None:
 
 
 def _print_package(package: dict[str, object], console: Console, *, show_files: bool) -> None:
+    """Print one package inventory: its summary, and its files when they are asked for.
+
+    Without ``show_files``, a hint to use ``--show-files`` follows a non-empty inventory.
+
+    Args:
+        package: The package inventory entry of the report.
+        console: The console to print on.
+        show_files: Whether to list every file.
+    """
     files = _package_files(package)
     status = str(package.get("status", "incomplete"))
     style = "green" if status == "verified" else "yellow" if status == "incomplete" else "cyan"
@@ -164,12 +217,27 @@ def _print_package(package: dict[str, object], console: Console, *, show_files: 
 
 
 def _print_package_contents(report: RedactedReport, console: Console, *, show_files: bool) -> None:
+    """Print every package inventory of the report.
+
+    Args:
+        report: The redacted report.
+        console: The console to print on.
+        show_files: Whether to list every file of each package.
+    """
     for package in report.package_contents:
         _print_package(package, console, show_files=show_files)
 
 
 def _print_summary(report: RedactedReport, records: ExecutionRecords, console: Console) -> None:
-    """The outcome panel, the check selection and the selected document."""
+    """Print the outcome panel, the check selection and the selected document.
+
+    A request error is printed without a panel or scope.
+
+    Args:
+        report: The redacted report.
+        records: The execution records of the report.
+        console: The console to print on.
+    """
     outcome = report.outcome.replace("_", " ").capitalize()
     style = OUTCOME_STYLES[report.outcome]
     request_error = report.is_request_error
@@ -189,7 +257,15 @@ def _print_summary(report: RedactedReport, records: ExecutionRecords, console: C
 
 
 def _print_findings(report: RedactedReport, views: list[FindingView], console: Console) -> None:
-    """Each finding view, then what could not run because a prerequisite failed."""
+    """Print each finding view, then what could not run because a prerequisite failed.
+
+    A note that no issues were found follows when every view is of an always-listed rule.
+
+    Args:
+        report: The redacted report.
+        views: The finding views to print.
+        console: The console to print on.
+    """
     for view in views:
         console.print()
         color = _finding_style(view.finding)
@@ -216,7 +292,16 @@ def _print_findings(report: RedactedReport, views: list[FindingView], console: C
 
 
 def _print_changes(report: RedactedReport, options: RenderOptions, console: Console) -> None:
-    """The proposed or applied changes, summarized by kind when there are many."""
+    """Print the proposed or applied changes, summarized by kind when there are many.
+
+    Individual changes are listed when there are at most ``MAX_LISTED_CHANGES`` or diffs
+    are asked for; each diff follows its change when diffs are shown.
+
+    Args:
+        report: The redacted report.
+        options: The rendering options; ``show_diff`` lists every change with its diff.
+        console: The console to print on.
+    """
     if not report.changes:
         return
     console.print(
@@ -251,7 +336,15 @@ def _print_changes(report: RedactedReport, options: RenderOptions, console: Cons
 def _print_artifacts_and_hints(
     report: RedactedReport, records: ExecutionRecords, views: list[FindingView], console: Console
 ) -> None:
-    """Published files, the opt-in checks left off, and how to explain a check."""
+    """Print published files, the opt-in checks left off, and how to explain a check.
+
+    Args:
+        report: The redacted report.
+        records: The execution records of the report.
+        views: The finding views; a hint to explain a check follows when one of them has a
+            code and did not pass.
+        console: The console to print on.
+    """
     if report.artifacts:
         console.print(Text("\nArtifacts", style="bold cyan"))
         for name, path in report.artifacts.items():
@@ -265,7 +358,13 @@ def _print_artifacts_and_hints(
 def print_redacted_report(
     report: RedactedReport, console: Console, *, options: RenderOptions = DEFAULT_RENDER_OPTIONS
 ) -> None:
-    """Print the styled terminal report of a report that was already redacted."""
+    """Print the styled terminal report of a report that was already redacted.
+
+    Args:
+        report: The redacted report.
+        console: The console to print on.
+        options: The rendering options.
+    """
     records = read_execution_records(report.execution)
     views = finding_views(report, show_hidden=options.show_passed)
     _print_summary(report, records, console)
@@ -278,14 +377,28 @@ def print_redacted_report(
 def print_report(
     report: Report, console: Console, *, options: RenderOptions = DEFAULT_RENDER_OPTIONS
 ) -> None:
-    """Print the styled terminal report; the report is redacted before display."""
+    """Print the styled terminal report; the report is redacted before display.
+
+    Args:
+        report: The report to print.
+        console: The console to print on.
+        options: The rendering options.
+    """
     print_redacted_report(redact_report(report), console, options=options)
 
 
 def render_redacted_terminal(
     report: RedactedReport, *, options: RenderOptions = DEFAULT_RENDER_OPTIONS
 ) -> str:
-    """Plain rendering of an already redacted report, without styling."""
+    """Render an already redacted report as plain text, without styling.
+
+    Args:
+        report: The redacted report.
+        options: The rendering options.
+
+    Returns:
+        The terminal report without trailing whitespace.
+    """
     output = StringIO()
     print_redacted_report(
         report,
@@ -296,5 +409,15 @@ def render_redacted_terminal(
 
 
 def render_terminal(report: Report, *, options: RenderOptions = DEFAULT_RENDER_OPTIONS) -> str:
-    """Plain rendering for tests/embedding; the live CLI retains terminal colors."""
+    """Render a report as plain text for tests and embedding.
+
+    The live CLI retains terminal colors. The report is redacted before rendering.
+
+    Args:
+        report: The report to render.
+        options: The rendering options.
+
+    Returns:
+        The terminal report without trailing whitespace.
+    """
     return render_redacted_terminal(redact_report(report), options=options)

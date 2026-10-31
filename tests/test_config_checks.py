@@ -111,12 +111,16 @@ online_provider_interval_seconds = 0.5
 
 
 class CheckConfigTests(unittest.TestCase):
+    """Tests of loading, validating and serializing the nested check settings."""
+
     def setUp(self) -> None:
+        """Create a temporary directory as ``self.root``."""
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)
 
     def load(self, text: str = _EXAMPLE) -> Settings:
+        """Load settings from a ``settings.toml`` holding ``text``, by default ``_EXAMPLE``."""
         path = self.root / "settings.toml"
         path.write_text(text, encoding="utf-8")
         return load_settings(path, {})

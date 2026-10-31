@@ -1,3 +1,10 @@
+"""Concurrent PDF inspection and comparison under a shared resource budget.
+
+Serial, parallel and standalone runs must agree; operations overlap only where the budget
+and the page preflight allow it; a failure or a cancellation drains sibling work and keeps the
+evidence already measured before rasters and leases are released.
+"""
+
 from __future__ import annotations
 
 import asyncio
@@ -27,7 +34,27 @@ from tests.pdf_fakes import FakePdfRunner
 
 
 class RecordingPdfRunner(FakePdfRunner):
-    """Fake tool output with the runtime's actual freeze and version-cache contracts."""
+    """Fake tool output with the runtime's actual freeze and version-cache contracts.
+
+    Every command is recorded and counted while it runs. ``pdfinfo`` reports ``pages`` letter
+    pages, ``pdftotext`` one line of text per page, and ``pdftoppm`` writes a one-pixel
+    ``page.ppm`` that is black for a page of ``changed_pages`` when an input contains "right"
+    and white otherwise.
+
+    Attributes:
+        pages: The page count that ``pdfinfo`` reports.
+        changed_pages: The pages that render differently in the PDF that contains "right".
+        hook: An async function awaited with the command line, the workspace and the
+            read-only inputs of each command that is not a ``-v`` probe, before it runs.
+        records: The command line, workspace and read-only inputs of every command.
+        active: The number of commands running now.
+        peak: The largest number of commands that ran at once.
+        active_renders: The number of ``pdftoppm`` renders running now.
+        peak_renders: The largest number of ``pdftoppm`` renders that ran at once.
+        render_completions: The pages of the PDF that contains "right", in the order their
+            renders finished.
+        render_memory_limits: The memory cap, or ``None``, passed to each render.
+    """
 
     def __init__(self, *, pages: int = 3, changed_pages: tuple[int, ...] = ()) -> None:
         super().__init__()
@@ -48,6 +75,12 @@ class RecordingPdfRunner(FakePdfRunner):
         readonly_inputs: tuple[Path, ...] = (),
         memory_mb: int | None = None,
     ) -> CommandResult:
+        """Record and count the command, await the hook, then answer it as described above.
+
+        The arguments are those of :meth:`CommandRunner.run`. The result is the output of
+        :class:`FakePdfRunner`, with the page count, text or rendered page of this runner where
+        those apply.
+        """
         self.records.append((argv, workspace, readonly_inputs))
         self.active += 1
         self.peak = max(self.peak, self.active)
@@ -90,7 +123,11 @@ class RecordingPdfRunner(FakePdfRunner):
 
 
 class FailingTextRunner(FakePdfRunner):
-    """Fails text extraction with a controlled tool error."""
+    """Fails text extraction with a controlled tool error.
+
+    Attributes:
+        error: The error that every ``pdftotext`` command other than the version probe raises.
+    """
 
     def __init__(self, error: PreparationError) -> None:
         super().__init__()
@@ -105,6 +142,13 @@ class FailingTextRunner(FakePdfRunner):
         readonly_inputs: tuple[Path, ...] = (),
         memory_mb: int | None = None,
     ) -> CommandResult:
+        """Raise ``error`` for text extraction and answer every other command as the base does.
+
+        The arguments are those of :meth:`CommandRunner.run`.
+
+        Raises:
+            PreparationError: ``error``, for a ``pdftotext`` command other than the probe.
+        """
         if argv[0] == "pdftotext" and argv[-1] != "-v":
             raise self.error
         return await super().run(
@@ -124,6 +168,10 @@ class ImageOnlyRunner(FakePdfRunner):
         readonly_inputs: tuple[Path, ...] = (),
         memory_mb: int | None = None,
     ) -> CommandResult:
+        r"""Answer as the base does, except that text extraction prints only a form feed.
+
+        The arguments are those of :meth:`CommandRunner.run`; ``pdftotext`` prints ``"\f"``.
+        """
         result = await super().run(
             argv, cwd, workspace, readonly_inputs=readonly_inputs, memory_mb=memory_mb
         )
@@ -133,7 +181,10 @@ class ImageOnlyRunner(FakePdfRunner):
 
 
 class ParallelPdfTests(unittest.IsolatedAsyncioTestCase):
+    """Overlap, ordering, failure and cancellation of PDF tool work on two PDFs."""
+
     async def asyncSetUp(self) -> None:
+        """Create a left and a right ``document.pdf`` in separate directories."""
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
         (self.root / "left").mkdir()
@@ -145,6 +196,7 @@ class ParallelPdfTests(unittest.IsolatedAsyncioTestCase):
         self.right.write_bytes(b"%PDF-right")
 
     async def asyncTearDown(self) -> None:
+        """Remove the temporary directory."""
         self.temporary.cleanup()
 
     async def test_serial_parallel_and_standalone_findings_are_identical(self) -> None:

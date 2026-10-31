@@ -27,6 +27,17 @@ from .online_support import (
 
 
 def client_for(answers, selected=None, budget=None, resolver=public_resolver):
+    """Build an online client whose transport is a fake that answers with ``answers``.
+
+    Args:
+        answers: The fake transport's answers, as :class:`FakeTransport` takes them.
+        selected: The online options, or ``None`` for those of :func:`options`.
+        budget: The resource budget passed to the client, or ``None``.
+        resolver: The host-name resolver; by default every host is one public address.
+
+    Returns:
+        The client and its fake transport.
+    """
     transport = FakeTransport(answers)
     return OnlineClient(selected or options(), budget, resolver=resolver, transport=transport), (
         transport
@@ -34,6 +45,8 @@ def client_for(answers, selected=None, budget=None, resolver=public_resolver):
 
 
 class AddressPolicyTests(unittest.IsolatedAsyncioTestCase):
+    """The address policy: unsafe literals and answers, revalidated redirects, the user agent."""
+
     async def test_unsafe_literals_and_query_credentials_do_not_resolve(self):
         resolver = AsyncMock()
         client, transport = client_for(Response(200), resolver=resolver)
@@ -105,6 +118,8 @@ class AddressPolicyTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RedirectAndRetryTests(unittest.IsolatedAsyncioTestCase):
+    """Redirect loops and limits, asking again with GET after HEAD, and the provider throttle."""
+
     async def test_redirect_loop_and_redirect_limit_are_distinct(self):
         client, _ = client_for(Response(301, (("location", "/"),)))
         self.assertEqual((await client.fetch("https://example.org/")).outcome, "redirect_loop")
@@ -143,6 +158,8 @@ class RedirectAndRetryTests(unittest.IsolatedAsyncioTestCase):
 
 
 class AddressFallbackTests(unittest.IsolatedAsyncioTestCase):
+    """When and how the client moves on to the next validated address."""
+
     async def test_connection_failure_moves_on_to_the_next_validated_address(self):
         attempts = []
 
@@ -182,6 +199,8 @@ class AddressFallbackTests(unittest.IsolatedAsyncioTestCase):
 
 
 class BudgetAndCacheTests(unittest.IsolatedAsyncioTestCase):
+    """The shared request budget, cancellation, the response cache and shared fetches."""
+
     async def test_shared_budget_and_cancellation_release_requests(self):
         entered, stopped = asyncio.Event(), asyncio.Event()
 
@@ -270,6 +289,8 @@ class BudgetAndCacheTests(unittest.IsolatedAsyncioTestCase):
 
 
 class DeadlineAndDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
+    """Request and fetch deadlines, and the host, time and error code a fetch records."""
+
     async def test_request_timeout_is_inconclusive(self):
         async def slow(request):
             await asyncio.sleep(2)

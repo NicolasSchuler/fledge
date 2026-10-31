@@ -33,7 +33,11 @@ TESTS = Path(__file__).resolve().parent
 
 
 def _relative_imports() -> dict[str, list[tuple[str, int, tuple[str, ...]]]]:
-    """Each module's package-internal imports as (target module, line, imported names)."""
+    """Collect each module's package-internal imports.
+
+    Returns:
+        Each module's imports as (target module, line, imported names), by module name.
+    """
     imports: dict[str, list[tuple[str, int, tuple[str, ...]]]] = {}
     for path in sorted(PACKAGE.glob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -52,7 +56,14 @@ def _relative_imports() -> dict[str, list[tuple[str, int, tuple[str, ...]]]]:
 
 
 def _third_party_imports() -> dict[str, set[str]]:
-    """The top-level packages each module imports outside the standard library's own names."""
+    """Collect the top-level names of each module's absolute imports.
+
+    The names include standard library modules; a caller compares them with the
+    third-party packages it cares about.
+
+    Returns:
+        The top-level package names each module imports, by module name.
+    """
     found: dict[str, set[str]] = {}
     for path in sorted(PACKAGE.glob("*.py")):
         names: set[str] = set()
@@ -66,7 +77,12 @@ def _third_party_imports() -> dict[str, set[str]]:
 
 
 def _documented_layers() -> dict[str, list[tuple[str, str]]]:
-    """The tables of ``docs/modules.md``: each layer's (module, responsibility) rows."""
+    """Read the layer tables of ``docs/modules.md``.
+
+    Returns:
+        Each layer's (module, responsibility) rows, by layer, for every heading that names
+        a layer.
+    """
     title_to_layer = {title: layer for layer, title in LAYER_TITLES.items()}
     tables: dict[str, list[tuple[str, str]]] = {}
     current: str | None = None
@@ -81,6 +97,8 @@ def _documented_layers() -> dict[str, list[tuple[str, str]]]:
 
 
 class ModuleBoundaryTests(unittest.TestCase):
+    """Package-internal imports: no private names across modules and no import cycles."""
+
     def test_no_module_imports_another_modules_private_names(self) -> None:
         violations = [
             f"{module}.py:{line} imports {name} from {target}"
@@ -121,6 +139,8 @@ class ModuleBoundaryTests(unittest.TestCase):
 
 
 class LayerTests(unittest.TestCase):
+    """Module layers: one per module, imports point down, and ``docs/modules.md`` agrees."""
+
     def test_every_module_belongs_to_exactly_one_layer(self) -> None:
         listed = [module for modules in MODULES_BY_LAYER.values() for module in modules]
         duplicated = sorted({module for module in listed if listed.count(module) > 1})

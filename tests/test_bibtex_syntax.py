@@ -17,16 +17,20 @@ from latexprep.bibtex_syntax import (
 
 
 def parse(text: str):
+    """Parse ``text`` as the BibTeX file ``refs.bib``."""
     return parse_bibtex("refs.bib", text)
 
 
 def only_field(text: str):
+    """Return the one field of a ``@misc`` entry whose field list is ``text``."""
     (entry,) = parse(f"@misc{{k, {text}}}").entries
     (item,) = entry.fields
     return item
 
 
 class ParseTests(unittest.TestCase):
+    """Tests of ``parse_bibtex``: records, offsets, syntax errors, limits and byte order marks."""
+
     def test_entries_declarations_and_comments_are_told_apart(self):
         document = parse(
             'free text\n@string{venue = "Journal"}\n@preamble{"\\\\x"}\n'
@@ -98,6 +102,8 @@ class ParseTests(unittest.TestCase):
 
 
 class LiteralTests(unittest.TestCase):
+    """Tests of the literal readers ``field_literal`` and ``plain_literal``."""
+
     def test_field_literal_reads_one_literal_or_number(self):
         self.assertEqual(field_literal(only_field("title = { A {B} }")), "A {B}")
         self.assertEqual(field_literal(only_field("year = 2024")), "2024")
@@ -116,6 +122,8 @@ class LiteralTests(unittest.TestCase):
 
 
 class DoiTests(unittest.TestCase):
+    """Tests of ``DOI_PATTERN`` and ``read_doi``."""
+
     def test_the_shared_pattern_accepts_registrant_and_suffix_only(self):
         for good in ("10.1234/abc", "10.12345678/a.b-c_d", "10.1002/(SICI)1097:x"):
             self.assertIsNotNone(DOI_PATTERN.fullmatch(good), good)
@@ -149,6 +157,8 @@ class DoiTests(unittest.TestCase):
 
 
 class MessageHelperTests(unittest.TestCase):
+    """Tests of the message helpers ``mebibytes`` and ``describe_read_failure``."""
+
     def test_limits_are_quoted_in_whole_mebibytes(self):
         self.assertEqual(mebibytes(16 * 1024 * 1024), "16 MiB")
 

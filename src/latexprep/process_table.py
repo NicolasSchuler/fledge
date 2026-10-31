@@ -17,7 +17,13 @@ _ANCESTRY_COLUMNS = 4
 
 
 class ProcessSample(NamedTuple):
-    """One process's resident memory, attributed to the process group it counts against."""
+    """One process's resident memory, attributed to the process group it counts against.
+
+    Attributes:
+        pid: The process id.
+        group: The process group the memory counts against.
+        rss_kb: The resident set size in kilobytes.
+    """
 
     pid: int
     group: int
@@ -33,12 +39,33 @@ class ProcessTable(Protocol):
         ...
 
     def parse_processes(self, output: bytes, registered: set[int]) -> list[ProcessSample]:
-        """Attribute each listed process to the registered command group it belongs to."""
+        """Attribute each listed process to the registered command group it belongs to.
+
+        Args:
+            output: The ``ps`` output with the columns of ``process_columns``.
+            registered: The pids of the registered commands.
+
+        Returns:
+            One sample per listed process.
+
+        Raises:
+            PreparationError: The output holds invalid values or no processes.
+        """
         ...
 
 
 def parse_group_rows(output: bytes) -> list[ProcessSample]:
-    """Read ``pid pgid rss`` rows; each command already leads its own process group."""
+    """Read ``pid pgid rss`` rows; each command already leads its own process group.
+
+    A row with another number of fields is skipped.
+
+    Returns:
+        One sample per row, attributed to the listed process group.
+
+    Raises:
+        PreparationError: A row holds a value that is not an integer, or no row has the
+            three fields.
+    """
     samples = []
     for line in output.splitlines():
         fields = line.split()
@@ -59,6 +86,18 @@ def parse_ancestry_rows(output: bytes, registered: set[int]) -> list[ProcessSamp
     Bubblewrap starts a new session for the tool it runs, which leaves the tool in a
     process group of its own; the parent chain still leads back to the registered
     command that started it.
+
+    Args:
+        output: The ``ps`` output.
+        registered: The pids of the registered commands.
+
+    Returns:
+        One sample per row, attributed to the process itself or its nearest ancestor when
+        that one is registered, otherwise to the listed process group.
+
+    Raises:
+        PreparationError: A row is incomplete or holds invalid values or process
+            identities (a repeated pid included), or the output lists no processes.
     """
     records: dict[int, tuple[int, int, int]] = {}
     for line in output.splitlines():
@@ -89,18 +128,28 @@ def parse_ancestry_rows(output: bytes, registered: set[int]) -> list[ProcessSamp
 
 
 class GroupProcessTable:
-    """Process groups as listed: each registered command leads its own group."""
+    """Process groups as listed: each registered command leads its own group.
+
+    Attributes:
+        process_columns: The ``ps -o`` columns that :func:`parse_group_rows` reads.
+    """
 
     process_columns = "pid=,pgid=,rss="
 
     def parse_processes(self, output: bytes, registered: set[int]) -> list[ProcessSample]:
+        """Read the rows with :func:`parse_group_rows`, which needs no ``registered`` pids."""
         return parse_group_rows(output)
 
 
 class AncestryProcessTable:
-    """Process groups found through parent links, for a sandbox that splits sessions."""
+    """Process groups found through parent links, for a sandbox that splits sessions.
+
+    Attributes:
+        process_columns: The ``ps -o`` columns that :func:`parse_ancestry_rows` reads.
+    """
 
     process_columns = "pid=,ppid=,pgid=,rss="
 
     def parse_processes(self, output: bytes, registered: set[int]) -> list[ProcessSample]:
+        """Read the rows with :func:`parse_ancestry_rows`, following parents to ``registered``."""
         return parse_ancestry_rows(output, registered)

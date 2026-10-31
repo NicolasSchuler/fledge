@@ -1,3 +1,5 @@
+"""Scheduling task graphs, and the findings that report blocked and failed tasks."""
+
 from __future__ import annotations
 
 import asyncio
@@ -20,6 +22,15 @@ from latexprep.task_findings import (
 
 
 class SchedulerTests(unittest.IsolatedAsyncioTestCase):
+    """Running task graphs with :class:`Scheduler`.
+
+    Results are deterministic under bounded overlap; a failure blocks the tasks that need its
+    artifacts while diagnostics still run; composite tasks hold no reservation; every result has a
+    status that serializes as a plain string; failures name their exception type and only defects
+    keep their frames; cycles, invalid graphs and unsatisfiable resources are rejected; and
+    cancellation stops active work without starting queued work.
+    """
+
     async def test_bounded_overlap_and_deterministic_results(self):
         active = 0
         peak = 0
@@ -244,6 +255,8 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
 
 
 class TaskFindingTests(unittest.TestCase):
+    """Findings for skipped and failed tasks: the prerequisites they name and a defect's frames."""
+
     def test_skipped_task_names_its_failed_prerequisites_for_report_renderers(self):
         result = TaskResult(
             "pdf", TaskStatus.BLOCKED, error="Prerequisite failed: build", blocked_by=("build",)

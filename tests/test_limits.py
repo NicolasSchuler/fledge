@@ -1,3 +1,5 @@
+"""The shared limits: unit names, positive values, established defaults and a leaf module."""
+
 from __future__ import annotations
 
 import ast
@@ -11,10 +13,17 @@ UNIT_SUFFIXES = ("_BYTES", "_CHARS", "_ENTRIES", "_LEVELS", "_MB", "_SECONDS")
 
 
 def _constants() -> dict[str, int]:
+    """Collect the constants of :mod:`latexprep.limits`.
+
+    Returns:
+        The value of every upper-case name in the module, by name.
+    """
     return {name: value for name, value in vars(limits).items() if name.isupper()}
 
 
 class LimitsTests(unittest.TestCase):
+    """The constants of :mod:`latexprep.limits` and the module's imports."""
+
     def test_binary_units_build_on_each_other(self) -> None:
         self.assertEqual(limits.KIB, 1024)
         self.assertEqual(limits.MIB, 1024 * limits.KIB)

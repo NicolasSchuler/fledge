@@ -28,7 +28,19 @@ _EXTERNAL_RULE = "build.external_dependency"
 
 @dataclass(frozen=True, slots=True)
 class RecorderEvidence:
-    """What the recorder shows this build read, interpreted for build checks."""
+    """What the recorder shows this build read, interpreted for build checks.
+
+    Attributes:
+        trace: The parsed recorder trace, or ``None`` when none could be read.
+        inputs: Every recorded input, resolved.
+        project_inputs: The recorded inputs inside the project copy, relative to it.
+        loaded_packages: The class and package files read from declared locations, with
+            their declared releases.
+        complete: Whether the trace shows that the main file was read and holds no more
+            than ``MAX_LOADED_PACKAGES`` class and package files.
+        findings: The findings about a missing or incomplete trace and about undeclared
+            external inputs.
+    """
 
     trace: RecorderTrace | None
     inputs: frozenset[Path]
@@ -43,7 +55,15 @@ def read_recorder(
 ) -> RecorderEvidence:
     """Read and interpret the recorder trace of the build of ``main``.
 
-    ``declared_roots`` are the toolchain directories the build may legitimately read.
+    Args:
+        main: The main file, relative to the project.
+        layout: The workspace of the build, whose output folder holds the trace.
+        declared_roots: The toolchain directories the build may legitimately read.
+        max_bytes: The largest trace, in bytes, that is read.
+
+    Returns:
+        The evidence of the trace; when no complete, bounded trace could be read, an
+        incomplete evidence with a finding that says so.
     """
     stem = PurePosixPath(main).stem
     try:
@@ -65,6 +85,22 @@ def read_recorder(
 def _interpret(
     trace: RecorderTrace, main: str, layout: BuildLayout, declared_roots: tuple[Path, ...]
 ) -> RecorderEvidence:
+    """Sort the recorded inputs and collect the loaded class and package files.
+
+    An input is declared when it lies in the project copy, the workspace or one of
+    ``declared_roots``; an undeclared input is reported as a finding. The evidence is
+    complete only when the trace shows that the main file was read and holds no more
+    than ``MAX_LOADED_PACKAGES`` class and package files.
+
+    Args:
+        trace: The parsed recorder trace.
+        main: The main file, relative to the project.
+        layout: The workspace of the build.
+        declared_roots: The toolchain directories the build may legitimately read.
+
+    Returns:
+        The evidence of the trace.
+    """
     inputs: set[Path] = set()
     project_inputs: set[str] = set()
     packages: dict[Path, LoadedPackage] = {}

@@ -44,21 +44,32 @@ TEXT_TRACE = (
 
 
 def commands_started(calls: list[list[str]]) -> set[str]:
-    """The tools of the commands a runner saw, without the version probes."""
+    """Return the tools of the command lines in ``calls``, without the version probes."""
     return {argv[0] for argv in calls if argv[-1] not in {"-v", "--version"}}
 
 
 class RequiredToolTests(AsyncProjectTestCase):
+    """The tools each adapter declares match the commands its configured checks start."""
+
     async def asyncSetUp(self) -> None:
+        """Write a placeholder ``document.pdf`` into the project root."""
         self.pdf = self.root / "document.pdf"
         self.pdf.write_bytes(b"%PDF-fixture")
         self.runs = 0
 
     def work(self) -> Path:
+        """Return a new, not yet created work directory path below the project root."""
         self.runs += 1
         return self.root / f"work-{self.runs}"
 
     def assert_tools(self, used: set[str], required: set[str], *, label: str) -> None:
+        """Assert that the started and the required tools agree and are all PDF tools.
+
+        Args:
+            used: The tools of the commands that were started.
+            required: The tools the adapter declares for the same options.
+            label: The name of the case, shown in a failure message.
+        """
         self.assertLessEqual(used, required, f"{label}: a started tool is not required")
         self.assertLessEqual(required, used, f"{label}: a required tool was never started")
         self.assertLessEqual(required, PDF_TOOLS)

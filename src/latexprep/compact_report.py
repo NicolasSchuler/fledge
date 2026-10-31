@@ -24,7 +24,16 @@ from .terminal_report import one_line
 def render_redacted_compact(
     report: RedactedReport, *, options: RenderOptions = DEFAULT_RENDER_OPTIONS
 ) -> str:
-    """Short plain records of a report that was already redacted."""
+    """Render a report that was already redacted as short plain records.
+
+    Args:
+        report: The redacted report.
+        options: Rendering choices; ``show_passed`` also lists the findings that are
+            hidden by default.
+
+    Returns:
+        The records joined by newlines, one physical line per finding.
+    """
     lines = [f"{report.outcome} | {result_counts(report)} | scope: {one_line(report.scope)}"]
     records = read_execution_records(report.execution)
     if selection := selection_description(records.check_selection):
@@ -56,5 +65,15 @@ def render_redacted_compact(
 
 
 def render_compact(report: Report, *, options: RenderOptions = DEFAULT_RENDER_OPTIONS) -> str:
-    """Short plain records; one physical line per finding, full evidence remains in JSON."""
+    """Redact a report and render it as short plain records.
+
+    One physical line per finding; the full evidence remains in the JSON report.
+
+    Args:
+        report: The report to redact and render.
+        options: Rendering choices, as for :func:`render_redacted_compact`.
+
+    Returns:
+        The records joined by newlines.
+    """
     return render_redacted_compact(redact_report(report), options=options)

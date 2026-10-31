@@ -105,7 +105,11 @@ class _RedactionLimitExceeded(Exception):
 
 
 def _decoded_json_string(value: str) -> str | None:
-    """The text a double-quoted JSON string literal denotes, or None if it is not one."""
+    """Decode ``value`` if it is a double-quoted JSON string literal.
+
+    Returns:
+        The text the literal denotes, or ``None`` if ``value`` is not one.
+    """
     if not value.startswith('"'):
         return None
     try:
@@ -116,6 +120,14 @@ def _decoded_json_string(value: str) -> str | None:
 
 
 def _variants(text: str) -> list[str]:
+    """List ``text`` followed by its successive URL decodings, at most three of them.
+
+    Returns:
+        ``text`` and each decoding that changed it.
+
+    Raises:
+        _RedactionLimitExceeded: The text is still encoded after three decodings.
+    """
     result = [text]
     for _ in range(3):
         decoded = unquote(result[-1])
@@ -128,7 +140,11 @@ def _variants(text: str) -> list[str]:
 
 
 def _token_like(value: str) -> bool:
-    """Whether a long username is more likely a bearer token than a name."""
+    """Return whether a long username is more likely a bearer token than a name.
+
+    A token is at least ``_TOKEN_USERNAME_MIN_CHARS`` long and contains a digit or has a
+    high character entropy, with a lower threshold for mixed case.
+    """
     if len(value) < _TOKEN_USERNAME_MIN_CHARS:
         return False
     if any(char.isdigit() for char in value):
@@ -140,10 +156,18 @@ def _token_like(value: str) -> bool:
 
 
 def _userinfo_secrets(userinfo: str, *, authority: bool) -> tuple[str, ...]:
-    """Secrets in ``user:password`` or, for an authority, a token-like lone username.
+    """Find the secrets in ``user:password`` or, for an authority, a token-like lone username.
 
     Short names such as ``git`` or ``oauth2`` and recipients such as
     ``mailto:alice`` are not credentials; neither is ever added on its own.
+
+    Args:
+        userinfo: The user information before the ``@``.
+        authority: Whether it belongs to a ``//`` authority rather than a bare
+            ``scheme:address@host``.
+
+    Returns:
+        The whole user information and the password, the lone username, or nothing.
     """
     user, _, password = userinfo.partition(":")
     if password and (authority or user.lower() not in _NON_CREDENTIAL_SCHEMES):
@@ -152,16 +176,31 @@ def _userinfo_secrets(userinfo: str, *, authority: bool) -> tuple[str, ...]:
 
 
 def _sensitive_key(key: str) -> bool:
+    """Return whether ``key``, decoded and reduced to letters and digits, names a secret."""
     normalized = re.sub(r"[^a-z0-9]", "", _variants(key)[-1].lower())
     return _SENSITIVE_END.search(normalized) is not None
 
 
 def _query_sensitive(key: str) -> bool:
+    """Return whether a query key names a secret; the bare ``key``, ``auth`` and ``sig`` do."""
     return _sensitive_key(key) or key.lower() in {"key", "auth", "sig"}
 
 
 @dataclass
 class _Scan:
+    """The discovery pass of :func:`redact_data`: it copies a tree and collects secrets.
+
+    Exceeding any limit raises ``_RedactionLimitExceeded``.
+
+    Attributes:
+        nodes: The values visited.
+        text_chars: The characters of text inspected.
+        secret_chars: The characters of the distinct secrets collected.
+        discoveries: The secrets found, repeats included.
+        secrets: The distinct secrets and their decoded variants.
+        ancestors: The ids of the containers being visited, so a cycle is refused.
+    """
+
     nodes: int = 0
     text_chars: int = 0
     secret_chars: int = 0
@@ -170,6 +209,12 @@ class _Scan:
     ancestors: set[int] = field(default_factory=set)
 
     def add(self, value: str) -> None:
+        """Record a discovered secret with its decoded variants, skipping redaction markers.
+
+        Raises:
+            _RedactionLimitExceeded: There are too many discoveries, secrets or secret
+                characters.
+        """
         self.discoveries += 1
         if self.discoveries > MAX_DISCOVERIES:
             raise _RedactionLimitExceeded
@@ -183,7 +228,15 @@ class _Scan:
                     raise _RedactionLimitExceeded
 
     def inspect(self, text: str, *, sensitive: bool = False) -> None:
-        """Record every secret found in ``text``; a ``sensitive`` text is one secret itself."""
+        """Record every secret found in ``text``; a ``sensitive`` text is one secret itself.
+
+        Args:
+            text: The text to inspect.
+            sensitive: Whether the text lies below a sensitive key.
+
+        Raises:
+            _RedactionLimitExceeded: The inspected text or the secrets exceed a limit.
+        """
         self.text_chars += len(text)
         if self.text_chars > MAX_TEXT_CHARS:
             raise _RedactionLimitExceeded
@@ -197,10 +250,12 @@ class _Scan:
             self._add_query_secrets(value)
 
     def _add_standalone_tokens(self, value: str) -> None:
+        """Record every access-key-shaped or credential-shaped token in ``value``, whole."""
         for match in _STANDALONE.finditer(value):
             self.add(match.group())
 
     def _add_private_keys(self, value: str) -> None:
+        """Record every private-key block in ``value`` and each line of its body."""
         for match in _PRIVATE_BLOCK.finditer(value):
             self.add(match.group())
             # PEM body lines may also appear alone in tool output or a diff.
@@ -210,13 +265,17 @@ class _Scan:
                     self.add(line[1:].strip())
 
     def _add_assigned_secrets(self, value: str) -> None:
-        """Values assigned to a sensitive name, such as ``password = "..."``."""
+        """Record the values assigned to a sensitive name, such as ``password = "..."``."""
         for match in _ASSIGNMENT.finditer(value):
             if _sensitive_key(match.group("key")):
                 self._add_assigned_value(match.group("value"))
 
     def _add_assigned_value(self, candidate: str) -> None:
-        """Record an assigned value without its quotes; a quote never closed is unsafe."""
+        """Record an assigned value without its quotes; a quote never closed is unsafe.
+
+        Raises:
+            _RedactionLimitExceeded: The value opens a quote that it never closes.
+        """
         if candidate.startswith(('\\"', "\\'")) and candidate[-2:] == candidate[:2]:
             candidate = candidate[2:-2]
         elif candidate.startswith(('"', "'")) and candidate[-1:] == candidate[:1]:
@@ -228,7 +287,7 @@ class _Scan:
         self.add(candidate)
 
     def _add_authorization_secrets(self, value: str) -> None:
-        """Bearer tokens and the credentials in a URL's user information."""
+        """Record bearer tokens and the credentials in a URL's user information."""
         for match in _BEARER.finditer(value):
             self.add(match.group("value"))
         for pattern, authority in ((_USERINFO, True), (_BARE_USERINFO, False)):
@@ -237,6 +296,7 @@ class _Scan:
                     self.add(secret)
 
     def _add_query_secrets(self, value: str) -> None:
+        """Record the value of every sensitive query parameter, as written and decoded."""
         for match in _QUERY.finditer(value):
             if _query_sensitive(unquote_plus(match.group("key"))):
                 self.add(match.group("value"))
@@ -245,6 +305,22 @@ class _Scan:
     def collect_secrets_and_copy(
         self, value: Any, depth: int = 0, *, sensitive: bool = False
     ) -> Any:
+        """Copy a JSON-shaped value while recording the secrets in its text.
+
+        Unsupported values and dictionary keys become redaction markers, and every string
+        below a sensitive key is a secret itself.
+
+        Args:
+            value: The value to copy.
+            depth: The nesting depth of ``value``.
+            sensitive: Whether ``value`` lies below a sensitive key.
+
+        Returns:
+            The copy.
+
+        Raises:
+            _RedactionLimitExceeded: A limit is exceeded or a container contains itself.
+        """
         self.nodes += 1
         if self.nodes > MAX_NODES or depth > MAX_DEPTH:
             raise _RedactionLimitExceeded
@@ -287,10 +363,13 @@ class _Scan:
 def _replacement_patterns(
     secrets: set[str],
 ) -> tuple[re.Pattern[str] | None, re.Pattern[str] | None]:
-    """The patterns that replace ``secrets`` in text and in dictionary keys.
+    """Build the patterns that replace ``secrets`` in text and in dictionary keys.
 
     A short secret such as a password "git" is replaced only as a whole token, so it cannot
     corrupt unrelated words; keys are matched only by secrets long enough to be unique.
+
+    Returns:
+        The text pattern and the key pattern, each ``None`` when it has nothing to match.
     """
     ordered = sorted(secrets, key=len, reverse=True)
     long_secrets = [secret for secret in ordered if len(secret) >= _MIN_SUBSTRING_SECRET]
@@ -309,13 +388,31 @@ def _replacement_patterns(
 
 @dataclass(frozen=True)
 class _Replacer:
-    """Replaces every discovered secret in a copied report tree."""
+    """Replaces every discovered secret in a copied report tree.
+
+    Attributes:
+        secrets: The discovered secrets.
+        pattern: Matches the secrets in text.
+        key_pattern: Matches the secrets long enough to be replaced in dictionary keys.
+    """
 
     secrets: frozenset[str]
     pattern: re.Pattern[str] | None
     key_pattern: re.Pattern[str] | None
 
     def text(self, source: str, *, key: bool = False) -> str:
+        """Replace the secrets in one string.
+
+        A string is rewritten in its most decoded form in which a secret appears; a key
+        that is a secret in any decoded form becomes ``[REDACTED]`` as a whole.
+
+        Args:
+            source: The string.
+            key: Whether the string is a dictionary key.
+
+        Returns:
+            The string with every secret replaced by ``[REDACTED]``.
+        """
         matcher = self.key_pattern if key else self.pattern
         variants = _variants(source)
         if key and any(variant in self.secrets for variant in variants):
@@ -329,6 +426,7 @@ class _Replacer:
         return matcher.sub(REDACTED, result)
 
     def clean(self, item: Any) -> Any:
+        """Replace the secrets in every string and dictionary key of a copied tree."""
         if isinstance(item, str):
             return self.text(item)
         if isinstance(item, dict):
@@ -369,7 +467,15 @@ def redact_secrets(value: str) -> str:
 
 
 class _KnownSecretScan:
-    """One bounded pass that replaces known secret values and secret-shaped text."""
+    """One bounded pass that replaces known secret values and secret-shaped text.
+
+    Construction raises ``_RedactionLimitExceeded`` for more than ``MAX_SECRETS`` secrets.
+
+    Attributes:
+        secrets: The nonempty known secrets, longest first.
+        nodes: The values visited.
+        text_chars: The characters of text cleaned.
+    """
 
     def __init__(self, secrets: Collection[str]) -> None:
         if len(secrets) > MAX_SECRETS:
@@ -379,6 +485,20 @@ class _KnownSecretScan:
         self.text_chars = 0
 
     def clean(self, value: Any, depth: int = 0) -> Any:
+        """Copy a JSON-shaped value with known secrets and secret-shaped text replaced.
+
+        Dictionary keys are cleaned as well and become strings.
+
+        Args:
+            value: The value to clean.
+            depth: The nesting depth of ``value``.
+
+        Returns:
+            The cleaned copy.
+
+        Raises:
+            _RedactionLimitExceeded: A limit is exceeded.
+        """
         self.nodes += 1
         if self.nodes > MAX_NODES or depth > MAX_DEPTH:
             raise _RedactionLimitExceeded
@@ -403,12 +523,18 @@ class _KnownSecretScan:
 def redact_known_secrets(value: Any, secrets: Collection[str]) -> Any:
     """Return a copy of a JSON-shaped value with ``secrets`` and secret-shaped text replaced.
 
-    ``secrets`` are values already discovered elsewhere, such as credentials found in a
-    project's files; each is replaced wherever it appears, longest first, and
-    ``redact_secrets`` then replaces anything that merely looks like a credential.
-    Like ``redact_data`` this is bounded in nodes, depth and work, and when a bound is
-    exceeded the whole value is withheld as ``LIMIT_REDACTION``, never returned as it was.
-    Values that are not strings, lists, tuples or dictionaries are kept unchanged.
+    After the known secrets, ``redact_secrets`` replaces anything that merely looks like
+    a credential. Like ``redact_data`` this is bounded in nodes, depth and work. Values
+    that are not strings, lists, tuples or dictionaries are kept unchanged.
+
+    Args:
+        value: The JSON-shaped value.
+        secrets: Values already discovered elsewhere, such as credentials found in a
+            project's files; each is replaced wherever it appears, longest first.
+
+    Returns:
+        The redacted copy, or, when a bound is exceeded, ``LIMIT_REDACTION`` in place of
+        the whole value, which is never returned as it was.
     """
     try:
         return _KnownSecretScan(secrets).clean(value)
@@ -417,10 +543,14 @@ def redact_known_secrets(value: Any, secrets: Collection[str]) -> Any:
 
 
 def local_directory_labels() -> dict[str, str]:
-    """The home and temporary directories of this machine, each with its generic label.
+    """List the home and temporary directories of this machine, each with its generic label.
 
     Both the spelled and the symlink-resolved form are listed, because tools report either.
     ``/tmp`` counts as a temporary directory although macOS keeps the real one elsewhere.
+
+    Returns:
+        The label of each directory, written without a trailing slash; the file-system
+        root is never listed.
     """
     labels: dict[str, str] = {}
     for label, directory in (
@@ -449,6 +579,14 @@ def scrub_local_paths(value: Any, labels: dict[str, str] | None = None) -> Any:
     relative to a project are unchanged, and so is any text that merely starts like a
     directory name (``/home/ann`` does not match ``/home/anna``). Only strings are
     rewritten; dictionary keys keep their names.
+
+    Args:
+        value: The string or JSON-shaped value to scrub.
+        labels: The generic label of each directory; by default those of
+            :func:`local_directory_labels`.
+
+    Returns:
+        The scrubbed copy, or ``value`` itself when there is no directory to replace.
     """
     generic = local_directory_labels() if labels is None else labels
     if not generic:
@@ -460,9 +598,11 @@ def scrub_local_paths(value: Any, labels: dict[str, str] | None = None) -> Any:
     )
 
     def scrub_text(text: str) -> str:
+        """Replace every local directory in ``text`` with its label."""
         return pattern.sub(lambda match: generic[match.group()], text)
 
     def scrub(item: Any) -> Any:
+        """Scrub every string in ``item``, keeping dictionary keys."""
         if isinstance(item, str):
             return scrub_text(item)
         if isinstance(item, dict):

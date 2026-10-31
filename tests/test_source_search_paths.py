@@ -11,7 +11,14 @@ from tests.support import ProjectTestCase
 
 
 class SourceSearchPathTests(ProjectTestCase):
+    """Finding files through graphics paths, the TeX lookup order and import contexts."""
+
     def assert_usable(self, plan) -> None:
+        """Assert that the flattening ``plan`` is usable.
+
+        The plan must hold no blocking finding, and no two of its target names may differ only in
+        letter case; a failure lists the error findings.
+        """
         self.assertFalse(
             has_blockers(plan.findings),
             [finding for finding in plan.findings if finding.severity == "error"],

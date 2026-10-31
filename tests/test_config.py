@@ -1,3 +1,5 @@
+"""Settings loading: precedence, former names, validation, byte and tool limits, and errors."""
+
 from __future__ import annotations
 
 import re
@@ -18,6 +20,8 @@ from latexprep.submission_options import SubmissionOptions
 
 
 class ConfigTests(unittest.TestCase):
+    """Precedence of files and options, former names, and the validation of setting values."""
+
     def test_explicit_file_then_command_precedence(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "settings.toml"
@@ -131,7 +135,7 @@ class ConfigTests(unittest.TestCase):
 
 
 class ByteLimitTests(unittest.TestCase):
-    """max_bytes is the default of the import total and of the size of one tool file."""
+    """``max_bytes`` is the default of the import total and of the size of one tool file."""
 
     def test_max_bytes_is_the_fallback_of_both_specific_limits(self) -> None:
         settings = load_settings(None, {"max_bytes": 4096})
@@ -157,7 +161,10 @@ class ByteLimitTests(unittest.TestCase):
         self.assertEqual(only_file.generated_file_byte_limit, 1024)
 
     def test_the_import_total_must_fit_in_the_workspace_of_a_build(self) -> None:
-        """The documented 1 GiB import with 64 MiB per file could never be built."""
+        """Check that an import total too large for the workspace of a build is rejected.
+
+        The documented 1 GiB import with 64 MiB per file could never be built.
+        """
         mebibyte = 1024 * 1024
         for overrides in (
             {"max_import_bytes": 1024 * mebibyte, "max_generated_file_bytes": 64 * mebibyte},
@@ -236,6 +243,8 @@ class ByteLimitTests(unittest.TestCase):
 
 
 class ToolLimitTests(unittest.TestCase):
+    """The runtime limits of tool commands, their defaults and their validation."""
+
     def test_runtime_limits_have_one_default_with_the_settings(self) -> None:
         self.assertEqual(RuntimeLimits.from_settings(Settings()), RuntimeLimits())
 
@@ -266,6 +275,8 @@ class ToolLimitTests(unittest.TestCase):
 
 
 class JobToolLimitTests(unittest.IsolatedAsyncioTestCase):
+    """The tool runner of a job takes its limits from the settings of the job."""
+
     async def test_a_job_runs_its_tools_under_limits_from_its_settings(self) -> None:
         settings = Settings(timeout_seconds=33, build_memory_mb=512, max_bytes=7000)
         self.assertEqual(
@@ -345,6 +356,8 @@ class SharedTableTests(unittest.TestCase):
 
 
 class BuildSettingsTests(unittest.TestCase):
+    """Loading settings from a mapping of values."""
+
     def test_loading_settings_leaves_the_given_values_unchanged(self) -> None:
         from copy import deepcopy
 

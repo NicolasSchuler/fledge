@@ -46,7 +46,13 @@ _MAX_QUOTED_CHARACTERS = 60
 
 @dataclass(frozen=True)
 class Bounds:
-    """The numbers a setting accepts: inclusive limits, or a minimum that excludes itself."""
+    """The numbers a setting accepts: inclusive limits, or a minimum that excludes itself.
+
+    Attributes:
+        minimum: The lowest accepted number, or ``None`` for no lower limit.
+        maximum: The highest accepted number, or ``None`` for no upper limit.
+        exclusive_minimum: Whether ``minimum`` itself is rejected.
+    """
 
     minimum: float | None = None
     maximum: float | None = None
@@ -69,7 +75,16 @@ EIGHT_BIT_VALUE = Bounds(minimum=0, maximum=EIGHT_BIT_MAXIMUM)
 
 
 def _settings_error(location: str, message: str) -> SettingsError:
-    """An error about the value at ``location``, named by the top-level setting that holds it."""
+    """Return an error about the value at ``location``, keyed by its top-level setting.
+
+    Args:
+        location: The path of the value, such as ``table.name[0]``; the part before the
+            first ``.`` or ``[`` is the top-level setting that the error carries.
+        message: The error message.
+
+    Returns:
+        The error, for the caller to raise.
+    """
     return SettingsError(message, (re.split(r"[.\[]", location, maxsplit=1)[0],))
 
 
@@ -77,20 +92,31 @@ def _settings_error(location: str, message: str) -> SettingsError:
 
 
 def _bound(value: float) -> str:
-    """A limit as a person writes it: 1048576 and 0.1, never 1.04858e+06 or 5.0."""
+    """Format a limit as a person writes it: 1048576 and 0.1, never 1.04858e+06 or 5.0."""
     return str(int(value)) if float(value).is_integer() else str(value)
 
 
 def _quoted(value: object) -> str:
+    """Return the ``repr`` of ``value``, cut to ``_MAX_QUOTED_CHARACTERS`` with an ellipsis."""
     text = repr(value)
     return text if len(text) <= _MAX_QUOTED_CHARACTERS else text[: _MAX_QUOTED_CHARACTERS - 1] + "…"
 
 
 def _reject(name: str, requirement: str) -> NoReturn:
+    """Raise an error saying that the setting ``name`` must be ``requirement``.
+
+    Args:
+        name: The setting, which the error also carries as its key.
+        requirement: What the value must be; completes "name must be ...".
+
+    Raises:
+        SettingsError: Always.
+    """
     raise SettingsError(f"{name} must be {requirement}", (name,))
 
 
 def _integer_requirement(bounds: Bounds) -> str:
+    """Describe the integers that ``bounds`` accepts, as in "a positive integer"."""
     low, high = bounds.minimum, bounds.maximum
     if low is not None and high is not None:
         return f"an integer from {_bound(low)} to {_bound(high)}"
@@ -106,6 +132,7 @@ def _integer_requirement(bounds: Bounds) -> str:
 
 
 def _number_requirement(bounds: Bounds) -> str:
+    """Describe the numbers that ``bounds`` accepts, as in "a nonnegative number"."""
     low, high, exclusive = bounds.minimum, bounds.maximum, bounds.exclusive_minimum
     if low is not None and high is not None:
         if exclusive:
@@ -123,6 +150,17 @@ def _number_requirement(bounds: Bounds) -> str:
 
 
 def _check_integer(name: str, value: object, bounds: Bounds, *, allow_none: bool) -> None:
+    """Reject anything but an integer within ``bounds``; ``True`` is not an integer.
+
+    Args:
+        name: The setting named in the message.
+        value: The value to check.
+        bounds: The accepted limits.
+        allow_none: Whether ``None`` is accepted too.
+
+    Raises:
+        SettingsError: ``value`` is not an integer within ``bounds``.
+    """
     if value is None and allow_none:
         return
     if (
@@ -134,6 +172,17 @@ def _check_integer(name: str, value: object, bounds: Bounds, *, allow_none: bool
 
 
 def _check_number(name: str, value: object, bounds: Bounds, *, allow_none: bool) -> None:
+    """Reject anything but a finite integer or float within ``bounds``; not a boolean.
+
+    Args:
+        name: The setting named in the message.
+        value: The value to check.
+        bounds: The accepted limits.
+        allow_none: Whether ``None`` is accepted too.
+
+    Raises:
+        SettingsError: ``value`` is not a finite number within ``bounds``.
+    """
     if value is None and allow_none:
         return
     if (
@@ -155,7 +204,18 @@ def require_int(
     maximum: int | None = None,
     allow_none: bool = False,
 ) -> None:
-    """Reject anything but an integer within the limits; ``True`` is not an integer."""
+    """Reject anything but an integer within the limits; ``True`` is not an integer.
+
+    Args:
+        name: The setting named in the message.
+        value: The value to check.
+        minimum: The lowest accepted integer, or ``None`` for no lower limit.
+        maximum: The highest accepted integer, or ``None`` for no upper limit.
+        allow_none: Whether ``None`` is accepted too.
+
+    Raises:
+        SettingsError: ``value`` is not an integer within the limits.
+    """
     _check_integer(name, value, Bounds(minimum, maximum), allow_none=allow_none)
 
 
@@ -168,7 +228,19 @@ def require_number(
     exclusive_minimum: bool = False,
     allow_none: bool = False,
 ) -> None:
-    """Reject anything but a finite integer or float within the limits; not ``True`` or NaN."""
+    """Reject anything but a finite integer or float within the limits; not ``True`` or NaN.
+
+    Args:
+        name: The setting named in the message.
+        value: The value to check.
+        minimum: The lowest accepted number, or ``None`` for no lower limit.
+        maximum: The highest accepted number, or ``None`` for no upper limit.
+        exclusive_minimum: Whether ``minimum`` itself is rejected.
+        allow_none: Whether ``None`` is accepted too.
+
+    Raises:
+        SettingsError: ``value`` is not a finite number within the limits.
+    """
     _check_number(name, value, Bounds(minimum, maximum, exclusive_minimum), allow_none=allow_none)
 
 
@@ -178,6 +250,15 @@ def require_choice(
     """Reject a value that is not one of ``choices``, such as the arguments of a Literal.
 
     Types are compared too: neither ``True`` nor ``1`` matches the other.
+
+    Args:
+        name: The setting named in the message.
+        value: The value to check.
+        choices: The accepted values, listed in the message in their given order.
+        allow_none: Whether ``None`` is accepted too.
+
+    Raises:
+        SettingsError: ``value`` is not one of ``choices``.
     """
     if value is None and allow_none:
         return
@@ -198,8 +279,17 @@ def require_text(
 ) -> None:
     """Reject text that is blank, contains NUL, does not match ``pattern`` or is too long.
 
-    ``expected`` completes "name must be ..." and describes what the pattern accepts.
-    With ``allow_blank`` an empty or all-space string is accepted too.
+    Args:
+        name: The setting named in the message.
+        value: The value to check; anything but a string is rejected.
+        expected: Completes "name must be ..." and describes what the pattern accepts.
+        max_length: The most characters the text may have, or ``None`` for no limit.
+        pattern: A pattern the whole text must match, or ``None``.
+        allow_blank: Whether an empty or all-space string is accepted too.
+        allow_none: Whether ``None`` is accepted too.
+
+    Raises:
+        SettingsError: ``value`` is not acceptable text, or it is longer than ``max_length``.
     """
     if value is None and allow_none:
         return
@@ -215,17 +305,39 @@ def require_text(
 
 
 def _ordered(choices: Iterable[str]) -> tuple[str, ...]:
-    """The choices in their given order; an unordered set is sorted for a stable message."""
+    """Return the choices in their given order; an unordered set is sorted for a stable message."""
     return tuple(sorted(choices)) if isinstance(choices, (set, frozenset)) else tuple(choices)
 
 
 def _require_at_most(name: str, items: Sequence[object], max_items: int | None) -> None:
+    """Reject more than ``max_items`` entries.
+
+    Args:
+        name: The setting named in the message.
+        items: The entries of the setting.
+        max_items: The most entries allowed, or ``None`` for no limit.
+
+    Raises:
+        SettingsError: ``items`` has more than ``max_items`` entries.
+    """
     if max_items is not None and len(items) > max_items:
         raise SettingsError(f"{name} may list at most {max_items} entries", (name,))
 
 
 def _require_tuple(name: str, values: object, kind: str) -> tuple[Any, ...]:
-    """A tuple, which is what a TOML array becomes; ``kind`` completes "a list of ..."."""
+    """Return ``values`` if it is a tuple, which is what a TOML array becomes.
+
+    Args:
+        name: The setting named in the message.
+        values: The value to check.
+        kind: What the entries must be; completes "a list of ...".
+
+    Returns:
+        ``values`` itself.
+
+    Raises:
+        SettingsError: ``values`` is not a tuple; a list gets a message of its own.
+    """
     if isinstance(values, list):
         raise SettingsError(f"{name} must be given as a tuple, not a list", (name,))
     if not isinstance(values, tuple):
@@ -234,7 +346,13 @@ def _require_tuple(name: str, values: object, kind: str) -> tuple[Any, ...]:
 
 
 class TextFormat(NamedTuple):
-    """What an entry of a string list must look like, and how a message describes that."""
+    """What an entry of a string list must look like, and how a message describes that.
+
+    Attributes:
+        pattern: The pattern that a whole entry must match.
+        description: The accepted entries as a message names them; completes "entry ...
+            must be ...", as in "a lowercase entry type".
+    """
 
     pattern: re.Pattern[str]
     description: str
@@ -253,8 +371,19 @@ def require_unique_strings(
 ) -> None:
     """Reject anything but a tuple of distinct nonempty strings, which TOML spells as a list.
 
-    ``choices`` limits the entries to a closed set, and ``item_format`` to a pattern, as in
-    "a lowercase entry type". Entries may start or end with whitespace only if allowed.
+    Args:
+        name: The setting named in the messages.
+        values: The value to check.
+        max_items: The most entries allowed, or ``None`` for no limit.
+        max_length: The most characters an entry may have, or ``None`` for no limit.
+        allow_surrounding_whitespace: Whether an entry may start or end with whitespace.
+        choices: A closed set that limits the entries, or ``None``.
+        item_format: A pattern that limits the entries, as in "a lowercase entry type", or
+            ``None``.
+        allow_none: Whether ``None`` is accepted too.
+
+    Raises:
+        SettingsError: ``values`` is not such a tuple, or an entry breaks one of the limits.
     """
     if values is None and allow_none:
         return
@@ -298,8 +427,18 @@ def require_records(
 ) -> None:
     """Reject anything but a tuple of ``record_type`` instances, optionally all distinct.
 
-    ``distinct_by`` maps a record to what must differ between records, and
-    ``distinct_description`` names that for the message.
+    Args:
+        name: The setting named in the messages.
+        values: The value to check.
+        record_type: The class every entry must be an instance of.
+        max_items: The most entries allowed, or ``None`` for no limit.
+        distinct_by: Maps a record to what must differ between records, or ``None`` to
+            allow repeats.
+        distinct_description: Names what ``distinct_by`` returns, for the message.
+
+    Raises:
+        SettingsError: ``values`` is not such a tuple, has too many entries, or repeats
+            what ``distinct_by`` returns.
     """
     values = _require_tuple(name, values, f"{record_type.__name__} records")
     if any(not isinstance(value, record_type) for value in values):
@@ -321,7 +460,19 @@ def require_integers(
     maximum: int | None = None,
     max_items: int | None = None,
 ) -> None:
-    """Reject anything but a tuple of integers within the limits, such as page numbers."""
+    """Reject anything but a tuple of integers within the limits, such as page numbers.
+
+    Args:
+        name: The setting named in the messages; an entry is named ``name[index]``.
+        values: The value to check.
+        minimum: The lowest accepted integer, or ``None`` for no lower limit.
+        maximum: The highest accepted integer, or ``None`` for no upper limit.
+        max_items: The most entries allowed, or ``None`` for no limit.
+
+    Raises:
+        SettingsError: ``values`` is not a tuple, has too many entries, or holds an entry
+            that is not an integer within the limits.
+    """
     values = _require_tuple(name, values, "integers")
     _require_at_most(name, values, max_items)
     for index, value in enumerate(values):
@@ -340,7 +491,18 @@ def require_numbers(
 ) -> None:
     """Reject anything but a tuple of exactly ``count`` numbers within the limits.
 
-    ``description`` names the numbers for the message, as in "(left, top, right, bottom)".
+    Args:
+        name: The setting named in the messages; an entry is named ``name[index]``.
+        values: The value to check.
+        count: The number of entries required.
+        minimum: The lowest accepted number, or ``None`` for no lower limit.
+        maximum: The highest accepted number, or ``None`` for no upper limit.
+        description: Names the numbers for the message, as in "(left, top, right, bottom)".
+        allow_none: Whether ``None`` is accepted too.
+
+    Raises:
+        SettingsError: ``values`` is not a tuple of ``count`` entries, or an entry is not a
+            finite number within the limits.
     """
     if values is None and allow_none:
         return
@@ -367,7 +529,20 @@ def require_pairs(
     """Reject anything but a tuple of two-item tuples whose items pass ``first`` and ``second``.
 
     The checks are called as ``check("name[0][1]", item)``, an index path that matches the
-    messages of the TOML conversion. With ``unique_first`` the first items must differ.
+    messages of the TOML conversion.
+
+    Args:
+        name: The setting named in the messages.
+        rows: The value to check.
+        first: The check of the first item of every pair.
+        second: The check of the second item of every pair.
+        max_items: The most pairs allowed, or ``None`` for no limit.
+        unique_first: Whether the first items must differ.
+
+    Raises:
+        SettingsError: ``rows`` is not a tuple of two-item tuples, has too many pairs, or
+            repeats a first item that must be unique. ``first`` and ``second`` raise their
+            own errors.
     """
     rows = _require_tuple(name, rows, "two-item lists")
     if any(not isinstance(row, tuple) or len(row) != 2 for row in rows):
@@ -386,7 +561,10 @@ def require_pairs(
 def _scalar_fields(
     kind: type[DataclassInstance],
 ) -> tuple[tuple[str, str, tuple[object, ...], bool], ...]:
-    """Each bool, int, float and Literal field as (name, tag, choices, optional)."""
+    """Return each bool, int, float and Literal field as (name, tag, choices, optional).
+
+    ``X | None`` counts as ``X`` with ``optional`` set; any other union is left out.
+    """
     hints = get_type_hints(kind)
     scalars = []
     for item in fields(kind):
@@ -413,6 +591,12 @@ def validate_scalars(options: DataclassInstance) -> None:
 
     ``X | None`` fields may be ``None``. Numbers must lie within the limits that the
     dataclass lists for them in ``FIELD_BOUNDS``; a field without an entry is unbounded.
+
+    Args:
+        options: The option dataclass instance to check.
+
+    Raises:
+        SettingsError: A field does not match its annotation or its limits.
     """
     kind = type(options)
     limits: Mapping[str, Bounds] = getattr(kind, "FIELD_BOUNDS", {})
@@ -433,7 +617,16 @@ def validate_scalars(options: DataclassInstance) -> None:
 
 
 def closest_names(names: Iterable[str], known: Iterable[str]) -> dict[str, str]:
-    """The known name that resembles each of ``names``, for the names that resemble one."""
+    """Return the known name that resembles each of ``names``, for the names that resemble one.
+
+    Args:
+        names: The names to match.
+        known: The valid names.
+
+    Returns:
+        The closest known name, by :func:`difflib.get_close_matches`, of each name that
+        resembles one.
+    """
     candidates = sorted(known)
     return {
         name: close[0]
@@ -443,7 +636,15 @@ def closest_names(names: Iterable[str], known: Iterable[str]) -> dict[str, str]:
 
 
 def with_suggestions(names: Iterable[str], guesses: Mapping[str, str]) -> str:
-    """The names in a message, each followed by "(did you mean ...?)" when ``guesses`` has one."""
+    """List the names for a message, each followed by "(did you mean ...?)" if ``guesses`` has one.
+
+    Args:
+        names: The names to list.
+        guesses: The suggestion for some of the names, as :func:`closest_names` returns.
+
+    Returns:
+        The names, separated by commas.
+    """
     return ", ".join(
         f"{name} (did you mean {guesses[name]}?)" if name in guesses else name for name in names
     )
@@ -453,7 +654,16 @@ def with_suggestions(names: Iterable[str], guesses: Mapping[str, str]) -> str:
 
 
 def _reject_unknown_keys(table: Mapping[object, object], known: set[str], location: str) -> None:
-    """Raise for the keys of ``table`` that are not in ``known``, suggesting the nearest names."""
+    """Raise for the keys of ``table`` that are not in ``known``, suggesting the nearest names.
+
+    Args:
+        table: The TOML table to check.
+        known: The valid keys.
+        location: The table as the messages name it.
+
+    Raises:
+        SettingsError: ``table`` has a key that is not in ``known``.
+    """
     unknown = sorted(map(str, set(table) - known))
     if unknown:
         guesses = closest_names(unknown, known)
@@ -465,7 +675,20 @@ def _reject_unknown_keys(table: Mapping[object, object], known: set[str], locati
 
 
 def read_options(kind: type[T], value: object, location: str) -> T:
-    """Convert one TOML table into the option dataclass ``kind``; reuse an instance as is."""
+    """Convert one TOML table into the option dataclass ``kind``; reuse an instance as is.
+
+    Args:
+        kind: The option dataclass.
+        value: The TOML table, or an instance of ``kind``.
+        location: The table as the messages name it; nested tables extend it with a dot.
+
+    Returns:
+        The option object.
+
+    Raises:
+        SettingsError: ``value`` is not a table, ``kind`` is not a dataclass, a key is
+            unknown, or a value is invalid, including when the dataclass rejects it.
+    """
     if isinstance(value, kind):
         return value
     if not isinstance(value, dict):
@@ -491,7 +714,20 @@ def read_option_groups(kinds: Sequence[type], value: object, location: str) -> t
     A module keeps the options of its own feature, but a settings file may write them in a
     table that another feature named. Every key belongs to exactly one of ``kinds``; an
     unknown key is reported against the keys of all of them, as ``read_options`` does for
-    one. The result has one option object per kind, in the order of ``kinds``.
+    one.
+
+    Args:
+        kinds: The option dataclasses that share the table.
+        value: The TOML table.
+        location: The table as the messages name it.
+
+    Returns:
+        One option object per kind, in the order of ``kinds``.
+
+    Raises:
+        SettingsError: ``value`` is not a table, a kind is not a dataclass, a key is unknown,
+            or a value is invalid.
+        TypeError: Two of ``kinds`` declare the same option.
     """
     if not isinstance(value, dict):
         raise _settings_error(location, f"{location} must be a settings table")
@@ -518,8 +754,18 @@ def read_option_groups(kinds: Sequence[type], value: object, location: str) -> t
 def read_top_level_options(kind: type[T], values: Mapping[str, object]) -> T:
     """Convert top-level TOML settings into the option dataclass ``kind`` that holds them.
 
-    Each key is its own location, as in ``abstract_min_words must be ...``. The caller has
-    already limited ``values`` to the keys of ``kind``.
+    Each key is its own location, as in ``abstract_min_words must be ...``.
+
+    Args:
+        kind: The option dataclass.
+        values: The top-level settings, which the caller has already limited to the keys
+            of ``kind``.
+
+    Returns:
+        The option object.
+
+    Raises:
+        SettingsError: A value is invalid, including when the dataclass rejects it.
     """
     hints = get_type_hints(kind)
     limits: Mapping[str, Bounds] = getattr(kind, "FIELD_BOUNDS", {})
@@ -535,7 +781,16 @@ def read_top_level_options(kind: type[T], values: Mapping[str, object]) -> T:
 
 
 def _scalar_error(location: str, check: Callable[[], None]) -> None:
-    """Run a kit check on the value at ``location``, naming the top-level setting at fault."""
+    """Run a kit check on the value at ``location``, naming the top-level setting at fault.
+
+    Args:
+        location: The path of the value.
+        check: The check to run.
+
+    Raises:
+        SettingsError: The check failed; the error carries the top-level setting of
+            ``location``.
+    """
     try:
         check()
     except SettingsError as error:
@@ -543,7 +798,21 @@ def _scalar_error(location: str, check: Callable[[], None]) -> None:
 
 
 def _convert(annotation: Any, value: object, location: str, bounds: Bounds | None = None) -> object:
-    """Convert the TOML ``value`` at ``location`` to what ``annotation`` declares."""
+    """Convert the TOML ``value`` at ``location`` to what ``annotation`` declares.
+
+    Args:
+        annotation: The type of the field or item.
+        value: The TOML value.
+        location: The path of the value, for the messages.
+        bounds: The limits of a numeric value, from the dataclass's ``FIELD_BOUNDS``, or
+            ``None``.
+
+    Returns:
+        The converted value.
+
+    Raises:
+        SettingsError: ``value`` does not fit ``annotation``.
+    """
     origin, args = get_origin(annotation), get_args(annotation)
     if origin in {Union, types.UnionType}:
         return _convert_union(args, value, location, bounds)
@@ -560,7 +829,20 @@ def _convert(annotation: Any, value: object, location: str, bounds: Bounds | Non
 def _convert_union(
     variants: tuple[Any, ...], value: object, location: str, bounds: Bounds | None
 ) -> object:
-    """Convert to ``X | None`` (``None`` stays ``None``) or to the first variant that fits."""
+    """Convert to ``X | None`` (``None`` stays ``None``) or to the first variant that fits.
+
+    Args:
+        variants: The types of the union.
+        value: The TOML value.
+        location: The path of the value, for the messages.
+        bounds: The limits of a numeric value; applied only to ``X | None``.
+
+    Returns:
+        The converted value.
+
+    Raises:
+        SettingsError: No variant fits ``value``.
+    """
     if value is None and type(None) in variants:
         return None
     candidates = [item for item in variants if item is not type(None)]
@@ -576,10 +858,20 @@ def _convert_union(
 
 
 def _named_pairs(args: tuple[Any, ...], value: object, location: str) -> object:
-    """A TOML table as sorted (name, value) pairs where the annotation asks for pairs.
+    """Turn a TOML table into sorted (name, value) pairs where the annotation asks for pairs.
 
-    That is named policy pairs such as ``required_fields.article = ["title", "author"]``;
-    any other value is returned as it is.
+    That is named policy pairs such as ``required_fields.article = ["title", "author"]``.
+
+    Args:
+        args: The type arguments of the tuple annotation.
+        value: The TOML value.
+        location: The path of the value, for the messages.
+
+    Returns:
+        The sorted pairs, or any other value as it is.
+
+    Raises:
+        SettingsError: A key of the table is not a string.
     """
     if not isinstance(value, dict) or len(args) != 2 or args[-1] is not Ellipsis:
         return value
@@ -592,7 +884,20 @@ def _named_pairs(args: tuple[Any, ...], value: object, location: str) -> object:
 
 
 def _convert_tuple(args: tuple[Any, ...], value: object, location: str) -> object:
-    """Convert a TOML list (or table of pairs) to the tuple form ``args`` describes."""
+    """Convert a TOML list (or table of pairs) to the tuple form ``args`` describes.
+
+    Args:
+        args: The type arguments of the tuple annotation.
+        value: The TOML value.
+        location: The path of the value, for the messages.
+
+    Returns:
+        The converted tuple.
+
+    Raises:
+        SettingsError: ``value`` is not a list, has the wrong number of items for a
+            fixed-length tuple, or holds an invalid item.
+    """
     value = _named_pairs(args, value, location)
     if not isinstance(value, (list, tuple)):
         raise _settings_error(location, f"{location} must be a list")
@@ -609,7 +914,20 @@ def _convert_tuple(args: tuple[Any, ...], value: object, location: str) -> objec
 
 
 def _convert_scalar(annotation: Any, value: object, location: str, bounds: Bounds | None) -> object:
-    """Check a bool, int, float or str against its annotation; other types pass unchanged."""
+    """Check a bool, int, float or str against its annotation; other types pass unchanged.
+
+    Args:
+        annotation: The type of the field or item.
+        value: The TOML value.
+        location: The path of the value, for the messages.
+        bounds: The limits of a numeric value, or ``None`` for none.
+
+    Returns:
+        ``value`` itself.
+
+    Raises:
+        SettingsError: ``value`` does not match ``annotation`` or lies outside ``bounds``.
+    """
     if annotation is bool and type(value) is not bool:
         raise _settings_error(location, f"{location} must be a boolean")
     if annotation is int:

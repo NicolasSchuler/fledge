@@ -1,3 +1,5 @@
+"""Builds, build log diagnostics, and the limits, isolation and environment of tool commands."""
+
 from __future__ import annotations
 
 import asyncio
@@ -33,7 +35,15 @@ from tests.fakes import (
 
 
 class BuildTests(unittest.IsolatedAsyncioTestCase):
+    """Building a project with :func:`build_project` and a faked latexmk, and reading its log.
+
+    Failures, stopping limits, a missing PDF, a final rerun request and external dependencies
+    block success; the build copy is fresh, safe and bounded; recorder traces establish the
+    submission inputs; and log diagnostics keep only the source locations the log states.
+    """
+
     async def asyncSetUp(self) -> None:
+        """Create a temporary directory whose ``source`` folder holds a placeholder ``main.tex``."""
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
         self.source = self.root / "source"
@@ -41,6 +51,7 @@ class BuildTests(unittest.IsolatedAsyncioTestCase):
         (self.source / "main.tex").write_text("source content")
 
     async def asyncTearDown(self) -> None:
+        """Remove the temporary directory."""
         self.temporary.cleanup()
 
     async def test_failed_tool_never_accepts_partial_pdf(self) -> None:
@@ -78,7 +89,14 @@ class BuildTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_limit_that_stopped_the_build_is_reported_once_with_its_value(self) -> None:
         class StoppedBuildRunner(FakeBuildRunner):
-            """latexmk was killed by a limit and so left a signal status behind."""
+            """latexmk was killed by a limit and so left a signal status behind.
+
+            Attributes:
+                limits: Runtime limits with a 7 s timeout and a 3 MiB output limit, which the
+                    findings quote.
+                stopped: The :class:`CommandResult` fields that record the limit that stopped the
+                    build.
+            """
 
             def __init__(self, **stopped) -> None:
                 super().__init__()
@@ -86,6 +104,11 @@ class BuildTests(unittest.IsolatedAsyncioTestCase):
                 self.stopped = stopped
 
             async def run(self, argv, cwd, workspace, **kwargs):
+                """Fake the command; a build ends with status ``-9`` and the ``stopped`` fields.
+
+                A version probe (a last argument of ``-v`` or ``--version``) returns the faked
+                result. The arguments are those of :meth:`CommandRunner.run`.
+                """
                 result = await super().run(argv, cwd, workspace, **kwargs)
                 if argv[-1] in {"-v", "--version"}:
                     return result
@@ -119,7 +142,15 @@ class BuildTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_missing_pdf_reports_the_log_tail_without_a_tool_failure(self) -> None:
         class EmptyOutputRunner(FakeBuildRunner):
+            """A fake build runner whose builds leave a ``main.pdf`` that is not a PDF."""
+
             async def run(self, argv, cwd, workspace, **kwargs):
+                """Fake the command and, for a build, overwrite ``output/main.pdf``.
+
+                A version probe (a last argument of ``-v`` or ``--version``) is left alone. The
+                arguments are those of :meth:`CommandRunner.run`, and the result is that of
+                :meth:`FakeBuildRunner.run`.
+                """
                 result = await super().run(argv, cwd, workspace, **kwargs)
                 if argv[-1] not in {"-v", "--version"}:
                     (workspace / "output/main.pdf").write_bytes(b"not a PDF")
@@ -169,7 +200,15 @@ class BuildTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_missing_backend_trace_does_not_relabel_pdf_success(self) -> None:
         class MissingDatabaseRunner(FakeBuildRunner):
+            """A fake build runner whose builds leave no ``main.fdb_latexmk`` database."""
+
             async def run(self, argv, cwd, workspace, **kwargs):
+                """Fake the command and, for a build, delete ``output/main.fdb_latexmk``.
+
+                A version probe (a last argument of ``-v`` or ``--version``) is left alone. The
+                arguments are those of :meth:`CommandRunner.run`, and the result is that of
+                :meth:`FakeBuildRunner.run`.
+                """
                 result = await super().run(argv, cwd, workspace, **kwargs)
                 if argv[-1] not in {"-v", "--version"}:
                     (workspace / "output/main.fdb_latexmk").unlink()
@@ -213,9 +252,12 @@ class BuildTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("build.external_dependency", {item.rule for item in result.findings})
 
     async def test_tool_state_reads_keep_the_dependency_evidence_complete(self) -> None:
-        """The runner keeps each command's state under the workspace's ``.tool-state``; what
-        a tool writes there and reads back, such as the font cache of luaotfload, is toolchain
-        evidence, so the build still establishes the inputs the submission needs."""
+        """Count what a command writes to its own tool state and reads back as toolchain evidence.
+
+        The runner keeps each command's state under the workspace's ``.tool-state``; what a tool
+        writes there and reads back, such as the font cache of luaotfload, is toolchain evidence, so
+        the build still establishes the inputs the submission needs.
+        """
         work = (self.root / "build").resolve()
         cache = work / ".tool-state/invocation-x/texmf-var/luatex-cache/generic/fonts/otl/lm.luc"
         trace = (
@@ -238,7 +280,13 @@ class BuildTests(unittest.IsolatedAsyncioTestCase):
         declared.mkdir()
 
         class ContextRunner(FakeBuildRunner):
+            """A fake build runner with fixed tool metadata and a declared resource root."""
+
             async def tool_version(self, argv: list[str], workspace: Path) -> ToolVersion:
+                """Return the fixed ``metadata`` for any command and workspace.
+
+                The arguments are those of :meth:`CommandRunner.tool_version`.
+                """
                 return metadata
 
             async def run(
@@ -250,6 +298,11 @@ class BuildTests(unittest.IsolatedAsyncioTestCase):
                 readonly_inputs: tuple[Path, ...] = (),
                 memory_mb: int | None = None,
             ) -> CommandResult:
+                """Fake the command and report the ``declared`` directory as its only resource root.
+
+                The arguments are those of :meth:`CommandRunner.run`; ``readonly_inputs`` and
+                ``memory_mb`` are not passed on.
+                """
                 result = await super().run(argv, cwd, workspace)
                 return replace(result, resource_roots=(str(declared),))
 
@@ -314,7 +367,14 @@ class BuildTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_report_records_how_long_the_build_command_took(self) -> None:
         class TimedBuildRunner(FakeBuildRunner):
+            """A fake build runner whose build commands report a duration of 2.5 seconds."""
+
             async def run(self, argv, cwd, workspace, **kwargs):
+                """Fake the command; a build reports ``duration_seconds`` of 2.5.
+
+                A version probe returns the faked result. The arguments are those of
+                :meth:`CommandRunner.run`.
+                """
                 result = await super().run(argv, cwd, workspace, **kwargs)
                 if argv[-1] in {"-v", "--version"}:
                     return result
@@ -443,7 +503,16 @@ class BuildTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RuntimeTests(unittest.IsolatedAsyncioTestCase):
+    """Tool commands run as real Perl processes: limits, refusals, version probes and environment.
+
+    Limits and cancellation stop the whole process group, a refused sandbox is not a tool failure,
+    a failure or a version probe stopped by a limit names the value or the setting to change, the
+    tool state directory lives only as long as its command, and the environment drops injected and
+    private variables. Two tests use the host's real pdflatex or sandbox and skip without them.
+    """
+
     async def asyncSetUp(self) -> None:
+        """Create the temporary work directory and find Perl, skipping the test without it."""
         self.temporary = tempfile.TemporaryDirectory()
         self.work = Path(self.temporary.name).resolve()
         perl = shutil.which("perl")
@@ -452,6 +521,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.perl = perl
 
     async def asyncTearDown(self) -> None:
+        """Remove the temporary work directory."""
         self.temporary.cleanup()
 
     async def test_output_limit_stops_real_process(self) -> None:

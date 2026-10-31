@@ -24,7 +24,13 @@ REQUEST_ERROR_RULE = "execution.request"
 
 
 class EvidenceKind(StrEnum):
-    """How directly a finding's evidence supports its conclusion."""
+    """How directly a finding's evidence supports its conclusion.
+
+    Attributes:
+        DIRECT: Evidence read directly from file contents, bytes or tool output.
+        DERIVED: A verdict derived from the literal source.
+        HEURISTIC: A heuristic observation.
+    """
 
     DIRECT = "direct"
     DERIVED = "derived"
@@ -37,6 +43,20 @@ class DetailKey(StrEnum):
     ``details`` is free-form evidence that a check records for people and for the
     renderers; these keys are the part with a contract. A member equals its string, so
     a check may still write the plain string.
+
+    Attributes:
+        DOCUMENT: The document of a multi-document job that the finding belongs to.
+        STAGE: The job stage that produced the finding.
+        PAGE: The PDF page the finding concerns.
+        INPUT_LINE: The input line a build log reported for a file it did not resolve.
+        REVIEW: The review decisions applied to the finding.
+        VIOLATIONS: The individual violation records.
+        VIOLATION_COUNT: How many violations there are when ``violations`` lists fewer.
+        CHANGED_PAGES: The pages a comparison found changed.
+        DIFFERING_PAGES: The pages whose dimensions differ from the expected size.
+        DIMENSIONS_PT: The page dimensions, in PDF points.
+        BOUNDS_PT: Boxes as left, top, right and bottom, in PDF points.
+        BBOX: A box, read when ``bounds_pt`` is absent.
     """
 
     DOCUMENT = "document"
@@ -57,14 +77,24 @@ class DetailKey(StrEnum):
 class Finding:
     """The result of one check, or an execution diagnostic that no check produces.
 
-    ``rule`` is the descriptive dotted name (``source.edit_marker``); ``code`` is the
-    stable public check code derived from it, ``None`` for diagnostics such as
-    ``execution.internal``. ``status`` says what happened and ``severity`` how much it
-    matters: only an error that did not pass blocks (``is_blocking``). ``incomplete``
-    marks evidence that was partial, unavailable or bounded, so the finding can be
-    neither accepted nor suppressed. ``suggestion`` is the fix for this occurrence;
-    ``next_step`` falls back to the rule's generic fix. ``details`` holds evidence for
-    renderers and JSON; the keys in :class:`DetailKey` have shared meaning.
+    ``code`` is the stable public check code derived from ``rule``, ``None`` for
+    diagnostics such as ``execution.internal``. Only an error that did not pass blocks
+    (``is_blocking``).
+
+    Attributes:
+        rule: The descriptive dotted name (``source.edit_marker``).
+        message: What the check reports.
+        severity: How much the finding matters.
+        status: What happened.
+        path: The file the finding concerns, if any.
+        line: The line of ``path`` the finding concerns, if any.
+        evidence_kind: How directly the evidence supports the conclusion.
+        incomplete: The check's evidence was partial, unavailable or bounded, as the
+            producer knows it; such a failure can be neither accepted nor suppressed.
+        suggestion: The fix for this occurrence; ``next_step`` falls back to the rule's
+            generic fix.
+        details: Evidence for renderers and JSON; the keys in :class:`DetailKey` have
+            shared meaning.
     """
 
     rule: str
@@ -75,8 +105,6 @@ class Finding:
     path: str | None = None
     line: int | None = None
     evidence_kind: EvidenceKind = EvidenceKind.DIRECT
-    # The check's evidence was partial, unavailable or bounded, as the producer
-    # knows it; such a failure can be neither accepted nor suppressed.
     incomplete: bool = False
     suggestion: str | None = None
     details: dict[str, object] = field(default_factory=dict)
@@ -127,12 +155,20 @@ class Finding:
 
 
 def has_blockers(findings: list[Finding]) -> bool:
-    """Whether any finding is a blocking error."""
+    """Return whether any finding is a blocking error."""
     return any(item.is_blocking for item in findings)
 
 
 def request_error_finding(error: Exception, suggestion: str) -> Finding:
-    """Describe a rejected request; a RequestError supplies its own next step."""
+    """Describe a rejected request; a RequestError supplies its own next step.
+
+    Args:
+        error: The error that rejected the request; its text is the message.
+        suggestion: The next step when ``error`` is not a ``RequestError``.
+
+    Returns:
+        An inconclusive ``execution.request`` error.
+    """
     return Finding(
         REQUEST_ERROR_RULE,
         str(error),
@@ -148,9 +184,18 @@ def internal_error_finding(
     suggestion: str = "Report this defect with the command and the JSON report.",
     frames: Sequence[str] = (),
 ) -> Finding:
-    """A defect must still yield a machine-readable error report and exit code.
+    """Describe a defect as an inconclusive ``execution.internal`` error.
 
-    ``frames`` summarize where it was raised; see ``defects.summarize_traceback``.
+    A defect must still yield a machine-readable error report and exit code.
+
+    Args:
+        error: The unexpected error; its type and text are reported.
+        suggestion: The next step.
+        frames: A summary of where the error was raised; see
+            ``defects.summarize_traceback``.
+
+    Returns:
+        The finding.
     """
     return Finding(
         "execution.internal",
@@ -163,7 +208,15 @@ def internal_error_finding(
 
 
 def cancelled_finding(message: str, suggestion: str | None = None) -> Finding:
-    """Describe a run the user stopped."""
+    """Describe a run the user stopped.
+
+    Args:
+        message: What was cancelled.
+        suggestion: The next step, if any.
+
+    Returns:
+        An inconclusive ``execution.cancelled`` error.
+    """
     return Finding(
         "execution.cancelled",
         message,

@@ -16,6 +16,8 @@ from tests.support import ProjectTestCase
 
 
 class SourceAnalysisTests(ProjectTestCase):
+    """Analysing sources: roots, selected closures, dependencies, limits and error messages."""
+
     def test_roots_ignore_comments_and_literal_examples(self) -> None:
         self.write(
             "draft.tex",
@@ -229,6 +231,18 @@ class SourceAnalysisTests(ProjectTestCase):
                 self.assertTrue(has_blockers(result.findings))
 
     def finding(self, findings, rule: str):
+        """Return the first of ``findings`` whose rule is ``rule``.
+
+        Args:
+            findings: The findings to search.
+            rule: The rule to look for.
+
+        Returns:
+            The first finding with that rule.
+
+        Raises:
+            StopIteration: No finding has that rule.
+        """
         return next(item for item in findings if item.rule == rule)
 
     def test_read_failures_and_encoding_failures_are_told_apart_without_local_paths(self) -> None:

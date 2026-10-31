@@ -36,7 +36,17 @@ WCAG_FLARE = 0.05
 
 
 def finite_number(value: str | None) -> float:
-    """A finite float from tool output; anything else is an invalid measurement."""
+    """Parse a finite float from tool output; anything else is an invalid measurement.
+
+    Args:
+        value: The text the tool printed, or ``None`` when it printed nothing.
+
+    Returns:
+        The number.
+
+    Raises:
+        PreparationError: ``value`` is missing, not a number, or not finite.
+    """
     try:
         number = float(value) if value is not None else math.nan
     except ValueError as error:
@@ -47,7 +57,7 @@ def finite_number(value: str | None) -> float:
 
 
 def contains(outer: tuple[float, ...], inner: tuple[float, ...], tolerance: float) -> bool:
-    """Whether ``inner`` lies within ``outer``, allowing ``tolerance`` points on each side."""
+    """Return whether ``inner`` lies within ``outer``, allowing ``tolerance`` points per side."""
     return (
         inner[0] >= outer[0] - tolerance
         and inner[1] >= outer[1] - tolerance
@@ -57,14 +67,14 @@ def contains(outer: tuple[float, ...], inner: tuple[float, ...], tolerance: floa
 
 
 def intersection_area(first: tuple[float, ...], second: tuple[float, ...]) -> float:
-    """The area of overlap of two boxes, zero when they are apart."""
+    """Return the area of overlap of two boxes, zero when they are apart."""
     return max(0.0, min(first[2], second[2]) - max(first[0], second[0])) * max(
         0.0, min(first[3], second[3]) - max(first[1], second[1])
     )
 
 
 def relative_luminance(rgb: tuple[float, float, float]) -> float:
-    """WCAG relative luminance of sRGB components in [0, 1]."""
+    """Compute the WCAG relative luminance of sRGB components in [0, 1]."""
     linear = [
         value / 12.92 if value <= 0.04045 else ((value + 0.055) / 1.055) ** 2.4 for value in rgb
     ]
@@ -74,13 +84,13 @@ def relative_luminance(rgb: tuple[float, float, float]) -> float:
 
 
 def wcag_contrast_ratio(first_luminance: float, second_luminance: float) -> float:
-    """The WCAG contrast ratio, from 1 to 21, of two relative luminances in either order."""
+    """Return the WCAG contrast ratio, from 1 to 21, of two relative luminances in either order."""
     lighter, darker = max(first_luminance, second_luminance), min(first_luminance, second_luminance)
     return (lighter + WCAG_FLARE) / (darker + WCAG_FLARE)
 
 
 def measurement_raster_size(size: tuple[float, float], dpi: int) -> tuple[int, int]:
-    """The pixel width and height of a page of ``size`` points rendered at ``dpi``."""
+    """Return the pixel width and height of a page of ``size`` points rendered at ``dpi``."""
     return (
         math.ceil(size[0] * dpi / POINTS_PER_INCH),
         math.ceil(size[1] * dpi / POINTS_PER_INCH),
@@ -88,14 +98,21 @@ def measurement_raster_size(size: tuple[float, float], dpi: int) -> tuple[int, i
 
 
 def exceeds_measurement_raster(dimensions: tuple[int, int]) -> bool:
-    """Whether a render of ``dimensions`` pixels is beyond the measurement limits."""
+    """Return whether a render of ``dimensions`` pixels is beyond the measurement limits."""
     return math.prod(dimensions) > MAX_MEASUREMENT_PIXELS or max(dimensions) > (
         MAX_MEASUREMENT_DIMENSION
     )
 
 
 def require_comparison_raster_fit(sizes: Sequence[tuple[float, float]]) -> None:
-    """Reject pages that cannot be rendered at the comparison resolution within raster limits."""
+    """Reject pages that cannot be rendered at the comparison resolution within raster limits.
+
+    Args:
+        sizes: The width and height of every page, in points.
+
+    Raises:
+        PreparationError: A page is too large; the message names the first one.
+    """
     for page, size in enumerate(sizes, 1):
         pixels = measurement_raster_size(size, COMPARISON_DPI)
         if max(pixels) > MAX_RASTER_DIMENSION or math.prod(pixels) > MAX_RASTER_PIXELS:
@@ -109,7 +126,19 @@ def require_comparison_raster_fit(sizes: Sequence[tuple[float, float]]) -> None:
 def read_measurement_raster(
     path: Path, *, channels: Literal[1, 3], max_file_bytes: int
 ) -> RasterImage:
-    """A configured measurement render: at most ``MAX_MEASUREMENT_PIXELS`` pixels."""
+    """Read a configured measurement render of at most ``MAX_MEASUREMENT_PIXELS`` pixels.
+
+    Args:
+        path: The renderer's output file.
+        channels: 1 for a gray page, 3 for an RGB page.
+        max_file_bytes: The largest file size accepted.
+
+    Returns:
+        The page.
+
+    Raises:
+        PreparationError: The file or its raster is invalid or beyond the limits.
+    """
     return read_pnm_raster(
         path,
         channels=channels,

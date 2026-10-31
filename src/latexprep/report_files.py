@@ -23,7 +23,13 @@ from .report import Outcome, RedactedReport, Report, redact_report, redacted_jso
 
 @dataclass(slots=True)
 class ReportFiles:
-    """New report files outside the input; each is set once its option was validated."""
+    """New report files outside the input; each is set once its option was validated.
+
+    Attributes:
+        json: The ``--json-report`` destination.
+        html: The ``--html-report`` destination.
+        diagnostics: The ``--diagnostics`` destination.
+    """
 
     json: Path | None = None
     html: Path | None = None
@@ -35,7 +41,13 @@ class ReportFiles:
 
 
 class RenderedReport(NamedTuple):
-    """The JSON text of a report, and its HTML if that is still the final report."""
+    """The JSON text of a report, and its HTML if that is still the final report.
+
+    Attributes:
+        json: The JSON text.
+        html: The HTML text, or ``None`` when none was rendered or a later write failure
+            changed the report.
+    """
 
     json: str
     html: str | None
@@ -49,7 +61,19 @@ def resolve_report_files(
     diagnostics: Path | None,
     files: ReportFiles,
 ) -> None:
-    """Validate each requested destination against ``source`` and record it in ``files``."""
+    """Validate each requested destination against ``source`` and record it in ``files``.
+
+    Args:
+        source: The input project.
+        json: The requested ``--json-report`` file, if any.
+        html: The requested ``--html-report`` file, if any.
+        diagnostics: The requested ``--diagnostics`` file, if any.
+        files: Receives each validated destination.
+
+    Raises:
+        RequestError: A destination is not a new file outside ``source`` in an existing
+            folder; ``files`` keeps the destinations validated before it.
+    """
     if json:
         files.json = validate_destination(source, json, "--json-report")
     if html:
@@ -59,7 +83,16 @@ def resolve_report_files(
 
 
 def record_write_failure(report: Report, option: str, destination: Path, error: Exception) -> None:
-    """Record that a requested report file could not be saved, in the report itself."""
+    """Record that a requested report file could not be saved, in the report itself.
+
+    An unexpected error is recorded as an internal error instead.
+
+    Args:
+        report: The report that receives the finding and the error outcome.
+        option: The option that named the file, such as ``--json-report``.
+        destination: The file that could not be saved.
+        error: Why saving failed.
+    """
     if not is_expected_failure(error):
         record_internal_error(report, error)
         return
@@ -84,7 +117,16 @@ def save_reports(
 
     The report is redacted once and every file is written from that copy. A failure adds
     a finding to ``report``, so the copy is made again and the later files include it.
-    Returns the final redacted report with the text of its JSON and, if still valid, HTML.
+    The HTML and diagnostics files are written before the JSON file, so a failure is
+    reflected in the saved JSON.
+
+    Args:
+        report: The report to save.
+        files: The validated destinations; an unset one is not written.
+        preview_images: PDF preview images for the HTML file.
+
+    Returns:
+        The final redacted report with the text of its JSON and, if still valid, HTML.
     """
     public = redact_report(report)
     # Rendered once for the file and reused for stdout unless a later write failure

@@ -22,7 +22,18 @@ from tests.support import controlled_backends, minimal_project
 
 
 class WorkflowPreviewTests(unittest.IsolatedAsyncioTestCase):
+    """Standalone ``pdf`` jobs and grayscale previews: what they skip, keep and roll back.
+
+    A standalone PDF check neither imports nor builds sources, a preview needs no inventory of
+    figure sources, the previews of a standalone check outlive its temporary workspace, and a
+    timeout while previews are exported rolls back the output of single and multiple packages.
+    """
+
     async def asyncSetUp(self):
+        """Write a minimal project to ``input`` in a temporary directory removed after the test.
+
+        ``self.base`` is the temporary directory and ``self.source`` the project in it.
+        """
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.base = Path(self.temporary.name)

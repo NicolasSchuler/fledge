@@ -16,7 +16,17 @@ from tests.support import controlled_backends, minimal_project
 
 
 class WorkflowReviewTests(unittest.IsolatedAsyncioTestCase):
+    """Accepted exceptions in ``prepare`` jobs with controlled PDF backends.
+
+    An accepted failure stays visible and marks the outcome, a baseline difference is accepted
+    at the stage the workflow records, and an archive mismatch cannot be waived.
+    """
+
     async def asyncSetUp(self):
+        """Write a minimal project to ``input`` in a temporary directory removed after the test.
+
+        ``self.base`` is the temporary directory and ``self.source`` the project in it.
+        """
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.base = Path(self.temporary.name)

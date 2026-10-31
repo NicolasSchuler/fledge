@@ -72,7 +72,24 @@ _FAILURE_RULES = {
 
 @dataclass(frozen=True, slots=True)
 class BuildRequest:
-    """One isolated build of ``main`` from ``source`` in the new directory ``work``."""
+    """One isolated build of ``main`` from ``source`` in the new directory ``work``.
+
+    Construction raises ``SettingsError`` when a field is invalid or
+    ``ignored_log_checks`` repeats a code or names one outside ``SELECTABLE_BUILD_ERRORS``,
+    and ``PreparationError`` when ``main`` is not a relative ``.tex`` path of letters,
+    digits, underscores, dots or hyphens.
+
+    Attributes:
+        source: The project directory to copy.
+        main: The main file, relative to ``source``.
+        work: The workspace directory to create.
+        engine: The TeX engine.
+        bibliography_backend: The bibliography strategy.
+        inventory_loaded_options: Whether to instrument the build for the loaded class
+            and package option inventory.
+        ignored_log_checks: The deselected policy-level log errors, from
+            ``SELECTABLE_BUILD_ERRORS``, that do not fail the build.
+    """
 
     source: Path
     main: str
@@ -98,12 +115,19 @@ class BuildRequest:
 
     @property
     def stem(self) -> str:
+        """The main file's name without folder or suffix, which names the log and PDF."""
         return PurePosixPath(self.main).stem
 
 
 @dataclass(frozen=True, slots=True)
 class _BibliographyOutcome:
-    """The bibliography record of a build, its findings and the backend versions verified."""
+    """The bibliography record of a build, its findings and the backend versions verified.
+
+    Attributes:
+        record: The strategy, the control-file evidence and the Biber preparation note.
+        findings: The bibliography policy finding and the backend verification findings.
+        versions: The verified backend versions by tool.
+    """
 
     record: BibliographyRecord
     findings: list[Finding]
@@ -112,7 +136,12 @@ class _BibliographyOutcome:
 
 @dataclass(frozen=True, slots=True)
 class _LogEvidence:
-    """The bounded final-pass log and the findings read from it."""
+    """The bounded final-pass log and the findings read from it.
+
+    Attributes:
+        text: The log text, at most the output byte limit.
+        findings: The findings read from the log, and one when it is incomplete.
+    """
 
     text: str
     findings: list[Finding]
@@ -135,6 +164,23 @@ async def build_project(
     costs seconds per job. Unless the sources mention biblatex, an automatic build
     first runs with Biber blocked. Only if that build writes a fresh .bcf is it
     discarded and rebuilt in the same, emptied workspace with Biber prepared.
+
+    Args:
+        source: The project directory to copy.
+        main: The main file, relative to ``source``.
+        work: The workspace directory to create.
+        engine: The TeX engine.
+        runner: The restricted tool runner.
+        bibliography_backend: The bibliography strategy.
+        inventory_loaded_options: Whether to collect the loaded class and package option
+            inventory.
+        ignored_log_checks: The deselected policy-level log errors.
+
+    Returns:
+        The build result; tool and evidence failures are findings in it.
+
+    Raises:
+        PreparationError: The request is invalid, or the build copy cannot be prepared.
     """
     request = BuildRequest(
         source,
@@ -158,7 +204,21 @@ async def build_project(
 
 
 async def _build_once(request: BuildRequest, runner: ToolRunner, biber: BiberPlan) -> BuildResult:
-    """Run one isolated build; raise ``BiberRequired`` if a deferred build needs Biber."""
+    """Run one isolated build.
+
+    Args:
+        request: The build to run.
+        runner: The restricted tool runner.
+        biber: Whether Biber is deferred for this build.
+
+    Returns:
+        The build result, successful only with a complete PDF, no unignored error
+        finding and, when requested, a complete option inventory.
+
+    Raises:
+        BiberRequired: A build that deferred Biber needs it.
+        PreparationError: The build copy cannot be prepared.
+    """
     layout = await run_in_thread(
         prepare_layout, request.source, request.main, request.work, runner.limits.max_copy_bytes
     )
@@ -270,7 +330,18 @@ async def _judge_bibliography(
 ) -> _BibliographyOutcome:
     """Compare the fresh control files with the strategy and verify the backends they need.
 
-    Raises ``BiberRequired`` when a build that deferred Biber wrote a Biber control file.
+    Args:
+        request: The build.
+        runner: The restricted tool runner.
+        layout: The build's workspace and output folders.
+        biber: Whether Biber was deferred, and the preparation note.
+        biber_setup: The prepared Biber, or why preparing it failed.
+
+    Returns:
+        The bibliography record, findings and verified backend versions.
+
+    Raises:
+        BiberRequired: A build that deferred Biber wrote a Biber control file.
     """
     evidence = read_bibliography_evidence(layout.output, runner.limits.max_output_bytes)
     if biber.deferred and "biber" in evidence.observed_backends:
@@ -295,7 +366,16 @@ async def _judge_bibliography(
 def _stage_loaded_options(
     request: BuildRequest, layout: BuildLayout
 ) -> LoadedOptionsProbe | LoadedOptionsEvidence | None:
-    """Instrument the build copy, or say why the option inventory is unavailable."""
+    """Instrument the build copy, or say why the option inventory is unavailable.
+
+    Args:
+        request: The build, which says whether the inventory is wanted.
+        layout: The build's workspace.
+
+    Returns:
+        The staged probe, evidence that records why instrumentation was unavailable, or
+        ``None`` when no inventory is wanted.
+    """
     if not request.inventory_loaded_options:
         return None
     try:
@@ -305,7 +385,16 @@ def _stage_loaded_options(
 
 
 def _unavailable_findings(error: PreparationError, request: BuildRequest) -> list[Finding]:
-    """The findings for a build whose tools could not be verified or started."""
+    """Report a build whose tools could not be verified or started.
+
+    Args:
+        error: Why the tools could not be verified or started.
+        request: The build, which says whether an option inventory was wanted.
+
+    Returns:
+        An inconclusive ``build.execution_unavailable`` finding, and an unavailable
+        option inventory finding when one was wanted.
+    """
     findings = [
         Finding(
             "build.execution_unavailable",
@@ -321,7 +410,16 @@ def _unavailable_findings(error: PreparationError, request: BuildRequest) -> lis
 
 
 def _read_log(request: BuildRequest, layout: BuildLayout, max_bytes: int) -> _LogEvidence:
-    """Read the bounded final-pass log and the findings it holds."""
+    """Read the bounded final-pass log and the findings it holds.
+
+    Args:
+        request: The build, whose main file names the log.
+        layout: The build's folders.
+        max_bytes: The most bytes of log read.
+
+    Returns:
+        The log text and its findings, with one more when the log is incomplete.
+    """
     text, complete = read_bounded(layout.output / f"{request.stem}.log", max_bytes)
     findings = log_findings(text, request.main, layout.project, layout.cwd)
     if not complete:
@@ -338,7 +436,15 @@ def _read_log(request: BuildRequest, layout: BuildLayout, max_bytes: int) -> _Lo
 
 
 def _submission_findings(submission: SubmissionDependencies, main: str) -> list[Finding]:
-    """A finding when the original inputs a submission needs could not be established."""
+    """Report when the original inputs a submission needs could not be established.
+
+    Args:
+        submission: The submission dependency evidence.
+        main: The main file the finding names.
+
+    Returns:
+        One inconclusive warning, or an empty list when the inputs are established.
+    """
     if submission.inputs is not None:
         return []
     return [
@@ -361,6 +467,19 @@ def _loaded_options(
     built: bool,
     max_bytes: int,
 ) -> LoadedOptionsEvidence:
+    """Collect the loaded option inventory of a finished build.
+
+    Args:
+        request: The build.
+        staged: The staged probe, or evidence of why instrumentation was unavailable,
+            which is returned as it is.
+        recorder: The build's recorder evidence.
+        built: Whether the build completed without an unignored error.
+        max_bytes: The most bytes of evidence read.
+
+    Returns:
+        The option inventory evidence.
+    """
     if isinstance(staged, LoadedOptionsEvidence):
         return staged
     return collect_loaded_options(
@@ -377,7 +496,15 @@ def _loaded_options(
 
 
 def _failure_suggestion(failure: CommandFailure, limits: RuntimeLimits) -> str | None:
-    """What a researcher can do about a build that a limit stopped; none for a plain failure."""
+    """Suggest what a researcher can do about a build that a limit stopped.
+
+    Args:
+        failure: How the build failed.
+        limits: The runtime limits, whose timeout the suggestion names.
+
+    Returns:
+        The suggestion, or ``None`` for a plain failure.
+    """
     match failure:
         case CommandFailure.TIMEOUT:
             return (
@@ -402,11 +529,20 @@ def _failure_suggestion(failure: CommandFailure, limits: RuntimeLimits) -> str |
 def _execution_findings(
     execution: CommandResult, main: str, log: str, limits: RuntimeLimits
 ) -> list[Finding]:
-    """The one finding that explains why latexmk did not exit normally, if it did not.
+    """Explain in one finding why latexmk did not exit normally, if it did not.
 
     A limit that stopped the build also leaves the killed process with a signal
     status, so the limit is reported alone: that status adds nothing the researcher
     can act on.
+
+    Args:
+        execution: The result of the latexmk command.
+        main: The main file the finding names.
+        log: The final-pass log, whose tail explains a failed exit status.
+        limits: The runtime limits.
+
+    Returns:
+        One error finding, or an empty list when latexmk exited normally.
     """
     failure = execution.failure
     if failure is None:
@@ -437,6 +573,7 @@ def _execution_findings(
 
 
 def _is_complete_pdf(pdf: Path, max_bytes: int) -> bool:
+    """Return whether ``pdf`` is a file of at most ``max_bytes`` that starts with a PDF header."""
     if not pdf.is_file() or not len(_PDF_HEADER) <= pdf.stat().st_size <= max_bytes:
         return False
     with pdf.open("rb") as stream:

@@ -47,7 +47,16 @@ MEASURED_SECTIONS = frozenset({"observed", "resources"})
 
 
 def command_paths(command: click.Command, prefix: tuple[str, ...] = ()) -> list[tuple[str, ...]]:
-    """The name path of ``command`` and of every command below it, depth first."""
+    """List the name path of ``command`` and of every command below it, depth first.
+
+    Args:
+        command: The command to start from.
+        prefix: The name path of ``command`` itself.
+
+    Returns:
+        The name paths, ``prefix`` first; the subcommands of a group are visited in name
+        order.
+    """
     paths = [prefix]
     if isinstance(command, click.Group):
         for name, child in sorted(command.commands.items()):
@@ -56,11 +65,22 @@ def command_paths(command: click.Command, prefix: tuple[str, ...] = ()) -> list[
 
 
 def help_golden_name(path: tuple[str, ...]) -> str:
+    """Return the golden file name of the help of the command at ``path``.
+
+    The names are joined with hyphens below ``help/``; the empty path of the top-level
+    command gives ``help/fledge.txt``.
+    """
     return "help/" + "-".join(path or ("fledge",)) + ".txt"
 
 
 class HelpGoldenTests(unittest.TestCase):
+    """The ``--help`` text of every command against its golden file."""
+
     def help_text(self, path: tuple[str, ...]) -> str:
+        """Return the ``--help`` output of the command at ``path``, 100 columns wide, uncoloured.
+
+        Asserts that the command exits with code 0.
+        """
         environment = {"COLUMNS": str(HELP_WIDTH), "NO_COLOR": "1"}
         result = CliRunner(env=environment).invoke(
             cli, [*path, "--help"], terminal_width=HELP_WIDTH, color=False
@@ -90,6 +110,7 @@ class GoldenHelperTests(ProjectTestCase):
     """The comparison fails with a way forward, and regeneration rewrites the file."""
 
     def compare(self, actual: str) -> None:
+        """Compare ``actual`` with the golden file ``nested/sample.txt`` in the temporary root."""
         with patch("tests.support.GOLDEN_DIRECTORY", self.root):
             assert_matches_golden(self, "nested/sample.txt", actual)
 
@@ -119,6 +140,11 @@ class ControlledCheckGoldenTests(ProjectTestCase):
     """One ``check`` run with controlled build and PDF backends, and what it produces."""
 
     def setUp(self) -> None:
+        """Run ``check`` on a small cited paper with controlled backends and keep its report.
+
+        The paper carries a TODO comment and an uncited bibliography entry, and the controlled
+        PDF inspection reports one passed page count.
+        """
         super().setUp()
         self.project = self.write_project(
             {
@@ -147,6 +173,11 @@ class ControlledCheckGoldenTests(ProjectTestCase):
         )
 
     def replacements(self) -> dict[str, str]:
+        """Return the placeholder of each path of this test and of the version.
+
+        Returns:
+            Each text to replace, with its placeholder.
+        """
         return {
             str(self.project): "<project>",
             str(self.project.resolve()): "<project>",
@@ -155,12 +186,24 @@ class ControlledCheckGoldenTests(ProjectTestCase):
         }
 
     def normalised_json(self) -> str:
+        """Return the JSON report as its golden file holds it.
+
+        Paths and the version become placeholders, and so do the measured figures in
+        ``MEASURED_SECTIONS``.
+
+        Returns:
+            The normalised report, indented by one space and ending with a newline.
+        """
         data = normalise_report_data(
             json.loads(self.report.to_json()), self.replacements(), measured=MEASURED_SECTIONS
         )
         return json.dumps(data, indent=1, ensure_ascii=False) + "\n"
 
     def terminal_text(self) -> str:
+        """Return the terminal summary, 100 columns wide and without colour.
+
+        Paths and the version are replaced, and trailing spaces are removed from each line.
+        """
         output = StringIO()
         console = Console(
             file=output, width=HELP_WIDTH, color_system=None, no_color=True, highlight=False
@@ -173,7 +216,7 @@ class ControlledCheckGoldenTests(ProjectTestCase):
         return "".join(line.rstrip() + "\n" for line in text.splitlines())
 
     def report_with_placeholders(self) -> Report:
-        """A copy of the report whose measured times and resource figures are placeholders.
+        """Return a copy of the report whose measured times and resource figures are placeholders.
 
         They are in ``execution`` and ``stages`` only, and are replaced there by the rules of
         the JSON golden, so the renderers format the copy as they would format any report.
@@ -186,20 +229,20 @@ class ControlledCheckGoldenTests(ProjectTestCase):
         )
 
     def rendered(self, output_format: OutputFormat) -> str:
-        """The copy with placeholders as ``--output-format`` renders it, ending with a newline."""
+        """Render the copy with placeholders as ``--output-format`` does, ending with a newline."""
         report = redact_report(self.report_with_placeholders())
         text = render_redacted_document(report, output_format)
         return text if text.endswith("\n") else text + "\n"
 
     def plain_text(self, output_format: OutputFormat) -> str:
-        """The compact or CI rendering with paths and the version replaced."""
+        """Return the compact or CI rendering with paths and the version replaced."""
         text = self.rendered(output_format)
         for old, new in self.replacements().items():
             text = text.replace(old, new)
         return text
 
     def html_text(self) -> str:
-        """The HTML rendering with paths and the version replaced, one tag per line.
+        """Return the HTML rendering with paths and the version replaced, one tag per line.
 
         Apart from its style sheet and preformatted evidence the page is a single line, so a
         line break is added between adjacent tags to let a change show as a line diff. The
@@ -238,9 +281,12 @@ class ControlledCheckGoldenTests(ProjectTestCase):
         self.assertEqual(normalised["settings"], original["settings"])
 
     def test_the_copy_with_placeholders_keeps_no_measured_value(self) -> None:
-        """The compact, CI and HTML goldens render a copy with placeholders in ``execution``
+        """Check that the copy with placeholders keeps no measured time or resource figure.
+
+        The compact, CI and HTML goldens render a copy with placeholders in ``execution``
         and ``stages``; normalising its JSON again changes nothing, so no measured time or
-        resource figure elsewhere in the report can make those goldens vary."""
+        resource figure elsewhere in the report can make those goldens vary.
+        """
         data = json.loads(self.report_with_placeholders().to_json())
         self.assertEqual(normalise_report_data(data, {}, measured=MEASURED_SECTIONS), data)
 

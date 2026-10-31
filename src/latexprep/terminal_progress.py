@@ -16,8 +16,13 @@ from .text_safety import sanitize_terminal_text
 class TerminalProgress:
     """A context manager yielding the core's optional string progress callback.
 
-    Supply the CLI's stderr console. Rich handles terminal and color detection;
-    output streams are never captured or redirected by this helper.
+    Rich handles terminal and color detection; output streams are never captured or
+    redirected by this helper. On a terminal that is not dumb, progress is one transient
+    line; otherwise each message is printed as a plain line.
+
+    Attributes:
+        console: The console progress is shown on; supply the CLI's stderr console.
+        quiet: Whether progress is suppressed; a quiet instance yields ``None``.
     """
 
     def __init__(self, console: Console, *, quiet: bool = False) -> None:
@@ -49,6 +54,11 @@ class TerminalProgress:
         return self.update
 
     def update(self, message: str) -> None:
+        """Show ``message`` as the current stage, with terminal control characters made safe.
+
+        Args:
+            message: The progress message.
+        """
         if self.quiet:
             return
         message = sanitize_terminal_text(message)

@@ -53,16 +53,26 @@ _DRIVE_PREFIX = re.compile(r"[A-Za-z]:")
 
 
 def has_drive_prefix(value: str) -> bool:
-    """Whether ``value`` starts with a Windows drive such as ``C:``, which is absolute there."""
+    """Return whether ``value`` starts with a Windows drive such as ``C:``.
+
+    Such a path is absolute on Windows.
+    """
     return _DRIVE_PREFIX.match(value) is not None
 
 
 def lexically_escapes(normalized: str) -> bool:
-    """Whether a path already normalized with ``posixpath.normpath`` climbs out of its base."""
+    """Return whether a normalized path climbs out of its base.
+
+    The path must already be normalized with ``posixpath.normpath``.
+    """
     return normalized == ".." or normalized.startswith("../")
 
 
 def _has_unwanted_characters(value: str, characters: PathCharacters) -> bool:
+    """Return whether ``value`` holds a character that the level ``characters`` refuses.
+
+    NUL is checked separately, before this.
+    """
     if characters == "any":
         return False
     if characters == "no_line_breaks":
@@ -73,7 +83,7 @@ def _has_unwanted_characters(value: str, characters: PathCharacters) -> bool:
 
 
 def _spelling_problem(value: str) -> RelativePathProblem | None:
-    """The problem visible in the raw spelling, before the path is split into segments."""
+    """Return the problem visible in the raw spelling, before the path is split into segments."""
     if not value:
         return "empty"
     if value.startswith("/"):
@@ -88,7 +98,16 @@ def _spelling_problem(value: str) -> RelativePathProblem | None:
 def _root_only_problem(
     value: str, *, normalized: bool, allow_current: bool
 ) -> RelativePathProblem | None:
-    """The problem of a path made only of empty and ``.`` segments, such as ``.`` or ``./``."""
+    """Return the problem of a path such as ``.`` or ``./``, made only of empty and ``.`` segments.
+
+    Args:
+        value: The path.
+        normalized: Whether only the canonical spelling ``.`` is accepted.
+        allow_current: Whether a path naming the project root itself is accepted.
+
+    Returns:
+        The problem, or ``None`` when the path is accepted.
+    """
     if normalized and value != ".":
         return "unnormalized"
     return None if allow_current else "current"
@@ -102,14 +121,19 @@ def relative_path_problem(
     characters: PathCharacters = "any",
     component_pattern: re.Pattern[str] | None = None,
 ) -> RelativePathProblem | None:
-    """Why ``value`` cannot name a file inside a project, or ``None`` when it can.
+    """Say why ``value`` cannot name a file inside a project, or return ``None`` when it can.
 
-    ``normalized`` requires the canonical spelling: no empty or ``.`` segment and no
-    trailing slash, so ``a//b``, ``./a`` and ``a/`` are refused. Without it those are
-    tolerated, as they are in paths a user types or a tool reports.
-    ``allow_current`` accepts a path naming the project root itself (``.``).
-    ``characters`` sets how unusual characters are treated (see ``PathCharacters``).
-    ``component_pattern`` must match every segment completely.
+    Args:
+        value: The path to check.
+        normalized: Whether to require the canonical spelling: no empty or ``.`` segment
+            and no trailing slash, so ``a//b``, ``./a`` and ``a/`` are refused. Without it
+            those are tolerated, as they are in paths a user types or a tool reports.
+        allow_current: Whether to accept a path naming the project root itself (``.``).
+        characters: How unusual characters are treated (see ``PathCharacters``).
+        component_pattern: A pattern that must match every segment completely, or ``None``.
+
+    Returns:
+        The problem, or ``None`` when ``value`` is accepted.
     """
     problem = _spelling_problem(value)
     if problem is not None:
@@ -139,7 +163,18 @@ def is_relative_posix_path(
     characters: PathCharacters = "any",
     component_pattern: re.Pattern[str] | None = None,
 ) -> bool:
-    """Whether ``value`` may name a file inside a project; see ``relative_path_problem``."""
+    """Return whether ``value`` may name a file inside a project.
+
+    Args:
+        value: The path to check.
+        normalized: As for :func:`relative_path_problem`.
+        allow_current: As for :func:`relative_path_problem`.
+        characters: As for :func:`relative_path_problem`.
+        component_pattern: As for :func:`relative_path_problem`.
+
+    Returns:
+        Whether :func:`relative_path_problem` finds no problem.
+    """
     return (
         relative_path_problem(
             value,
@@ -153,12 +188,19 @@ def is_relative_posix_path(
 
 
 def is_contained(root: Path, path: Path, *, regular_file: bool = False) -> bool:
-    """Whether ``path`` is not itself a link and resolves to a place inside ``root``.
+    """Return whether ``path`` is not itself a link and resolves to a place inside ``root``.
 
     Links in the parent directories are followed, so one that leads out of ``root``
-    is refused and one that stays inside is accepted. With ``regular_file`` the
-    path must also be a regular file. A path that does not exist is contained when
-    it would lie inside ``root``, unless ``regular_file`` is set.
+    is refused and one that stays inside is accepted. A path that does not exist is
+    contained when it would lie inside ``root``, unless ``regular_file`` is set.
+
+    Args:
+        root: The folder that must contain the path.
+        path: The path to check.
+        regular_file: Whether the path must also be a regular file.
+
+    Returns:
+        Whether ``path`` is contained in ``root``.
     """
     if path.is_symlink():
         return False
@@ -168,13 +210,20 @@ def is_contained(root: Path, path: Path, *, regular_file: bool = False) -> bool:
 
 
 def is_link_free_regular_file(root: Path, path: Path) -> bool:
-    """Whether ``path``, spelled under ``root``, is a regular file reached without any link.
+    """Return whether ``path``, spelled under ``root``, is a regular file reached without links.
 
     Stricter than ``is_contained``: nothing is resolved first, so every directory
     from ``root`` down to the file is examined as written, and ``root`` itself and
     every directory between it and the file must not be a link, even one that
     leads somewhere inside ``root``. A ``..`` segment is refused as well: the spelling
     ``root/../elsewhere/file`` is lexically under ``root`` but names a file beside it.
+
+    Args:
+        root: The folder the file must lie in.
+        path: The file, spelled under ``root``.
+
+    Returns:
+        Whether ``path`` is such a file; ``False`` also when it cannot be examined.
     """
     if not path.is_relative_to(root) or ".." in path.relative_to(root).parts:
         return False
@@ -189,6 +238,14 @@ def is_link_free_regular_file(root: Path, path: Path) -> bool:
 
 
 def contained_relative_name(root: Path, path: Path) -> str | None:
-    """The POSIX name of ``path`` under ``root`` after resolving links, or ``None`` if outside."""
+    """Return the POSIX name of ``path`` under ``root`` after resolving links.
+
+    Args:
+        root: The folder the name is relative to; its links are resolved too.
+        path: The path to name.
+
+    Returns:
+        The name, or ``None`` when ``path`` resolves outside ``root``.
+    """
     resolved, base = path.resolve(), root.resolve()
     return resolved.relative_to(base).as_posix() if resolved.is_relative_to(base) else None

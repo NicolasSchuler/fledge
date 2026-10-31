@@ -21,7 +21,41 @@ AbbreviationPolicy = Literal["forbid", "define"]
 
 @dataclass(frozen=True)
 class ManuscriptCheckOptions:
-    """Which opt-in manuscript policies run, and the values they compare against."""
+    r"""Which opt-in manuscript policies run, and the values they compare against.
+
+    Construction raises ``SettingsError`` when a value is invalid or repeated, when
+    ``allowed_packages`` holds anything but single literal package names, or when line
+    numbers are both required and forbidden.
+
+    Attributes:
+        FIELD_BOUNDS: The bounds :func:`validate_scalars` applies to ``max_heading_depth``,
+            which must be a heading depth.
+        allowed_packages: The direct packages the allowlist policy accepts, or ``None`` for
+            no allowlist; an allowlist also produces the package inventory.
+        inventory_packages: Whether to report the direct package inventory.
+        check_layout_manipulation: Whether to report layout override candidates.
+        forbid_abstract_citations: Whether citation commands in the abstract fail.
+        abstract_abbreviation_policy: ``forbid`` reports every uppercase abbreviation in
+            the abstract, ``define`` only those without a definition candidate; ``None``
+            switches the advisory off.
+        abstract_abbreviation_exceptions: Abbreviations the abstract policy never reports.
+        max_heading_depth: The deepest heading level allowed, or ``None`` for no limit.
+        check_empty_sections: Whether to report section subtrees with no observable content.
+        check_hardcoded_references: Whether to report hard-coded figure, table, section and
+            equation numbers.
+        required_metadata: The metadata fields that must have a literal value.
+        check_orcid: Whether to check the syntax and checksum of literal ORCID identifiers.
+        required_declarations: The names of the declarations that must be present as a
+            nonempty section or ``\declaration{name}{text}``.
+        require_float_captions: Whether every figure and table needs a nonempty caption.
+        require_float_labels: Whether every figure and table needs a label.
+        check_float_label_order: Whether a float label must follow the caption.
+        require_float_references: Whether every float needs an external reference.
+        check_float_reference_order: Whether floats must be first referenced in source order.
+        require_figure_descriptions: Whether every figure needs a usable ``Description``.
+        require_line_numbers: Whether literal line-number activation is required.
+        forbid_line_numbers: Whether literal line-number activation is forbidden.
+    """
 
     # Heading depths run from part (-1) to subparagraph (5).
     FIELD_BOUNDS: ClassVar[dict[str, Bounds]] = {

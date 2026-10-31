@@ -28,7 +28,10 @@ PDF_PREVIEWS_KEY = "pdf_previews"
 class CheckSelectionRecord:
     """The ``--select`` and ``--ignore`` selectors a run used.
 
-    ``always_enforced`` lists the codes of the guards that selection cannot switch off.
+    Attributes:
+        select: The ``--select`` selectors.
+        ignore: The ``--ignore`` selectors.
+        always_enforced: The codes of the guards that selection cannot switch off.
     """
 
     select: tuple[str, ...]
@@ -36,7 +39,7 @@ class CheckSelectionRecord:
     always_enforced: tuple[str, ...] = ()
 
     def to_report(self) -> dict[str, object]:
-        """The entry as ``Report.execution`` carries it."""
+        """Return the entry as ``Report.execution`` carries it."""
         return {
             "select": list(self.select),
             "ignore": list(self.ignore),
@@ -48,8 +51,12 @@ class CheckSelectionRecord:
 class NotCheckedArea:
     """Opt-in checks a run did not perform because its settings left them off.
 
-    ``codes`` are the check codes and ``settings`` the setting names that would
-    activate them. The area ``OTHER_OPT_IN_AREA`` stands for all remaining opt-in checks.
+    Attributes:
+        area: The name of the area; ``OTHER_OPT_IN_AREA`` stands for all remaining opt-in
+            checks.
+        label: The name of the area that reports show.
+        codes: The check codes.
+        settings: The setting names that would activate the checks.
     """
 
     area: str
@@ -58,7 +65,7 @@ class NotCheckedArea:
     settings: tuple[str, ...]
 
     def to_report(self) -> dict[str, object]:
-        """The entry as ``Report.execution`` carries it."""
+        """Return the entry as ``Report.execution`` carries it."""
         return {
             "area": self.area,
             "label": self.label,
@@ -69,7 +76,14 @@ class NotCheckedArea:
 
 @dataclass(frozen=True, slots=True)
 class ExecutionRecords:
-    """The execution entries a renderer shows, read from ``Report.execution``."""
+    """The execution entries a renderer shows, read from ``Report.execution``.
+
+    Attributes:
+        config_path: The settings file the run used, or ``None``.
+        preset: The preset the run used, or ``None``.
+        check_selection: The check selectors the run used, or ``None`` when not recorded.
+        not_checked: The opt-in areas the run left unchecked.
+    """
 
     config_path: str | None = None
     preset: str | None = None
@@ -101,14 +115,17 @@ def record_pdf_previews(execution: dict[str, object], summary: Mapping[str, obje
 
 
 def _strings(value: object) -> tuple[str, ...] | None:
-    """The items of a list as strings, or None when ``value`` is not a list."""
+    """Return the items of a list as strings, or ``None`` when ``value`` is not a list."""
     if not isinstance(value, (list, tuple)):
         return None
     return tuple(map(str, value))
 
 
 def read_check_selection(value: object) -> CheckSelectionRecord | None:
-    """The selectors in an ``execution.check_selection`` entry, or None if it is malformed."""
+    """Read the selectors in an ``execution.check_selection`` entry, or ``None`` if it is malformed.
+
+    A missing ``select`` reads as ``ALL`` and a missing ``ignore`` as none.
+    """
     if not isinstance(value, Mapping):
         return None
     select = _strings(value.get("select", ["ALL"]))
@@ -120,7 +137,7 @@ def read_check_selection(value: object) -> CheckSelectionRecord | None:
 
 
 def read_not_checked(entries: object) -> tuple[NotCheckedArea, ...]:
-    """The areas in an ``execution.not_checked`` entry; items without a label are skipped."""
+    """Read the areas in an ``execution.not_checked`` entry; items without a label are skipped."""
     if not isinstance(entries, (list, tuple)):
         return ()
     areas = []
@@ -139,6 +156,7 @@ def read_not_checked(entries: object) -> tuple[NotCheckedArea, ...]:
 
 
 def _text(value: object) -> str | None:
+    """Return ``value`` when it is a non-empty string, otherwise ``None``."""
     return value if isinstance(value, str) and value else None
 
 

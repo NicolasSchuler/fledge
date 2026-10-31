@@ -28,7 +28,19 @@ from latexprep.submission_scan_findings import ScanLimits
 
 
 class ReviewTests(unittest.TestCase):
+    """Review rules: their validation, their scopes and the findings they may not waive."""
+
     def finding(self, **changes):
+        """Return a failed ``pdf.rendered_text_size`` error on page 4 of ``paper.pdf``.
+
+        The finding belongs to the ``final`` stage of ``main.tex``.
+
+        Args:
+            **changes: Fields of the :class:`Finding` that replace those described above.
+
+        Returns:
+            The finding.
+        """
         finding = Finding(
             "pdf.rendered_text_size",
             "Caption text is small",

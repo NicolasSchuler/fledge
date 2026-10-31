@@ -1,3 +1,5 @@
+"""The shared wording of finding text and the redaction of secrets in findings."""
+
 from __future__ import annotations
 
 import unittest
@@ -16,6 +18,8 @@ TOKEN = "ghp_" + "a1B2c3D4" * 4
 
 
 class WordingTests(unittest.TestCase):
+    """Check statuses, location lists and plural counts in finding text."""
+
     def test_status_prefers_a_confirmed_failure_over_missing_evidence(self) -> None:
         self.assertEqual(check_status(failed=True, incomplete=True), "failed")
         self.assertEqual(check_status(failed=False, incomplete=True), "inconclusive")
@@ -38,6 +42,8 @@ class WordingTests(unittest.TestCase):
 
 
 class RedactionTests(unittest.TestCase):
+    """Redaction of known and secret-shaped text in findings and nested values."""
+
     def test_known_secrets_and_secret_shaped_text_are_replaced_everywhere(self) -> None:
         finding = Finding(
             "submission.secret",

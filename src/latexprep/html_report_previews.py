@@ -20,7 +20,14 @@ from .report import RedactedReport
 
 @dataclass(frozen=True, slots=True)
 class PreviewSide:
-    """One side (before or after) of a page pair, as the preview store described it."""
+    """One side (before or after) of a page pair, as the preview store described it.
+
+    Attributes:
+        image_id: The id of the side's image in the preview store, or ``None``.
+        page_absent: Whether the page does not exist in this side's PDF.
+        status: The preview status the store recorded for this side.
+        error: The error the store recorded for this side.
+    """
 
     image_id: str | None
     page_absent: bool
@@ -30,7 +37,19 @@ class PreviewSide:
 
 @dataclass(frozen=True, slots=True)
 class PreviewPage:
-    """A compared page pair; ``number`` is the page as the comparison recorded it."""
+    """A compared page pair.
+
+    Attributes:
+        number: The page as the comparison recorded it.
+        omitted: Whether the pair was left out of the previews.
+        text_only: Whether only the extracted text differs; the rendered pages match.
+        dimensions_changed: Whether the page dimensions differ.
+        within_tolerance: Whether the measured visual difference is within the configured
+            tolerance.
+        status: The preview status of the pair.
+        left: The page before.
+        right: The page after.
+    """
 
     number: object
     omitted: bool
@@ -44,7 +63,15 @@ class PreviewPage:
 
 @dataclass(frozen=True, slots=True)
 class PreviewComparison:
-    """The preview summary of one PDF comparison, titled by document and stage."""
+    """The preview summary of one PDF comparison, titled by document and stage.
+
+    Attributes:
+        title: The stage, preceded by the document when there is one.
+        status: The preview status of the comparison.
+        error: Why the previews are unavailable, if they are.
+        omitted_pages: How many affected page pairs the shared preview limit left out.
+        pages: The compared page pairs.
+    """
 
     title: str
     status: object
@@ -54,6 +81,7 @@ class PreviewComparison:
 
 
 def _read_side(descriptor: object) -> PreviewSide:
+    """Read one side of a recorded page pair; a malformed descriptor reads as empty."""
     data = descriptor if isinstance(descriptor, dict) else {}
     image_id = data.get("image_id")
     return PreviewSide(
@@ -65,6 +93,7 @@ def _read_side(descriptor: object) -> PreviewSide:
 
 
 def _read_page(page: dict) -> PreviewPage:
+    """Read one recorded page pair, with defaults for missing entries."""
     return PreviewPage(
         number=page.get("page", "?"),
         omitted=page.get("status") == "omitted",
@@ -78,7 +107,7 @@ def _read_page(page: dict) -> PreviewPage:
 
 
 def read_preview_comparisons(execution: Mapping[str, object]) -> tuple[PreviewComparison, ...]:
-    """The comparisons in ``execution.pdf_previews``; malformed entries are skipped."""
+    """Read the comparisons in ``execution.pdf_previews``; malformed entries are skipped."""
     summary = execution.get(PDF_PREVIEWS_KEY)
     comparisons = summary.get("comparisons", []) if isinstance(summary, dict) else []
     if not isinstance(comparisons, list):
@@ -107,7 +136,16 @@ def read_preview_comparisons(execution: Mapping[str, object]) -> tuple[PreviewCo
 
 
 def _preview_image(side: PreviewSide, images: Mapping[str, bytes]) -> bytes | None:
-    """Bounded PNG bytes for a side's image, if the explicit store holds valid ones."""
+    """Return the bounded PNG bytes of a side's image, if the explicit store holds valid ones.
+
+    Args:
+        side: The side whose image is looked up.
+        images: The explicit preview store, by image id.
+
+    Returns:
+        The image, or ``None`` when it is missing, larger than ``MAX_PREVIEW_BYTES`` or not a
+        valid preview image.
+    """
     data = images.get(side.image_id) if side.image_id is not None else None
     if not isinstance(data, bytes) or len(data) > MAX_PREVIEW_BYTES:
         return None
@@ -119,6 +157,7 @@ def _preview_image(side: PreviewSide, images: Mapping[str, bytes]) -> bytes | No
 
 
 def _page_notes(page: PreviewPage) -> list[str]:
+    """Explain text-only differences, changed dimensions and differences within tolerance."""
     notes = []
     if page.text_only:
         notes.append("<p>Extracted text differs although the rendered pages match.</p>")
@@ -132,7 +171,17 @@ def _page_notes(page: PreviewPage) -> list[str]:
 def _side_html(
     side: PreviewSide, label: str, page: PreviewPage, images: Mapping[str, bytes]
 ) -> tuple[str, str | None]:
-    """The figure of one side, and the data URI of its image if it has one."""
+    """Draw the figure of one side, and return the data URI of its image if it has one.
+
+    Args:
+        side: The side to draw.
+        label: The caption, ``Before`` or ``After``.
+        page: The page pair the side belongs to.
+        images: The explicit preview store, by image id.
+
+    Returns:
+        The figure's HTML and the data URI of its image, or ``None`` without an image.
+    """
     parts = [f"<figure><figcaption>{label}</figcaption>"]
     uri = None
     data = _preview_image(side, images)
@@ -153,6 +202,7 @@ def _side_html(
 
 
 def _difference_overlay(left_uri: str, right_uri: str) -> str:
+    """Overlay the after image on the before image so that differing pixels stand out."""
     return (
         "<details><summary>Difference overlay</summary>"
         "<p>Matching pixels are black; nonblack areas differ. "
@@ -167,6 +217,19 @@ def _difference_overlay(left_uri: str, right_uri: str) -> str:
 
 
 def _page_comparison_html(page: PreviewPage, anchor: str, images: Mapping[str, bytes]) -> str:
+    """Show one page pair side by side.
+
+    A difference overlay follows when both sides have an image and the page dimensions
+    did not change.
+
+    Args:
+        page: The page pair.
+        anchor: The ``id`` of the page's article, the target of the navigation link.
+        images: The explicit preview store, by image id.
+
+    Returns:
+        The HTML of the page pair.
+    """
     sections = [
         f'<article id="{anchor}" class="page-comparison"><h4>Page {escape_html(page.number)}</h4>',
         *_page_notes(page),
@@ -188,7 +251,16 @@ def _page_comparison_html(page: PreviewPage, anchor: str, images: Mapping[str, b
 def _comparison_html(
     index: int, comparison: PreviewComparison, images: Mapping[str, bytes]
 ) -> tuple[list[str], list[str]]:
-    """The section of one comparison and the navigation links to its pages."""
+    """Show the section of one comparison and the navigation links to its pages.
+
+    Args:
+        index: The comparison's position, counted from 1, which makes page anchors unique.
+        comparison: The comparison to show.
+        images: The explicit preview store, by image id.
+
+    Returns:
+        The HTML parts of the section, and one navigation link per page pair shown.
+    """
     sections = [f"<section><h3>{escape_html(comparison.title)}</h3>"]
     if comparison.error:
         sections.append(f"<p>Preview unavailable: {escape_html(comparison.error)}</p>")
@@ -214,7 +286,15 @@ def _comparison_html(
 
 
 def pdf_previews_html(report: RedactedReport, images: Mapping[str, bytes]) -> str:
-    """The PDF-differences section, or an empty string when no previews were recorded."""
+    """Show the PDF-differences section, or an empty string when no previews were recorded.
+
+    Args:
+        report: The redacted report, whose execution record holds the preview summary.
+        images: The explicit preview store, by image id.
+
+    Returns:
+        The HTML of the section.
+    """
     comparisons = read_preview_comparisons(report.execution)
     if not comparisons:
         return ""

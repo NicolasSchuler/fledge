@@ -44,16 +44,29 @@ _KEY_ENTRY_COMMANDS = frozenset({"bibentry", "entrydata", "entryset", "defbibent
 
 
 class KeyMapping(NamedTuple):
-    """The outcome of renaming and merging keys."""
+    """The outcome of renaming and merging keys.
 
-    # Every old key or alias that changes, and the key that now replaces it.
+    Attributes:
+        mapping: Every old key or alias that changes, mapped to the key that now
+            replaces it.
+        sources: The rewritten TeX sources by relative path, as they are stored in their
+            files.
+        citations_updated: The number of citation keys rewritten in the sources.
+    """
+
     mapping: dict[str, str]
-    # The rewritten TeX sources by relative path, as they are stored in their files.
     sources: dict[str, str]
     citations_updated: int
 
 
 def _unsupported_key_uses(inspection: SourceGraph) -> list[str]:
+    r"""List the uses of ``\bibentry``, ``\entrydata``, ``\entryset`` and ``\defbibentryset``.
+
+    Key changes and pruning do not support these key uses in the reachable sources.
+
+    Returns:
+        One reason per use, with its path and line.
+    """
     return [
         f"{path}:{command.line}: \\{command.name} key use is unsupported"
         for path in reachable_sources(inspection)
@@ -63,6 +76,11 @@ def _unsupported_key_uses(inspection: SourceGraph) -> list[str]:
 
 
 def _executable_preambles(documents: dict[str, BibDocument]) -> list[str]:
+    """List the ``@preamble`` declarations whose values contain a backslash.
+
+    Returns:
+        One reason per such declaration, naming its document.
+    """
     return [
         f"{document.path}: executable bibliography preamble is unsupported"
         for document in documents.values()
@@ -76,7 +94,19 @@ def _executable_preambles(documents: dict[str, BibDocument]) -> list[str]:
 def require_literal_graph(
     inspection: SourceGraph, graph: CitationGraph, documents: dict[str, BibDocument]
 ) -> None:
-    """Refuse key changes and pruning unless every key use is literal and resolved."""
+    """Refuse key changes and pruning unless every key use is literal and resolved.
+
+    Args:
+        inspection: The source graph of the manuscript.
+        graph: The citations of the selected sources.
+        documents: The parsed .bib documents by relative path.
+
+    Raises:
+        ProposalBlocked: The citations are uncertain, the package does not have exactly
+            one document root, a key or alias is ambiguous or a relationship target
+            unresolved, a key use or a preamble is unsupported, or a citation key is
+            unresolved. The message lists the reasons.
+    """
     reasons = [*graph.reasons, *graph.unused_reasons]
     if len(inspection.roots) != 1:
         reasons.append("Key changes and pruning require a package with exactly one document root")
@@ -96,7 +126,20 @@ def require_literal_graph(
 def _key_list_edits(
     document: BibDocument, key: str, item: FieldSpan, mapping: dict[str, str]
 ) -> list[TextEdit]:
-    """Rewrite mapped keys inside one literal relationship or alias field."""
+    """Rewrite mapped keys inside one literal relationship or alias field.
+
+    Args:
+        document: The document that holds the field.
+        key: The key of the entry that holds the field, which a refusal names.
+        item: The field and its location.
+        mapping: The replacement of each changed key or alias.
+
+    Returns:
+        One edit per listed key that ``mapping`` changes.
+
+    Raises:
+        ProposalBlocked: The field is not one literal, or its key list is not literal.
+    """
     line = document.line(item.field.start)
     if len(item.field.atoms) != 1 or item.field.atoms[0].kind != "literal":
         raise ProposalBlocked(
@@ -119,7 +162,18 @@ def _key_list_edits(
 
 
 def _citation_edits(inspection: SourceGraph, mapping: dict[str, str]) -> dict[str, list[TextEdit]]:
-    """Rewrite mapped keys in the literal citation commands of the selected sources."""
+    """Rewrite mapped keys in the literal citation commands of the selected sources.
+
+    A citation command's first argument is rewritten, a multicite command's every
+    argument.
+
+    Args:
+        inspection: The source graph whose reachable sources are rewritten.
+        mapping: The replacement of each changed key or alias.
+
+    Returns:
+        The edits of each source that changes, by relative path.
+    """
     edits: dict[str, list[TextEdit]] = {}
     for path in sorted(reachable_sources(inspection)):
         changes: list[TextEdit] = []
@@ -142,7 +196,18 @@ def _citation_edits(inspection: SourceGraph, mapping: dict[str, str]) -> dict[st
 def _require_consistent_request(
     entries: dict[str, LocatedEntry], renames: dict[str, str], merges: dict[str, str]
 ) -> None:
-    """Block a rename or merge that names missing entries or would collide."""
+    """Block a rename or merge that names missing entries or would collide.
+
+    Args:
+        entries: Every entry by key.
+        renames: The new key of each renamed key.
+        merges: The target key of each merge donor.
+
+    Raises:
+        ProposalBlocked: With status "failed": a merge donor is also renamed or is a
+            merge target, a named key does not exist, or the result would hold duplicate
+            keys.
+    """
     if set(renames) & set(merges) or set(merges) & set(merges.values()):
         raise ProposalBlocked(
             "A merge donor cannot also be renamed or serve as another merge target.",
@@ -166,7 +231,23 @@ def _build_mapping(
     merges: dict[str, str],
     inline_keys: set[str],
 ) -> dict[str, str]:
-    """The old-to-new key map, including the aliases of merged-away entries."""
+    """Build the old-to-new key map, including the aliases of merged-away entries.
+
+    A merge donor maps to its target's new key.
+
+    Args:
+        documents: The parsed .bib documents by relative path.
+        renames: The new key of each renamed key.
+        merges: The target key of each merge donor.
+        inline_keys: The keys of inline bibliography entries.
+
+    Returns:
+        The replacement of each changed key or alias.
+
+    Raises:
+        ProposalBlocked: With status "failed" when the map's old or new keys include an
+            inline bibliography key.
+    """
     mapping = dict(renames)
     for donor, target in merges.items():
         mapping[donor] = renames.get(target, target)
@@ -187,7 +268,20 @@ def _key_edits(
     merges: dict[str, str],
     mapping: dict[str, str],
 ) -> dict[str, list[TextEdit]]:
-    """Rename the renamed keys, drop the merged-away entries and update key-list fields."""
+    """Rename the renamed keys, drop the merged-away entries and update key-list fields.
+
+    Args:
+        entries: Every entry by key.
+        renames: The new key of each renamed key.
+        merges: The target key of each merge donor.
+        mapping: The replacement of each changed key or alias.
+
+    Returns:
+        The edits of each document, by relative path.
+
+    Raises:
+        ProposalBlocked: An entry cannot be laid out, or a key-list field is not literal.
+    """
     edits: dict[str, list[TextEdit]] = defaultdict(list)
     for key, reference in entries.items():
         document = reference.document
@@ -213,6 +307,21 @@ def map_keys(
     """Apply reviewed key renames and merges to the documents and the citing sources.
 
     A merge discards the donor entry and keeps the target; it never combines metadata.
+
+    Args:
+        inspection: The source graph of the manuscript.
+        graph: The citations of the selected sources.
+        documents: The parsed .bib documents by relative path; the changed ones are
+            replaced.
+        key_renames: Pairs of an old key and its new key.
+        merge_keys: Pairs of a donor key and the target key that replaces it.
+
+    Returns:
+        The key map, the rewritten sources and the number of citations updated.
+
+    Raises:
+        ProposalBlocked: A key use is not literal and resolved, the request is
+            inconsistent, an edit cannot be made, or the resulting keys are ambiguous.
     """
     require_literal_graph(inspection, graph, documents)
     entries = unique_entries(documents)
@@ -240,10 +349,21 @@ def prune_unreachable(
     documents: dict[str, BibDocument],
     mapping: dict[str, str],
 ) -> int:
-    """Remove the entries that no citation, ``\\nocite{*}`` or relationship reaches.
+    r"""Remove the entries that no citation, ``\nocite{*}`` or relationship reaches.
 
-    Citations are resolved after ``mapping`` was applied; the number of entries removed
-    is returned.
+    Args:
+        inspection: The source graph of the manuscript.
+        graph: The citations of the selected sources.
+        documents: The parsed .bib documents by relative path; the changed ones are
+            replaced.
+        mapping: The key changes already applied; citations are resolved after it.
+
+    Returns:
+        The number of entries removed.
+
+    Raises:
+        ProposalBlocked: A key use is not literal and resolved, or an entry cannot be
+            removed safely.
     """
     remapped = replace(
         graph,

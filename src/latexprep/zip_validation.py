@@ -61,7 +61,17 @@ _ALLOWED_FILE_TYPES = {0, stat.S_IFREG, stat.S_IFDIR}
 
 @dataclass(frozen=True, slots=True)
 class _DirectoryLocation:
-    """Where the central directory lies, from the end record or its ZIP64 replacement."""
+    """Where the central directory lies, from the end record or its ZIP64 replacement.
+
+    Attributes:
+        disk: The number of the disk that holds the end record.
+        directory_disk: The number of the disk on which the central directory starts.
+        disk_entries: The number of directory entries on this disk.
+        total_entries: The total number of directory entries.
+        directory_size: The size of the central directory in bytes.
+        directory_offset: The offset at which the central directory starts.
+        end: The offset of the record that follows the central directory.
+    """
 
     disk: int
     directory_disk: int
@@ -76,9 +86,17 @@ class _DirectoryLocation:
 def check_zip_directory(stream: BinaryIO, budget: ImportBudget) -> None:
     """Bound the central directory before ZipFile loads it into memory.
 
-    Raises ``PreparationError`` for a missing or inconsistent end record, a multi-disk
-    or embedded archive, too many entries or too much metadata. Leaves ``stream`` at
-    its start.
+    Leaves ``stream`` at its start.
+
+    Args:
+        stream: The seekable archive.
+        budget: The import's budget; its limits bound the number of entries.
+
+    Raises:
+        PreparationError: The end record is missing or inconsistent, the archive spans
+            several disks or is embedded in other data, it has too many entries or too much
+            metadata, or the import's time limit has passed.
+        AnalysisCancelled: The worker running the import was cancelled.
     """
     location = _locate_directory(stream)
     _check_directory_bounds(location, budget)
@@ -87,7 +105,18 @@ def check_zip_directory(stream: BinaryIO, budget: ImportBudget) -> None:
 
 
 def _locate_directory(stream: BinaryIO) -> _DirectoryLocation:
-    """Find the end record, and follow a ZIP64 locator to the record that replaces it."""
+    """Find the end record, and follow a ZIP64 locator to the record that replaces it.
+
+    Args:
+        stream: The seekable archive.
+
+    Returns:
+        The location of the central directory.
+
+    Raises:
+        PreparationError: The end record is missing or truncated, the comment or trailing
+            data after it is malformed, or the ZIP64 records are invalid.
+    """
     stream.seek(0, os.SEEK_END)
     size = stream.tell()
     tail_size = min(size, _END_SEARCH_BYTES)
@@ -109,7 +138,20 @@ def _locate_directory(stream: BinaryIO) -> _DirectoryLocation:
 
 
 def _follow_zip64_locator(stream: BinaryIO, location: _DirectoryLocation) -> _DirectoryLocation:
-    """Replace the end record's values with the ZIP64 record's, when a locator announces one."""
+    """Replace the end record's values with the ZIP64 record's, when a locator announces one.
+
+    Args:
+        stream: The seekable archive.
+        location: The location read from the end record.
+
+    Returns:
+        The location read from the ZIP64 record, which ends where that record starts, or
+        ``location`` unchanged when no locator precedes the end record.
+
+    Raises:
+        PreparationError: The archive spans several disks, or the ZIP64 record lies outside
+            the archive, is malformed or has inconsistent offsets.
+    """
     end = location.end
     if end < _ZIP64_LOCATOR.size:
         return location
@@ -141,6 +183,18 @@ def _follow_zip64_locator(stream: BinaryIO, location: _DirectoryLocation) -> _Di
 
 
 def _check_directory_bounds(location: _DirectoryLocation, budget: ImportBudget) -> None:
+    """Check the central directory's location against one disk and the import limits.
+
+    Args:
+        location: The location of the central directory.
+        budget: The import's budget, whose file limit bounds the number of entries.
+
+    Raises:
+        PreparationError: The archive spans several disks or its entry counts disagree, it
+            has more entries than the file limit, its directory is larger than
+            ``MAX_DIRECTORY_BYTES``, or the directory does not end where the next record
+            starts, as in an embedded archive.
+    """
     if location.disk or location.directory_disk or location.disk_entries != location.total_entries:
         raise PreparationError("Multi-disk ZIP archives are unsupported or inconsistent.")
     if location.total_entries > budget.limits.max_files:
@@ -160,7 +214,20 @@ def _check_directory_bounds(location: _DirectoryLocation, budget: ImportBudget) 
 def _check_central_entries(
     stream: BinaryIO, location: _DirectoryLocation, budget: ImportBudget
 ) -> None:
-    """Walk the central directory header by header and count what it actually holds."""
+    """Walk the central directory header by header and count what it actually holds.
+
+    Args:
+        stream: The seekable archive.
+        location: The location of the central directory.
+        budget: The import's budget, whose file limit bounds the count and whose time limit
+            is checked at each header.
+
+    Raises:
+        PreparationError: A header is malformed or truncated, the directory holds more
+            entries than the file limit or a different number than its end record states,
+            or the import's time limit has passed.
+        AnalysisCancelled: The worker running the import was cancelled.
+    """
     stream.seek(location.directory_offset)
     remaining = location.directory_size
     actual_count = 0
@@ -183,7 +250,24 @@ def _check_central_entries(
 
 
 def zip_entries(archive: zipfile.ZipFile, budget: ImportBudget) -> list[ProjectEntry]:
-    """The archive's entries by normalized path, each checked against the import limits."""
+    """Return the archive's entries by normalized path, each checked against the import limits.
+
+    Args:
+        archive: The opened archive, whose central directory :func:`check_zip_directory`
+            has bounded.
+        budget: The import's budget, which counts every entry.
+
+    Returns:
+        The entries, sorted by path.
+
+    Raises:
+        PreparationError: An entry name is unsafe or collides with another, an entry is a
+            link, a special file or contradicts itself, it is encrypted or compressed with
+            a method other than stored or deflated, its compression ratio exceeds the limit,
+            the declared sizes together exceed the size limit, or a limit of ``budget`` is
+            exceeded.
+        AnalysisCancelled: The worker running the import was cancelled.
+    """
     entries: list[ProjectEntry] = []
     registry = PathRegistry()
     declared_bytes = 0
@@ -209,7 +293,20 @@ def zip_entries(archive: zipfile.ZipFile, budget: ImportBudget) -> list[ProjectE
 
 
 def _entry_is_directory(info: zipfile.ZipInfo, path: str) -> bool:
-    """Whether the entry is a folder; links, special files and contradictions are refused."""
+    """Return whether the entry is a folder; links, special files and contradictions are refused.
+
+    Args:
+        info: The entry's central-directory record.
+        path: The entry's normalized path, for the error messages.
+
+    Returns:
+        ``True`` when the record, its Unix file type or its DOS attribute marks a directory.
+
+    Raises:
+        PreparationError: The entry declares a Unix file type other than a regular file or
+            a directory, or it is marked as a directory but declares a regular file type or
+            a nonzero size.
+    """
     file_type = stat.S_IFMT(info.external_attr >> 16)
     if file_type not in _ALLOWED_FILE_TYPES:
         raise PreparationError(

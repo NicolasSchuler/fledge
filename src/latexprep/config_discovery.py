@@ -28,7 +28,15 @@ logger = logging.getLogger(__name__)
 
 
 def load_toml(path: Path) -> dict[str, object]:
-    """Parse the TOML file ``path``; a missing, unreadable or invalid file is an error."""
+    """Parse the TOML file ``path``; a missing, unreadable or invalid file is an error.
+
+    Returns:
+        The parsed values.
+
+    Raises:
+        RequestError: The file does not exist.
+        PreparationError: The file cannot be read or is not valid TOML.
+    """
     try:
         with path.open("rb") as stream:
             return tomllib.load(stream)
@@ -46,7 +54,18 @@ def load_toml(path: Path) -> dict[str, object]:
 
 
 def _pyproject_settings(path: Path, values: dict[str, object]) -> dict[str, object] | None:
-    """The [tool.fledge] or [tool.latex-prep] table, or None when neither exists."""
+    """Return the [tool.fledge] or [tool.latex-prep] table, or ``None`` when neither exists.
+
+    Args:
+        path: The ``pyproject.toml`` file, named in messages.
+        values: The parsed contents of ``path``.
+
+    Returns:
+        The settings table, or ``None`` when neither table exists.
+
+    Raises:
+        PreparationError: Both tables exist, or the one that exists is not a table.
+    """
     tool = values.get("tool", {})
     if not isinstance(tool, dict):
         return None
@@ -66,7 +85,17 @@ def _pyproject_settings(path: Path, values: dict[str, object]) -> dict[str, obje
 
 
 def read_settings_file(path: Path) -> dict[str, object]:
-    """The raw settings in ``path``; for ``pyproject.toml`` only its Fledge table."""
+    """Read the raw settings in ``path``; for ``pyproject.toml`` only its Fledge table.
+
+    Returns:
+        The raw values.
+
+    Raises:
+        RequestError: The file does not exist.
+        PreparationError: The file cannot be read or is not valid TOML, or a
+            ``pyproject.toml`` has no Fledge table, both tables, or a table that is not a
+            settings table.
+    """
     values = load_toml(path)
     if path.name != _PYPROJECT:
         return values
@@ -77,7 +106,7 @@ def read_settings_file(path: Path) -> dict[str, object]:
 
 
 def _search_boundaries() -> frozenset[Path]:
-    """Directories whose own configuration is never a project's: home and temporary space.
+    """List the home and temporary directories, whose own configuration is never a project's.
 
     A file in a shared directory such as ``/tmp`` could have been put there by anyone.
     """
@@ -87,16 +116,33 @@ def _search_boundaries() -> frozenset[Path]:
 
 
 def _is_search_boundary(directory: Path, boundaries: frozenset[Path]) -> bool:
-    """Whether the search must not look in or above ``directory``."""
+    """Return whether the search must not look in or above ``directory``.
+
+    Args:
+        directory: The resolved directory to test.
+        boundaries: The directories from :func:`_search_boundaries`; the filesystem root is
+            a boundary too.
+
+    Returns:
+        Whether ``directory`` is a boundary.
+    """
     return directory in boundaries or directory == directory.parent
 
 
 def _is_repository_root(directory: Path) -> bool:
+    """Return whether ``directory`` holds a repository marker (``.git`` or ``.hg``)."""
     return any((directory / marker).exists() for marker in _REPOSITORY_MARKERS)
 
 
 def _settings_file_in(directory: Path) -> Path | None:
-    """The settings file in ``directory`` that wins, or None; an unrelated pyproject is skipped."""
+    """Find the settings file in ``directory`` that wins.
+
+    The names in ``CONFIG_FILENAMES`` are tried in order before ``pyproject.toml``; an
+    unrelated ``pyproject.toml``, one without a Fledge table, is skipped.
+
+    Returns:
+        The winning file, or ``None`` when ``directory`` holds none.
+    """
     for name in CONFIG_FILENAMES:
         if (candidate := directory / name).is_file():
             return candidate
@@ -111,9 +157,23 @@ def resolve_config_path(
 ) -> Path | None:
     """Choose one config beside the original input; never inspect extracted ZIPs.
 
-    Stop after a repository root, before the home, temporary or filesystem-root
-    ancestor, or after the starting directory when the input itself is at such a
-    boundary.
+    The search starts in the input's directory and goes upwards. It stops after a
+    repository root, before the home, temporary or filesystem-root ancestor, or after the
+    starting directory when the input itself is at such a boundary.
+
+    Args:
+        source: The original input, a file or a directory.
+        explicit: The file named by ``--config``; when given, it is resolved and returned
+            without a search.
+        isolated: Whether ``--isolated`` asks for no settings file at all.
+
+    Returns:
+        The settings file, or ``None`` when none is found or ``isolated`` is set.
+
+    Raises:
+        PreparationError: ``isolated`` is combined with ``explicit``, or a
+            ``pyproject.toml`` met during the search cannot be read or holds an invalid
+            Fledge table.
     """
     if explicit is not None:
         if isolated:

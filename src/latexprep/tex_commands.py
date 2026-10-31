@@ -96,6 +96,6 @@ MULTICITE_COMMANDS = frozenset(
 
 
 def with_capitalized_forms(names: Iterable[str]) -> frozenset[str]:
-    """``names`` and their spellings with a capital first letter, such as ``Citet``."""
+    """Return ``names`` and their spellings with a capital first letter, such as ``Citet``."""
     names = frozenset(names)
     return names | {name[:1].upper() + name[1:] for name in names}

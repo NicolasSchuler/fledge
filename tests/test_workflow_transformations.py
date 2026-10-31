@@ -19,7 +19,17 @@ from tests.support import controlled_backends, minimal_project
 
 
 class WorkflowTransformationTests(unittest.IsolatedAsyncioTestCase):
+    """Bibliography and source transformations in ``prepare`` jobs, and online reference checks.
+
+    Transformations reach the archive but never the input; online checks see the final
+    references once, or the initial snapshot in a dry run.
+    """
+
     async def asyncSetUp(self):
+        """Write a minimal project to ``input`` in a temporary directory removed after the test.
+
+        ``self.base`` is the temporary directory and ``self.source`` the project in it.
+        """
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.base = Path(self.temporary.name)

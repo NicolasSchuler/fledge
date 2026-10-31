@@ -75,6 +75,15 @@ _CATALOGUE_ORDER = (
 
 
 def _require_key(name: str, value: object) -> None:
+    """Reject a value that is not a literal BibTeX key.
+
+    Args:
+        name: The setting path that the error message names.
+        value: The value to check.
+
+    Raises:
+        SettingsError: ``value`` is not a literal BibTeX key.
+    """
     require_text(name, value, expected="a literal BibTeX key", pattern=_KEY)
 
 
@@ -82,10 +91,21 @@ def _require_key(name: str, value: object) -> None:
 class BibliographyTransformOptions:
     """All transformations are opt-in; tuples make reviewed requests immutable.
 
-    ``field_edits`` rows contain (key, field, expected, replacement). Expected
-    and replacement are literal contents, including any TeX brace protection.
-    None means an absent field; a None replacement removes the selected field.
-    Relationship fields must use key mappings instead of metadata edits.
+    Relationship fields must use key mappings instead of metadata edits. Construction
+    raises ``SettingsError`` when a value breaks its rule, such as a relationship field
+    in ``remove_fields`` or a malformed key pair or field edit.
+
+    Attributes:
+        format_entries: Whether to give the entries a lossless field layout.
+        remove_fields: The names of the fields to remove; relationship fields are not
+            accepted.
+        cited_only: Whether to remove the entries that no citation reaches.
+        key_renames: Pairs of an old key and its new key.
+        merge_keys: Pairs of a donor key and the target key that replaces it.
+        field_edits: Rows of (key, field, expected, replacement). Expected and
+            replacement are literal contents, including any TeX brace protection. ``None``
+            means an absent field; a ``None`` replacement removes the selected field.
+        order_entries: Whether to sort each document's entries by key.
     """
 
     format_entries: bool = False
@@ -111,6 +131,13 @@ class BibliographyTransformOptions:
         self._validate_field_edits()
 
     def _validate_field_edits(self) -> None:
+        """Check every guarded field edit row.
+
+        Raises:
+            SettingsError: ``field_edits`` is not a tuple, or a row does not hold four
+                items, has a malformed key, field or value, edits a relationship field
+                or a field that ``remove_fields`` removes, or repeats a key and field.
+        """
         if not isinstance(self.field_edits, tuple):
             raise SettingsError(
                 "field_edits must be a list of guarded field edits", ("field_edits",)
@@ -149,6 +176,7 @@ class BibliographyTransformOptions:
 
     @property
     def key_mapping(self) -> bool:
+        """Whether any key is renamed or merged."""
         return bool(self.key_renames or self.merge_keys)
 
 
@@ -156,7 +184,20 @@ _DEFAULT_OPTIONS = BibliographyTransformOptions()
 
 
 def _read_documents(root: Path, names: set[str]) -> dict[str, BibDocument]:
-    """Read the declared resources; any file that is unusable, or unparsable, blocks."""
+    """Read the declared resources; any file that is unusable, or unparsable, blocks.
+
+    Args:
+        root: The project directory the names are relative to.
+        names: The project-relative names of the declared resources.
+
+    Returns:
+        The parsed documents by relative path.
+
+    Raises:
+        ProposalBlocked: A file cannot be read, a byte, file or entry limit is reached,
+            a document uses bare carriage-return line endings, or a document does not
+            parse completely.
+    """
     budget = BibliographyBudget(
         max_total_bytes=MAX_RESOURCES_TOTAL_BYTES,
         max_files=MAX_RESOURCE_FILES,
@@ -179,23 +220,47 @@ def _read_documents(root: Path, names: set[str]) -> dict[str, BibDocument]:
 
 @dataclass(slots=True)
 class _ProposalState:
-    """The state that the selected operations transform in turn."""
+    """The state that the selected operations transform in turn.
+
+    Attributes:
+        inspection: The source graph of the manuscript.
+        graph: The citations of the selected sources.
+        documents: The parsed .bib documents by relative path.
+        options: The selected operations and their requests.
+        originals: The text of each document as read, by relative path, to tell
+            afterwards which ones changed.
+        mapping: The key changes the key mapping applied.
+        sources: The TeX sources the key mapping rewrote, by relative path, as stored in
+            their files.
+    """
 
     inspection: SourceGraph
     graph: CitationGraph
     documents: dict[str, BibDocument]
     options: BibliographyTransformOptions
-    # Each document as read, to tell afterwards which ones changed.
     originals: dict[str, str]
     mapping: dict[str, str] = field(default_factory=dict)
-    # Rewritten TeX sources, as stored in their files.
     sources: dict[str, str] = field(default_factory=dict)
 
 
 def _open_proposal(
     root: Path, main: str | None, options: BibliographyTransformOptions
 ) -> _ProposalState:
-    """Select the manuscript and read its resources, or block with the reason."""
+    """Select the manuscript and read its resources, or block with the reason.
+
+    Args:
+        root: The project directory.
+        main: The main source to select, if given.
+        options: The selected operations and their requests.
+
+    Returns:
+        The state before any operation runs.
+
+    Raises:
+        ProposalBlocked: No readable main source with supported literal bibliography
+            resources is selected, the selected sources are incomplete, or a resource
+            cannot be read.
+    """
     inspection = SourceGraph.build(root, main)
     graph = build_citation_graph(inspection)
     scope_errors = graph_failures(inspection, reachable_sources(inspection))
@@ -212,16 +277,19 @@ def _open_proposal(
 
 
 def _apply_field_edits(state: _ProposalState) -> str:
+    """Apply the guarded field edits and describe the result."""
     count = edit_fields(state.documents, state.options.field_edits, state.options.merge_keys)
     return f"Reviewed metadata edits change {count} resource(s)."
 
 
 def _apply_field_removal(state: _ProposalState) -> str:
+    """Remove the selected fields and describe the result."""
     count = remove_selected_fields(state.documents, state.options.remove_fields)
     return f"Proposed removal of {count} explicitly selected field(s)."
 
 
 def _apply_key_mapping(state: _ProposalState) -> str:
+    """Apply the key renames and merges, keep the map and sources, and describe the result."""
     options = state.options
     result = map_keys(
         state.inspection, state.graph, state.documents, options.key_renames, options.merge_keys
@@ -234,6 +302,7 @@ def _apply_key_mapping(state: _ProposalState) -> str:
 
 
 def _apply_pruning(state: _ProposalState) -> str:
+    """Remove the entries that no mapped citation reaches and describe the result."""
     count = prune_unreachable(state.inspection, state.graph, state.documents, state.mapping)
     return (
         f"Proposed removal of {count} unreachable entry/entries; "
@@ -242,10 +311,12 @@ def _apply_pruning(state: _ProposalState) -> str:
 
 
 def _apply_ordering(state: _ProposalState) -> str:
+    """Sort each document's entries by key and describe the result."""
     return f"Literal key ordering changes {order_entries(state.documents)} resource(s)."
 
 
 def _apply_formatting(state: _ProposalState) -> str:
+    """Give the entries a lossless field layout and describe the result."""
     return f"Lossless field layout changes {format_entries(state.documents)} resource(s)."
 
 
@@ -263,11 +334,20 @@ _STEPS: tuple[tuple[str, Callable[[_ProposalState], str]], ...] = (
 
 
 def _passed(operation: str, message: str) -> Finding:
+    """Build the passed ``bibliography.<operation>`` finding that reports ``message``."""
     return Finding(f"bibliography.{operation}", message, severity="info", status="passed")
 
 
 def _refusal(operation: str, error: ProposalBlocked) -> BibliographyProposal:
-    """No file, no change, and one finding: a partial plan is never exposed."""
+    """Build a proposal with no file, no change, and one finding: a partial plan is never exposed.
+
+    Args:
+        operation: The operation the finding is reported under.
+        error: The block whose message, status and location the finding takes.
+
+    Returns:
+        The refused proposal.
+    """
     finding = Finding(
         f"bibliography.{operation}",
         str(error),
@@ -284,7 +364,15 @@ def _refusal(operation: str, error: ProposalBlocked) -> BibliographyProposal:
 
 
 def _assemble(state: _ProposalState, findings: list[Finding]) -> BibliographyProposal:
-    """The changed files with a unified diff each, from the state after every step ran."""
+    """Collect the changed files with a unified diff each, from the state after every step ran.
+
+    Args:
+        state: The state after every selected step ran.
+        findings: The finding of each step.
+
+    Returns:
+        The changed .bib files and rewritten sources, a diff for each, and ``findings``.
+    """
     after = {
         path: document.file_text
         for path, document in state.documents.items()
@@ -321,6 +409,19 @@ def plan_bibliography(
     supported. Callers apply returned bytes only to their isolated working copy.
     A failure before any step runs, such as graph selection or reading, is reported
     under the first requested operation.
+
+    Args:
+        root: The project directory.
+        main: The main source to select, if given.
+        options: The selected operations and their requests.
+
+    Returns:
+        The changed files, a diff for each and one passed finding per selected
+        operation; or, when an operation is blocked, no file, no change and one finding
+        that says why. With no operation selected the proposal is empty.
+
+    Raises:
+        PreparationError: An operation is selected and ``root`` is not a directory.
     """
     requested = [operation for operation in _CATALOGUE_ORDER if getattr(options, operation)]
     if not requested:
@@ -344,11 +445,21 @@ def plan_bibliography(
 def normalize_dois(root: Path, main: str | None = None) -> BibliographyProposal:
     """Propose literal DOI prefix removal; callers explicitly select and apply it.
 
-    ``main`` narrows the inspected and proposed files exactly as it does for
-    :func:`~latexprep.bibliography_integrity.check_bibliography_integrity`, whose
-    findings are returned. Invalid files and repeated DOI fields are left
-    unchanged. Only changed files are returned, keyed by their relative POSIX
-    path, with visible unified diffs.
+    Invalid files and repeated DOI fields are left unchanged.
+
+    Args:
+        root: The project directory.
+        main: The main source that narrows the inspected and proposed files exactly as
+            it does for
+            :func:`~latexprep.bibliography_integrity.check_bibliography_integrity`.
+
+    Returns:
+        Only the changed files, keyed by their relative POSIX path, with visible
+        unified diffs, and the findings of
+        :func:`~latexprep.bibliography_integrity.check_bibliography_integrity`.
+
+    Raises:
+        PreparationError: ``root`` is not a directory.
     """
     documents, findings = inspect_bibliography_integrity(root, main)
     proposed: dict[str, bytes] = {}

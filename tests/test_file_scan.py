@@ -1,3 +1,5 @@
+"""The file inventory of a project and the plural wording of counts."""
+
 from __future__ import annotations
 
 import os
@@ -9,6 +11,8 @@ from tests.support import ProjectTestCase
 
 
 class InventoryTests(ProjectTestCase):
+    """The issues that :func:`inventory_files` records for directories it cannot read."""
+
     def test_unreadable_directory_is_named_in_the_issue(self) -> None:
         (self.root / "main.tex").write_text("x")
         locked = self.root / "figures" / "raw"
@@ -25,6 +29,8 @@ class InventoryTests(ProjectTestCase):
 
 
 class PluralTests(unittest.TestCase):
+    """The agreement of a noun with its count in :func:`plural`."""
+
     def test_noun_agrees_with_the_count(self) -> None:
         self.assertEqual(plural(0, "float"), "0 floats")
         self.assertEqual(plural(1, "float"), "1 float")

@@ -75,7 +75,24 @@ _PDF_NAME = re.compile(r"[A-Za-z][A-Za-z0-9]*")
 
 @dataclass(frozen=True)
 class PdfRegion:
-    """A named rectangle in top-left PDF points on one page."""
+    """A named rectangle in top-left PDF points on one page.
+
+    Construction raises ``SettingsError`` when the name is blank, a number has the wrong type
+    or lies outside its bounds, or the right or bottom edge does not lie beyond the left or
+    top edge.
+
+    Attributes:
+        FIELD_BOUNDS: The bounds :func:`validate_scalars` applies to the page, the edges and
+            ``min_text_size_pt``.
+        name: The name of the region in findings.
+        page: The 1-based page number.
+        left_pt: The left edge.
+        top_pt: The top edge.
+        right_pt: The right edge, right of ``left_pt``.
+        bottom_pt: The bottom edge, below ``top_pt``.
+        min_text_size_pt: The smallest text size allowed in the region, or ``None``; every
+            text size region needs one.
+    """
 
     FIELD_BOUNDS: ClassVar[dict[str, Bounds]] = {
         "page": POSITIVE_INTEGER,
@@ -104,12 +121,25 @@ class PdfRegion:
 
     @property
     def box(self) -> tuple[float, float, float, float]:
+        """The region as ``(left, top, right, bottom)`` points."""
         return self.left_pt, self.top_pt, self.right_pt, self.bottom_pt
 
 
 @dataclass(frozen=True)
 class PdfSectionBudget:
-    """A page budget for one named, inclusive page range of the PDF."""
+    """A page budget for one named, inclusive page range of the PDF.
+
+    Construction raises ``SettingsError`` when the name is blank, a number has the wrong type
+    or lies outside its bounds, or ``end_page`` is before ``start_page``.
+
+    Attributes:
+        FIELD_BOUNDS: The bounds :func:`validate_scalars` applies to the page numbers and
+            ``max_pages``.
+        name: The name of the section in findings.
+        start_page: The first page of the range.
+        end_page: The last page of the range, not before ``start_page``.
+        max_pages: The page budget of the section.
+    """
 
     FIELD_BOUNDS: ClassVar[dict[str, Bounds]] = {
         "start_page": POSITIVE_INTEGER,
@@ -131,7 +161,52 @@ class PdfSectionBudget:
 
 @dataclass(frozen=True)
 class PdfCheckOptions:
-    """Every opt-in measurement of the manuscript PDF; an unset option enables nothing."""
+    """Every opt-in measurement of the manuscript PDF; an unset option enables nothing.
+
+    Construction raises ``SettingsError`` when a setting has the wrong type or lies outside
+    its bounds, a list is malformed or too long, a text size region lacks its minimum, or
+    ``min_text_contrast`` is set without ``contrast_background_rgb``.
+
+    Attributes:
+        FIELD_BOUNDS: The bounds :func:`validate_scalars` applies to the sampling, size,
+            ratio, contrast and tolerance settings.
+        section_budgets: The page budgets of named page ranges.
+        min_text_size_pt: The smallest reported text size allowed anywhere.
+        text_size_regions: Regions with a minimum text size of their own.
+        printable_margins_pt: The margins that text boxes are compared with, as
+            (left, top, right, bottom) points.
+        printable_regions: The regions that text boxes must lie inside.
+        overlap_min_area_ratio: The intersection area ratio from which two text boxes are
+            an overlap candidate.
+        geometry_tolerance_pt: The slack allowed when a text box is compared with the edge
+            of a region or margin.
+        min_page_ink_ratio: The smallest share of a rendered page that ink must cover.
+        sparse_page_exemptions: The pages exempt from the sparse page check.
+        raster_dpi: The resolution of rendered pages.
+        background_gray: The paper gray value, 0 to 255.
+        ink_difference: The gray difference from the paper that counts as ink.
+        required_metadata: The PDF metadata fields that must be present and nonempty.
+        expected_metadata: The expected value of each named metadata field, as
+            (field, value) pairs.
+        require_tagged: Whether the PDF must be reported as tagged.
+        require_language: Whether the catalog must declare a language.
+        expected_language: The language tag the catalog must declare, or ``None``.
+        forbidden_annotation_types: The annotation subtypes that must not occur, as PDF
+            names without a leading slash.
+        forbidden_action_types: The action types that must not occur, as PDF names without
+            a leading slash.
+        min_stroke_width_pt: The thinnest stroke allowed.
+        allowed_color_spaces: The colour-space names that rendering may use.
+        min_text_contrast: The lowest contrast ratio of text against
+            ``contrast_background_rgb``; requires it.
+        contrast_background_rgb: The assumed uniform background, as (red, green, blue)
+            components from 0 to 1.
+        min_grayscale_luminance_difference: The smallest luminance difference between
+            distinct colours of a page.
+        require_embedded_figure_fonts: Whether the fonts of included PDF figures must be
+            embedded.
+        forbid_type3_figure_fonts: Whether included PDF figures must not use Type 3 fonts.
+    """
 
     FIELD_BOUNDS: ClassVar[dict[str, Bounds]] = {
         **RASTER_SAMPLING_BOUNDS,
@@ -180,6 +255,12 @@ class PdfCheckOptions:
         self._validate_names()
 
     def _validate_regions(self) -> None:
+        """Check the section budgets and regions; every text size region needs its minimum.
+
+        Raises:
+            SettingsError: A list is not a tuple of budgets or regions, is too long, or holds
+                a text size region without ``min_text_size_pt``.
+        """
         require_records(
             "section_budgets",
             self.section_budgets,
@@ -194,6 +275,12 @@ class PdfCheckOptions:
             )
 
     def _validate_geometry(self) -> None:
+        """Check the printable margins and the sparse page exemptions.
+
+        Raises:
+            SettingsError: The margins are not four nonnegative numbers, or an exemption is
+                not a page number.
+        """
         require_numbers(
             "printable_margins_pt",
             self.printable_margins_pt,
@@ -205,6 +292,12 @@ class PdfCheckOptions:
         require_integers("sparse_page_exemptions", self.sparse_page_exemptions, minimum=1)
 
     def _validate_contrast(self) -> None:
+        """Check the contrast background, which ``min_text_contrast`` requires.
+
+        Raises:
+            SettingsError: The background is not three numbers from 0 to 1, or
+                ``min_text_contrast`` is set without it.
+        """
         require_numbers(
             "contrast_background_rgb",
             self.contrast_background_rgb,
@@ -221,6 +314,12 @@ class PdfCheckOptions:
             )
 
     def _validate_metadata(self) -> None:
+        """Check the metadata fields and the expected language.
+
+        Raises:
+            SettingsError: A field is unknown or repeated, an expected value is blank, or the
+                expected language is blank.
+        """
         require_unique_strings("required_metadata", self.required_metadata, choices=METADATA_FIELDS)
         require_pairs(
             "expected_metadata",
@@ -231,6 +330,11 @@ class PdfCheckOptions:
         require_text("expected_language", self.expected_language, allow_none=True)
 
     def _validate_names(self) -> None:
+        """Check the forbidden PDF names and the allowed colour spaces.
+
+        Raises:
+            SettingsError: A forbidden type is not a PDF name, or a list repeats an entry.
+        """
         for name in ("forbidden_annotation_types", "forbidden_action_types"):
             require_unique_strings(
                 name,
@@ -243,7 +347,7 @@ class PdfCheckOptions:
 
 
 def configured_pdf_check_rules(options: PdfCheckOptions) -> list[str]:
-    """The rules ``options`` enables, in the order their findings are reported."""
+    """Return the rules ``options`` enables, in the order their findings are reported."""
     settings = {
         PdfRule.SECTION_PAGE_BUDGET: bool(options.section_budgets),
         PdfRule.RENDERED_TEXT_SIZE: options.min_text_size_pt is not None
@@ -268,12 +372,15 @@ def configured_pdf_check_rules(options: PdfCheckOptions) -> list[str]:
 
 
 def figure_font_checks_enabled(options: PdfCheckOptions) -> bool:
-    """Input-figure font policies need the source graph's included PDF figures."""
+    """Return whether an input-figure font policy is configured.
+
+    Input-figure font policies need the source graph's included PDF figures.
+    """
     return options.require_embedded_figure_fonts or options.forbid_type3_figure_fonts
 
 
 def required_pdf_check_tools(options: PdfCheckOptions) -> set[str]:
-    """The external tools the configured measurements run, for setup diagnostics."""
+    """Return the external tools the configured measurements run, for setup diagnostics."""
     rules = set(configured_pdf_check_rules(options))
     tools = {"pdfinfo"} if rules else set()
     if rules & TEXT_GEOMETRY_RULES:

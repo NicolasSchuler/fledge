@@ -24,15 +24,28 @@ from tests.fakes import FakeBuildRunner
 
 
 class LookupRunner:
+    """A runner that answers every kpsewhich lookup with a fixed status and output.
+
+    Attributes:
+        status: The exit status of every lookup.
+        output: The standard output of every lookup.
+        calls: The command line, working directory and workspace of every lookup.
+    """
+
     def __init__(self, status, output):
         self.status, self.output = status, output
         self.calls = []
 
     async def tool_version(self, argv, workspace):
+        """Return a fixed kpsewhich version, asserting that ``workspace`` exists."""
         assert workspace.is_dir()
         return ToolVersion(("Kpathsea fixture",), "/tools/kpsewhich", ("--version",))
 
     async def run(self, argv, cwd, workspace):
+        """Record one lookup and answer it with ``status`` and ``output``.
+
+        It asserts that the lookup runs in its workspace and that the workspace is empty.
+        """
         self.calls.append((argv, cwd, workspace))
         assert cwd == workspace
         assert not list(workspace.iterdir())
@@ -40,6 +53,12 @@ class LookupRunner:
 
 
 class BuildCheckTests(unittest.IsolatedAsyncioTestCase):
+    """Tests of the configured build checks on real log, recorder and package header evidence.
+
+    They cover loaded packages, package dates, the overfull tolerance, local package shadows
+    and option validation.
+    """
+
     async def test_recorder_collects_loaded_packages_and_rejects_empty_trace(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
@@ -53,7 +72,13 @@ class BuildCheckTests(unittest.IsolatedAsyncioTestCase):
             )
 
             class RecorderRunner(FakeBuildRunner):
+                """A build runner whose recorder file lists project and toolchain inputs."""
+
                 async def run(self, argv, cwd, workspace, **kwargs):
+                    """Run the fake build and rewrite its recorder file.
+
+                    A version probe leaves the recorder file alone.
+                    """
                     result = await super().run(argv, cwd, workspace, **kwargs)
                     if argv[-1] not in {"-v", "--version"}:
                         (workspace / "output/main.fls").write_text(
@@ -270,13 +295,19 @@ class BuildCheckTests(unittest.IsolatedAsyncioTestCase):
 
 
 class VersionRunner(FakeBuildRunner):
-    """Answer the engine version probe with a fixed banner, or fail it."""
+    """A build runner that answers the engine version probe with a fixed banner, or fails it.
+
+    Attributes:
+        banner: The first line of the version output, or ``None`` for an engine that is not
+            found.
+    """
 
     def __init__(self, banner: str | None) -> None:
         super().__init__()
         self.banner = banner
 
     async def run(self, argv, cwd, workspace, *, readonly_inputs=(), memory_mb=None):
+        """Answer a ``--version`` probe from ``banner``, and run the fake build otherwise."""
         if argv[-1] == "--version":
             if self.banner is None:
                 return CommandResult(127, "", "pdflatex: command not found", resolved_command=argv)
@@ -289,12 +320,23 @@ class VersionRunner(FakeBuildRunner):
 
 
 def _engine_version(engine: str, banner: str) -> BuildTools:
+    """Return build tools that hold one version of ``engine``, whose only line is ``banner``."""
     version = ToolVersion((banner,), f"/tools/{engine}", ("--version",))
     return BuildTools(versions={engine: version})
 
 
 class TexDistributionTests(unittest.IsolatedAsyncioTestCase):
+    """Tests of ``check_tex_distribution``: the TeX Live year, packagers and missing versions."""
+
     async def build(self, banner: str | None) -> BuildResult:
+        """Build a minimal project with a :class:`VersionRunner`.
+
+        Args:
+            banner: The version banner of the engine, or ``None`` for an engine not found.
+
+        Returns:
+            The result of ``build_project``.
+        """
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "source"
             source.mkdir()

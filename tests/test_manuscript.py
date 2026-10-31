@@ -1,3 +1,5 @@
+"""Manuscript constraints: class and options, packages, abstract, keywords, sections, counts."""
+
 from __future__ import annotations
 
 import unittest
@@ -9,7 +11,19 @@ from tests.support import ProjectTestCase
 
 
 class ManuscriptTests(ProjectTestCase):
+    """:func:`check_manuscript` on source fixtures: definite results, counts and uncertainty."""
+
     def finding(self, text: str, options: ManuscriptOptions, rule: str) -> Finding:
+        """Write ``main.tex`` with ``text`` and return its finding of ``rule``.
+
+        Args:
+            text: The whole source of ``main.tex``.
+            options: The constraints to check.
+            rule: The rule of the finding to return.
+
+        Returns:
+            The first finding of ``rule``.
+        """
         self.write("main.tex", text)
         findings = check_manuscript(self.root, "main.tex", options)
         return next(item for item in findings if item.rule == rule)

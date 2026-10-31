@@ -56,7 +56,11 @@ _AUXILIARY_SUFFIXES = (
 
 
 def cleanup_reason(path: str) -> str | None:
-    """Why a project file is known debris, or ``None`` when it is not."""
+    """Explain why the project file ``path`` is known debris.
+
+    Returns:
+        The reason, or ``None`` when the file is not known debris.
+    """
     *directories, name = path.split("/")
     if metadata_prefix(path, is_dir=False) or name in {"Thumbs.db", "desktop.ini"}:
         return "Operating-system or version-control metadata."
@@ -76,7 +80,19 @@ def cleanup_reason(path: str) -> str | None:
 
 
 def plan_cleanup(root: Path, observed_dependencies: set[str]) -> list[Change]:
-    """Propose known debris only; retain every observed dependency and unknown file."""
+    """Propose known debris only; retain every observed dependency and unknown file.
+
+    Args:
+        root: The staged project folder.
+        observed_dependencies: The inputs the build observed; each one inside ``root`` is
+            protected whatever its name, and the others are ignored.
+
+    Returns:
+        One exclusion per known-debris file, with the reason it is debris.
+
+    Raises:
+        PreparationError: ``root`` is not a directory, or listing it failed.
+    """
     try:
         source = source_path(root)
         if not source.is_dir:

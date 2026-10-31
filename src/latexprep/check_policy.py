@@ -176,11 +176,15 @@ SettingValues = Mapping[str, Any]
 
 
 def opt_in_activation() -> OptInActivation:
-    """Every opt-in check code with the settings fields that activate it.
+    """Map every opt-in check code to the settings fields that activate it.
 
     A check is configured when any listed field differs from its disabled value.
     A code may be activated from more than one table (figure and PDF artwork).
     Source and PDF identity checks (PRV001/PRV002) share submission identity terms.
+
+    Returns:
+        Each opt-in check code with its activating fields, as ``OptInActivation``
+        describes them.
     """
     activation: OptInActivation = {}
     for code, fields in ROOT_CHECKS.items():
@@ -194,11 +198,28 @@ def opt_in_activation() -> OptInActivation:
 
 
 def _current(values: SettingValues, group: str | None, name: str) -> object:
+    """Read the current value of one setting.
+
+    Args:
+        values: The settings values.
+        group: The settings group of the setting, or ``None`` for a top-level setting.
+        name: The name of the setting.
+
+    Returns:
+        The current value of the setting.
+    """
     return values[name] if group is None else getattr(values[group], name)
 
 
 def configured_opt_in_codes(values: SettingValues) -> frozenset[str]:
-    """Opt-in check codes with an activating field that differs from its disabled value."""
+    """Find the opt-in checks with an activating field that differs from its disabled value.
+
+    Args:
+        values: The settings values.
+
+    Returns:
+        The codes of the configured opt-in checks.
+    """
     return frozenset(
         code
         for code, sections in opt_in_activation().items()
@@ -213,6 +234,16 @@ def configured_opt_in_codes(values: SettingValues) -> frozenset[str]:
 def _disabled_values(
     policies: dict[str, dict[str, object]], selection: CheckSelection
 ) -> dict[str, object]:
+    """Collect the disabled value of every activating field of the unselected checks.
+
+    Args:
+        policies: The activating fields and their disabled values, by check code.
+        selection: The check selection.
+
+    Returns:
+        The disabled value of each activating field of a check that ``selection`` does
+        not enable.
+    """
     return {
         field: disabled
         for code, values in policies.items()
@@ -224,15 +255,22 @@ def _disabled_values(
 def unselected_policy_updates(
     values: SettingValues, selection: CheckSelection
 ) -> dict[str, object]:
-    """Replacement values that disable unselected configured policies.
+    """Compute the replacement values that disable unselected configured policies.
 
-    Keys are those of ``values``; only changed entries are returned, so the
-    default ALL policy yields none. A table is replaced by a modified copy of its
-    option object. Context shared with a selected check is retained. PRV001/PRV002
-    share identity terms: their individual source/PDF dispatchers must also clear
-    terms for their own unselected producer. Source heuristics, bibliography parse
-    diagnostics and ordinary build-log findings arise during required work and
-    are filtered only after their dependent checks have consumed that evidence.
+    A table is replaced by a modified copy of its option object. Context shared with a
+    selected check is retained. PRV001/PRV002 share identity terms: their individual
+    source/PDF dispatchers must also clear terms for their own unselected producer.
+    Source heuristics, bibliography parse diagnostics and ordinary build-log findings
+    arise during required work and are filtered only after their dependent checks have
+    consumed that evidence.
+
+    Args:
+        values: The current settings values.
+        selection: The check selection.
+
+    Returns:
+        The replacement values, keyed like ``values``. Only changed entries are
+        returned, so the default ALL policy yields none.
     """
     updates = {
         name: value
@@ -263,6 +301,14 @@ def selected_findings(findings: Iterable[Finding], selection: CheckSelection) ->
 
     Consult the selection for any registered code rather than an optional-check
     allowlist, so new rule families cannot silently disappear from reports.
+
+    Args:
+        findings: The findings to filter.
+        selection: The check selection.
+
+    Returns:
+        The findings without a code, those of mandatory rules and those of enabled
+        checks, in their original order.
     """
     return [
         finding

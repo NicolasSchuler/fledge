@@ -37,31 +37,49 @@ PACKAGE_LOGGER = logging.getLogger(PACKAGE_LOGGER_NAME)
 
 
 class RecordingRunner(ToolRunner):
-    """A runner whose commands finish at once with a chosen result, without any process."""
+    """A runner whose commands finish at once with a chosen result, without any process.
+
+    Attributes:
+        result: The result of every command.
+    """
 
     def __init__(self, result: CommandResult) -> None:
         super().__init__()
         self.result = result
 
     async def _run_command(self, argv, cwd, workspace, readonly_inputs, memory_mb):
+        """Return the chosen result without starting ``argv``."""
         return self.result
 
 
 def finished(returncode: int = 0, **flags: object) -> CommandResult:
+    """Build the result of a finished ``tool`` command without output.
+
+    Args:
+        returncode: The exit code of the command.
+        **flags: Further fields of the :class:`CommandResult`.
+
+    Returns:
+        The result, with ``tool`` as its resolved command.
+    """
     return CommandResult(returncode, "", "", resolved_command=["tool"], **flags)
 
 
 class FontsRunner(ToolRunner):
-    """Answers every PDF tool command with a fixed output, so no tool is needed."""
+    """A runner that answers every PDF tool command with a fixed output, so no tool is needed."""
 
     async def tool_version(self, argv, workspace):
+        """Return a fixed ``pdffonts`` version without running ``argv``."""
         return ToolVersion(("pdffonts 1.0",), "/usr/bin/pdffonts", ("-v",))
 
     async def run(self, argv, cwd, workspace, *, readonly_inputs=(), memory_mb=None):
+        """Return a successful result with a fixed ``pdffonts`` table header for ``argv``."""
         return CommandResult(0, "name type\n", "", resolved_command=argv)
 
 
 class ArgvSummaryTests(unittest.TestCase):
+    """The summary of a command line that log records show instead of its arguments."""
+
     def test_keeps_the_tool_and_option_names_but_no_path_or_option_value(self) -> None:
         summary = argv_summary(
             ["/opt/tex/bin/pdftoppm", "-r", "300", "-png", "/home/ann/paper.pdf", "out"]
@@ -77,6 +95,8 @@ class ArgvSummaryTests(unittest.TestCase):
 
 
 class LibraryIsSilentTests(unittest.TestCase):
+    """Without the debug option the package writes no log records anywhere."""
+
     def test_the_package_logger_only_has_a_null_handler(self) -> None:
         self.assertTrue(
             any(isinstance(handler, logging.NullHandler) for handler in PACKAGE_LOGGER.handlers)
@@ -96,6 +116,8 @@ class LibraryIsSilentTests(unittest.TestCase):
 
 
 class DebugLoggingTests(unittest.TestCase):
+    """The stderr handler of :func:`debug_logging`: its format, redaction and cleanup."""
+
     def test_records_use_relative_time_and_the_module_name_without_the_package(self) -> None:
         stream = io.StringIO()
         with debug_logging(stream):
@@ -168,11 +190,15 @@ class DebugLoggingTests(unittest.TestCase):
 
 
 class ToolRunnerLoggingTests(unittest.IsolatedAsyncioTestCase):
+    """The start, end, limit and error records of tool commands."""
+
     async def asyncSetUp(self) -> None:
+        """Create a temporary working directory."""
         self.temporary = tempfile.TemporaryDirectory()
         self.work = Path(self.temporary.name).resolve()
 
     async def asyncTearDown(self) -> None:
+        """Remove the temporary working directory."""
         self.temporary.cleanup()
 
     async def test_a_command_logs_its_start_and_end_without_paths(self) -> None:
@@ -222,6 +248,8 @@ class ToolRunnerLoggingTests(unittest.IsolatedAsyncioTestCase):
 
 
 class OnlineClientLoggingTests(unittest.IsolatedAsyncioTestCase):
+    """The records of online requests, which name the host but not the URL or contact."""
+
     async def test_requests_log_the_host_and_outcome_but_never_the_url_or_contact(self) -> None:
         from latexprep.online_http_session import OnlineClient
 
@@ -260,6 +288,8 @@ class OnlineClientLoggingTests(unittest.IsolatedAsyncioTestCase):
 
 
 class PdfMemoLoggingTests(unittest.IsolatedAsyncioTestCase):
+    """The records of PDF measurements that are run or reused."""
+
     async def test_a_remembered_measurement_is_logged_as_reused(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
@@ -280,6 +310,8 @@ class PdfMemoLoggingTests(unittest.IsolatedAsyncioTestCase):
 
 
 class SchedulerLoggingTests(unittest.IsolatedAsyncioTestCase):
+    """The records of scheduled tasks: start, end, blocking reasons and defects."""
+
     async def test_start_end_and_the_reason_a_task_is_blocked_are_logged(self) -> None:
         async def fine() -> str:
             return "ok"
@@ -324,7 +356,19 @@ class SchedulerLoggingTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ConfigDiscoveryLoggingTests(unittest.TestCase):
+    """The records of settings file discovery."""
+
     def discover(self, files: dict[str, str], **keywords: object):
+        """Discover the settings of a new project inside a repository and capture the records.
+
+        Args:
+            files: The files of the project by relative path, with their text.
+            **keywords: Keyword arguments passed to :func:`resolve_config_path`.
+
+        Returns:
+            The records that ``latexprep.config_discovery`` logged at ``DEBUG`` or above, as
+            captured by ``assertLogs``.
+        """
         with tempfile.TemporaryDirectory() as temporary:
             project = write_project(Path(temporary) / "project", files)
             (project / ".git").mkdir()
@@ -360,6 +404,8 @@ class ConfigDiscoveryLoggingTests(unittest.TestCase):
 
 
 class SourceAnalysisLoggingTests(unittest.TestCase):
+    """The records of the analysed source cache."""
+
     def test_cache_misses_hits_and_builds_are_logged(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = write_project(Path(temporary) / "project", {"main.tex": "\\input{part}\n"})
@@ -379,7 +425,10 @@ class SourceAnalysisLoggingTests(unittest.TestCase):
 
 
 class CommandLineLoggingTests(unittest.TestCase):
+    """The log lines on stderr that ``--debug`` and ``FLEDGE_DEBUG`` turn on."""
+
     def setUp(self) -> None:
+        """Write a minimal project into a temporary directory."""
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.project = write_project(
@@ -388,6 +437,15 @@ class CommandLineLoggingTests(unittest.TestCase):
         )
 
     def invoke(self, *arguments: str, environment: dict[str, str] | None = None):
+        """Run ``fledge inspect`` on the project with JSON output and ``--quiet``.
+
+        Args:
+            *arguments: Further command-line arguments.
+            environment: Environment variables to set for the run, or ``None`` to set none.
+
+        Returns:
+            The Click result of the run.
+        """
         return CliRunner().invoke(
             cli,
             ["inspect", str(self.project), "--main", "main.tex", "--json", "--quiet", *arguments],

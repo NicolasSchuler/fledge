@@ -13,33 +13,60 @@ from typing import NamedTuple
 
 
 class FamilyName(NamedTuple):
-    """The family name of one author, with and without its lowercase particles."""
+    """The family name of one author, with and without its lowercase particles.
+
+    Attributes:
+        full: The family name from its first lowercase "von" word to the end, braces
+            removed.
+        last: The last name alone, without the lowercase particles, braces removed.
+    """
 
     full: str
     last: str
 
     def spellings(self) -> tuple[str, ...]:
-        """The spellings under which another source may list this family name."""
+        """Return the spellings under which another source may list this family name.
+
+        Returns:
+            The full family name, the last name, and the full family name without its
+            leading lowercase words.
+        """
         return (self.full, self.last, without_particles(self.full))
 
 
 class AuthorList(NamedTuple):
-    """The authors of an entry; ``truncated`` when the list ends with ``and others``."""
+    """The authors of an entry.
+
+    Attributes:
+        names: The family name of every listed author, in order.
+        truncated: Whether the list ends with ``and others``.
+    """
 
     names: list[FamilyName]
     truncated: bool
 
 
 def _unbraced(text: str) -> str:
+    """Return ``text`` without its braces."""
     return text.replace("{", "").replace("}", "")
 
 
 def _starts_lowercase(word: str) -> bool:
+    """Return whether ``word`` begins with a lowercase letter."""
     return word[:1].islower()
 
 
 def without_particles(family: str) -> str:
-    """``family`` without its leading lowercase words, such as "van der"."""
+    """Strip the leading lowercase words, such as "van der", from a family name.
+
+    The last word always stays, even when it is lowercase.
+
+    Args:
+        family: A family name whose words are separated by whitespace.
+
+    Returns:
+        ``family`` without its leading lowercase words.
+    """
     words = family.split()
     while len(words) > 1 and _starts_lowercase(words[0]):
         words.pop(0)
@@ -47,7 +74,7 @@ def without_particles(family: str) -> str:
 
 
 def _words(text: str) -> list[str]:
-    """The words and separating commas of an author list; a braced group stays one word."""
+    """Split an author list into words and separating commas; a braced group stays one word."""
     words: list[str] = []
     current: list[str] = []
     depth = 0
@@ -70,7 +97,14 @@ def _words(text: str) -> list[str]:
 
 
 def _family_name(words: list[str]) -> FamilyName | None:
-    """The family name of one author written as ``First von Last`` or ``von Last, First``."""
+    """Read the family name of one author written as ``First von Last`` or ``von Last, First``.
+
+    Args:
+        words: The words and commas of one name, as :func:`_words` splits them.
+
+    Returns:
+        The family name, or ``None`` when the part before the first comma is empty.
+    """
     parts: list[list[str]] = [[]]
     for word in words:
         if word == ",":
@@ -96,7 +130,16 @@ def _family_name(words: list[str]) -> FamilyName | None:
 
 
 def parse_author_list(text: str) -> AuthorList | None:
-    """The family names of a BibTeX author list, or None when any name cannot be read."""
+    """Read the family names of a BibTeX author list.
+
+    A final ``and others`` is dropped and marks the list as truncated.
+
+    Args:
+        text: The value of an ``author`` field.
+
+    Returns:
+        The authors, or ``None`` when the list is empty or any name cannot be read.
+    """
     names: list[list[str]] = [[]]
     for word in _words(text):
         if word.casefold() == "and":

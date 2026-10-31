@@ -12,6 +12,8 @@ from latexprep.terminal_report import render_terminal
 
 
 class PresentationTests(unittest.TestCase):
+    """Tests of how the terminal and compact reports order, excerpt and summarize results."""
+
     def test_terminal_prioritizes_failures_with_locations_and_clear_incomplete_status(self):
         report = Report(
             "check",

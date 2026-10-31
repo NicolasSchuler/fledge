@@ -24,6 +24,8 @@ from latexprep.rules import RULES
 
 
 class CheckSelectionTests(unittest.TestCase):
+    """Tests of the selector semantics of ``CheckSelection`` and of the command-line selectors."""
+
     def test_default_preserves_all_catalogued_checks(self) -> None:
         selection = CheckSelection()
         self.assertTrue(all(selection.enabled(rule.code) for rule in RULES))
@@ -55,7 +57,10 @@ class CheckSelectionTests(unittest.TestCase):
                         CheckSelection(**{name: (selector,)})
 
     def test_rule_names_and_former_names_select_the_check_by_its_code(self) -> None:
-        """TEX001 was ``source-edit-marker`` and is ``source.edit_marker`` in reports."""
+        """Check that rule names and former names select a check as its code does.
+
+        TEX001 was ``source-edit-marker`` and is ``source.edit_marker`` in reports.
+        """
         for spelling in ("source-edit-marker", "source.edit_marker", "TEX001"):
             for name in ("select", "ignore"):
                 with self.subTest(spelling=spelling, name=name):
@@ -134,7 +139,10 @@ class CheckSelectionTests(unittest.TestCase):
 
 
 class ConfigDiscoveryTests(unittest.TestCase):
+    """Tests of project TOML discovery and its precedence, through the API and the CLI."""
+
     def setUp(self) -> None:
+        """Create ``self.source`` below a temporary root that is marked as a Git repository."""
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name).resolve()
@@ -144,6 +152,10 @@ class ConfigDiscoveryTests(unittest.TestCase):
         (self.root / ".git").mkdir()
 
     def write(self, path: Path, text: str = "jobs = 3\n") -> Path:
+        """Write ``text`` to ``path`` as UTF-8 and return ``path``.
+
+        The default text sets ``jobs = 3``.
+        """
         path.write_text(text, encoding="utf-8")
         return path
 

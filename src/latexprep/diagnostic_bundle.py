@@ -29,10 +29,15 @@ _ENTRY_MODE = 0o100644 << 16
 
 
 def _envelope(public: RedactedReport) -> RedactedReport:
-    """The report labelled as an unverified export of ``public``, with its outcome blocked.
+    """Label ``public`` as an unverified export, with its outcome blocked.
 
     The additions are fixed text and the already redacted outcome and scope, so the
     envelope needs no second redaction.
+
+    Returns:
+        A copy of ``public`` with a blocked outcome, a scope saying it is not a submission
+        package, an added ``report.diagnostic_bundle`` finding and the source outcome and
+        scope under ``execution.diagnostic_export``.
     """
     return RedactedReport(
         replace(
@@ -62,7 +67,7 @@ def _envelope(public: RedactedReport) -> RedactedReport:
 
 
 def _entries(envelope: RedactedReport) -> dict[str, str]:
-    """The text of every archive entry, by entry name."""
+    """Collect the text of every archive entry, by entry name."""
     entries = {
         "README.txt": _README,
         "report.json": redacted_json(envelope),
@@ -76,7 +81,7 @@ def _entries(envelope: RedactedReport) -> dict[str, str]:
 
 
 def _archive(entries: dict[str, str]) -> bytes:
-    """A deflated ZIP of ``entries`` in name order."""
+    """Pack ``entries`` into a deflated ZIP in name order."""
     output = io.BytesIO()
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for name, contents in sorted(entries.items()):
@@ -90,7 +95,15 @@ def _archive(entries: dict[str, str]) -> bytes:
 def export_redacted_diagnostic_bundle(public: RedactedReport, destination: Path) -> Path:
     """Create an exclusive ZIP of the unverified diagnostic text of a redacted report.
 
-    Raises ``PreparationError`` if ``destination`` exists or cannot be written.
+    Args:
+        public: The redacted report to export.
+        destination: The ZIP file to create; it must not exist yet.
+
+    Returns:
+        ``destination``.
+
+    Raises:
+        PreparationError: ``destination`` exists or cannot be written.
     """
     if destination.exists() or destination.is_symlink():
         raise PreparationError("Diagnostic destination already exists")
@@ -106,5 +119,16 @@ def export_redacted_diagnostic_bundle(public: RedactedReport, destination: Path)
 
 
 def export_diagnostic_bundle(report: Report, destination: Path) -> Path:
-    """Redact ``report``, then export it as ``export_redacted_diagnostic_bundle`` does."""
+    """Redact ``report``, then export it as ``export_redacted_diagnostic_bundle`` does.
+
+    Args:
+        report: The report to redact and export.
+        destination: The ZIP file to create; it must not exist yet.
+
+    Returns:
+        ``destination``.
+
+    Raises:
+        PreparationError: ``destination`` exists or cannot be written.
+    """
     return export_redacted_diagnostic_bundle(redact_report(report), destination)

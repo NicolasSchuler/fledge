@@ -43,12 +43,28 @@ _UNIT_SQUARE_CORNERS: Final = ((0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0))
 
 
 class Point(NamedTuple):
+    """A point of a trace, in PDF points.
+
+    Attributes:
+        x: The horizontal coordinate.
+        y: The vertical coordinate.
+    """
+
     x: float
     y: float
 
 
 class Matrix(NamedTuple):
-    """A PDF affine transform ``[a b c d e f]`` mapping ``(x, y)`` to ``(ax+cy+e, bx+dy+f)``."""
+    """A PDF affine transform ``[a b c d e f]`` mapping ``(x, y)`` to ``(ax+cy+e, bx+dy+f)``.
+
+    Attributes:
+        a: The factor of ``x`` in the new ``x``.
+        b: The factor of ``x`` in the new ``y``.
+        c: The factor of ``y`` in the new ``x``.
+        d: The factor of ``y`` in the new ``y``.
+        e: The horizontal translation.
+        f: The vertical translation.
+    """
 
     a: float
     b: float
@@ -59,7 +75,17 @@ class Matrix(NamedTuple):
 
     @classmethod
     def of_node(cls, node: ET.Element) -> Self:
-        """The transform attribute of a trace element; raises when it is not a full matrix."""
+        """Read the transform attribute of a trace element.
+
+        Args:
+            node: The trace element.
+
+        Returns:
+            The transform.
+
+        Raises:
+            PreparationError: The attribute does not hold six finite numbers.
+        """
         values = [finite_number(value) for value in node.get("transform", "").split()]
         if len(values) != _MATRIX_VALUES:
             raise PreparationError("Drawing operation has no complete affine transform")
@@ -67,9 +93,21 @@ class Matrix(NamedTuple):
 
     @property
     def determinant(self) -> float:
+        """The determinant ``ad - bc`` of the linear part."""
         return self.a * self.d - self.b * self.c
 
     def apply(self, point: Point | tuple[float, float]) -> Point:
+        """Map ``point`` through the transform.
+
+        Args:
+            point: The point to map.
+
+        Returns:
+            The mapped point.
+
+        Raises:
+            PreparationError: A mapped coordinate is not finite.
+        """
         x, y = point
         result = Point(self.a * x + self.c * y + self.e, self.b * x + self.d * y + self.f)
         if not all(math.isfinite(value) for value in result):
@@ -78,7 +116,14 @@ class Matrix(NamedTuple):
 
 
 class Box(NamedTuple):
-    """An axis-aligned rectangle ``(left, top, right, bottom)`` in PDF points."""
+    """An axis-aligned rectangle ``(left, top, right, bottom)`` in PDF points.
+
+    Attributes:
+        left: The left edge.
+        top: The top edge.
+        right: The right edge.
+        bottom: The bottom edge.
+    """
 
     left: float
     top: float
@@ -87,13 +132,24 @@ class Box(NamedTuple):
 
     @classmethod
     def around(cls, points: Sequence[Point]) -> Self:
+        """Return the smallest box that holds every one of ``points``.
+
+        Args:
+            points: The points to enclose.
+
+        Returns:
+            The box.
+
+        Raises:
+            PreparationError: ``points`` is empty.
+        """
         if not points:
             raise PreparationError("Drawing path has no measured vertices")
         xs, ys = [point.x for point in points], [point.y for point in points]
         return cls(min(xs), min(ys), max(xs), max(ys))
 
     def clipped(self, clip: Box) -> Box:
-        """The overlap with ``clip``; empty (see ``is_empty``) when they do not meet."""
+        """Return the overlap with ``clip``; empty (see ``is_empty``) when they do not meet."""
         return Box(
             max(self.left, clip.left),
             max(self.top, clip.top),
@@ -103,30 +159,52 @@ class Box(NamedTuple):
 
     @property
     def is_empty(self) -> bool:
+        """Whether the box has no area."""
         return self.left >= self.right or self.top >= self.bottom
 
     def contains(self, inner: tuple[float, ...], tolerance: float = 0) -> bool:
-        """Whether ``inner`` lies inside this box, up to ``tolerance`` points."""
+        """Return whether ``inner`` lies inside this box, up to ``tolerance`` points."""
         return contains(self, inner, tolerance)
 
 
 class Segment(NamedTuple):
+    """A straight segment of a path.
+
+    Attributes:
+        start: Where the segment starts.
+        end: Where the segment ends.
+    """
+
     start: Point
     end: Point
 
 
 class PathSegments(NamedTuple):
-    """The straight segments of a path, and whether the path holds nothing but those."""
+    """The straight segments of a path, and whether the path holds nothing but those.
+
+    Attributes:
+        segments: The straight segments, in path order.
+        straight: Whether the path holds at least one segment and nothing else.
+    """
 
     segments: list[Segment]
     straight: bool
 
 
 def path_segments(node: ET.Element) -> PathSegments:
-    """Segments of a path made only of ``moveto``, ``lineto`` and ``closepath``.
+    """Return the segments of a path made only of ``moveto``, ``lineto`` and ``closepath``.
 
     A curve or a line without a current point makes the path unsupported; the segments
     collected up to that point are returned with ``straight`` false.
+
+    Args:
+        node: The trace element of the path.
+
+    Returns:
+        The segments, before any transform.
+
+    Raises:
+        PreparationError: A coordinate is not a finite number.
     """
     result: list[Segment] = []
     start: Point | None = None
@@ -150,6 +228,7 @@ def path_segments(node: ET.Element) -> PathSegments:
 
 
 def _path_box(node: ET.Element) -> Box | None:
+    """Return the transformed extent of a straight path, or ``None`` for any other path."""
     path = path_segments(node)
     if not path.straight:
         return None
@@ -158,7 +237,7 @@ def _path_box(node: ET.Element) -> Box | None:
 
 
 def _rectangle(node: ET.Element) -> Box | None:
-    """The box of a clip path that is an axis-aligned rectangle, else None."""
+    """Return the box of a clip path that is an axis-aligned rectangle, else ``None``."""
     path = path_segments(node)
     if (
         not path.straight
@@ -187,10 +266,16 @@ def _rectangle(node: ET.Element) -> Box | None:
 class Drawing:
     """One painted operation: its page, its 1-based number on that page and its extent.
 
-    ``box`` is the transformed extent of an image or straight filled path (None for
-    anything else); ``clip`` is the active rectangular clip (None when the clip is not a
-    supported rectangle); ``uncertain`` is set when the page already held content this
-    module cannot follow, such as transparency groups.
+    Attributes:
+        page: The 1-based page number.
+        index: The 1-based number of the operation on its page.
+        node: The trace element of the operation.
+        box: The transformed extent of an image or straight filled path (``None`` for
+            anything else).
+        clip: The active rectangular clip (``None`` when the clip is not a supported
+            rectangle).
+        uncertain: Set when the page already held content this module cannot follow, such
+            as transparency groups.
     """
 
     page: int
@@ -202,11 +287,18 @@ class Drawing:
 
     @property
     def kind(self) -> str:
+        """The tag of the trace element, such as ``fill_path``."""
         return self.node.tag
 
 
 class DrawingTrace(NamedTuple):
-    """Every painted operation of a document, its page frames and its uncertain pages."""
+    """Every painted operation of a document, its page frames and its uncertain pages.
+
+    Attributes:
+        drawings: Every painted operation, in page order.
+        page_boxes: The media box of every page of the trace, in page order.
+        trace_uncertain_pages: The pages with content the extents cannot follow.
+    """
 
     drawings: list[Drawing]
     page_boxes: list[Box]
@@ -214,6 +306,14 @@ class DrawingTrace(NamedTuple):
 
 
 def _media_box(page: ET.Element) -> Box:
+    """Read the media box of a trace page.
+
+    Returns:
+        The media box.
+
+    Raises:
+        PreparationError: The box is not four finite numbers that enclose an area.
+    """
     values = [finite_number(value) for value in page.get("mediabox", "").split()]
     if len(values) != _BOX_VALUES or values[0] >= values[2] or values[1] >= values[3]:
         raise PreparationError("Trace page bounds are incomplete")
@@ -221,6 +321,7 @@ def _media_box(page: ET.Element) -> Box:
 
 
 def _painted_extent(node: ET.Element) -> Box | None:
+    """Return the transformed extent of an image or straight filled path, else ``None``."""
     if node.tag in IMAGE_OPERATIONS:
         matrix = Matrix.of_node(node)
         return Box.around([matrix.apply(corner) for corner in _UNIT_SQUARE_CORNERS])
@@ -230,7 +331,19 @@ def _painted_extent(node: ET.Element) -> Box | None:
 
 
 def _parse_page(number: int, page: ET.Element) -> tuple[list[Drawing], Box, bool]:
-    """The drawings of one trace page, its frame, and whether the page is uncertain."""
+    """Parse the drawings of one trace page, its frame, and whether the page is uncertain.
+
+    Args:
+        number: The 1-based page number.
+        page: The trace element of the page.
+
+    Returns:
+        The drawings, the media box, and whether the page holds content the extents cannot
+        follow or leaves a clip unrestored.
+
+    Raises:
+        PreparationError: The page has an unmatched clipping restore or invalid geometry.
+    """
     page_box = _media_box(page)
     drawings: list[Drawing] = []
     uncertain = False
@@ -261,7 +374,14 @@ def _parse_page(number: int, page: ET.Element) -> tuple[list[Drawing], Box, bool
 
 
 def parse_drawing_trace(document: TracedDocument) -> DrawingTrace:
-    """Drawings, page frames and uncertain pages of a validated MuPDF trace."""
+    """Parse the drawings, page frames and uncertain pages of a validated MuPDF trace.
+
+    Returns:
+        The drawings, the frame of every page and the uncertain pages.
+
+    Raises:
+        PreparationError: A page's bounds, transforms or clips cannot be read.
+    """
     drawings: list[Drawing] = []
     page_boxes: list[Box] = []
     uncertain_pages: set[int] = set()
@@ -278,10 +398,18 @@ def parse_drawing_trace(document: TracedDocument) -> DrawingTrace:
 def misaligned_frame_pages(
     page_boxes: Sequence[Box], sizes: Sequence[tuple[float, float]], tolerance: float
 ) -> frozenset[int]:
-    """Pages whose trace frame is not the origin-anchored page Poppler reported.
+    """Find the pages whose trace frame is not the origin-anchored page Poppler reported.
 
     Measurements in the top-left frame are only meaningful when the trace's page box
     starts at the origin and matches the reported size within ``tolerance`` points.
+
+    Args:
+        page_boxes: The trace frame of every page.
+        sizes: The width and height Poppler reported for every page, in points.
+        tolerance: The largest size difference that still matches, in points.
+
+    Returns:
+        The 1-based numbers of the misaligned pages.
     """
     return frozenset(
         number
@@ -296,29 +424,37 @@ def misaligned_frame_pages(
 
 @dataclass(frozen=True, slots=True)
 class TracedArtwork:
-    """Traced drawings, page frames and the pages their measurements must treat with care."""
+    """Traced drawings, page frames and the pages their measurements must treat with care.
+
+    Attributes:
+        drawings: The painted operations.
+        page_boxes: The trace frame of every page.
+        trace_uncertain_pages: The pages with trace content the extents here cannot follow
+            (groups, masks, odd operators).
+        misaligned_frame_pages: The pages whose coordinate frame cannot be aligned with the
+            reported page size: rotated or cropped pages, and pages whose trace frame
+            disagrees with it.
+    """
 
     drawings: Sequence[Drawing]
     page_boxes: Sequence[Box]
-    # Pages with trace content the extents here cannot follow (groups, masks, odd operators).
     trace_uncertain_pages: frozenset[int]
-    # Pages whose coordinate frame cannot be aligned with the reported page size: rotated or
-    # cropped pages, and pages whose trace frame disagrees with it.
     misaligned_frame_pages: frozenset[int]
 
     @property
     def unusable_pages(self) -> frozenset[int]:
+        """The pages that are uncertain or misaligned."""
         return self.trace_uncertain_pages | self.misaligned_frame_pages
 
     def drawings_by_page(self) -> dict[int, list[Drawing]]:
-        """The drawings grouped by page, so per-region work never rescans every drawing."""
+        """Group the drawings by page, so per-region work never rescans every drawing."""
         pages: dict[int, list[Drawing]] = {}
         for drawing in self.drawings:
             pages.setdefault(drawing.page, []).append(drawing)
         return pages
 
     def region_is_measurable(self, region: PdfRegion) -> bool:
-        """Whether the region lies on a traced page whose frame can be trusted."""
+        """Return whether the region lies within a traced page whose frame can be trusted."""
         return (
             region.page <= len(self.page_boxes)
             and region.page not in self.unusable_pages

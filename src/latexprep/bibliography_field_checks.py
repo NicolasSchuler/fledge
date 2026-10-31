@@ -33,8 +33,19 @@ Presence = Literal["present", "unknown", "missing"]
 
 
 def content_state(entry: Entry, names: list[str]) -> Presence:
-    """Whether one of the fields ``names`` holds text: present, unknown (a macro, repeated or
-    inherited field) or missing."""
+    """Return whether one of the fields ``names`` holds text.
+
+    Braces do not count as text.
+
+    Args:
+        entry: The entry to inspect.
+        names: The field names that each satisfy the requirement.
+
+    Returns:
+        ``"present"`` when one of the fields holds literal text, ``"unknown"`` when a field
+        is a macro or repeated or the entry may inherit fields, and otherwise
+        ``"missing"``.
+    """
     uncertain = False
     for name in names:
         matches = entry.fields_named(name)
@@ -52,7 +63,13 @@ def content_state(entry: Entry, names: list[str]) -> Presence:
 
 
 class Verdict(NamedTuple):
-    """The outcome of one literal field syntax check."""
+    """The outcome of one literal field syntax check.
+
+    Attributes:
+        status: The check's status: passed, failed or inconclusive.
+        reason: Why the value did not pass; empty when it passed.
+        tokens: The words the capitalization check flags.
+    """
 
     status: Status
     reason: str = ""
@@ -60,7 +77,18 @@ class Verdict(NamedTuple):
 
 
 def page_verdict(value: str) -> Verdict:
-    """Judge a literal ``pages`` value: ranges must ascend and use one notation."""
+    """Judge a literal ``pages`` value: ranges must ascend and use one notation.
+
+    Single pages and comma-separated ranges with matching letter prefixes are supported.
+
+    Args:
+        value: The literal field value.
+
+    Returns:
+        A failed verdict for an empty value, descending endpoints or a malformed numeric
+        range, an inconclusive one for brace markup or an unsupported notation, and
+        otherwise a passed one.
+    """
     if not value:
         return Verdict("failed", "empty page field")
     if any(character in value for character in "{}"):
@@ -88,7 +116,16 @@ def page_verdict(value: str) -> Verdict:
 
 
 def _url_text_verdict(value: str) -> Verdict | None:
-    """The verdict on the characters of a URL, or None when they are acceptable."""
+    """Judge the characters of a URL before its structure.
+
+    Args:
+        value: The literal field value.
+
+    Returns:
+        An inconclusive verdict for brace markup, a failed one for an empty value,
+        whitespace, control characters, an invalid percent escape or a reserved
+        delimiter, or ``None`` when the characters are acceptable.
+    """
     if any(character in value for character in "{}"):
         return Verdict("inconclusive", "brace markup")
     if not value or any(
@@ -101,7 +138,17 @@ def _url_text_verdict(value: str) -> Verdict | None:
 
 
 def url_verdict(value: str) -> Verdict:
-    """Judge a literal ``url`` value: an absolute URL with a valid host and port."""
+    """Judge a literal ``url`` value: an absolute URL with a valid host and port.
+
+    No request is made.
+
+    Args:
+        value: The literal field value.
+
+    Returns:
+        A passed verdict for a well-formed HTTP, HTTPS or FTP URL, an inconclusive one
+        for brace markup or another scheme, and otherwise a failed one.
+    """
     text = _url_text_verdict(value)
     if text is not None:
         return text
@@ -123,7 +170,16 @@ def url_verdict(value: str) -> Verdict:
 
 
 def unprotected_tokens(value: str) -> list[str]:
-    """The case-sensitive words of ``value`` that no brace group protects."""
+    """Find the case-sensitive words of ``value`` that no brace group protects.
+
+    A word is case-sensitive when it has two capitals or a capital after its first letter.
+
+    Args:
+        value: The literal title.
+
+    Returns:
+        The words, sorted and without repeats.
+    """
     depth = 0
     plain: list[str] = []
     for index, char in enumerate(value):
@@ -148,7 +204,14 @@ def unprotected_tokens(value: str) -> list[str]:
 
 
 def capitalization_verdict(value: str) -> Verdict:
-    """Judge a literal ``title``: words with capitals beyond the first letter need braces."""
+    """Judge a literal ``title``: words with capitals beyond the first letter need braces.
+
+    Args:
+        value: The literal title.
+
+    Returns:
+        A failed verdict that lists the unprotected words, or a passed one.
+    """
     tokens = unprotected_tokens(value)
     if tokens:
         return Verdict("failed", "case-sensitive tokens may need brace protection", tuple(tokens))
@@ -171,6 +234,18 @@ _METADATA_DESCRIPTIONS = {
 
 
 def _required_field(reference: LocatedEntry, spec: str, *, uncertain: bool) -> Finding | None:
+    """Check one required-field specification against an entry.
+
+    Args:
+        reference: The entry to check.
+        spec: The required field, or alternatives separated by ``|``.
+        uncertain: Whether the coverage is uncertain, which turns a missing field into an
+            unknown one.
+
+    Returns:
+        A failed finding for a missing field, an inconclusive one for a field that is not
+        statically established, or ``None`` when a field is present.
+    """
     state = content_state(reference.entry, spec.split("|"))
     if state == "missing" and uncertain:
         state = "unknown"
@@ -188,6 +263,7 @@ def _required_field(reference: LocatedEntry, spec: str, *, uncertain: bool) -> F
 
 
 def _doi_presence(reference: LocatedEntry) -> Finding | None:
+    """Report an entry whose DOI is missing (failed) or unverified (inconclusive), or ``None``."""
     state = content_state(reference.entry, ["doi"])
     if state == "present":
         return None
@@ -201,6 +277,17 @@ def _doi_presence(reference: LocatedEntry) -> Finding | None:
 
 
 def _field_syntax(reference: LocatedEntry, rule: str, bib_fields: list[Field]) -> Finding | None:
+    """Run one literal field syntax check on an entry's fields of that name.
+
+    Args:
+        reference: The entry to check.
+        rule: The check, a key of ``_FIELD_CHECKS``.
+        bib_fields: The entry's fields that the check reads; anything but one literal
+            value is inconclusive.
+
+    Returns:
+        A finding for a value that did not pass, or ``None``.
+    """
     name, verdict_of, evidence = _FIELD_CHECKS[rule]
     value = field_literal(bib_fields[0]) if len(bib_fields) == 1 else None
     verdict = (
@@ -226,7 +313,16 @@ def check_entry_fields(
     options: BibliographyOptions,
     results: ResultCollector,
 ) -> None:
-    """Run the configured field checks over ``references`` and summarize each of them."""
+    """Run the configured field checks over ``references`` and summarize each of them.
+
+    Args:
+        references: The entries to check.
+        uncertainties: The gaps that weaken the checks; any gap makes a missing required
+            field unknown.
+        options: Which checks run, the required fields by entry type and the DOI entry
+            types.
+        results: The collector that receives the findings and the summaries.
+    """
     requirements = dict(options.required_fields)
     enabled = {
         "required_fields": bool(requirements),
@@ -239,6 +335,7 @@ def check_entry_fields(
     counts: dict[str, int] = defaultdict(int)
 
     def add(rule: str, finding: Finding | None) -> None:
+        """Count one checked item for ``rule`` and keep its finding, if any."""
         counts[rule] += 1
         if finding is not None:
             rows[rule].append(finding)

@@ -49,7 +49,23 @@ DEFAULT_MAX_PIXEL_VISITS_PER_PAGE: Final = 8_000_000
 
 
 class ArtworkRule(StrEnum):
-    """The names of the artwork rules, as reports and the rule catalogue spell them."""
+    """The names of the artwork rules, as reports and the rule catalogue spell them.
+
+    Attributes:
+        PRINTER_MARKS: Printed crop/registration-mark candidates.
+        FIGURE_WHITESPACE: Figure outer whitespace.
+        FIGURE_EDGE_INK: Figure boundary ink candidates.
+        DRAWING_BOUNDS: Image and polygon drawing bounds.
+        CLIPPING_CANDIDATES: Rectangular clipping candidates.
+        ARTWORK_COMPOSITION: Observed artwork composition.
+        CATEGORY_RESOLUTION: Explicit artwork-category DPI.
+        TYPE3_GLYPH_PROGRAMS: Type 3 glyph painting classification.
+        TRANSFORMED_STROKE_WIDTH: Affine stroke-normal thickness.
+        RASTER_REGION_CANDIDATES: Raster-dominated region candidates.
+        GRAYSCALE_PREVIEW: Grayscale review preview.
+        RENDERED_SAMPLE_CONTRAST: Rendered foreground/background sample contrast.
+        COLOR_SPACE: The required colour family of figures.
+    """
 
     PRINTER_MARKS = "pdf.printer_marks"
     FIGURE_WHITESPACE = "pdf.figure_whitespace"
@@ -84,14 +100,33 @@ DRAWING_TRACE_RULES: Final = frozenset(
 
 @dataclass(frozen=True, slots=True)
 class ArtworkLimits:
-    """Work bounds of the rendered measurements; the defaults suit ordinary manuscripts."""
+    """Work bounds of the rendered measurements; the defaults suit ordinary manuscripts.
+
+    Attributes:
+        max_pixel_visits_per_page: The most pixels examined across all figure regions of
+            one rendered page, and across all contrast patches of one page.
+    """
 
     max_pixel_visits_per_page: int = DEFAULT_MAX_PIXEL_VISITS_PER_PAGE
 
 
 @dataclass(frozen=True)
 class PdfContrastSample:
-    """User-selected foreground/background patches, with no inferred text semantics."""
+    """User-selected foreground/background patches, with no inferred text semantics.
+
+    Construction raises ``SettingsError`` when the name is blank, a number has the wrong type
+    or lies outside its bounds, or the patches are not PDF regions on the same page.
+
+    Attributes:
+        FIELD_BOUNDS: The bounds :func:`validate_scalars` applies to ``minimum_ratio`` and
+            ``max_channel_spread``.
+        name: The name of the sample in findings.
+        foreground: The foreground patch.
+        background: The background patch, on the same page as ``foreground``.
+        minimum_ratio: The lowest acceptable contrast ratio.
+        max_channel_spread: How much a colour channel may vary within a patch; 0 requires
+            homogeneous patches.
+    """
 
     FIELD_BOUNDS: ClassVar[dict[str, Bounds]] = {
         "minimum_ratio": CONTRAST_RATIO_BOUNDS,
@@ -119,8 +154,49 @@ class PdfArtworkOptions:
 
     Lengths ending in ``_pt`` are PDF points (1/72 inch) in the top-left frame of an
     unrotated page. ``raster_dpi``, ``background_gray`` and ``ink_difference`` tune how
-    rendered pages are sampled (resolution, paper gray level 0 to 255, and the gray
-    difference that counts as ink); they select no measurement by themselves.
+    rendered pages are sampled; they select no measurement by themselves.
+
+    Construction raises ``SettingsError`` when a setting has the wrong type or lies outside
+    its bounds, a list is malformed or too long, or settings that only work together are
+    not set together.
+
+    Attributes:
+        FIELD_BOUNDS: The bounds :func:`validate_scalars` applies to the sampling, length,
+            ratio and tolerance settings.
+        detect_printer_marks: Whether to look for crop and registration mark candidates;
+            requires ``trim_regions`` and ``printer_mark_max_length_pt``.
+        trim_regions: The trim region of a page, at most one per page.
+        printer_mark_max_length_pt: The longest stroke that can be part of a printer mark.
+        printer_mark_exemptions: The pages that are not searched for printer marks.
+        figure_regions: The rendered regions whose whitespace and edge ink are measured.
+        max_figure_whitespace_ratio: The largest share of a figure region that may lie
+            outside its ink box.
+        figure_edge_band_pt: The width of the band along a figure region's boundary in
+            which ink is a candidate.
+        drawing_regions: The regions that images and filled shapes must lie inside.
+        check_clipping: Whether to look for images and filled shapes that cross a clip
+            rectangle or the page.
+        classify_artwork: Whether to inventory the raster and vector operations.
+        artwork_category: The declared category whose minimum DPI applies; it must be
+            listed in ``category_min_dpi``.
+        category_min_dpi: The minimum image DPI of each category, as (category, DPI)
+            pairs.
+        classify_type3_glyphs: Whether to classify how Type 3 glyph programs paint.
+        forbid_bitmap_type3_glyphs: Whether bitmap Type 3 glyphs violate the policy.
+        min_stroke_width_pt: The thinnest stroke allowed after placement.
+        raster_regions: The regions measured for raster coverage; requires
+            ``min_raster_region_coverage``.
+        min_raster_region_coverage: The raster coverage from which a region is a
+            candidate; requires ``raster_regions``.
+        grayscale_preview: Whether to keep grayscale page previews for review.
+        contrast_samples: The foreground and background patches whose contrast is
+            measured.
+        required_color_space: The colour family painted operations must use, or ``None``;
+            grayscale satisfies either.
+        raster_dpi: The resolution of rendered pages.
+        background_gray: The paper gray level, 0 to 255.
+        ink_difference: The gray difference from the paper that counts as ink.
+        geometry_tolerance_pt: The slack of the geometric comparisons.
     """
 
     FIELD_BOUNDS: ClassVar[dict[str, Bounds]] = {
@@ -166,6 +242,12 @@ class PdfArtworkOptions:
         self._validate_categories()
 
     def _validate_regions(self) -> None:
+        """Check the region and contrast sample lists; a page has at most one trim region.
+
+        Raises:
+            SettingsError: A list is not a tuple of regions or samples, is too long, or
+                lists two trim regions for one page.
+        """
         require_records(
             "trim_regions",
             self.trim_regions,
@@ -184,6 +266,13 @@ class PdfArtworkOptions:
         )
 
     def _validate_companion_settings(self) -> None:
+        """Check the settings that only work together.
+
+        Raises:
+            SettingsError: Printer marks lack ``trim_regions`` or
+                ``printer_mark_max_length_pt``, or only one of ``raster_regions`` and
+                ``min_raster_region_coverage`` is set.
+        """
         if self.detect_printer_marks and (
             not self.trim_regions or self.printer_mark_max_length_pt is None
         ):
@@ -198,6 +287,12 @@ class PdfArtworkOptions:
             )
 
     def _validate_categories(self) -> None:
+        """Check the artwork category and the minimum DPI of each category.
+
+        Raises:
+            SettingsError: A category name or minimum is invalid, or ``artwork_category``
+                is not listed in a nonempty ``category_min_dpi``.
+        """
         require_text("artwork_category", self.artwork_category, allow_none=True)
         require_pairs(
             "category_min_dpi",
@@ -213,7 +308,7 @@ class PdfArtworkOptions:
 
 
 def configured_artwork_rules(options: PdfArtworkOptions) -> list[ArtworkRule]:
-    """The rules the options switch on, in the order their findings are reported."""
+    """Return the rules the options switch on, in the order their findings are reported."""
     return [
         rule
         for rule, enabled in (
@@ -239,7 +334,7 @@ def configured_artwork_rules(options: PdfArtworkOptions) -> list[ArtworkRule]:
 
 
 def required_artwork_tools(options: PdfArtworkOptions) -> set[str]:
-    """The external tools the configured measurements run, for setup diagnostics."""
+    """Return the external tools the configured measurements run, for setup diagnostics."""
     rules = set(configured_artwork_rules(options))
     tools = {"pdfinfo"} if rules else set()
     if rules & DRAWING_TRACE_RULES or ArtworkRule.COLOR_SPACE in rules:
@@ -259,5 +354,8 @@ def required_artwork_tools(options: PdfArtworkOptions) -> set[str]:
 
 
 def artwork_checks_enabled(options: PdfArtworkOptions) -> bool:
-    """Tuning values alone do not select a measurement or require a source graph."""
+    """Return whether the options switch on any artwork rule.
+
+    Tuning values alone do not select a measurement or require a source graph.
+    """
     return bool(configured_artwork_rules(options))

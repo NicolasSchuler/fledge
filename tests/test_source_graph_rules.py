@@ -1,3 +1,5 @@
+"""How source-graph rules are classified, and which argument of a file command names the file."""
+
 from __future__ import annotations
 
 import re
@@ -19,6 +21,8 @@ GRAPH_MODULES = (
 
 
 class GraphRuleSetTests(unittest.TestCase):
+    """The rule sets that classify source-graph findings as unparsed, incomplete or advisory."""
+
     def test_unparsed_files_are_a_subset_of_the_rules_that_leave_the_graph_incomplete(self) -> None:
         self.assertLess(UNPARSED_SOURCE_RULES, INCOMPLETE_GRAPH_RULES)
         self.assertEqual(
@@ -48,6 +52,8 @@ class GraphRuleSetTests(unittest.TestCase):
 
 
 class FileArgumentIndexTests(unittest.TestCase):
+    """Which argument of a file-reading command names the file."""
+
     def test_the_file_follows_the_directory_for_import_style_commands(self) -> None:
         for name in ("import", "subimport", "inputfrom", "DTLloaddb", "inputminted"):
             with self.subTest(name=name):

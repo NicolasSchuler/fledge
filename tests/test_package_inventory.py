@@ -19,7 +19,10 @@ from latexprep.report import Change, ChangeKind
 
 
 class PackageInventoryTests(unittest.TestCase):
+    """Input selection and the package inventory: reasons, flat names, sizes, missing evidence."""
+
     def setUp(self) -> None:
+        """Create a temporary folder that holds an empty ``source`` project."""
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.base = Path(self.temporary.name)
@@ -27,11 +30,30 @@ class PackageInventoryTests(unittest.TestCase):
         self.source.mkdir()
 
     def write(self, name: str, data: str | bytes, *, root: Path | None = None) -> None:
+        """Write ``data`` to the file ``name``, creating its folders.
+
+        Args:
+            name: The file's path relative to ``root``.
+            data: The content; text is encoded as UTF-8.
+            root: The folder to write under, or ``None`` for the source project.
+        """
         path = (root or self.source) / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data.encode() if isinstance(data, str) else data)
 
     def select(self, observed: set[str], explicit: set[str] | None = None, generated=()):
+        """Select the inputs of ``main.tex`` from the source project into ``selected``.
+
+        The selection must report a passed finding.
+
+        Args:
+            observed: The inputs the build recorded.
+            explicit: The files the settings ask to keep, or ``None`` for none.
+            generated: The names of generated bibliography files the build read.
+
+        Returns:
+            The changes and the inventory of the selection.
+        """
         result = select_package_inputs(
             self.source,
             self.base / "selected",

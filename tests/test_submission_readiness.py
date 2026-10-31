@@ -24,6 +24,10 @@ PREAMBLE = "\\documentclass{article}\n"
 
 
 def png(color_type: int) -> bytes:
+    """Return the signature and ``IHDR`` chunk of a 4 by 4, 8-bit PNG of ``color_type``.
+
+    The image ends after its header chunk.
+    """
     header = struct.pack(">IIBBBBB", 4, 4, 8, color_type, 0, 0, 0)
     chunk = b"IHDR" + header
     return (
@@ -35,6 +39,19 @@ def png(color_type: int) -> bytes:
 
 
 def jpeg(components: int, *, adobe_transform: int | None = None) -> bytes:
+    """Return a 4 by 4, 8-bit baseline JPEG with ``components`` colour components.
+
+    An Exif application segment precedes the frame header, so a reader must skip it; there is no
+    image data between the frame header and the end marker.
+
+    Args:
+        components: The number of components in the frame header.
+        adobe_transform: The transform flag of an Adobe segment placed first, or ``None`` for no
+            Adobe segment.
+
+    Returns:
+        The JPEG bytes.
+    """
     data = b"\xff\xd8"
     if adobe_transform is not None:
         payload = b"Adobe" + b"\x00\x64" + b"\x00\x00" + b"\x00\x00" + bytes([adobe_transform])
@@ -48,7 +65,15 @@ def jpeg(components: int, *, adobe_transform: int | None = None) -> bytes:
 
 
 class ReadinessCase(ProjectTestCase):
+    """Base of the readiness tests, which writes documents and runs the readiness checks."""
+
     def document(self, preamble: str = "", body: str = "Text.") -> None:
+        """Write ``main.tex`` as an article with ``preamble`` and a document body of ``body``.
+
+        Args:
+            preamble: Text placed after the document class line.
+            body: The text of the document environment.
+        """
         self.write(
             "main.tex", PREAMBLE + preamble + "\\begin{document}\n" + body + "\n\\end{document}\n"
         )
@@ -60,6 +85,18 @@ class ReadinessCase(ProjectTestCase):
         required_color_space: str | None = None,
         **options: object,
     ) -> list[Finding]:
+        """Run the submission-readiness checks and return the findings of ``rule``.
+
+        Args:
+            rule: The rule whose findings to return.
+            main: The main file, or ``None`` to select the single document root.
+            required_color_space: The colour space raster figures must use, or ``None`` for no
+                policy.
+            **options: The fields of the :class:`BblOptions` to use.
+
+        Returns:
+            The findings of ``rule``, in the order the checks report them.
+        """
         readiness = check_submission_readiness(
             self.root,
             main,
@@ -69,12 +106,27 @@ class ReadinessCase(ProjectTestCase):
         return [item for item in readiness if item.rule == rule]
 
     def one(self, rule: str, **options: object) -> Finding:
+        """Return the only finding of ``rule``; the test fails unless there is exactly one.
+
+        Args:
+            rule: The rule whose finding to return.
+            **options: Passed on to :meth:`findings`.
+
+        Returns:
+            The finding.
+        """
         findings = self.findings(rule, **options)
         self.assertEqual(len(findings), 1, findings)
         return findings[0]
 
 
 class BibliographyBblTests(ReadinessCase):
+    """The ``.bbl`` advisories: a missing ``.bbl``, its coverage of the citations and its format.
+
+    The ``require_bbl`` and format version options are read from the project settings, validated
+    where the ``.bbl`` options live, and share the submission checks table.
+    """
+
     def test_bib_without_bbl_is_a_note_and_bbl_passes(self) -> None:
         self.write("refs.bib", "@book{knuth, title={The TeXbook}, year={1984}}")
         self.document(body="Text \\cite{knuth}.\n\\bibliographystyle{plain}\n\\bibliography{refs}")
@@ -303,6 +355,8 @@ class BibliographyBblTests(ReadinessCase):
 
 
 class HyperrefOrderTests(ReadinessCase):
+    """The advisory about packages loaded before hyperref."""
+
     def test_packages_before_hyperref_are_reported(self) -> None:
         self.write("preamble.tex", "\\usepackage{amsmath,cleveref}\n")
         self.document("\\input{preamble}\n\\usepackage{bookmark}\n\\usepackage{hyperref}\n")
@@ -333,6 +387,8 @@ class HyperrefOrderTests(ReadinessCase):
 
 
 class FigureTests(ReadinessCase):
+    """EPS figures, and the raster colour space policy read from PNG and JPEG headers."""
+
     def test_eps_figures_are_reported_as_information(self) -> None:
         self.write("figs/plot.eps", "%!PS-Adobe-3.0 EPSF-3.0\n")
         self.write("photo.pdf", b"%PDF-1.5\n")
@@ -428,6 +484,8 @@ class FigureTests(ReadinessCase):
 
 
 class PrivateMarkerTests(ReadinessCase):
+    """The advisory about private markers in comments, such as notes and author initials."""
+
     def test_private_markers_report_locations_and_categories_only(self) -> None:
         self.document(
             "\\author{Nina Schmidt}",
@@ -500,7 +558,19 @@ class PrivateMarkerTests(ReadinessCase):
 
 
 class LineNumberTests(ReadinessCase):
+    """The manuscript policies that require or forbid line numbers."""
+
     def check(self, **options: bool) -> Finding:
+        """Run the manuscript policies with ``options`` and return the only line-number finding.
+
+        The test fails unless there is exactly one.
+
+        Args:
+            **options: The fields of the :class:`ManuscriptCheckOptions` to use.
+
+        Returns:
+            The line-number finding.
+        """
         findings = [
             item
             for item in check_manuscript_policies(

@@ -22,6 +22,18 @@ from .pdf_tools import PdfToolSession, ToolMeasurement, qpdf_objects_argv
 
 
 def _language_finding(objects: QpdfObjectGraph, options: PdfCheckOptions) -> Finding:
+    """Check the catalog's language declaration against the options.
+
+    A declaration that is not a decoded text string makes the finding incomplete; the
+    expected language is compared without regard to case.
+
+    Args:
+        objects: The object graph.
+        options: The PDF check options, which may name the expected language.
+
+    Returns:
+        The finding, with a violation for a missing, empty or different language.
+    """
     raw = objects.resolve(objects.root.get("/Lang"))
     language = raw[2:].strip() if isinstance(raw, str) and raw.startswith("u:") else None
     expected = options.expected_language
@@ -52,6 +64,19 @@ def _language_finding(objects: QpdfObjectGraph, options: PdfCheckOptions) -> Fin
 
 
 def _annotation_finding(objects: QpdfObjectGraph, options: PdfCheckOptions) -> Finding:
+    """Report the page annotations whose subtype is forbidden.
+
+    Args:
+        objects: The object graph.
+        options: The PDF check options, which list the forbidden annotation types.
+
+    Returns:
+        The finding, with a violation for every forbidden annotation.
+
+    Raises:
+        PreparationError: A page or annotation object is malformed, or the annotations
+            exceed the traversal limit.
+    """
     annotations: list[object] = []
     count = 0
     for page_number, page in enumerate(objects.pages, 1):
@@ -85,6 +110,18 @@ def _annotation_finding(objects: QpdfObjectGraph, options: PdfCheckOptions) -> F
 
 
 def _action_finding(objects: QpdfObjectGraph, options: PdfCheckOptions) -> Finding:
+    """Report the reachable dictionaries whose action type (``/S``) is forbidden.
+
+    Args:
+        objects: The object graph.
+        options: The PDF check options, which list the forbidden action types.
+
+    Returns:
+        An advisory finding, with a candidate for every match.
+
+    Raises:
+        PreparationError: The traversal exceeds its bounds.
+    """
     actions: list[object] = []
     # A matching /S in reachable objects is intentionally conservative: qpdf
     # resolves compressed dictionaries but does not classify executable semantics.
@@ -122,6 +159,23 @@ _OBJECT_CHECKS: tuple[
 def _object_findings(
     output: str, pages: int, options: PdfCheckOptions, rules: Collection[str]
 ) -> list[Finding]:
+    """Run the configured object checks on qpdf's output.
+
+    A check whose part of the object graph is incomplete becomes unavailable evidence, and
+    the other checks keep their observations.
+
+    Args:
+        output: The qpdf JSON output.
+        pages: The number of pages of the PDF.
+        options: The PDF check options.
+        rules: The configured object rules.
+
+    Returns:
+        One finding per configured rule.
+
+    Raises:
+        PreparationError: The output is not complete, supported object data.
+    """
     objects = QpdfObjectGraph(output, pages)
     # Preserve completed observations if another part of the object graph is incomplete.
     result = []
@@ -138,7 +192,17 @@ def _object_findings(
 async def measure_object_policies(
     session: PdfToolSession, pages: int, options: PdfCheckOptions, rules: Collection[str]
 ) -> list[Finding]:
-    """The configured object policies; each of ``rules`` is inconclusive if qpdf fails."""
+    """Measure the configured object policies; each of ``rules`` is inconclusive if qpdf fails.
+
+    Args:
+        session: The PDF tool session that runs qpdf.
+        pages: The number of pages of the PDF.
+        options: The PDF check options.
+        rules: The configured object rules.
+
+    Returns:
+        One finding per configured rule.
+    """
     return await ToolMeasurement(
         "objects",
         qpdf_objects_argv(),

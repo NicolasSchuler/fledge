@@ -30,7 +30,17 @@ class JobDeadlineExceeded(TimeoutError):
 
 
 class JobExecution:
-    """Create inside the job's coroutine: the whole-job deadline starts here."""
+    """The resource budget, restricted runner, deadline and workspaces of one job.
+
+    Create it inside the job's coroutine: the whole-job deadline starts here, and the
+    task that is current then is the one whose cancellation ``check_deadline`` notices.
+
+    Attributes:
+        settings: The settings of the job.
+        budget: The resource budget that tool processes and tasks reserve from.
+        runner: The restricted tool runner that accounts to ``budget``.
+        started: The monotonic clock reading when the job started.
+    """
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
@@ -52,13 +62,31 @@ class JobExecution:
 
     @contextmanager
     def workspace(self, prefix: str) -> Generator[Path]:
-        """A private temporary directory, removed with everything in it afterwards."""
+        """Create a private temporary directory, removed with everything in it afterwards.
+
+        Args:
+            prefix: The start of the directory's name.
+
+        Yields:
+            The resolved path of the directory.
+        """
         with tempfile.TemporaryDirectory(prefix=prefix) as temporary:
             yield Path(temporary).resolve()
 
     @asynccontextmanager
     async def bounded(self, work: Path) -> AsyncGenerator[None]:
-        """Account tool processes and temporary bytes to ``work`` within the job deadline."""
+        """Account tool processes and temporary bytes to ``work`` within the job deadline.
+
+        Args:
+            work: The directory whose temporary bytes count against the job's limit.
+
+        Yields:
+            Control to the block, which runs within the job's accounting and deadline.
+
+        Raises:
+            JobDeadlineExceeded: The whole-job deadline passed inside the block. Any other
+                ``TimeoutError`` propagates unchanged.
+        """
         async with self.runner.job_scope(work, max_temp_bytes=self.settings.max_temporary_bytes):
             try:
                 async with asyncio.timeout(self.settings.job_timeout_seconds) as deadline:
@@ -69,14 +97,24 @@ class JobExecution:
                 raise
 
     def check_deadline(self) -> None:
-        """Stop a synchronous step once the job is cancelled or its deadline has passed."""
+        """Stop a synchronous step once the job is cancelled or its deadline has passed.
+
+        Raises:
+            asyncio.CancelledError: The job's task is being cancelled.
+            JobDeadlineExceeded: The whole-job deadline has passed.
+        """
         if self._task is not None and self._task.cancelling():
             raise asyncio.CancelledError
         if time.monotonic() >= self._deadline:
             raise JobDeadlineExceeded
 
     def statistics(self) -> dict[str, object]:
-        """Reserved and observed resources and the elapsed time, for ``Report.execution``."""
+        """Summarize the reserved and observed resources and the elapsed time.
+
+        Returns:
+            The figures for ``Report.execution``, under ``resources``, ``observed`` and
+            ``elapsed_seconds``.
+        """
         return {
             "resources": self.budget.statistics(),
             "observed": asdict(self.runner.statistics()),

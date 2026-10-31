@@ -1,3 +1,5 @@
+"""Resolving file references: candidate paths, project lookup, path helpers and graph findings."""
+
 from __future__ import annotations
 
 import unittest
@@ -20,11 +22,17 @@ from latexprep.tex_lexer import scan_source_commands
 
 
 def reference(text: str) -> Reference:
+    """Return the reference that the only file command in ``text`` makes from ``main.tex``.
+
+    The referenced name is the command's first argument.
+    """
     (command,) = scan_source_commands(text)
     return Reference(command.arguments[0].value, "main.tex", command)
 
 
 class CandidatePathTests(unittest.TestCase):
+    """The candidate paths a file command tries for a name, and their order."""
+
     def test_a_suffixless_name_tries_each_default_suffix_before_the_bare_name(self) -> None:
         suffixes = DEFAULT_SUFFIXES_BY_FILE_COMMAND["includegraphics"]
         candidates = candidate_paths("includegraphics", ["fig/a"], suffixes)
@@ -44,7 +52,18 @@ class CandidatePathTests(unittest.TestCase):
 
 
 class ProjectLookupTests(unittest.TestCase):
+    """Looking up references: links, missing files, case mismatches and toolchain files."""
+
     def tree(self, names: dict[str, Path], on_link=None) -> ProjectTree:
+        """Return a project tree of ``names`` whose compilation directory is the project root.
+
+        Args:
+            names: The project files by project-relative name.
+            on_link: Called with each linked file the lookup skips, or ``None`` for a :class:`Mock`.
+
+        Returns:
+            The project tree.
+        """
         return ProjectTree(names, "", on_link or Mock())
 
     def test_a_link_is_skipped_and_reported_to_the_graph(self) -> None:
@@ -87,6 +106,8 @@ class ProjectLookupTests(unittest.TestCase):
 
 
 class ProjectFilesTests(unittest.TestCase):
+    """Project file helpers: the known-path index, which files are parsed and path comparison."""
+
     def test_the_index_holds_every_suffix_and_directory_prefix(self) -> None:
         self.assertEqual(
             known_path_index(["a/b/c.tex"]),
@@ -108,6 +129,8 @@ class ProjectFilesTests(unittest.TestCase):
 
 
 class ListedNamesTests(unittest.TestCase):
+    """Shortening a long list of file names in a message."""
+
     def test_many_names_are_cut_short_and_counted(self) -> None:
         names = [f"f{index}.tex" for index in range(MAX_LISTED_PATHS + 3)]
         text = listed_names(names)
@@ -116,6 +139,8 @@ class ListedNamesTests(unittest.TestCase):
 
 
 class GraphFindingsTests(unittest.TestCase):
+    """Recording graph findings and uncertainties without duplicates."""
+
     def test_an_identical_uncertainty_or_error_is_recorded_once(self) -> None:
         findings, uncertainties = [], []
         sink = GraphFindings(findings, uncertainties)

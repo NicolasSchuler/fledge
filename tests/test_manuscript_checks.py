@@ -1,3 +1,5 @@
+"""Manuscript policies: packages, layout, abstracts, headings, metadata, floats, uncertainty."""
+
 from __future__ import annotations
 
 import unittest
@@ -13,11 +15,32 @@ from tests.support import ProjectTestCase
 
 
 class ManuscriptDetailTests(ProjectTestCase):
+    """:func:`check_manuscript_policies` and :func:`read_literal_metadata` on source fixtures."""
+
     def results(self, body: str, options: ManuscriptCheckOptions) -> list[Finding]:
+        """Write ``main.tex`` as an ``article`` with ``body`` and check its policies.
+
+        Args:
+            body: The source after the line that loads the ``article`` class.
+            options: The policies to check.
+
+        Returns:
+            Every finding of the check.
+        """
         self.write("main.tex", "\\documentclass{article}\n" + body)
         return check_manuscript_policies(self.root, "main.tex", options)
 
     def result(self, body: str, options: ManuscriptCheckOptions, suffix: str) -> Finding:
+        """Return the finding of the policy ``manuscript.<suffix>`` for ``body``.
+
+        Args:
+            body: The source after the class line, as for :meth:`results`.
+            options: The policies to check.
+            suffix: The rule name after ``manuscript.``.
+
+        Returns:
+            The first finding of that rule.
+        """
         return next(
             finding
             for finding in self.results(body, options)
@@ -34,6 +57,20 @@ class ManuscriptDetailTests(ProjectTestCase):
         *,
         advisory: bool = False,
     ) -> None:
+        """Assert that a policy passes, fails and turns inconclusive as it should.
+
+        ``valid`` must pass as an info finding. ``violating`` must fail with ``code`` and
+        list its matches, and inside a conditional it must be inconclusive and record the
+        uncertainty.
+
+        Args:
+            suffix: The rule name after ``manuscript.``.
+            code: The code the failing finding must have.
+            options: The policies to check.
+            valid: A body that satisfies the policy.
+            violating: A body that violates it.
+            advisory: Whether the failure is a heuristic warning instead of a derived error.
+        """
         good = self.result(valid, options, suffix)
         self.assertEqual(good.status, "passed", good.details)
         self.assertEqual(good.severity, "info")

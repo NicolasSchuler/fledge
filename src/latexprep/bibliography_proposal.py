@@ -28,7 +28,13 @@ _MAX_LISTED_REASONS = 3
 
 
 class BibliographyProposal(NamedTuple):
-    """The changed files by relative path, a diff for each, and the finding per operation."""
+    """The changed files by relative path, a diff for each, and the finding per operation.
+
+    Attributes:
+        files: The new contents of each changed file, by relative path.
+        changes: A diff for each changed file.
+        findings: The finding of each operation.
+    """
 
     files: dict[str, bytes]
     changes: list[Change]
@@ -38,8 +44,15 @@ class BibliographyProposal(NamedTuple):
 class ProposalBlocked(Exception):
     """An operation that cannot be carried out safely, and where the cause lies.
 
-    ``status`` is "failed" when the request itself is wrong (a key that does not exist)
-    and "inconclusive" when the files or sources cannot be analysed well enough to tell.
+    Args:
+        message: What stopped the operation; it becomes the exception's message.
+
+    Attributes:
+        status: "failed" when the request itself is wrong (a key that does not exist)
+            and "inconclusive" when the files or sources cannot be analysed well enough
+            to tell.
+        path: The file where the cause lies, if known.
+        line: The line in that file where the cause lies, if known.
     """
 
     def __init__(
@@ -57,7 +70,7 @@ class ProposalBlocked(Exception):
 
 
 def joined_reasons(reasons: list[str]) -> str:
-    """The first few distinct ``reasons`` as one sentence, with a count of those left out."""
+    """Join the first few distinct ``reasons`` into one sentence, with a count of those left out."""
     distinct = list(dict.fromkeys(reason.rstrip(".") for reason in reasons))
     text = "; ".join(distinct[:_MAX_LISTED_REASONS])
     if len(distinct) > _MAX_LISTED_REASONS:
@@ -66,7 +79,19 @@ def joined_reasons(reasons: list[str]) -> str:
 
 
 def entry_layout(document: BibDocument, entry: Entry) -> EntrySpan:
-    """The layout of ``entry``, or a block that names the document it cannot be found in."""
+    """Lay out ``entry``, or block with the document it cannot be laid out in.
+
+    Args:
+        document: The parsed file that holds the entry.
+        entry: The entry to lay out.
+
+    Returns:
+        The offsets of the entry's key, comma, fields and closing delimiter.
+
+    Raises:
+        ProposalBlocked: The entry's delimiters cannot be located; the block names the
+            document and the line where the entry starts.
+    """
     try:
         return layout_entry(document, entry)
     except UnsupportedLayout as error:
@@ -76,7 +101,14 @@ def entry_layout(document: BibDocument, entry: Entry) -> EntrySpan:
 
 
 def require_valid(document: BibDocument) -> BibDocument:
-    """``document``, if it parsed completely."""
+    """Return ``document`` if it parsed completely.
+
+    Returns:
+        ``document`` unchanged.
+
+    Raises:
+        ProposalBlocked: The document's bibliography syntax is incomplete.
+    """
     if not document.valid:
         raise ProposalBlocked(
             f"{document.path}: repair the incomplete bibliography syntax first.",
@@ -86,7 +118,17 @@ def require_valid(document: BibDocument) -> BibDocument:
 
 
 def unique_entries(documents: dict[str, BibDocument]) -> dict[str, LocatedEntry]:
-    """Every entry by key; a key that occurs twice blocks, because edits could not target it."""
+    """Map every entry by key; a key that occurs twice blocks, because edits could not target it.
+
+    Args:
+        documents: The parsed documents by relative path.
+
+    Returns:
+        Every entry with the document that holds it, by key.
+
+    Raises:
+        ProposalBlocked: A key occurs more than once.
+    """
     result: dict[str, LocatedEntry] = {}
     for reference in located_entries(documents.values()):
         key = reference.entry.key
@@ -101,7 +143,19 @@ def unique_entries(documents: dict[str, BibDocument]) -> dict[str, LocatedEntry]
 
 
 def apply_edits(text: str, edits: list[TextEdit], *, path: str | None = None) -> str:
-    """``text`` with ``edits`` applied; edits that overlap block the whole proposal."""
+    """Apply ``edits`` to ``text``; edits that overlap block the whole proposal.
+
+    Args:
+        text: The text to edit.
+        edits: The edits, in any order.
+        path: The file the text belongs to, which the block names.
+
+    Returns:
+        The edited text.
+
+    Raises:
+        ProposalBlocked: Edits overlap or lie outside the text.
+    """
     try:
         return apply_text_edits(text, edits)
     except OverlappingEdits as error:
@@ -111,7 +165,19 @@ def apply_edits(text: str, edits: list[TextEdit], *, path: str | None = None) ->
 
 
 def replace_documents(documents: dict[str, BibDocument], edits: dict[str, list[TextEdit]]) -> int:
-    """Apply each path's edits, re-parse the result and store it; the number that changed."""
+    """Apply each path's edits, re-parse the result and store it in ``documents``.
+
+    Args:
+        documents: The parsed documents by relative path; a changed one is replaced.
+        edits: The edits of each document, by relative path.
+
+    Returns:
+        The number of documents that changed.
+
+    Raises:
+        ProposalBlocked: Edits overlap, or an edited document no longer parses
+            completely.
+    """
     changed = 0
     for path, changes in edits.items():
         document = documents[path]

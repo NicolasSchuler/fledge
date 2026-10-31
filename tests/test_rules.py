@@ -20,6 +20,8 @@ from latexprep.rules import (
 
 
 class RuleRegistryTests(unittest.TestCase):
+    """The rule catalogue: linked tests, serialized codes, derived sets and report order."""
+
     def test_every_unique_code_links_to_existing_behavioral_unit_tests(self):
         loader = unittest.TestLoader()
         self.assertEqual(len(RULES), len(BY_CODE))

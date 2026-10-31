@@ -1,3 +1,10 @@
+"""Redaction of secrets in report data and scrubbing of local directory paths.
+
+Redaction hides secret values, credentials in URLs and private keys together with their repeats
+elsewhere in the data, leaves ordinary text and structure unchanged, and fails closed beyond its
+bounds; scrubbing replaces the home and temporary directories with generic labels.
+"""
+
 from __future__ import annotations
 
 import json
@@ -16,11 +23,19 @@ from latexprep.redaction import (
 
 
 class RedactionTests(unittest.TestCase):
+    """What :func:`redact_data` hides, what it keeps and where it fails closed."""
+
     def test_long_plain_tokens_and_marker_runs_remain_unchanged(self) -> None:
         value = {"text": "a" * 12000, "punctuation": "." * 12000, "markers": "?" * 12000}
         self.assertEqual(redact_data(value), value)
 
     def assert_hidden(self, result: object, *values: str) -> None:
+        """Assert that none of ``values`` appears in the JSON form of ``result``.
+
+        Args:
+            result: The redacted data.
+            *values: The secrets that must not appear.
+        """
         serialized = json.dumps(result)
         for value in values:
             self.assertNotIn(value, serialized)
@@ -308,6 +323,12 @@ class RedactionTests(unittest.TestCase):
 
 
 class LocalPathScrubbingTests(unittest.TestCase):
+    """Replacing local directories in a data tree with generic labels.
+
+    Attributes:
+        LABELS: The directories and labels that most tests scrub with.
+    """
+
     LABELS: ClassVar[dict[str, str]] = {"/home/ann": "~", "/var/tmp/x": "<tmp>"}
 
     def test_home_and_temporary_directories_become_generic_everywhere_in_a_tree(self) -> None:

@@ -22,12 +22,16 @@ MAX_DRAWN_ITEMS = 100
 
 
 def _is_coordinate(value: object) -> TypeGuard[int | float]:
-    """A finite integer or float; a boolean is not a coordinate."""
+    """Return whether ``value`` is a finite integer or float; a boolean is not a coordinate."""
     return isinstance(value, (int, float)) and type(value) in {int, float} and math.isfinite(value)
 
 
 def _boxes(value: object) -> list[tuple[float, float, float, float]]:
-    """Every (left, top, right, bottom) box in a nested list of coordinates."""
+    """Collect every (left, top, right, bottom) box in a nested list of coordinates.
+
+    A box without area or beyond ``MAX_COORDINATE_POINTS`` is left out, and only the
+    first ``MAX_DRAWN_ITEMS`` items of each list are searched.
+    """
     if not isinstance(value, (tuple, list)):
         return []
     if len(value) == 4 and all(_is_coordinate(v) for v in value):
@@ -42,6 +46,18 @@ def _boxes(value: object) -> list[tuple[float, float, float, float]]:
 
 
 def _pdf_link(path: object, page: int) -> str | None:
+    """Link to ``page`` of the PDF at ``path``.
+
+    A path with one leading slash is checked without it but linked as given.
+
+    Args:
+        path: The path recorded for the PDF.
+        page: The page to open, counted from 1.
+
+    Returns:
+        The quoted path with a ``#page=`` fragment, or ``None`` when ``path`` is not text
+        ending in ``.pdf`` that forms a relative POSIX path.
+    """
     if not isinstance(path, str) or not path.lower().endswith(".pdf"):
         return None
     relative = path[1:] if path.startswith("/") and not path.startswith("//") else path
@@ -51,7 +67,7 @@ def _pdf_link(path: object, page: int) -> str | None:
 
 
 def _plausible_size(size: object) -> tuple[float, float] | None:
-    """A (width, height) pair of positive, finite, plausible page dimensions."""
+    """Read a (width, height) pair of positive, finite, plausible page dimensions, or ``None``."""
     if isinstance(size, (list, tuple)) and len(size) == 2:
         width, height = size
         if (
@@ -67,9 +83,17 @@ def _plausible_size(size: object) -> tuple[float, float] | None:
 def page_size_from_evidence(
     report: RedactedReport, finding: Finding, page: int
 ) -> tuple[float, float] | None:
-    """The recorded size of ``page`` from findings of the same document and stage.
+    """Find the recorded size of ``page`` from findings of the same document and stage.
 
     Geometry from another document or stage must not be borrowed for this page.
+
+    Args:
+        report: The report whose findings may record page dimensions.
+        finding: The finding whose document and stage the evidence must share.
+        page: The page number, counted from 1.
+
+    Returns:
+        The page's width and height in points, or ``None`` when no finding records them.
     """
     for evidence in report.findings:
         if evidence.stage != finding.stage or evidence.document != finding.document:
@@ -85,7 +109,17 @@ def page_size_from_evidence(
 
 
 def _region_figure(item: dict, finding: Finding, report: RedactedReport) -> str:
-    """The figure for one finding or violation record, or an empty string without regions."""
+    """Draw the figure for one finding or violation record, or an empty string without regions.
+
+    Args:
+        item: The details of the finding or one of its violation records.
+        finding: The finding, whose document, stage and path locate the page.
+        report: The report whose findings record page sizes and whose ``pdf`` artifact is
+            the link of last resort.
+
+    Returns:
+        The ``<figure>`` HTML, or an empty string without a valid page and box.
+    """
     page = item.get(DetailKey.PAGE)
     if type(page) is not int or page < 1:
         return ""
@@ -115,7 +149,15 @@ def _region_figure(item: dict, finding: Finding, report: RedactedReport) -> str:
 
 
 def regions_html(finding: Finding, report: RedactedReport) -> str:
-    """Diagrams of the regions recorded in a finding and in its listed violations."""
+    """Draw diagrams of the regions recorded in a finding and in its listed violations.
+
+    Args:
+        finding: The finding whose details and violations are drawn.
+        report: The report the finding belongs to.
+
+    Returns:
+        The figures' HTML, or an empty string when nothing records a region.
+    """
     candidates = [finding.details]
     violations = finding.details.get(DetailKey.VIOLATIONS)
     if isinstance(violations, (list, tuple)):

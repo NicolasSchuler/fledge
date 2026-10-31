@@ -13,7 +13,14 @@ class PreparationError(Exception):
 
 
 class RequestError(PreparationError):
-    """An invalid request or setting that names its source and a concrete next step."""
+    """An invalid request or setting that names its source and a concrete next step.
+
+    Args:
+        message: What is wrong.
+
+    Attributes:
+        suggestion: The concrete next step.
+    """
 
     def __init__(self, message: str, suggestion: str) -> None:
         super().__init__(message)
@@ -21,7 +28,14 @@ class RequestError(PreparationError):
 
 
 class ToolUnavailableError(PreparationError):
-    """A required external program is not installed or not on ``PATH``."""
+    """A required external program is not installed or not on ``PATH``.
+
+    Args:
+        message: What is wrong.
+
+    Attributes:
+        tool: The program that is missing.
+    """
 
     def __init__(self, message: str, tool: str) -> None:
         super().__init__(message)
@@ -38,9 +52,13 @@ class SandboxRefusedError(PreparationError):
 class SettingsError(PreparationError):
     """An invalid settings value; ``settings`` names the top-level settings at fault.
 
-    The names are in the spelling a researcher uses in a settings file or on the
-    command line, in the order the message mentions them. A message that no single
-    setting explains carries none.
+    Args:
+        message: What is wrong.
+
+    Attributes:
+        settings: The top-level settings at fault, in the spelling a researcher uses in a
+            settings file or on the command line and in the order the message mentions
+            them. A message that no single setting explains carries none.
     """
 
     def __init__(self, message: str, settings: tuple[str, ...] = ()) -> None:

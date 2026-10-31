@@ -21,7 +21,15 @@ from .terminal_report import print_redacted_report, render_redacted_terminal
 
 
 class OutputFormat(StrEnum):
-    """How a command writes its final report to standard output."""
+    """How a command writes its final report to standard output.
+
+    Attributes:
+        TERMINAL: Text for the terminal, printed with styling to the console.
+        COMPACT: Short plain records.
+        JSON: The JSON report.
+        HTML: The HTML report.
+        CI: CI annotations.
+    """
 
     TERMINAL = "terminal"
     COMPACT = "compact"
@@ -37,7 +45,17 @@ def render_redacted_document(
     options: RenderOptions = DEFAULT_RENDER_OPTIONS,
     preview_images: Mapping[str, bytes] | None = None,
 ) -> str:
-    """Render an already redacted report as text; the terminal format has no styling."""
+    """Render an already redacted report as text; the terminal format has no styling.
+
+    Args:
+        report: The redacted report.
+        output_format: The format to render.
+        options: Rendering choices for the terminal, compact and CI formats.
+        preview_images: PDF preview images for the HTML format.
+
+    Returns:
+        The rendered document.
+    """
     match output_format:
         case OutputFormat.TERMINAL:
             return render_redacted_terminal(report, options=options)
@@ -60,7 +78,17 @@ def render_document(
     options: RenderOptions = DEFAULT_RENDER_OPTIONS,
     preview_images: Mapping[str, bytes] | None = None,
 ) -> str:
-    """Render the report as text; the terminal format is rendered without styling."""
+    """Render the report as text; the terminal format is rendered without styling.
+
+    Args:
+        report: The report to redact and render.
+        output_format: The format to render.
+        options: Rendering choices, as for :func:`render_redacted_document`.
+        preview_images: PDF preview images for the HTML format.
+
+    Returns:
+        The rendered document.
+    """
     return render_redacted_document(
         redact_report(report), output_format, options=options, preview_images=preview_images
     )
@@ -77,9 +105,16 @@ def write_redacted_report(
 ) -> None:
     """Write the final, already redacted report to standard output.
 
-    The terminal format prints styled text to ``console``; every other format is
-    echoed as plain text. ``document`` is text the caller already rendered in
-    ``output_format`` from this exact report, such as a saved JSON or HTML file.
+    Args:
+        report: The redacted report.
+        output_format: The format to write. The terminal format prints styled text to
+            ``console``; every other format is echoed as plain text.
+        console: The console for the terminal format.
+        options: Rendering choices, as for :func:`render_redacted_document`.
+        preview_images: PDF preview images for the HTML format.
+        document: Text the caller already rendered in ``output_format`` from this exact
+            report, such as a saved JSON or HTML file; when ``None`` the report is
+            rendered here. The terminal format does not use it.
     """
     if output_format is OutputFormat.TERMINAL:
         print_redacted_report(report, console, options=options)
@@ -101,7 +136,17 @@ def write_report(
     preview_images: Mapping[str, bytes] | None = None,
     document: str | None = None,
 ) -> None:
-    """Redact ``report`` once, then write it to standard output as ``write_redacted_report``."""
+    """Redact ``report`` once, then write it to standard output as ``write_redacted_report``.
+
+    Args:
+        report: The report to redact and write.
+        output_format: The format to write.
+        console: The console for the terminal format.
+        options: Rendering choices, as for :func:`render_redacted_document`.
+        preview_images: PDF preview images for the HTML format.
+        document: Text already rendered from this exact report, as for
+            :func:`write_redacted_report`.
+    """
     write_redacted_report(
         redact_report(report),
         output_format,

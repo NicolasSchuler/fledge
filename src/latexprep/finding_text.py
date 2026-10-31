@@ -18,14 +18,30 @@ from .redaction import LIMIT_REDACTION, redact_known_secrets
 
 
 def check_status(*, failed: bool, incomplete: bool) -> Status:
-    """A confirmed violation fails even when other evidence is incomplete."""
+    """Turn a confirmed violation and incomplete evidence into a status.
+
+    A confirmed violation fails even when other evidence is incomplete.
+
+    Args:
+        failed: Whether a violation was confirmed.
+        incomplete: Whether the evidence is incomplete.
+
+    Returns:
+        ``failed`` for a confirmed violation, otherwise ``inconclusive`` for incomplete
+        evidence and ``passed`` for complete evidence.
+    """
     if failed:
         return "failed"
     return "inconclusive" if incomplete else "passed"
 
 
 def location_label(item: Mapping[str, object]) -> str:
-    """``path:line`` for a reported item, ``path`` without a line, or nothing without a path."""
+    """Label the location of a reported item.
+
+    Returns:
+        ``path:line`` for an item with a path and a line, ``path`` without a line, or an
+        empty string without a path.
+    """
     path, line = item.get("path"), item.get("line")
     if not isinstance(path, str):
         return ""
@@ -33,17 +49,26 @@ def location_label(item: Mapping[str, object]) -> str:
 
 
 def more_suffix(hidden: int) -> str:
-    """`` (+N more)`` for ``hidden`` items left out of a listing, or nothing."""
+    """Return `` (+N more)`` for ``hidden`` items left out of a listing, or nothing."""
     return f" (+{hidden} more)" if hidden > 0 else ""
 
 
 def plural(count: int, noun: str) -> str:
-    """``1 float``, ``3 floats``: a count with its regularly pluralized noun."""
+    """Write a count with its regularly pluralized noun: ``1 float``, ``3 floats``."""
     return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
 
 
 def list_locations(items: Sequence[Mapping[str, object]], limit: int = 3) -> str:
-    """Distinct item locations, the first ``limit`` named: ``a.tex:1, b.tex (+2 more)``."""
+    """List the distinct locations of ``items``, naming the first ``limit``.
+
+    Args:
+        items: Reported items with optional ``path`` and ``line`` keys; items without a
+            path are left out.
+        limit: How many locations to name before the rest are only counted.
+
+    Returns:
+        The locations joined by commas, such as ``a.tex:1, b.tex (+2 more)``.
+    """
     places = list(dict.fromkeys(filter(None, map(location_label, items))))
     return ", ".join(places[:limit]) + more_suffix(len(places) - limit)
 
@@ -53,6 +78,13 @@ def redact_findings(findings: list[Finding], secrets: set[str]) -> list[Finding]
 
     A finding too large to scan within the redaction bounds is replaced by one that
     reports only that its content was withheld.
+
+    Args:
+        findings: The findings whose path, message, suggestion and details are redacted.
+        secrets: The discovered secret values.
+
+    Returns:
+        The redacted findings, in the order given.
     """
     redacted = []
     for item in findings:

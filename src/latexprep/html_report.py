@@ -21,12 +21,20 @@ from .report import RedactedReport, Report, redact_report
 
 @cache
 def load_stylesheet() -> str:
-    """The report's style sheet, packaged as ``report.css``."""
+    """Load the report's style sheet, packaged as ``report.css``."""
     return resources.files("latexprep").joinpath("report.css").read_text(encoding="utf-8")
 
 
 def _diff_html(diff: str, path: str) -> str:
-    """A before/after table of a unified diff; ``path`` names the file in its caption."""
+    """Show a unified diff as a before/after table; ``path`` names the file in its caption.
+
+    Args:
+        diff: The unified diff.
+        path: The changed file.
+
+    Returns:
+        The escaped HTML table.
+    """
     rows = []
     for line in diff.splitlines():
         if line.startswith(("---", "+++", "@@")):
@@ -47,6 +55,7 @@ def _diff_html(diff: str, path: str) -> str:
 
 
 def _package_contents_html(report: RedactedReport) -> str:
+    """Show each package's files and selection reasons, or nothing without package contents."""
     if not report.package_contents:
         return ""
     parts = ['<h2 id="package-contents">What is in the submission?</h2>']
@@ -97,6 +106,11 @@ def _package_contents_html(report: RedactedReport) -> str:
 
 
 def _findings_html(report: RedactedReport) -> list[str]:
+    """Show every finding, including hidden ones, and the checks that did not run.
+
+    Returns:
+        The HTML parts of the findings section.
+    """
     parts = ["<h2>Findings and actions</h2>"]
     for index, view in enumerate(finding_views(report, show_hidden=True), 1):
         finding = view.finding
@@ -142,6 +156,11 @@ def _findings_html(report: RedactedReport) -> list[str]:
 
 
 def _changes_html(report: RedactedReport) -> list[str]:
+    """Show the proposed or applied changes with their diffs.
+
+    Returns:
+        The HTML parts of the changes section; none without changes.
+    """
     if not report.changes:
         return []
     parts = [
@@ -162,17 +181,29 @@ def _changes_html(report: RedactedReport) -> list[str]:
 
 
 def render_html(report: Report, *, preview_images: Mapping[str, bytes] | None = None) -> str:
-    """Render one offline document with escaped evidence and no executable resources."""
+    """Render one offline document with escaped evidence and no executable resources.
+
+    The report is redacted first.
+
+    Args:
+        report: The report to render.
+        preview_images: The explicit preview store: PNG images by image id, for the PDF
+            differences section.
+
+    Returns:
+        The HTML document.
+    """
     return render_redacted_html(redact_report(report), preview_images=preview_images)
 
 
 def _page_title(report: RedactedReport) -> str:
-    """The browser title: the command and, when known, the document the report is about."""
+    """Title the page with the command and, when known, the document the report is about."""
     title = f"Fledge {report.command} report"
     return f"{title}: {report.main}" if report.main else title
 
 
 def _run_details_html(report: RedactedReport) -> str:
+    """Show the run's settings, stages, tools, artifacts and execution record as JSON."""
     return (
         "<details><summary>Run settings, stages, tools and artifacts</summary><pre>"
         + escape_html(
@@ -196,7 +227,16 @@ def _run_details_html(report: RedactedReport) -> str:
 def render_redacted_html(
     report: RedactedReport, *, preview_images: Mapping[str, bytes] | None = None
 ) -> str:
-    """Render a report that was already redacted together with other exported text."""
+    """Render a report that was already redacted together with other exported text.
+
+    Args:
+        report: The redacted report.
+        preview_images: The explicit preview store: PNG images by image id, for the PDF
+            differences section.
+
+    Returns:
+        The HTML document.
+    """
     header = [
         '<!doctype html><html lang="en"><head><meta charset="utf-8">',
         '<meta name="viewport" content="width=device-width,initial-scale=1">',

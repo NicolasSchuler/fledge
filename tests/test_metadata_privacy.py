@@ -28,6 +28,8 @@ from latexprep.report import Report
 
 
 class MetadataPrivacyTests(unittest.TestCase):
+    """Metadata sanitization: options, field targets, source edit plans and the final recheck."""
+
     def test_options_are_explicit_literal_and_immutable(self):
         for parameters in (
             {"path": "../main.tex"},
@@ -375,12 +377,29 @@ class MetadataPrivacyTests(unittest.TestCase):
 
 
 def png_chunk(kind, value):
+    """Return a PNG chunk of type ``kind`` that holds ``value``, with its length and CRC.
+
+    Args:
+        kind: The four-byte chunk type, such as ``b"tEXt"``.
+        value: The chunk data.
+
+    Returns:
+        The bytes of the chunk.
+    """
     return (
         struct.pack(">I", len(value)) + kind + value + struct.pack(">I", zlib.crc32(kind + value))
     )
 
 
 def png(*chunks):
+    """Return a 1 x 1 RGB PNG with ``chunks`` between its header and its image data.
+
+    Args:
+        *chunks: The (type, data) pairs of the further chunks.
+
+    Returns:
+        The bytes of the PNG file.
+    """
     return (
         b"\x89PNG\r\n\x1a\n"
         + png_chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0))
@@ -391,6 +410,19 @@ def png(*chunks):
 
 
 def exif(value, *, tag=0x013B, kind=2):
+    """Return a little-endian TIFF block whose one directory entry holds ``value``.
+
+    The value gets a terminating NUL; it is stored in the entry when it fits in four bytes
+    and after the directory otherwise.
+
+    Args:
+        value: The value, as ASCII text or as bytes.
+        tag: The entry's tag; the default, 0x013B, is the EXIF Artist field.
+        kind: The entry's TIFF field type; the default, 2, is ASCII.
+
+    Returns:
+        The bytes of the block.
+    """
     raw = (value.encode("ascii") if isinstance(value, str) else value) + b"\0"
     stored = raw.ljust(4, b"\0") if len(raw) <= 4 else struct.pack("<I", 26)
     return (
@@ -405,10 +437,28 @@ def exif(value, *, tag=0x013B, kind=2):
 
 
 def iptc(dataset, value, record=2):
+    """Return an IPTC dataset that holds ``value``.
+
+    Args:
+        dataset: The dataset number within the record.
+        value: The dataset's bytes.
+        record: The record number; the default, 2, is the application record.
+
+    Returns:
+        The bytes of the dataset, with its marker, numbers and length.
+    """
     return b"\x1c" + bytes([record, dataset]) + struct.pack(">H", len(value)) + value
 
 
 def photoshop(*datasets):
+    """Return a Photoshop 3.0 block with one IPTC resource (0x0404) that holds ``datasets``.
+
+    Args:
+        *datasets: The IPTC datasets of the resource, as :func:`iptc` builds them.
+
+    Returns:
+        The bytes of the block, with the resource data padded to an even length.
+    """
     payload = b"".join(datasets)
     return (
         b"Photoshop 3.0\0"
@@ -421,6 +471,15 @@ def photoshop(*datasets):
 
 
 def jpeg(*segments):
+    """Return a JPEG file that holds ``segments`` between its start and end markers.
+
+    Args:
+        *segments: The (marker, data) pairs of the segments, where the marker is the byte
+            after ``0xFF``, such as ``0xE1`` for APP1.
+
+    Returns:
+        The bytes of the file.
+    """
     return (
         b"\xff\xd8"
         + b"".join(
@@ -432,7 +491,20 @@ def jpeg(*segments):
 
 
 class ImageMetadataTests(unittest.TestCase):
+    """:func:`check_image_metadata` on PNG and JPEG bytes: matches, limits and messages."""
+
     def scan(self, data, suffix=".png", terms=("Alice Researcher",), limits=None):
+        """Scan one image in a temporary project for identity terms.
+
+        Args:
+            data: The bytes of the image.
+            suffix: The suffix of the image's file name.
+            terms: The identity terms to look for.
+            limits: The scan limits, or ``None`` for the defaults.
+
+        Returns:
+            The first finding of the scan.
+        """
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / ("figure" + suffix)).write_bytes(data)

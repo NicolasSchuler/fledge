@@ -28,14 +28,17 @@ from tests.support import AsyncProjectTestCase
 
 
 def selection(*codes: str) -> CheckSelection:
+    """Return a check selection that selects only ``codes``."""
     return CheckSelection(select=codes)
 
 
 def codes(findings: list[Finding]) -> set[str]:
+    """Return the codes of ``findings``, leaving out findings without a code."""
     return {finding.code for finding in findings if finding.code is not None}
 
 
 def configured_artwork() -> PdfArtworkOptions:
+    """Return artwork options with a broad set of checks configured on one page region."""
     region = PdfRegion("Figure", 1, 5, 5, 95, 95)
     return PdfArtworkOptions(
         detect_printer_marks=True,
@@ -62,6 +65,7 @@ def configured_artwork() -> PdfArtworkOptions:
 
 
 def configured_pdf_details() -> PdfCheckOptions:
+    """Return PDF check options with a broad set of detail checks configured."""
     return PdfCheckOptions(
         section_budgets=(PdfSectionBudget("Body", 1, 1, 2),),
         min_text_size_pt=10,
@@ -89,7 +93,10 @@ def configured_pdf_details() -> PdfCheckOptions:
 
 
 class CheckPolicyAdapterTests(AsyncProjectTestCase):
+    """Tests that the online, PDF detail, artwork and structure adapters obey check selection."""
+
     async def asyncSetUp(self) -> None:
+        """Write a placeholder ``paper.pdf`` below ``root``."""
         self.pdf = self.root / "paper.pdf"
         self.pdf.write_bytes(b"%PDF-fixture")
 

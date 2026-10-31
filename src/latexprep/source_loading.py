@@ -51,7 +51,16 @@ _ARGUMENT_LIMIT_ADVICE: dict[ParseLimit, tuple[str, str]] = {
 
 @dataclass(frozen=True, slots=True)
 class ParsedSource:
-    """One readable project source and its lexical scan."""
+    """One readable project source and its lexical scan.
+
+    Attributes:
+        text: The decoded text of the file, without its byte-order mark.
+        masked: The text the lexer scanned.
+        commands: The commands the lexer found in ``masked``.
+        bom: Whether the file began with a UTF-8 byte-order mark.
+        comment_starts: Where the blanked comments begin.
+        unclosed_literals: Where the unterminated literal regions begin.
+    """
 
     text: str
     # ``text`` with comments and literal regions blanked; offsets are unchanged.
@@ -64,16 +73,23 @@ class ParsedSource:
     unclosed_literals: tuple[int, ...] = ()
 
     def line_at(self, offset: int) -> int:
-        """The 1-based line of ``offset`` in ``text``."""
+        """Return the 1-based line of ``offset`` in ``text``."""
         return self.text.count("\n", 0, offset) + 1
 
     def encode(self, text: str | None = None) -> bytes:
-        """``text`` (default: the source's own) as the file stores it, with its byte-order mark."""
+        """Encode ``text`` as the file stores it: UTF-8, with the source's byte-order mark.
+
+        Args:
+            text: The text to encode; ``None`` encodes the source's own text.
+
+        Returns:
+            The encoded bytes, starting with a byte-order mark when the source had one.
+        """
         return with_bom(self.text if text is None else text, bom=self.bom).encode("utf-8")
 
 
 def is_document_root(commands: list[Command]) -> bool:
-    """Whether a source declares a document class or opens the document environment."""
+    """Return whether a source declares a document class or opens the document environment."""
     return any(
         command.name == "documentclass" or command.begins("document") for command in commands
     )
@@ -81,7 +97,12 @@ def is_document_root(commands: list[Command]) -> bool:
 
 @dataclass(slots=True)
 class LoadBudget:
-    """What one graph has spent on loading: bytes read and commands scanned so far."""
+    """What one graph has spent on loading: bytes read and commands scanned so far.
+
+    Attributes:
+        source_bytes: The bytes read from source files so far.
+        commands: The commands scanned in loaded sources so far.
+    """
 
     source_bytes: int = 0
     commands: int = 0
@@ -94,7 +115,12 @@ class LoadBudget:
 
 @dataclass(frozen=True, slots=True)
 class _SourceText:
-    """The decoded text of a file, and whether it began with a byte-order mark."""
+    """The decoded text of a file, and whether it began with a byte-order mark.
+
+    Attributes:
+        text: The decoded text, without the byte-order mark.
+        bom: Whether the file began with a UTF-8 byte-order mark.
+    """
 
     text: str
     bom: bool
@@ -103,7 +129,20 @@ class _SourceText:
 def _read_text(
     name: str, path: Path, budget: LoadBudget, findings: GraphFindings
 ) -> _SourceText | None:
-    """Read and decode ``path`` within the budget, or report why it cannot be used."""
+    """Read and decode ``path`` within the budget, or report why it cannot be used.
+
+    A file that was read adds its bytes to ``budget`` even when it then fails to decode.
+
+    Args:
+        name: The project-relative name the findings report.
+        path: The file to read.
+        budget: The loading budget; it limits the read and records its bytes.
+        findings: Where a file over the size limit, an unreadable file or one that is not
+            valid UTF-8 is recorded as an uncertainty.
+
+    Returns:
+        The decoded text, or ``None`` when the file cannot be used.
+    """
     try:
         raw = read_regular_file(path, budget.remaining_bytes)
     except FileTooLargeError:
@@ -141,7 +180,14 @@ def _read_text(
 def _report_parse_limit(
     name: str, text: str, error: ParseLimitExceeded, findings: GraphFindings
 ) -> None:
-    """Record which bound of the lexical subset a source exceeded, and where."""
+    """Record which bound of the lexical subset a source exceeded, and where.
+
+    Args:
+        name: The project-relative name the finding reports.
+        text: The text of the source, used to turn the offset into a line.
+        error: The exceeded bound and its offset, as the lexer raised it.
+        findings: Where the uncertainty is recorded.
+    """
     line = text.count("\n", 0, error.offset) + 1
     if error.reason == "command_count":
         findings.uncertain(
@@ -164,6 +210,16 @@ def load_source(
     Every refusal is recorded in ``findings`` as an uncertainty, because the commands
     and references of a file that was not read are unknown. A source read adds its
     bytes and commands to ``budget``.
+
+    Args:
+        name: The project-relative name of the file.
+        path: The file on disk; a symbolic link is refused.
+        budget: The bytes and commands the graph has spent so far.
+        findings: Where every refusal is recorded.
+
+    Returns:
+        The parsed source, or ``None`` when the file is a link, cannot be read or decoded,
+        exceeds a bound of the lexer, or takes the project over the command budget.
     """
     if path.is_symlink():
         findings.uncertain(

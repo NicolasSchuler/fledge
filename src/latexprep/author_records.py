@@ -37,7 +37,16 @@ _COMMAND = re.compile(r"[A-Za-z][A-Za-z@]{0,63}")
 
 @dataclass(frozen=True)
 class AuthorRecordOptions:
-    """The command that opens an author record and the commands each record must contain."""
+    """The command that opens an author record and the commands each record must contain.
+
+    Construction raises ``SettingsError`` when a command name is malformed, a field is
+    repeated or there are too many, or the fields list the author command itself.
+
+    Attributes:
+        author_command: The record-opening command, without the backslash.
+        required_author_fields: The associated commands, without the backslash, that each
+            record must contain; an empty tuple disables the check.
+    """
 
     author_command: str = "author"
     required_author_fields: tuple[str, ...] = ()
@@ -63,7 +72,15 @@ class AuthorRecordOptions:
 
 
 def _problem(item: dict[str, object]) -> str:
-    """Name where one confirmed violation is and what is wrong there."""
+    """Name where one confirmed violation is and what is wrong there.
+
+    Args:
+        item: A violation from the scan: a record with ``author_index``, ``empty_value``
+            and ``missing_fields``, or a field placed before the first record.
+
+    Returns:
+        The location and the problems, for the failure message.
+    """
     where = location_label(item)
     if "author_index" not in item:
         return f"\\{item['field']} at {where}"
@@ -77,7 +94,13 @@ def _problem(item: dict[str, object]) -> str:
 
 
 class _Step(StrEnum):
-    """What the scan does with one command of the preamble."""
+    """What the scan does with one command of the preamble.
+
+    Attributes:
+        DEFINITION: Skip the command and the definition it introduces.
+        STOP: End the scan.
+        READ: Read the command as a possible record opener or associated field.
+    """
 
     DEFINITION = "definition"  # the command being defined is not an author record
     STOP = "stop"  # the title or the body starts: no record can follow
@@ -85,6 +108,7 @@ class _Step(StrEnum):
 
 
 def _classify(command: Command) -> _Step:
+    """Decide what the scan does with ``command``."""
     if command.name in COMMAND_DEFINITION_COMMANDS:
         return _Step.DEFINITION
     if not command.depth and (command.name == "maketitle" or command.begins("document")):
@@ -93,7 +117,16 @@ def _classify(command: Command) -> _Step:
 
 
 def _syntax_problem(document: ExpandedDocument, command: Command, where: str) -> str | None:
-    """Why ``command`` cannot be read as a plain one-argument record, or ``None``."""
+    """Explain why ``command`` cannot be read as a plain one-argument record.
+
+    Args:
+        document: The expanded document whose conditionals enclose the command or not.
+        command: An author-record opener or associated field.
+        where: The command's location label, which starts the reason.
+
+    Returns:
+        The reason, or ``None`` when the command is a plain one-argument record.
+    """
     # A \if… token only matters where it encloses a record: a \newif-defined
     # name or a branch-taking package conditional executes nothing by itself.
     if in_conditional(document.conditionals, command.start):
@@ -105,16 +138,26 @@ def _syntax_problem(document: ExpandedDocument, command: Command, where: str) ->
 
 @dataclass
 class _AuthorScan:
-    """Author records in preamble order: each opener starts a record, fields join the open one."""
+    """Author records in preamble order: each opener starts a record, fields join the open one.
+
+    Attributes:
+        author_command: The record-opening command.
+        required_fields: The associated commands each record must contain.
+        uncertainty: The reasons the scan cannot interpret the preamble with certainty.
+        records: The records found, each with its index, location and, once closed, its
+            present and missing fields.
+        violations: The records and stray fields that break the contract.
+        empty_names: The indexes of the records whose author name is empty or a
+            placeholder.
+        fields: How many times each required field was given for the open record.
+    """
 
     author_command: str
     required_fields: tuple[str, ...]
     uncertainty: list[str]
     records: list[dict[str, object]] = field(default_factory=list)
     violations: list[dict[str, object]] = field(default_factory=list)
-    # Indexes of the records whose author name is empty or a placeholder.
     empty_names: set[object] = field(default_factory=set)
-    # How many times each required field was given for the open record.
     fields: dict[str, int] = field(default_factory=dict)
 
     def read(self, document: ExpandedDocument) -> None:
@@ -136,6 +179,12 @@ class _AuthorScan:
             self.violations.append({"reason": "no supported literal author records"})
 
     def _read_command(self, document: ExpandedDocument, command: Command) -> None:
+        """Open a record, count a field for the open record, or note what cannot be read.
+
+        Args:
+            document: The expanded document that locates the command.
+            command: One preamble command that is not a definition.
+        """
         if command.name in _DYNAMIC_COMMANDS:
             self.uncertainty.append("dynamically redefined preamble commands")
         if command.name != self.author_command and command.name not in self.required_fields:
@@ -180,7 +229,16 @@ class _AuthorScan:
 
 
 def _failure_message(violations: list[dict[str, object]], records: int, author_command: str) -> str:
-    """The failed records out of all records, each with its missing fields."""
+    """Describe the failed records out of all records, each with its missing fields.
+
+    Args:
+        violations: The confirmed violations.
+        records: How many records the scan found.
+        author_command: The record-opening command, for the message.
+
+    Returns:
+        The message, which explains what to do when no record was found.
+    """
     if not records:
         return (
             f"No literal \\{author_command} author record was found in the preamble, so the "
@@ -202,7 +260,17 @@ def _failure_message(violations: list[dict[str, object]], records: int, author_c
 
 
 def _author_finding(scan: _AuthorScan, main: str | None) -> Finding:
-    """The finding for a scanned preamble: violations are withheld while anything is unclear."""
+    """Build the finding for a scanned preamble.
+
+    Violations are withheld while anything is unclear.
+
+    Args:
+        scan: The finished scan.
+        main: The main file the finding names.
+
+    Returns:
+        The ``manuscript.author_records`` finding.
+    """
     reasons = sorted(set(scan.uncertainty))
     # Any interpretation gap withholds every violation, unlike the manuscript policies.
     confirmed = scan.violations if not reasons else []
@@ -245,8 +313,16 @@ def check_author_records(
     """Check sequential top-level literal records before begin{document}/maketitle.
 
     Each opener starts a new author; fields apply only until the next opener.
-    ``analysed`` shares the source analysis of the same root and main file with other
-    checks; without one the document is expanded here.
+
+    Args:
+        root: The project root.
+        main: The main file, or ``None`` for the project's single document root.
+        options: The record-opening command and the required fields.
+        analysed: The source analysis of the same root and main file shared with other
+            checks; without one the document is expanded here.
+
+    Returns:
+        One finding, or none when no required author fields are configured.
     """
     if not options.required_author_fields:
         return []

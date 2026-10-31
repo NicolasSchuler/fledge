@@ -31,6 +31,7 @@ try:
 except ImportError:  # the suite also runs under `python -m unittest`
 
     def _LIVE_MARKER(target):
+        """Return ``target`` unchanged, since there is no pytest marker to apply."""
         return target
 
 
@@ -41,7 +42,16 @@ MINIMAL_DOCUMENT = "\\documentclass{article}\n\\begin{document}Hello.\\end{docum
 
 
 def write_file(root: Path, name: str, content: str | bytes = "") -> Path:
-    """Write ``content`` (UTF-8 for text) to ``root / name``, creating parents; return the path."""
+    """Write ``content`` (UTF-8 for text) to ``root / name``, creating parent directories.
+
+    Args:
+        root: The directory the name is relative to.
+        name: The relative path of the file.
+        content: The text or bytes of the file.
+
+    Returns:
+        The path of the written file.
+    """
     path = root / name
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(content.encode("utf-8") if isinstance(content, str) else content)
@@ -55,22 +65,42 @@ class TemporaryRoot(unittest.TestCase):
     ``TestCase`` and ``IsolatedAsyncioTestCase`` alike, and cleanup is registered with
     ``addCleanup`` so it runs even when ``setUp`` of a subclass fails afterwards. The root is
     resolved, so that paths compare equal to the real locations the code under test reports.
+
+    Attributes:
+        root: The resolved temporary directory of the current test.
     """
 
     root: Path
 
     def setUp(self) -> None:
+        """Create the temporary ``root`` and register its removal."""
         super().setUp()
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name).resolve()
 
     def write(self, name: str, content: str | bytes = "") -> Path:
-        """Write a file below ``root``; the same helper every test module used to define."""
+        """Write a file below ``root``; the same helper every test module used to define.
+
+        Args:
+            name: The path of the file relative to ``root``.
+            content: The text (written as UTF-8) or bytes of the file.
+
+        Returns:
+            The path of the written file.
+        """
         return write_file(self.root, name, content)
 
     def write_project(self, files: Mapping[str, str | bytes], name: str = "project") -> Path:
-        """Create the directory ``root / name`` holding ``files``; return it."""
+        """Create the directory ``root / name`` holding ``files``.
+
+        Args:
+            files: The text or bytes of each file, by path relative to the project.
+            name: The name of the project directory below ``root``.
+
+        Returns:
+            The project directory.
+        """
         return write_project(self.root / name, files)
 
 
@@ -83,7 +113,18 @@ class AsyncProjectTestCase(TemporaryRoot, unittest.IsolatedAsyncioTestCase):
 
 
 def write_project(root: Path, files: Mapping[str, str | bytes]) -> Path:
-    """Create ``root`` and write each relative path with its text or bytes; return ``root``."""
+    """Create ``root`` and write each relative path with its text or bytes.
+
+    Args:
+        root: The project directory, created with its parents if needed.
+        files: The text or bytes of each file, by path relative to ``root``.
+
+    Returns:
+        ``root``.
+
+    Raises:
+        ValueError: A path resolves to a place outside ``root``.
+    """
     root.mkdir(parents=True, exist_ok=True)
     base = root.resolve()
     for name, value in files.items():
@@ -114,6 +155,21 @@ def fake_build_result(
     ``work``) and reports ``main`` as both the only dependency and the only submission input,
     unless the arguments say otherwise. A failed build records no PDF. The recorder is reported
     complete with no loaded packages, so dependency checks treat the trace as authoritative.
+
+    Args:
+        work: The build directory that receives ``built.pdf``.
+        main: The main file of the build.
+        success: Whether the build succeeded.
+        pdf_bytes: The contents of the PDF a successful build writes.
+        findings: The findings of the build.
+        dependencies: The project inputs the recorder reports, or ``None`` for ``main`` alone.
+        submission_inputs: The submission inputs, or ``None`` for ``main`` alone.
+        tools: The tools of the build, or ``None`` for an empty ``BuildTools()``.
+        command: The command line of the build.
+        log: The text of the build log.
+
+    Returns:
+        The build result.
     """
     work.mkdir(parents=True, exist_ok=True)
     pdf = work / "built.pdf"
@@ -134,12 +190,16 @@ def fake_build_result(
 
 
 async def fake_build(tree, main, work, engine, runner, **_options) -> BuildResult:
-    """A controlled build backend: succeeds with ``main`` as the only dependency."""
+    """Act as a controlled build backend that succeeds with ``main`` as the only dependency.
+
+    It writes the PDF through :func:`fake_build_result` into ``work``; the other arguments
+    are ignored.
+    """
     return fake_build_result(work, main)
 
 
 def _backend(behaviour: object) -> Callable[..., Awaitable[object]]:
-    """An async backend that does what ``behaviour`` says.
+    """Return an async backend that does what ``behaviour`` says.
 
     A callable is the backend itself (an async function or an ``AsyncMock``), an exception
     instance is raised on every call, and any other value is returned on every call; lists
@@ -149,6 +209,7 @@ def _backend(behaviour: object) -> Callable[..., Awaitable[object]]:
         return behaviour
 
     async def backend(*_arguments: object, **_options: object) -> object:
+        """Raise or return ``behaviour``, whatever the arguments."""
         if isinstance(behaviour, BaseException):
             raise behaviour
         return list(behaviour) if isinstance(behaviour, list | tuple) else behaviour
@@ -162,12 +223,20 @@ def controlled_backends(
     inspect_pdf: object = (),
     compare_pdfs: object = (),
 ) -> DocumentBackends:
-    """Document backends that never start a tool, to pass to ``run_job(..., backends=...)``.
+    """Build document backends that never start a tool, for ``run_job(..., backends=...)``.
 
     By default a build succeeds with ``main`` as its only dependency, and a PDF inspection
     and comparison find nothing. Each argument replaces one backend: pass an async callable
     (it receives the arguments the real function would), a ``BuildResult`` or a list of
     findings to return every time, or an exception to raise.
+
+    Args:
+        build: The behaviour of the build backend.
+        inspect_pdf: The behaviour of the PDF inspection backend.
+        compare_pdfs: The behaviour of the PDF comparison backend.
+
+    Returns:
+        The document backends.
     """
     return DocumentBackends(
         build=_backend(build),
@@ -177,6 +246,7 @@ def controlled_backends(
 
 
 def sectioned_project(root: Path) -> None:
+    """Write a project whose ``main.tex`` inputs two ``results.tex`` in different directories."""
     (root / "sections").mkdir(parents=True)
     (root / "appendix").mkdir()
     (root / "main.tex").write_text(
@@ -188,11 +258,19 @@ def sectioned_project(root: Path) -> None:
 
 
 def minimal_project(root: Path, main: str = "main.tex") -> None:
+    """Create ``root``, with its parents if needed, holding a minimal article as ``main``."""
     root.mkdir(parents=True, exist_ok=True)
     (root / main).write_text("\\documentclass{article}\n\\begin{document}Hello.\\end{document}\n")
 
 
 def single_file_project(root: Path, body: str = "Body.", preamble: str = "") -> None:
+    """Create ``root`` holding one article, ``main.tex``.
+
+    Args:
+        root: The project directory; its parent must exist and it must not.
+        body: The text of the document environment.
+        preamble: Text inserted after the document class line.
+    """
     root.mkdir()
     (root / "main.tex").write_text(
         "\\documentclass{article}\n"
@@ -204,7 +282,11 @@ def single_file_project(root: Path, body: str = "Body.", preamble: str = "") -> 
 
 
 async def build_with_loaded_class(tree, main, work, engine, runner, **_options):
-    """Orchestration double only; live TeX evidence belongs to opt-in integration tests."""
+    """Write ``work/paper.pdf`` and report a build that loaded ``article.cls`` from the toolchain.
+
+    Orchestration double only; live TeX evidence belongs to opt-in integration tests. ``main``
+    is the only project and submission input; ``tree``, ``engine`` and ``runner`` are ignored.
+    """
     work.mkdir()
     pdf = work / "paper.pdf"
     pdf.write_bytes(b"%PDF-1.7\ncontrolled build result\n")
@@ -244,6 +326,7 @@ SOURCE_GRAPH_ADVISORY_RULES = frozenset(
 
 
 def directory_contents(root: Path) -> dict[str, bytes]:
+    """Return the bytes of every file below ``root``, by POSIX path relative to it."""
     return {
         path.relative_to(root).as_posix(): path.read_bytes()
         for path in root.rglob("*")
@@ -252,7 +335,20 @@ def directory_contents(root: Path) -> dict[str, bytes]:
 
 
 class RecordedBuild:
-    """Supply fixed per-document traces; fake PDFs validate orchestration only."""
+    """A build backend that supplies fixed per-document traces.
+
+    Fake PDFs validate orchestration only.
+
+    Attributes:
+        traces: The recorded project inputs of each successive build, by main file; ``None``
+            gives no project inputs and ``None`` as the submission inputs.
+        generated_reads: The generated files every build reports as read.
+        fail_archive_main: The main file whose build in an ``archive-build`` directory fails,
+            if any.
+        counts: How many builds of each main file have run.
+        visits: The main file, the work directory name and the project contents of each
+            build.
+    """
 
     def __init__(
         self,
@@ -296,13 +392,28 @@ async def format_with(
     settings: Settings | None = None,
     **options: object,
 ) -> FormattingResult:
-    """Format with the formatting settings of ``settings``, as the job core passes them."""
+    """Format with the formatting settings of ``settings``, as the job core passes them.
+
+    Args:
+        source: The project whose TeX documents are formatted.
+        work: The directory, which must not exist, that holds the formatter's workspaces.
+        runner: The runner of the formatter.
+        settings: The settings whose ``formatting_options`` apply, ``Settings()`` if omitted.
+        **options: Further keyword arguments of ``format_project``.
+
+    Returns:
+        The result of ``format_project``.
+    """
     settings = settings or Settings()
     return await format_project(source, work, runner, settings.formatting_options, **options)
 
 
 def live_tests_enabled(*legacy: str) -> bool:
-    """Whether opt-in live tool tests run: ``FLEDGE_RUN_INTEGRATION=1`` or a legacy variable."""
+    """Return whether opt-in live tool tests run.
+
+    They run when ``FLEDGE_RUN_INTEGRATION``, ``LATEX_PREP_RUN_INTEGRATION`` or one of the
+    ``legacy`` variables is ``1``.
+    """
     return any(
         os.environ.get(name) == "1"
         for name in ("FLEDGE_RUN_INTEGRATION", "LATEX_PREP_RUN_INTEGRATION", *legacy)
@@ -314,11 +425,20 @@ def live_test(reason: str, *legacy: str, platform: str | None = None) -> Callabl
 
     It is skipped unless ``FLEDGE_RUN_INTEGRATION=1`` (or a ``legacy`` variable) is set, and
     on any platform other than ``platform`` when one is given. Under pytest the ``live``
-    marker also selects it with ``-m live``. ``reason`` is the skip message.
+    marker also selects it with ``-m live``.
+
+    Args:
+        reason: The skip message.
+        *legacy: Further environment variables that enable live tests when set to ``1``.
+        platform: The ``sys.platform`` the test requires, or ``None`` for any.
+
+    Returns:
+        The decorator.
     """
     enabled = live_tests_enabled(*legacy) and (platform is None or sys.platform == platform)
 
     def decorate(target: _T) -> _T:
+        """Apply the skip condition and the ``live`` marker to ``target``."""
         return _LIVE_MARKER(unittest.skipUnless(enabled, reason)(target))
 
     return decorate
@@ -340,6 +460,11 @@ def assert_matches_golden(case: unittest.TestCase, name: str, actual: str) -> No
 
     With ``FLEDGE_UPDATE_GOLDEN=1`` the file is written instead, so a deliberate change of an
     output is reviewed as a diff of the golden file rather than edited by hand.
+
+    Args:
+        case: The test case that reports the failure.
+        name: The path of the golden file relative to ``tests/golden``.
+        actual: The output to compare.
     """
     path = GOLDEN_DIRECTORY / name
     if os.environ.get(UPDATE_GOLDEN_VARIABLE) == "1":
@@ -367,13 +492,24 @@ def normalise_report_data(
     measured: frozenset[str] = frozenset(),
     in_measured: bool = False,
 ) -> object:
-    """A report with what varies between runs replaced by a placeholder.
+    """Replace what varies between runs in a report with placeholders.
 
     Each text in ``replacements`` (a path, a version) is replaced inside every string, longest
-    first. Numbers under a timing key (``elapsed_seconds``, ``queue_seconds``), and every number
-    inside a section named in ``measured`` (resource accounting, which depends on timing and the
-    host), become ``"<seconds>"`` and ``"<measured>"``. Keys, structure and all other values,
-    including configured limits such as ``timeout_seconds``, are kept.
+    first. Numbers under a timing key (``elapsed_seconds``, ``queue_seconds``,
+    ``duration_seconds``), and every number inside a section named in ``measured`` (resource
+    accounting, which depends on timing and the host), become ``"<seconds>"`` and
+    ``"<measured>"``. Keys, structure and all other values, including configured limits such as
+    ``timeout_seconds``, are kept.
+
+    Args:
+        value: The report data, or a part of it.
+        replacements: The placeholder of each text that varies.
+        measured: The keys of the sections whose numbers are measured.
+        in_measured: Whether ``value`` lies inside a measured section, as the recursion
+            passes it.
+
+    Returns:
+        A normalised copy of ``value``.
     """
     if isinstance(value, str):
         for old in sorted(replacements, key=len, reverse=True):
@@ -421,7 +557,15 @@ _SCHEMA_TYPES: dict[str, Callable[[object], bool]] = {
 
 
 def schema_keyword_problems(schema: Mapping[str, Any], where: str = "#") -> list[str]:
-    """The places where ``schema`` uses a keyword that ``schema_violations`` cannot check."""
+    """List the places where ``schema`` uses a keyword that ``schema_violations`` cannot check.
+
+    Args:
+        schema: The schema to inspect, with its nested schemas.
+        where: The JSON pointer of ``schema``, which prefixes each problem.
+
+    Returns:
+        One readable line per unsupported keyword.
+    """
     problems = [
         f"{where}: unsupported keyword {key!r}"
         for key in schema
@@ -444,14 +588,24 @@ def schema_keyword_problems(schema: Mapping[str, Any], where: str = "#") -> list
 def schema_violations(
     instance: object, schema: Mapping[str, Any], root: Mapping[str, Any] | None = None
 ) -> list[str]:
-    """How ``instance`` breaks ``schema``, as readable lines; empty when it conforms.
+    """List how ``instance`` breaks ``schema``.
 
     A small validator for the subset of JSON Schema that the published report schema uses:
     ``type`` (one name or a list), ``required``, ``properties``, ``additionalProperties`` (a
     boolean or a schema), ``enum``, ``items``, ``const`` and local ``$ref`` pointers such as
-    ``#/$defs/finding``. Annotation keywords are ignored. A schema that uses any other keyword
-    raises ``ValueError``, so a schema that outgrows this validator fails loudly instead of
-    being checked only in part.
+    ``#/$defs/finding``. Annotation keywords are ignored.
+
+    Args:
+        instance: The value to validate.
+        schema: The schema the value must conform to.
+        root: The document that local ``$ref`` pointers resolve in, ``schema`` if omitted.
+
+    Returns:
+        The violations as readable lines; empty when ``instance`` conforms.
+
+    Raises:
+        ValueError: The schema uses any other keyword, so a schema that outgrows this
+            validator fails loudly instead of being checked only in part.
     """
     root = schema if root is None else root
     if problems := schema_keyword_problems(schema):
@@ -462,7 +616,7 @@ def schema_violations(
 
 
 def _referenced(schema: Mapping[str, Any], root: Mapping[str, Any]) -> Mapping[str, Any] | None:
-    """The schema a local ``$ref`` points at, or ``None`` when the pointer does not resolve."""
+    """Return the schema a local ``$ref`` points at, or ``None`` when it does not resolve."""
     target: object = root
     for step in str(schema["$ref"]).removeprefix("#/").split("/"):
         target = target[step] if isinstance(target, Mapping) else {}
@@ -470,6 +624,7 @@ def _referenced(schema: Mapping[str, Any], root: Mapping[str, Any]) -> Mapping[s
 
 
 def _type_violations(instance: object, schema: Mapping[str, Any], where: str) -> list[str]:
+    """Check the ``type`` keyword, reporting at ``where`` a value of none of its types."""
     if "type" not in schema:
         return []
     names = schema["type"] if isinstance(schema["type"], list) else [schema["type"]]
@@ -479,7 +634,7 @@ def _type_violations(instance: object, schema: Mapping[str, Any], where: str) ->
 
 
 def _value_violations(instance: object, schema: Mapping[str, Any], where: str) -> list[str]:
-    """The ``const`` and ``enum`` keywords."""
+    """Check the ``const`` and ``enum`` keywords, reporting at ``where``."""
     problems = []
     if "const" in schema and instance != schema["const"]:
         problems.append(f"{where}: expected {schema['const']!r}, got {instance!r}")
@@ -491,6 +646,17 @@ def _value_violations(instance: object, schema: Mapping[str, Any], where: str) -
 def _violations(
     instance: object, schema: Mapping[str, Any], root: Mapping[str, Any], where: str
 ) -> list[str]:
+    """List how ``instance`` at ``where`` breaks ``schema``, following local references.
+
+    Args:
+        instance: The value to validate.
+        schema: The schema the value must conform to.
+        root: The document that local ``$ref`` pointers resolve in.
+        where: The path of ``instance`` in the validated document, such as ``$.items[0]``.
+
+    Returns:
+        The violations as readable lines.
+    """
     if "$ref" in schema:
         target = _referenced(schema, root)
         if target is None:
@@ -514,6 +680,17 @@ def _object_violations(
     root: Mapping[str, Any],
     where: str,
 ) -> list[str]:
+    """Check the ``required``, ``properties`` and ``additionalProperties`` keywords.
+
+    Args:
+        instance: The object to validate.
+        schema: The schema the object must conform to.
+        root: The document that local ``$ref`` pointers resolve in.
+        where: The path of ``instance`` in the validated document.
+
+    Returns:
+        The violations as readable lines.
+    """
     problems = [
         f"{where}: missing required property {name!r}"
         for name in schema.get("required", ())

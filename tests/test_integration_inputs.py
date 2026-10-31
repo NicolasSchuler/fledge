@@ -138,14 +138,29 @@ CLI_SETTINGS = f"source_date_epoch = {EPOCH}\njob_timeout_seconds = {JOB_TIMEOUT
 
 
 def _settings(**options: Any) -> Settings:
-    """Settings for main.tex with a fixed epoch and a deadline that tolerates a loaded host."""
+    """Return settings for main.tex with a fixed epoch and a deadline that tolerates a loaded host.
+
+    Args:
+        **options: Further settings.
+
+    Returns:
+        The settings.
+    """
     return Settings(
         main="main.tex", source_date_epoch=EPOCH, job_timeout_seconds=JOB_TIMEOUT_SECONDS, **options
     )
 
 
 def _unresolved(report: Report) -> list[tuple[object, ...]]:
-    """The findings that block a release or await review, to explain a failed assertion."""
+    """List the findings that block a release or await review, to explain a failed assertion.
+
+    Args:
+        report: The report of the job.
+
+    Returns:
+        The code, rule, severity, status, stage and message of each finding that is not
+        informational and did not pass.
+    """
     return [
         (item.code, item.rule, item.severity, item.status, item.details.get("stage"), item.message)
         for item in report.findings
@@ -154,7 +169,14 @@ def _unresolved(report: Report) -> list[tuple[object, ...]]:
 
 
 def _finding_keys(report: Report) -> Counter[tuple[object, ...]]:
-    """How often each finding decided what, and where, without its wording or measurements."""
+    """Count how often each finding decided what, and where, without its wording or measurements.
+
+    Args:
+        report: The report of the job.
+
+    Returns:
+        The number of findings with each code, rule, status, stage, path and line.
+    """
     return Counter(
         (item.code, item.rule, item.status, item.details.get("stage"), item.path, item.line)
         for item in report.findings
@@ -162,13 +184,13 @@ def _finding_keys(report: Report) -> Counter[tuple[object, ...]]:
 
 
 def _archive_files(archive: Path) -> dict[str, bytes]:
-    """Every entry of ``archive`` with its bytes."""
+    """Read every entry of ``archive`` with its bytes."""
     with zipfile.ZipFile(archive) as packaged:
         return {name: packaged.read(name) for name in packaged.namelist()}
 
 
 def _inventory_rows(report: Report) -> dict[object, dict[str, Any]]:
-    """The rows of the report's only package inventory, by source path."""
+    """Return the rows of the report's only package inventory, by source path."""
     (inventory,) = report.package_contents
     rows = inventory["files"]
     assert isinstance(rows, list)
@@ -176,7 +198,18 @@ def _inventory_rows(report: Report) -> dict[object, dict[str, Any]]:
 
 
 async def _directories_while(task: asyncio.Task[Any], directory: Path) -> set[str]:
-    """The names of the directories that ``directory`` holds at some time while ``task`` runs."""
+    """Collect the names of the directories that ``directory`` holds while ``task`` runs.
+
+    The directory is listed until the task is done, waiting ``LISTING_INTERVAL_SECONDS``
+    between listings.
+
+    Args:
+        task: The task to watch.
+        directory: The directory to list.
+
+    Returns:
+        The name of every directory seen in any listing.
+    """
     seen: set[str] = set()
     while not task.done():
         seen.update(entry.name for entry in directory.iterdir() if entry.is_dir())
@@ -185,7 +218,12 @@ async def _directories_while(task: asyncio.Task[Any], directory: Path) -> set[st
 
 
 def _write_macos_zip(folder: Path, archive: Path) -> None:
-    """Compress ``folder`` the way macOS does: inside a wrapper, with __MACOSX and .DS_Store."""
+    """Compress ``folder`` the way macOS does: inside a wrapper, with __MACOSX and .DS_Store.
+
+    Args:
+        folder: The project folder to compress.
+        archive: The ZIP file to write.
+    """
     with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zipped:
         zipped.write(folder, WRAPPER)
         for path in sorted(folder.rglob("*")):
@@ -201,30 +239,44 @@ class InputPreparationTests(unittest.IsolatedAsyncioTestCase):
     """Real TeX, Poppler, tex-fmt, Biber and sandbox runs on inputs as authors supply them."""
 
     def setUp(self) -> None:
+        """Create a temporary base directory."""
         temporary = tempfile.TemporaryDirectory(prefix="fledge-inputs-")
         self.addCleanup(temporary.cleanup)
         self.base = Path(temporary.name).resolve()
 
     def copy_nested_paper(self, name: str) -> Path:
-        """A fresh copy of examples/nested-paper, a BibTeX project that builds cleanly."""
+        """Copy examples/nested-paper, a BibTeX project that builds cleanly, to ``name``.
+
+        Returns:
+            The fresh copy in the base directory.
+        """
         return Path(shutil.copytree(NESTED_PAPER, self.base / name))
 
     async def prepare(self, source: Path, settings: Settings, output_name: str) -> Report:
-        """Prepare ``source`` into the new directory ``output_name``, which must be released."""
+        """Prepare ``source`` into the new directory ``output_name``, which must be released.
+
+        Args:
+            source: The project or ZIP to prepare.
+            settings: The settings of the job.
+            output_name: The name of the output directory in the base directory.
+
+        Returns:
+            The report of the job.
+        """
         output = self.base / output_name
         report = await run_job(JobRequest("prepare", source, settings, output))
         self.assert_published(report, output)
         return report
 
     def assert_published(self, report: Report, output: Path) -> None:
-        """The run released its bundle, and released it into ``output``."""
+        """Assert that the run released its bundle, and released it into ``output``."""
         self.assertIn(report.outcome, RELEASED, _unresolved(report))
         archive = output / "submission.zip"
         self.assertEqual(report.artifacts.get("archive"), str(archive))
         self.assertTrue(archive.is_file())
 
     async def test_macos_zip_with_wrapper_and_metadata_packages_like_its_folder(self) -> None:
-        """A ZIP input gives the same submission.zip as the folder it was made from.
+        """Check that a ZIP input gives the same submission.zip as the folder it was made from.
 
         Documented: the input "can also be a ZIP of the project" (quickstart), and import
         handles "Folder or ZIP; wrapper-directory handling; ... OS metadata excluded"
@@ -256,7 +308,9 @@ class InputPreparationTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn(METADATA_REASON, rows[name]["reasons"])
 
     async def test_repeated_preparation_is_deterministic_and_idempotent(self) -> None:
-        """The same input gives the same archive, and a prepared output prepares to itself.
+        """Check that repeated preparation is deterministic and idempotent.
+
+        The same input gives the same archive, and a prepared output prepares to itself.
 
         Documented in the workflow reference (implemented areas): packaging writes a
         "deterministic ZIP", the flat layout is a "Deterministic mapping", and formatting
@@ -290,11 +344,15 @@ class InputPreparationTests(unittest.IsolatedAsyncioTestCase):
         )
 
     def assert_private_comments_removed(self, report: Report, shipped: dict[str, bytes]) -> None:
-        """The edits really happened, so the comparisons of the archives are not vacuous.
+        """Assert that the edits really happened, so the archive comparisons are not vacuous.
 
         Comment removal rewrote the annotated section, tex-fmt reformatted it and the flat
         layout moved it. No shipped file keeps either private comment, but the section's
         own text is still shipped.
+
+        Args:
+            report: The report of the job.
+            shipped: The bytes of each shipped file by archive name.
         """
         edits = {(change.path, change.kind) for change in report.changes}
         self.assertLessEqual({("sections/results.tex", kind) for kind in SOURCE_EDITS}, edits)
@@ -304,7 +362,9 @@ class InputPreparationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(b"The second finding.", text)
 
     async def test_messy_working_directory_ships_only_what_the_build_needs(self) -> None:
-        """Local build output, editor backups and repository metadata stay out of the bundle.
+        """Check that a messy working directory ships only what the build needs.
+
+        Local build output, editor backups and repository metadata stay out of the bundle.
 
         Documented in the workflow reference ("How package contents are selected"): cleanup
         removes OS and version-control metadata, editor backups and rebuildable auxiliary
@@ -339,7 +399,7 @@ class InputPreparationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(directory_contents(project), originals)
 
     def assert_excluded_for_their_reasons(self, report: Report) -> None:
-        """Every leftover file is excluded, and its inventory row names the rule that did it."""
+        """Assert that every leftover file is excluded and its inventory row names the rule."""
         expected = {
             **{name: cleanup_reason(name) for name in CLEANED_DEBRIS},
             # A PDF is not debris: it is left out only because the build never reads it.
@@ -359,6 +419,11 @@ class InputPreparationTests(unittest.IsolatedAsyncioTestCase):
 
         -norc keeps a personal latexmkrc, one that sets an output directory for instance,
         from moving the files this test expects.
+
+        Asserts that latexmk succeeded and wrote the expected build output.
+
+        Args:
+            project: The project that receives the build output.
         """
         scratch = Path(shutil.copytree(project, self.base / "local-build"))
         completed = await asyncio.to_thread(
@@ -378,7 +443,9 @@ class InputPreparationTests(unittest.IsolatedAsyncioTestCase):
                 shutil.copyfile(scratch / name, project / name)
 
     async def test_awkward_paths_and_relative_command_line_arguments(self) -> None:
-        """Spaces, quotes, parentheses and accents in paths, and relative command-line paths.
+        """Check preparation with awkward paths and relative command-line arguments.
+
+        Spaces, quotes, parentheses and accents in paths, and relative command-line paths.
 
         Documented: INPUT is "a source folder or ZIP" and --output a "New directory outside
         the input" (command help; quickstart), so any folder name is accepted, and a sibling
@@ -415,8 +482,15 @@ class InputPreparationTests(unittest.IsolatedAsyncioTestCase):
 
         ``temporary`` is the run's TMPDIR: a job workspace must appear in it while the run
         lasts and be gone afterwards. The settings file beside the project fixes the epoch
-        and deadline that the in-process runs use. Returns the JSON report, which must have
-        released.
+        and deadline that the in-process runs use.
+
+        Args:
+            project: The project directory, the working directory of the command.
+            temporary: The empty directory used as TMPDIR.
+            *arguments: The command and its arguments, relative to ``project``.
+
+        Returns:
+            The JSON report, which must have released.
         """
         run = asyncio.create_task(
             asyncio.to_thread(
@@ -452,7 +526,9 @@ class InputPreparationTests(unittest.IsolatedAsyncioTestCase):
         return report
 
     async def test_serial_parallel_and_concurrent_jobs_give_the_same_results(self) -> None:
-        """The number of parallel slots changes scheduling, never the findings or the archive.
+        """Check that serial, parallel and concurrent jobs give the same results.
+
+        The number of parallel slots changes scheduling, never the findings or the archive.
 
         Documented in the workflow reference ("Execution and resource limits"): --jobs sets
         the shared CPU slots and --jobs 1 runs everything serially, while the build gates
@@ -481,7 +557,7 @@ class InputPreparationTests(unittest.IsolatedAsyncioTestCase):
         await self.assert_concurrent_jobs_stay_apart()
 
     async def assert_concurrent_jobs_stay_apart(self) -> None:
-        """A BibTeX job and a Biber job started together each publish their own package."""
+        """Assert that a BibTeX job and a Biber job started together each publish their package."""
         projects = (
             self.copy_nested_paper("concurrent-bibtex"),
             write_project(

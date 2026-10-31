@@ -46,7 +46,7 @@ _ONLINE_RULE_PREFIX = "online."
 
 
 def _retained_files(settings: Settings) -> set[str]:
-    """Files shipped although the build does not read them.
+    """Collect the files shipped although the build does not read them.
 
     Uses the requested (not check-filtered) settings: deselecting PKG104/PKG107
     removes their presence checks but never changes what the package contains.
@@ -59,7 +59,18 @@ def _retained_files(settings: Settings) -> set[str]:
 
 
 async def run_project(context: JobContext, report: Report) -> VerifiedPackage | None:
-    """Inspect, check or prepare one project; return the package when ready to publish."""
+    """Inspect, check or prepare one project.
+
+    The input is imported, a supplied reference PDF frozen and the main file selected
+    before the document's stages run.
+
+    Args:
+        context: The job.
+        report: The report that the run fills in.
+
+    Returns:
+        The package when it is ready to publish, otherwise ``None``.
+    """
     request = context.request
     context.emit("Importing a separate project snapshot")
     imported = await import_input(context, report)
@@ -85,19 +96,30 @@ async def run_project(context: JobContext, report: Report) -> VerifiedPackage | 
 
 @dataclass
 class DocumentRun:
-    """The changing state of one document's run; each stage is a method."""
+    """The changing state of one document's run; each stage is a method.
+
+    Attributes:
+        context: The job.
+        report: The report that the run fills in.
+        imported: The imported project, which the baseline builds and which input
+            selection copies from.
+        reference: The frozen copy of a supplied reference PDF, or ``None``.
+        main: The selected main file; ``None`` when no main could be selected.
+        retained: The files shipped although the build does not read them.
+        completed: Every finished task's result, by task name, in the one place that tasks
+            and stages read it from.
+        reporter: Records task results, builds and inventories in ``report``.
+        scheduler: Runs the tasks within the job's budget.
+        verification: Packages the shipped sources and verifies the package.
+    """
 
     context: JobContext
     report: Report
     _: KW_ONLY
-    # The imported project, which the baseline builds and which input selection copies from.
     imported: Path
-    # The frozen copy of a supplied reference PDF.
     reference: Path | None
-    # The selected main file; None when no main could be selected.
     main: str | None
     retained: set[str]
-    # Every finished task's result, in the one place that tasks and stages read it from.
     completed: dict[str, TaskResult] = field(default_factory=dict)
     reporter: TaskReporter = field(init=False)
     scheduler: Scheduler = field(init=False)
@@ -118,34 +140,46 @@ class DocumentRun:
 
     @property
     def settings(self) -> Settings:
+        """The job's settings."""
         return self.context.settings
 
     @property
     def command(self) -> JobCommand:
+        """The command the job runs."""
         return self.context.request.command
 
     def _on_result(self, result: TaskResult) -> None:
+        """Keep a finished task's result and let the reporter collect it."""
         self.completed[result.name] = result
         self.reporter.collect(result)
 
     def _analysis_snapshot(self) -> Path:
-        """The selected preparation inputs once their selection succeeded, else the import."""
+        """Return the selected preparation inputs once their selection succeeded, else the import.
+
+        The selection exists only for ``prepare``.
+        """
         selection = self.completed.get(TaskName.SELECT_PREPARATION_INPUTS)
         if selection is not None and selection.succeeded:
             return selection.value.root
         return self.imported
 
     def _baseline_build(self) -> BuildResult:
+        """Return the result of the baseline build task."""
         return self.completed[TaskName.BASELINE_BUILD].value
 
     def _baseline_pdf(self) -> Path:
+        """Return the PDF of the baseline build, for tasks that start only after it succeeded."""
         pdf = self._baseline_build().pdf
         # Dependents start only after the baseline build succeeded with a PDF.
         assert pdf is not None
         return pdf
 
     async def run(self) -> VerifiedPackage | None:
-        """Run the document's stages; the package when preparation verified one."""
+        """Run the document's stages.
+
+        Returns:
+            The package when preparation verified one, otherwise ``None``.
+        """
         report, settings = self.report, self.settings
         await self.scheduler.execute(self._analysis_tasks())
         # Later stages read other trees; free the graphs the analysis tasks shared.
@@ -175,7 +209,12 @@ class DocumentRun:
         self._note_online_checks_not_reached()
 
     def _analysis_tasks(self) -> list[Task]:
-        """Source, bibliography, privacy, baseline build and baseline PDF tasks."""
+        """Build the source, bibliography, privacy, baseline build and baseline PDF tasks.
+
+        Without a main file, or for ``inspect``, only the source tasks run. For
+        ``prepare``, the preparation inputs are selected after the baseline build, and the
+        other checks wait for that selection.
+        """
         sources = source_analysis_tasks(self.context, self._analysis_snapshot, self.main)
         if self.main is None or self.command is JobCommand.INSPECT:
             return sources
@@ -208,6 +247,12 @@ class DocumentRun:
         return [baseline, *waiting, selection]
 
     async def _select_preparation_inputs(self, main: str) -> InputSelection:
+        """Copy the inputs the baseline build read, and the retained files, for preparation.
+
+        Returns:
+            The selected inputs under ``selected-inputs`` in the work directory, with the
+            selection's changes, findings and inventory.
+        """
         destination = self.context.work / "selected-inputs"
         baseline = self._baseline_build()
         selected = await self.context.thread_operation(
@@ -226,7 +271,17 @@ class DocumentRun:
         return InputSelection(destination, *selected)
 
     async def _prepare(self, baseline: BuildResult, main: str) -> VerifiedPackage | None:
-        """Transform, ship and verify the document; the package, or None after stopping."""
+        """Transform, ship and verify the document.
+
+        A dry run stops after the transformations with a planned outcome.
+
+        Args:
+            baseline: The baseline build.
+            main: The main file.
+
+        Returns:
+            The verified package, or ``None`` after stopping or for a dry run.
+        """
         report = self.report
         prepared = await self._stage_transformations(baseline, main)
         if prepared is None:
@@ -252,7 +307,18 @@ class DocumentRun:
         return package
 
     async def _stage_transformations(self, baseline: BuildResult, main: str) -> Path | None:
-        """Apply the selected transformations and formatting to a staging copy."""
+        """Apply the selected transformations and formatting to a staging copy.
+
+        Formatting is applied only while nothing blocks, and only when it found no
+        blocking problem.
+
+        Args:
+            baseline: The baseline build, whose recorded inputs count as dependencies.
+            main: The main file.
+
+        Returns:
+            The staging copy, or ``None`` when the report is blocked.
+        """
         context, settings, report = self.context, self.settings, self.report
         context.emit("Planning and applying selected transformations in staging")
         snapshot = self._analysis_snapshot()
@@ -300,7 +366,18 @@ class DocumentRun:
         return None if is_blocked(report, settings) else prepared
 
     async def _ship(self, prepared: Path, main: str) -> ShippedSources | None:
-        """Rebuild staging, select the shipped inputs, flatten and compare with the baseline."""
+        """Rebuild staging, select the shipped inputs, flatten and compare with the baseline.
+
+        A flat layout is rebuilt once more from the flattened sources before the
+        comparison.
+
+        Args:
+            prepared: The staging copy.
+            main: The main file.
+
+        Returns:
+            The shipped sources, or ``None`` when a build failed or the report is blocked.
+        """
         context, settings, report = self.context, self.settings, self.report
         staged = await build_stage(context, self.reporter, prepared, main, TRANSFORMED)
         if not staged.success or staged.pdf is None:
@@ -353,7 +430,12 @@ class DocumentRun:
         return ShippedSources(flattened.root, flattened.main, pdf, flattened.path_mapping)
 
     def _note_online_checks_not_reached(self) -> None:
-        """Selected online checks run on the final extraction; say so when it was never reached."""
+        """Say when selected online checks never ran because the final extraction was not reached.
+
+        Selected online checks run on the final extraction. Nothing is noted outside a
+        preparation that is not a dry run, when online checks are off or none is selected,
+        or when an online check already reported.
+        """
         options, request = self.settings.online_checks, self.context.request
         if not options.online or request.command is not JobCommand.PREPARE or request.dry_run:
             return

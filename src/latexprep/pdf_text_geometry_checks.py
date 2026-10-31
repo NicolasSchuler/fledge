@@ -41,6 +41,15 @@ _LAYOUT_SCOPE = (
 
 @dataclass(frozen=True)
 class _TextBox:
+    """One nonempty Poppler text box.
+
+    Attributes:
+        page: The page number, from 1.
+        index: The box's position among the page's text elements, from 1.
+        box: The bounds as ``(left, top, right, bottom)`` in points.
+        size: The reported font size in points.
+    """
+
     page: int
     index: int
     box: tuple[float, float, float, float]
@@ -49,6 +58,15 @@ class _TextBox:
 
 @dataclass(frozen=True)
 class _TextPage:
+    """One page of Poppler text boxes and the page size they were measured on.
+
+    Attributes:
+        page: The page number, from 1.
+        width: The page width in points.
+        height: The page height in points.
+        boxes: The nonempty text boxes.
+    """
+
     page: int
     width: float
     height: float
@@ -56,6 +74,19 @@ class _TextPage:
 
 
 def _text_pages(output: str, pages: int) -> list[_TextPage]:
+    """Read the text boxes of every page from Poppler's XML output.
+
+    Args:
+        output: The XML that ``pdftohtml`` printed.
+        pages: The number of pages the document has.
+
+    Returns:
+        One text page per page, in order.
+
+    Raises:
+        PreparationError: The XML lacks a valid page number or size, has ambiguous font
+            sizes or an unmeasured text box, or does not list every page once in order.
+    """
     root = parse_tool_xml(output, "pdf2xml")
     fonts: dict[str, float] = {}
     result = []
@@ -99,6 +130,7 @@ def _text_pages(output: str, pages: int) -> list[_TextPage]:
 
 
 def _text_box_sample(box: _TextBox) -> dict[str, object]:
+    """Describe a text box for a finding: its page, index, bounds and reported size."""
     return {
         "page": box.page,
         "text_box": box.index,
@@ -109,18 +141,31 @@ def _text_box_sample(box: _TextBox) -> dict[str, object]:
 
 @dataclass(frozen=True, slots=True)
 class _TextLayout:
-    """Extracted text pages and the pages whose coordinate frame cannot be aligned."""
+    """Extracted text pages and the pages whose coordinate frame cannot be aligned.
+
+    Attributes:
+        pages: The text pages.
+        unsupported: The numbers of the pages whose frame cannot be aligned.
+        options: The PDF check options.
+    """
 
     pages: tuple[_TextPage, ...]
     unsupported: frozenset[int]
     options: PdfCheckOptions
 
     def measurable_pages(self) -> Iterator[_TextPage]:
+        """Yield the text pages whose coordinate frame is aligned."""
         return (page for page in self.pages if page.page not in self.unsupported)
 
 
 class _BoxMinimum(NamedTuple):
-    """The minimum text size that applies to one text box, and what the regions said."""
+    """The minimum text size that applies to one text box, and what the regions said.
+
+    Attributes:
+        minimum: The minimum in points, or ``None`` when none applies.
+        regions_touched: The indexes of the configured regions that intersect the box.
+        partly_in_region: Whether the box's size class is unknown.
+    """
 
     minimum: float | None
     regions_touched: tuple[int, ...]
@@ -129,7 +174,7 @@ class _BoxMinimum(NamedTuple):
 
 
 def _minimum_for_box(box: _TextBox, options: PdfCheckOptions) -> _BoxMinimum:
-    """The strictest minimum of the regions containing ``box``, else the global minimum."""
+    """Find the strictest minimum of the regions containing ``box``, else the global one."""
     selected: list[float] = []
     touched: list[int] = []
     partly_in_region = False
@@ -146,6 +191,12 @@ def _minimum_for_box(box: _TextBox, options: PdfCheckOptions) -> _BoxMinimum:
 
 
 def _text_size_finding(layout: _TextLayout) -> Finding:
+    """Compare the reported text sizes with the configured minima.
+
+    A size within the rounding precision of its minimum, a page without text, a box only
+    partly in a region, a region that touches no box, or no measured box at all leaves
+    the result incomplete.
+    """
     options = layout.options
     violations: list[object] = []
     uncertain = bool(layout.unsupported)
@@ -182,6 +233,7 @@ def _text_size_finding(layout: _TextLayout) -> Finding:
 
 
 def _printable_regions(page: _TextPage, options: PdfCheckOptions) -> list[tuple[float, ...]]:
+    """Return the printable regions configured for ``page``, else those its margins leave."""
     regions: list[tuple[float, ...]] = [
         region.box for region in options.printable_regions if region.page == page.page
     ]
@@ -192,6 +244,11 @@ def _printable_regions(page: _TextPage, options: PdfCheckOptions) -> list[tuple[
 
 
 def _printable_bounds_finding(layout: _TextLayout) -> Finding:
+    """Check that every text box lies within a printable region of its page.
+
+    A region for a missing page, a region that does not fit its page, a page without
+    text or no measured box at all leaves the result incomplete.
+    """
     options = layout.options
     violations: list[object] = []
     page_numbers = {page.page for page in layout.pages}
@@ -234,7 +291,11 @@ def _printable_bounds_finding(layout: _TextLayout) -> Finding:
 def _vertically_overlapping_pairs(
     layout: _TextLayout,
 ) -> Iterator[tuple[int, _TextBox, _TextBox]]:
-    """Sweep each page top to bottom, pairing boxes whose vertical extents overlap."""
+    """Sweep each page top to bottom, pairing boxes whose vertical extents overlap.
+
+    Yields:
+        The page number and the two boxes of each pair, the upper one first.
+    """
     for page in layout.measurable_pages():
         active: list[_TextBox] = []
         for box in sorted(page.boxes, key=lambda item: item.box[1]):
@@ -245,6 +306,18 @@ def _vertically_overlapping_pairs(
 
 
 def _overlap_finding(layout: _TextLayout, minimum_ratio: float) -> Finding:
+    """Report pairs of text boxes that overlap by at least ``minimum_ratio``.
+
+    The ratio is the intersection area over the area of the smaller box. More than
+    ``MAX_PAIR_CHECKS`` comparisons leave the result incomplete.
+
+    Args:
+        layout: The text pages.
+        minimum_ratio: The smallest area ratio that counts as an overlap.
+
+    Returns:
+        The overlap finding, with at most ``MAX_SAMPLES`` overlaps listed and all counted.
+    """
     overlaps: list[object] = []
     comparisons = overlap_count = 0
     uncertain = bool(layout.unsupported)
@@ -286,6 +359,19 @@ def _overlap_finding(layout: _TextLayout, minimum_ratio: float) -> Finding:
 def _layout_findings(
     pages: list[_TextPage], frames: PageFrames, options: PdfCheckOptions
 ) -> list[Finding]:
+    """Run the configured text-box measurements on the pages whose frame can be aligned.
+
+    A page whose text-box size differs from its page-box size by more than
+    ``_FRAME_SIZE_TOLERANCE_PT`` is unsupported, like the pages ``frames`` cannot align.
+
+    Args:
+        pages: The text pages.
+        frames: The page boxes of every page.
+        options: The PDF check options.
+
+    Returns:
+        One finding per configured measurement.
+    """
     unsupported = set(frames.unsupported_pages)
     for page, size in zip(pages, frames.sizes, strict=True):
         if (
@@ -307,9 +393,20 @@ def _layout_findings(
 async def measure_text_geometry(
     session: PdfToolSession, pages: int, options: PdfCheckOptions, rules: Collection[str]
 ) -> list[Finding]:
-    """The configured text-box measurements; each of ``rules`` is inconclusive on failure."""
+    """Measure the configured text-box checks; each of ``rules`` is inconclusive on failure.
+
+    Args:
+        session: The session over the frozen document.
+        pages: The number of pages.
+        options: The PDF check options.
+        rules: The configured text-box rules.
+
+    Returns:
+        The findings of the configured measurements.
+    """
 
     async def measure() -> list[Finding]:
+        """Read the page boxes, then measure the text boxes against them."""
         frames = await session.measure(
             "page-boxes", page_boxes_argv(pages), lambda result: page_frames(result.stdout, pages)
         )

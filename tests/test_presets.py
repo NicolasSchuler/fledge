@@ -21,6 +21,8 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class PresetPackagingTests(unittest.TestCase):
+    """Every preset ships as package data, in the wheel and in the source archive."""
+
     def test_every_preset_is_package_data_readable_through_importlib_resources(self):
         directory = resources.files("latexprep").joinpath("presets")
         shipped = {item.name for item in directory.iterdir() if item.name.endswith(".toml")}
@@ -46,6 +48,8 @@ class PresetPackagingTests(unittest.TestCase):
 
 
 class PresetContentTests(unittest.TestCase):
+    """What the presets contain: valid settings, generic checks and no venue values."""
+
     def test_every_preset_validates_against_the_settings_schema(self):
         for name in preset_names():
             with self.subTest(preset=name):
@@ -123,7 +127,10 @@ class PresetContentTests(unittest.TestCase):
 
 
 class PresetPrecedenceTests(ProjectTestCase):
+    """A preset sits beneath the settings file and the command line."""
+
     def config(self, text: str) -> Path:
+        """Write ``text`` as ``fledge.toml`` in the project root and return its path."""
         path = self.root / "fledge.toml"
         path.write_text(text)
         return path

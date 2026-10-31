@@ -82,11 +82,19 @@ class SandboxBackend(ProcessTable, Protocol):
         ...
 
     def system_roots(self) -> frozenset[Path]:
-        """Fixed system resources every tool may read."""
+        """Return the fixed system resources every tool may read."""
         ...
 
     def declares_tool(self, path: Path, resolved: Path) -> bool:
-        """Whether an installed tool may become part of the declared toolchain."""
+        """Return whether an installed tool may become part of the declared toolchain.
+
+        Args:
+            path: The tool's path as found.
+            resolved: The path the tool resolves to.
+
+        Returns:
+            ``True`` if the tool may be declared.
+        """
         ...
 
     def wrap(
@@ -98,11 +106,27 @@ class SandboxBackend(ProcessTable, Protocol):
         readonly_inputs: tuple[Path, ...],
         biber: BiberToolchain | None,
     ) -> list[str]:
-        """Return ``command`` confined to ``workspace`` and the declared grants."""
+        """Return ``command`` confined to ``workspace`` and the declared grants.
+
+        Args:
+            command: The tool command.
+            workspace: The only writable directory.
+            context: The declared executables and resource roots of the toolchain.
+            readonly_inputs: Further paths the command may read.
+            biber: A runtime-owned Biber copy whose executable and payload are granted,
+                if any.
+
+        Returns:
+            The argv that runs the confined command.
+
+        Raises:
+            SandboxRefusedError: The backend is unavailable or a grant is not permitted.
+        """
         ...
 
 
 def select_sandbox_backend() -> SandboxBackend:
+    """Return the backend of this platform; one without support refuses every command."""
     match sys.platform:
         case "darwin":
             return SeatbeltSandbox()
@@ -116,16 +140,23 @@ class _EveryToolDeclared:
     """Declares every installed tool: this backend adds no rule about where a tool lives."""
 
     def declares_tool(self, path: Path, resolved: Path) -> bool:
+        """Declare every installed tool, wherever it lives."""
         return True
 
 
 class SeatbeltSandbox(_EveryToolDeclared, GroupProcessTable):
-    """macOS ``sandbox-exec`` with a generated deny-by-default profile."""
+    """macOS ``sandbox-exec`` with a generated deny-by-default profile.
+
+    Attributes:
+        description: How reports name this backend.
+        requires_sealed_biber: Biber may run only from a sealed runtime-owned copy.
+    """
 
     description = "macOS sandbox-exec"
     requires_sealed_biber = True
 
     def system_roots(self) -> frozenset[Path]:
+        """Return the macOS system resources and the font configurations that exist."""
         roots = {Path(value).resolve() for value in _MACOS_SYSTEM_RESOURCES}
         roots.add(Path("/private/var/select/sh"))
         roots.update(path.resolve() for path in _MACOS_FONT_CONFIGURATIONS if path.exists())
@@ -140,6 +171,14 @@ class SeatbeltSandbox(_EveryToolDeclared, GroupProcessTable):
         readonly_inputs: tuple[Path, ...],
         biber: BiberToolchain | None,
     ) -> list[str]:
+        """Return ``command`` run by ``sandbox-exec`` under a generated profile.
+
+        The arguments are those of :meth:`SandboxBackend.wrap`.
+
+        Raises:
+            SandboxRefusedError: ``sandbox-exec`` is missing, an executable lies in the
+                workspace, or the workspace lies inside a declared toolchain tree.
+        """
         backend = shutil.which("sandbox-exec", path=_SYSTEM_PROGRAM_PATH)
         if backend is None:
             raise SandboxRefusedError("Restricted execution requires macOS sandbox-exec")
@@ -159,10 +198,29 @@ def _seatbelt_profile(
     readonly_inputs: tuple[Path, ...],
     isolated: tuple[Path, ...],
 ) -> str:
+    """Generate the deny-by-default Seatbelt profile for one command.
+
+    The profile lets the command read the workspace, the resource roots, the executables
+    and the read-only inputs, and the metadata of every parent folder; execute only the
+    declared executables; and write only the workspace and ``/dev/null``.
+
+    Args:
+        workspace: The only writable directory.
+        context: The declared executables and resource roots.
+        readonly_inputs: Further paths the command may read.
+        isolated: Runtime-owned paths outside every workspace that the command may also
+            read and execute.
+
+    Returns:
+        The profile text.
+    """
+
     def quote(path: Path) -> str:
+        """Quote ``path`` as a profile string."""
         return json.dumps(str(path), ensure_ascii=False)
 
     def rule(path: Path) -> str:
+        """Match ``path`` as a subpath if it is a directory, otherwise as a literal."""
         return f"({'subpath' if path.is_dir() else 'literal'} {quote(path)})"
 
     executables, roots = context.executables, context.resource_roots
@@ -214,17 +272,26 @@ def _seatbelt_profile(
 
 
 def _linux_tool_path(path: Path) -> bool:
-    """Never infer a Linux toolchain grant from a private executable directory."""
+    """Return whether ``path`` lies under a system prefix that may supply Linux tools.
+
+    A Linux toolchain grant is never inferred from a private executable directory.
+    """
     return any(path.is_relative_to(prefix) for prefix in _LINUX_TOOL_PREFIXES)
 
 
 class BubblewrapSandbox(AncestryProcessTable):
-    """Linux Bubblewrap with every namespace unshared and exact read-only mounts."""
+    """Linux Bubblewrap with every namespace unshared and exact read-only mounts.
+
+    Attributes:
+        description: How reports name this backend.
+        requires_sealed_biber: Biber need not run from a sealed runtime-owned copy.
+    """
 
     description = "Linux Bubblewrap"
     requires_sealed_biber = False
 
     def system_roots(self) -> frozenset[Path]:
+        """Return the Linux system resources, both as spelled and resolved."""
         # Preserve distribution aliases (such as /lib -> /usr/lib) as distinct
         # mount destinations while exposing only their contents.
         return frozenset(
@@ -233,6 +300,7 @@ class BubblewrapSandbox(AncestryProcessTable):
         )
 
     def declares_tool(self, path: Path, resolved: Path) -> bool:
+        """Declare a tool only when its path and its resolved path lie under system prefixes."""
         return _linux_tool_path(path) and _linux_tool_path(resolved.resolve())
 
     def wrap(
@@ -244,6 +312,15 @@ class BubblewrapSandbox(AncestryProcessTable):
         readonly_inputs: tuple[Path, ...],
         biber: BiberToolchain | None,
     ) -> list[str]:
+        """Return ``command`` run by Bubblewrap in new namespaces with exact read-only mounts.
+
+        The arguments are those of :meth:`SandboxBackend.wrap`.
+
+        Raises:
+            SandboxRefusedError: Bubblewrap is missing or not a system executable, an
+                executable or resource root lies outside the system paths, the workspace
+                overlaps a resource root, or a read-only input lies inside the workspace.
+        """
         backend = shutil.which("bwrap", path=_SYSTEM_PROGRAM_PATH)
         if backend is None:
             raise SandboxRefusedError(
@@ -312,12 +389,18 @@ class BubblewrapSandbox(AncestryProcessTable):
 
 
 class UnavailableSandbox(_EveryToolDeclared, GroupProcessTable):
-    """Platforms without a supported backend refuse every command."""
+    """Platforms without a supported backend refuse every command.
+
+    Attributes:
+        description: How reports name this backend.
+        requires_sealed_biber: No sealed Biber copy is needed, because no command runs.
+    """
 
     description = "unavailable"
     requires_sealed_biber = False
 
     def system_roots(self) -> frozenset[Path]:
+        """Return no system resources."""
         return frozenset()
 
     def wrap(
@@ -329,6 +412,13 @@ class UnavailableSandbox(_EveryToolDeclared, GroupProcessTable):
         readonly_inputs: tuple[Path, ...],
         biber: BiberToolchain | None,
     ) -> list[str]:
+        """Refuse every command.
+
+        The arguments are those of :meth:`SandboxBackend.wrap`.
+
+        Raises:
+            SandboxRefusedError: Always.
+        """
         raise SandboxRefusedError(
             "Restricted execution is unavailable on this platform; supported backends "
             "require macOS sandbox-exec or Linux Bubblewrap with user namespaces."

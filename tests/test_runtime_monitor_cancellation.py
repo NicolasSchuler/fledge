@@ -1,3 +1,5 @@
+"""A job scope closes even when a resource sample swallows the monitor's cancellation."""
+
 from __future__ import annotations
 
 import asyncio
@@ -11,7 +13,12 @@ from tests.fakes import ScriptedJobMonitor
 
 
 class SwallowingSampleRunner(ToolRunner):
-    """Swallow the monitor's cancellation once, as asyncio.wait_for can on Python 3.11."""
+    """Swallow the monitor's cancellation once, as ``asyncio.wait_for`` can on Python 3.11.
+
+    Attributes:
+        monitor_sampling: Set when the monitor task starts the sample that blocks.
+        swallowed_cancellations: How many cancellations the blocking sample swallowed.
+    """
 
     def __init__(self) -> None:
         self.monitor_sampling = asyncio.Event()
@@ -24,6 +31,14 @@ class SwallowingSampleRunner(ToolRunner):
         )
 
     async def sample_job(self, scope: JobScope) -> None:
+        """Block the monitor's first sample until it is cancelled, then swallow the cancellation.
+
+        Samples from other tasks, such as the final one in ``job_scope``, and every sample after the
+        swallowed cancellation return at once.
+
+        Args:
+            scope: The job scope being sampled; its ``monitor`` task identifies the monitor.
+        """
         if asyncio.current_task() is not scope.monitor or self.swallowed_cancellations:
             # The final sample in job_scope and later monitor samples return at once.
             return
@@ -35,6 +50,8 @@ class SwallowingSampleRunner(ToolRunner):
 
 
 class JobMonitorCancellationTests(unittest.IsolatedAsyncioTestCase):
+    """Closing a job scope whose monitor swallows its cancellation."""
+
     async def test_job_scope_closes_when_a_sample_swallows_the_monitor_cancellation(
         self,
     ) -> None:

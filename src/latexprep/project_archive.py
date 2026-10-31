@@ -38,7 +38,16 @@ _UNIX_SYSTEM = 3
 
 
 def create_archive(root: Path, archive: Path) -> None:
-    """Write every staged file and directory without a wrapper or an overwrite."""
+    """Write every staged file and directory without a wrapper or an overwrite.
+
+    Args:
+        root: The staged project folder.
+        archive: The ZIP file to create; it must not exist and must lie outside ``root``.
+
+    Raises:
+        PreparationError: ``root`` is not a directory, ``archive`` exists or lies inside
+            ``root``, or reading a file or writing the archive failed.
+    """
     try:
         source = source_path(root)
         if not source.is_dir:
@@ -59,7 +68,7 @@ def create_archive(root: Path, archive: Path) -> None:
 
 
 def _entry_info(entry: ProjectEntry) -> zipfile.ZipInfo:
-    """The archive record of one entry: fixed date, modes and compression level."""
+    """Build the archive record of one entry: fixed date, modes and compression level."""
     info = zipfile.ZipInfo(entry.path + ("/" if entry.is_dir else ""))
     info.create_system = _UNIX_SYSTEM
     info.compress_type = zipfile.ZIP_DEFLATED
@@ -75,6 +84,15 @@ def _entry_info(entry: ProjectEntry) -> zipfile.ZipInfo:
 
 
 def _write_archive(stream: BinaryIO, directory_fd: int, entries: list[ProjectEntry]) -> None:
+    """Write the entries, sorted by name, as a ZIP archive to ``stream``.
+
+    Cancellation is checked before every entry and every chunk read.
+
+    Args:
+        stream: The new archive file.
+        directory_fd: The open staged folder that entry paths are relative to.
+        entries: The files and directories to store.
+    """
     with zipfile.ZipFile(stream, "w", compression=zipfile.ZIP_DEFLATED) as zipped:
         for entry in sorted(entries, key=lambda item: item.path + ("/" if item.is_dir else "")):
             cancellation_point()

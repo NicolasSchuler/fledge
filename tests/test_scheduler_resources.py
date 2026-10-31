@@ -1,3 +1,5 @@
+"""The shared resource budget under the scheduler, bounded workers and cancellable threads."""
+
 from __future__ import annotations
 
 import asyncio
@@ -16,6 +18,14 @@ from latexprep.scheduler import Scheduler, Task
 
 
 class SharedBudgetTests(unittest.IsolatedAsyncioTestCase):
+    """One :class:`ResourceBudget` shared by scheduler tasks, bounded workers and worker threads.
+
+    Leases reserve CPU, memory, build and render slots atomically, reject requests that cannot fit
+    or would nest, and give up their queue position when cancelled; :func:`bounded_map` keeps the
+    input order and drains its workers before propagating; :func:`run_in_thread` keeps its lease
+    until the thread exits; and the scheduler drains its tasks before releasing capacity.
+    """
+
     async def test_self_cancelled_leaf_still_records_every_final_task_state_once(self):
         independent_started = asyncio.Event()
         collected = []
@@ -48,14 +58,31 @@ class SharedBudgetTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(budget.statistics()["queued"], 0)
 
     async def wait_for_events(self, *events):
+        """Wait until every one of ``events`` is set.
+
+        Args:
+            *events: The :class:`asyncio.Event` objects to wait for.
+
+        Raises:
+            TimeoutError: They are not all set within two seconds.
+        """
         await asyncio.wait_for(asyncio.gather(*(event.wait() for event in events)), 2)
 
     async def checkpoint(self):
+        """Yield until the event loop has run the callbacks that are ready now."""
         resumed = asyncio.Event()
         asyncio.get_running_loop().call_soon(resumed.set)
         await resumed.wait()
 
     async def drain(self, *tasks):
+        """Cancel each of ``tasks`` that is still running and wait for all of them to finish.
+
+        A task that is already being cancelled is not cancelled again, and the outcomes, including
+        exceptions, are discarded.
+
+        Args:
+            *tasks: The tasks to drain.
+        """
         for task in tasks:
             if not task.done() and not task.cancelling():
                 task.cancel()

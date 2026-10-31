@@ -18,6 +18,11 @@ RELEASE_CHECKS = ROOT / "scripts" / "release_checks.py"
 
 
 def _release_checks():
+    """Load ``scripts/release_checks.py`` as a module.
+
+    Returns:
+        The loaded module.
+    """
     spec = importlib.util.spec_from_file_location("release_checks", RELEASE_CHECKS)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -26,6 +31,13 @@ def _release_checks():
 
 
 def _write_tree(root: Path, pyproject: str, version: str = "1.2.3") -> None:
+    """Write a minimal source tree with ``pyproject.toml`` and the package's version.
+
+    Args:
+        root: The folder of the tree.
+        pyproject: The text of ``pyproject.toml``.
+        version: The ``__version__`` that ``src/latexprep/__init__.py`` defines.
+    """
     (root / "src" / "latexprep").mkdir(parents=True, exist_ok=True)
     (root / "src" / "latexprep" / "__init__.py").write_text(f'__version__ = "{version}"\n')
     (root / "pyproject.toml").write_text(pyproject)
@@ -41,6 +53,8 @@ version = { attr = "latexprep.__version__" }
 
 
 class VersionTests(unittest.TestCase):
+    """One version definition, a release number with a changelog entry, and the release check."""
+
     def test_the_version_is_defined_once_as_the_module_attribute(self) -> None:
         pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
         self.assertNotIn("version", pyproject["project"])
@@ -79,7 +93,18 @@ class VersionTests(unittest.TestCase):
 
 
 class SourceArchiveTests(unittest.TestCase):
+    """The source archive ships the scripts, golden files and changelog the tests read."""
+
     def manifest_patterns(self, directive: str, directory: str) -> list[str]:
+        """Collect the patterns of the ``MANIFEST.in`` lines for ``directive`` and ``directory``.
+
+        Args:
+            directive: The command a line starts with, such as ``recursive-include``.
+            directory: The directory the line names.
+
+        Returns:
+            The patterns of every matching line, in file order.
+        """
         patterns: list[str] = []
         for line in (ROOT / "MANIFEST.in").read_text(encoding="utf-8").splitlines():
             words = line.split()
@@ -110,7 +135,14 @@ class SourceArchiveTests(unittest.TestCase):
 
 @unittest.skipUnless(WORKFLOWS.is_dir(), "the workflow files are not part of the source archive")
 class WorkflowTests(unittest.TestCase):
+    """The CI workflows: pinned actions, Dependabot, and the files and variables of live jobs."""
+
     def workflow(self, name: str) -> str:
+        """Read the workflow file ``name`` in ``.github/workflows``.
+
+        Returns:
+            The text of the file.
+        """
         return (WORKFLOWS / name).read_text(encoding="utf-8")
 
     def test_every_action_is_pinned_to_a_commit(self) -> None:
@@ -129,7 +161,10 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("package-ecosystem: github-actions", configuration)
 
     def test_every_test_file_with_live_tests_runs_in_a_live_job(self) -> None:
-        """Hand-written file lists once left three live tests out of CI unnoticed."""
+        """Check that every test file with live tests runs in a live job.
+
+        Hand-written file lists once left three live tests out of CI unnoticed.
+        """
         live_jobs = self.workflow("tests.yml").split("\n  live-macos:", 1)[1]
         live_files = sorted(
             path.name

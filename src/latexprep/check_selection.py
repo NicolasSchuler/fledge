@@ -10,7 +10,7 @@ from .rules import BY_CODE, BY_NAME
 
 
 def _prefixes(code: str) -> list[str]:
-    """The selectors matching ``code``: its family, each longer prefix and the code itself.
+    """List the selectors matching ``code``: its family, each longer prefix and the code.
 
     ``TEX101`` yields ``TEX``, ``TEX1``, ``TEX10`` and ``TEX101``.
     """
@@ -22,12 +22,22 @@ _SELECTORS = frozenset(prefix for code in BY_CODE for prefix in _prefixes(code))
 
 
 def resolve_selectors(selectors: tuple[str, ...], source: str) -> tuple[str, ...]:
-    """The selectors with each rule name replaced by its check code; reject unknown ones.
+    """Replace each rule name among the selectors by its check code; reject unknown ones.
 
     A rule name selects its check: the dotted name reports carry (``source.edit_marker``)
     and a former hyphenated name (``source-edit-marker``) both stand for the check's code.
-    Codes, prefixes and ``ALL`` are returned unchanged. The error names the ``source`` of
-    an unknown selector and the closest valid ones.
+    Codes, prefixes and ``ALL`` are returned unchanged.
+
+    Args:
+        selectors: The selectors to resolve.
+        source: Where the selectors come from, named in the error.
+
+    Returns:
+        The selectors with each rule name replaced by its check code.
+
+    Raises:
+        PreparationError: A selector is unknown. The error names the ``source`` of the
+            selector and the closest valid ones.
     """
     resolved = tuple(
         BY_NAME[selector].code if selector in BY_NAME else selector for selector in selectors
@@ -53,7 +63,16 @@ def resolve_selectors(selectors: tuple[str, ...], source: str) -> tuple[str, ...
 
 @dataclass(frozen=True)
 class CheckSelection:
-    """Filter configured checks; selection never supplies missing options or consent."""
+    """Filter configured checks; selection never supplies missing options or consent.
+
+    Construction raises ``PreparationError`` when either field is not a tuple of strings
+    or holds an unknown selector, and stores the selectors with rule names resolved to
+    check codes.
+
+    Attributes:
+        select: The selectors of the checks to run.
+        ignore: The selectors of the checks to leave out.
+    """
 
     select: tuple[str, ...] = ("ALL",)
     ignore: tuple[str, ...] = ()
@@ -75,6 +94,16 @@ class CheckSelection:
 
         --select replaces the configured select list; --ignore adds to the
         configured ignore list. Specificity and ignore-wins-ties still apply.
+
+        Args:
+            select: The ``--select`` selectors; none keeps the configured select list.
+            ignore: The ``--ignore`` selectors.
+
+        Returns:
+            The combined selection.
+
+        Raises:
+            PreparationError: A selector is unknown.
         """
         select = resolve_selectors(select, "--select")
         ignore = resolve_selectors(ignore, "--ignore")
@@ -83,11 +112,24 @@ class CheckSelection:
         )
 
     def enabled(self, code: str) -> bool:
-        """Use the most specific selector; ignore wins equally specific matches."""
+        """Return whether the check ``code`` is enabled.
+
+        The most specific selector decides; ignore wins equally specific matches.
+
+        Args:
+            code: A public check code.
+
+        Returns:
+            Whether the check is enabled.
+
+        Raises:
+            PreparationError: ``code`` is not a public check code.
+        """
         if code not in BY_CODE:
             raise PreparationError(f"Unknown public check code: {code}")
 
         def specificity(selectors: tuple[str, ...]) -> int:
+            """Measure the most specific of ``selectors`` that matches: ``ALL`` 0, none -1."""
             return max(
                 (
                     0 if selector == "ALL" else len(selector)

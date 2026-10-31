@@ -61,18 +61,27 @@ _BlockKind = Literal["abstract", "keywords"]
 
 @dataclass(frozen=True, slots=True)
 class LiteralHeading:
-    """One literal sectioning command with its resolved title text."""
+    """One literal sectioning command with its resolved title text.
+
+    Attributes:
+        path: The source file of the command.
+        line: The line of the command.
+        heading: The title's literal text, whitespace collapsed.
+        command: The sectioning command's name.
+        title_resolved: ``False`` when the title itself holds unresolved text, so it could
+            carry any name.
+        uncertainty: Why the title or the control flow around the command is unclear.
+    """
 
     path: str
     line: int
     heading: str
     command: str
-    # False when the title itself holds unresolved text, so it could carry any name.
     title_resolved: bool
     uncertainty: list[str]
 
     def as_dict(self) -> dict[str, object]:
-        """The heading as report details."""
+        """Render the heading as report details."""
         return {
             "path": self.path,
             "line": self.line,
@@ -85,7 +94,20 @@ class LiteralHeading:
 
 @dataclass(frozen=True, slots=True)
 class AbstractCount:
-    """The source word count of one abstract, as a range, with what is unclear about it."""
+    """The source word count of one abstract, as a range, with what is unclear about it.
+
+    Attributes:
+        path: The source file of the abstract.
+        line: The line where the abstract begins.
+        words: The literal words counted.
+        word_count_range: The smallest and largest word count the source allows.
+        unresolved_macros: How often unknown macros occur.
+        nonempty_literal_text: Whether the abstract holds any literal text.
+        content_uncertainty: Why an abstract without literal text may still have
+            rendered content.
+        macro_uncertainty: The unresolved constructs, which only widen the range.
+        uncertainty: Why the declaration of the abstract is unclear.
+    """
 
     path: str
     line: int
@@ -110,7 +132,7 @@ class AbstractCount:
         return [*self.gaps, *self.macro_uncertainty]
 
     def as_dict(self) -> dict[str, object]:
-        """The count as report details."""
+        """Render the count as report details."""
         return {
             "path": self.path,
             "line": self.line,
@@ -126,7 +148,14 @@ class AbstractCount:
 
 @dataclass(frozen=True, slots=True)
 class KeywordCount:
-    """The number of keyword phrases in one keyword block."""
+    """The number of keyword phrases in one keyword block.
+
+    Attributes:
+        path: The source file of the block.
+        line: The line where the block begins.
+        count: The nonempty keyword phrases.
+        uncertainty: The sorted, distinct reasons the count is unclear.
+    """
 
     path: str
     line: int
@@ -134,7 +163,7 @@ class KeywordCount:
     uncertainty: list[str]
 
     def as_dict(self) -> dict[str, object]:
-        """The count as report details."""
+        """Render the count as report details."""
         return {
             "path": self.path,
             "line": self.line,
@@ -145,7 +174,14 @@ class KeywordCount:
 
 @dataclass(frozen=True)
 class Block:
-    """The raw text of one abstract or keyword declaration."""
+    """The raw text of one abstract or keyword declaration.
+
+    Attributes:
+        path: The source file of the declaration.
+        line: The line where the declaration begins.
+        value: The raw text; empty when the body is missing or ambiguous.
+        uncertain: Why the declaration is unclear.
+    """
 
     path: str
     line: int
@@ -154,7 +190,19 @@ class Block:
 
 
 class _BlockReader:
-    """Abstract or keyword declarations of one source: commands and local environments."""
+    """Abstract or keyword declarations of one source: commands and local environments.
+
+    Attributes:
+        name: The source file.
+        source: The parsed source.
+        kind: Whether abstracts or keyword blocks are read.
+        conditionals: The spans of the source's primitive conditionals.
+        environments: The environment names of ``kind``.
+        result: The blocks read so far.
+        pending: The open environments of each name, innermost last.
+        nested: Where overlapping openers of the same kind start.
+        active_count: How many environments are open.
+    """
 
     def __init__(
         self, name: str, source: ParsedSource, kind: _BlockKind, conditionals: list[tuple[int, int]]
@@ -171,7 +219,7 @@ class _BlockReader:
         self.active_count = 0
 
     def read(self) -> list[Block]:
-        """The blocks in source order; an opener without a local closer is an unclear block."""
+        """Read the blocks in line order; an opener without a local closer is an unclear block."""
         for command in commands_before_end(self.source):
             if command.name == self.kind:
                 self._command_block(command)
@@ -189,12 +237,14 @@ class _BlockReader:
         return sorted(self.result, key=lambda item: item.line)
 
     def _reasons(self, command: Command) -> tuple[str, ...]:
+        """Explain why a declaring command is unclear: its context, or nesting."""
         found = context_reasons(command, self.conditionals, "declaration")
         if command.start in self.nested:
             found.append("nested manuscript environments")
         return tuple(found)
 
     def _command_block(self, command: Command) -> None:
+        """Record the block a declaring command holds in its first argument."""
         value = command.arguments[0].value if command.arguments else ""
         uncertainty = self._reasons(command)
         if not command.arguments:
@@ -202,6 +252,7 @@ class _BlockReader:
         self.result.append(Block(self.name, command.line, value, uncertainty))
 
     def _open(self, command: Command, environment: str) -> None:
+        """Open an environment; an opener inside another marks both as nested."""
         if self.active_count:
             if self.active_count == 1:
                 self.nested.add(next(stack[0].start for stack in self.pending.values() if stack))
@@ -210,6 +261,11 @@ class _BlockReader:
         self.active_count += 1
 
     def _close(self, command: Command, environment: str) -> None:
+        """Close the innermost open environment of this name and record its block.
+
+        A closer without an opener is ignored, and a nested environment's body is not
+        copied.
+        """
         if not self.pending.get(environment):
             return
         opening = self.pending[environment].pop()
@@ -225,7 +281,17 @@ class _BlockReader:
 
 
 def graph_reasons(graph: SourceGraph, selected: set[str], content: set[str]) -> list[str]:
-    """Why the selected graph as a whole cannot be read as one literal manuscript."""
+    """Explain why the selected graph as a whole cannot be read as one literal manuscript.
+
+    Args:
+        graph: The source graph.
+        selected: The sources selected for the scan.
+        content: The selected sources that contribute manuscript content.
+
+    Returns:
+        The reasons: an uninspected main source, subfiles, repeated inclusions, and
+        incomplete-graph findings within the scope of the selection.
+    """
     reasons: list[str] = []
     if graph.main not in selected:
         reasons.append("selected main source could not be inspected")
@@ -259,7 +325,17 @@ def graph_reasons(graph: SourceGraph, selected: set[str], content: set[str]) -> 
 
 @dataclass
 class ManuscriptScan:
-    """Literal declarations collected source by source from the selected graph."""
+    """Literal declarations collected source by source from the selected graph.
+
+    Attributes:
+        graph_reasons: Why the graph as a whole cannot be read as one literal
+            manuscript.
+        classes: The document class declarations.
+        packages: The package declarations.
+        headings: The literal headings of content sources.
+        abstracts: The abstract blocks of content sources.
+        keywords: The keyword blocks of content sources.
+    """
 
     graph_reasons: list[str]
     classes: list[Declaration] = field(default_factory=list)
@@ -269,7 +345,13 @@ class ManuscriptScan:
     keywords: list[Block] = field(default_factory=list)
 
     def read(self, name: str, source: ParsedSource, *, content: bool) -> None:
-        """Collect one source; only content sources supply abstracts, keywords and headings."""
+        """Collect one source; only content sources supply abstracts, keywords and headings.
+
+        Args:
+            name: The source file.
+            source: The parsed source.
+            content: Whether the source contributes manuscript content.
+        """
         # Only primitive \if…\fi ranges hide declarations. A \newif-defined name or a
         # branch-taking package conditional executes nothing by itself.
         conditionals = conditional_spans(source.commands)
@@ -288,6 +370,14 @@ class ManuscriptScan:
     def _end_of_input(
         self, name: str, source: ParsedSource, command: Command, *, conditional: bool
     ) -> None:
+        r"""Note an ``\endinput`` whose effect the scan cannot establish.
+
+        Args:
+            name: The source file.
+            source: The parsed source.
+            command: The ``\endinput`` command.
+            conditional: Whether the command lies inside a conditional.
+        """
         if command.depth or conditional:
             self.graph_reasons.append(
                 f"{name}:{command.line}: grouped, macro-defined, or conditional "
@@ -304,6 +394,13 @@ class ManuscriptScan:
     def _declaration(
         self, name: str, command: Command, conditionals: list[tuple[int, int]]
     ) -> None:
+        """Record a document class or package declaration with its names and options.
+
+        Args:
+            name: The source file.
+            command: The declaring command.
+            conditionals: The spans of the source's primitive conditionals.
+        """
         names = first_argument_names(command)
         options = (
             literal_list(command.options[0].value)
@@ -327,6 +424,13 @@ class ManuscriptScan:
     def _content_command(
         self, name: str, command: Command, conditionals: list[tuple[int, int]]
     ) -> None:
+        """Record a heading of a content source, or the graph gap a command causes.
+
+        Args:
+            name: The source file.
+            command: The command to examine.
+            conditionals: The spans of the source's primitive conditionals.
+        """
         if command.name == "PassOptionsToClass":
             self.graph_reasons.append(
                 f"{name}: class options are also passed outside the documentclass declaration"
@@ -353,7 +457,14 @@ class ManuscriptScan:
 
 
 def abstract_count(block: Block) -> AbstractCount:
-    """The word count range of one abstract block, and why its content may be unclear."""
+    """Count the words of one abstract block as a range, and say why its content may be unclear.
+
+    Args:
+        block: The abstract block.
+
+    Returns:
+        The count, following ``COUNT_METHOD``.
+    """
     text, unknown, macros = scan_literal_text(block.value)
     count = len(_WORD.findall(text))
     nonempty_text = bool(text.strip())
@@ -386,7 +497,14 @@ def abstract_count(block: Block) -> AbstractCount:
 
 
 def keyword_count(block: Block) -> KeywordCount:
-    """The number of nonempty keyword phrases in one keyword block."""
+    """Count the nonempty keyword phrases in one keyword block.
+
+    Args:
+        block: The keyword block.
+
+    Returns:
+        The count, following ``KEYWORD_COUNT_METHOD``.
+    """
     # Semicolons, commas, and common explicit separator macros separate phrases.
     count = 0
     uncertainty = list(block.uncertain)

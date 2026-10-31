@@ -96,7 +96,14 @@ Leslie Lamport.
 
 
 class _QuickstartRun(NamedTuple):
-    """The quick start's blocked ``prepare``: the command's result and the paths it was given."""
+    """The quick start's blocked ``prepare``: the command's result and the paths it was given.
+
+    Attributes:
+        result: The Click result of the command.
+        output: The ``--output`` directory given to the command.
+        report: The ``--report`` path given to the command.
+        diagnostics: The ``--diagnostics`` path given to the command.
+    """
 
     result: Result
     output: Path
@@ -109,24 +116,39 @@ def _invoke(command: str, *arguments: str) -> Result:
 
     The whole-run limit is given explicitly because other live builds may share the host; no
     test here asserts a duration.
+
+    Args:
+        command: The job command, such as ``check`` or ``prepare``.
+        *arguments: The arguments of the command.
+
+    Returns:
+        The Click result of the command.
     """
     return CliRunner().invoke(cli, [command, *arguments, "--job-timeout-seconds", "600"])
 
 
 def _findings(report: dict[str, Any], code: str) -> list[dict[str, Any]]:
-    """Every finding of ``code`` in a JSON report, one per stage that ran the check."""
+    """List every finding of ``code`` in a JSON report, one per stage that ran the check."""
     return [item for item in report["findings"] if item["code"] == code]
 
 
 def _matches(report: dict[str, Any], code: str) -> list[dict[str, Any]]:
-    """The matches that the findings of a scan with ``code`` record in ``details.matches``."""
+    """List the matches that the findings of a scan with ``code`` record in ``details.matches``."""
     return [
         match for item in _findings(report, code) for match in item["details"].get("matches", ())
     ]
 
 
 def _problems(report: dict[str, Any]) -> list[tuple[str, str, str, str]]:
-    """The unresolved errors and warnings of a JSON report, to explain a failed assertion."""
+    """List the unresolved errors and warnings of a JSON report, to explain a failed assertion.
+
+    Args:
+        report: The JSON report.
+
+    Returns:
+        The code (or the rule of a finding without one), severity, status and message of each
+        error or warning that did not pass.
+    """
     return [
         (item["code"] or item["rule"], item["severity"], item["status"], item["message"])
         for item in report["findings"]
@@ -139,24 +161,43 @@ class LiveFailingPolicyTests(unittest.TestCase):
     """Real builds that a policy or preset blocks or passes only with advisories."""
 
     def setUp(self) -> None:
+        """Create a temporary base directory."""
         temporary = tempfile.TemporaryDirectory(prefix="fledge-policies-")
         self.addCleanup(temporary.cleanup)
         self.base = Path(temporary.name).resolve()
 
     def nested_paper(self) -> Path:
-        """A private copy of the quick start's example project."""
+        """Copy the quick start's example project to a private ``paper`` directory.
+
+        Returns:
+            The copy.
+        """
         return Path(shutil.copytree(NESTED_PAPER, self.base / "paper"))
 
     def settings_file(self, tables: str = "") -> Path:
-        """A settings file outside the project that pins the PDF dates, followed by ``tables``."""
+        """Write a settings file outside the project that pins the PDF dates.
+
+        Args:
+            tables: Further settings text, written after the date.
+
+        Returns:
+            The path of the settings file.
+        """
         path = self.base / "settings.toml"
         path.write_text(f"source_date_epoch = {EPOCH}\n{tables}", encoding="utf-8")
         return path
 
     def check_json(self, *arguments: str) -> dict[str, Any]:
-        """The JSON report of ``fledge check ARGUMENTS --json --quiet``.
+        """Run ``fledge check ARGUMENTS --json --quiet`` and return its JSON report.
 
-        Also asserts that the command exited with the code docs/reports.md gives its outcome.
+        Also asserts that the command exited with the code docs/reports.md gives its outcome,
+        and fails the test when the command printed no JSON report.
+
+        Args:
+            *arguments: The arguments of ``fledge check``.
+
+        Returns:
+            The parsed JSON report.
         """
         result = _invoke("check", *arguments, "--json", "--quiet")
         try:
@@ -169,7 +210,15 @@ class LiveFailingPolicyTests(unittest.TestCase):
     def assert_status(
         self, report: dict[str, Any], code: str, status: str, *, severity: str | None = None
     ) -> None:
-        """``code`` was reported, with ``status`` (and ``severity``) in every stage."""
+        """Assert that ``code`` was reported, with ``status`` (and ``severity``) in every stage.
+
+        Args:
+            report: The JSON report.
+            code: The finding code.
+            status: The status every finding of ``code`` must have.
+            severity: The severity every finding of ``code`` must have, or ``None`` to accept
+                any.
+        """
         found = _findings(report, code)
         self.assertTrue(found, f"{code} was not reported; problems: {_problems(report)}")
         for item in found:
@@ -178,7 +227,14 @@ class LiveFailingPolicyTests(unittest.TestCase):
                 self.assertEqual(item["severity"], severity, item)
 
     def prepare_misspelt_quickstart(self) -> _QuickstartRun:
-        """The quick start's blocked run: ``prepare`` of the example citing ``knuth1948``."""
+        """Run the quick start's blocked run: ``prepare`` of the example citing ``knuth1948``.
+
+        The run is isolated, prints the compact report and saves a JSON report and a
+        diagnostics bundle in the base directory.
+
+        Returns:
+            The command's result and the paths it was given.
+        """
         source = self.nested_paper()
         results = source / "sections" / "results.tex"
         text = results.read_text(encoding="utf-8")
@@ -206,7 +262,11 @@ class LiveFailingPolicyTests(unittest.TestCase):
         return _QuickstartRun(result, output, report, diagnostics)
 
     def assert_compact_blocked_report(self, lines: list[str]) -> None:
-        """The compact report of the blocked quick start names the cause and what did not run."""
+        """Assert that the compact report of the blocked run names its cause and what did not run.
+
+        Args:
+            lines: The lines of the compact report of the quick start's blocked run.
+        """
         # skills/fledge/SKILL.md: the first line is `OUTCOME | counts | scope`.
         self.assertEqual(lines[0].split(" | ")[0], "blocked", lines)
         for prefix in ("BIB101 error/failed ", "BLD001 error/", "BLD002 error/", "BIB102 warning/"):
@@ -215,7 +275,13 @@ class LiveFailingPolicyTests(unittest.TestCase):
         self.assertTrue(any("baseline build" in line for line in not_run), lines)
 
     def assert_unverified_bundle(self, path: Path) -> None:
-        """A diagnostics ZIP holds one JSON report, labelled unverified (RPT103), and no sources."""
+        """Assert that a diagnostics ZIP holds one JSON report, labelled unverified, and no sources.
+
+        The report is labelled unverified by an RPT103 finding.
+
+        Args:
+            path: The diagnostics ZIP.
+        """
         self.assertTrue(zipfile.is_zipfile(path), path)
         with zipfile.ZipFile(path) as bundle:
             self.assertIsNone(bundle.testzip())
@@ -227,10 +293,12 @@ class LiveFailingPolicyTests(unittest.TestCase):
         self.assertIn("RPT103", {item["code"] for item in reports[0]["findings"]})
 
     def test_quickstart_blocked_run_names_the_cause_and_publishes_no_bundle(self) -> None:
-        """docs/quickstart.md "3. Read the result", docs/reports.md and docs/workflow-reference.md
+        """Check that the quick start's misspelt citation blocks prepare and publishes no bundle.
+
+        docs/quickstart.md "3. Read the result", docs/reports.md and docs/workflow-reference.md
         "Report formats": the misspelt key blocks prepare with exit code 3. The compact report
         lists BIB101 as an error beside the BLD001 and BLD002 errors and the BIB102 warning it
-        causes, and a `not run:` line names the failed baseline build. No output directory is
+        causes, and a ``not run:`` line names the failed baseline build. No output directory is
         written, while --report saves the blocked JSON report, whose BIB101 finding locates the
         key, and --diagnostics an unverified bundle without sources.
         """
@@ -252,7 +320,9 @@ class LiveFailingPolicyTests(unittest.TestCase):
         self.assert_unverified_bundle(run.diagnostics)
 
     def test_failed_baseline_build_carries_the_log_tail_when_latexmk_exits_zero(self) -> None:
-        """docs/reports.md "The JSON report": a failed build's finding carries the last lines
+        """Check that a failed baseline build carries the TeX log tail even when latexmk exits 0.
+
+        docs/reports.md "The JSON report": a failed build's finding carries the last lines
         of the TeX log in details.log_tail. In the quick start's blocked run latexmk exits 0
         and the baseline build fails because the BLD001 and BLD002 log findings are errors.
         No build.failed finding exists to carry the tail, so the build.baseline finding does,
@@ -275,8 +345,10 @@ class LiveFailingPolicyTests(unittest.TestCase):
         self.assertEqual(carrying, ["build.baseline"])
 
     def test_page_limit_blocks_preparation_and_keeps_the_passed_results(self) -> None:
-        """docs/checks.md PDF001 and docs/reports.md: a two-page PDF fails max_pages = 1, which
-        blocks prepare, so no output directory is written; `findings` still records every
+        """Check that a failed page limit blocks ``prepare`` and the report keeps passed results.
+
+        docs/checks.md PDF001 and docs/reports.md: a two-page PDF fails max_pages = 1, which
+        blocks prepare, so no output directory is written; ``findings`` still records every
         result, including those that passed beside the failed page limit.
         """
         source = write_project(self.base / "paper", {"main.tex": TWO_PAGES})
@@ -302,8 +374,10 @@ class LiveFailingPolicyTests(unittest.TestCase):
         self.assertTrue(beside, [(item.code or item.rule, item.status) for item in report.findings])
 
     def test_max_pages_option_blocks_check_and_is_recorded_in_the_settings(self) -> None:
-        """docs/reports.md: --max-pages 1 on a two-page document blocks check with exit code 3,
-        and the report's `settings` holds the effective value from the command line.
+        """Check that ``--max-pages`` blocks ``check`` and is recorded in the report's settings.
+
+        docs/reports.md: --max-pages 1 on a two-page document blocks check with exit code 3,
+        and the report's ``settings`` holds the effective value from the command line.
         """
         source = write_project(self.base / "paper", {"main.tex": TWO_PAGES})
         report = self.check_json(str(source), "--max-pages", "1", "--isolated")
@@ -312,7 +386,9 @@ class LiveFailingPolicyTests(unittest.TestCase):
         self.assert_status(report, "PDF001", "failed", severity="error")
 
     def test_camera_ready_preset_passes_a_clean_article(self) -> None:
-        """docs/configuration.md "Start from a preset": camera-ready switches on embedded fonts
+        """Check that the camera-ready preset passes a clean article with a title and an author.
+
+        docs/configuration.md "Start from a preset": camera-ready switches on embedded fonts
         without Type 3, consistent page size, no encryption, JavaScript or attachments, title
         and author metadata and the forbidden class options and packages (TEX102, TEX103); a
         clean article with a title and an author passes each of them, and the report records
@@ -340,7 +416,9 @@ class LiveFailingPolicyTests(unittest.TestCase):
                 self.assert_status(report, code, "passed")
 
     def test_anonymous_review_preset_blocks_the_configured_identity_terms(self) -> None:
-        """docs/configuration.md "Start from a preset" and docs/checks.md PRV001 to PRV005: with
+        """Check that the anonymous-review preset blocks a document naming an identity term.
+
+        docs/configuration.md "Start from a preset" and docs/checks.md PRV001 to PRV005: with
         identity terms filled in, anonymous-review blocks a document that names its author, at
         each location in the source (PRV001) and in the extracted PDF text (PRV002), and runs
         its identity-hint, secret and private-comment scans (PRV003, PRV004, PRV005).
@@ -374,7 +452,9 @@ class LiveFailingPolicyTests(unittest.TestCase):
             self.assertLessEqual(statuses, {"passed", "failed"}, code)
 
     def test_arxiv_preset_requires_a_shipped_bbl_that_covers_every_citation(self) -> None:
-        """docs/configuration.md "Start from a preset" and docs/checks.md TEX009 and BIB109: with
+        """Check that the arxiv preset requires a shipped ``main.bbl`` that covers every citation.
+
+        docs/configuration.md "Start from a preset" and docs/checks.md TEX009 and BIB109: with
         the arxiv preset a BibTeX project without a generated main.bbl passes only with
         advisories (TEX009 is a warning, exit code 1); a main.bbl holding the cited key passes
         TEX009 and BIB109, and one that lacks it fails BIB109.
@@ -405,8 +485,10 @@ class LiveFailingPolicyTests(unittest.TestCase):
             self.assert_status(report, "BIB109", "failed")
 
     def test_init_preset_file_is_discovered_until_a_run_is_isolated(self) -> None:
-        """docs/configuration.md "Start from a preset" and "Discovery and precedence": the
-        fledge.toml that `fledge init --preset arxiv` writes is discovered by a later check
+        """Check that the file ``fledge init`` writes is discovered until a run is isolated.
+
+        docs/configuration.md "Start from a preset" and "Discovery and precedence": the
+        fledge.toml that ``fledge init --preset arxiv`` writes is discovered by a later check
         without --preset (execution.config_path names it, execution.preset is null) and makes
         TEX009 a warning; --isolated skips discovery, so TEX009 is again a not-applicable note.
         """

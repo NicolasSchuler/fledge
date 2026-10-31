@@ -71,11 +71,26 @@ async def extract_pdf_evidence(
 
     Empty pages remain empty evidence, not proof of anonymity or readability.
     No PDF text or metadata is copied into diagnostic messages by this helper.
-    A shared ``session`` for ``pdf`` supplies the frozen PDF and remembered measurements.
+
+    Args:
+        pdf: The PDF to read.
+        work: The workspace in which the PDF is frozen when there is no shared session.
+        runner: Runs the PDF tools.
+        budget: The resource budget, or ``None``.
+        session: A shared session for ``pdf``, which supplies the frozen PDF and remembered
+            measurements, or ``None``.
+
+    Returns:
+        The extracted text and the document properties.
+
+    Raises:
+        PreparationError: The PDF cannot be opened or its text cannot be extracted.
+        OSError: A tool could not be run.
     """
     preflight = await PdfPreflight.open(pdf, work, runner, budget, session=session)
 
     def extract(result: CommandResult) -> str:
+        """Return the extracted text once its page boundaries are validated."""
         # Only the page boundaries are validated; the privacy scan reads the text as extracted.
         split_text_pages(result.stdout, preflight.pages)
         return result.stdout
@@ -85,6 +100,7 @@ async def extract_pdf_evidence(
 
 
 def _required_metadata_finding(fields: dict[str, str], options: PdfCheckOptions) -> Finding:
+    """Report each required PDF property that is missing or blank in ``fields``."""
     missing: list[object] = [
         key for key in options.required_metadata if not fields.get(key, "").strip()
     ]
@@ -100,7 +116,10 @@ def _required_metadata_finding(fields: dict[str, str], options: PdfCheckOptions)
 
 
 def _metadata_agreement_finding(fields: dict[str, str], options: PdfCheckOptions) -> Finding:
+    """Compare PDF properties with the expected text; only whitespace is normalised."""
+
     def normalize(value: str) -> str:
+        """Collapse each run of whitespace into one space and trim both ends."""
         return " ".join(value.split())
 
     different: list[object] = [
@@ -122,6 +141,7 @@ def _metadata_agreement_finding(fields: dict[str, str], options: PdfCheckOptions
 
 
 def _tagging_finding(fields: dict[str, str]) -> Finding:
+    """Check that the PDF is reported as tagged; incomplete unless it says yes or no."""
     value = fields.get("Tagged", "").lower()
     return measurement_finding(
         PdfRule.TAGGING_PRESENCE,
@@ -137,6 +157,7 @@ def _tagging_finding(fields: dict[str, str]) -> Finding:
 
 
 def _metadata_findings(fields: dict[str, str], options: PdfCheckOptions) -> list[Finding]:
+    """Return the configured property and tagging findings for the document properties."""
     result: list[Finding] = []
     if options.required_metadata:
         result.append(_required_metadata_finding(fields, options))
@@ -148,6 +169,15 @@ def _metadata_findings(fields: dict[str, str], options: PdfCheckOptions) -> list
 
 
 def _section_findings(pages: int, options: PdfCheckOptions) -> list[Finding]:
+    """Compare each section budget with the pages its range spans.
+
+    Args:
+        pages: The number of pages of the PDF.
+        options: The PDF check options, which list the section budgets.
+
+    Returns:
+        One finding per section; a range that ends beyond the PDF is inconclusive.
+    """
     result = []
     for section in options.section_budgets:
         actual = section.end_page - section.start_page + 1
@@ -214,8 +244,17 @@ async def inspect_pdf_details(
 ) -> list[Finding]:
     """Run only configured checks; unsupported or partial evidence is inconclusive.
 
-    A shared ``session`` for ``pdf`` supplies the frozen PDF and remembered measurements;
-    without one the PDF is frozen in ``work``.
+    Args:
+        pdf: The PDF to measure.
+        work: The workspace, in which the PDF is frozen when there is no shared session.
+        runner: Runs the PDF tools.
+        options: The PDF check options; ``None`` uses the defaults, which select nothing.
+        budget: The resource budget, or ``None``.
+        session: A shared session for ``pdf``, which supplies the frozen PDF and remembered
+            measurements, or ``None``.
+
+    Returns:
+        The findings; empty when no check is configured.
     """
     options = options or PdfCheckOptions()
     configured = configured_pdf_check_rules(options)
@@ -233,6 +272,15 @@ async def inspect_pdf_details(
 
 
 def _figure_font_finding(execution: CommandResult, *, options: PdfCheckOptions) -> Finding:
+    """Judge the fonts of one input figure against the figure font policies.
+
+    Args:
+        execution: The font inventory command of the figure.
+        options: The PDF check options, which hold the figure font policies.
+
+    Returns:
+        The finding, with a violation for every font that breaks a policy.
+    """
     inventory = font_inventory(execution.stdout)
     violations: list[object] = [
         font.to_report()
@@ -268,7 +316,23 @@ async def inspect_included_pdf_figures(
     options: PdfCheckOptions | None = None,
     budget: ResourceBudget | None = None,
 ) -> list[Finding]:
-    """Inspect explicit source figure files without claiming final-PDF object attribution."""
+    """Inspect explicit source figure files without claiming final-PDF object attribution.
+
+    Args:
+        figures: The input PDF figures; a repeated figure is inspected once.
+        work: A new workspace, which must not exist yet.
+        runner: Runs the PDF tools.
+        options: The PDF check options; ``None`` uses the defaults, which select nothing.
+        budget: The resource budget, or ``None``.
+
+    Returns:
+        One finding per figure, with the figure's path; empty when no figure font policy
+        is configured.
+
+    Raises:
+        PreparationError: ``figures`` is not a tuple of at most ``MAX_FIGURE_INPUTS`` paths,
+            or ``work`` already exists.
+    """
     figure_options = options or PdfCheckOptions()
     if not figure_font_checks_enabled(figure_options):
         return []

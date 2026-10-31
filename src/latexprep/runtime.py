@@ -72,10 +72,20 @@ MonitorFactory = Callable[[SandboxBackend, ResourceStatistics], ResourceMonitor]
 
 
 def _remove_directory(path: Path) -> None:
+    """Remove ``path`` and everything below it, ignoring errors."""
     shutil.rmtree(path, ignore_errors=True)
 
 
 def _require_arguments(argv: list[str], subject: str) -> None:
+    """Refuse an empty command or one with an argument that is not a NUL-free string.
+
+    Args:
+        argv: The command and its arguments.
+        subject: Names the command at the start of the error message.
+
+    Raises:
+        PreparationError: The command is empty or holds an invalid argument.
+    """
     if not argv or any(not isinstance(arg, str) or "\0" in arg for arg in argv):
         raise PreparationError(f"{subject} must contain non-NUL string arguments")
 
@@ -86,7 +96,13 @@ _STOPPED_BY_LIMIT = frozenset(
 
 
 def _log_tool_end(summary: str, result: CommandResult, seconds: float) -> None:
-    """Log how a command ended; a limit that stopped the tool is worth more than debugging."""
+    """Log how a command ended; a limit that stopped the tool is worth more than debugging.
+
+    Args:
+        summary: The command summary for the log.
+        result: How the command ended.
+        seconds: How long the command ran.
+    """
     failure = result.failure
     if failure in _STOPPED_BY_LIMIT:
         logger.info("tool stopped by its %s: %s (after %.2f s)", failure, summary, seconds)
@@ -101,7 +117,15 @@ def _log_tool_end(summary: str, result: CommandResult, seconds: float) -> None:
 
 
 def _unverified_version_message(tool: str, result: CommandResult) -> str:
-    """Why ``tool`` gave no usable version, without its location or its raw diagnostics."""
+    """Explain why ``tool`` gave no usable version, without its location or its raw diagnostics.
+
+    Args:
+        tool: The tool's name.
+        result: How the version command ended.
+
+    Returns:
+        The message, with the cause and what to do next.
+    """
     advice = f"Run {tool} on its own to see why, or reinstall it, then try again."
     if result.timed_out:
         cause = "it did not report its version within the time limit"
@@ -122,6 +146,23 @@ def _unverified_version_message(tool: str, result: CommandResult) -> str:
 
 
 def _verified_version(argv: list[str], executable: Path, result: CommandResult) -> ToolVersion:
+    """Check the output of a version command and keep its first lines.
+
+    ``pdfdetach -v`` also succeeds when it exits with its version status after printing
+    its version.
+
+    Args:
+        argv: The version command.
+        executable: The resolved tool.
+        result: How the command ended.
+
+    Returns:
+        The kept version lines, where the tool ran from and its arguments.
+
+    Raises:
+        PreparationError: The command hit a limit, failed, printed nothing or reported an
+            error.
+    """
     lines = (result.stdout + result.stderr).splitlines()
     detach_version = (
         executable.name == "pdfdetach"
@@ -147,10 +188,27 @@ class _FrozenInputs:
         self._directories: dict[Path, DirectoryIdentity] = {}
 
     def overlap(self, workspace: Path) -> bool:
+        """Return whether any frozen copy lies inside ``workspace``."""
         return any(path.is_relative_to(workspace) for path in self._identities)
 
     def freeze(self, source: Path, storage: Path, *, max_file_bytes: int) -> Path:
-        """Copy once into a runtime-owned directory; grant only the recorded copy."""
+        """Copy once into a runtime-owned directory; grant only the recorded copy.
+
+        A source that is a frozen copy itself, or was frozen before, is validated and
+        returned as its copy.
+
+        Args:
+            source: The input file.
+            storage: The runtime-owned directory for the copies, created on first use.
+            max_file_bytes: The largest size of the input.
+
+        Returns:
+            The read-only copy.
+
+        Raises:
+            PreparationError: The input is not a regular file, exceeds the size limit or
+                changed while it was copied, or a copy or its directory was modified.
+        """
         source_key = source.absolute()
         if source_key in self._identities:
             self.validate((source_key,))
@@ -179,6 +237,15 @@ class _FrozenInputs:
         return destination
 
     def _storage(self, storage: Path) -> Path:
+        """Return the runtime-owned storage directory, creating it on first use.
+
+        Returns:
+            The resolved directory.
+
+        Raises:
+            PreparationError: The directory is a link, existed before its first use, or
+                was replaced.
+        """
         storage = storage.absolute()
         if storage.is_symlink():
             raise PreparationError("A frozen-input directory cannot be a symlink")
@@ -201,6 +268,17 @@ class _FrozenInputs:
     def _copy(
         self, source: Path, destination: Path, identity: FileIdentity, max_file_bytes: int
     ) -> None:
+        """Copy ``source`` to the new ``destination``, refusing a changed or oversized input.
+
+        Args:
+            source: The resolved input file.
+            destination: The new copy.
+            identity: The identity ``source`` had when it was checked.
+            max_file_bytes: The largest size of the input.
+
+        Raises:
+            PreparationError: The input changed or exceeded the limit.
+        """
         descriptor = os.open(source, os.O_RDONLY | os.O_NOFOLLOW)
         with os.fdopen(descriptor, "rb") as incoming, destination.open("xb") as outgoing:
             if FileIdentity.from_stat(os.fstat(incoming.fileno())) != identity:
@@ -213,6 +291,15 @@ class _FrozenInputs:
                 raise PreparationError("An input changed or exceeded its limit while freezing")
 
     def validate(self, inputs: tuple[Path, ...]) -> tuple[Path, ...]:
+        """Check that every input is an unchanged frozen copy in its unchanged directory.
+
+        Returns:
+            The absolute paths of the inputs.
+
+        Raises:
+            PreparationError: An input is not an exact frozen copy, or it or its directory
+                was modified or replaced.
+        """
         validated = []
         for value in inputs:
             path = value.absolute()
@@ -231,7 +318,18 @@ class _FrozenInputs:
 
 @dataclass(frozen=True, slots=True)
 class _Invocation:
-    """A validated, sandboxed command ready to start."""
+    """A validated, sandboxed command ready to start.
+
+    Attributes:
+        resolved_command: The command with its resolved executable.
+        sandboxed_command: The command wrapped by the sandbox backend.
+        cwd: The resolved working directory.
+        workspace: The resolved writable workspace.
+        environment: The tool environment.
+        memory_mb: The memory limit of the command in MiB.
+        reserved_memory_mb: The memory reserved for the command in MiB.
+        resource_roots: The declared resource roots of the tool, sorted.
+    """
 
     resolved_command: list[str]
     sandboxed_command: list[str]
@@ -244,12 +342,29 @@ class _Invocation:
 
 
 class _Exit(NamedTuple):
+    """How waiting for a command ended.
+
+    Attributes:
+        timed_out: Whether the time limit passed first.
+        resource_exceeded: The resource failure that stopped the command, if any.
+    """
+
     timed_out: bool
     resource_exceeded: str | None
 
 
 class _BoundedOutput:
-    """Collect stdout and stderr up to one shared limit; exceeding it kills the group."""
+    """Collect stdout and stderr up to one shared limit; exceeding it kills the group.
+
+    Args:
+        max_bytes: The limit on the combined output in bytes.
+        pid: The process that leads the group to kill.
+
+    Attributes:
+        stdout: The collected standard output.
+        stderr: The collected standard error.
+        limited: Whether the output exceeded the limit.
+    """
 
     def __init__(self, max_bytes: int, pid: int) -> None:
         self._max_bytes = max_bytes
@@ -259,6 +374,12 @@ class _BoundedOutput:
         self.limited = False
 
     async def collect(self, stream: asyncio.StreamReader, buffer: bytearray) -> None:
+        """Read ``stream`` to its end into ``buffer``, keeping only what fits the limit.
+
+        Args:
+            stream: The pipe to read.
+            buffer: ``stdout`` or ``stderr`` of this collector.
+        """
         while chunk := await stream.read(IO_CHUNK_BYTES):
             if self.limited:
                 # Keep draining after the kill: the process counts as finished
@@ -273,11 +394,32 @@ class _BoundedOutput:
 
 
 def _kill_launched_group(process: asyncio.subprocess.Process) -> None:
+    """Kill the process group of a process whose launch was cancelled."""
     kill_process_group(process.pid)
 
 
 class ToolRunner:
-    """Run tools with immutable input grants and one shared job resource monitor."""
+    """Run tools with immutable input grants and one shared job resource monitor.
+
+    ``sandbox``, ``toolchain`` and ``monitor_factory`` replace what is otherwise chosen
+    from the host. Tests of process lifetimes and resource accounting supply these instead
+    of reaching into the runner afterwards; production passes none. Construction raises
+    ``PreparationError`` when ``source_date_epoch`` is not a non-negative integer.
+
+    Args:
+        source_date_epoch: The ``SOURCE_DATE_EPOCH`` of every tool; ``None`` uses the
+            current time.
+        toolchain: The installed tools and their resource roots; ``None`` discovers them
+            on first use.
+        monitor_factory: Builds the ``ResourceMonitor`` from the backend and the runner's
+            statistics.
+
+    Attributes:
+        limits: The limits of every command; the defaults when none are given.
+        budget: The shared job budget that admits commands, or ``None``.
+        sandbox: The isolation backend; the platform's when none is given.
+        monitor: The resource monitor of the runner's commands.
+    """
 
     def __init__(
         self,
@@ -289,14 +431,6 @@ class ToolRunner:
         toolchain: Toolchain | None = None,
         monitor_factory: MonitorFactory = ResourceMonitor,
     ) -> None:
-        """Create a runner; the last three replace what is otherwise chosen from the host.
-
-        ``sandbox`` is the isolation backend of the platform, ``toolchain`` the installed
-        tools and their resource roots (discovered on first use), and ``monitor_factory``
-        builds the ``ResourceMonitor`` from the backend and the runner's statistics.
-        Tests of process lifetimes and resource accounting supply these instead of
-        reaching into the runner afterwards; production passes none.
-        """
         self.limits = limits or RuntimeLimits()
         self.budget = budget
         epoch = str(int(time.time()) if source_date_epoch is None else source_date_epoch)
@@ -322,10 +456,12 @@ class ToolRunner:
 
     @property
     def source_date_epoch(self) -> str:
+        """The ``SOURCE_DATE_EPOCH`` value of every tool."""
         return self._source_date_epoch
 
     @property
     def toolchain(self) -> Toolchain:
+        """The installed tools and their resource roots, discovered on first use."""
         if self._toolchain is None:
             self._toolchain = Toolchain.discover(self.sandbox)
         return self._toolchain
@@ -342,6 +478,11 @@ class ToolRunner:
 
     @property
     def tool_versions(self) -> dict[str, ToolVersion]:
+        """The verified version of every probed tool.
+
+        Each is keyed by the tool's name, or by its resolved command when two probes share
+        a name.
+        """
         result: dict[str, ToolVersion] = {}
         for key in sorted(self._versions):
             name = self._version_names[key]
@@ -351,14 +492,22 @@ class ToolRunner:
         return result
 
     def statistics(self) -> ResourceStatistics:
-        """A snapshot of the observed resource use and any job-wide failure."""
+        """Return a snapshot of the observed resource use and any job-wide failure."""
         return replace(self.monitor.statistics)
 
     def _resolve_tool(self, name: str) -> Path:
+        """Resolve a tool name to its declared executable."""
         return self.toolchain.resolve(name)
 
     def freeze_input(self, source: Path, storage: Path) -> Path:
-        """Copy once into a runtime-owned directory; grant only the recorded copy."""
+        """Copy once into a runtime-owned directory; grant only the recorded copy.
+
+        The arguments are those of :meth:`CommandRunner.freeze_input`.
+
+        Raises:
+            PreparationError: The input is not a regular file, exceeds the file size limit
+                or changed while it was copied.
+        """
         return self._frozen.freeze(source, storage, max_file_bytes=self.limits.max_file_bytes)
 
     async def prepare_biber(self, root: Path) -> Path | None:
@@ -367,6 +516,15 @@ class ToolRunner:
         Only Seatbelt needs the sealed copy described in ``biber_toolchain``. Linux
         Bubblewrap already permits execution inside the bound workspace, so
         nothing is prepared there.
+
+        Args:
+            root: The directory under which the copy is made when no job scope is active.
+
+        Returns:
+            The sealed Biber executable, or ``None`` where no copy is needed.
+
+        Raises:
+            PreparationError: The copy could not be prepared, now or in an earlier attempt.
         """
         if not self.sandbox.requires_sealed_biber:
             return None
@@ -386,6 +544,11 @@ class ToolRunner:
                 raise PreparationError(str(error)) from error
 
     async def _prepare_biber(self, root: Path) -> Path:
+        """Create, warm up and seal the Biber copy, and make it the resolved tool.
+
+        Returns:
+            The executable of the copy.
+        """
         source = tool_path("biber")
         # The payload is counted against the job temporary budget: it is created
         # under the monitored job root whenever a job scope is active.
@@ -403,7 +566,16 @@ class ToolRunner:
     def _admission(
         self, name: str, memory_mb: int | None = None
     ) -> contextlib.AbstractAsyncContextManager[object]:
-        """Lease capacity for an unleased caller; a held lease already covers its commands."""
+        """Lease capacity for an unleased caller; a held lease already covers its commands.
+
+        Args:
+            name: The operation's name in the budget statistics.
+            memory_mb: The memory to reserve; by default the smallest of the runtime limit,
+                ``_UNLEASED_MEMORY_MB`` and the available memory.
+
+        Returns:
+            The lease, or a context that reserves nothing.
+        """
         if self.budget is None or self.budget.current_lease is not None:
             return contextlib.nullcontext()
         memory = memory_mb or min(
@@ -412,6 +584,14 @@ class ToolRunner:
         return self.budget.lease(name, memory_mb=memory)
 
     async def tool_version(self, argv: list[str], workspace: Path) -> ToolVersion:
+        """Run the version command ``argv`` under isolation in ``workspace``.
+
+        The version of each resolved tool and arguments is probed once and remembered.
+        The arguments are those of :meth:`CommandRunner.tool_version`.
+
+        Raises:
+            PreparationError: The command is invalid, or the tool gave no usable version.
+        """
         _require_arguments(argv, "A version command")
         executable = self._resolve_tool(argv[0])
         key = (str(executable), *argv[1:])
@@ -436,6 +616,7 @@ class ToolRunner:
         workspace: Path,
         readonly_inputs: tuple[Path, ...] = (),
     ) -> list[str]:
+        """Wrap ``command`` for the sandbox with its validated read-only inputs."""
         return self.sandbox.wrap(
             command,
             workspace,
@@ -446,6 +627,19 @@ class ToolRunner:
 
     @contextlib.asynccontextmanager
     async def job_scope(self, root: Path, *, max_temp_bytes: int) -> AsyncGenerator[Self]:
+        """Monitor every command of the job under ``root`` for the duration of the block.
+
+        Args:
+            root: The job directory.
+            max_temp_bytes: The largest size of the job tree in bytes.
+
+        Yields:
+            The runner itself.
+
+        Raises:
+            PreparationError: A scope or a command is already active, ``max_temp_bytes``
+                is not a positive integer, or ``root`` is not a directory.
+        """
         async with self.monitor.job_scope(
             root, max_temp_bytes=max_temp_bytes, max_file_bytes=self.limits.max_file_bytes
         ):
@@ -460,6 +654,23 @@ class ToolRunner:
         readonly_inputs: tuple[Path, ...] = (),
         memory_mb: int | None = None,
     ) -> CommandResult:
+        """Run one command under the runner's limits, admitted by the budget if unleased.
+
+        The arguments are those of :meth:`CommandRunner.run`. Here ``cwd`` must lie inside
+        ``workspace`` and ``readonly_inputs`` must be frozen copies. ``memory_mb`` may not
+        exceed the limit of the runner or of the caller's lease, and ``None`` keeps the
+        smaller of the two.
+
+        Raises:
+            PreparationError: The command is invalid, a job-wide resource failure was
+                recorded, an input is not an unchanged frozen copy, or the tool could not
+                start.
+            SandboxRefusedError: The sandbox refused the command, or the executable lies
+                in the workspace.
+            ValueError: ``memory_mb`` is invalid or exceeds the limit, or the working
+                directory or workspace is misplaced.
+            RuntimeError: A running command claims an overlapping workspace.
+        """
         _require_arguments(argv, "A tool command")
         if memory_mb is not None and (type(memory_mb) is not int or memory_mb < 1):
             raise ValueError("A command memory cap must be a positive integer")
@@ -488,6 +699,10 @@ class ToolRunner:
         readonly_inputs: tuple[Path, ...],
         memory_mb: int | None,
     ) -> CommandResult:
+        """Check the command, its directories and its inputs, then run it in the sandbox.
+
+        The arguments and exceptions are those of :meth:`run`.
+        """
         workspace = workspace.resolve(strict=True)
         cwd = cwd.resolve(strict=True)
         if not workspace.is_dir() or not cwd.is_dir() or not cwd.is_relative_to(workspace):
@@ -551,6 +766,15 @@ class ToolRunner:
             )
 
     async def _execute(self, invocation: _Invocation) -> CommandResult:
+        """Start the command and collect its output until it exits or a limit stops it.
+
+        Returns:
+            What the command printed and how it ended.
+
+        Raises:
+            PreparationError: The tool could not start.
+            SandboxRefusedError: The sandbox refused the command.
+        """
         started = time.monotonic()
         try:
             process = await start_process(
@@ -625,7 +849,16 @@ class ToolRunner:
         completion: asyncio.Task[int],
         watcher: asyncio.Task[str] | None,
     ) -> _Exit:
-        """Wait for the exit, the time limit or a resource failure, whichever is first."""
+        """Wait for the exit, the time limit or a resource failure, whichever is first.
+
+        Args:
+            command: The registered command.
+            completion: Completes when the process exits.
+            watcher: The standalone resource watcher, or ``None`` within a job scope.
+
+        Returns:
+            Whether the time limit passed first, and the resource failure, if any.
+        """
         watched: list[asyncio.Future[Any]] = [completion, command.failure]
         if watcher is not None:
             watched.append(watcher)
@@ -657,6 +890,7 @@ class ToolRunner:
         readers: tuple[asyncio.Task[None], ...],
         watcher: asyncio.Task[str] | None,
     ) -> None:
+        """Kill the group, stop the watcher, wait for the process and readers, then release."""
         try:
             kill_process_group(command.process.pid)
             if watcher is not None:

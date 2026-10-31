@@ -28,11 +28,33 @@ from tests.support import live_test
 
 
 def _units(value: str, engine: str = "pdflatex") -> str:
+    """Encode ``value`` as the hexadecimal code units of the option evidence.
+
+    Args:
+        value: The text to encode.
+        engine: The engine whose units to use: UTF-8 bytes for ``pdflatex``, Unicode code
+            points for any other engine.
+
+    Returns:
+        Each unit as eight upper-case hexadecimal digits, concatenated.
+    """
     units = value.encode("utf-8") if engine == "pdflatex" else [ord(char) for char in value]
     return "".join(f"{unit:08X}" for unit in units)
 
 
 def _evidence(token: str, engine: str = "pdflatex") -> str:
+    """Return complete loaded-options evidence for the hook with ``token``.
+
+    The records name a 2025-11-01 kernel, the global options ``11pt,twoside``, and the
+    options of ``article.cls`` and of ``local.sty``, each with its raw source text.
+
+    Args:
+        token: The hook's token, which opens and closes the records.
+        engine: The engine the records name and whose code units encode the values.
+
+    Returns:
+        The evidence, one record per line.
+    """
     return "\n".join(
         [
             f"START|{token}",
@@ -53,12 +75,35 @@ def _evidence(token: str, engine: str = "pdflatex") -> str:
 
 
 class OptionsRunner(FakeBuildRunner):
+    """A build runner that leaves the loaded-options evidence a real TeX run would leave.
+
+    Each build writes a recorder file (``.fls``) that lists the main file, ``local.sty``,
+    the toolchain's ``article.cls`` and the staged hook, and the hook's sidecar
+    (``output/<hook>.lpo`` in the workspace) with the evidence of :func:`_evidence`.
+
+    Args:
+        toolchain: The folder that holds the toolchain's ``article.cls``; builds may report
+            it as the origin of loaded packages.
+
+    Attributes:
+        fixture_toolchain: The ``toolchain`` folder.
+        mutation: One way to break the evidence, such as ``"missing-end"``,
+            ``"wrong-token"`` or ``"absent"``; the empty default keeps it complete.
+        log: The text of the ``.log`` file each build writes.
+    """
+
     def __init__(self, toolchain: Path, mutation: str = "", *, log: str = "") -> None:
         super().__init__(log=log, resource_roots=[toolchain])
         self.fixture_toolchain = toolchain
         self.mutation = mutation
 
     async def run(self, argv, cwd, workspace, **kwargs):
+        """Run the fake build, then write the recorder file and the hook's sidecar.
+
+        The arguments are those of :meth:`ToolRunner.run`; the last item of ``argv`` is the
+        main file, and ``workspace`` holds the staged hook and ``output``. Every call
+        returns the fake build's result; a version probe writes nothing else.
+        """
         result = await super().run(argv, cwd, workspace, **kwargs)
         if argv[-1] in {"-v", "--version"}:
             return result
@@ -117,7 +162,14 @@ class OptionsRunner(FakeBuildRunner):
 
 
 class LoadedOptionsTests(unittest.IsolatedAsyncioTestCase):
+    """Loaded-option collection with controlled builds: evidence, tampering, settings, hook."""
+
     async def asyncSetUp(self):
+        """Create a project and a toolchain folder in a temporary directory.
+
+        ``paper/main.tex`` loads the project's ``local.sty`` with an option, and the
+        toolchain holds ``article.cls``.
+        """
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name).resolve()
         self.source, self.toolchain = self.root / "source", self.root / "toolchain"
@@ -134,6 +186,7 @@ class LoadedOptionsTests(unittest.IsolatedAsyncioTestCase):
         (self.toolchain / "article.cls").write_text("\\ProvidesClass{article}")
 
     async def asyncTearDown(self):
+        """Remove the temporary directory."""
         self.temporary.cleanup()
 
     async def test_actual_options_and_origins_match_recorder(self):
@@ -285,7 +338,18 @@ class LoadedOptionsTests(unittest.IsolatedAsyncioTestCase):
 
 
 class LoadedOptionsDiagnosticsTests(unittest.TestCase):
+    """What :func:`collect_loaded_options` says about missing, incomplete or non-ASCII evidence."""
+
     def collect(self, directory: str, sidecar: bytes | None):
+        """Stage the option probe for a one-line project and collect its evidence.
+
+        Args:
+            directory: The temporary folder to stage the project in.
+            sidecar: The bytes to write as the probe's sidecar, or ``None`` to write none.
+
+        Returns:
+            The staged probe and the collected evidence.
+        """
         work = Path(directory).resolve() / "staging"
         project = work / "project"
         project.mkdir(parents=True)
@@ -298,6 +362,15 @@ class LoadedOptionsDiagnosticsTests(unittest.TestCase):
         return probe, evidence
 
     def build_evidence(self, probe, **overrides) -> BuildEvidence:
+        """Return the evidence of a complete pdfLaTeX build that recorded the probe's hook.
+
+        Args:
+            probe: The staged probe whose hook the recorder lists.
+            **overrides: Fields of :class:`BuildEvidence` that replace the defaults.
+
+        Returns:
+            The build evidence.
+        """
         return BuildEvidence(
             **{
                 "engine": "pdflatex",
@@ -342,6 +415,8 @@ class LoadedOptionsDiagnosticsTests(unittest.TestCase):
 
 @live_test("Enable FLEDGE_RUN_INTEGRATION for real restricted TeX option instrumentation")
 class LiveLoadedOptionsTests(unittest.IsolatedAsyncioTestCase):
+    """Live loaded-option collection with real restricted TeX."""
+
     async def test_live_forwarded_options_preserve_rendered_pdf_and_source(self):
         with tempfile.TemporaryDirectory(prefix="latex-prep-options-") as directory:
             root = Path(directory).resolve()

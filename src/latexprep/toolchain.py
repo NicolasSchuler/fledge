@@ -77,17 +77,42 @@ _MAX_TOTAL_RECEIPT_BYTES = 8 * MIB
 
 
 def _resolved_tool(found: Path, name: str) -> Path:
+    """Return the path through which the tool ``name``, found at ``found``, is run.
+
+    ``latexmk`` is resolved completely; any other tool keeps its own file name inside its
+    resolved directory.
+
+    Args:
+        found: The absolute path at which the tool was found on ``PATH``.
+        name: The name of the tool.
+
+    Returns:
+        The fully resolved path for ``latexmk``; otherwise the resolved directory of
+        ``found`` joined with its file name.
+    """
     # Resolve the TeX distribution directory links while preserving engine names
     # such as pdflatex (argv[0] selects the TeX format).
     return found.resolve() if name == "latexmk" else found.parent.resolve() / found.name
 
 
 def install_hint(name: str) -> str | None:
-    """The package that provides the tool ``name`` and how to install it, when known."""
+    """Return the package that provides the tool ``name`` and how to install it, when known."""
     return _INSTALL_HINTS.get(name)
 
 
 def tool_path(name: str) -> Path:
+    """Find the tool ``name`` on ``PATH`` and return the path it is run by.
+
+    Args:
+        name: The name of the tool.
+
+    Returns:
+        The absolute path, resolved as for the declared tools.
+
+    Raises:
+        ToolUnavailableError: The tool is not on ``PATH``; the message carries the
+            installation hint when one is known.
+    """
     found = shutil.which(name)
     if not found:
         hint = install_hint(name)
@@ -99,7 +124,16 @@ def tool_path(name: str) -> Path:
 
 
 def distribution_roots(executable: Path) -> set[Path]:
-    """Declare installed resources, without allowing an executable's home folder."""
+    """Declare installed resources, without allowing an executable's home folder.
+
+    Args:
+        executable: The executable whose resources to declare.
+
+    Returns:
+        The resolved executable, the TeX Live distribution directory that holds it, if
+        any, and for a Homebrew Cellar executable its package and the packages its
+        installation receipts declare.
+    """
     resolved = executable.resolve()
     roots: set[Path] = {resolved}
     parts = resolved.parts
@@ -117,7 +151,14 @@ def distribution_roots(executable: Path) -> set[Path]:
 
 
 def texlive_root(roots: frozenset[Path]) -> Path | None:
-    """The declared TeX Live distribution directory, if the roots include one."""
+    """Return the declared TeX Live distribution directory, if the roots include one.
+
+    Args:
+        roots: The declared resource roots.
+
+    Returns:
+        The smallest root named like a TeX Live year directory, or ``None``.
+    """
     return min((root for root in roots if _TEXLIVE_DIRECTORY.fullmatch(root.name)), default=None)
 
 
@@ -127,6 +168,16 @@ def _homebrew_runtime_roots(package: Path, cellar: Path) -> set[Path]:
     Homebrew updates opt links independently of dependent installation receipts.
     Both the recorded version and current alias may be needed by installed Mach-O
     load commands. Never grant the Cellar, opt directory, or an external symlink.
+    At most ``_MAX_HOMEBREW_PACKAGES`` packages are visited; a receipt that is missing,
+    invalid or over its size bounds adds no dependencies.
+
+    Args:
+        package: The Cellar package directory, ``Cellar/<formula>/<version>``, to start
+            from.
+        cellar: The Cellar directory; only package directories inside it are granted.
+
+    Returns:
+        The granted package directories and the opt links that resolve to them.
     """
     roots: set[Path] = set()
     pending = [package]
@@ -157,7 +208,24 @@ def _homebrew_runtime_roots(package: Path, cellar: Path) -> set[Path]:
 
 
 def _receipt_dependencies(receipt: Path, cellar: Path) -> Iterator[Path]:
-    """Installed directories of the runtime dependencies one receipt declares."""
+    """Yield the installed directories of the runtime dependencies one receipt declares.
+
+    For each dependency the recorded version and the current opt link are candidates; a
+    candidate counts when it resolves to a directory directly inside the formula's Cellar
+    directory. A receipt that is not an object or declares more than
+    ``_MAX_HOMEBREW_PACKAGES`` dependencies yields nothing.
+
+    Args:
+        receipt: The ``INSTALL_RECEIPT.json`` file of a package.
+        cellar: The Cellar directory.
+
+    Yields:
+        The resolved package directories of the dependencies.
+
+    Raises:
+        OSError: The receipt cannot be read.
+        ValueError: The receipt is not valid JSON text.
+    """
     declared = json.loads(receipt.read_text())
     if not isinstance(declared, dict):
         return
@@ -183,7 +251,14 @@ def _receipt_dependencies(receipt: Path, cellar: Path) -> Iterator[Path]:
 
 @dataclass(frozen=True, slots=True)
 class ToolContext:
-    """The executables, readable resources and search path granted to one tool."""
+    """The executables, readable resources and search path granted to one tool.
+
+    Attributes:
+        executable: The executable the tool runs.
+        executables: Every executable the tool may run.
+        resource_roots: The directories and files the tool may read.
+        search_paths: The directories of the tool's ``PATH``, in order.
+    """
 
     executable: Path
     executables: frozenset[Path]
@@ -194,13 +269,36 @@ class ToolContext:
 class ToolDeclarations(Protocol):
     """What toolchain discovery needs from the sandbox backend."""
 
-    def system_roots(self) -> frozenset[Path]: ...
+    def system_roots(self) -> frozenset[Path]:
+        """Return the fixed system resources every tool may read.
 
-    def declares_tool(self, path: Path, resolved: Path) -> bool: ...
+        Returns:
+            The system resource roots.
+        """
+        ...
+
+    def declares_tool(self, path: Path, resolved: Path) -> bool:
+        """Return whether an installed tool may become part of the declared toolchain.
+
+        Args:
+            path: The absolute path at which the tool was found on ``PATH``.
+            resolved: The path the tool is run by.
+
+        Returns:
+            ``True`` when the tool may be declared.
+        """
+        ...
 
 
 class Toolchain:
-    """Installed tools and their declared resources, discovered once per runner."""
+    """Installed tools and their declared resources, discovered once per runner.
+
+    Args:
+        executables: The declared executables.
+        roots: The declared resource roots every tool may read.
+        resolved: The path each tool is run by, keyed by name; later lookups and
+            substitutions are recorded in it.
+    """
 
     def __init__(
         self, executables: frozenset[Path], roots: frozenset[Path], resolved: dict[str, Path]
@@ -212,6 +310,19 @@ class Toolchain:
 
     @classmethod
     def discover(cls, backend: ToolDeclarations) -> Toolchain:
+        """Discover the installed tools that ``backend`` declares, and their resources.
+
+        The tools in ``_SANDBOXED_TOOL_NAMES`` are declared up front, so every command of a
+        job shares one stable grant set; the interpreters and shells that tools start are
+        declared as well. The roots are the backend's system roots and the distribution roots
+        of every declared executable.
+
+        Args:
+            backend: The sandbox backend that decides which tools may be declared.
+
+        Returns:
+            The toolchain with the declared tools resolved.
+        """
         declared = {*_INTERPRETERS, *Path("/usr/bin").glob("perl5.*")}
         resolved: dict[str, Path] = {}
         for name in _SANDBOXED_TOOL_NAMES:
@@ -230,12 +341,28 @@ class Toolchain:
         return cls(frozenset(declared), frozenset(roots), resolved)
 
     def resolve(self, name: str) -> Path:
+        """Return the path the tool ``name`` is run by, looking it up on first use.
+
+        Args:
+            name: The name of the tool.
+
+        Returns:
+            A substituted copy, the declared tool, or the tool found on ``PATH``.
+
+        Raises:
+            ToolUnavailableError: The tool is not known and not on ``PATH``.
+        """
         if name not in self._resolved:
             self._resolved[name] = tool_path(name)
         return self._resolved[name]
 
     def substitute(self, name: str, executable: Path) -> None:
-        """Run a runtime-prepared copy whenever ``name`` is requested."""
+        """Run a runtime-prepared copy whenever ``name`` is requested.
+
+        Args:
+            name: The name of the tool.
+            executable: The prepared copy to run instead.
+        """
         self._resolved[name] = executable
 
     def forget(self, name: str) -> None:
@@ -248,6 +375,19 @@ class Toolchain:
         return self._roots
 
     def context(self, executable: Path) -> ToolContext:
+        """Return the executables, readable resources and search path granted to ``executable``.
+
+        The context is built once per executable. Its search path is the executable's own
+        directory, ``/usr/bin``, ``/bin`` and the directories of the declared executables,
+        without repeats; its resource roots add the executable's distribution roots to the
+        toolchain's.
+
+        Args:
+            executable: The executable the tool runs.
+
+        Returns:
+            The grants of the tool, the same object for every call with ``executable``.
+        """
         if executable not in self._contexts:
             executables = self._executables | {executable}
             search_paths = tuple(

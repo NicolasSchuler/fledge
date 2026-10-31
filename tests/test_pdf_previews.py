@@ -1,3 +1,10 @@
+"""Visual previews of the pages a PDF comparison found different.
+
+The preview descriptors serialize only the fields that are set. Pages are captured after every
+page was measured and within the page and byte limits of the store; a failed preview leaves the
+comparison findings in place, and a cancelled one releases its scratch files and resource lease.
+"""
+
 from __future__ import annotations
 
 import asyncio
@@ -20,6 +27,24 @@ from tests.support import PNG
 
 
 class PreviewRunner(FakePdfRunner):
+    """Poppler output for two PDFs that also renders PNG previews with ``pdftoppm -png``.
+
+    The PDF that contains "right" has ``pages_right`` pages and the other ``pages_left``.
+    A PNG render records the call, writes ``png`` as ``page.png`` and awaits ``png_hook``.
+
+    Args:
+        **kwargs: The keyword arguments of :class:`FakePdfRunner`.
+
+    Attributes:
+        pages_left: The page count of the PDF that does not contain "right".
+        png: The bytes every PNG render writes.
+        png_error: Whether a PNG render raises :class:`PreparationError` after writing.
+        resize: Whether the pages of the PDF that contains "right" are 790 instead of 792
+            points high.
+        png_hook: An async function without arguments that each PNG render awaits, or
+            ``None``.
+    """
+
     def __init__(self, *, pages_left=1, png=PNG, png_error=False, resize=False, **kwargs):
         super().__init__(**kwargs)
         self.pages_left = pages_left
@@ -31,6 +56,16 @@ class PreviewRunner(FakePdfRunner):
     async def run(
         self, argv, cwd, workspace, *, readonly_inputs=(), memory_mb=None
     ) -> CommandResult:
+        """Render a PNG preview, or answer the command with this runner's pages and text.
+
+        The arguments are those of :meth:`CommandRunner.run`; a preview is written into
+        ``workspace``. A PNG render returns an empty successful result, and any other command
+        the output of :class:`FakePdfRunner` with the page count, page sizes and text of this
+        runner.
+
+        Raises:
+            PreparationError: A PNG render with ``png_error`` set, or with ``pdftoppm`` missing.
+        """
         if argv[0] == "pdftoppm" and "-png" in argv:
             self.require_frozen(readonly_inputs)
             self.calls.append(ToolCall(list(argv), workspace, readonly_inputs))
@@ -66,6 +101,8 @@ class PreviewRunner(FakePdfRunner):
 
 
 class PreviewDescriptorTests(unittest.TestCase):
+    """The report form of the preview side and page descriptors."""
+
     def test_descriptors_serialize_optional_fields_only_when_they_are_set(self) -> None:
         captured = PreviewSide(True, (612, 792), "captured", image_id="pdf-preview-0001-left")
         captured.pixels = (3, 4)
@@ -117,7 +154,10 @@ class PreviewDescriptorTests(unittest.TestCase):
 
 
 class PdfPreviewTests(unittest.IsolatedAsyncioTestCase):
+    """Preview capture during PDF comparisons, its limits and its failures."""
+
     async def asyncSetUp(self) -> None:
+        """Create ``left.pdf`` and ``right.pdf`` in a temporary directory."""
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
         self.left, self.right = self.root / "left.pdf", self.root / "right.pdf"
@@ -125,9 +165,22 @@ class PdfPreviewTests(unittest.IsolatedAsyncioTestCase):
         self.right.write_bytes(b"%PDF-right")
 
     async def asyncTearDown(self) -> None:
+        """Remove the temporary directory."""
         self.temporary.cleanup()
 
     async def compare(self, runner, store=None, name="compare", budget=None):
+        """Compare ``left.pdf`` with ``right.pdf``.
+
+        Args:
+            runner: The runner that answers the tool commands.
+            store: The preview store that collects the previews of a comparison of
+                ``main.tex`` at the ``prepared`` stage, or ``None`` for no previews.
+            name: The name of the work directory below the temporary root.
+            budget: The resource budget of the comparison, or ``None``.
+
+        Returns:
+            The result of :func:`compare_pdfs`.
+        """
         return await compare_pdfs(
             self.left,
             self.right,

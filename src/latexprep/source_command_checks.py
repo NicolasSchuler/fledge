@@ -120,10 +120,14 @@ _DECLARED_IDENTITY_COMMANDS = frozenset({"ProvidesPackage", "ProvidesClass", "Pr
 class SourceChecks:
     """One parsed source being checked: where it is, what it holds, and where to report.
 
-    ``known_paths`` is the project's index of every name suffix and directory prefix
-    (``project_files.known_path_index``); the lookup context of a reference is not
-    established while a file is checked, so it only rules out names no project file
-    could match.
+    Attributes:
+        path: The project-relative name of the source, reported with every finding.
+        source: The parsed source.
+        known_paths: The project's index of every name suffix and directory prefix
+            (``project_files.known_path_index``). The lookup context of a reference is not
+            established while a file is checked, so it only rules out names no project
+            file could match.
+        findings: Where the checks record their uncertainties.
     """
 
     path: str
@@ -132,7 +136,17 @@ class SourceChecks:
     findings: GraphFindings
 
     def names_project_file(self, command: Command) -> bool:
-        """Whether a class/package reference can name a file inside the project."""
+        """Return whether a class/package reference can name a file inside the project.
+
+        A name that is not literal text counts as one that can.
+
+        Args:
+            command: The class or package command; its first argument holds the names.
+
+        Returns:
+            ``True`` when a name is not literal or matches a known project path with or without
+            one of the command's default suffixes.
+        """
         if not command.arguments:
             return False
         suffixes = DEFAULT_SUFFIXES_BY_FILE_COMMAND[command.name]
@@ -149,11 +163,15 @@ class SourceChecks:
 
 
 def _is_file_command(command: Command) -> bool:
+    """Return whether ``command`` names a file or declares the graphics search path."""
     return command.name in FILE_COMMANDS or command.name == "graphicspath"
 
 
 def _check_conditional_dependencies(checks: SourceChecks) -> None:
-    """File references that sit inside a conditional, whose branch is not established."""
+    """Report file references that sit inside a conditional, whose branch is not established.
+
+    Toolchain classes and packages that cannot name a project file are left out.
+    """
     spans = conditional_spans(checks.source.commands)
     for command in checks.source.commands:
         if not _is_file_command(command) or not in_conditional(spans, command.start):
@@ -173,7 +191,7 @@ def _check_conditional_dependencies(checks: SourceChecks) -> None:
 
 
 def _check_unclosed_literals(checks: SourceChecks) -> None:
-    """Literal regions without a closing delimiter, after which commands are unreliable."""
+    """Report literal regions without a closing delimiter, after which commands are unreliable."""
     for offset in checks.source.unclosed_literals:
         checks.findings.uncertain(
             "source.literal_unclosed",
@@ -185,7 +203,12 @@ def _check_unclosed_literals(checks: SourceChecks) -> None:
 
 
 def _check_subfiles_v1(checks: SourceChecks, command: Command) -> None:
-    """The subfiles package in its ``v1`` mode, which runs preambles in a way not followed."""
+    """Report the subfiles package in its ``v1`` mode, which runs preambles in a way not followed.
+
+    Args:
+        checks: The source being checked.
+        command: The command to check.
+    """
     if (
         command.name in {"usepackage", "RequirePackage"}
         and command.arguments
@@ -201,7 +224,12 @@ def _check_subfiles_v1(checks: SourceChecks, command: Command) -> None:
 
 
 def _check_provides_identity(checks: SourceChecks, command: Command) -> None:
-    """A declared package, class or file name that contains a directory."""
+    """Report a declared package, class or file name that contains a directory.
+
+    Args:
+        checks: The source being checked.
+        command: The command to check.
+    """
     if (
         command.name in _DECLARED_IDENTITY_COMMANDS
         and command.arguments
@@ -218,7 +246,16 @@ def _check_provides_identity(checks: SourceChecks, command: Command) -> None:
 
 
 def _check_unsupported_or_custom_path(checks: SourceChecks, command: Command) -> None:
-    """A command that reads files at run time, or an unknown one handed what looks like a path."""
+    """Report a command that reads files at run time, or an unknown one handed a path.
+
+    An unknown command is one that is not a file, text or macro-name command; its options
+    and arguments are suspect when they look like a file name or match a known project
+    path that has a directory.
+
+    Args:
+        checks: The source being checked.
+        command: The command to check.
+    """
     if command.name in _UNSUPPORTED_COMMANDS:
         checks.findings.uncertain(
             "source.unsupported_command",
@@ -257,7 +294,14 @@ def _check_unsupported_or_custom_path(checks: SourceChecks, command: Command) ->
 
 
 def _check_option_paths(checks: SourceChecks, command: Command) -> None:
-    """Options of a file command that look like paths, whose lookup rules are not followed."""
+    """Report options of a file command that look like paths, whose lookup rules are not followed.
+
+    Supported font commands and a ``subfiles`` document class are left out.
+
+    Args:
+        checks: The source being checked.
+        command: The command to check.
+    """
     if not _is_file_command(command) or command.name in SUPPORTED_FONT_COMMANDS:
         return
     subfiles_parent = (
@@ -280,7 +324,12 @@ def _check_option_paths(checks: SourceChecks, command: Command) -> None:
 
 
 def _check_nested(checks: SourceChecks, command: Command) -> None:
-    """A file command inside a group or macro argument, whose execution context is unknown."""
+    """Report a file command inside a group or macro argument, whose execution context is unknown.
+
+    Args:
+        checks: The source being checked.
+        command: The command to check.
+    """
     if _is_file_command(command) and command.depth and command.name != "graphicspath":
         checks.findings.uncertain(
             "source.nested_file_command",
@@ -294,7 +343,14 @@ def _check_nested(checks: SourceChecks, command: Command) -> None:
 
 
 def _check_filename_argument(checks: SourceChecks, command: Command) -> None:
-    """A file command without a filename argument, or one whose argument hides text."""
+    """Report a file command without a filename argument, or one whose argument hides text.
+
+    An argument hides text when comments or literal regions were blanked inside it.
+
+    Args:
+        checks: The source being checked.
+        command: The command to check.
+    """
     if not _is_file_command(command):
         return
     index = file_argument_index(command.name)

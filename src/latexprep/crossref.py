@@ -41,7 +41,12 @@ _MALFORMED = "Crossref returned malformed metadata"
 
 
 class CrossrefReplyError(Exception):
-    """A reply that cannot be used, with the reason and the outcome to report."""
+    """A reply that cannot be used, with the reason and the outcome to report.
+
+    Attributes:
+        reason: Why the reply cannot be used, for the report.
+        outcome: The fetch outcome to report.
+    """
 
     def __init__(self, reason: str, outcome: FetchOutcome = FetchOutcome.MALFORMED) -> None:
         super().__init__(reason)
@@ -51,7 +56,13 @@ class CrossrefReplyError(Exception):
 
 @dataclass(frozen=True, slots=True)
 class PublishedVersion:
-    """A DOI that Crossref declares to be the published version of a preprint."""
+    """A DOI that Crossref declares to be the published version of a preprint.
+
+    Attributes:
+        doi: The DOI of the published version.
+        asserted_by: The party that asserted the relation, ``subject`` or ``object``, or
+            ``None`` when the record names neither.
+    """
 
     doi: str
     asserted_by: str | None
@@ -61,8 +72,16 @@ class PublishedVersion:
 class CrossrefWork:
     """The fields of one Crossref record that a bibliography entry is compared with.
 
-    A list is empty when the record gives no usable value. ``published_versions`` is
-    None when the record has a relation list that could not be read.
+    A list is empty when the record gives no usable value.
+
+    Attributes:
+        doi: The record's DOI.
+        titles: The record's titles.
+        authors: The authors' family names.
+        years: The distinct years of the record's issue and publication dates.
+        venues: The titles of the containers, such as the journal, that hold the work.
+        published_versions: The published versions of a preprint; ``None`` when the record
+            has a relation list that could not be read.
     """
 
     doi: str
@@ -75,7 +94,15 @@ class CrossrefWork:
 
 @dataclass(frozen=True, slots=True)
 class CrossrefCandidate:
-    """One result of a title search; ``authors`` is None when its names were unusable."""
+    """One result of a title search.
+
+    Attributes:
+        doi: The result's DOI.
+        titles: The result's titles.
+        work_type: The type of work Crossref records, if any.
+        authors: The authors' family names; ``None`` when its names were unusable.
+        years: The distinct years of the result's issue and publication dates.
+    """
 
     doi: str
     titles: list[str]
@@ -86,41 +113,55 @@ class CrossrefCandidate:
 
 @dataclass(frozen=True, slots=True)
 class UpdateNotice:
-    """A record that corrects, retracts or otherwise updates a work."""
+    """A record that corrects, retracts or otherwise updates a work.
+
+    Attributes:
+        kind: The kind of update, as Crossref names it.
+        notice_doi: The DOI of the updating record.
+    """
 
     kind: str
     notice_doi: str
 
 
 class NoticeReply(NamedTuple):
-    """The update notices that name a DOI; ``truncated`` when Crossref holds more."""
+    """The update notices that name a DOI.
+
+    Attributes:
+        notices: The notices that the reply lists.
+        truncated: Whether Crossref holds more results than the reply lists.
+    """
 
     notices: list[UpdateNotice]
     truncated: bool
 
 
 def doi_url(doi: str) -> str:
-    """The doi.org address of ``doi``."""
+    """Return the doi.org address of ``doi``."""
     return "https://doi.org/" + quote(doi, safe="/")
 
 
 def work_url(doi: str) -> str:
-    """The Crossref lookup of one DOI."""
+    """Return the URL of the Crossref lookup of one DOI."""
     return CROSSREF_WORKS_URL + "/" + quote(doi, safe="")
 
 
 def search_url(title: str) -> str:
-    """A bibliographic search for ``title`` returning at most ``SEARCH_ROWS`` results."""
+    """Return the URL of a bibliographic search for ``title``.
+
+    The search returns at most ``SEARCH_ROWS`` results.
+    """
     return CROSSREF_WORKS_URL + "?" + urlencode({"query.bibliographic": title, "rows": SEARCH_ROWS})
 
 
 def notices_url(doi: str) -> str:
-    """The records that update ``doi``, at most ``NOTICE_ROWS`` of them."""
+    """Return the URL that asks for the records that update ``doi``, at most ``NOTICE_ROWS``."""
     query = urlencode({"filter": "updates:" + doi, "rows": NOTICE_ROWS})
     return CROSSREF_WORKS_URL + "?" + query
 
 
 def _strings(value: Any) -> list[str]:
+    """Return ``value`` if it is a bounded list of bounded strings, otherwise an empty list."""
     if (
         not isinstance(value, list)
         or len(value) > _MAX_STRINGS
@@ -131,6 +172,7 @@ def _strings(value: Any) -> list[str]:
 
 
 def _family_names(value: Any) -> list[str] | None:
+    """Read the authors' family names, or ``None`` when the list or any name is unusable."""
     if not isinstance(value, list) or len(value) > _MAX_AUTHORS:
         return None
     result = []
@@ -143,6 +185,7 @@ def _family_names(value: Any) -> list[str] | None:
 
 
 def _years(record: dict[str, Any]) -> list[str]:
+    """Collect the distinct years of a record's issue and publication dates, sorted."""
     years = set()
     for key in _DATE_KEYS:
         value = record.get(key)
@@ -159,7 +202,15 @@ def _years(record: dict[str, Any]) -> list[str]:
 
 
 def _message(body: bytes) -> dict[str, Any]:
-    """The ``message`` object of a successful Crossref reply."""
+    """Return the ``message`` object of a successful Crossref reply.
+
+    Returns:
+        The ``message`` object.
+
+    Raises:
+        CrossrefReplyError: The reply is not JSON with the status ``ok`` and a ``message``
+            object.
+    """
     try:
         data = json.loads(body)
         message = data["message"]
@@ -171,6 +222,14 @@ def _message(body: bytes) -> dict[str, Any]:
 
 
 def _items(message: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return the ``items`` of a reply's message.
+
+    Returns:
+        The items.
+
+    Raises:
+        CrossrefReplyError: ``items`` is not a list of at most ``_MAX_ITEMS`` objects.
+    """
     items = message.get("items")
     if (
         not isinstance(items, list)
@@ -182,6 +241,12 @@ def _items(message: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _published_versions(record: dict[str, Any]) -> list[PublishedVersion] | None:
+    """Read the DOIs of which the record declares itself a preprint.
+
+    Returns:
+        The published versions, empty without an ``is-preprint-of`` relation, or ``None``
+        when the relation list could not be read.
+    """
     relation = record.get("relation", {})
     related = relation.get("is-preprint-of", []) if isinstance(relation, dict) else []
     if not related:
@@ -205,7 +270,14 @@ def _published_versions(record: dict[str, Any]) -> list[PublishedVersion] | None
 
 
 def parse_work_reply(body: bytes) -> CrossrefWork:
-    """The record in a reply to a lookup of one DOI."""
+    """Parse the record in a reply to a lookup of one DOI.
+
+    Returns:
+        The record's DOI and the fields a bibliography entry is compared with.
+
+    Raises:
+        CrossrefReplyError: The reply, or the DOI it names, cannot be used.
+    """
     message = _message(body)
     doi = message.get("DOI")
     if not isinstance(doi, str) or DOI_PATTERN.fullmatch(doi) is None:
@@ -221,7 +293,15 @@ def parse_work_reply(body: bytes) -> CrossrefWork:
 
 
 def parse_search_reply(body: bytes) -> list[CrossrefCandidate]:
-    """The candidates in a reply to a title search, in the order Crossref ranked them."""
+    """Parse the candidates in a reply to a title search, in the order Crossref ranked them.
+
+    Returns:
+        The candidates, at most ``SEARCH_ROWS``.
+
+    Raises:
+        CrossrefReplyError: The reply cannot be used, holds more than ``SEARCH_ROWS``
+            results, or holds a result without a usable DOI or title.
+    """
     items = _items(_message(body))
     if len(items) > SEARCH_ROWS:
         raise CrossrefReplyError(f"Crossref returned more than the {SEARCH_ROWS} results asked for")
@@ -244,7 +324,19 @@ def parse_search_reply(body: bytes) -> list[CrossrefCandidate]:
 
 
 def _update_kinds(item: dict[str, Any], doi: str) -> list[str]:
-    """The kinds of update that ``item`` makes to ``doi``; an item that makes none is wrong."""
+    """List the kinds of update that ``item`` makes to ``doi``; an item that makes none is wrong.
+
+    Args:
+        item: One record of an update-filter reply.
+        doi: The DOI whose updates are wanted.
+
+    Returns:
+        The kinds, as Crossref names them, in the order the record lists them.
+
+    Raises:
+        CrossrefReplyError: An update entry cannot be read, or none names ``doi``; the
+            latter is reported as an identifier mismatch.
+    """
     updates = item.get("update-to")
     if not isinstance(updates, list) or len(updates) > _MAX_UPDATES:
         raise CrossrefReplyError("Crossref returned an update record that could not be read")
@@ -269,7 +361,19 @@ def _update_kinds(item: dict[str, Any], doi: str) -> list[str]:
 
 
 def parse_notice_reply(body: bytes, doi: str) -> NoticeReply:
-    """The notices in a reply to an update-filter query for ``doi``."""
+    """Parse the notices in a reply to an update-filter query for ``doi``.
+
+    Args:
+        body: The reply.
+        doi: The DOI whose updates were asked for.
+
+    Returns:
+        The notices, and whether Crossref holds more results than the reply lists.
+
+    Raises:
+        CrossrefReplyError: The reply or one of its update records cannot be read, a record
+            does not name ``doi``, or the reply lists more than ``NOTICE_ROWS`` notices.
+    """
     message = _message(body)
     items = _items(message)
     notices: list[UpdateNotice] = []

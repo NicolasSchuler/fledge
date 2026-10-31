@@ -11,7 +11,18 @@ from tests.support import ProjectTestCase
 
 
 class SourceCommandTests(ProjectTestCase):
+    """Recognising file-reading commands and their arguments, and where recognition stops.
+
+    Dynamic and unsupported commands block flattening, literal examples, comments and prose are
+    not dependencies, heuristics stay advisories, and argument collection is bounded.
+    """
+
     def assert_usable(self, plan) -> None:
+        """Assert that the flattening ``plan`` is usable.
+
+        The plan must hold no blocking finding, and no two of its target names may differ only in
+        letter case; a failure lists the error findings.
+        """
         self.assertFalse(
             has_blockers(plan.findings),
             [finding for finding in plan.findings if finding.severity == "error"],

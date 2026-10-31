@@ -62,7 +62,19 @@ FONTS = (
 def recording_runner(
     *, info: str = "Pages: 2\n", fail: str | None = None, delay: float = 0
 ) -> FakeCommandRunner:
-    """Answers pdfinfo and pdffonts; counts the commands and optionally fails one tool."""
+    """Return a runner that answers pdfinfo and pdffonts, counts commands and may fail a tool.
+
+    Every other tool prints its own name followed by " output".
+
+    Args:
+        info: What ``pdfinfo`` prints.
+        fail: A tool whose commands exit with status 1 and print "tool failed" on stderr, or
+            ``None``.
+        delay: The seconds each command other than a version probe sleeps before it answers.
+
+    Returns:
+        The runner; ``pdffonts`` prints ``FONTS``.
+    """
     failed = Reply("", "tool failed", 1)
     replies: dict[str, Script] = {"pdfinfo": info, "pdffonts": FONTS}
     if fail is not None:
@@ -71,6 +83,8 @@ def recording_runner(
 
 
 class ArgumentBuilderTests(unittest.TestCase):
+    """The canonical command lines of the PDF tools."""
+
     def test_pdfinfo_has_one_canonical_form(self) -> None:
         self.assertEqual(pdfinfo_argv(), ["pdfinfo", "-enc", "UTF-8", "-isodates", DOCUMENT])
         self.assertEqual(pdfinfo_argv("@left@")[-1], "@left@")
@@ -114,6 +128,8 @@ class ArgumentBuilderTests(unittest.TestCase):
 
 
 class TextPageTests(unittest.TestCase):
+    """Splitting extracted text into pages and normalizing its newlines."""
+
     def test_split_pages_require_exactly_one_form_feed_per_page(self) -> None:
         self.assertEqual(split_text_pages("a\n\fb \r\n\f", 2), ["a\n", "b \r\n"])
         self.assertEqual(split_text_pages("a\f\f  \n", 2), ["a", ""])
@@ -135,6 +151,8 @@ class TextPageTests(unittest.TestCase):
 
 
 class FontPolicyTests(unittest.TestCase):
+    """The font policy: observations always, violations only for the enabled switches."""
+
     def test_observations_ignore_the_switches_and_violations_follow_them(self) -> None:
         inventory = font_inventory(FONTS)
         names = {
@@ -161,7 +179,13 @@ class FontPolicyTests(unittest.TestCase):
 
 
 class ToolXmlTests(unittest.TestCase):
-    """Tool XML is parsed with xml.etree, so entity tricks must never reach the parser."""
+    """Tool XML is parsed with ``xml.etree``, so entity tricks must never reach the parser.
+
+    Attributes:
+        BILLION_LAUGHS: A document whose nested internal entities expand exponentially.
+        EXTERNAL_ENTITY: A document whose entity reads a local file.
+        EXTERNAL_PARAMETER_ENTITY: A document whose parameter entity loads a remote DTD.
+    """
 
     BILLION_LAUGHS = (
         '<?xml version="1.0"?><!DOCTYPE pdf2xml ['
@@ -218,8 +242,19 @@ class ToolXmlTests(unittest.TestCase):
 
 
 class QpdfEnvelopeTests(unittest.TestCase):
+    """The envelope of qpdf's JSON version 2 output and the defects that reject it."""
+
     @staticmethod
     def document(**changes: object) -> str:
+        """Return a two-page qpdf JSON version 2 document with one object.
+
+        Args:
+            **changes: Top-level keys that replace those of the document; a key whose value
+                is ``None`` is left out.
+
+        Returns:
+            The document as JSON text.
+        """
         document: dict[str, object] = {
             "version": 2,
             "pages": [{}, {}],
@@ -258,17 +293,23 @@ class QpdfEnvelopeTests(unittest.TestCase):
 
 
 class SessionTestCase(AsyncProjectTestCase):
+    """A placeholder PDF in the project root and fresh work directories for tool sessions."""
+
     async def asyncSetUp(self) -> None:
+        """Write a placeholder ``document.pdf`` into the project root."""
         self.pdf = self.root / "document.pdf"
         self.pdf.write_bytes(b"%PDF-fixture")
         self.counter = 0
 
     def work(self) -> Path:
+        """Return a new, not yet created work directory path below the project root."""
         self.counter += 1
         return self.root / f"work-{self.counter}"
 
 
 class MeasurementMemoTests(SessionTestCase):
+    """Which measurements a tool session remembers and shares, and which it runs again."""
+
     async def test_an_identical_measurement_runs_its_tool_once(self) -> None:
         runner = recording_runner()
         session = await PdfToolSession.open(self.work(), {"document": self.pdf}, runner, None)
@@ -336,6 +377,8 @@ class MeasurementMemoTests(SessionTestCase):
 
 
 class SessionOpeningTests(SessionTestCase):
+    """Which resource budget the measurements of an opened session use."""
+
     async def test_measurements_default_to_the_runner_budget_unless_told_otherwise(self) -> None:
         runner = recording_runner()
         runner.budget = ResourceBudget(1, 256)
@@ -354,6 +397,8 @@ class SessionOpeningTests(SessionTestCase):
 
 
 class PreflightTests(SessionTestCase):
+    """The PDF preflight: its session, properties and page count, or its failure."""
+
     async def test_a_readable_document_yields_its_session_properties_and_page_count(self) -> None:
         runner = recording_runner(info="Pages: 3\nTitle: Paper\n")
         preflight = await preflight_pdf(self.pdf, self.work(), runner, None, ["pdf.any"])
@@ -401,6 +446,8 @@ class PreflightTests(SessionTestCase):
 
 
 class TypedFontTests(unittest.TestCase):
+    """The typed rows of the font inventory and their report form."""
+
     def test_inventory_rows_are_typed_fonts_that_report_under_the_established_keys(self) -> None:
         loose, glyphs = font_inventory(FONTS)[1:3]
         self.assertEqual(
@@ -423,6 +470,8 @@ class TypedFontTests(unittest.TestCase):
 
 
 class ColorContrastTests(unittest.TestCase):
+    """The WCAG contrast ratio of two relative luminances."""
+
     def test_wcag_ratio_runs_from_one_to_twenty_one_in_either_order(self) -> None:
         black, white = relative_luminance((0, 0, 0)), relative_luminance((1, 1, 1))
         self.assertAlmostEqual(wcag_contrast_ratio(black, white), 21.0)
@@ -434,11 +483,15 @@ class ColorContrastTests(unittest.TestCase):
 
 
 class ToolMeasurementTests(SessionTestCase):
+    """A tool measurement's findings, its inconclusive outcomes and its worker thread."""
+
     async def session(self, runner: FakeCommandRunner) -> PdfToolSession:
+        """Open a tool session over ``document.pdf`` without a budget, using ``runner``."""
         return await PdfToolSession.open(self.work(), {"document": self.pdf}, runner, None)
 
     @staticmethod
     def finding(rule: str, message: str) -> Finding:
+        """Return a passed informational finding of ``rule`` with ``message``."""
         return Finding(rule, message, severity="info", status="passed")
 
     async def test_the_findings_of_a_readable_command_are_returned(self) -> None:

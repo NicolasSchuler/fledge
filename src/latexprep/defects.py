@@ -24,11 +24,19 @@ REPORT_DEFECT_SUGGESTION = (
 
 
 def is_expected_failure(error: BaseException) -> bool:
-    """Whether ``error`` is a problem with the input, a setting or the machine."""
+    """Return whether ``error`` is a problem with the input, a setting or the machine."""
     return isinstance(error, PreparationError | OSError)
 
 
 def summarize_traceback(error: BaseException) -> tuple[str, ...]:
-    """The innermost traceback frames as ``file.py:line in function``, without directories."""
+    """Summarize the innermost traceback frames of ``error`` without their directories.
+
+    Args:
+        error: The exception whose traceback is summarized.
+
+    Returns:
+        One ``file.py:line in function`` entry per frame, for at most the innermost
+        ``_TRACEBACK_FRAME_LIMIT`` frames.
+    """
     frames = traceback.extract_tb(error.__traceback__)[-_TRACEBACK_FRAME_LIMIT:]
     return tuple(f"{Path(frame.filename).name}:{frame.lineno} in {frame.name}" for frame in frames)

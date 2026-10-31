@@ -16,14 +16,24 @@ CONDITIONAL_FLOW = "conditional source control flow"
 
 
 def grouped_reason(noun: str) -> str:
-    """The reason for a ``noun`` written in a group or a macro argument."""
+    """Return the reason for a ``noun`` written in a group or a macro argument."""
     return f"{noun} inside a group or macro argument"
 
 
 def context_reasons(
     command: Command, conditionals: Sequence[tuple[int, int]], noun: str
 ) -> list[str]:
-    """Reasons ``command``, a declaration of ``noun``, may not execute: grouped, conditional."""
+    """Return the reasons ``command``, a declaration of ``noun``, may not execute.
+
+    Args:
+        command: The declaration command.
+        conditionals: The merged ``conditional_spans`` of the source.
+        noun: What the command declares, as the reasons word it.
+
+    Returns:
+        The grouped reason when the command is inside a group or macro argument, then
+        ``CONDITIONAL_FLOW`` when it is inside a conditional; empty when neither applies.
+    """
     reasons = []
     if command.depth:
         reasons.append(grouped_reason(noun))

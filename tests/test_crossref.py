@@ -23,10 +23,32 @@ from .online_support import crossref_work
 
 
 def reply(message: Any, status: str = "ok") -> bytes:
+    """Encode a Crossref reply body as JSON.
+
+    Args:
+        message: The value of the ``message`` field.
+        status: The value of the ``status`` field.
+
+    Returns:
+        The UTF-8 encoded JSON body.
+    """
     return json.dumps({"status": status, "message": message}).encode()
 
 
 def refused(parse, body: bytes, *args: Any) -> CrossrefReplyError:
+    """Return the error with which ``parse`` refuses ``body``.
+
+    Args:
+        parse: The reply parser to call.
+        body: The reply body to parse.
+        *args: Further arguments passed to ``parse`` after ``body``.
+
+    Returns:
+        The :class:`CrossrefReplyError` that ``parse`` raised.
+
+    Raises:
+        AssertionError: ``parse`` accepted the reply.
+    """
     try:
         parse(body, *args)
     except CrossrefReplyError as error:
@@ -35,6 +57,8 @@ def refused(parse, body: bytes, *args: Any) -> CrossrefReplyError:
 
 
 class UrlTests(unittest.TestCase):
+    """The DOI, work, search and notice URLs and how they escape their input."""
+
     def test_every_url_is_built_from_the_doi_or_title_and_escapes_it(self):
         self.assertEqual(doi_url("10.1000/a b"), "https://doi.org/10.1000/a%20b")
         self.assertEqual(work_url("10.1000/a/b"), "https://api.crossref.org/works/10.1000%2Fa%2Fb")
@@ -49,6 +73,8 @@ class UrlTests(unittest.TestCase):
 
 
 class WorkReplyTests(unittest.TestCase):
+    """The typed record read from a reply about one work."""
+
     def test_the_comparable_fields_of_a_record_are_typed(self):
         work = parse_work_reply(
             reply(
@@ -123,6 +149,8 @@ class WorkReplyTests(unittest.TestCase):
 
 
 class SearchReplyTests(unittest.TestCase):
+    """The candidates read from a bibliographic search reply."""
+
     def test_candidates_keep_their_type_authors_and_years(self):
         candidates = parse_search_reply(
             reply({"items": [crossref_work(), {**crossref_work(), "author": "x"}]})
@@ -153,10 +181,22 @@ class SearchReplyTests(unittest.TestCase):
 
 
 def notice(doi: str, kind: str, target: str = "10.1234/example") -> dict[str, Any]:
+    """Build a Crossref item that is an update notice for another work.
+
+    Args:
+        doi: The DOI of the notice itself.
+        kind: The update type, such as ``"retraction"``.
+        target: The DOI of the work the notice updates.
+
+    Returns:
+        The item with its ``DOI`` and one ``update-to`` entry.
+    """
     return {"DOI": doi, "update-to": [{"DOI": target, "type": kind}]}
 
 
 class NoticeReplyTests(unittest.TestCase):
+    """The update notices, such as retractions and corrections, read from a reply."""
+
     def test_notices_name_the_kind_and_the_notice_doi(self):
         body = reply(
             {"items": [notice("10.1000/a", "retraction"), notice("10.1000/b", "correction")]}

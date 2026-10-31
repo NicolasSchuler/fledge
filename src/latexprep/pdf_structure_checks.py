@@ -2,8 +2,8 @@
 
 The tagged-structure checks read the structure tree through qpdf's object data: tables,
 links, figure alternative text and the parent links that tie marked content to its
-elements. Expected-heading checks read the extracted text. None of them infer heading
-semantics or establish PDF/UA conformance, meaningful reading order, or description
+elements. Expected-heading checks read the extracted text. No check infers heading
+semantics or establishes PDF/UA conformance, meaningful reading order, or description
 quality.
 """
 
@@ -44,6 +44,17 @@ _MAX_HEADING_NUMBER_CHARACTERS = 64
 
 
 def _require_single_line(name: str, value: object, max_length: int) -> None:
+    """Refuse a setting that is not one line of at most ``max_length`` characters.
+
+    Args:
+        name: The setting named in the error.
+        value: The value to check.
+        max_length: The most characters allowed.
+
+    Raises:
+        SettingsError: ``value`` is not a string, is too long, has surrounding spaces or
+            contains a control character.
+    """
     if (
         not isinstance(value, str)
         or len(value) > max_length
@@ -59,6 +70,18 @@ def _require_single_line(name: str, value: object, max_length: int) -> None:
 
 @dataclass(frozen=True)
 class HeadingExpectation:
+    """One configured heading: the line of text expected on a page.
+
+    Construction raises ``SettingsError`` when the page lies outside the inspected range,
+    the title or the number is not one line, or the title is empty.
+
+    Attributes:
+        FIELD_BOUNDS: The bounds :func:`validate_scalars` applies to ``page``.
+        page: The page, from 1, on which the heading is expected.
+        title: The heading's title.
+        number: The heading's number, which precedes the title; it may be empty.
+    """
+
     FIELD_BOUNDS: ClassVar[dict[str, Bounds]] = {"page": Bounds(1, MAX_INSPECTION_PAGES)}
 
     page: int
@@ -78,7 +101,18 @@ class StructureOptions:
     """The PDF structure checks to run and the headings to expect.
 
     These are the PDF keys of ``[structure_checks]``; the same table also holds the
-    ``AuthorRecordOptions`` keys, which ``config`` reads separately.
+    ``AuthorRecordOptions`` keys, which ``config`` reads separately. Construction raises
+    ``SettingsError`` when a switch is not a boolean, or the heading expectations are not
+    a tuple of ``HeadingExpectation`` records, are too many, or repeat a page and title.
+
+    Attributes:
+        heading_expectations: The headings to expect.
+        require_structure_tree: Whether the PDF must have a structure tree.
+        check_table_structure: Whether to check tagged tables.
+        check_link_structure: Whether to check Link tags against link annotations.
+        require_figure_alt: Whether every tagged Figure needs alternative text.
+        check_structure_references: Whether to check parent links and marked-content
+            references.
     """
 
     heading_expectations: tuple[HeadingExpectation, ...] = ()
@@ -101,6 +135,20 @@ class StructureOptions:
 
 
 def _heading_findings(text: str, pages: int, options: StructureOptions) -> list[Finding]:
+    """Check each expected heading against the lines extracted from its page.
+
+    A heading matches a line equal to its number and title after whitespace
+    normalization. A page beyond the document, a page without text or more than one
+    matching line leaves the result incomplete.
+
+    Args:
+        text: The text extracted from every page.
+        pages: The number of pages.
+        options: The structure options.
+
+    Returns:
+        One finding per expected heading.
+    """
     extracted = split_text_pages(text, pages)
     results = []
     for expectation in options.heading_expectations:
@@ -138,7 +186,11 @@ def _heading_findings(text: str, pages: int, options: StructureOptions) -> list[
 
 
 def _marked_content_problems(tree: StructureTree) -> tuple[list[object], list[object]]:
-    """Problems with each marked-content item's page and parent-tree entry, and the items."""
+    """Check the page and the parent-tree entry of each marked-content item.
+
+    Returns:
+        The problems found, and every item as the tree lists it.
+    """
     problems: list[object] = []
     sequence: list[object] = []
     seen: set[tuple[str | None, str | None, int]] = set()
@@ -167,6 +219,7 @@ def _marked_content_problems(tree: StructureTree) -> tuple[list[object], list[ob
 
 
 def _object_reference_problems(tree: StructureTree) -> list[object]:
+    """Check the target, the page and the parent-tree entry of each object reference."""
     problems: list[object] = []
     for owner, page, target in tree.object_references:
         item = {**tree.location(owner), "target": target}
@@ -185,6 +238,16 @@ def _object_reference_problems(tree: StructureTree) -> list[object]:
 
 
 def _structure_references(tree: StructureTree, *, required: bool) -> Finding:
+    """Check the parent links and the marked-content and object references of the tree.
+
+    Args:
+        tree: The structure tree.
+        required: Whether a structure tree is required, so one without elements fails.
+
+    Returns:
+        The structure reference finding, incomplete when the tree holds constructs the
+        checks do not interpret.
+    """
     problems = list(tree.problems)
     if required and not tree.elements:
         problems.append({"reason": "Required structure tree has no structure elements"})
@@ -214,7 +277,16 @@ _TABLE_CELLS = frozenset({"/TH", "/TD"})
 def _table_rows(
     tree: StructureTree, table: StructureElement, violations: list[object]
 ) -> list[int]:
-    """The rows of a table, looking through its header, body and footer groups."""
+    """Collect the rows of a table, looking through its header, body and footer groups.
+
+    Args:
+        tree: The structure tree.
+        table: The table element.
+        violations: Receives each child that is neither a row, such a group nor a caption.
+
+    Returns:
+        The indexes of the row elements, in tree order.
+    """
     rows: list[int] = []
     pending = list(reversed(table.children))
     while pending:
@@ -230,7 +302,16 @@ def _table_rows(
 
 
 def _table_summary(tree: StructureTree, index: int, violations: list[object]) -> dict[str, object]:
-    """Check one table's rows and cells; its location with its row and cell counts."""
+    """Check one table's rows and cells.
+
+    Args:
+        tree: The structure tree.
+        index: The index of the table element.
+        violations: Receives each problem found.
+
+    Returns:
+        The table's location with its row, cell and header cell counts.
+    """
     rows = _table_rows(tree, tree.elements[index], violations)
     headers = cells = 0
     if not rows:
@@ -252,6 +333,7 @@ def _table_summary(tree: StructureTree, index: int, violations: list[object]) ->
 
 
 def _table_structure(tree: StructureTree) -> Finding:
+    """Check every tagged table; a tree without tables or uncertainty is not applicable."""
     violations: list[object] = []
     tables = [
         _table_summary(tree, index, violations)
@@ -276,10 +358,16 @@ def _table_structure(tree: StructureTree) -> Finding:
 
 
 def _unicode_string(value: object) -> str | None:
+    """Return the text of a qpdf ``u:`` string, or ``None`` for any other value."""
     return value[2:] if isinstance(value, str) and value.startswith("u:") else None
 
 
 def _figure_alt(tree: StructureTree) -> Finding:
+    """Check that every tagged Figure has a nonempty Alt string.
+
+    An Alt value that is not a Unicode string leaves the result incomplete, and a tree
+    without Figures or uncertainty is not applicable.
+    """
     violations: list[object] = []
     uncertain = bool(tree.uncertainty)
     figures = 0
@@ -310,14 +398,25 @@ def _figure_alt(tree: StructureTree) -> Finding:
 
 
 class _LinkOwner(NamedTuple):
-    """A Link element that owns an object reference, and the page that reference is on."""
+    """A Link element that owns an object reference, and the page that reference is on.
+
+    Attributes:
+        index: The index of the Link element.
+        page: The page reference of the object reference, if known.
+    """
 
     index: int
     page: str | None
 
 
 class _Problem(NamedTuple):
-    """What is wrong with a link target: a violation, or something the check cannot resolve."""
+    """What is wrong with a link target: a violation, or something the check cannot resolve.
+
+    Attributes:
+        reason: What is wrong.
+        unresolved: Whether the check cannot resolve the target, so the problem is an
+            uncertainty rather than a violation.
+    """
 
     reason: str
     unresolved: bool = False
@@ -325,7 +424,16 @@ class _Problem(NamedTuple):
 
 @dataclass(slots=True)
 class _LinkAudit:
-    """What the link check has found so far, across every page's annotations."""
+    """What the link check has found so far, across every page's annotations.
+
+    Attributes:
+        tree: The structure tree.
+        associated: The Link elements that own each annotation reference.
+        uncertainty: What the check cannot resolve.
+        violations: The violations found.
+        annotations: Each page link annotation inspected.
+        encountered: The annotation references seen in page arrays.
+    """
 
     tree: StructureTree
     associated: dict[str, list[_LinkOwner]]
@@ -335,9 +443,11 @@ class _LinkAudit:
     encountered: set[str] = field(default_factory=set)
 
     def violate(self, item: dict[str, object], reason: str) -> None:
+        """Record a violation at ``item`` with its ``reason``."""
         self.violations.append({**item, "reason": reason})
 
     def record(self, item: dict[str, object], problem: _Problem | None) -> None:
+        """Record ``problem`` at ``item`` as an uncertainty or a violation, if there is one."""
         if problem is None:
             return
         if problem.unresolved:
@@ -347,7 +457,11 @@ class _LinkAudit:
 
 
 def _link_tag_associations(tree: StructureTree) -> dict[str, list[_LinkOwner]]:
-    """For each annotation an element references, the Link elements that own the reference."""
+    """Map each annotation an element references to the Link elements that own the reference.
+
+    The owner of a reference is the nearest Link element at or above the referencing
+    element.
+    """
     associated: dict[str, list[_LinkOwner]] = {}
     for reference in tree.object_references:
         target = reference.target
@@ -362,6 +476,15 @@ def _link_tag_associations(tree: StructureTree) -> dict[str, list[_LinkOwner]]:
 
 
 def _destination_problem(tree: StructureTree, raw: object) -> _Problem | None:
+    """Find what is wrong with a link destination.
+
+    Args:
+        tree: The structure tree, whose pages a local destination must name.
+        raw: The destination.
+
+    Returns:
+        The problem, or ``None`` for a local destination on a valid page.
+    """
     destination = tree.objects.resolve(raw)
     if destination is None or destination == [] or destination in ("u:", "b:", "/"):
         return _Problem("link destination is empty")
@@ -374,6 +497,13 @@ def _destination_problem(tree: StructureTree, raw: object) -> _Problem | None:
 
 
 def _check_link_action(audit: _LinkAudit, raw: object, item: dict[str, object]) -> None:
+    """Check a link action: a nonempty URI, or a GoTo with a valid destination.
+
+    Args:
+        audit: The link check's findings so far.
+        raw: The action.
+        item: The record of the annotation that holds the action.
+    """
     tree = audit.tree
     action = tree.objects.dictionary(raw)
     kind = action.get("/S")
@@ -394,6 +524,15 @@ def _check_link_action(audit: _LinkAudit, raw: object, item: dict[str, object]) 
 def _check_link_annotation(
     audit: _LinkAudit, page: str, number: int, reference: str, annotation: dict[str, object]
 ) -> None:
+    """Check one page link annotation: its Link tag, its page and its target.
+
+    Args:
+        audit: The link check's findings so far.
+        page: The object reference of the page.
+        number: The page number.
+        reference: The object reference of the annotation.
+        annotation: The annotation dictionary.
+    """
     item: dict[str, object] = {"page": number, "annotation": reference}
     audit.annotations.append(item)
     if reference in audit.encountered:
@@ -413,6 +552,11 @@ def _check_link_annotation(
 
 
 def _audit_page_link_annotations(audit: _LinkAudit) -> None:
+    """Check every link annotation of every page.
+
+    Raises:
+        PreparationError: A page's annotation array is malformed or too long.
+    """
     tree = audit.tree
     for page, number in tree.pages.items():
         page_object = tree.objects.dictionary(page)
@@ -432,7 +576,8 @@ def _audit_page_link_annotations(audit: _LinkAudit) -> None:
 def _orphan_link_findings(audit: _LinkAudit) -> set[int]:
     """Report Link tags without an annotation and references without a page annotation.
 
-    Returns the Link elements that own an annotation reference.
+    Returns:
+        The Link elements that own an annotation reference.
     """
     associated = audit.associated
     for reference in associated:
@@ -450,6 +595,15 @@ def _orphan_link_findings(audit: _LinkAudit) -> set[int]:
 
 
 def _link_structure(tree: StructureTree) -> Finding:
+    """Check Link tags against the link annotations of every page.
+
+    Returns:
+        The link structure finding; not applicable when the PDF has no link annotations,
+        Link tags, violations or uncertainty.
+
+    Raises:
+        PreparationError: A page's annotation array is malformed or too long.
+    """
     audit = _LinkAudit(
         tree, associated=_link_tag_associations(tree), uncertainty=set(tree.uncertainty)
     )
@@ -473,6 +627,7 @@ def _link_structure(tree: StructureTree) -> Finding:
 
 
 def _object_rules(options: StructureOptions) -> list[str]:
+    """List the selected checks that read the structure tree."""
     return [
         rule
         for rule, selected in (
@@ -489,7 +644,7 @@ def _object_rules(options: StructureOptions) -> list[str]:
 
 
 def required_structure_tools(options: StructureOptions) -> set[str]:
-    """The external tools the configured checks run, for setup diagnostics."""
+    """Return the external tools the configured checks run, for setup diagnostics."""
     object_rules = _object_rules(options)
     tools = {"pdfinfo"} if object_rules or options.heading_expectations else set()
     if options.heading_expectations:
@@ -500,6 +655,23 @@ def required_structure_tools(options: StructureOptions) -> set[str]:
 
 
 def _object_findings(output: str, pages: int, options: StructureOptions) -> list[Finding]:
+    """Run the selected structure-tree checks on qpdf's object data.
+
+    Without a structure tree every check is incomplete, except that the structure
+    reference check fails when a tree is required. A check that fails on the tree is
+    reported as unavailable.
+
+    Args:
+        output: qpdf's JSON object data.
+        pages: The number of pages.
+        options: The structure options.
+
+    Returns:
+        One finding per selected check.
+
+    Raises:
+        PreparationError: The object data or the structure tree cannot be read.
+    """
     rules = _object_rules(options)
     objects = QpdfObjectGraph(output, pages)
     if objects.root.get("/StructTreeRoot") is None:
@@ -544,7 +716,18 @@ async def inspect_pdf_structure(
 ) -> list[Finding]:
     """Inspect only selected line expectations and tagged PDF object structures.
 
-    A shared ``session`` for ``pdf`` supplies the frozen PDF and remembered measurements.
+    Args:
+        pdf: The PDF to inspect.
+        work: The new working directory.
+        runner: Runs the tools.
+        options: The structure options.
+        budget: The resource budget, if any.
+        session: A shared session for ``pdf`` that supplies the frozen PDF and remembered
+            measurements.
+
+    Returns:
+        The findings of the selected checks, or each selected check as unavailable when
+        the PDF cannot be preflighted; empty when no check is selected.
     """
     object_rules = _object_rules(options)
     configured = (

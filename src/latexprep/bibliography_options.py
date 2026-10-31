@@ -34,12 +34,34 @@ _FIELD_OR_ALTERNATIVES = TextFormat(
 
 
 def _require_entry_type(name: str, value: object) -> None:
+    """Reject a value that is neither a lowercase entry type nor ``'*'``.
+
+    Args:
+        name: The setting path that the error message names.
+        value: The value to check.
+
+    Raises:
+        SettingsError: ``value`` is not a lowercase entry type or ``'*'``.
+    """
     require_text(
         name, value, expected=_ENTRY_TYPE_OR_ANY.description, pattern=_ENTRY_TYPE_OR_ANY.pattern
     )
 
 
 def _require_field_alternatives(name: str, specs: object) -> None:
+    """Reject field requirements that are not distinct field names or alternatives.
+
+    Each entry is a lowercase field name, or alternatives of which one suffices, such as
+    ``"doi|url"``.
+
+    Args:
+        name: The setting path that the error messages name.
+        specs: The field requirements of one entry type.
+
+    Raises:
+        SettingsError: ``specs`` is not a tuple of distinct, well-formed entries, lists
+            no field, or has an entry that repeats an alternative.
+    """
     require_unique_strings(name, specs, item_format=_FIELD_OR_ALTERNATIVES)
     if not isinstance(specs, tuple) or not specs:
         raise SettingsError(f"{name} must list at least one field", (name,))
@@ -51,7 +73,30 @@ def _require_field_alternatives(name: str, specs: object) -> None:
 
 @dataclass(frozen=True)
 class BibliographyOptions:
-    """Which offline bibliography checks run and how strictly; all values are immutable."""
+    """Which offline bibliography checks run and how strictly; all values are immutable.
+
+    Construction raises ``SettingsError`` when a value breaks its rule: a scalar of the
+    wrong type or out of bounds, or a malformed or repeated entry type or field
+    requirement.
+
+    Attributes:
+        FIELD_BOUNDS: The bounds :func:`validate_scalars` applies to
+            ``fuzzy_duplicate_threshold``.
+        check_citation_coverage: Whether to resolve citation keys against the declared
+            bibliography resources.
+        check_uncited_entries: Whether to report entries that no citation reaches.
+        all_roots: Whether citation usage is unioned across every root instead of taken
+            from one root.
+        required_fields: Pairs of an entry type (or ``'*'``) and the fields it must have;
+            a field may be alternatives such as ``"doi|url"``.
+        doi_entry_types: The entry types (or ``'*'``) whose missing DOI is reported.
+        check_page_ranges: Whether to check the syntax of page ranges.
+        check_urls: Whether to check the syntax of URLs.
+        check_capitalization: Whether to flag title capitalization that a style may lose.
+        check_fuzzy_duplicates: Whether to look for entries with similar titles.
+        fuzzy_duplicate_threshold: The title similarity at or above which two entries
+            are reported as possible duplicates, greater than 0 and at most 1.
+    """
 
     FIELD_BOUNDS: ClassVar[dict[str, Bounds]] = {"fuzzy_duplicate_threshold": NONZERO_FRACTION}
 

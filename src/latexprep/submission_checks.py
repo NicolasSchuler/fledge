@@ -59,7 +59,18 @@ _DEFAULT_OPTIONS = SubmissionOptions()
 
 
 def _long_file_names(limit: int) -> Describe:
+    """Return the message wording for file names longer than ``limit`` characters."""
+
     def describe(matches: Sequence[Mapping[str, object]], count: str) -> str:
+        """Describe the over-long file names, each with its length in characters.
+
+        Args:
+            matches: The matches of the scan, each with the ``path`` of a file.
+            count: The number of matches as text, such as ``5`` or ``200+``.
+
+        Returns:
+            The finding message.
+        """
         names = [
             f"{short_name(str(match['path']))} ({len(Path(str(match['path'])).name)} characters)"
             for match in matches
@@ -70,7 +81,18 @@ def _long_file_names(limit: int) -> Describe:
 
 
 def _disallowed_characters(allowed: set[str]) -> Describe:
+    """Return the message wording for file names with characters outside ``allowed``."""
+
     def describe(matches: Sequence[Mapping[str, object]], count: str) -> str:
+        """Describe the file names, each with the first few characters that are not allowed.
+
+        Args:
+            matches: The matches of the scan, each with the ``path`` of a file.
+            count: The number of matches as text, such as ``5`` or ``200+``.
+
+        Returns:
+            The finding message.
+        """
         names = []
         for match in matches:
             path = str(match["path"])
@@ -84,6 +106,15 @@ def _disallowed_characters(allowed: set[str]) -> Describe:
 
 
 def _other_extensions(matches: Sequence[Mapping[str, object]], count: str) -> str:
+    """Describe the files whose extensions are not allowed, each with its extension.
+
+    Args:
+        matches: The matches of the scan, each with the ``path`` of a file.
+        count: The number of matches as text, such as ``5`` or ``200+``.
+
+    Returns:
+        The finding message.
+    """
     names = []
     for match in matches:
         path = str(match["path"])
@@ -94,6 +125,17 @@ def _other_extensions(matches: Sequence[Mapping[str, object]], count: str) -> st
 def _filename_findings(
     files: Mapping[str, Path], issues: list[str], options: SubmissionOptions, limits: ScanLimits
 ) -> list[Finding]:
+    """Check every file basename against the configured length, character and extension policies.
+
+    Args:
+        files: The supplied regular files by project path.
+        issues: The reasons the file inventory was incomplete.
+        options: The submission options that configure the policies.
+        limits: The limits of the scans.
+
+    Returns:
+        One finding per configured policy.
+    """
     scope = "All supplied regular-file basenames."
     findings = []
     if options.filename_max_length is not None:
@@ -130,6 +172,18 @@ def check_submission(
 
     ``analysed`` shares the source analysis of the same root and main file with other
     checks; the unused-asset scan is the only one that needs it.
+
+    Args:
+        root: The project directory.
+        main: The project path of the selected main file, if any; only the unused-asset
+            scan uses it.
+        options: The submission options that select and configure the checks.
+        limits: The limits of the scans.
+        analysed: The shared source analysis of ``root`` and ``main``, if one exists.
+
+    Returns:
+        The findings of the selected checks, with every discovered secret value redacted;
+        empty when the options select no bundle check.
     """
     if not options.inspects_bundle():
         return []
@@ -158,6 +212,16 @@ _DELIVERABLE_PROBLEMS = {
 
 
 def _unmet_deliverables(matches: Sequence[Mapping[str, object]], count: str) -> str:
+    """Describe the required deliverables that are missing or do not match their kind.
+
+    Args:
+        matches: The matches of the scan, each with the ``path``, ``kind`` and ``reason``
+            of a deliverable.
+        count: The number of matches as text, such as ``5`` or ``200+``.
+
+    Returns:
+        The finding message.
+    """
     problems = []
     for match in matches:
         path = short_name(str(match["path"]))
@@ -170,7 +234,18 @@ def _unmet_deliverables(matches: Sequence[Mapping[str, object]], count: str) -> 
 
 
 def _has_kind_evidence(kind: str, data: bytes) -> bool:
-    """Whether the leading bytes (PDF, ZIP) or the whole content (text) fit the declared kind."""
+    """Return whether ``data`` fits the declared ``kind`` of a deliverable.
+
+    The leading bytes are judged for a PDF or ZIP file and the whole content for any other
+    kind (text): it must be non-empty UTF-8 without NUL characters.
+
+    Args:
+        kind: The declared kind of the deliverable.
+        data: The leading bytes (PDF, ZIP) or the whole content (text) of the file.
+
+    Returns:
+        ``True`` when the bytes fit the kind.
+    """
     if kind == "pdf":
         return data.startswith(b"%PDF-")
     if kind == "zip":
@@ -184,6 +259,20 @@ def _has_kind_evidence(kind: str, data: bytes) -> bool:
 def _deliverables(
     files: dict[str, Path], issues: list[str], options: SubmissionOptions, limits: ScanLimits
 ) -> Finding:
+    """Check that each required deliverable is present and fits its declared kind.
+
+    A deliverable of kind ``file`` needs only to be present. While the file inventory is
+    incomplete, a missing deliverable is not reported as a match.
+
+    Args:
+        files: The supplied regular files by project path.
+        issues: The reasons the file inventory was incomplete.
+        options: The submission options that list the required deliverables.
+        limits: The limits of the scan.
+
+    Returns:
+        The finding of the deliverable check.
+    """
     matches = []
     incomplete = list(issues)
     budget = ByteBudget()
@@ -218,7 +307,17 @@ def _deliverables(
 
 
 def _declared_version(raw: bytes) -> tuple[str, ...] | None:
-    """The ``\\ProvidesClass``-style name, date and version declared in a file, if any."""
+    r"""Return the ``\ProvidesClass``-style name, date and version declared in a file, if any.
+
+    Literal regions are masked before the declaration is searched.
+
+    Args:
+        raw: The bytes of the file.
+
+    Returns:
+        The declared name, date and version (``None`` when no version is given), or
+        ``None`` when the file is not UTF-8 or declares none.
+    """
     try:
         match = _VERSION.search(mask_literals(raw.decode("utf-8-sig")))
     except UnicodeDecodeError:
@@ -229,7 +328,23 @@ def _declared_version(raw: bytes) -> tuple[str, ...] | None:
 def _template_comparison(
     name: str, reference: str, files: Mapping[str, Path], budget: ByteBudget
 ) -> tuple[list[dict[str, object]], dict[str, object]]:
-    """The matches and details of comparing a project template with its reference file."""
+    """Compare a project template with its reference file.
+
+    Args:
+        name: The project path of the template.
+        reference: The path of the reference file; ``~`` is expanded.
+        files: The supplied regular files by project path, which include ``name``.
+        budget: The byte budget that both reads count against.
+
+    Returns:
+        The matches, one when the bytes differ, and the details: both paths, whether the
+        bytes are equal, and how the declared versions compare.
+
+    Raises:
+        OSError: A file is a link or a special file, holds more than the budget allows, or
+            reading it failed.
+        RuntimeError: ``Path.expanduser`` cannot find a home directory.
+    """
     details: dict[str, object] = {"project_path": name, "reference_path": reference}
     actual = budget.read(files[name])
     expected = budget.read(Path(reference).expanduser())
@@ -247,6 +362,17 @@ def _template_comparison(
 def _templates(
     files: dict[str, Path], issues: list[str], options: SubmissionOptions, limits: ScanLimits
 ) -> list[Finding]:
+    """Compare each configured project template with its reference file.
+
+    Args:
+        files: The supplied regular files by project path.
+        issues: The reasons the file inventory was incomplete.
+        options: The submission options that list the template references.
+        limits: The limits of the scan.
+
+    Returns:
+        One finding per template reference.
+    """
     results = []
     budget = ByteBudget()
     rule = ScanRule(
@@ -277,6 +403,15 @@ def _templates(
 
 
 def _unused_assets(matches: Sequence[Mapping[str, object]], count: str) -> str:
+    """Describe the asset files that the selected document does not reference.
+
+    Args:
+        matches: The matches of the scan, each with the ``path`` of a file.
+        count: The number of matches as text, such as ``5`` or ``200+``.
+
+    Returns:
+        The finding message.
+    """
     names = [short_name(str(match["path"])) for match in matches]
     return f"Asset files not referenced by the selected document ({count}): {listed(names)}"
 
@@ -289,6 +424,23 @@ def _unused(
     limits: ScanLimits,
     analysed: AnalysedSource | None,
 ) -> Finding:
+    """List the asset files outside the selected literal dependency graph.
+
+    The finding is advisory, and inconclusive whenever the file inventory or the
+    dependency graph is incomplete; no candidate is safe to delete based on it.
+
+    Args:
+        root: The project directory.
+        main: The project path of the selected main file, if any.
+        files: The supplied regular files by project path.
+        issues: The reasons the file inventory was incomplete; with any, the graph is not
+            analysed.
+        limits: The limits of the scan.
+        analysed: The shared source analysis of ``root`` and ``main``, if one exists.
+
+    Returns:
+        The finding of the unused-asset scan.
+    """
     incomplete = list(issues)
     candidates = []
     if not incomplete:
@@ -329,7 +481,16 @@ def check_submission_archive(
     *,
     limits: ScanLimits = DEFAULT_SCAN_LIMITS,
 ) -> list[Finding]:
-    """Check the actual compressed archive length independently of import limits."""
+    """Check the actual compressed archive length independently of import limits.
+
+    Args:
+        archive: The final compressed archive.
+        options: The submission options, whose ``max_archive_bytes`` sets the limit.
+        limits: The limits of the scan.
+
+    Returns:
+        One finding, or none when no archive limit is configured.
+    """
     maximum = options.max_archive_bytes
     if maximum is None:
         return []
@@ -348,6 +509,7 @@ def check_submission_archive(
         issues.append("The final archive is missing or is not an accessible regular file.")
 
     def describe(_matches: Sequence[Mapping[str, object]], _count: str) -> str:
+        """Describe the archive size and the configured limit."""
         return (
             f"The compressed archive is {details['compressed_bytes']:,} bytes, "
             f"over the configured limit of {maximum:,} bytes"
@@ -361,7 +523,13 @@ def check_submission_archive(
 
 @dataclass(slots=True)
 class _PdfEvidence:
-    """The extracted PDF text and metadata to scan, and why that evidence is incomplete."""
+    """The extracted PDF text and metadata to scan, and why that evidence is incomplete.
+
+    Attributes:
+        values: The evidence to scan, in the order it was accepted.
+        issues: The reasons the evidence is incomplete.
+        used_bytes: The UTF-8 bytes of the evidence accepted so far.
+    """
 
     # Each value is a channel ("text" or "metadata") and the text found there.
     values: list[tuple[str, str]] = field(default_factory=list)
@@ -369,6 +537,12 @@ class _PdfEvidence:
     used_bytes: int = 0
 
     def add_text(self, text: str, limits: ScanLimits) -> None:
+        """Add the extracted PDF text, or an issue when it is missing, empty or over the limit.
+
+        Args:
+            text: The extracted text.
+            limits: The limits of the scan, whose ``max_pdf_evidence_bytes`` bounds the text.
+        """
         if not isinstance(text, str) or not text.strip():
             self.issues.append("Extracted PDF text is unavailable or empty.")
             return
@@ -380,6 +554,17 @@ class _PdfEvidence:
         self.used_bytes = size
 
     def add_metadata(self, metadata: Mapping[str, object], limits: ScanLimits) -> None:
+        """Add each metadata entry as its key and value joined by a space.
+
+        An entry that is not a string key with a scalar value within ``MAX_SOURCE_BYTES`` is
+        skipped with an issue. Collection stops with an issue after
+        ``_MAX_PDF_METADATA_ENTRIES`` entries or when the combined evidence exceeds
+        ``limits.max_pdf_evidence_bytes``; missing or empty metadata is an issue too.
+
+        Args:
+            metadata: The PDF metadata.
+            limits: The limits of the scan.
+        """
         if not isinstance(metadata, Mapping) or not metadata:
             self.issues.append("PDF metadata evidence is unavailable or empty.")
             return
@@ -413,7 +598,19 @@ def check_pdf_identity(
     *,
     limits: ScanLimits = DEFAULT_SCAN_LIMITS,
 ) -> list[Finding]:
-    """Scan supplied extracted evidence; empty text/metadata mark extraction incomplete."""
+    """Scan supplied extracted evidence; empty text/metadata mark extraction incomplete.
+
+    Args:
+        text: The text extracted from the PDF.
+        metadata: The PDF metadata.
+        options: The submission options, whose identity terms and secret scan select the
+            checks.
+        limits: The limits of the scan.
+
+    Returns:
+        One finding for the identity terms and one for secrets, as configured, with every
+        secret value found redacted; empty when neither is configured.
+    """
     if not options.identity_terms and not options.scan_secrets:
         return []
     cancellation_point()

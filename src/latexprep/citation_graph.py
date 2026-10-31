@@ -88,6 +88,10 @@ class Uncertainty:
 
     A blocking source error is reported by the source checks themselves, so a
     bibliography summary whose only uncertainty restates it can be collapsed.
+
+    Attributes:
+        message: What makes the evidence incomplete.
+        already_reported: Whether the message restates a blocking source error.
     """
 
     message: str
@@ -95,9 +99,17 @@ class Uncertainty:
 
 
 def bounded_uncertainties(items: Iterable[Uncertainty]) -> list[Uncertainty]:
-    """Distinct messages in sorted order; beyond the listing limit, only a count remains.
+    """Merge uncertainties into distinct messages in sorted order, up to a listing limit.
 
-    A message is already reported when any of its occurrences is.
+    Beyond the listing limit, only a count remains. A message is already reported when
+    any of its occurrences is.
+
+    Args:
+        items: The uncertainties to merge.
+
+    Returns:
+        The distinct uncertainties sorted by message, with those beyond the listing limit
+        replaced by one that counts them.
     """
     reported: dict[str, bool] = {}
     for item in items:
@@ -113,11 +125,18 @@ def bounded_uncertainties(items: Iterable[Uncertainty]) -> list[Uncertainty]:
 
 
 def uncertainty_messages(items: Iterable[Uncertainty]) -> list[str]:
+    """List the messages of the uncertainties."""
     return [item.message for item in items]
 
 
 class Citation(NamedTuple):
-    """One literal citation key and the source line that cites it."""
+    """One literal citation key and the source line that cites it.
+
+    Attributes:
+        key: The cited key.
+        path: The source that cites it.
+        line: The line of the citation.
+    """
 
     key: str
     path: str
@@ -126,32 +145,52 @@ class Citation(NamedTuple):
 
 @dataclass(slots=True)
 class CitationGraph:
-    """Literal citation evidence of one selected main source."""
+    """Literal citation evidence of one selected main source.
+
+    Attributes:
+        main: The selected main source, if any.
+        resources: The bibliography resources the selected sources declare.
+        citations: The literal citations.
+        inline_keys: The keys that ``bibitem`` commands in the sources define rather than
+            a bibliography resource.
+        nocite_all: Whether a ``nocite`` of ``*`` cites every entry.
+        uncertainties: The gaps in the citation evidence itself.
+        unused_uncertainties: Further gaps that only weaken claims that an entry is
+            unused.
+    """
 
     main: str | None
     resources: set[str] = field(default_factory=set)
     citations: list[Citation] = field(default_factory=list)
-    # Keys defined by \bibitem in the sources rather than by a bibliography resource.
     inline_keys: set[str] = field(default_factory=set)
     nocite_all: bool = False
-    # Gaps in the citation evidence itself.
     uncertainties: list[Uncertainty] = field(default_factory=list)
-    # Further gaps that only weaken claims that an entry is unused.
     unused_uncertainties: list[Uncertainty] = field(default_factory=list)
 
     @property
     def reasons(self) -> list[str]:
+        """The messages of ``uncertainties``."""
         return uncertainty_messages(self.uncertainties)
 
     @property
     def unused_reasons(self) -> list[str]:
+        """The messages of ``unused_uncertainties``."""
         return uncertainty_messages(self.unused_uncertainties)
 
 
 def resource_declarations(
     inspection: SourceGraph, selected: set[str]
 ) -> tuple[set[str], list[str]]:
-    """Resolve literal bibliography resource declarations in the selected sources."""
+    """Resolve literal bibliography resource declarations in the selected sources.
+
+    Args:
+        inspection: The source graph of the manuscript.
+        selected: The selected sources, by relative path.
+
+    Returns:
+        The resolved resources, and a reason for each declaration that could not be
+        resolved.
+    """
     resources: set[str] = set()
     reasons: list[str] = []
     for name in sorted(selected):
@@ -175,7 +214,12 @@ def resource_declarations(
 
 
 class StyleReference(NamedTuple):
-    """A ``\\bibliographystyle`` name and the project .bst file it resolved to, if any."""
+    r"""A ``\bibliographystyle`` name and the project .bst file it resolved to, if any.
+
+    Attributes:
+        name: The style name, without surrounding white space.
+        local_file: The project .bst file it resolved to, or ``None``.
+    """
 
     name: str
     local_file: str | None
@@ -184,8 +228,11 @@ class StyleReference(NamedTuple):
 class BibliographySelection(NamedTuple):
     """What one selected main source declares about its bibliography.
 
-    ``resources`` is None when the whole tree is in scope. ``styles`` is None when no
-    selected document could be read, so the BibTeX style in use is unknown.
+    Attributes:
+        resources: The declared bibliography resources; ``None`` when the whole tree is in
+            scope.
+        styles: The named BibTeX styles; ``None`` when no selected document could be read, so
+            the BibTeX style in use is unknown.
     """
 
     resources: set[str] | None
@@ -193,7 +240,15 @@ class BibliographySelection(NamedTuple):
 
 
 def bibliography_styles(inspection: SourceGraph, selected: set[str]) -> list[StyleReference]:
-    """The BibTeX styles named by the selected sources, in source order."""
+    """List the BibTeX styles named by the selected sources, in source order.
+
+    Args:
+        inspection: The source graph of the manuscript.
+        selected: The selected sources, by relative path.
+
+    Returns:
+        A reference for each style command, with the project .bst file it resolved to.
+    """
     styles: list[StyleReference] = []
     for name in sorted(selected):
         cancellation_point()
@@ -210,12 +265,19 @@ def bibliography_styles(inspection: SourceGraph, selected: set[str]) -> list[Sty
 def selected_bibliography(
     root: Path, main: str | None, *, analysed: AnalysedSource | None = None
 ) -> BibliographySelection:
-    """Resources and styles one selected literal graph declares; None where unavailable.
+    """Find the resources and styles that one selected literal graph declares.
 
     An unselectable main source or a declaration that cannot be resolved keeps the
     documented whole-tree scope instead of silently narrowing the inspected files.
-    ``analysed`` is a source analysis of the same root and main file shared with other
-    checks; without one the graph is built here.
+
+    Args:
+        root: The project directory.
+        main: The main source, relative to ``root``, or ``None`` when none is selected.
+        analysed: A source analysis of the same root and main file shared with other
+            checks; without one the graph is built here.
+
+    Returns:
+        The declared resources and styles; ``None`` where unavailable.
     """
     if main is None:
         return BibliographySelection(None, None)
@@ -228,7 +290,15 @@ def selected_bibliography(
 
 
 def require_directory(root: Path, purpose: str) -> None:
-    """Refuse a project root that is not a directory, naming ``purpose`` and the fix."""
+    """Refuse a project root that is not a directory, naming ``purpose`` and the fix.
+
+    Args:
+        root: The project root.
+        purpose: What the directory is for, named in the error.
+
+    Raises:
+        PreparationError: ``root`` is not a directory.
+    """
     if not root.is_dir():
         raise PreparationError(
             f"{purpose} must be a directory, but {root} is not. "
@@ -237,7 +307,16 @@ def require_directory(root: Path, purpose: str) -> None:
 
 
 def graph_failures(inspection: SourceGraph, selected: set[str]) -> list[Finding]:
-    """Unresolved source findings that leave the selected sources incomplete."""
+    """List the unresolved source findings that leave the selected sources incomplete.
+
+    Args:
+        inspection: The source graph of the manuscript.
+        selected: The selected sources, by relative path.
+
+    Returns:
+        The findings about the selected sources or the main file whose rules mark an
+        incomplete graph and that did not pass.
+    """
     scope = selected | {inspection.main}
     # A resolved lookup-order or conditional dependency is evidence, not a gap.
     return [
@@ -248,7 +327,7 @@ def graph_failures(inspection: SourceGraph, selected: set[str]) -> list[Finding]
 
 
 def citation_keys(value: str) -> list[str] | None:
-    """The keys of a literal comma-separated key list, or None if any key is not literal."""
+    """Split a literal comma-separated key list; return ``None`` if any key is not literal."""
     keys = [part.strip() for part in value.split(",")]
     if not keys or any(
         not key or any(char.isspace() or char in "\\{}#$^~&%\x00" for char in key) for key in keys
@@ -258,13 +337,21 @@ def citation_keys(value: str) -> list[str] | None:
 
 
 def _citation_marked(text: str) -> bool:
-    """Whether a command name or definition body can reach citation machinery."""
+    """Return whether a command name or definition body can reach citation machinery."""
     lowered = text.lower()
     return any(marker in lowered for marker in _CITATION_MARKERS)
 
 
 def _execution_gaps(command: Command, spans: list[tuple[int, int]]) -> Iterator[str]:
-    """Constructs around one command that lexical inspection cannot follow."""
+    """Describe the constructs around one command that lexical inspection cannot follow.
+
+    Args:
+        command: The command to inspect.
+        spans: The conditional spans of its source.
+
+    Yields:
+        A description of each construct that is not followed.
+    """
     if command.name == "subfile":
         yield "subfile bibliography content context is unsupported"
     if _citation_marked(command.name) and in_conditional(spans, command.start):
@@ -290,7 +377,16 @@ def _execution_gaps(command: Command, spans: list[tuple[int, int]]) -> Iterator[
 def _citation_shape_gaps(
     command: Command, arguments: Sequence[Argument], *, multicite: bool
 ) -> Iterator[str]:
-    """What is unverified about the arguments and placement of one citation command."""
+    """Describe what is unverified about the arguments and placement of a citation command.
+
+    Args:
+        command: The citation command.
+        arguments: The arguments that hold its keys.
+        multicite: Whether the command is a multicite command.
+
+    Yields:
+        A description of each unverified aspect.
+    """
     if not arguments:
         yield "citation has no supported key argument"
     if command.depth:
@@ -302,7 +398,21 @@ def _citation_shape_gaps(
 def _read_citation(
     graph: CitationGraph, name: str, source: ParsedSource, command: Command
 ) -> Iterator[str]:
-    """Record the literal keys of a citation or \\bibitem; yield what stays unverified."""
+    r"""Record the literal keys of a citation or \bibitem; yield what stays unverified.
+
+    A ``nocite`` of ``*`` sets ``nocite_all``, and the keys of a ``bibitem`` become
+    inline keys. A command that is neither is read only to report an unsupported
+    citation-like command.
+
+    Args:
+        graph: The graph that receives the keys.
+        name: The source that holds the command, by relative path.
+        source: The parsed source.
+        command: The command to read.
+
+    Yields:
+        A description of each unverified aspect of the command.
+    """
     lowered = command.name.lower()
     multicite = lowered in MULTICITE_COMMANDS
     inline = command.name == "bibitem"
@@ -327,7 +437,15 @@ def _read_citation(
 
 
 def build_citation_graph(inspection: SourceGraph) -> CitationGraph:
-    """Collect the literal citations, resources and evidence gaps of the selected main."""
+    """Collect the literal citations, resources and evidence gaps of the selected main.
+
+    Args:
+        inspection: The source graph of the manuscript.
+
+    Returns:
+        The citation graph; without a selected main source, it holds only the
+        uncertainty that says so.
+    """
     graph = CitationGraph(inspection.main)
     selected = reachable_sources(inspection)
     if inspection.main not in selected:

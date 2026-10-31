@@ -1,7 +1,7 @@
-"""Explicit literal metadata edits in copied TeX sources, and the final PDF recheck.
+r"""Explicit literal metadata edits in copied TeX sources, and the final PDF recheck.
 
-``plan_metadata_sanitization`` proposes all-or-nothing replacements of ``\\title``,
-``\\author``, ``\\email``, ``\\affiliation`` and selected ``\\hypersetup`` keys, and only
+``plan_metadata_sanitization`` proposes all-or-nothing replacements of ``\title``,
+``\author``, ``\email``, ``\affiliation`` and selected ``\hypersetup`` keys, and only
 where the unique declaration holds the exact expected old value. Generated, ambiguous or
 conditional declarations block the whole proposal. ``check_sanitized_pdf_metadata`` then
 compares freshly inspected PDF properties with the edits, because a source proposal is
@@ -62,7 +62,12 @@ Violation = dict[str, object]
 
 
 class Span(NamedTuple):
-    """A half-open range of source text."""
+    """A half-open range of source text.
+
+    Attributes:
+        start: The offset of the first character.
+        end: The offset just past the last character.
+    """
 
     start: int
     end: int
@@ -70,7 +75,13 @@ class Span(NamedTuple):
 
 @dataclass(frozen=True, slots=True)
 class PlannedEdit:
-    """The proposal for one source file: its original bytes, edited bytes and change record."""
+    """The proposal for one source file: its original bytes, edited bytes and change record.
+
+    Attributes:
+        original: The bytes of the file as read.
+        content: The edited bytes, with the original's byte order mark if it had one.
+        change: The change record with the diff of the edit.
+    """
 
     original: bytes
     content: bytes
@@ -79,32 +90,54 @@ class PlannedEdit:
 
 @dataclass
 class MetadataSanitizationPlan:
-    """All-or-nothing source proposals, keyed by project-relative path, with their findings."""
+    """All-or-nothing source proposals, keyed by project-relative path, with their findings.
+
+    Attributes:
+        planned: The proposal for each file that the edits change; empty when any
+            finding blocks.
+        findings: One finding per selected file, or one for an incomplete inventory.
+    """
 
     planned: dict[str, PlannedEdit] = field(default_factory=dict)
     findings: list[Finding] = field(default_factory=list)
 
     @property
     def contents(self) -> dict[str, bytes]:
+        """The edited bytes of each planned file."""
         return {name: edit.content for name, edit in self.planned.items()}
 
     @property
     def originals(self) -> dict[str, bytes]:
+        """The original bytes of each planned file."""
         return {name: edit.original for name, edit in self.planned.items()}
 
     @property
     def changes(self) -> list[Change]:
+        """The change record of each planned file."""
         return [edit.change for edit in self.planned.values()]
 
 
 def _line_of(text: str, offset: int) -> int:
+    """Return the 1-based line number of ``offset`` in ``text``."""
     return text.count("\n", 0, offset) + 1
 
 
 def _hypersetup_values(text: str, start: int, end: int) -> list[tuple[str, Span]]:
-    """Locate plain keys with braced or unbraced literal values, retaining source offsets.
+    r"""Locate plain keys with braced or unbraced literal values, retaining source offsets.
 
     Keys without a value are accepted and skipped; they hold no text to edit.
+
+    Args:
+        text: The source text.
+        start: The offset where the ``\hypersetup`` argument begins.
+        end: The offset where the argument ends.
+
+    Returns:
+        Each key with a value, and the span of that value, in source order.
+
+    Raises:
+        PreparationError: A setting is not written as ``key``, ``key=value`` or
+            ``key={value}``, or a value is malformed.
     """
     result = []
     cursor = start
@@ -133,13 +166,29 @@ def _hypersetup_values(text: str, start: int, end: int) -> list[tuple[str, Span]
 
 
 def _skip_spaces(text: str, cursor: int, end: int) -> int:
+    """Return the first offset from ``cursor`` that is not whitespace, at most ``end``."""
     while cursor < end and text[cursor].isspace():
         cursor += 1
     return cursor
 
 
 def _read_hypersetup_value(text: str, key: str, cursor: int, end: int) -> tuple[Span, int]:
-    """The span of one braced or unbraced value starting at ``cursor``, and where to resume."""
+    r"""Read one braced or unbraced value starting at ``cursor``.
+
+    Args:
+        text: The source text.
+        key: The hyperref key, named in the errors.
+        cursor: The offset where the value begins.
+        end: The offset where the ``\hypersetup`` argument ends.
+
+    Returns:
+        The span of the value, without braces or trailing whitespace, and the offset to
+        resume from.
+
+    Raises:
+        PreparationError: A braced value is not closed or is followed by text before the
+            next comma.
+    """
     if cursor < end and text[cursor] == "{":
         value = read_group(text, cursor)
         if value is None or value.end > end:
@@ -159,7 +208,16 @@ def _read_hypersetup_value(text: str, key: str, cursor: int, end: int) -> tuple[
 
 
 def _selected_command_problem(command: Command, text: str) -> str | None:
-    """Why a selected declaration cannot be edited safely, or None when it is a plain one."""
+    """Explain why a selected declaration cannot be edited safely, or ``None`` when it is plain.
+
+    Args:
+        command: The declaration.
+        text: The source text, read to detect the starred form.
+
+    Returns:
+        The problem: grouped, with an optional argument, without exactly one braced
+        argument, or starred; ``None`` when there is none.
+    """
     name = f"\\{command.name}"
     if command.depth:
         return f"{name} is inside braces or an environment, so its scope is not certain"
@@ -173,7 +231,18 @@ def _selected_command_problem(command: Command, text: str) -> str | None:
 
 
 def _scan_source(text: str) -> list[Command]:
-    """The commands of ``text``, refusing sources whose declarations cannot be trusted."""
+    """Scan the commands of ``text``, refusing sources whose declarations cannot be trusted.
+
+    Args:
+        text: The source text.
+
+    Returns:
+        The commands in source order.
+
+    Raises:
+        PreparationError: A literal region is unclosed, the parse limits are exceeded, or
+            a command that can change metadata while TeX runs is present.
+    """
     regions, unclosed = source_regions(text)
     if unclosed:
         raise PreparationError("An unclosed literal region prevents metadata editing")
@@ -193,7 +262,20 @@ def _scan_source(text: str) -> list[Command]:
 def _collect_declarations(
     text: str, commands: list[Command], edits: Sequence[MetadataEdit]
 ) -> dict[str, list[Span]]:
-    """The value spans of each selected field's declarations, up to the end of the document."""
+    """Collect the value spans of each selected field's declarations, up to the end of the document.
+
+    Args:
+        text: The source text.
+        commands: The commands of ``text``.
+        edits: The selected edits of this file.
+
+    Returns:
+        The value spans of each selected field's declarations, in source order.
+
+    Raises:
+        PreparationError: A selected declaration lies inside a conditional or cannot be
+            edited safely, or the document ends inside a group.
+    """
     by_command = {edit.command: edit.field for edit in edits if edit.command is not None}
     by_key = {edit.hyperref_key: edit.field for edit in edits if edit.hyperref_key is not None}
     targets: dict[str, list[Span]] = {edit.field: [] for edit in edits}
@@ -226,7 +308,21 @@ def _collect_declarations(
 
 
 def _edit_spans(text: str, edits: Sequence[MetadataEdit]) -> list[TextEdit]:
-    """The text edits that apply ``edits`` to ``text``; raises when any precondition fails."""
+    """Build the text edits that apply ``edits`` to ``text``.
+
+    A replacement of an unbraced hyperref value is braced.
+
+    Args:
+        text: The source text.
+        edits: The selected edits of this file.
+
+    Returns:
+        One text edit per selected edit.
+
+    Raises:
+        PreparationError: Any precondition fails: a field is not declared exactly once, or
+            its declaration does not hold the expected old value as plain literal text.
+    """
     targets = _collect_declarations(text, _scan_source(text), edits)
     replacements = []
     for edit in edits:
@@ -249,7 +345,20 @@ def _edit_spans(text: str, edits: Sequence[MetadataEdit]) -> list[TextEdit]:
 
 
 def _plan_file(name: str, original: bytes, selected: Sequence[MetadataEdit]) -> PlannedEdit | None:
-    """The proposal for one file, or None when the edits would leave it unchanged."""
+    """Plan the proposal for one file, or ``None`` when the edits would leave it unchanged.
+
+    Args:
+        name: The project-relative path of the file.
+        original: The bytes of the file; a UTF-8 byte order mark is kept.
+        selected: The selected edits of this file.
+
+    Returns:
+        The planned edit, or ``None``.
+
+    Raises:
+        PreparationError: A precondition fails or the edits overlap.
+        UnicodeDecodeError: The file is not UTF-8 text.
+    """
     bom = original.startswith(codecs.BOM_UTF8)
     text = original.decode("utf-8-sig")
     try:
@@ -268,6 +377,15 @@ def _plan_file(name: str, original: bytes, selected: Sequence[MetadataEdit]) -> 
 
 
 def _matched_finding(name: str, selected: Sequence[MetadataEdit]) -> Finding:
+    """Report that the selected edits of one file met their old-value preconditions.
+
+    Args:
+        name: The project-relative path of the file.
+        selected: The selected edits of this file.
+
+    Returns:
+        A passed finding that still asks for the final PDF recheck.
+    """
     return Finding(
         "privacy.metadata_sanitization",
         "Selected literal metadata matched its old-value "
@@ -283,6 +401,17 @@ def _matched_finding(name: str, selected: Sequence[MetadataEdit]) -> Finding:
 
 
 def _rejected_finding(name: str, selected: Sequence[MetadataEdit], error: Exception) -> Finding:
+    """Report why the selected edits of one file cannot be proposed.
+
+    Args:
+        name: The project-relative path of the file.
+        selected: The selected edits of this file.
+        error: The refusal; only a ``PreparationError`` is quoted, any other error is
+            described generically.
+
+    Returns:
+        An inconclusive error finding.
+    """
     # Rejection messages are fixed text; file-system errors may name absolute paths.
     reason = (
         str(error)
@@ -304,7 +433,16 @@ def _rejected_finding(name: str, selected: Sequence[MetadataEdit], error: Except
 def plan_metadata_sanitization(
     root: Path, options: MetadataPrivacyOptions
 ) -> MetadataSanitizationPlan:
-    """Return all-or-nothing source proposals; never modify the source directory."""
+    """Return all-or-nothing source proposals; never modify the source directory.
+
+    Args:
+        root: The source directory.
+        options: The selected edits.
+
+    Returns:
+        The proposals and one finding per selected file; when any finding blocks, or the
+        source inventory is incomplete, nothing is proposed.
+    """
     plan = MetadataSanitizationPlan()
     if not options.edits:
         return plan
@@ -342,14 +480,30 @@ def plan_metadata_sanitization(
 
 
 class _FinalProperties(NamedTuple):
-    """PDF properties by case-folded name, and the spelling each name had in the PDF."""
+    """PDF properties by case-folded name, and the spelling each name had in the PDF.
+
+    Attributes:
+        values: Each property's value by case-folded name.
+        spellings: Each case-folded name's spelling in the PDF.
+    """
 
     values: dict[str, str]
     spellings: dict[str, str]
 
 
 def _final_properties(pdf_findings: Sequence[Finding]) -> _FinalProperties:
-    """The single inspected property inventory; raises when it is missing or ambiguous."""
+    """Read the single inspected property inventory.
+
+    Args:
+        pdf_findings: The findings of the fresh PDF inspection.
+
+    Returns:
+        The properties of the one passed ``pdf.metadata`` finding.
+
+    Raises:
+        PreparationError: The inventory is missing or ambiguous, its names collide when
+            case-folded, or it lacks a page count.
+    """
     inventories = [
         finding.details.get("properties")
         for finding in pdf_findings
@@ -374,10 +528,23 @@ def _final_properties(pdf_findings: Sequence[Finding]) -> _FinalProperties:
 def _edit_violations(
     index: int, edit: MetadataEdit, properties: _FinalProperties
 ) -> list[Violation]:
-    """The ways the final PDF properties disagree with one edit."""
+    """List the ways the final PDF properties disagree with one edit.
+
+    The property the edit sets must show the replacement, whitespace aside, and no
+    property may still contain the removed value unless the replacement contains it.
+
+    Args:
+        index: The 1-based number of the edit, named in each reason.
+        edit: The selected edit.
+        properties: The final PDF properties.
+
+    Returns:
+        The violations, each naming the edit and the property.
+    """
     violations: list[Violation] = []
 
     def violation(name: str, problem: str) -> None:
+        """Record that PDF property ``name`` has ``problem``."""
         # The reason names the edit and property, never a value, and is what a terminal
         # report shows for each violation.
         violations.append(
@@ -403,7 +570,7 @@ def _edit_violations(
 
 
 def _recheck_message(violations: Sequence[Mapping[str, object]]) -> str:
-    """Outcome of the final-PDF recheck, naming the first few problems."""
+    """Summarize the outcome of the final-PDF recheck, naming the first few problems."""
     if not violations:
         return (
             "Checked selected metadata replacements and removed "
@@ -421,7 +588,16 @@ def _recheck_message(violations: Sequence[Mapping[str, object]]) -> str:
 def check_sanitized_pdf_metadata(
     pdf_findings: Sequence[Finding], options: MetadataPrivacyOptions
 ) -> list[Finding]:
-    """Recheck freshly inspected PDF properties; never treat a source proposal as proof."""
+    """Recheck freshly inspected PDF properties; never treat a source proposal as proof.
+
+    Args:
+        pdf_findings: The findings of the fresh inspection of the rebuilt PDF.
+        options: The selected edits.
+
+    Returns:
+        One ``privacy.sanitized_pdf_metadata`` finding, inconclusive when the property
+        evidence is missing or ambiguous, or an empty list when no edits are selected.
+    """
     if not options.edits:
         return []
     try:

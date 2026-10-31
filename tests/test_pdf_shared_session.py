@@ -63,12 +63,22 @@ _ALL_GROUPS = PdfCheckSettings(
 
 
 def normalized(argv: list[str]) -> tuple[str, ...]:
-    """A command line with the frozen PDF, as the runner or a session names it, as ``_FROZEN``."""
+    """Return ``argv`` with the frozen PDF, as the runner or a session names it, as ``_FROZEN``."""
     return tuple(_FROZEN if item == DOCUMENT or item.endswith(".pdf") else item for item in argv)
 
 
 class SharedRunner(DetailRunner):
-    """Every tool the groups use, recording which commands ran and failing on request."""
+    """Every tool the groups use, recording which commands ran and failing on request.
+
+    Args:
+        **outputs: Tool outputs that replace the defaults of :class:`DetailRunner`.
+
+    Attributes:
+        freezes: How often an input was frozen.
+        freeze_failure: An exception the next freeze raises once, or ``None``.
+        fail_once: A tool whose next command other than a version probe fails once, or
+            ``None``.
+    """
 
     def __init__(self, **outputs: object) -> None:
         # DetailRunner applies the keyword outputs last, so these defaults come first.
@@ -78,6 +88,13 @@ class SharedRunner(DetailRunner):
         super().__init__(**outputs)
 
     def freeze_input(self, source: Path, storage: Path) -> Path:
+        """Count the freeze, then raise ``freeze_failure`` once or freeze as the base does.
+
+        The arguments are those of :meth:`CommandRunner.freeze_input`.
+
+        Raises:
+            BaseException: ``freeze_failure``, which is then cleared.
+        """
         self.freezes += 1
         if self.freeze_failure is not None:
             failure, self.freeze_failure = self.freeze_failure, None
@@ -93,6 +110,15 @@ class SharedRunner(DetailRunner):
         readonly_inputs: tuple[Path, ...] = (),
         memory_mb: int | None = None,
     ) -> CommandResult:
+        """Fail the ``fail_once`` tool once; otherwise answer as :class:`DetailRunner` does.
+
+        The arguments are those of :meth:`CommandRunner.run`. Apart from the version probes,
+        ``pdfdetach`` lists no embedded files and ``pdfimages`` no images.
+
+        Raises:
+            PreparationError: The command is the first of the ``fail_once`` tool that is not
+                a version probe.
+        """
         probe = argv[-1] in _VERSION_FLAGS
         if argv[0] == self.fail_once and not probe:
             self.fail_once = None
@@ -110,35 +136,52 @@ class SharedRunner(DetailRunner):
         return result
 
     def commands(self) -> Counter[tuple[str, ...]]:
-        """How often each command ran, apart from the version probes."""
+        """Count how often each normalized command ran, apart from the version probes."""
         return Counter(
             normalized(argv) for argv, _, _ in self.calls if argv[-1] not in _VERSION_FLAGS
         )
 
     def runs_of(self, argv: list[str]) -> int:
+        """Return how often the command ``argv`` ran, with the PDF names normalized."""
         return self.commands()[normalized(argv)]
 
     def probes(self) -> Counter[str]:
+        """Count the version probes of each tool."""
         return Counter(argv[0] for argv, _, _ in self.calls if argv[-1] in _VERSION_FLAGS)
 
 
 class SharedSessionCase(AsyncProjectTestCase):
+    """A placeholder PDF in the project root, with helpers for work directories and views."""
+
     async def asyncSetUp(self) -> None:
+        """Write a placeholder ``document.pdf`` into the project root."""
         self.pdf = self.root / "document.pdf"
         self.pdf.write_bytes(b"%PDF-fixture")
         self.counter = 0
 
     def work(self, name: str = "work") -> Path:
+        """Return a new, not yet created directory path ``name-N`` below the project root."""
         self.counter += 1
         return self.root / f"{name}-{self.counter}"
 
     async def properties(self, view) -> str:
+        """Measure the ``pdfinfo`` properties through ``view`` under the name "properties".
+
+        Returns:
+            What ``pdfinfo`` printed.
+        """
         return await view.measure("properties", pdfinfo_argv(), lambda result: result.stdout)
 
 
 class PipelineSharingTests(SharedSessionCase):
+    """A pipeline run measures once, finds what the groups find alone and cleans up."""
+
     async def run_groups_alone(self, runner: SharedRunner) -> list[Finding]:
-        """Each group of ``_ALL_GROUPS`` run on its own, so each freezes the PDF itself."""
+        """Run each group of ``_ALL_GROUPS`` on its own, so each freezes the PDF itself.
+
+        Returns:
+            The findings of every group, in the order the groups ran.
+        """
         settings, budget = _ALL_GROUPS, ResourceBudget(2, 1024)
         findings = await inspect_pdf(
             self.pdf,
@@ -162,6 +205,11 @@ class PipelineSharingTests(SharedSessionCase):
         return findings
 
     async def run_pipeline(self, runner: SharedRunner) -> list[Finding]:
+        """Run every group of ``_ALL_GROUPS`` through one standalone pipeline run.
+
+        Returns:
+            The findings of :func:`inspect_standalone_pdf`.
+        """
         return await inspect_standalone_pdf(
             self.pdf, self.work(), runner, _ALL_GROUPS, ResourceBudget(2, 1024)
         )
@@ -327,7 +375,17 @@ class PipelineSharingTests(SharedSessionCase):
 
 
 class SharedSessionTests(SharedSessionCase):
+    """The shared session itself: views, opening, failures, cancellation and release."""
+
     def shared(self, runner: SharedRunner | None = None) -> SharedPdfSession:
+        """Return a shared session over ``document.pdf`` without a budget.
+
+        Args:
+            runner: The runner of the session; a new :class:`SharedRunner` when ``None``.
+
+        Returns:
+            The session, not yet opened.
+        """
         return SharedPdfSession(self.pdf, self.work("shared"), runner or SharedRunner(), None)
 
     async def test_views_share_results_but_keep_their_own_directories_and_tool_records(

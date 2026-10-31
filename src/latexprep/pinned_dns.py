@@ -39,7 +39,15 @@ print(json.dumps(addresses))
 
 
 async def _read_answer(process: asyncio.subprocess.Process) -> bytes:
-    """The child's output, bounded; a longer answer is refused rather than buffered."""
+    """Read the child's output, bounded; a longer answer is refused rather than buffered.
+
+    Returns:
+        The output.
+
+    Raises:
+        NetworkFailure: The child has no output stream, or its answer exceeds the byte
+            limit.
+    """
     stream = process.stdout
     if stream is None:
         raise NetworkFailure(FetchOutcome.UNAVAILABLE, "Public DNS resolution did not complete")
@@ -52,7 +60,23 @@ async def _read_answer(process: asyncio.subprocess.Process) -> bytes:
 
 
 async def resolve_public(host: str, port: int) -> tuple[str, ...]:
-    """The public addresses of ``host``; any non-public answer makes the whole lookup unsafe."""
+    """Resolve ``host`` to public addresses; any non-public answer makes the whole lookup unsafe.
+
+    An IP address literal is checked without a lookup. Otherwise the lookup runs in a child
+    interpreter, which is killed if it has not finished when the lookup ends or is
+    cancelled.
+
+    Args:
+        host: The host name or IP address literal.
+        port: The port passed to ``getaddrinfo`` with the name.
+
+    Returns:
+        The validated addresses; those of a lookup are sorted.
+
+    Raises:
+        NetworkFailure: The name does not resolve, the lookup did not complete or gave a
+            malformed or oversized answer, or an address is not public.
+    """
     try:
         return (require_public_ip(str(ipaddress.ip_address(host))),)
     except ValueError:
@@ -101,6 +125,10 @@ class JobResolver:
     The remembered answers are bounded by the job's request budget, because every
     lookup serves a request. A failed lookup is not remembered, so a name that failed
     for a transient reason is tried again by the next request.
+
+    Args:
+        resolve: Looks up the public addresses of a host and port; by default
+            :func:`resolve_public`.
     """
 
     def __init__(self, resolve: Resolver = resolve_public) -> None:
@@ -108,6 +136,18 @@ class JobResolver:
         self._answers: dict[tuple[str, int], tuple[str, ...]] = {}
 
     async def __call__(self, host: str, port: int) -> tuple[str, ...]:
+        """Return the validated addresses of ``host``, looking them up on first use.
+
+        Args:
+            host: The host name or IP address literal.
+            port: The port to resolve for.
+
+        Returns:
+            The validated addresses.
+
+        Raises:
+            NetworkFailure: The lookup failed; the failure is not remembered.
+        """
         key = (host, port)
         if key not in self._answers:
             self._answers[key] = await self._resolve(host, port)

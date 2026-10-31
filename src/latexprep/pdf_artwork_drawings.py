@@ -88,12 +88,20 @@ _UNCLASSIFIED_SPACE_PREFIXES: Final = ("separation", "devicen", "indexed", "lab"
 
 
 def _tuple(box: Box | None) -> tuple[float, float, float, float] | None:
-    """A plain tuple for a report; the report copier accepts no tuple subclasses."""
+    """Return a plain tuple for a report; the report copier accepts no tuple subclasses."""
     return None if box is None else (box.left, box.top, box.right, box.bottom)
 
 
 def drawing_report(drawing: Drawing, **extra: object) -> Violation:
-    """The report row for a drawing, with any measurement-specific fields."""
+    """Return the report row for a drawing, with any measurement-specific fields.
+
+    Args:
+        drawing: The drawing to describe.
+        **extra: The measurement-specific fields.
+
+    Returns:
+        The row: page, operation number, kind and bounds, followed by ``extra``.
+    """
     return {
         "page": drawing.page,
         "operation": drawing.index,
@@ -104,22 +112,38 @@ def drawing_report(drawing: Drawing, **extra: object) -> Violation:
 
 
 def _kind_label(row: Mapping[str, object]) -> str:
+    """Name the kind of drawing in a report row as a researcher would say it."""
     return _KIND_LABELS.get(str(row.get("kind")), "a drawing")
 
 
 def _uncertain_suffix(*, uncertain: bool) -> str:
+    """Return the sentence that says some drawings could not be measured, if ``uncertain``."""
     return " Some drawings could not be measured." if uncertain else ""
 
 
 class FontEvidence(NamedTuple):
-    """Whether every font is scalable, and why that could not be established if it failed."""
+    """Whether every font is scalable, and why that could not be established if it failed.
+
+    Attributes:
+        scalable: Whether every font is scalable.
+        failure: Why the fonts could not be listed, or ``None``.
+    """
 
     scalable: bool
     failure: str | None = None
 
 
 class Composition(NamedTuple):
-    """Painted operations by kind for the whole selected PDF."""
+    """Painted operations by kind for the whole selected PDF.
+
+    Attributes:
+        raster: The image operations.
+        vector: The path operations, and the text operations when every font is scalable.
+        text: The text operations.
+        unsupported: Whether the inventory is incomplete: a page is uncertain, a shading is
+            painted, or text cannot count as vector artwork.
+        fonts: Whether every font is scalable.
+    """
 
     raster: list[Drawing]
     vector: list[Drawing]
@@ -131,6 +155,16 @@ class Composition(NamedTuple):
     def of(
         cls, drawings: Sequence[Drawing], *, uncertain: bool, fonts: FontEvidence
     ) -> Composition:
+        """Sort painted operations into a composition by kind.
+
+        Args:
+            drawings: The painted operations.
+            uncertain: Whether some page of the trace is uncertain.
+            fonts: Whether every font is scalable.
+
+        Returns:
+            The composition.
+        """
         raster = [d for d in drawings if d.kind in IMAGE_OPERATIONS]
         text = [d for d in drawings if d.kind in TEXT_OPERATIONS]
         vector = [d for d in drawings if d.kind in {"fill_path", "stroke_path"}]
@@ -145,12 +179,14 @@ class Composition(NamedTuple):
 
     @property
     def classification(self) -> str:
+        """The composition as ``mixed``, ``raster``, ``vector`` or ``empty``."""
         if self.raster and self.vector:
             return "mixed"
         return "raster" if self.raster else "vector" if self.vector else "empty"
 
 
 def _composition_finding(composition: Composition) -> Finding:
+    """Report the composition; incomplete when the inventory is unsupported or empty."""
     failure = composition.fonts.failure
     message = "Inventoried painted raster and vector operations."
     if failure is not None:
@@ -180,7 +216,13 @@ def _composition_finding(composition: Composition) -> Finding:
 
 
 class PlacementSampling(NamedTuple):
-    """Image pixels per inch along both image axes and in the coarsest direction."""
+    """Image pixels per inch along both image axes and in the coarsest direction.
+
+    Attributes:
+        x_dpi: The image pixels per inch along the image's x axis.
+        y_dpi: The image pixels per inch along the image's y axis.
+        minimum_direction_dpi: The image pixels per inch in the coarsest direction.
+    """
 
     x_dpi: float
     y_dpi: float
@@ -188,7 +230,17 @@ class PlacementSampling(NamedTuple):
 
 
 def placement_sampling(drawing: Drawing) -> PlacementSampling | None:
-    """Axis and coarsest-direction sampling of one image placement, if measurable."""
+    """Measure the axis and coarsest-direction sampling of one image placement.
+
+    Args:
+        drawing: The image placement.
+
+    Returns:
+        The sampling, or ``None`` when the image size or the transform is degenerate.
+
+    Raises:
+        PreparationError: The image size or the transform is not a valid measurement.
+    """
     node = drawing.node
     matrix = Matrix.of_node(node)
     a, b, c, d = matrix.a, matrix.b, matrix.c, matrix.d
@@ -214,6 +266,15 @@ def placement_sampling(drawing: Drawing) -> PlacementSampling | None:
 
 
 def _category_resolution_finding(composition: Composition, options: PdfArtworkOptions) -> Finding:
+    """Compare every image placement with the minimum DPI of the declared category.
+
+    Args:
+        composition: The painted operations by kind.
+        options: The artwork options, which name the category and its minimum.
+
+    Returns:
+        The finding, with a violation for every placement below the minimum.
+    """
     category = options.artwork_category or ""
     minimum = dict(options.category_min_dpi)[category]
     measurements: list[object] = []
@@ -275,10 +336,21 @@ def _category_resolution_finding(composition: Composition, options: PdfArtworkOp
 
 
 def effective_stroke_widths(drawing: Drawing) -> list[float]:
-    """Stroke thickness normal to each straight segment after placement; empty if unmeasurable.
+    """Measure the stroke thickness normal to each straight segment after placement.
 
     A path with curves or text is measured only under a uniform, perpendicular
     transform, where one scale factor applies to every direction.
+
+    Args:
+        drawing: The stroke.
+
+    Returns:
+        The thickness of each straight segment, or a single thickness for a path with
+        curves or text, in points; empty if unmeasurable.
+
+    Raises:
+        PreparationError: The line width, the transform or a coordinate is not a valid
+            measurement.
     """
     node = drawing.node
     width = finite_number(node.get("linewidth"))
@@ -307,6 +379,15 @@ def effective_stroke_widths(drawing: Drawing) -> list[float]:
 
 
 def _stroke_finding(artwork: TracedArtwork, options: PdfArtworkOptions) -> Finding:
+    """Compare the thickness of every stroke after placement with ``min_stroke_width_pt``.
+
+    Args:
+        artwork: The traced drawings.
+        options: The artwork options.
+
+    Returns:
+        The finding, with a violation for every stroke that is too thin.
+    """
     minimum = options.min_stroke_width_pt
     violations: list[object] = []
     thinnest: tuple[float, int] | None = None
@@ -352,6 +433,17 @@ def _stroke_finding(artwork: TracedArtwork, options: PdfArtworkOptions) -> Findi
 
 
 def _drawing_bounds_finding(artwork: TracedArtwork, options: PdfArtworkOptions) -> Finding:
+    """Compare the visible extent of images and filled shapes with the allowed regions.
+
+    Only the drawings on a page with an allowed drawing region are compared.
+
+    Args:
+        artwork: The traced drawings.
+        options: The artwork options, which list the allowed drawing regions.
+
+    Returns:
+        The finding, with a violation for every drawing outside the allowed regions.
+    """
     allowed_by_page: dict[int, list[PdfRegion]] = {}
     for region in options.drawing_regions:
         allowed_by_page.setdefault(region.page, []).append(region)
@@ -394,6 +486,16 @@ def _drawing_bounds_finding(artwork: TracedArtwork, options: PdfArtworkOptions) 
 
 
 def _bounds_message(violations: Sequence[object], measured: int, *, uncertain: bool) -> str:
+    """Word the message of the drawing bounds finding.
+
+    Args:
+        violations: The rows of the drawings outside the allowed regions.
+        measured: The number of drawings compared.
+        uncertain: Whether some drawings could not be measured.
+
+    Returns:
+        The message.
+    """
     rows = [row for row in violations if isinstance(row, dict)]
     if rows:
         first = rows[0]
@@ -410,6 +512,15 @@ def _bounds_message(violations: Sequence[object], measured: int, *, uncertain: b
 
 
 def _clipping_finding(artwork: TracedArtwork, options: PdfArtworkOptions) -> Finding:
+    """Look for images and filled shapes that extend past their clip rectangle or the page.
+
+    Args:
+        artwork: The traced drawings.
+        options: The artwork options, which give the geometry tolerance.
+
+    Returns:
+        The finding, with a violation for every drawing that crosses its clip.
+    """
     tolerance = options.geometry_tolerance_pt
     violations: list[object] = []
     measured = 0
@@ -438,6 +549,16 @@ def _clipping_finding(artwork: TracedArtwork, options: PdfArtworkOptions) -> Fin
 
 
 def _clipping_message(violations: Sequence[object], measured: int, *, uncertain: bool) -> str:
+    """Word the message of the clipping finding.
+
+    Args:
+        violations: The rows of the drawings that cross their clip.
+        measured: The number of drawings compared.
+        uncertain: Whether some drawings could not be measured.
+
+    Returns:
+        The message.
+    """
     rows = [row for row in violations if isinstance(row, dict)]
     if rows:
         first = rows[0]
@@ -455,7 +576,21 @@ def _clipping_message(violations: Sequence[object], measured: int, *, uncertain:
 
 
 def union_area(boxes: Sequence[Box], region: Box) -> float:
-    """Area of ``region`` covered by the union of ``boxes``, by a sweep over their x edges."""
+    """Return the area of ``region`` covered by the union of ``boxes``.
+
+    The union is measured by a sweep over the x edges of the boxes.
+
+    Args:
+        boxes: The boxes, which may overlap.
+        region: The region to measure.
+
+    Returns:
+        The covered area, in square points.
+
+    Raises:
+        PreparationError: More than ``_MAX_IMAGE_BOXES_PER_REGION`` boxes overlap
+            ``region``.
+    """
     clipped = [box.clipped(region) for box in boxes if intersection_area(box, region) > 0]
     if len(clipped) > _MAX_IMAGE_BOXES_PER_REGION:
         raise PreparationError("Raster region exceeds the bounded image-union limit")
@@ -478,6 +613,21 @@ def _raster_region_finding(
     region: PdfRegion,
     page_drawings: Sequence[Drawing],
 ) -> Finding:
+    """Measure how much of ``region`` raster images cover, and whether it may be a scan.
+
+    Args:
+        artwork: The traced drawings.
+        options: The artwork options, which give the coverage of a candidate.
+        region: The region to measure.
+        page_drawings: The drawings of the region's page.
+
+    Returns:
+        The finding, with a violation when the region is a candidate.
+
+    Raises:
+        PreparationError: Too many images overlap the region, or a transform is not a
+            valid measurement.
+    """
     incomplete = (
         region.page > len(artwork.page_boxes)
         or region.page in artwork.unusable_pages
@@ -533,6 +683,7 @@ def _raster_region_finding(
 
 
 def _geometry_findings(artwork: TracedArtwork, options: PdfArtworkOptions) -> list[Finding]:
+    """Return the configured geometry findings of the traced drawings, in report order."""
     result = []
     if options.drawing_regions:
         result.append(_drawing_bounds_finding(artwork, options))
@@ -557,7 +708,17 @@ def _measure_drawings(
     fonts: FontEvidence,
     options: PdfArtworkOptions,
 ) -> list[Finding]:
-    """Every configured drawing finding, in report order (pure; runs in a worker thread)."""
+    """Return every configured drawing finding, in report order (pure; runs in a worker thread).
+
+    Args:
+        trace: The parsed trace.
+        misaligned_frame_pages: The pages whose frame cannot be aligned.
+        fonts: Whether every font is scalable.
+        options: The artwork options.
+
+    Returns:
+        The findings.
+    """
     composition = Composition.of(
         trace.drawings, uncertain=bool(trace.trace_uncertain_pages), fonts=fonts
     )
@@ -576,7 +737,19 @@ def _measure_drawings(
 async def scalable_text_fonts(
     session: PdfToolSession, drawings: Sequence[Drawing], options: PdfArtworkOptions
 ) -> FontEvidence:
-    """Whether every font is scalable, so painted text can count as vector artwork."""
+    """Check whether every font is scalable, so painted text can count as vector artwork.
+
+    The fonts are listed only when the composition or category resolution is configured
+    and the trace paints text.
+
+    Args:
+        session: The PDF tool session that lists the fonts.
+        drawings: The painted operations.
+        options: The artwork options.
+
+    Returns:
+        The evidence; a failure to list the fonts is recorded in it, not raised.
+    """
     if not (options.classify_artwork or options.category_min_dpi) or not any(
         drawing.kind in TEXT_OPERATIONS for drawing in drawings
     ):
@@ -598,7 +771,15 @@ async def scalable_text_fonts(
 
 
 def trace_unavailable_findings(rules: Sequence[ArtworkRule], error: Exception) -> list[Finding]:
-    """Each rule that needed the MuPDF trace, as evidence that could not be measured."""
+    """Report each rule that needed the MuPDF trace as evidence that could not be measured.
+
+    Args:
+        rules: The rules that needed the trace.
+        error: Why the trace could not be measured.
+
+    Returns:
+        One finding per rule: an error for category resolution, else a warning.
+    """
     return [
         unavailable_finding(
             rule,
@@ -620,6 +801,16 @@ async def inspect_drawings(
 
     Any measurement failure makes all of the rules unavailable evidence, because the
     drawings are measured together.
+
+    Args:
+        session: The PDF tool session.
+        trace: The parsed trace.
+        misaligned_frame_pages: The pages whose frame cannot be aligned.
+        options: The artwork options.
+        rules: The configured trace rules.
+
+    Returns:
+        The findings, in report order.
     """
     try:
         fonts = await scalable_text_fonts(session, trace.drawings, options)
@@ -632,7 +823,11 @@ async def inspect_drawings(
 
 
 def color_family(name: str) -> str | None:
-    """Map a MuPDF colour-space name to gray/rgb/cmyk; other spaces stay unknown."""
+    """Map a MuPDF colour-space name to gray/rgb/cmyk; other spaces stay unknown.
+
+    Returns:
+        The family, or ``None`` for an unknown space.
+    """
     folded = name.casefold()
     if folded.startswith(_UNCLASSIFIED_SPACE_PREFIXES):
         return None
@@ -646,7 +841,15 @@ def color_family(name: str) -> str | None:
 
 
 def color_space_finding(document: TracedDocument, required: ColorSpaceFamily) -> Finding:
-    """Compare every traced paint operation's colour family with the required one."""
+    """Compare every traced paint operation's colour family with the required one.
+
+    Args:
+        document: The MuPDF trace.
+        required: The required family; grayscale satisfies either.
+
+    Returns:
+        The finding, with a violation for every operation outside the family.
+    """
     violations: list[object] = []
     spaces: dict[str, int] = {}
     unknown: set[str] = set()
@@ -687,6 +890,17 @@ def _color_space_message(
     unknown: set[str],
     required: ColorSpaceFamily,
 ) -> str:
+    """Word the message of the colour-space finding.
+
+    Args:
+        violations: The rows of the operations outside the required family.
+        spaces: The number of painted operations in each colour space.
+        unknown: The colour spaces that could not be classified.
+        required: The required family.
+
+    Returns:
+        The message.
+    """
     family = required.upper()
     rows = [row for row in violations if isinstance(row, dict)]
     if rows:

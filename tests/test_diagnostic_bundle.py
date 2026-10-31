@@ -19,6 +19,8 @@ from latexprep.report import Change, ChangeKind, Outcome, Report, redact_report
 
 
 class DiagnosticBundleTests(unittest.TestCase):
+    """Exporting the bundle: redaction, the unverified label and refused destinations."""
+
     def test_bundle_is_unverified_and_cross_redacted(self):
         secret = "CrossFieldSecret"
         report = Report(

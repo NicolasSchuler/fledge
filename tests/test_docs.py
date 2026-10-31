@@ -14,6 +14,11 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def _generator():
+    """Load ``scripts/generate_check_docs.py`` as a module.
+
+    Returns:
+        The executed ``generate_check_docs`` module.
+    """
     spec = importlib.util.spec_from_file_location(
         "generate_check_docs", ROOT / "scripts" / "generate_check_docs.py"
     )
@@ -24,7 +29,12 @@ def _generator():
 
 
 def _defined_tests() -> tuple[set[str], dict[str, set[str]]]:
-    """Every test function name in ``tests/`` and the test methods of each class."""
+    """Collect every test function name in ``tests/`` and the methods of each class.
+
+    Returns:
+        The names of all functions and methods that start with ``test``, and the names of
+        the methods of each class by class name; classes of the same name are merged.
+    """
     names: set[str] = set()
     methods: dict[str, set[str]] = {}
     for path in sorted((ROOT / "tests").glob("*.py")):
@@ -43,6 +53,8 @@ def _defined_tests() -> tuple[set[str], dict[str, set[str]]]:
 
 
 class DocumentationTests(unittest.TestCase):
+    """Documentation links, the check catalogue, the agent skill, quoted test names and examples."""
+
     def test_documentation_links_match_the_documentation_url_of_the_project(self) -> None:
         import tomllib
 
@@ -111,7 +123,10 @@ class DocumentationTests(unittest.TestCase):
                         self.assertIn(word, options, f"{invocation}: unknown option {word}")
 
     def test_test_names_quoted_in_the_published_docs_exist(self) -> None:
-        """The backlog and development notes name tests as evidence; a rename must update them."""
+        """Check that every test name quoted in the published docs exists.
+
+        The backlog and development notes name tests as evidence; a rename must update them.
+        """
         names, methods = _defined_tests()
         quoted = re.compile(r"(?<![\w/.<])(?:([A-Z]\w+)\.)?(test_[a-z0-9_]+)(?!\w)")
         checked = 0

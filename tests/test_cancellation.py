@@ -1,3 +1,5 @@
+"""Tests of the cancellation helpers: finishing work despite cancellation, stopping owned work."""
+
 from __future__ import annotations
 
 import asyncio
@@ -14,6 +16,8 @@ from latexprep.cancellation import (
 
 
 class CompleteDespiteCancellationTests(unittest.IsolatedAsyncioTestCase):
+    """Tests of ``complete_despite_cancellation``: results, errors, cleanup and existing tasks."""
+
     async def test_returns_the_result_when_nothing_cancels_the_caller(self) -> None:
         async def work() -> str:
             await asyncio.sleep(0)
@@ -62,6 +66,8 @@ class CompleteDespiteCancellationTests(unittest.IsolatedAsyncioTestCase):
 
 
 class OwnedWorkTests(unittest.IsolatedAsyncioTestCase):
+    """Tests that ``cancel_and_drain`` and ``run_in_thread`` wait for owned work to stop."""
+
     async def test_cancel_and_drain_absorbs_repeated_cancellation_of_its_caller(self) -> None:
         release = asyncio.Event()
         stopped: list[str] = []

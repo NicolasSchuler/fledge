@@ -36,7 +36,16 @@ from tests.support import (
 
 
 class WorkflowCheckTests(AsyncProjectTestCase):
+    """Configured checks through whole jobs on real source fixtures.
+
+    The cases cover identical results at any parallelism, the citation scope of the ``bib``
+    command, offline runs that never resolve or connect, output policies applied after cleanup
+    and flattening, constraints and PDF checks that block publication, and source policies and
+    template references that follow the flattened files.
+    """
+
     async def asyncSetUp(self):
+        """Set ``self.source`` to the ``input`` directory under ``self.root``; tests create it."""
         self.source = self.root / "input"
 
     async def test_inspect_runs_new_source_checks_with_deterministic_parallel_results(self):
@@ -242,6 +251,14 @@ class WorkflowCheckTests(AsyncProjectTestCase):
 
 
 class PdfCheckCompositionTests(unittest.IsolatedAsyncioTestCase):
+    """What :func:`inspect_configured_pdf_checks` passes to the PDF adapters it calls.
+
+    Source metadata becomes the expected PDF metadata unless it is ambiguous, privacy terms
+    reach the check of the extracted PDF text and metadata, a failed extraction stays
+    inconclusive, and only the figures the source includes are inspected and reported by their
+    source path.
+    """
+
     async def test_title_only_matching_ignores_unrelated_author_ambiguity(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
@@ -374,6 +391,8 @@ class PdfCheckCompositionTests(unittest.IsolatedAsyncioTestCase):
 
 
 class OnlineCliTests(unittest.TestCase):
+    """``--online`` and ``--offline`` change only the consent of the configured online checks."""
+
     def test_online_flags_override_only_consent_and_preserve_selected_checks(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

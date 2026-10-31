@@ -48,6 +48,15 @@ CONVERTED_EPS_MISSING = re.compile(r"File `[^'\n]*-eps-converted-to\.pdf' not fo
 
 
 def _document(body: str, preamble: str = "") -> str:
+    r"""Return the source of an ``article`` document that typesets ``body``.
+
+    Args:
+        body: The text between ``\begin{document}`` and ``\end{document}``.
+        preamble: The text after ``\documentclass{article}``, before the document begins.
+
+    Returns:
+        The document source, ending with a newline.
+    """
     return (
         "\\documentclass{article}\n"
         + preamble
@@ -58,7 +67,11 @@ def _document(body: str, preamble: str = "") -> str:
 
 
 def _png() -> bytes:
-    """A valid 1 x 1 RGB PNG."""
+    """Return a valid 1 x 1 RGB PNG.
+
+    Returns:
+        The bytes of the PNG file.
+    """
 
     def chunk(kind: bytes, data: bytes) -> bytes:
         payload = kind + data
@@ -142,7 +155,14 @@ STYLED_FLAT_COMMANDS = (
 
 
 class Prepared(NamedTuple):
-    """One preparation: its report, the input and output folders and the input's bytes."""
+    """One preparation: its report, the input and output folders and the input's bytes.
+
+    Attributes:
+        report: The report of the ``prepare`` job.
+        source: The project folder the job read.
+        output: The folder the job prepared the project into.
+        originals: The project's files before the job, as :func:`_snapshot` records them.
+    """
 
     report: Report
     source: Path
@@ -151,6 +171,17 @@ class Prepared(NamedTuple):
 
 
 def _settings(**options: Any) -> Settings:
+    """Return the settings of a live job on ``main.tex``, with ``options`` added.
+
+    The settings fix ``source_date_epoch`` at ``EPOCH`` and the job deadline at
+    ``JOB_TIMEOUT_SECONDS``.
+
+    Args:
+        **options: Further keyword arguments for :class:`Settings`.
+
+    Returns:
+        The settings.
+    """
     return Settings(
         main="main.tex",
         source_date_epoch=EPOCH,
@@ -160,6 +191,11 @@ def _settings(**options: Any) -> Settings:
 
 
 def _snapshot(root: Path) -> dict[str, bytes]:
+    """Read every file under ``root``.
+
+    Returns:
+        The bytes of each file, keyed by its POSIX path relative to ``root``.
+    """
     return {
         path.relative_to(root).as_posix(): path.read_bytes()
         for path in root.rglob("*")
@@ -168,26 +204,59 @@ def _snapshot(root: Path) -> dict[str, bytes]:
 
 
 def _archive(output: Path) -> dict[str, bytes]:
-    """Every entry of the published ZIP by name; a directory entry has empty content."""
+    """Read every entry of the published ZIP.
+
+    Args:
+        output: The folder that holds ``submission.zip``.
+
+    Returns:
+        The content of each entry by name; a directory entry has empty content.
+    """
     with zipfile.ZipFile(output / "submission.zip") as archive:
         return {name: archive.read(name) for name in archive.namelist()}
 
 
 def _with_code(report: Report, code: str) -> list[Finding]:
+    """Select the findings of ``report`` whose code is ``code``.
+
+    Args:
+        report: The report to search.
+        code: The code the findings must have.
+
+    Returns:
+        The matching findings, in report order.
+    """
     return [item for item in report.findings if item.code == code]
 
 
 def _with_rule(report: Report, rule: str) -> list[Finding]:
+    """Select the findings of ``report`` whose rule is ``rule``.
+
+    Args:
+        report: The report to search.
+        rule: The rule the findings must have.
+
+    Returns:
+        The matching findings, in report order.
+    """
     return [item for item in report.findings if item.rule == rule]
 
 
 def _results(findings: list[Finding]) -> set[tuple[str, str, str | None]]:
-    """The distinct (severity, status, path) of ``findings``; empty when there are none."""
+    """Collect the distinct (severity, status, path) of ``findings``.
+
+    Returns:
+        The distinct (severity, status, path) tuples; empty when there are no findings.
+    """
     return {(item.severity, item.status, item.path) for item in findings}
 
 
 def _problems(report: Report) -> list[tuple[str | None, str, str, str]]:
-    """The blocking findings, which explain an unexpected outcome."""
+    """Describe the blocking findings of ``report``, which explain an unexpected outcome.
+
+    Returns:
+        The (code, rule, status, message) of each blocking finding.
+    """
     return [
         (item.code, item.rule, item.status, item.message)
         for item in report.findings
@@ -196,10 +265,17 @@ def _problems(report: Report) -> list[tuple[str | None, str, str, str]]:
 
 
 def _pdf_text(pdftotext: str, pdf: Path) -> str:
-    """The text pdftotext extracts from ``pdf``.
+    """Return the text pdftotext extracts from ``pdf``.
 
     NFKC normalization turns a ligature back into its letters, in case a Poppler version
     extracts the ff of "Off" as the single character U+FB00.
+
+    Args:
+        pdftotext: The path of the ``pdftotext`` program.
+        pdf: The PDF to read.
+
+    Returns:
+        The extracted text, decoded as UTF-8 and NFKC-normalized.
     """
     extracted = subprocess.run(
         [pdftotext, "-enc", "UTF-8", str(pdf), "-"], capture_output=True, check=True, timeout=60
@@ -208,7 +284,12 @@ def _pdf_text(pdftotext: str, pdf: Path) -> str:
 
 
 def _installed_tex_file(name: str) -> Path | None:
-    """Where kpsewhich finds the TeX file ``name``, or ``None``."""
+    """Find the TeX file ``name`` with kpsewhich.
+
+    Returns:
+        Where kpsewhich finds the file, or ``None`` when kpsewhich is not installed or does
+        not find it.
+    """
     kpsewhich = shutil.which("kpsewhich")
     if kpsewhich is None:
         return None
@@ -221,7 +302,10 @@ def _installed_tex_file(name: str) -> Path | None:
 
 @live_test("Set FLEDGE_RUN_INTEGRATION=1 for live TeX checks of hostile and structured sources")
 class LiveSourceProjectTests(unittest.IsolatedAsyncioTestCase):
+    """Live TeX preparations of hostile constructs, structured sources and an EPS figure."""
+
     def setUp(self) -> None:
+        """Create a temporary base folder for the test's projects."""
         temporary = tempfile.TemporaryDirectory(prefix="fledge-sources-")
         self.addCleanup(temporary.cleanup)
         self.base = Path(temporary.name).resolve()
@@ -229,7 +313,17 @@ class LiveSourceProjectTests(unittest.IsolatedAsyncioTestCase):
     async def prepare(
         self, name: str, files: Mapping[str, str | bytes], **options: Any
     ) -> Prepared:
-        """Write ``files`` as the project ``name`` and prepare it into a new folder."""
+        """Write ``files`` as the project ``name`` and prepare it into a new folder.
+
+        Args:
+            name: The project's folder under the base folder; the output folder is
+                ``<name>-prepared`` beside it.
+            files: The project's files by relative path, as text or bytes.
+            **options: Further settings for :func:`_settings`.
+
+        Returns:
+            The report, both folders and the project's files before the job.
+        """
         source = write_project(self.base / name, files)
         originals = _snapshot(source)
         output = self.base / f"{name}-prepared"
@@ -237,33 +331,54 @@ class LiveSourceProjectTests(unittest.IsolatedAsyncioTestCase):
         return Prepared(report, source, output, originals)
 
     def installed(self, name: str, install: str) -> Path:
-        """The TeX file ``name``; skip the test, saying how to install it, when it is absent."""
+        """Find the TeX file ``name``; skip the test, saying how to install it, when it is absent.
+
+        Args:
+            name: The TeX file to look up with kpsewhich.
+            install: How to install the file, which the reason for the skip states.
+
+        Returns:
+            Where kpsewhich finds the file.
+
+        Raises:
+            unittest.SkipTest: kpsewhich does not find the file.
+        """
         location = _installed_tex_file(name)
         if location is None:
             self.skipTest(f"kpsewhich does not find {name}: {install}")
         return location
 
     def assert_unchanged(self, prepared: Prepared) -> None:
-        """The project is byte for byte what it was before the job."""
+        """Assert that the project is byte for byte what it was before the job."""
         self.assertEqual(_snapshot(prepared.source), prepared.originals)
 
     def assert_published(self, prepared: Prepared) -> dict[str, bytes]:
-        """A passing outcome; return the entries of the published ZIP."""
+        """Assert a passing outcome and read the published ZIP.
+
+        A failure message lists the blocking findings.
+
+        Returns:
+            The content of each entry of the published ZIP by name.
+        """
         self.assertIn(prepared.report.outcome, PUBLISHED_OUTCOMES, _problems(prepared.report))
         return _archive(prepared.output)
 
     def assert_blocked(self, prepared: Prepared) -> None:
-        """The blocked outcome, which publishes nothing (docs/workflow.md, step "Publish")."""
+        """Assert the blocked outcome, which publishes nothing.
+
+        See docs/workflow.md, step "Publish": the report has no artifacts and the output
+        folder does not exist.
+        """
         self.assertEqual(prepared.report.outcome, "blocked")
         self.assertEqual(prepared.report.artifacts, {})
         self.assertFalse(prepared.output.exists())
 
     def assert_rendering_unchanged(self, report: Report) -> None:
-        """There is a CMP003 comparison of rendered pages, and every one passed."""
+        """Assert that there is a CMP003 comparison of rendered pages and every one passed."""
         self.assertEqual({item.status for item in _with_code(report, "CMP003")}, {"passed"})
 
     async def test_shell_escape_command_is_flagged_and_never_runs(self) -> None:
-        """PRV006 flags a literal write18; TeX has shell escape off and nothing is written.
+        """Check that PRV006 flags a literal write18, shell escape is off and nothing is written.
 
         Documented claims: PRV006 is an optional advisory preflight for literal write18
         (docs/checks.md), and the build runs in a sandbox with shell escape disabled
@@ -298,7 +413,7 @@ class LiveSourceProjectTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(named, {"main.tex"})
 
     async def test_absolute_input_outside_the_project_blocks(self) -> None:
-        """TEX006 rejects a literal absolute input outside the project and blocks the job.
+        """Check that TEX006 blocks the job for a literal absolute input outside the project.
 
         Documented claims: TEX006 rejects absolute and escaping literal references and is
         mandatory (docs/checks.md, docs/check-backlog.md); a blocked run publishes nothing
@@ -315,7 +430,7 @@ class LiveSourceProjectTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(_results(external), {("error", "failed", "main.tex")})
 
     async def test_absolute_write_outside_the_workspace_is_refused(self) -> None:
-        """A TeX write to an absolute path outside the build workspace never happens.
+        """Check that a TeX write to an absolute path outside the build workspace never happens.
 
         Documented claim: the build runs in a sandbox, with no unsandboxed fallback
         (docs/workflow.md, docs/limitations.md). Fledge's tool environment also sets TeX's
@@ -347,7 +462,7 @@ class LiveSourceProjectTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any(refusal.search(log) for log in logs), logs)
 
     async def test_import_and_subimport_flatten_to_top_level_names(self) -> None:
-        """Flat layout rewrites literal import and subimport paths and renders the same.
+        """Check that flat layout rewrites literal import and subimport paths and renders the same.
 
         Documented claims: flattening supports literal import/subimport
         (docs/workflow-reference.md, "Supported source syntax"), and the prepared PDF must
@@ -366,7 +481,7 @@ class LiveSourceProjectTests(unittest.IsolatedAsyncioTestCase):
         self.assert_unchanged(prepared)
 
     async def test_subfiles_flatten_with_the_parent_option_rewritten_to_main(self) -> None:
-        """Flat layout supports a constrained subfile, and inspect resolves the subfile.
+        """Check that flat layout supports a constrained subfile and inspect resolves the subfile.
 
         Documented claims: flattening supports constrained subfile bodies
         (docs/workflow-reference.md, "Supported source syntax"), and TEX005 reports a
@@ -393,7 +508,7 @@ class LiveSourceProjectTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(_results(_with_code(control, "TEX005")), {("error", "failed", "main.tex")})
 
     async def test_local_class_style_and_bibliography_style_in_subdirectories(self) -> None:
-        """Local files in subdirectories build in both layouts; flat moves them to the top.
+        """Build local files in subdirectories in both layouts; flat moves them to the top.
 
         Documented claims: flattening rewrites literal include, includegraphics,
         graphicspath, bibliography and bibliographystyle references, and local class and
@@ -424,12 +539,17 @@ class LiveSourceProjectTests(unittest.IsolatedAsyncioTestCase):
     def assert_preserved_styled_project(
         self, archive: dict[str, bytes], files: Mapping[str, str | bytes]
     ) -> None:
-        """Every file keeps its folder, and main.tex is shipped unchanged."""
+        """Assert that every file keeps its folder and that main.tex is shipped unchanged.
+
+        Args:
+            archive: The entries of the published ZIP by name.
+            files: The project's files by relative path.
+        """
         self.assertEqual({name for name in archive if not name.endswith("/")}, set(files))
         self.assertEqual(archive["main.tex"].decode(), STYLED_MAIN)
 
     def assert_flat_styled_project(self, archive: dict[str, bytes]) -> None:
-        """Every file is at the top level, and main.tex names the flat files."""
+        """Assert that every file is at the top level and that main.tex names the flat files."""
         self.assertEqual(sorted(archive), STYLED_FLAT_NAMES)
         main = archive["main.tex"].decode()
         for command in STYLED_FLAT_COMMANDS:
@@ -438,11 +558,12 @@ class LiveSourceProjectTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn(folder, main)
 
     async def test_eps_figure_fails_the_build_instead_of_hanging(self) -> None:
-        """An EPS figure needs epstopdf, which needs shell escape; the build fails, not hangs.
+        """Check that the build of an EPS figure fails instead of hanging.
 
-        Documented claim: pdfLaTeX converts EPS only through epstopdf with shell escape,
-        which the isolated build disables, and TEX011 says so (docs/checks.md). Observed:
-        the log tail of build.failed shows TeX refusing the epstopdf command
+        An EPS figure needs epstopdf, which needs shell escape. Documented claim: pdfLaTeX
+        converts EPS only through epstopdf with shell escape, which the isolated build
+        disables, and TEX011 says so (docs/checks.md). Observed: the log tail of
+        build.failed shows TeX refusing the epstopdf command
         ("runsystem(repstopdf ...)...disabled") and pdftex.def's error for the converted
         "-eps-converted-to.pdf" file that was never written; there is no timeout or job
         deadline, and the job is blocked.
