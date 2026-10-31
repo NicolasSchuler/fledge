@@ -579,6 +579,24 @@ class SubmissionTests(ProjectTestCase):
                     "submission.unused_assets", SubmissionOptions(report_unused_assets=True)
                 )
 
+    def test_more_matches_than_the_limit_are_reported_as_the_limit_with_a_plus(self) -> None:
+        # File-name policies do not stop at the limit, so they can supply more matches.
+        for name in ("a.dat", "b.dat", "c.dat"):
+            self.write(name, "")
+        result = self.result(
+            "submission.file_extensions",
+            SubmissionOptions(allowed_extensions=(".tex",)),
+            limits=ScanLimits(max_matches=2),
+        )
+        # The message counts and names only the matches the details keep.
+        self.assertEqual(
+            result.message,
+            "Files with extensions that are not allowed (2+): a.dat (.dat), b.dat (.dat)",
+        )
+        self.assertEqual([item["path"] for item in result.details["matches"]], ["a.dat", "b.dat"])
+        self.assertTrue(result.details["match_output_limited"])
+        self.assertTrue(result.incomplete)
+
 
 if __name__ == "__main__":
     unittest.main()

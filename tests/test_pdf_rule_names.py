@@ -26,9 +26,12 @@ from latexprep.pdf_structure_checks import (
 )
 from latexprep.resource_budget import ResourceBudget
 from latexprep.rules import BY_NAME
-from tests import test_pdf as pdf_tests
-from tests import test_pdf_checks as check_tests
-from tests import test_structure_checks as structure_tests
+from tests.pdf_fakes import (
+    ConfigurablePdfRunner,
+    DetailRunner,
+    color_trace,
+    structured_pdf_objects,
+)
 from tests.support import AsyncProjectTestCase
 
 PACKAGE = Path(__file__).resolve().parents[1] / "src" / "latexprep"
@@ -141,22 +144,22 @@ class EmittedRuleTests(AsyncProjectTestCase):
             await inspect_pdf_details(
                 self.pdf,
                 self.work(),
-                check_tests.DetailRunner(trace=check_tests.color_trace()),
+                DetailRunner(trace=color_trace()),
                 options=everything,
             )
         )
         emitted |= self.assert_names_known(
             await inspect_included_pdf_figures(
-                (self.pdf,), self.work(), check_tests.DetailRunner(), options=everything
+                (self.pdf,), self.work(), DetailRunner(), options=everything
             )
         )
         emitted |= self.assert_names_known(
             await inspect_pdf_structure(
                 self.pdf,
                 self.work(),
-                check_tests.DetailRunner(
+                DetailRunner(
                     info="Pages: 1\n",
-                    objects=json.dumps(structure_tests.structured_pdf_objects()),
+                    objects=json.dumps(structured_pdf_objects()),
                     text="2 Methods\nBody.\f",
                 ),
                 StructureOptions(
@@ -184,7 +187,7 @@ class EmittedRuleTests(AsyncProjectTestCase):
             await inspect_pdf(
                 self.pdf,
                 self.work(),
-                pdf_tests.ConfigurablePdfRunner(),
+                ConfigurablePdfRunner(),
                 2,
                 options=inspection,
                 budget=ResourceBudget(2, 1024),
@@ -196,7 +199,7 @@ class EmittedRuleTests(AsyncProjectTestCase):
                 await inspect_pdf(
                     self.pdf,
                     self.work(),
-                    pdf_tests.ConfigurablePdfRunner(missing=tool),
+                    ConfigurablePdfRunner(missing=tool),
                     2,
                     options=inspection,
                     budget=ResourceBudget(2, 1024),
@@ -206,7 +209,7 @@ class EmittedRuleTests(AsyncProjectTestCase):
             await inspect_standalone_pdf(
                 self.pdf,
                 self.work(),
-                pdf_tests.ConfigurablePdfRunner(),
+                ConfigurablePdfRunner(),
                 PdfCheckSettings(details=everything, match_source_metadata=("title",)),
                 ResourceBudget(2, 1024),
             )

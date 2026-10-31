@@ -3,9 +3,10 @@
 This module owns the question "does the entry agree with the record?" for four literal
 fields: title, author family names, year and venue. The answer is a typed
 ``MetadataComparison``; turning it into a finding, and deciding what a difference
-means, is ``online_checks``'s job. Text is compared after normalization (case, accents,
-markup and punctuation are ignored), author lists as ordered family names read with
-BibTeX's name syntax. Agreement is never proof of identity.
+means, is ``online_checks``'s job. Text is compared after normalization (case, markup
+and punctuation are ignored, but accents count, so ``Müller`` and ``Muller`` differ),
+author lists as ordered family names read with BibTeX's name syntax. Agreement is never
+proof of identity.
 """
 
 from __future__ import annotations
@@ -24,13 +25,18 @@ MetadataOutcome = Literal["mismatch", "incomplete", "agreement"]
 
 
 def normalized_text(value: str) -> str:
-    """Reduce ``value`` to lowercase words: markup, entities, accents and punctuation removed.
+    """Reduce ``value`` to casefolded words, with markup and punctuation removed.
+
+    HTML tags are dropped and entities decoded, as Crossref titles carry them. The text is
+    NFKC-normalized, so a precomposed and a decomposed accented letter agree, but accents
+    are kept: ``Müller`` and ``Muller`` differ.
 
     Args:
         value: The text to normalize.
 
     Returns:
-        The words of ``value``, casefolded and separated by single spaces.
+        The runs of word characters (letters, digits and underscores) of ``value``,
+        casefolded and separated by single spaces.
     """
     return " ".join(
         re.findall(

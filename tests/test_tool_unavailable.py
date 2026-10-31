@@ -166,6 +166,15 @@ class MissingToolchainExplanationTests(unittest.TestCase):
             [explained] = explain_missing_toolchain([self.unavailable("pdflatex")], "pdflatex")
         self.assertEqual(explained.details["missing_tools"], ["latexmk"])
 
+    def test_every_finding_of_a_missing_tex_tool_is_explained(self) -> None:
+        findings = [self.unavailable("latexmk"), self.unavailable("pdflatex")]
+        with patch("latexprep.toolchain_help.shutil.which", return_value=None):
+            explained = explain_missing_toolchain(findings, "pdflatex")
+        self.assertEqual(
+            [finding.details.get("missing_tools") for finding in explained],
+            [["latexmk", "pdflatex"], ["latexmk", "pdflatex"]],
+        )
+
     def test_the_message_wording_alone_is_never_parsed(self) -> None:
         finding = self.unavailable(None)
         other_tool = self.unavailable("pdftotext")

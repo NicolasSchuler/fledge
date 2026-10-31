@@ -354,6 +354,48 @@ class ReportPublicationSafetyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report.artifacts, {})
         self.assertIn("report.redaction_limit", {item.rule for item in report.findings})
 
+    async def test_a_run_that_ended_in_a_defect_is_not_refused_as_unrepresentable(self):
+        async def measured(_pdf, _root, _main, work, *_args, **_options):
+            work.mkdir(parents=True)
+            preview = work / "gray.png"
+            preview.write_bytes(b"PNG fixture")
+            return [
+                Finding(
+                    "pdf.grayscale_preview",
+                    "Generated",
+                    severity="info",
+                    status="passed",
+                    details={"artifacts": [str(preview)]},
+                )
+            ]
+
+        def crash(_root, _main=None, **_options):
+            raise KeyError("unexpected")
+
+        settings = Settings(rendered_pdf_artwork=PdfArtworkOptions(grayscale_preview=True))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            source = root / "input"
+            single_file_project(source)
+            previews = root / "previews"
+            backends = controlled_backends(build=build_with_loaded_class)
+            with (
+                patch(
+                    "latexprep.document_tasks.inspect_configured_pdf_checks", side_effect=measured
+                ),
+                patch("latexprep.document_tasks.check_bibliography_integrity", side_effect=crash),
+            ):
+                report = await run_job(
+                    JobRequest("check", source, settings, preview_output=previews),
+                    backends=backends,
+                )
+            published = json.loads((previews / "report.json").read_text(encoding="utf-8"))
+            self.assertTrue((previews / "page-0001.png").is_file())
+        # The error outcome is the defect's; the report itself was represented safely.
+        self.assertEqual(report.outcome, "error")
+        self.assertEqual(published["outcome"], "error")
+        self.assertNotIn("report.redaction_limit", {item.rule for item in report.findings})
+
     async def test_a_job_without_publication_sanitizes_its_report_once(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "input"

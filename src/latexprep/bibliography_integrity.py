@@ -84,14 +84,17 @@ def _load_bibliographies(
 
 
 def _defined_keys(documents: list[BibDocument]) -> set[str]:
-    """Collect every entry key and literal ``ids`` alias of ``documents``."""
+    """Collect every entry key and literal ``ids`` alias of ``documents``.
+
+    Only keyed entries define aliases: an ``@string`` macro named ``ids`` is not one.
+    """
     keys = {entry.key for document in documents for entry in document.entries}
     # biblatex's literal ids field supplies alternate entry keys.
     for document in documents:
         cancellation_point()
-        for record in document.records:
-            for bib_field in record.fields:
-                if bib_field.name == "ids" and (value := plain_literal(bib_field)) is not None:
+        for entry in document.entries:
+            for bib_field in entry.fields_named("ids"):
+                if (value := plain_literal(bib_field)) is not None:
                     keys.update(key.strip() for key in value.split(",") if key.strip())
     return keys
 

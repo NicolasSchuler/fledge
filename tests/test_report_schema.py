@@ -126,6 +126,14 @@ class SchemaValidatorTests(unittest.TestCase):
         self.assertEqual(len(problems), 1)
         self.assertIn("$[1]", problems[0])
 
+    def test_a_reference_that_does_not_resolve_is_reported(self) -> None:
+        for pointer in ("#/$defs/missing", "#/$defs/name/type", "#/$defs/name/type/deeper"):
+            schema = {"items": {"$ref": pointer}, "$defs": {"name": {"type": "string"}}}
+            with self.subTest(pointer=pointer):
+                self.assertEqual(
+                    self.violations([1], schema), [f"$[0]: unresolved reference {pointer!r}"]
+                )
+
     def test_a_keyword_it_does_not_check_is_refused_rather_than_ignored(self) -> None:
         for keyword in ("pattern", "minimum", "oneOf", "allOf", "format"):
             with self.subTest(keyword=keyword), self.assertRaisesRegex(ValueError, keyword):

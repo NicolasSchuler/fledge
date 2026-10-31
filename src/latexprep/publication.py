@@ -21,7 +21,7 @@ from .errors import PreparationError, RequestError
 from .findings import Finding
 from .path_safety import is_contained
 from .redaction import scrub_local_paths
-from .report import Outcome, Report
+from .report import WITHHELD_SCOPE, Outcome, Report
 
 # Workspace preview images and the published path of each.
 PreviewPlan = tuple[tuple[Path, Path], ...]
@@ -262,6 +262,9 @@ def _render_report(report: Report, artifacts: dict[str, str]) -> _RenderedReport
 
     Final paths are included before the first publication mutation: paths themselves
     can contain credentials or push the complete report beyond redaction limits.
+    Sanitizing withholds such a report and puts an error in its place. Only that is
+    refused: a run that ended in a defect also has the error outcome, and its report is
+    rendered like any other.
 
     Args:
         report: The final report.
@@ -271,7 +274,7 @@ def _render_report(report: Report, artifacts: dict[str, str]) -> _RenderedReport
         The rendered report, or ``None`` when it cannot be represented safely.
     """
     public = replace(report, artifacts=artifacts).to_dict()
-    if public["outcome"] == "error":
+    if public["outcome"] == "error" and public["scope"] == WITHHELD_SCOPE:
         return None
     return _RenderedReport(artifacts, _json_text(public))
 

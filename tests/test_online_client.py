@@ -1,6 +1,7 @@
 """The online client: address policy, redirects, budget, spacing, caching and diagnostics.
 
-The client takes a resolver and a transport, so every case here runs without a network.
+The client takes a resolver and a transport, so every case here runs without a network. The
+last cases pin how the fake transport behind the others consumes its answers.
 """
 
 from __future__ import annotations
@@ -348,6 +349,30 @@ class DeadlineAndDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         result = await client.fetch("https://example.org/data")
         self.assertEqual((result.outcome, result.host), ("available", "example.org"))
         self.assertGreaterEqual(result.elapsed_seconds, 0)
+
+
+class FakeTransportTests(unittest.IsolatedAsyncioTestCase):
+    """The fake transport uses one answer for every exchange, or any iterable of them in turn."""
+
+    async def test_answers_from_any_iterable_are_used_in_turn(self):
+        for answers in (
+            [Response(405), Response(200)],
+            (Response(405), Response(200)),
+            (answer for answer in (Response(405), Response(200))),
+        ):
+            with self.subTest(kind=type(answers).__name__):
+                client, transport = client_for(answers)
+                result = await client.fetch("https://example.org/")
+                self.assertEqual(result.outcome, "available")
+                self.assertEqual([item.method for item in transport.requests], ["HEAD", "GET"])
+
+    async def test_a_single_answer_is_reused_for_every_exchange(self):
+        for answer in (Response(404), lambda request: Response(404)):
+            with self.subTest(callable=callable(answer)):
+                client, transport = client_for(answer)
+                result = await client.fetch("https://example.org/")
+                self.assertEqual(result.outcome, "not_found")
+                self.assertEqual([item.method for item in transport.requests], ["HEAD", "GET"])
 
 
 if __name__ == "__main__":

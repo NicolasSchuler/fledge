@@ -73,7 +73,6 @@ _TEXT_EXTENSIONS = {
     ".log",
 }
 _TEX_EXTENSIONS = TEX_SOURCE_SUFFIXES | {".dtx"}
-_TEX_EXTENSIONS = TEX_SOURCE_SUFFIXES | {".dtx"}
 # Example credentials shipped in templates and documentation; they are not secrets.
 _PLACEHOLDERS = {"your_api_key_here", "your_password_here", "example_password", "changemechangeme"}
 _HINT = re.compile(

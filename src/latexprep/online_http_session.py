@@ -678,8 +678,9 @@ class OnlineClient:
         """Ask the first validated address that accepts a connection.
 
         Only a failed connection moves on to the next address; IPv4 goes first because
-        a missing IPv6 route is the commoner failure, and the first connection attempt
-        gets a share of the timeout so that a silent address cannot use all of it.
+        a missing IPv6 route is the commoner failure. When there is more than one address,
+        each connection attempt gets a share of the timeout so that a silent address cannot
+        use all of it.
 
         Args:
             target: The URL to ask.

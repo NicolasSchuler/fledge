@@ -28,6 +28,9 @@ USAGE_EXIT_CODE = 64
 REQUEST_SCOPE = "request validation"
 # The scope of a report whose job was cancelled or hit a defect before it finished.
 UNFINISHED_SCOPE = "run did not finish"
+# The scope of the content-free report that ``Report.redacted_copy`` returns in place of a
+# report it cannot sanitize; publication recognises a withheld report by it.
+WITHHELD_SCOPE = "report sanitization"
 
 
 class Outcome(StrEnum):

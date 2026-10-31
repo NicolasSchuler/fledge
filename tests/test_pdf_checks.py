@@ -42,6 +42,7 @@ from latexprep.runtime import ToolRunner
 from latexprep.submission_options import SubmissionOptions
 from tests.pdf_fakes import (
     DetailRunner,
+    color_trace,
     geometry,
     gray_raster,
     object_json,
@@ -64,34 +65,6 @@ def large_page_geometry(width: int, height: int) -> str:
     return (
         f"Page 1 size: {width} x {height} pts\nPage 1 rot: 0\n"
         f"Page 1 MediaBox: 0 0 {width} {height}\nPage 1 CropBox: 0 0 {width} {height}\n"
-    )
-
-
-def color_trace(
-    *,
-    text_color: str = "0 0 0",
-    other_color: str = "1 1 1",
-    space: str = "DeviceRGB",
-    alpha: str = "1",
-) -> str:
-    """Return a mutool trace of one letter page with one filled glyph and one filled path.
-
-    Args:
-        text_color: The colour components of the glyph ``A``.
-        other_color: The ``DeviceRGB`` colour components of the filled path.
-        space: The colour space of the glyph.
-        alpha: The alpha of the glyph.
-
-    Returns:
-        The trace XML of ``document.pdf``.
-    """
-    return (
-        '<document filename="document.pdf"><page number="1" mediabox="0 0 612 792">'
-        f'<fill_text colorspace="{space}" color="{text_color}" alpha="{alpha}" '
-        'transform="1 0 0 1 0 0"><span font="Times" wmode="0" trm="12 0 0 12">'
-        '<g unicode="A" glyph="A" x="20" y="30"/></span></fill_text>'
-        f'<fill_path colorspace="DeviceRGB" color="{other_color}" transform="1 0 0 1 0 0">'
-        '<moveto x="20" y="40"/><lineto x="50" y="40"/></fill_path></page></document>'
     )
 
 

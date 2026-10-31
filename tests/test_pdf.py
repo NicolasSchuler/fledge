@@ -14,7 +14,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from latexprep.command_runner import CommandResult, RuntimeLimits
+from latexprep.command_runner import RuntimeLimits
 from latexprep.errors import PreparationError
 from latexprep.pdf_comparison import ComparisonPolicy, PageDifference, compare_pdfs
 from latexprep.pdf_geometry import COMPARISON_DPI, require_comparison_raster_fit
@@ -24,7 +24,7 @@ from latexprep.report import Report
 from latexprep.resource_budget import ResourceBudget
 from latexprep.runtime import ToolRunner
 from latexprep.workflow_options import ComparisonOptions
-from tests.pdf_fakes import FakePdfRunner
+from tests.pdf_fakes import ConfigurablePdfRunner, FakePdfRunner
 from tests.support import live_test
 
 
@@ -243,59 +243,6 @@ def stencil_mask_pdf() -> bytes:
     output.extend(b"".join(f"{offset:010} 00000 n \n".encode() for offset in offsets))
     output.extend(f"trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n{start}\n%%EOF\n".encode())
     return bytes(output)
-
-
-class ConfigurablePdfRunner(FakePdfRunner):
-    """Poppler output for one PDF whose page count and tool outputs a test chooses.
-
-    Every command other than a ``-v`` probe succeeds with the output of ``outputs``, else a
-    default for ``pages`` letter pages (``pdfinfo``, ``pdfinfo -box`` and ``pdftotext``),
-    else the output of :class:`FakePdfRunner`.
-
-    Args:
-        missing: A missing tool, passed to :class:`FakePdfRunner`.
-
-    Attributes:
-        pages: The page count of the default outputs.
-        outputs: Outputs by tool name; the key ``geometry`` stands for ``pdfinfo -box``.
-    """
-
-    def __init__(
-        self, *, pages: int = 1, outputs: dict[str, str] | None = None, missing: str | None = None
-    ) -> None:
-        super().__init__(missing=missing)
-        self.pages = pages
-        self.outputs = outputs or {}
-
-    async def run(
-        self,
-        argv: list[str],
-        cwd: Path,
-        workspace: Path,
-        *,
-        readonly_inputs: tuple[Path, ...] = (),
-        memory_mb: int | None = None,
-    ) -> CommandResult:
-        """Answer the command with the chosen output, the default or the base output.
-
-        The arguments are those of :meth:`CommandRunner.run`. A ``-v`` probe gets the base
-        result; any other command succeeds with the output described in the class docstring.
-        """
-        result = await super().run(
-            argv, cwd, workspace, readonly_inputs=readonly_inputs, memory_mb=memory_mb
-        )
-        if argv[-1] == "-v":
-            return result
-        key = "geometry" if argv[0] == "pdfinfo" and "-box" in argv else argv[0]
-        defaults = {
-            "pdfinfo": f"Pages: {self.pages}\nEncrypted: no\nForm: none\nJavaScript: no\n",
-            "geometry": "".join(
-                f"Page {page} size: 612 x 792 pts\n" for page in range(1, self.pages + 1)
-            ),
-            "pdftotext": "Text\n\f" * self.pages,
-        }
-        output = self.outputs.get(key, defaults.get(key, result.stdout))
-        return CommandResult(0, output, "", resolved_command=argv)
 
 
 class PdfConstraintTests(unittest.IsolatedAsyncioTestCase):

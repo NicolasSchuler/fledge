@@ -30,7 +30,8 @@ _MAX_REPORTED_RECORDS = 100
 # Records and fields named in the message; the details list up to _MAX_REPORTED_RECORDS.
 _MAX_NAMED_PROBLEMS = 3
 _DYNAMIC_COMMANDS = PRIMITIVE_DEFINITION_COMMANDS | {"csname", "catcode"}
-# Associated author-block commands, such as affiliation or email, that must follow each author.
+# At most this many associated commands, such as affiliation or email, may be required of
+# each author record.
 _MAX_AUTHOR_FIELDS = 32
 _COMMAND = re.compile(r"[A-Za-z][A-Za-z@]{0,63}")
 

@@ -69,7 +69,8 @@ class OnlineCheckTests(unittest.IsolatedAsyncioTestCase):
         """
         self.bib.write_text(
             f"@{kind}{{key, title={{A reference title}}, author={{{author}}}, "
-            f"year={{2024}}, journal={{Example Journal}}, {extra}}}\n"
+            f"year={{2024}}, journal={{Example Journal}}, {extra}}}\n",
+            encoding="utf-8",
         )
 
     async def run_check(self, selected, answer, rule, code):
@@ -414,6 +415,24 @@ class OnlineCheckTests(unittest.IsolatedAsyncioTestCase):
                 )
                 row = finding.details["comparisons"]["authors"]
                 self.assertEqual(row["matches"], expected == "passed")
+
+    async def test_name_comparison_ignores_case_and_composition_but_not_accents(self):
+        for author, family, matches in (
+            # NFKC composes a decomposed letter, so both encodings of one name agree.
+            ("Mu\u0308ller, Ada", "Müller", True),
+            ("MÜLLER, Ada", "müller", True),
+            # Accents are kept: a name written without them differs from the record.
+            ("Muller, Ada", "Müller", False),
+        ):
+            with self.subTest(author=author, family=family):
+                self.reference(author=author)
+                finding, _, _ = await self.run_check(
+                    options(online_metadata=True),
+                    document(metadata(author=[{"family": family}])),
+                    "online.metadata",
+                    "NET002",
+                )
+                self.assertEqual(finding.details["comparisons"]["authors"]["matches"], matches)
 
     async def test_metadata_finding_names_the_entry_and_the_first_differences(self):
         self.reference(author="Smith, Ada and Jones, Bo and others")

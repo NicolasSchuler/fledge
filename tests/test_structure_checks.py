@@ -20,77 +20,7 @@ from latexprep.pdf_structure_checks import (
 )
 from latexprep.pdf_tool_output import MAX_INSPECTION_PAGES
 from latexprep.resource_budget import ResourceBudget
-from tests.pdf_fakes import DetailRunner
-
-
-def structured_pdf_objects() -> dict[str, object]:
-    """Return the qpdf JSON of a one-page tagged PDF.
-
-    The structure tree holds a document element with a table (one row with a header cell), a
-    figure with alternative text and a link element tied to the page's URI annotation; the parent
-    tree maps the page's marked content and the annotation back to their elements.
-
-    Returns:
-        The document in the layout of qpdf's JSON version 2.
-    """
-
-    def entry(value: dict[str, object]) -> dict[str, object]:
-        return {"value": value}
-
-    objects = {
-        "trailer": entry({"/Root": "1 0 R"}),
-        "obj:1 0 R": entry({"/Type": "/Catalog", "/Pages": "2 0 R", "/StructTreeRoot": "4 0 R"}),
-        "obj:2 0 R": entry({"/Type": "/Pages", "/Kids": ["3 0 R"], "/Count": 1}),
-        "obj:3 0 R": entry(
-            {"/Type": "/Page", "/Parent": "2 0 R", "/StructParents": 0, "/Annots": ["10 0 R"]}
-        ),
-        "obj:4 0 R": entry({"/Type": "/StructTreeRoot", "/K": ["5 0 R"], "/ParentTree": "11 0 R"}),
-        "obj:5 0 R": entry(
-            {
-                "/Type": "/StructElem",
-                "/S": "/Document",
-                "/P": "4 0 R",
-                "/Pg": "3 0 R",
-                "/K": ["6 0 R", "9 0 R", "12 0 R"],
-            }
-        ),
-        "obj:6 0 R": entry(
-            {"/Type": "/StructElem", "/S": "/Table", "/P": "5 0 R", "/K": ["7 0 R"]}
-        ),
-        "obj:7 0 R": entry({"/Type": "/StructElem", "/S": "/TR", "/P": "6 0 R", "/K": ["8 0 R"]}),
-        "obj:8 0 R": entry({"/Type": "/StructElem", "/S": "/TH", "/P": "7 0 R", "/K": 0}),
-        "obj:9 0 R": entry(
-            {
-                "/Type": "/StructElem",
-                "/S": "/Figure",
-                "/P": "5 0 R",
-                "/K": 1,
-                "/Alt": "u:Measured result chart",
-            }
-        ),
-        "obj:10 0 R": entry(
-            {
-                "/Type": "/Annot",
-                "/Subtype": "/Link",
-                "/StructParent": 1,
-                "/A": {"/S": "/URI", "/URI": "u:https://example.org"},
-            }
-        ),
-        "obj:11 0 R": entry({"/Nums": [0, ["8 0 R", "9 0 R", "12 0 R"], 1, "12 0 R"]}),
-        "obj:12 0 R": entry(
-            {
-                "/Type": "/StructElem",
-                "/S": "/Link",
-                "/P": "5 0 R",
-                "/K": [2, {"/Type": "/OBJR", "/Pg": "3 0 R", "/Obj": "10 0 R"}],
-            }
-        ),
-    }
-    return {
-        "version": 2,
-        "pages": [{"object": "3 0 R", "pageposfrom1": 1}],
-        "qpdf": [{"jsonversion": 2}, objects],
-    }
+from tests.pdf_fakes import DetailRunner, structured_pdf_objects
 
 
 def object_value(document: dict[str, object], number: int) -> dict[str, object]:

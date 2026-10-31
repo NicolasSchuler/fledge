@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import base64
 import json
+from pathlib import Path
 from typing import ClassVar
 
+from latexprep.command_runner import CommandResult
 from latexprep.pdf_artwork_options import PdfContrastSample
 from latexprep.pdf_check_options import PdfRegion
 from tests.fakes import FakeCommandRunner, Reply, ToolCall
@@ -102,6 +104,76 @@ def object_json(
     )
 
 
+def structured_pdf_objects() -> dict[str, object]:
+    """Return the qpdf JSON of a one-page tagged PDF.
+
+    The structure tree holds a document element with a table (one row with a header cell), a
+    figure with alternative text and a link element tied to the page's URI annotation; the parent
+    tree maps the page's marked content and the annotation back to their elements.
+
+    Returns:
+        The document in the layout of qpdf's JSON version 2.
+    """
+
+    def entry(value: dict[str, object]) -> dict[str, object]:
+        return {"value": value}
+
+    objects = {
+        "trailer": entry({"/Root": "1 0 R"}),
+        "obj:1 0 R": entry({"/Type": "/Catalog", "/Pages": "2 0 R", "/StructTreeRoot": "4 0 R"}),
+        "obj:2 0 R": entry({"/Type": "/Pages", "/Kids": ["3 0 R"], "/Count": 1}),
+        "obj:3 0 R": entry(
+            {"/Type": "/Page", "/Parent": "2 0 R", "/StructParents": 0, "/Annots": ["10 0 R"]}
+        ),
+        "obj:4 0 R": entry({"/Type": "/StructTreeRoot", "/K": ["5 0 R"], "/ParentTree": "11 0 R"}),
+        "obj:5 0 R": entry(
+            {
+                "/Type": "/StructElem",
+                "/S": "/Document",
+                "/P": "4 0 R",
+                "/Pg": "3 0 R",
+                "/K": ["6 0 R", "9 0 R", "12 0 R"],
+            }
+        ),
+        "obj:6 0 R": entry(
+            {"/Type": "/StructElem", "/S": "/Table", "/P": "5 0 R", "/K": ["7 0 R"]}
+        ),
+        "obj:7 0 R": entry({"/Type": "/StructElem", "/S": "/TR", "/P": "6 0 R", "/K": ["8 0 R"]}),
+        "obj:8 0 R": entry({"/Type": "/StructElem", "/S": "/TH", "/P": "7 0 R", "/K": 0}),
+        "obj:9 0 R": entry(
+            {
+                "/Type": "/StructElem",
+                "/S": "/Figure",
+                "/P": "5 0 R",
+                "/K": 1,
+                "/Alt": "u:Measured result chart",
+            }
+        ),
+        "obj:10 0 R": entry(
+            {
+                "/Type": "/Annot",
+                "/Subtype": "/Link",
+                "/StructParent": 1,
+                "/A": {"/S": "/URI", "/URI": "u:https://example.org"},
+            }
+        ),
+        "obj:11 0 R": entry({"/Nums": [0, ["8 0 R", "9 0 R", "12 0 R"], 1, "12 0 R"]}),
+        "obj:12 0 R": entry(
+            {
+                "/Type": "/StructElem",
+                "/S": "/Link",
+                "/P": "5 0 R",
+                "/K": [2, {"/Type": "/OBJR", "/Pg": "3 0 R", "/Obj": "10 0 R"}],
+            }
+        ),
+    }
+    return {
+        "version": 2,
+        "pages": [{"object": "3 0 R", "pageposfrom1": 1}],
+        "qpdf": [{"jsonversion": 2}, objects],
+    }
+
+
 def trace_xml(
     *,
     width: str = "0.7",
@@ -124,6 +196,34 @@ def trace_xml(
         f'linejoin="0" {color} transform="{transform}">'
         '<moveto x="30" y="30"/><lineto x="100" y="30"/></stroke_path>'
         "</page></document>"
+    )
+
+
+def color_trace(
+    *,
+    text_color: str = "0 0 0",
+    other_color: str = "1 1 1",
+    space: str = "DeviceRGB",
+    alpha: str = "1",
+) -> str:
+    """Return a mutool trace of one letter page with one filled glyph and one filled path.
+
+    Args:
+        text_color: The colour components of the glyph ``A``.
+        other_color: The ``DeviceRGB`` colour components of the filled path.
+        space: The colour space of the glyph.
+        alpha: The alpha of the glyph.
+
+    Returns:
+        The trace XML of ``document.pdf``.
+    """
+    return (
+        '<document filename="document.pdf"><page number="1" mediabox="0 0 612 792">'
+        f'<fill_text colorspace="{space}" color="{text_color}" alpha="{alpha}" '
+        'transform="1 0 0 1 0 0"><span font="Times" wmode="0" trm="12 0 0 12">'
+        '<g unicode="A" glyph="A" x="20" y="30"/></span></fill_text>'
+        f'<fill_path colorspace="DeviceRGB" color="{other_color}" transform="1 0 0 1 0 0">'
+        '<moveto x="20" y="40"/><lineto x="50" y="40"/></fill_path></page></document>'
     )
 
 
@@ -456,3 +556,56 @@ class FakePdfRunner(FakeCommandRunner):
                 "x-ppi y-ppi size ratio\n---\n"
             )
         return Reply()
+
+
+class ConfigurablePdfRunner(FakePdfRunner):
+    """Poppler output for one PDF whose page count and tool outputs a test chooses.
+
+    Every command other than a ``-v`` probe succeeds with the output of ``outputs``, else a
+    default for ``pages`` letter pages (``pdfinfo``, ``pdfinfo -box`` and ``pdftotext``),
+    else the output of :class:`FakePdfRunner`.
+
+    Args:
+        missing: A missing tool, passed to :class:`FakePdfRunner`.
+
+    Attributes:
+        pages: The page count of the default outputs.
+        outputs: Outputs by tool name; the key ``geometry`` stands for ``pdfinfo -box``.
+    """
+
+    def __init__(
+        self, *, pages: int = 1, outputs: dict[str, str] | None = None, missing: str | None = None
+    ) -> None:
+        super().__init__(missing=missing)
+        self.pages = pages
+        self.outputs = outputs or {}
+
+    async def run(
+        self,
+        argv: list[str],
+        cwd: Path,
+        workspace: Path,
+        *,
+        readonly_inputs: tuple[Path, ...] = (),
+        memory_mb: int | None = None,
+    ) -> CommandResult:
+        """Answer the command with the chosen output, the default or the base output.
+
+        The arguments are those of :meth:`CommandRunner.run`. A ``-v`` probe gets the base
+        result; any other command succeeds with the output described in the class docstring.
+        """
+        result = await super().run(
+            argv, cwd, workspace, readonly_inputs=readonly_inputs, memory_mb=memory_mb
+        )
+        if argv[-1] == "-v":
+            return result
+        key = "geometry" if argv[0] == "pdfinfo" and "-box" in argv else argv[0]
+        defaults = {
+            "pdfinfo": f"Pages: {self.pages}\nEncrypted: no\nForm: none\nJavaScript: no\n",
+            "geometry": "".join(
+                f"Page {page} size: 612 x 792 pts\n" for page in range(1, self.pages + 1)
+            ),
+            "pdftotext": "Text\n\f" * self.pages,
+        }
+        output = self.outputs.get(key, defaults.get(key, result.stdout))
+        return CommandResult(0, output, "", resolved_command=argv)

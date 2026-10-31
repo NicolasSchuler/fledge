@@ -94,17 +94,37 @@ def listed(items: Sequence[str]) -> str:
     return ", ".join(shown) + more_suffix(sum(item not in shown for item in items))
 
 
-def match_count(matches: Sequence[object], limits: ScanLimits) -> str:
-    """Return the number of matches, with ``+`` when collecting stopped at the limit.
+def _limited(matches: Sequence[object], limits: ScanLimits) -> bool:
+    """Return whether the matches reach the reporting limit, so further ones may be unlisted.
 
     Args:
         matches: The matches one rule collected.
-        limits: The limits of the scan, whose ``max_matches`` is the collection limit.
+        limits: The limits of the scan, whose ``max_matches`` is the reporting limit.
+
+    Returns:
+        ``True`` when there are at least ``limits.max_matches`` matches.
+    """
+    return len(matches) >= limits.max_matches
+
+
+def match_count(matches: Sequence[object], limits: ScanLimits) -> str:
+    """Return the number of reported matches, with ``+`` when they reach the limit.
+
+    A finding reports at most ``limits.max_matches`` matches, and reaching that many
+    means further matches may be unlisted. A rule that collected more than the limit, by
+    adding several matches at once or by not stopping at all, is therefore counted as the
+    limit followed by ``+``, as many as the details keep.
+
+    Args:
+        matches: The matches one rule collected.
+        limits: The limits of the scan, whose ``max_matches`` is the reporting limit.
 
     Returns:
         The count as text, such as ``5`` or ``200+``.
     """
-    return f"{len(matches)}{'+' if len(matches) == limits.max_matches else ''}"
+    if _limited(matches, limits):
+        return f"{limits.max_matches}+"
+    return str(len(matches))
 
 
 def _match_label(match: Mapping[str, object]) -> str:
@@ -174,12 +194,14 @@ def scan_finding(
 ) -> Finding:
     """Return the finding for one scan: a violation fails it, an incomplete scan leaves it open.
 
-    A scan that collected ``limits.max_matches`` matches counts as incomplete, because
-    further matches may be unlisted.
+    The message and the details report the first ``limits.max_matches`` matches. A scan
+    that reached that many counts as incomplete, because further matches may be unlisted,
+    and its count carries a ``+``.
 
     Args:
         rule: How the rule reports.
-        matches: The matches of the scan; the details keep up to ``limits.max_matches``.
+        matches: The matches of the scan; the message and the details report up to
+            ``limits.max_matches``.
         issues: The reasons the scan was incomplete; the details keep up to
             ``limits.max_matches``.
         limits: The limits of the scan.
@@ -191,17 +213,18 @@ def scan_finding(
     status = check_status(failed=bool(matches), incomplete=bool(issues))
     weight = ADVISORY if rule.advisory else DIRECT_POLICY
     # Scans stop collecting at the reporting limit, so further matches may be unlisted.
-    limited = len(matches) >= limits.max_matches
+    limited = _limited(matches, limits)
+    reported = matches[: limits.max_matches]
     return Finding(
         rule.name,
-        _message(rule, matches, issues, limits),
+        _message(rule, reported, issues, limits),
         severity=weight.severity(status),
         status=status,
         evidence_kind=weight.evidence_kind,
         incomplete=bool(issues) or limited,
         details={
             "scope": rule.scope,
-            "matches": [dict(item) for item in matches[: limits.max_matches]],
+            "matches": [dict(item) for item in reported],
             "match_output_limited": limited,
             "issues": issues[: limits.max_matches],
             **(details or {}),

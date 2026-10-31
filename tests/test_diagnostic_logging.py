@@ -36,8 +36,8 @@ from .support import write_project
 PACKAGE_LOGGER = logging.getLogger(PACKAGE_LOGGER_NAME)
 
 
-class RecordingRunner(ToolRunner):
-    """A runner whose commands finish at once with a chosen result, without any process.
+class FixedResultRunner(ToolRunner):
+    """A runner whose every command finishes at once with one fixed result, without a process.
 
     Attributes:
         result: The result of every command.
@@ -202,7 +202,7 @@ class ToolRunnerLoggingTests(unittest.IsolatedAsyncioTestCase):
         self.temporary.cleanup()
 
     async def test_a_command_logs_its_start_and_end_without_paths(self) -> None:
-        runner = RecordingRunner(finished(0))
+        runner = FixedResultRunner(finished(0))
         argv = ["/opt/tex/bin/pdflatex", "-halt-on-error", str(self.work / "paper.tex")]
         with self.assertLogs("latexprep.runtime", level="DEBUG") as logs:
             await runner.run(argv, self.work, self.work)
@@ -213,7 +213,7 @@ class ToolRunnerLoggingTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(record.levelno == logging.DEBUG for record in logs.records))
 
     async def test_a_nonzero_exit_is_named_in_the_end_line(self) -> None:
-        runner = RecordingRunner(finished(2))
+        runner = FixedResultRunner(finished(2))
         with self.assertLogs("latexprep.runtime", level="DEBUG") as logs:
             await runner.run(["pdfinfo"], self.work, self.work)
         self.assertIn("exit 2", logs.output[-1])
@@ -226,7 +226,7 @@ class ToolRunnerLoggingTests(unittest.IsolatedAsyncioTestCase):
             ({"resource_exceeded": "The memory limit was exceeded"}, "resource limit"),
         ):
             with self.subTest(kind=kind):
-                runner = RecordingRunner(finished(137, **flags))
+                runner = FixedResultRunner(finished(137, **flags))
                 with self.assertLogs("latexprep.runtime", level="DEBUG") as logs:
                     await runner.run(["pdflatex"], self.work, self.work)
                 stopped = [record for record in logs.records if record.levelno == logging.INFO]
@@ -489,7 +489,7 @@ class CommandLineLoggingTests(unittest.TestCase):
         self.assertNotIn(str(Path(self.temporary.name).resolve()), result.stderr)
 
     def test_a_tool_command_shows_its_start_and_end_lines_on_stderr(self) -> None:
-        runner = RecordingRunner(finished(0))
+        runner = FixedResultRunner(finished(0))
 
         async def fake_doctor(settings, *, progress):
             await runner.run(

@@ -14,7 +14,7 @@ _TEX_TOOLS = frozenset({"latexmk", *ENGINES})
 
 
 def explain_missing_toolchain(findings: list[Finding], engine: Engine) -> list[Finding]:
-    """Explain a missing TeX toolchain once, with installation steps for this system.
+    """Explain each finding of a missing TeX toolchain, with installation steps for this system.
 
     A finding counts when its rule is ``build.execution_unavailable`` and the tool named in
     its details is ``latexmk`` or a TeX engine. Its message names the tools that are not on

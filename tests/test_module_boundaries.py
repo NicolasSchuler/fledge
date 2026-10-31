@@ -206,33 +206,69 @@ class LayerTests(unittest.TestCase):
                     self.assertFalse(responsibility.endswith("."), "end the sentence without a dot")
 
 
+def _imported_test_modules(source: str) -> list[tuple[int, str]]:
+    """List the test modules that the module with ``source`` imports.
+
+    Every import form counts: ``import tests.test_x``, ``from tests.test_x import y`` and
+    ``from .test_x import y`` name the test module as the module, while ``from tests import
+    test_x`` and ``from . import test_x`` name it among the imported names.
+
+    Args:
+        source: The Python source of a module.
+
+    Returns:
+        The line and the name of each imported test module.
+    """
+    found = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            modules = [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            from_package = (node.level, node.module) in {(0, "tests"), (1, None)}
+            modules = [alias.name for alias in node.names] if from_package else [node.module or ""]
+        else:
+            continue
+        found.extend(
+            (node.lineno, name)
+            for name in (module.rsplit(".", 1)[-1] for module in modules)
+            if name.startswith("test_")
+        )
+    return found
+
+
 class TestSuiteBoundaryTests(unittest.TestCase):
     """Fixtures shared between test modules live in support modules, never in test modules."""
 
     def test_no_test_module_imports_another_test_module(self) -> None:
-        violations = []
-        for path in sorted(TESTS.glob("test_*.py")):
-            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"), filename=str(path))):
-                if isinstance(node, ast.ImportFrom):
-                    # `from tests.test_x import y` and `from .test_x import y`
-                    imported = [node.module or ""]
-                    if node.level == 1 and node.module is None:
-                        imported = [alias.name for alias in node.names]
-                    named = [name.rsplit(".", 1)[-1] for name in imported]
-                elif isinstance(node, ast.Import):
-                    named = [alias.name.rsplit(".", 1)[-1] for alias in node.names]
-                else:
-                    continue
-                violations.extend(
-                    f"{path.name}:{node.lineno} imports {name}"
-                    for name in named
-                    if name.startswith("test_")
-                )
+        violations = [
+            f"{path.name}:{line} imports {name}"
+            for path in sorted(TESTS.glob("test_*.py"))
+            for line, name in _imported_test_modules(path.read_text(encoding="utf-8"))
+        ]
         self.assertEqual(
             violations,
             [],
             "Move the shared fixture into tests/support.py, tests/fakes.py or tests/pdf_fakes.py.",
         )
+
+    def test_every_form_of_importing_a_test_module_is_caught(self) -> None:
+        for source in (
+            "import tests.test_pdf",
+            "import tests.test_pdf as pdf_tests",
+            "from tests.test_pdf import ConfigurablePdfRunner",
+            "from .test_pdf import ConfigurablePdfRunner",
+            "from tests import test_pdf as pdf_tests",
+            "from . import test_pdf",
+        ):
+            with self.subTest(source=source):
+                self.assertEqual(_imported_test_modules(source), [(1, "test_pdf")])
+        for source in (
+            "from tests import SOURCE_ROOT",
+            "from . import support",
+            "from .support import live_test",
+        ):
+            with self.subTest(source=source):
+                self.assertEqual(_imported_test_modules(source), [])
 
 
 if __name__ == "__main__":

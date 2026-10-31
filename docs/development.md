@@ -190,7 +190,9 @@ def read_regular_file(path: Path, limit: int) -> bytes:
 
 Tests are `unittest.TestCase` classes, run by pytest. Shared fixtures live in three
 support modules, never in a test module: a rule in
-`tests/test_module_boundaries.py` rejects `from tests.test_x import ...`.
+`tests/test_module_boundaries.py` rejects every way of importing one test module from
+another (`from tests.test_x import ...`, `from tests import ...` naming a test module, and
+`import tests.test_x`).
 
 - `tests/support.py` holds project builders (`write_project`, `minimal_project`),
   the `ProjectTestCase` and `AsyncProjectTestCase` bases (a temporary `self.root`
@@ -204,8 +206,9 @@ support modules, never in a test module: a rule in
   `ToolRunner` doubles for builds and process lifetimes; they use the `sandbox`,
   `toolchain` and `monitor_factory` parameters of `ToolRunner` instead of
   reaching into its private state.
-- `tests/pdf_fakes.py` holds the PDF tool output fixtures and the runners built on
-  `FakeCommandRunner` (`DetailRunner`, `ArtworkRunner`, `FakePdfRunner`).
+- `tests/pdf_fakes.py` holds the PDF tool output fixtures (`trace_xml`, `object_json`,
+  `color_trace`, `structured_pdf_objects`) and the runners built on `FakeCommandRunner`
+  (`DetailRunner`, `ArtworkRunner`, `FakePdfRunner`, `ConfigurablePdfRunner`).
 
 A job that would run TeX or the PDF tools takes its tool-driven operations from a
 `DocumentBackends` value (`run_job(..., backends=...)`): the build, the PDF

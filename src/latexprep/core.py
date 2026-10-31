@@ -458,7 +458,8 @@ async def run_job(
                 outputs = None
             if has_task_defect(report.findings):
                 # A defect in a check is not a problem with the input: it ends in the error
-                # outcome, whatever the other tasks found, and nothing is published.
+                # outcome, whatever the other tasks found, and no package is published.
+                # Previews still go to an explicit preview directory, as for a blocked run.
                 report.outcome = Outcome.ERROR
                 outputs = None
             execution.check_deadline()

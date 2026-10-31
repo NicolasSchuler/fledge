@@ -351,7 +351,16 @@ class LinuxSandboxTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ToolIsolationTests(unittest.IsolatedAsyncioTestCase):
-    """A universal Biber image is split in-process; the lipo stub is never granted."""
+    """The private Biber toolchain: host slice, per-preparation directory, sealing and grants.
+
+    A universal Biber image is split in-process rather than with ``lipo``, from either
+    container width, while unusable containers and unsupported hosts are refused and thin
+    images pass through. Each preparation copies Biber into its own private, inert
+    directory, refusing an oversized Biber or a path with unsafe characters; sealing leaves
+    no writable entry and refuses links; and on macOS only commands that may run Biber
+    receive Seatbelt grants for the executable and its payload, which must not have been
+    replaced.
+    """
 
     @staticmethod
     def universal(entries: tuple[tuple[int, bytes], ...], *, wide: bool = False) -> bytes:

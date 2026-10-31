@@ -291,13 +291,7 @@ class OnlineDisclosureTests(unittest.TestCase):
 
 
 class ConsoleFactoryTests(unittest.TestCase):
-    """The consoles of standard output and standard error: blanks, terminals and literal text.
-
-    Attributes:
-        PADDED: A wrapped, indented action line whose first line ends with a blank.
-    """
-
-    PADDED = "Next: a long action that wraps \n  onto a second line\n"
+    """The consoles of standard output and standard error: blanks, terminals and literal text."""
 
     def test_redirected_report_carries_no_trailing_blanks(self):
         sink = StringIO()

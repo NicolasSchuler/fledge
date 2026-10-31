@@ -68,9 +68,10 @@ class FakeTransport:
     """A transport that records each exchange and answers it.
 
     Args:
-        answers: One answer used for every exchange, or a list or tuple of answers used in
-            turn. An answer is a response, an exception to raise, or a function of the
-            request that returns either.
+        answers: One answer used for every exchange, or any other iterable of answers (a
+            list, a tuple, a generator) used in turn; the iterable is read in full when the
+            transport is built. An answer is a response, an exception to raise, or a
+            function of the request that returns either.
 
     Attributes:
         requests: Every request, in order.
@@ -78,8 +79,9 @@ class FakeTransport:
 
     def __init__(self, answers: Answer | Iterable[Answer]) -> None:
         self.requests: list[ExchangeRequest] = []
-        self._answers = iter(answers) if isinstance(answers, list | tuple) else None
-        self._single = None if self._answers is not None else answers
+        single = isinstance(answers, Response | BaseException) or callable(answers)
+        self._answers = None if single else iter(tuple(answers))
+        self._single = answers if single else None
 
     async def __call__(self, request: ExchangeRequest) -> Response:
         self.requests.append(request)

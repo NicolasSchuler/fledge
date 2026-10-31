@@ -220,6 +220,13 @@ class BibliographyTests(unittest.TestCase):
         self.assertEqual(findings[-1].status, "inconclusive")
         self.assertEqual([item.code for item in findings], ["BIB005", "BIB004", "BIB005"])
 
+    def test_a_string_macro_named_ids_defines_no_relationship_target(self) -> None:
+        self.write('@string{ids = "target"}\n@misc{child, crossref={target}}\n')
+
+        findings = check_bibliography_integrity(self.root)
+
+        self.assertEqual([item.rule for item in findings], ["bibliography.missing_relationship"])
+
     def test_incomplete_parse_does_not_claim_macro_or_target_is_definitely_missing(self) -> None:
         self.write("@misc{k, title=maybe, crossref={later}}\n@misc{broken, title={")
 

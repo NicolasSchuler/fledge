@@ -616,10 +616,23 @@ def schema_violations(
 
 
 def _referenced(schema: Mapping[str, Any], root: Mapping[str, Any]) -> Mapping[str, Any] | None:
-    """Return the schema a local ``$ref`` points at, or ``None`` when it does not resolve."""
+    """Return the schema a local ``$ref`` points at, or ``None`` when it does not resolve.
+
+    A pointer does not resolve when a step names a missing key, passes through a value that
+    is not a mapping, or ends at one.
+
+    Args:
+        schema: The schema that holds the ``$ref`` keyword.
+        root: The document the pointer resolves in.
+
+    Returns:
+        The referenced schema, or ``None``.
+    """
     target: object = root
     for step in str(schema["$ref"]).removeprefix("#/").split("/"):
-        target = target[step] if isinstance(target, Mapping) else {}
+        if not isinstance(target, Mapping) or step not in target:
+            return None
+        target = target[step]
     return target if isinstance(target, Mapping) else None
 
 
