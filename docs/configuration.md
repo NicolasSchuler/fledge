@@ -39,11 +39,15 @@ fledge check /path/to/paper --preset arxiv
 
 `fledge init [DIRECTORY]` writes `fledge.toml` in the directory (default: the
 current one): the preset's text with `--preset`, otherwise a minimal starter. It
-refuses to replace an existing `fledge.toml` unless you add `--force`, and warns
-when a higher-priority file such as `.fledge.toml` would shadow the new one.
+looks for the main file as a run would, among the files that declare
+`\documentclass`: when there is exactly one, the new file sets `main` to it; when
+there are several, it lists them as commented `main = "..."` lines for you to
+choose from, and says so. It refuses to replace an existing `fledge.toml` unless
+you add `--force`, and warns when a higher-priority file such as `.fledge.toml`
+would shadow the new one.
 
-`--preset NAME` on `inspect`, `check` and `prepare` applies a preset without
-writing a file. The preset is the lowest layer: your settings file overrides it
+`--preset NAME` on `inspect`, `check`, `prepare`, `bib check` and `pdf check`
+applies a preset without writing a file. The preset is the lowest layer: your settings file overrides it
 and command-line options override both. Tables merge key by key, so a file's
 `[submission_checks]` replaces only the keys it names and the preset's other keys
 stay in effect. Top-level keys and arrays replace the preset's value outright.
@@ -69,9 +73,14 @@ fledge check /path/to/paper --select TEX --select BIB1
 ```
 
 `--select` replaces `checks.select` from the file; `--ignore` adds to
-`checks.ignore`. Both are repeatable and available on `inspect`, `check` and
-`prepare`. An unknown selector stops the run as a request error (exit code 4) and
-suggests the closest codes.
+`checks.ignore`. Both are repeatable and available on `inspect`, `check`,
+`prepare`, `bib check` and `pdf check`. An unknown selector stops the run as a
+request error (exit code 4) and suggests the closest codes. A `--select` that
+chooses only checks the command cannot run, such as `fledge inspect --select
+PDF001` (`inspect` builds no PDF), is a usage error that names the command that
+runs them; when only some of the chosen checks cannot run, a warning names them
+and the run goes on. `fledge rules TEX` lists the checks of one family and marks
+which run by default and which are opt-in.
 
 `select` defaults to `["ALL"]` and `ignore` to `[]`. A selector is `ALL`, an
 exact code such as `TEX001`, a family such as `TEX`, or a family plus numeric
@@ -79,9 +88,10 @@ prefix such as `BIB1`; it must match at least one registered code. The name of o
 check stands for its code: the dotted name that reports show (`source.edit_marker`)
 and the hyphenated name of earlier releases (`source-edit-marker`) both select
 `TEX001`, in the file and on the command line, and `fledge rule` explains a check
-by any of its names. Selectors are case-sensitive, and empty strings, partial
-family names such as `TE` and unknown codes are errors. `select = []` disables
-every selectable check.
+by any of its names. Codes, prefixes and `ALL` may be written in any case
+(`tex001` selects `TEX001`); empty strings, surrounding spaces, partial family
+names such as `TE` and unknown codes are errors. `select = []` disables every
+selectable check.
 
 The most specific matching selector wins, regardless of list order, and `ignore`
 wins ties. For example, `select = ["ALL", "TEX001"]` with `ignore = ["TEX"]` keeps
@@ -213,11 +223,22 @@ papers; raise a limit when an error message names it.
 | `max_bytes` | 268435456 (256 MiB) | The default of `max_import_bytes` and `max_generated_file_bytes` below |
 | `max_import_bytes` | `max_bytes` | Combined size of all files in a project folder or ZIP import, of the copy each build makes of the sources, and of the prepared archive when it is extracted again to verify it |
 | `max_generated_file_bytes` | `max_bytes` | Size of any one file a tool may write, and the largest PDF or image a tool opens |
+| `jobs` | The number of CPUs, at most 4 | Operations that run at once (`--jobs`); 1 runs everything one after another |
+| `build_jobs` | 1 | TeX builds that run at once (`--build-jobs`), for example of several documents |
+| `render_jobs` | Half the number of CPUs, from 1 to 4 | PDF pages rendered at once (`--render-jobs`) |
 | `timeout_seconds` | 120 | One tool command (`--timeout-seconds`) |
 | `job_timeout_seconds` | 600 | The whole job (`--job-timeout-seconds`) |
 | `build_memory_mb` | 1024 | Memory of one build command |
 | `memory_mb` | 2048 | Memory shared by all running tools; it must allow `build_memory_mb` plus 128 MiB for the coordinator |
 | `max_temporary_bytes` | 2147483648 (2 GiB) | Temporary data of the whole job |
+
+The parallelism defaults follow the CPUs that Fledge may use, so a laptop with
+eight cores runs four operations and four page renders at once, and a two-core
+runner two and one. Every operation still reserves its share of `memory_mb`, so on
+a machine with many cores and a small memory budget the extra workers wait rather
+than overcommit. Reports record the values in effect under `settings`. On the
+command line, an out-of-range number, such as `--jobs 0` or `--max-pages 0`, is a
+usage error (exit code 64), and `--help` shows each range.
 
 `max_bytes` is the one number that older settings files use for both byte limits,
 and it keeps working: set alone, it gives `max_import_bytes` and

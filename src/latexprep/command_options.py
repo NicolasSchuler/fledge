@@ -11,6 +11,7 @@ from typing import TypeVar
 
 import click
 
+from .cli_completion import complete_main_files
 from .defects import REPORT_DEFECT_SUGGESTION, is_expected_failure, summarize_traceback
 from .diagnostic_logging import debug_logging, safe_diagnostic_text
 from .errors import RequestError
@@ -59,11 +60,17 @@ settings_file_options = compose_options(
 
 # The document a command works on, for inputs that hold several.
 main_option = click.option(
+    "-m",
     "--main",
     metavar="FILE",
-    help="Main .tex file of the document, relative to the input; needed when the input "
-    "holds several documents.",
+    shell_complete=complete_main_files,
+    help="Main .tex file of the document, relative to INPUT; needed when INPUT holds "
+    "several documents.",
 )
+
+
+# Every command that shows progress on stderr offers this option with one wording.
+quiet_option = click.option("-q", "--quiet", is_flag=True, help=QUIET_HELP)
 
 
 def reject_config_with_isolated(config: Path | None, *, isolated: bool) -> None:

@@ -177,11 +177,7 @@ class CommandTests(ProjectTestCase):
                 "inspect",
                 str(self.source),
                 "--jobs",
-                "4",
-                "--build-jobs",
-                "2",
-                "--render-jobs",
-                "2",
+                "3",
                 "--job-timeout-seconds",
                 "45",
                 "--json",
@@ -190,9 +186,7 @@ class CommandTests(ProjectTestCase):
         )
         self.assertEqual(result.exit_code, 1, result.output)
         report = json.loads(result.stdout)
-        self.assertEqual(report["settings"]["jobs"], 4)
-        self.assertEqual(report["settings"]["build_jobs"], 2)
-        self.assertEqual(report["settings"]["render_jobs"], 2)
+        self.assertEqual(report["settings"]["jobs"], 3)
         self.assertEqual(report["settings"]["job_timeout_seconds"], 45)
         self.assertEqual(report["execution"]["resources"]["active_cpu"], 0)
         self.assertEqual(report["execution"]["resources"]["queued"], 0)
@@ -306,6 +300,7 @@ class RequestErrorTests(ProjectTestCase):
     def test_existing_output_directory_names_the_option_to_change(self):
         existing = self.root / "existing"
         existing.mkdir()
+        (existing / "notes.txt").write_text("kept\n")
         finding = self.request_error("prepare", str(self.source), "--output", str(existing))
         self.assertIn("Output already exists", finding["message"])
         self.assertIn("Choose a new output path", finding["next_step"])
@@ -327,10 +322,12 @@ class RequestErrorTests(ProjectTestCase):
         self.assertIn("Input does not exist", finding["message"])
         self.assertIn("LaTeX source folder or ZIP", finding["next_step"])
 
-    def test_prepare_without_output_suggests_output_or_dry_run(self):
-        finding = self.request_error("prepare", str(self.source))
-        self.assertIn("output directory", finding["next_step"])
-        self.assertIn("dry run", finding["next_step"])
+    def test_prepare_without_output_names_output_and_dry_run(self):
+        result = self.runner.invoke(cli, ["prepare", str(self.source), "--json", "--quiet"])
+        self.assertEqual(result.exit_code, USAGE_EXIT_CODE, result.output)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("--output DIR", result.stderr)
+        self.assertIn("--dry-run", result.stderr)
 
     def test_unknown_main_lists_the_documents_found(self):
         finding = self.request_error("inspect", str(self.source), "--main", "nope.tex")
@@ -347,10 +344,13 @@ class RequestErrorTests(ProjectTestCase):
         ]
         self.assertIn("Rerun with --main set to one of the candidate roots", finding["next_step"])
 
-    def test_invalid_command_line_value_names_the_flag(self):
-        finding = self.request_error("check", str(self.source), "--max-pages", "0")
-        self.assertIn("max_pages must be a positive integer", finding["message"])
-        self.assertIn("--max-pages on the command line", finding["next_step"])
+    def test_out_of_range_command_line_value_is_a_usage_error_naming_the_flag(self):
+        for flag, value in (("--max-pages", "0"), ("--jobs", "65"), ("--timeout-seconds", "0")):
+            with self.subTest(flag=flag):
+                result = self.runner.invoke(cli, ["check", str(self.source), flag, value])
+                self.assertEqual(result.exit_code, USAGE_EXIT_CODE, result.output)
+                self.assertIn(f"Invalid value for '{flag}'", result.stderr)
+                self.assertIn("is not in the range", result.stderr)
 
     def test_invalid_configured_value_names_the_settings_file(self):
         config = self.source / ".fledge.toml"
@@ -405,7 +405,7 @@ class RequestErrorTests(ProjectTestCase):
         self.assertIn("max_pages", finding["next_step"])
 
     def test_terminal_report_is_headed_as_a_request_error(self):
-        result = self.runner.invoke(cli, ["prepare", str(self.source), "--quiet"])
+        result = self.runner.invoke(cli, ["inspect", str(self.root / "missing"), "--quiet"])
         self.assertEqual(result.exit_code, 4, result.output)
         self.assertTrue(result.stdout.startswith("Request error\n"), result.stdout)
         self.assertNotIn("source analysis", result.stdout)

@@ -264,7 +264,7 @@ report. It uses everything below it and knows nothing of terminals, HTML or the 
 
 Everything a person or a script sees: the `fledge` command line and its option helpers, the
 renderers for the terminal, compact, JSON, HTML and CI output, the progress display and the
-diagnostic log. These are the only modules that import `click` or `rich`. (21 modules)
+diagnostic log. These are the only modules that import `click` or `rich`. (24 modules)
 
 | Module | Responsibility |
 | --- | --- |
@@ -287,5 +287,8 @@ diagnostic log. These are the only modules that import `click` or `rich`. (21 mo
 | `rule_catalogue_view` | Terminal views of the check catalogue: the list of checks and the explanation of one |
 | `submission_text_command` | CLI adapter for source-only submission text export |
 | `terminal_console` | The Rich consoles every command prints through |
-| `terminal_progress` | Transient progress on a terminal, plain stages when stderr is redirected |
+| `terminal_progress` | One live progress line on a terminal, phase-level lines when stderr is redirected |
 | `terminal_report` | The Rich terminal report, and plain rendering of it for tests and embedding |
+| `cli_completion` | Shell completion of check codes for `--select`, `--ignore` and `rule`, and of `.tex` files for `--main` |
+| `cli_inputs` | Common command-line mistakes read as what was meant, or turned into a clear usage error |
+| `cli_options` | The options, help layout and examples of the `fledge` commands |

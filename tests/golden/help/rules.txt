@@ -1,7 +1,14 @@
-Usage: fledge rules [OPTIONS]
+Usage: fledge rules [OPTIONS] [SELECTOR]...
 
-  List every check with its stable code and title.
+  List the checks by code, with their titles and whether they run by default.
+
+  SELECTOR limits the list to a family such as TEX, a code prefix such as BIB1, or one code, in any
+  case. Opt-in checks run only once their setting is configured.
 
 Options:
-  --json      Print every check as JSON.
+  --json      Print the listed checks as JSON.
   -h, --help  Show this message and exit.
+
+Examples:
+  fledge rules TEX    List the checks whose codes start with TEX.
+  fledge rule TEX001  Explain one check.

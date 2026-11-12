@@ -2,9 +2,11 @@ Usage: fledge init [OPTIONS] [DIRECTORY]
 
   Write fledge.toml into DIRECTORY (default: the current directory).
 
-  Presets switch on generic checks and leave venue values, such as page limits and identity terms,
-  as commented placeholders for you to fill in. They are starting points, not certifications of
-  compliance. An existing fledge.toml is kept unless --force is given.
+  The file names the main file when exactly one file declares \documentclass, and lists the
+  candidates for you to choose from when several do. Presets switch on generic checks and leave
+  venue values, such as page limits and identity terms, as commented placeholders for you to fill
+  in. They are starting points, not certifications of compliance. An existing fledge.toml is kept
+  unless --force is given.
 
 Options:
   --preset [anonymous-review|arxiv|camera-ready]
@@ -12,3 +14,8 @@ Options:
   --force                         Overwrite an existing fledge.toml.
   --list                          List the presets and exit.
   -h, --help                      Show this message and exit.
+
+Examples:
+  fledge init paper                 Write paper/fledge.toml, naming the main file it finds.
+  fledge init paper --preset arxiv  Start from the arxiv preset instead.
+  fledge init --list                Describe the presets.

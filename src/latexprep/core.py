@@ -120,7 +120,7 @@ def _grayscale_previews(settings: Settings) -> bool:
 
 
 def _validate_destinations(request: JobRequest) -> _Destinations:
-    """Validate the new output directories of the request, which must not overlap each other.
+    """Validate the output directories of the request, which must not overlap each other.
 
     Returns:
         The validated directories; each is ``None`` when the request names none.
@@ -129,12 +129,20 @@ def _validate_destinations(request: JobRequest) -> _Destinations:
         RequestError: The preview output is the output, or one lies inside the other.
     """
     output = (
-        validate_destination(request.source, request.output, "output")
+        validate_destination(
+            request.source, request.output, "output", folder=True, force=request.force
+        )
         if request.output is not None
         else None
     )
     preview_output = (
-        validate_destination(request.source, request.preview_output, "preview output")
+        validate_destination(
+            request.source,
+            request.preview_output,
+            "preview output",
+            folder=True,
+            force=request.force,
+        )
         if request.preview_output is not None
         else None
     )
@@ -186,7 +194,7 @@ def _validate_request(request: JobRequest, settings: Settings) -> _Destinations:
     if request.command is JobCommand.PREPARE and not request.dry_run and request.output is None:
         raise RequestError(
             "prepare needs an output directory, or a dry run",
-            "Give an output directory that does not exist yet and lies outside the input, or "
+            "Give an output directory that is new or empty and lies outside the input, or "
             "request a dry run to preview the planned changes without writing a bundle.",
         )
     if _runs_documents(request, settings) and request.reference_pdf is not None:
@@ -356,7 +364,7 @@ def _publish(
     preview_output = destinations.previews
     # Previews go into the bundle only without an explicit preview directory.
     bundled_previews = previews if preview_output is None else ()
-    with OutputTransaction(emit, report) as transaction:
+    with OutputTransaction(emit, report, replace_previous=request.force) as transaction:
         try:
             refused = False
             if isinstance(outputs, VerifiedPackage):

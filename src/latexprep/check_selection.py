@@ -18,7 +18,40 @@ def _prefixes(code: str) -> list[str]:
     return [code[:length] for length in range(family, len(code) + 1)]
 
 
-_SELECTORS = frozenset(prefix for code in BY_CODE for prefix in _prefixes(code)) | {"ALL"}
+# Every valid selector that is not a rule name: ALL, the check codes and their prefixes.
+SELECTORS = frozenset(prefix for code in BY_CODE for prefix in _prefixes(code)) | {"ALL"}
+
+
+def _resolve_selector(selector: str, source: str) -> str:
+    """Return the code, prefix or ``ALL`` that one selector stands for.
+
+    Args:
+        selector: The selector as written.
+        source: Where the selector comes from, named in the error.
+
+    Returns:
+        The check code of a rule name, otherwise the selector in upper case.
+
+    Raises:
+        PreparationError: The selector is unknown; the error names the closest valid ones.
+    """
+    if selector in BY_NAME:
+        return BY_NAME[selector].code
+    candidate = selector.upper()
+    if candidate in SELECTORS:
+        return candidate
+    stripped = candidate.strip()
+    close = (
+        [stripped]
+        if stripped in SELECTORS
+        else difflib.get_close_matches(stripped, sorted(SELECTORS), n=3)
+    )
+    hint = f" (did you mean {' or '.join(close)}?)" if close else ""
+    raise PreparationError(
+        f"Unknown {source} selector {selector!r}{hint}. Use ALL, a check code such as TEX001, "
+        "a rule name such as source.edit_marker, or a family or family-plus-number prefix "
+        "such as TEX or BIB1, in any case; fledge rules lists every check code"
+    )
 
 
 def resolve_selectors(selectors: tuple[str, ...], source: str) -> tuple[str, ...]:
@@ -26,39 +59,36 @@ def resolve_selectors(selectors: tuple[str, ...], source: str) -> tuple[str, ...
 
     A rule name selects its check: the dotted name reports carry (``source.edit_marker``)
     and a former hyphenated name (``source-edit-marker``) both stand for the check's code.
-    Codes, prefixes and ``ALL`` are returned unchanged.
+    Codes, prefixes and ``ALL`` may be written in any case and are returned in upper case,
+    so ``tex001`` selects ``TEX001``; surrounding white space is still an error.
 
     Args:
         selectors: The selectors to resolve.
         source: Where the selectors come from, named in the error.
 
     Returns:
-        The selectors with each rule name replaced by its check code.
+        The selectors with each rule name replaced by its check code and every other
+        selector in upper case.
 
     Raises:
         PreparationError: A selector is unknown. The error names the ``source`` of the
             selector and the closest valid ones.
     """
-    resolved = tuple(
-        BY_NAME[selector].code if selector in BY_NAME else selector for selector in selectors
-    )
-    for selector in resolved:
-        if selector in _SELECTORS:
-            continue
-        candidate = selector.strip().upper()
-        close = (
-            [candidate]
-            if candidate in _SELECTORS
-            else difflib.get_close_matches(candidate, sorted(_SELECTORS), n=3)
-        )
-        hint = f" (did you mean {' or '.join(close)}?)" if close else ""
-        raise PreparationError(
-            f"Unknown {source} selector {selector!r}{hint}. Selectors are case-sensitive: "
-            "use ALL, a check code such as TEX001, a rule name such as source.edit_marker, "
-            "or a family or family-plus-number prefix such as TEX or BIB1; fledge rules "
-            "lists every check code"
-        )
-    return resolved
+    return tuple(_resolve_selector(selector, source) for selector in selectors)
+
+
+def selected_codes(selector: str) -> tuple[str, ...]:
+    """List the check codes one resolved selector matches, in catalogue order.
+
+    Args:
+        selector: A resolved selector: ``ALL``, a check code or a code prefix.
+
+    Returns:
+        Every check code for ``ALL``, otherwise the codes that start with ``selector``.
+    """
+    if selector == "ALL":
+        return tuple(BY_CODE)
+    return tuple(code for code in BY_CODE if code.startswith(selector))
 
 
 @dataclass(frozen=True)

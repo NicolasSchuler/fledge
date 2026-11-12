@@ -43,8 +43,8 @@ your project ──copy──▶ snapshot ──build──▶ baseline PDF
 7. **Archive rebuild.** Fledge writes the ZIP, extracts it into a fresh
    directory, builds it again and requires an exact match. Source and
    bibliography policies run again on the extracted files.
-8. **Publish.** Only now does the output directory appear. A blocked, expired or
-   cancelled run publishes nothing.
+8. **Publish.** Only now does the output appear in the `--output` folder. A
+   blocked, expired or cancelled run publishes nothing.
 
 ## What each command covers
 
@@ -52,15 +52,71 @@ your project ──copy──▶ snapshot ──build──▶ baseline PDF
 | --- | --- |
 | `fledge inspect INPUT` | Source and bibliography checks on the snapshot; no build, so no TeX needed |
 | `fledge check INPUT` | Those checks plus the baseline build and PDF checks |
-| `fledge prepare INPUT --dry-run` | `check` plus a preview of requested changes; no bundle |
+| `fledge prepare INPUT --dry-run` | `check` plus a preview of requested changes; no bundle (add `--diff` to see each edit) |
 | `fledge prepare INPUT --output DIR` | Every step above |
 | `fledge bib check INPUT` | Bibliography checks only |
 | `fledge fmt INPUT --check` | Read-only `tex-fmt` formatting check |
-| `fledge pdf check FILE` | Configured PDF checks on an existing PDF |
+| `fledge pdf check PDF` | Configured PDF checks on an existing PDF |
+
+INPUT is the paper's folder or ZIP. A `.tex` file works too: `fledge check
+paper/main.tex` means `fledge check paper --main main.tex`, and a note says so.
+`--main` is relative to INPUT, but a path into INPUT from the current folder, such
+as `--main paper/main.tex`, or an absolute one also works. Each command offers only
+the options that change what it does: `inspect` builds nothing, so it has no build
+or render limits, and only `prepare` lists the files of its package
+(`--show-files`). `fledge COMMAND --help` ends with examples.
 
 Without `workflow.documents`, Fledge builds one document. To verify a paper and
 its supplement separately, see
 [independent packages](preparation-options.md#independent-manuscript-and-supplement-packages).
+
+## Output folders and reruns
+
+`--output DIR` (`-o DIR`) must lie outside INPUT and be new or an empty folder;
+`prepare` without it, and without `--dry-run`, stops with a usage error that names
+both. Every folder that Fledge publishes, the output and a `--preview-output`
+folder alike, holds a hidden `.fledge-output` file. To rerun into the same folder,
+add `--force`: Fledge then replaces a folder holding that file, and only such a
+folder, and only after the new run has passed. It writes the new output into a
+hidden sibling folder and swaps it into place when everything is written, so a
+blocked, failed or cancelled rerun leaves the earlier output as it was. Any other
+existing folder or file is still refused, and report files (`--json-report`,
+`--html-report`, `--diagnostics`) must lie outside the output folders.
+
+```sh
+fledge prepare paper -o submission          # first run: new or empty folder
+fledge prepare paper -o submission --force  # rerun: replaces the earlier output
+```
+
+## Progress
+
+While a command runs, a terminal shows one line with the step that has been
+running longest and its time, for example `baseline build (12s) +2 more`. When
+stderr goes to a file or a CI log, Fledge prints only phase-level lines: each
+phase, the start and end of each build, and any step that did not end cleanly.
+`--quiet` (`-q`) turns progress off; the final report still goes to standard
+output.
+
+## Shell completion
+
+Fledge can complete commands, options, check codes for `--select`, `--ignore` and
+`fledge rule`, and the `.tex` files inside INPUT for `--main`. Enable it once for
+your shell:
+
+```sh
+# bash 4.4 or later, in ~/.bashrc
+eval "$(_FLEDGE_COMPLETE=bash_source fledge)"
+# zsh, in ~/.zshrc
+eval "$(_FLEDGE_COMPLETE=zsh_source fledge)"
+# fish, in ~/.config/fish/completions/fledge.fish
+_FLEDGE_COMPLETE=fish_source fledge | source
+```
+
+The `eval` lines run `fledge` each time a shell starts. To start shells faster,
+save the script once and load the file instead, for example
+`_FLEDGE_COMPLETE=zsh_source fledge > ~/.fledge-complete.zsh` and
+`source ~/.fledge-complete.zsh` in `~/.zshrc`; save it again after upgrading
+Fledge.
 
 ## What a pass means
 

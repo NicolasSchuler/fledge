@@ -2,19 +2,23 @@
 
 Both the document workflow and the bibliography command start from this choice. The
 workflow reports no choice as a finding and stops; the bibliography command can still
-check every ``.bib`` file without a main file. This module does not read the sources
-beyond finding candidate roots, and it skips that scan when a main file is configured.
+check every ``.bib`` file without a main file, and ``fledge init`` writes the candidates
+into a new settings file. This module does not read the sources beyond finding candidate
+roots, and it skips that scan when a main file is configured.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import NamedTuple
 
 from .errors import RequestError
 from .findings import Finding
+from .import_budget import ImportLimits
 from .job_context import JobContext
 from .path_safety import is_relative_posix_path
+from .project import import_project
 from .report import Report
 from .source_analysis import discover_roots
 
@@ -101,6 +105,28 @@ async def resolve_main(context: JobContext, snapshot: Path) -> MainChoice:
         roots = roots or await context.thread_operation("discover roots", discover_roots, snapshot)
         raise main_selection_error(selected, roots)
     return MainChoice(Path(selected).as_posix(), roots)
+
+
+def candidate_mains(source: Path, limits: ImportLimits) -> list[str]:
+    r"""List the files of a project that could be its main file, as a job would find them.
+
+    The project is imported into a temporary snapshot within ``limits`` first, so the
+    candidates are exactly those the job chooses from: the files that declare
+    ``\documentclass``. Nothing of the project is changed.
+
+    Args:
+        source: The project folder or ZIP.
+        limits: The bounds of the import.
+
+    Returns:
+        The project-relative paths of the candidates, in project order.
+
+    Raises:
+        PreparationError: The project cannot be imported within ``limits``.
+    """
+    with TemporaryDirectory(prefix="fledge-main-") as temporary:
+        imported = import_project(source, Path(temporary) / "project", limits)
+        return discover_roots(imported.root)
 
 
 def _main_selection_finding(roots: list[str]) -> Finding:

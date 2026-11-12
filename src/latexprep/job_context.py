@@ -79,6 +79,8 @@ class JobRequest:
             were requested.
         document_name: The configured name of the document when the request is one
             document of a multi-document job, else ``None``.
+        force: Whether an output or preview directory that Fledge published earlier may be
+            replaced, once the new run has succeeded.
     """
 
     command: JobCommand
@@ -90,6 +92,7 @@ class JobRequest:
     preview_output: Path | None = None
     pdf_previews: PdfPreviewStore | None = None
     document_name: str | None = None
+    force: bool = False
 
     def __post_init__(self) -> None:
         # Interfaces may pass the command's string value; an unknown one fails up front.

@@ -7,6 +7,7 @@ settings file < command-line overrides. Finding and reading the settings file is
 
 from __future__ import annotations
 
+import os
 import re
 import tomllib
 from collections.abc import Mapping
@@ -63,6 +64,13 @@ from .workflow_options import PackageOptions, WorkflowOptions
 COORDINATOR_MEMORY_MB = 128
 # Upper bound of jobs, build_jobs and render_jobs.
 MAX_CONCURRENCY = 64
+# The largest defaults of jobs and render_jobs, which otherwise follow the CPU count. A
+# 60-page prepare took 32 s with 2 and 1 and 18 s with 4 and 4, for 12 MB more peak
+# memory and a byte-identical ZIP; more workers than that add little to one paper.
+# Every operation still reserves its memory from memory_mb, so on a machine with many
+# CPUs and a small memory budget the extra workers wait instead of overcommitting.
+MAX_DEFAULT_JOBS = 4
+MAX_DEFAULT_RENDER_JOBS = 4
 MIN_MEMORY_MB = 256
 MIN_BUILD_MEMORY_MB = 128
 # 9999-12-31T23:59:59Z, the last second with a four-digit year.
@@ -77,6 +85,34 @@ RENAMED_SETTINGS: dict[str, str] = {
 
 # Source-document fields whose value a PDF property may be required to match.
 _PDF_METADATA_SOURCES = ("title", "author")
+
+
+def usable_cpu_count() -> int:
+    """Count the CPUs this process may run on, at least one.
+
+    The CPU affinity mask counts where the platform has one (Linux), so a container or a
+    ``taskset`` limit lowers the count; elsewhere every CPU of the machine counts.
+    """
+    process_count = getattr(os, "process_cpu_count", None)  # Python 3.13 and later
+    if process_count is not None:
+        return max(1, process_count() or 1)
+    if hasattr(os, "sched_getaffinity"):
+        return max(1, len(os.sched_getaffinity(0)))
+    return max(1, os.cpu_count() or 1)
+
+
+def default_jobs() -> int:
+    """Return the default of ``jobs``: the CPU count, at most ``MAX_DEFAULT_JOBS``."""
+    return min(MAX_DEFAULT_JOBS, usable_cpu_count())
+
+
+def default_render_jobs() -> int:
+    """Return the default of ``render_jobs``: half the CPUs, from 1 to ``MAX_DEFAULT_RENDER_JOBS``.
+
+    Each page renderer is a separate process, so half the CPUs leaves room for the checks
+    that run beside the renders.
+    """
+    return min(MAX_DEFAULT_RENDER_JOBS, max(1, usable_cpu_count() // 2))
 
 
 def _bibliography_edit_tables(value: object) -> object:
@@ -161,9 +197,11 @@ class Settings:
         apply_formatting: Whether preparation applies the formatting (``--format``).
         normalize_doi: Whether preparation normalizes DOIs.
         cleanup: Whether preparation removes debris (``--no-cleanup`` turns it off).
-        jobs: The shared CPU slots.
+        jobs: The shared CPU slots; by default the CPU count, at most
+            ``MAX_DEFAULT_JOBS`` (see :func:`default_jobs`).
         build_jobs: How many builds may overlap.
-        render_jobs: How many page-pair renderers may run at once.
+        render_jobs: How many page-pair renderers may run at once; by default half the
+            CPUs, from 1 to ``MAX_DEFAULT_RENDER_JOBS`` (see :func:`default_render_jobs`).
         memory_mb: The memory shared by all running tools, in MiB.
         build_memory_mb: The memory of one build command, in MiB.
         timeout_seconds: The time limit of one tool command, in seconds.
@@ -229,9 +267,9 @@ class Settings:
     apply_formatting: bool = False
     normalize_doi: bool = False
     cleanup: bool = True
-    jobs: int = 2
+    jobs: int = field(default_factory=default_jobs)
     build_jobs: int = 1
-    render_jobs: int = 1
+    render_jobs: int = field(default_factory=default_render_jobs)
     memory_mb: int = 2048
     build_memory_mb: int = DEFAULT_BUILD_MEMORY_MB
     timeout_seconds: int = DEFAULT_TOOL_TIMEOUT_SECONDS

@@ -13,14 +13,14 @@ Options:
   -h, --help  Show this message and exit.
 
 Commands:
-  bib              Bibliography checks (offline unless you allow online).
-  check            Build the PDF and check the sources and the PDF.
-  doctor           Test that your TeX setup works.
-  fmt              Check tex-fmt formatting without changing any file.
-  init             Write a starter fledge.toml settings file.
   inspect          Check sources and bibliography without running TeX.
-  pdf              Check a PDF without its source project.
+  check            Build the PDF and check the sources and the PDF.
   prepare          Create a verified submission copy of the paper.
-  rule             Explain one check by its code.
-  rules            List every check with its code and title.
+  bib              Bibliography checks (offline unless you allow online).
+  pdf              Check a PDF without its source project.
+  fmt              Check tex-fmt formatting without changing any file.
   submission-text  Preview title, abstract and keywords for a submission form.
+  rules            List the checks with their codes, titles and when they run.
+  rule             Explain one check by its code.
+  doctor           Test that your TeX setup works.
+  init             Write a starter fledge.toml settings file.

@@ -12,6 +12,7 @@ from click.testing import CliRunner
 from latexprep.cli import USAGE_EXIT_CODE, cli
 from latexprep.config import load_settings
 from latexprep.config_discovery import resolve_config_path
+from latexprep.errors import PreparationError
 from latexprep.init_command import STARTER
 from latexprep.presets import PRESETS, preset_text
 from latexprep.report import Outcome
@@ -120,6 +121,72 @@ class InitCommandTests(ProjectTestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("now takes precedence over", result.output)
         self.assertEqual(resolve_config_path(legacy), legacy / "fledge.toml")
+
+
+class InitMainFileTests(ProjectTestCase):
+    """The main file that ``fledge init`` finds and writes into the new settings file."""
+
+    def setUp(self):
+        """Create the project folder ``paper`` and a Click runner."""
+        super().setUp()
+        self.project = self.root / "paper"
+        self.project.mkdir()
+        self.target = self.project / "fledge.toml"
+        self.runner = CliRunner()
+
+    def document(self, name: str) -> None:
+        """Write a file ``name`` in the project that declares a document class."""
+        self.write(
+            f"paper/{name}", "\\documentclass{article}\n\\begin{document}\n\\end{document}\n"
+        )
+
+    def test_the_only_candidate_is_written_as_main(self):
+        self.document("main.tex")
+        self.write("paper/sections/intro.tex", "Intro.\n")
+        result = self.runner.invoke(cli, ["init", str(self.project)])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn('\nmain = "main.tex"\n', self.target.read_text(encoding="utf-8"))
+        self.assertEqual(load_settings(self.target, {}).main, "main.tex")
+        self.assertIn("Main file: main.tex.", result.output)
+
+    def test_several_candidates_are_listed_commented_out(self):
+        for name in ("main.tex", "supplement.tex", "drafts/old.tex"):
+            self.document(name)
+        result = self.runner.invoke(cli, ["init", str(self.project)])
+        self.assertEqual(result.exit_code, 0, result.output)
+        text = self.target.read_text(encoding="utf-8")
+        for name in ("main.tex", "supplement.tex", "drafts/old.tex"):
+            self.assertIn(f'# main = "{name}"\n', text)
+        self.assertIsNone(load_settings(self.target, {}).main)
+        self.assertIn("Found 3 candidate main files", result.output)
+        self.assertIn("uncomment one main line", result.output)
+
+    def test_a_preset_file_also_names_the_main_file(self):
+        self.document("paper.tex")
+        result = self.runner.invoke(cli, ["init", str(self.project), "--preset", "arxiv"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        text = self.target.read_text(encoding="utf-8")
+        self.assertTrue(text.endswith(preset_text("arxiv")))
+        settings = load_settings(self.target, {})
+        self.assertEqual(settings.main, "paper.tex")
+        self.assertEqual(settings.top_level_values()["require_embedded_fonts"], True)
+
+    def test_unusual_file_names_are_written_as_valid_toml(self):
+        self.document("Résumé du papier.tex")
+        result = self.runner.invoke(cli, ["init", str(self.project)])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(load_settings(self.target, {}).main, "Résumé du papier.tex")
+
+    def test_a_project_that_cannot_be_read_gets_the_placeholder_and_a_reason(self):
+        self.document("main.tex")
+        with patch(
+            "latexprep.init_command.candidate_mains",
+            side_effect=PreparationError("too many files"),
+        ):
+            result = self.runner.invoke(cli, ["init", str(self.project)])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(self.target.read_text(encoding="utf-8"), STARTER)
+        self.assertIn("Could not look for the main file (too many files)", result.output)
 
 
 if __name__ == "__main__":

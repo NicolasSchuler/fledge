@@ -348,7 +348,8 @@ class LiveEngineWorkflowTests(AsyncLiveProjectTestCase):
             engine: The engine of the supplement; the paper uses pdfLaTeX.
         """
         self.assertEqual(
-            sorted(path.name for path in output.iterdir()), ["paper", "report.json", "supplement"]
+            sorted(path.name for path in output.iterdir()),
+            [".fledge-output", "paper", "report.json", "supplement"],
         )
         engines = {"paper": "pdflatex", "supplement": engine}
         for name, document_engine in engines.items():

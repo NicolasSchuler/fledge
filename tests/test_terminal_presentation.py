@@ -1,10 +1,7 @@
-"""Readable, literal report text and isolated progress across terminal capabilities."""
+"""Readable, literal report text across terminal capabilities."""
 
 from __future__ import annotations
 
-import os
-import re
-import sys
 import unittest
 from io import StringIO
 from unittest.mock import patch
@@ -18,7 +15,6 @@ from latexprep.finding_view import RenderOptions
 from latexprep.findings import Finding
 from latexprep.report import Outcome, Report
 from latexprep.terminal_console import stderr_console, stdout_console
-from latexprep.terminal_progress import TerminalProgress
 from latexprep.terminal_report import print_report, render_terminal
 from latexprep.text_safety import sanitize_terminal_text
 
@@ -324,67 +320,6 @@ class ConsoleFactoryTests(unittest.TestCase):
             stdout_console().print("[bold]literal[/bold]")
         self.assertEqual(buffer.getvalue().strip(), "[bold]literal[/bold]")
         self.assertTrue(stderr_console().stderr)
-
-
-class TerminalProgressTests(unittest.TestCase):
-    """Progress on terminals, redirected output, dumb and colourless terminals, and when quiet."""
-
-    def test_redirected_progress_is_plain_literal_stages(self):
-        output = StringIO()
-        console = Console(file=output, width=80, markup=True)
-        with TerminalProgress(console) as update:
-            self.assertIsNotNone(update)
-            update("Starting [bold]source[/bold]\x1b[31m")
-            update("baseline build: succeeded (0.1s)")
-        self.assertEqual(
-            output.getvalue(),
-            "Starting [bold]source[/bold]\nbaseline build: succeeded (0.1s)\n",
-        )
-
-    def test_quiet_progress_emits_nothing(self):
-        for terminal in (False, True):
-            output = TerminalBuffer() if terminal else StringIO()
-            with TerminalProgress(Console(file=output), quiet=True) as update:
-                self.assertIsNone(update)
-            self.assertEqual(output.getvalue(), "")
-
-    def test_terminal_progress_has_stage_elapsed_and_restores_on_exception(self):
-        output = TerminalBuffer()
-        stdout, stderr = sys.stdout, sys.stderr
-        progress = TerminalProgress(
-            Console(file=output, width=60, force_terminal=True, color_system=None)
-        )
-        with self.assertRaisesRegex(RuntimeError, "controlled failure"):
-            with progress as update:
-                self.assertIs(sys.stdout, stdout)
-                self.assertIs(sys.stderr, stderr)
-                update("Checking [bold]literal[/bold]\x1b[31m")
-                self.assertIsNotNone(progress._progress)
-                raise RuntimeError("controlled failure")
-        text = output.getvalue()
-        self.assertIn("Checking [bold]literal[/bold]", text)
-        self.assertRegex(text, r"\d+:\d\d:\d\d")
-        self.assertNotIn("\x1b[31m", text)
-        self.assertIsNone(progress._progress)
-        self.assertIs(sys.stdout, stdout)
-        self.assertIs(sys.stderr, stderr)
-
-    def test_dumb_terminal_uses_plain_progress(self):
-        with patch.dict(os.environ, {"TERM": "dumb"}, clear=False):
-            output = TerminalBuffer()
-            with TerminalProgress(Console(file=output)) as update:
-                update("Starting baseline build")
-            self.assertEqual(output.getvalue(), "Starting baseline build\n")
-
-    def test_no_color_terminal_retains_progress_without_color_codes(self):
-        with patch.dict(os.environ, {"NO_COLOR": "1", "TERM": "xterm"}, clear=False):
-            output = TerminalBuffer()
-            with TerminalProgress(Console(file=output, width=60)) as update:
-                update("Checking sources")
-            text = output.getvalue()
-            self.assertIn("Checking sources", text)
-            # Cursor controls are expected for live progress, SGR colors are not.
-            self.assertFalse(re.search(r"\x1b\[[0-9;]*(?:3[0-7]|9[0-7])m", text), text)
 
 
 if __name__ == "__main__":

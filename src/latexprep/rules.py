@@ -14,6 +14,8 @@ are derived from them here and nowhere else.
 
 from __future__ import annotations
 
+import difflib
+import re
 from collections import Counter
 from types import MappingProxyType
 
@@ -84,6 +86,10 @@ RULES = _catalogue(
 )
 BY_CODE = MappingProxyType({rule.code: rule for rule in RULES})
 BY_NAME = MappingProxyType({name: rule for rule in RULES for name in (rule.name, *rule.aliases)})
+# A check code or code prefix as someone might type it: letters, then optional digits.
+_CODE_SHAPE = re.compile(r"([A-Za-z]+)(\d*)")
+# The most codes a did-you-mean names; a prefix of more checks is sent to ``fledge rules``.
+_MAX_SUGGESTIONS = 3
 
 # These establish the safety of reading, transforming, building or publishing a prepared
 # copy. Check selection never removes their findings: ignoring the code does not switch
@@ -157,6 +163,35 @@ def code_for(name: str) -> str | None:
     return rule.code if rule is not None else None
 
 
+def closest_rule_codes(code: str) -> list[str]:
+    """Suggest up to three check codes or rule names close to an unknown ``code``.
+
+    Codes are compared in upper case, and missing or extra leading zeros count as the same
+    number, so ``tex01`` and ``TEX0001`` suggest ``TEX001`` first. A dotted or hyphenated
+    name such as ``source.edit_markr`` suggests the closest rule names.
+    """
+    candidate = code.strip()
+    match = _CODE_SHAPE.fullmatch(candidate)
+    if match is None:
+        return difflib.get_close_matches(candidate, list(BY_NAME), n=3)
+    family, digits = match.group(1).upper(), match.group(2)
+    suggestions = []
+    if digits and f"{family}{int(digits):03d}" in BY_CODE:
+        suggestions.append(f"{family}{int(digits):03d}")
+    starting = _codes_starting_with(family + digits)
+    if len(starting) <= _MAX_SUGGESTIONS:
+        suggestions.extend(item for item in starting if item not in suggestions)
+    for close in difflib.get_close_matches(family + digits, list(BY_CODE), n=_MAX_SUGGESTIONS):
+        if close not in suggestions:
+            suggestions.append(close)
+    return suggestions[:_MAX_SUGGESTIONS]
+
+
+def _codes_starting_with(prefix: str) -> list[str]:
+    """List the check codes that start with ``prefix``, which is compared in upper case."""
+    return [item for item in BY_CODE if prefix and item.startswith(prefix.upper())]
+
+
 def get_rule(code: str) -> Rule:
     """Look up the check with this code (in any case), or with this rule name or former name.
 
@@ -164,9 +199,19 @@ def get_rule(code: str) -> Rule:
         The check.
 
     Raises:
-        ValueError: No check has this code or name.
+        ValueError: No check has this code or name. The message points a family or code
+            prefix of many checks, such as ``BIB``, to ``fledge rules BIB``, and otherwise
+            suggests the closest codes or names when there are any.
     """
     rule = BY_CODE.get(code.upper()) or BY_NAME.get(code)
-    if rule is None:
-        raise ValueError(f"Unknown check code {code!r}; run 'fledge rules' to list checks")
-    return rule
+    if rule is not None:
+        return rule
+    starting = _codes_starting_with(code) if _CODE_SHAPE.fullmatch(code) else []
+    if len(starting) > _MAX_SUGGESTIONS:
+        raise ValueError(
+            f"{code!r} is the start of {len(starting)} check codes, not one check; run "
+            f"'fledge rules {code.upper()}' to list them"
+        )
+    close = closest_rule_codes(code)
+    hint = f" (did you mean {', '.join(close)}?)" if close else ""
+    raise ValueError(f"Unknown check code {code!r}{hint}; run 'fledge rules' to list checks")

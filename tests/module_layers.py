@@ -245,6 +245,9 @@ MODULES_BY_LAYER: dict[str, tuple[str, ...]] = {
         "terminal_console",
         "terminal_progress",
         "terminal_report",
+        "cli_completion",
+        "cli_inputs",
+        "cli_options",
     ),
 }
 

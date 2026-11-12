@@ -19,7 +19,7 @@ from latexprep.cli import (
     CommandOptions,
     cli,
 )
-from latexprep.config import Settings
+from latexprep.config import MAX_DEFAULT_JOBS, MAX_DEFAULT_RENDER_JOBS, Settings
 
 
 class HelpTests(unittest.TestCase):
@@ -126,13 +126,14 @@ class HelpTests(unittest.TestCase):
         settings = Settings()
         text = self.help_text("prepare")
         for expected in (
-            f"(default {settings.jobs})",
             f"(default {settings.build_jobs})",
-            f"(default {settings.render_jobs})",
             f"(default {settings.timeout_seconds})",
             f"(default {settings.job_timeout_seconds})",
             f"(default {settings.engine})",
             f"default {settings.layout}.",
+            # The parallelism defaults follow the CPU count, so help describes them.
+            f"(default: the number of CPUs, at most {MAX_DEFAULT_JOBS})",
+            f"(default: half the number of CPUs, from 1 to {MAX_DEFAULT_RENDER_JOBS})",
         ):
             self.assertIn(expected, text)
 
@@ -206,7 +207,7 @@ class HelpTests(unittest.TestCase):
         overview = self.help_text()
         self.assertIn("'fledge rules' lists the checks", overview)
         self.assertIn("Reports list findings", overview)
-        self.assertIn("List every check with its code and title", overview)
+        self.assertIn("List the checks with their codes, titles and when they run", overview)
         self.assertIn("Explain the check with code CODE", self.help_text("rule"))
 
 

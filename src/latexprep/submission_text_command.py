@@ -15,6 +15,8 @@ from tempfile import TemporaryDirectory
 import click
 from rich.text import Text
 
+from .cli_inputs import choose_input
+from .cli_options import FledgeCommand
 from .command_options import (
     debug_option,
     main_option,
@@ -34,6 +36,11 @@ from .text_safety import escape_single_line_text
 # Increases only when a field of the JSON output is removed, renamed or changes meaning;
 # new fields may appear within a version.
 SUBMISSION_TEXT_SCHEMA_VERSION = 1
+
+SUBMISSION_TEXT_EXAMPLES = (
+    ("fledge submission-text paper", "Preview the title, abstract and keywords."),
+    ("fledge submission-text paper --field abstract", "Print the abstract, ready to paste."),
+)
 
 
 def _read_fields(
@@ -92,7 +99,10 @@ def _print_one_field(name: str, fields: dict[str, SubmissionField]) -> None:
 
 
 @click.command(
-    "submission-text", short_help="Preview title, abstract and keywords for a submission form."
+    "submission-text",
+    cls=FledgeCommand,
+    short_help="Preview title, abstract and keywords for a submission form.",
+    examples=SUBMISSION_TEXT_EXAMPLES,
 )
 @click.argument("source", type=click.Path(exists=True, path_type=Path), metavar="INPUT")
 @main_option
@@ -118,11 +128,15 @@ def submission_text_command(
 ) -> None:
     """Preview title, abstract and keywords, or export one ready field as a single line.
 
-    INPUT is a project folder or ZIP. No TeX compilation or network access is used.
+    INPUT is a project folder or ZIP, or its main .tex file. No TeX compilation or
+    network access is used.
     """
     if json_output and field is not None:
         raise click.UsageError("--json returns all fields; do not combine it with --field")
     reject_config_with_isolated(config, isolated=isolated)
+    source, main, note = choose_input(source, main)
+    if note is not None:
+        click.echo(note, err=True)
     try:
         fields = _read_fields(source, main, config, isolated=isolated)
     except (PreparationError, OSError) as error:

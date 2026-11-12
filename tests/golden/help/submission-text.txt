@@ -2,11 +2,12 @@ Usage: fledge submission-text [OPTIONS] INPUT
 
   Preview title, abstract and keywords, or export one ready field as a single line.
 
-  INPUT is a project folder or ZIP. No TeX compilation or network access is used.
+  INPUT is a project folder or ZIP, or its main .tex file. No TeX compilation or network access is
+  used.
 
 Options:
-  --main FILE                     Main .tex file of the document, relative to the input; needed when
-                                  the input holds several documents.
+  -m, --main FILE                 Main .tex file of the document, relative to INPUT; needed when
+                                  INPUT holds several documents.
   --field [title|abstract|keywords]
                                   Print only this field as one line of text ready to paste; the exit
                                   code is 3 when it is not ready.
@@ -15,3 +16,7 @@ Options:
                                   configuration.
   --isolated                      Ignore discovered configuration and use defaults.
   -h, --help                      Show this message and exit.
+
+Examples:
+  fledge submission-text paper                   Preview the title, abstract and keywords.
+  fledge submission-text paper --field abstract  Print the abstract, ready to paste.

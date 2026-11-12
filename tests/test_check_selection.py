@@ -15,7 +15,7 @@ from click.testing import CliRunner
 
 from latexprep.check_selection import CheckSelection
 from latexprep.cli import USAGE_EXIT_CODE, cli
-from latexprep.config import load_settings
+from latexprep.config import Settings, load_settings
 from latexprep.config_discovery import resolve_config_path
 from latexprep.errors import PreparationError
 from latexprep.redaction import scrub_local_paths
@@ -50,7 +50,7 @@ class CheckSelectionTests(unittest.TestCase):
         self.assertTrue(CheckSelection(select=("TEX",), ignore=("ALL",)).enabled("TEX001"))
 
     def test_unknown_and_partial_family_selectors_are_rejected(self) -> None:
-        for selector in ("", " ", "tex", "TE", "TEX999", "BIB9", "TEX0010", "ALL1"):
+        for selector in ("", " ", " tex", "TE", "te", "TEX999", "BIB9", "TEX0010", "ALL1"):
             for name in ("select", "ignore"):
                 with self.subTest(name=name, selector=selector):
                     with self.assertRaisesRegex(PreparationError, "Unknown checks"):
@@ -101,10 +101,21 @@ class CheckSelectionTests(unittest.TestCase):
         with self.assertRaisesRegex(PreparationError, "Unknown public check code"):
             selection.enabled("TEX999")
 
+    def test_codes_prefixes_and_all_are_selected_in_any_case(self) -> None:
+        for written, stored in (("tex001", "TEX001"), ("Tex", "TEX"), ("bib1", "BIB1")):
+            with self.subTest(written=written):
+                selection = CheckSelection(select=(written, "all"), ignore=(written,))
+                self.assertEqual(selection.select, (stored, "ALL"))
+                self.assertEqual(selection.ignore, (stored,))
+        layered = CheckSelection().with_command_line(select=("tex",), ignore=("tex001",))
+        self.assertEqual((layered.select, layered.ignore), (("TEX",), ("TEX001",)))
+        self.assertFalse(layered.enabled("TEX001"))
+        self.assertTrue(layered.enabled("TEX002"))
+
     def test_unknown_selector_suggests_the_closest_valid_selector(self) -> None:
-        with self.assertRaisesRegex(PreparationError, r"'tex001' \(did you mean TEX001\?\)"):
-            CheckSelection(select=("tex001",))
-        with self.assertRaisesRegex(PreparationError, "case-sensitive.*fledge rules"):
+        with self.assertRaisesRegex(PreparationError, r"' tex001' \(did you mean TEX001\?\)"):
+            CheckSelection(select=(" tex001",))
+        with self.assertRaisesRegex(PreparationError, "in any case; fledge rules"):
             CheckSelection(ignore=("XYZ",))
 
     def test_command_line_select_replaces_and_ignore_extends_configuration(self) -> None:
@@ -328,9 +339,11 @@ class ConfigDiscoveryTests(unittest.TestCase):
         )
 
     def test_cli_explicit_and_isolated_override_discovery(self) -> None:
-        self.write(self.source / "latex-prep.toml", "jobs = 3\n")
-        explicit = self.write(self.root / "explicit.toml", "jobs = 4\n")
-        for flags, expected in ((["--config", str(explicit)], 4), (["--isolated"], 2)):
+        # Both values lie above every default, which follows the CPU count up to 4.
+        self.write(self.source / "latex-prep.toml", "jobs = 7\n")
+        explicit = self.write(self.root / "explicit.toml", "jobs = 5\n")
+        isolated = Settings().jobs
+        for flags, expected in ((["--config", str(explicit)], 5), (["--isolated"], isolated)):
             with self.subTest(flags=flags):
                 with patch(
                     "latexprep.cli.run_job",
@@ -394,13 +407,13 @@ class ConfigDiscoveryTests(unittest.TestCase):
     def test_cli_invalid_selector_option_prevents_dispatch(self) -> None:
         with patch("latexprep.cli.run_job", new=AsyncMock()) as run:
             result = CliRunner().invoke(
-                cli, ["inspect", str(self.source), "--ignore", "tex001", "--json"]
+                cli, ["inspect", str(self.source), "--ignore", "tex01x", "--json"]
             )
         self.assertEqual(result.exit_code, 4, result.output)
         run.assert_not_awaited()
         [finding] = json.loads(result.output)["findings"]
-        self.assertIn("Unknown --ignore selector 'tex001'", finding["message"])
-        self.assertIn("did you mean TEX001?", finding["message"])
+        self.assertIn("Unknown --ignore selector 'tex01x'", finding["message"])
+        self.assertIn("did you mean TEX01 or", finding["message"])
         self.assertIn("fledge rule CODE", finding["next_step"])
 
     def test_cli_select_and_ignore_accept_a_former_rule_name(self) -> None:

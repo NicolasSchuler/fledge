@@ -165,9 +165,12 @@ class ControlledCheckGoldenTests(ProjectTestCase):
         passed_inspection = Finding(
             "pdf.page_count", "The PDF has 1 page.", severity="info", status="passed"
         )
+        # The parallelism defaults follow the CPU count; two CPUs keep the golden stable.
+        with patch("latexprep.config.usable_cpu_count", return_value=2):
+            settings = Settings()
         self.report: Report = asyncio.run(
             run_job(
-                JobRequest("check", self.project, Settings()),
+                JobRequest("check", self.project, settings),
                 backends=controlled_backends(inspect_pdf=[passed_inspection]),
             )
         )

@@ -3,33 +3,32 @@ Usage: fledge fmt [OPTIONS] INPUT
   Read-only tex-fmt check; show differences without editing originals.
 
 Common options:
-  --config PATH                   Use this TOML settings file instead of discovering project
-                                  configuration.
-  --json                          Alias for --output-format json.
-  --output-format [terminal|compact|json|html|ci]
-                                  Terminal, agent-friendly compact, JSON, offline HTML or CI
-                                  annotations.
-  --quiet                         Suppress progress messages on stderr; the final report is still
-                                  printed.
-  --show-passed                   Also list passed findings and inventories.
-  --show-files                    List every included and excluded submission file.
   --check                         Check only (also the default).
   --diff                          Show proposed formatting patches in terminal output.
+  --config PATH                   Use this TOML settings file instead of discovering project
+                                  configuration.
+  --json                          Print the report as JSON (the same as --output-format json).
+  --output-format [terminal|compact|json|html|ci]
+                                  How to print the report: terminal (default), compact records for
+                                  scripts and agents, JSON, an HTML page, or CI annotations.
+  -q, --quiet                     Suppress progress messages on stderr; the final report is still
+                                  printed.
+  --show-passed                   Also list passed findings and inventories.
   -h, --help                      Show this message and exit.
 
 Advanced options:
   --isolated                     Ignore discovered configuration and use defaults.
-  --html-report PATH             Save an escaped offline HTML report to a new file outside the
-                                 input.
-  --preview-output PATH          New directory for explicitly selected grayscale page previews.
-  --diagnostics PATH             Export an explicitly unverified diagnostic ZIP of sanitized reports
-                                 and diffs.
+  --html-report PATH             Also save the report as an HTML page that opens offline, in a new
+                                 file outside the input.
+  --diagnostics PATH             Save a ZIP of the redacted report and diffs to share when asking
+                                 for help; it is not a verified submission.
   --json-report, --report PATH   Also save the JSON report to a new file outside the input.
-  --jobs INTEGER                 Most operations that may run at once on this computer; 1 runs them
-                                 one after another (default 2).
-  --build-jobs INTEGER           Most TeX builds that may run at once (default 1).
-  --render-jobs INTEGER          Most PDF pages that may be rendered at once (default 1).
-  --job-timeout-seconds INTEGER  Longest the whole run may take, in seconds, including time spent
-                                 waiting (default 600).
-  --timeout-seconds INTEGER      Longest one external tool, such as latexmk, may run, in seconds
-                                 (default 120).
+  --jobs N                       How many operations may run at once; 1 runs them one after another
+                                 (default: the number of CPUs, at most 4).  [1<=x<=64]
+  --job-timeout-seconds SECONDS  Longest the whole run may take, in seconds, including time spent
+                                 waiting (default 600).  [x>=1]
+  --timeout-seconds SECONDS      Longest one external tool, such as latexmk, may run, in seconds
+                                 (default 120).  [x>=1]
+
+Examples:
+  fledge fmt paper --diff  Show what tex-fmt would change.

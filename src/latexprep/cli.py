@@ -2,9 +2,11 @@
 
 Owns the Click command tree and what a command does around a job: choosing the settings
 file, layering the preset, file and command-line options into ``Settings``, running the
-job, and turning every failure into a report and an exit code. Saving report files is in
-``report_files``, printing the final report in ``report_formats``, and the commands that
-are not jobs (``init``, ``doctor``, ``submission-text``) in their own modules.
+job, and turning every failure into a report and an exit code. The options and help of
+the commands are in ``cli_options``, the readings of common command-line mistakes in
+``cli_inputs``, saving report files in ``report_files``, printing the final report in
+``report_formats``, and the commands that are not jobs (``init``, ``doctor``,
+``submission-text``) in their own modules.
 """
 
 from __future__ import annotations
@@ -20,17 +22,33 @@ from typing import Any
 import click
 
 from . import __version__
+from .check_selection import resolve_selectors, selected_codes
+from .cli_completion import complete_check_codes, complete_check_selectors
+from .cli_inputs import check_selection_note, choose_input, require_destination
+from .cli_options import (
+    ADVANCED_OPTIONS,
+    BIBLIOGRAPHY_CHECK_EXAMPLES,
+    CHECK_EXAMPLES,
+    FORMATTING_EXAMPLES,
+    INSPECT_EXAMPLES,
+    PDF_CHECK_EXAMPLES,
+    PREPARE_EXAMPLES,
+    RULES_EXAMPLES,
+    JobCommandHelp,
+    bibliography_check_options,
+    check_options,
+    formatting_options,
+    inspect_options,
+    pdf_check_options,
+    prepare_options,
+)
 from .command_options import (
-    QUIET_HELP,
-    compose_options,
     debug_option,
     discard_closed_stdout,
-    main_option,
     print_debug_traceback,
     record_cancellation,
     record_job_failure,
     reject_config_with_isolated,
-    settings_file_options,
 )
 from .config import SETTING_NAMES, Settings, load_settings
 from .config_discovery import resolve_config_path
@@ -43,208 +61,41 @@ from .findings import cancelled_finding
 from .init_command import init_command
 from .job_context import JobCommand, JobRequest
 from .pdf_previews import PdfPreviewStore
-from .presets import preset_names
 from .report import UNFINISHED_SCOPE, USAGE_EXIT_CODE, Outcome, Report
 from .report_files import ReportFiles, resolve_report_files, save_reports
 from .report_formats import OutputFormat, write_redacted_report
-from .rule_catalogue_view import print_rule_explanation, print_rule_table
+from .rule_catalogue_view import print_rule_explanation, print_rule_table, rule_payload
 from .rule_definition import RULE_SCHEMA_VERSION
-from .rules import RULES, get_rule
-from .setting_choices import BIBLIOGRAPHY_BACKENDS, ENGINES, LAYOUTS
+from .rules import BY_CODE, get_rule
 from .submission_text_command import submission_text_command
 from .terminal_console import stderr_console, stdout_console
 from .terminal_progress import TerminalProgress
 
-# The defaults that option help quotes, read from the settings so help cannot drift.
-_DEFAULTS = Settings()
+__all__ = [
+    "ADVANCED_OPTIONS",
+    "COMMAND_ORDER",
+    "USAGE_EXIT_CODE",
+    "CommandOptions",
+    "cli",
+    "main",
+    "settings_suggestion",
+]
 
-_common = compose_options(
-    click.argument("source", type=click.Path(path_type=Path), metavar="INPUT"),
-    settings_file_options,
-    debug_option,
-    click.option("--json", "json_output", is_flag=True, help="Alias for --output-format json."),
-    click.option(
-        "--output-format",
-        type=click.Choice([item.value for item in OutputFormat]),
-        help="Terminal, agent-friendly compact, JSON, offline HTML or CI annotations.",
-    ),
-    click.option(
-        "--html-report",
-        type=click.Path(path_type=Path),
-        help="Save an escaped offline HTML report to a new file outside the input.",
-    ),
-    click.option(
-        "--preview-output",
-        type=click.Path(path_type=Path),
-        help="New directory for explicitly selected grayscale page previews.",
-    ),
-    click.option(
-        "--diagnostics",
-        type=click.Path(path_type=Path),
-        help="Export an explicitly unverified diagnostic ZIP of sanitized reports and diffs.",
-    ),
-    click.option(
-        "--json-report",
-        "--report",
-        "report",
-        type=click.Path(path_type=Path),
-        help="Also save the JSON report to a new file outside the input.",
-    ),
-    click.option("--quiet", is_flag=True, help=QUIET_HELP),
-    click.option("--show-passed", is_flag=True, help="Also list passed findings and inventories."),
-    click.option(
-        "--show-files", is_flag=True, help="List every included and excluded submission file."
-    ),
-    click.option(
-        "--jobs",
-        type=int,
-        help="Most operations that may run at once on this computer; 1 runs them one after "
-        f"another (default {_DEFAULTS.jobs}).",
-    ),
-    click.option(
-        "--build-jobs",
-        type=int,
-        help=f"Most TeX builds that may run at once (default {_DEFAULTS.build_jobs}).",
-    ),
-    click.option(
-        "--render-jobs",
-        type=int,
-        help=f"Most PDF pages that may be rendered at once (default {_DEFAULTS.render_jobs}).",
-    ),
-    click.option(
-        "--job-timeout-seconds",
-        type=int,
-        help="Longest the whole run may take, in seconds, including time spent waiting "
-        f"(default {_DEFAULTS.job_timeout_seconds}).",
-    ),
-    click.option(
-        "--timeout-seconds",
-        type=int,
-        help="Longest one external tool, such as latexmk, may run, in seconds "
-        f"(default {_DEFAULTS.timeout_seconds}).",
-    ),
+# The commands in the order a paper meets them: check it, prepare it, look closer at one
+# part, look up the checks, then set up. Help and shell completion list them this way.
+COMMAND_ORDER = (
+    "inspect",
+    "check",
+    "prepare",
+    "bib",
+    "pdf",
+    "fmt",
+    "submission-text",
+    "rules",
+    "rule",
+    "doctor",
+    "init",
 )
-
-_online_option = click.option(
-    "--online/--offline",
-    default=None,
-    help="Allow configured DOI/URL checks to send public queries; offline by default.",
-)
-
-_preset_option = click.option(
-    "--preset",
-    type=click.Choice(preset_names()),
-    help=(
-        "Apply an example preset beneath the settings file and command-line options; "
-        "a starting point, not a compliance certification (fledge init --list)."
-    ),
-)
-
-_selection_options = compose_options(
-    click.option(
-        "--select",
-        "select_checks",
-        multiple=True,
-        metavar="CODE_OR_PREFIX",
-        help=(
-            "Run only these checks: a check code (TEX001), a code prefix (TEX, BIB1) or ALL. "
-            "Repeatable; replaces checks.select from configuration."
-        ),
-    ),
-    click.option(
-        "--ignore",
-        "ignore_checks",
-        multiple=True,
-        metavar="CODE_OR_PREFIX",
-        help=(
-            "Skip these checks; same syntax as --select. Repeatable; adds to checks.ignore "
-            "from configuration."
-        ),
-    ),
-)
-
-_max_pages_option = click.option(
-    "--max-pages", type=int, help="Total page limit, including references."
-)
-
-_build_options = compose_options(
-    click.option(
-        "--engine",
-        type=click.Choice(ENGINES),
-        help=f"TeX engine that builds the PDF (default {_DEFAULTS.engine}).",
-    ),
-    click.option(
-        "--bibliography-backend",
-        type=click.Choice(BIBLIOGRAPHY_BACKENDS),
-        help="Bibliography tool: bibtex, biber, or auto to detect it from the sources "
-        f"(default {_DEFAULTS.bibliography_backend}).",
-    ),
-    click.option(
-        "--reference-pdf",
-        type=click.Path(path_type=Path),
-        help="PDF that the build must match page by page, for example the version you "
-        "already submitted.",
-    ),
-    _max_pages_option,
-)
-
-# `pdf check` builds nothing, so it offers neither an engine nor a bibliography tool.
-_pdf_check_options = compose_options(
-    click.option(
-        "--reference-pdf",
-        type=click.Path(path_type=Path),
-        help="PDF to compare the checked PDF with page by page, for example the version "
-        "you already submitted.",
-    ),
-    _max_pages_option,
-)
-
-# Expert knobs listed under "Advanced options" in command help; nothing is removed.
-ADVANCED_OPTIONS = frozenset(
-    {
-        "jobs",
-        "build_jobs",
-        "render_jobs",
-        "job_timeout_seconds",
-        "timeout_seconds",
-        "preview_output",
-        "diagnostics",
-        "html_report",
-        "report",
-        "isolated",
-        "bibliography_backend",
-        "normalize_doi",
-        "cleanup",
-    }
-)
-
-
-class _FledgeCommand(click.Command):
-    """Split long option lists into common and advanced help sections."""
-
-    def format_options(self, ctx: click.Context, formatter: click.HelpFormatter) -> None:
-        """Write the option help; with an advanced option, in common and advanced sections.
-
-        Args:
-            ctx: The context of the command.
-            formatter: The help formatter that receives the sections.
-        """
-        common, advanced = [], []
-        for parameter in self.get_params(ctx):
-            # The command's text describes its arguments, as in Click's own option
-            # section; since Click 8.5.1 arguments return help records too.
-            if isinstance(parameter, click.Argument):
-                continue
-            record = parameter.get_help_record(ctx)
-            if record is not None:
-                (advanced if parameter.name in ADVANCED_OPTIONS else common).append(record)
-        if not advanced:
-            super().format_options(ctx, formatter)
-            return
-        with formatter.section("Common options"):
-            formatter.write_dl(common)
-        with formatter.section("Advanced options"):
-            formatter.write_dl(advanced)
 
 
 @contextmanager
@@ -297,12 +148,25 @@ class _FledgeGroup(click.Group):
 
     Attributes:
         command_class: The class of the commands of the group, which splits their help
-            into common and advanced options.
+            into common and advanced options and ends it with examples.
         group_class: ``type``, so that subgroups use this class too.
     """
 
-    command_class = _FledgeCommand
+    command_class = JobCommandHelp
     group_class = type
+
+    def list_commands(self, ctx: click.Context) -> list[str]:
+        """List the commands in ``COMMAND_ORDER``, then any others by name.
+
+        Args:
+            ctx: The context of the group, unused: the order is fixed.
+
+        Returns:
+            The names of the commands of this group.
+        """
+        del ctx
+        ordered = [name for name in COMMAND_ORDER if name in self.commands]
+        return ordered + sorted(set(self.commands) - set(ordered))
 
     def make_context(self, *args: Any, **kwargs: Any) -> click.Context:
         """Parse the options of the group, reporting usage errors with ``USAGE_EXIT_CODE``.
@@ -371,61 +235,32 @@ def _exit(result: int | None, **_kwargs) -> None:
     click.get_current_context().exit(result or 0)
 
 
-@cli.command("inspect", short_help="Check sources and bibliography without running TeX.")
-@_common
-@_selection_options
-@_preset_option
-@_online_option
-@main_option
+@cli.command(
+    "inspect",
+    short_help="Check sources and bibliography without running TeX.",
+    examples=INSPECT_EXAMPLES,
+)
+@inspect_options
 def inspect_command(**options) -> int:
     """Run source, manuscript and bibliography checks without running TeX."""
     return _execute(JobCommand.INSPECT, options)
 
 
-@cli.command("check", short_help="Build the PDF and check the sources and the PDF.")
-@_common
-@_selection_options
-@_preset_option
-@_online_option
-@main_option
-@_build_options
+@cli.command(
+    "check", short_help="Build the PDF and check the sources and the PDF.", examples=CHECK_EXAMPLES
+)
+@check_options
 def check_command(**options) -> int:
     """Run source checks, build the PDF in a separate restricted workspace and check the PDF."""
     return _execute(JobCommand.CHECK, options)
 
 
-@cli.command("prepare", short_help="Create a verified submission copy of the paper.")
-@_common
-@_selection_options
-@_preset_option
-@_online_option
-@main_option
-@_build_options
-@click.option("--output", type=click.Path(path_type=Path), help="New directory outside the input.")
-@click.option(
-    "--layout",
-    type=click.Choice(LAYOUTS),
-    help="Keep the folder structure (preserve) or move every file to the top level (flat); "
-    f"default {_DEFAULTS.layout}.",
+@cli.command(
+    "prepare",
+    short_help="Create a verified submission copy of the paper.",
+    examples=PREPARE_EXAMPLES,
 )
-@click.option(
-    "--format/--no-format",
-    "apply_formatting",
-    default=None,
-    help="Apply tex-fmt to the separate copy.",
-)
-@click.option(
-    "--normalize-doi/--no-normalize-doi", default=None, help="Normalize literal DOI prefixes."
-)
-@click.option(
-    "--cleanup/--no-cleanup",
-    default=None,
-    help="Remove known build debris from the copy before editing; files the paper needs "
-    f"are always kept (default {'on' if _DEFAULTS.cleanup else 'off'}).",
-)
-@click.option(
-    "--dry-run", is_flag=True, help="Build the baseline and preview edits; no final bundle."
-)
+@prepare_options
 def prepare_command(**options) -> int:
     """Package the selected paper's needed inputs and explicit deliverables.
 
@@ -441,20 +276,19 @@ def bibliography() -> None:
     """Bibliography checks, offline unless explicitly enabled."""
 
 
-@bibliography.command("check")
-@_common
-@_online_option
-@main_option
+@bibliography.command("check", examples=BIBLIOGRAPHY_CHECK_EXAMPLES)
+@bibliography_check_options
 def bibliography_check(**options) -> int:
     """Check syntax, citation use and configured fields; online evidence is opt-in."""
     return _execute(JobCommand.BIBLIOGRAPHY, options)
 
 
-@cli.command("fmt", short_help="Check tex-fmt formatting without changing any file.")
-@_common
-# Fledge never edits the input here, so --check, which the documentation names, adds nothing.
-@click.option("--check", is_flag=True, expose_value=False, help="Check only (also the default).")
-@click.option("--diff", is_flag=True, help="Show proposed formatting patches in terminal output.")
+@cli.command(
+    "fmt",
+    short_help="Check tex-fmt formatting without changing any file.",
+    examples=FORMATTING_EXAMPLES,
+)
+@formatting_options
 def formatting(**options) -> int:
     """Read-only tex-fmt check; show differences without editing originals."""
     return _execute(JobCommand.FORMAT, options)
@@ -465,9 +299,8 @@ def pdf_group() -> None:
     """Inspect a PDF independently of a source project."""
 
 
-@pdf_group.command("check")
-@_common
-@_pdf_check_options
+@pdf_group.command("check", examples=PDF_CHECK_EXAMPLES)
+@pdf_check_options
 def pdf_check(**options) -> int:
     """Check PDF constraints; --reference-pdf adds an exact comparison."""
     return _execute(JobCommand.PDF, options)
@@ -478,24 +311,60 @@ cli.add_command(doctor_command)
 cli.add_command(submission_text_command)
 
 
-@cli.command("rules", short_help="List every check with its code and title.")
-@click.option("--json", "json_output", is_flag=True, help="Print every check as JSON.")
+def _chosen_rules(selectors: tuple[str, ...]) -> list[str]:
+    """List the check codes that the selectors of ``fledge rules`` choose, sorted by code.
+
+    Args:
+        selectors: Families, code prefixes, codes or rule names, in any case; none chooses
+            every check.
+
+    Returns:
+        The chosen codes in code order.
+
+    Raises:
+        click.BadParameter: A selector matches no check.
+    """
+    try:
+        resolved = resolve_selectors(selectors, "fledge rules") if selectors else ("ALL",)
+    except PreparationError as error:
+        raise click.BadParameter(str(error), param_hint="SELECTOR") from error
+    return sorted({code for selector in resolved for code in selected_codes(selector)})
+
+
+@cli.command(
+    "rules",
+    short_help="List the checks with their codes, titles and when they run.",
+    examples=RULES_EXAMPLES,
+)
+@click.argument(
+    "selectors",
+    nargs=-1,
+    metavar="[SELECTOR]...",
+    shell_complete=complete_check_selectors,
+)
+@click.option("--json", "json_output", is_flag=True, help="Print the listed checks as JSON.")
 @debug_option
-def rules_command(*, json_output: bool) -> int:
-    """List every check with its stable code and title."""
+def rules_command(selectors: tuple[str, ...], *, json_output: bool) -> int:
+    """List the checks by code, with their titles and whether they run by default.
+
+    SELECTOR limits the list to a family such as TEX, a code prefix such as BIB1, or one
+    code, in any case. Opt-in checks run only once their setting is configured.
+    """
+    rules = [BY_CODE[code] for code in _chosen_rules(selectors)]
+    defaults = Settings()
     if json_output:
         payload = {
             "schema_version": RULE_SCHEMA_VERSION,
-            "rules": [rule.to_dict() for rule in RULES],
+            "rules": [rule_payload(rule, defaults) for rule in rules],
         }
         click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
     else:
-        print_rule_table(RULES, stdout_console())
+        print_rule_table(rules, stdout_console(), defaults=defaults)
     return 0
 
 
 @cli.command("rule", short_help="Explain one check by its code.")
-@click.argument("code")
+@click.argument("code", shell_complete=complete_check_codes)
 @click.option(
     "--json",
     "json_output",
@@ -509,11 +378,12 @@ def rule_command(code: str, *, json_output: bool) -> int:
         definition = get_rule(code)
     except ValueError as error:
         raise click.BadParameter(str(error), param_hint="CODE") from error
+    defaults = Settings()
     if json_output:
-        payload = {"schema_version": RULE_SCHEMA_VERSION, **definition.to_dict()}
+        payload = {"schema_version": RULE_SCHEMA_VERSION, **rule_payload(definition, defaults)}
         click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
     else:
-        print_rule_explanation(definition, stdout_console())
+        print_rule_explanation(definition, stdout_console(), defaults=defaults)
     return 0
 
 
@@ -563,6 +433,7 @@ class CommandOptions:
             was given.
         dry_run: Whether ``--dry-run`` was given.
         diff: Whether ``--diff`` was given.
+        force: Whether ``--force`` was given.
     """
 
     command: JobCommand
@@ -599,6 +470,7 @@ class CommandOptions:
     cleanup: bool | None = None
     dry_run: bool = False
     diff: bool = False
+    force: bool = False
 
     def setting_overrides(self) -> dict[str, object]:
         """Collect the settings given on the command line.
@@ -630,6 +502,10 @@ class CommandOptions:
         return OutputFormat.JSON
 
 
+# The job commands that take --main, and so may take a .tex file as INPUT.
+_COMMANDS_WITH_MAIN = frozenset(
+    {JobCommand.INSPECT, JobCommand.CHECK, JobCommand.PREPARE, JobCommand.BIBLIOGRAPHY}
+)
 # Command options that set the top-level setting of the same name.
 _SETTING_OPTIONS = tuple(item.name for item in fields(CommandOptions) if item.name in SETTING_NAMES)
 # Settings whose command-line option is not the setting name in kebab case.
@@ -645,7 +521,8 @@ def _check_input_and_outputs(options: CommandOptions, files: ReportFiles) -> Non
             the same.
 
     Raises:
-        RequestError: The input does not exist.
+        RequestError: The input does not exist, or a report file would be saved inside the
+            output or preview folder.
         PreparationError: Two of the output, JSON, HTML and diagnostics destinations are
             the same.
     """
@@ -659,15 +536,23 @@ def _check_input_and_outputs(options: CommandOptions, files: ReportFiles) -> Non
             "spelling and the current directory.",
         )
     # The job validates --output and --preview-output, naming the option at fault.
-    destinations = [
-        item
-        for item in (files.json, files.html, files.diagnostics, options.output)
-        if item is not None
-    ]
+    reports = [item for item in (files.json, files.html, files.diagnostics) if item is not None]
+    destinations = [*reports, *([options.output] if options.output is not None else [])]
     if len({item.resolve() for item in destinations}) != len(destinations):
         # Whichever file was written first would take the path of the others.
         files.discard()
         raise PreparationError("Output, JSON, HTML and diagnostics destinations must be distinct")
+    folders = [
+        item.resolve() for item in (options.output, options.preview_output) if item is not None
+    ]
+    if any(report.resolve().is_relative_to(folder) for report in reports for folder in folders):
+        # An existing output folder may be empty or replaced; a report inside it would clash.
+        files.discard()
+        raise RequestError(
+            "Report files must be saved outside the output and preview folders",
+            "Choose --json-report, --html-report and --diagnostics paths outside --output "
+            "and --preview-output; the output folder receives its own report.json.",
+        )
 
 
 def settings_suggestion(
@@ -782,6 +667,7 @@ def _run(
         reference_pdf=options.reference_pdf,
         preview_output=options.preview_output,
         pdf_previews=pdf_previews,
+        force=options.force,
     )
     with TerminalProgress(stderr_console(), quiet=options.quiet) as progress:
         return asyncio.run(run_job(request, progress, report))
@@ -852,6 +738,40 @@ def _interrupted_report_message(report: Report) -> str:
     return "Cancelled; no verified output was published"
 
 
+def _checked_options(options: CommandOptions) -> CommandOptions:
+    """Check the options of a job command and read common mistakes as what was meant.
+
+    A ``.tex`` file given as INPUT becomes its folder and ``--main``, and ``--main``
+    written as a path into INPUT becomes relative to it; a note on stderr says so unless
+    ``--quiet`` is given. A warning about checks that ``--select`` chose but the command
+    cannot run goes to stderr even with ``--quiet``, which silences progress only.
+
+    Args:
+        options: The options as Click parsed them.
+
+    Returns:
+        The options to run with.
+
+    Raises:
+        click.UsageError: ``--config`` was combined with ``--isolated``; INPUT is a
+            ``.tex`` file and ``--main`` was given as well; ``prepare`` has neither
+            ``--output`` nor ``--dry-run``; or ``--select`` chose only checks that the
+            command cannot run.
+    """
+    reject_config_with_isolated(options.config, isolated=options.isolated)
+    if options.command in _COMMANDS_WITH_MAIN:
+        choice = choose_input(options.source, options.main)
+        options = replace(options, source=choice.source, main=choice.main)
+        if choice.note is not None and not options.quiet:
+            click.echo(choice.note, err=True)
+    if options.command is JobCommand.PREPARE:
+        require_destination(output=options.output, dry_run=options.dry_run)
+    warning = check_selection_note(options.command, options.select_checks)
+    if warning is not None:
+        click.echo(warning, err=True)
+    return options
+
+
 def _execute(command: JobCommand, arguments: dict[str, Any]) -> int:
     """Run a job command and deliver its report.
 
@@ -867,11 +787,11 @@ def _execute(command: JobCommand, arguments: dict[str, Any]) -> int:
         The exit code.
 
     Raises:
-        click.UsageError: ``--config`` was combined with ``--isolated``, or ``--json``
-            does not agree with ``--output-format``.
+        click.UsageError: ``--config`` was combined with ``--isolated``, ``--json`` does
+            not agree with ``--output-format``, or the command line asks for something the
+            command cannot do (see :func:`_checked_options`).
     """
-    options = CommandOptions(command=command, **arguments)
-    reject_config_with_isolated(options.config, isolated=options.isolated)
+    options = _checked_options(CommandOptions(command=command, **arguments))
     output_format = options.output_choice()
     report = Report(command.value, scope=UNFINISHED_SCOPE)
     files = ReportFiles()

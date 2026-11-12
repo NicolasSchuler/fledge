@@ -5,19 +5,52 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from latexprep.config import COORDINATOR_MEMORY_MB, load_settings
+from latexprep.config import (
+    COORDINATOR_MEMORY_MB,
+    MAX_DEFAULT_RENDER_JOBS,
+    Settings,
+    load_settings,
+    usable_cpu_count,
+)
 from latexprep.errors import PreparationError
+from latexprep.pdf_tools import MEASUREMENT_RENDER_MEMORY_MB
 
 
 class ParallelConfigTests(unittest.TestCase):
     """Tests of the parallel capacity and limit settings and of ``source_date_epoch``."""
 
+    def test_parallel_defaults_follow_the_cpu_count_within_small_bounds(self):
+        for cpus, jobs, render_jobs in ((1, 1, 1), (2, 2, 1), (3, 3, 1), (8, 4, 4), (64, 4, 4)):
+            with (
+                self.subTest(cpus=cpus),
+                patch("latexprep.config.usable_cpu_count", return_value=cpus),
+            ):
+                settings = load_settings(None, {})
+                self.assertEqual(settings.jobs, jobs)
+                self.assertEqual(settings.build_jobs, 1)
+                self.assertEqual(settings.render_jobs, render_jobs)
+                # Explicit values still win over the defaults.
+                explicit = load_settings(None, {"jobs": 1, "render_jobs": 2})
+                self.assertEqual((explicit.jobs, explicit.render_jobs), (1, 2))
+
+    def test_the_cpu_count_respects_the_affinity_of_the_process(self):
+        with patch("latexprep.config.os") as fake_os:
+            del fake_os.process_cpu_count
+            fake_os.sched_getaffinity.return_value = {0, 1, 2}
+            self.assertEqual(usable_cpu_count(), 3)
+            del fake_os.sched_getaffinity
+            fake_os.cpu_count.return_value = None
+            self.assertEqual(usable_cpu_count(), 1)
+
+    def test_the_largest_default_renders_fit_the_default_memory_budget(self):
+        defaults = Settings()
+        renders = MAX_DEFAULT_RENDER_JOBS * MEASUREMENT_RENDER_MEMORY_MB
+        self.assertLessEqual(renders + COORDINATOR_MEMORY_MB, defaults.memory_mb)
+
     def test_parallel_defaults_preserve_small_fan_out_and_explicit_job_limits(self):
         settings = load_settings(None, {})
-        self.assertEqual(settings.jobs, 2)
-        self.assertEqual(settings.build_jobs, 1)
-        self.assertEqual(settings.render_jobs, 1)
         self.assertEqual(settings.job_timeout_seconds, 600)
         self.assertEqual(settings.max_temporary_bytes, 2_147_483_648)
         self.assertIsNone(settings.source_date_epoch)

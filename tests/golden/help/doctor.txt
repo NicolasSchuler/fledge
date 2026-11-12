@@ -1,10 +1,11 @@
-Usage: fledge doctor [OPTIONS] [PROJECT]
+Usage: fledge doctor [OPTIONS] [INPUT]
 
   Test the local setup with a tiny built-in document.
 
-  PROJECT selects nearby settings. With no PROJECT, defaults apply unless --config is supplied.
-  Every configured document engine is exercised. Your manuscript is never compiled or changed. A
-  pass covers the built-in fixture, not project packages, custom classes, or venue compliance.
+  INPUT, a project folder or ZIP, selects the settings that apply to it. With no INPUT, defaults
+  apply unless --config is supplied. Every configured document engine is exercised. Your manuscript
+  is never compiled or changed. A pass covers the built-in fixture, not project packages, custom
+  classes, or venue compliance.
 
 Options:
   --engine [pdflatex|xelatex|lualatex]
@@ -14,6 +15,11 @@ Options:
                                   configuration.
   --isolated                      Ignore discovered configuration and use defaults.
   --json                          Print the structured setup report.
-  --quiet                         Suppress progress messages on stderr; the final report is still
+  -q, --quiet                     Suppress progress messages on stderr; the final report is still
                                   printed.
   -h, --help                      Show this message and exit.
+
+Examples:
+  fledge doctor                    Test TeX and the PDF tools with the default settings.
+  fledge doctor paper              Test the engines that the settings of paper choose.
+  fledge doctor --engine lualatex  Test one engine instead of the configured ones.
