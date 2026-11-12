@@ -17,6 +17,7 @@ import click
 from .check_selection import resolve_selectors, selected_codes
 from .errors import PreparationError
 from .job_context import JobCommand
+from .text_safety import escape_single_line_text
 
 # The check families each command can never run, by code family. ``inspect`` builds no
 # PDF, ``bib check`` runs only the bibliography and online reference checks, and
@@ -111,16 +112,19 @@ def choose_input(source: Path, main: str | None) -> InputChoice:
         click.UsageError: INPUT is a ``.tex`` file and ``--main`` was given as well.
     """
     if source.suffix.lower() == ".tex" and source.is_file():
+        # The path may come from tab completion of a file name in an untrusted project.
+        shown = escape_single_line_text(str(source))
         if main is not None:
             raise click.UsageError(
-                f"INPUT {source} is a .tex file; with --main, give the project folder as INPUT."
+                f"INPUT {shown} is a .tex file; with --main, give the project folder as INPUT."
             )
         folder = source.parent
         return InputChoice(
             folder,
             source.name,
-            f"Note: {source} is a .tex file, so INPUT is its folder {folder} and --main is "
-            f"{source.name}.",
+            f"Note: {shown} is a .tex file, so INPUT is its folder "
+            f"{escape_single_line_text(str(folder))} and --main is "
+            f"{escape_single_line_text(source.name)}.",
         )
     if main is not None and source.is_dir():
         return InputChoice(source, _main_inside_input(source, main))

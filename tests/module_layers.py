@@ -144,6 +144,7 @@ MODULES_BY_LAYER: dict[str, tuple[str, ...]] = {
         "build_fonts",
         "font_cache",
         "tool_versions",
+        "publication_folders",
     ),
     "checks": (
         "author_records",

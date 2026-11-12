@@ -177,6 +177,31 @@ class InitMainFileTests(ProjectTestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertEqual(load_settings(self.target, {}).main, "Résumé du papier.tex")
 
+    def test_a_name_with_an_escape_sequence_is_never_echoed_or_chosen(self):
+        hostile = "evil\x1b]0;title\x07\x1b[31mred.tex"
+        self.document(hostile)
+        self.document("main.tex")
+        result = self.runner.invoke(cli, ["init", str(self.project)])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertNotIn("\x1b", result.output)
+        self.assertNotIn("\x07", result.output)
+        self.assertIn("Left out 1 file(s) whose names hold control or invisible", result.output)
+        text = self.target.read_text(encoding="utf-8")
+        self.assertNotIn("evil", text)
+        # With a candidate left out, the ordinary one is offered but not chosen.
+        self.assertIn('# main = "main.tex"\n', text)
+        self.assertIsNone(load_settings(self.target, {}).main)
+
+    def test_an_error_message_is_shown_with_its_escapes_visible(self):
+        with patch(
+            "latexprep.init_command.candidate_mains",
+            side_effect=PreparationError("cannot read evil\x1b[2J.tex"),
+        ):
+            result = self.runner.invoke(cli, ["init", str(self.project)])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertNotIn("\x1b", result.output)
+        self.assertIn("cannot read evil\\u001b[2J.tex", result.output)
+
     def test_a_project_that_cannot_be_read_gets_the_placeholder_and_a_reason(self):
         self.document("main.tex")
         with patch(

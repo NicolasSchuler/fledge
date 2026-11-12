@@ -23,6 +23,7 @@ from .import_budget import ImportLimits
 from .main_selection import candidate_mains
 from .presets import PRESETS, preset_names, preset_text
 from .report import Outcome
+from .text_safety import escape_single_line_text, is_unsafe_character
 
 CONFIG_NAME = "fledge.toml"
 # How many candidate main files the settings file lists before it counts the rest.
@@ -75,11 +76,52 @@ def _toml_string(value: str) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
+def _shown(name: str) -> str:
+    """Show a project-derived name or message on one terminal line, escapes made visible."""
+    return escape_single_line_text(name)
+
+
+def _candidate_lines(candidates: list[str], *, only: bool) -> MainSetting:
+    """Write the main-file lines and the note for candidates with ordinary names.
+
+    Args:
+        candidates: The candidate main files, at least one, none holding an unsafe
+            character.
+        only: Whether the project has no other candidate, so the one given becomes main.
+
+    Returns:
+        ``main = "..."`` for the only candidate, otherwise the commented candidates, with
+        a note that names them.
+    """
+    if only:
+        lines = (
+            "# The document to build: the only file that declares \\documentclass.\n"
+            f"main = {_toml_string(candidates[0])}\n"
+        )
+        return MainSetting(lines, f"Main file: {_shown(candidates[0])}.")
+    listed = candidates[:MAX_LISTED_CANDIDATES]
+    lines = "# Several files declare \\documentclass; uncomment the main file to build:\n"
+    lines += "".join(f"# main = {_toml_string(name)}\n" for name in listed)
+    if len(candidates) > len(listed):
+        lines += f"# ... and {len(candidates) - len(listed)} more.\n"
+    named = ", ".join(_shown(name) for name in listed[:3])
+    more = ", ..." if len(candidates) > 3 else ""
+    noun = "file" if len(candidates) == 1 else "files"
+    return MainSetting(
+        lines,
+        f"Found {len(candidates)} candidate main {noun} ({named}{more}); uncomment one main "
+        f"line in {CONFIG_NAME}.",
+    )
+
+
 def _main_setting(directory: Path) -> MainSetting:
     """Find the main file of the project in ``directory`` and write its settings lines.
 
     The project is read as a job reads it, within the default import limits; a project
-    that cannot be read that way gets no main file and a note that says why.
+    that cannot be read that way gets no main file and a note that says why. Project file
+    names are untrusted: a candidate whose name holds a control, format or other unsafe
+    character is left out of the file, and the note counts it; every name and message in
+    the note is shown with its escapes made visible.
 
     Args:
         directory: The project folder.
@@ -88,29 +130,24 @@ def _main_setting(directory: Path) -> MainSetting:
         The lines and the note.
     """
     try:
-        candidates = candidate_mains(directory, ImportLimits.from_settings(Settings()))
+        found = candidate_mains(directory, ImportLimits.from_settings(Settings()))
     except (PreparationError, OSError) as error:
-        return MainSetting(None, f"Could not look for the main file ({error}); set main by hand.")
-    if not candidates:
         return MainSetting(
-            None, "No file declares \\documentclass yet; main is left commented out."
+            None, f"Could not look for the main file ({_shown(str(error))}); set main by hand."
         )
-    if len(candidates) == 1:
-        lines = (
-            "# The document to build: the only file that declares \\documentclass.\n"
-            f"main = {_toml_string(candidates[0])}\n"
-        )
-        return MainSetting(lines, f"Main file: {candidates[0]}.")
-    listed = candidates[:MAX_LISTED_CANDIDATES]
-    lines = "# Several files declare \\documentclass; uncomment the main file to build:\n"
-    lines += "".join(f"# main = {_toml_string(name)}\n" for name in listed)
-    if len(candidates) > len(listed):
-        lines += f"# ... and {len(candidates) - len(listed)} more.\n"
-    return MainSetting(
-        lines,
-        f"Found {len(candidates)} candidate main files ({', '.join(listed[:3])}"
-        f"{', ...' if len(candidates) > 3 else ''}); uncomment one main line in {CONFIG_NAME}.",
+    candidates = [name for name in found if not any(map(is_unsafe_character, name))]
+    skipped = (
+        f" Left out {len(found) - len(candidates)} file(s) whose names hold control or "
+        "invisible characters; rename one to use it as main."
+        if len(candidates) < len(found)
+        else ""
     )
+    if not candidates:
+        reason = "No file declares \\documentclass yet" if not found else "No usable main file"
+        return MainSetting(None, f"{reason}; main is left commented out.{skipped}")
+    # A candidate left out still counts: then no candidate becomes main by itself.
+    setting = _candidate_lines(candidates, only=len(found) == 1)
+    return MainSetting(setting.lines, f"{setting.note}{skipped}")
 
 
 def settings_text(directory: Path, preset: str | None) -> tuple[str, str | None]:

@@ -85,6 +85,19 @@ class TexFileInputTests(InputTestCase):
         choice = choose_input(Path("main.tex"), None)
         self.assertEqual((choice.source, choice.main), (Path(), "main.tex"))
 
+    def test_the_note_shows_escape_sequences_in_the_name_as_text(self) -> None:
+        hostile = self.project / "evil\x1b]0;title\x07name.tex"
+        hostile.write_text("\\documentclass{article}\n\\begin{document}\n\\end{document}\n")
+        request, result = self.run_job_of("inspect", str(hostile))
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(request.settings.main, hostile.name)
+        self.assertNotIn("\x1b", result.stderr)
+        self.assertNotIn("\x07", result.stderr)
+        self.assertIn("evil\\u001b]0;title\\u0007name.tex", result.stderr)
+        request, result = self.run_job_of("check", str(hostile), "--main", "main.tex")
+        self.assertEqual(result.exit_code, USAGE_EXIT_CODE, result.output)
+        self.assertNotIn("\x1b", result.stderr)
+
     def test_submission_text_takes_a_tex_file_as_input(self) -> None:
         self.write(
             "paper/main.tex",

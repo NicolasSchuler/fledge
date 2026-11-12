@@ -72,16 +72,24 @@ its supplement separately, see
 
 ## Output folders and reruns
 
-`--output DIR` (`-o DIR`) must lie outside INPUT and be new or an empty folder;
-`prepare` without it, and without `--dry-run`, stops with a usage error that names
-both. Every folder that Fledge publishes, the output and a `--preview-output`
-folder alike, holds a hidden `.fledge-output` file. To rerun into the same folder,
-add `--force`: Fledge then replaces a folder holding that file, and only such a
-folder, and only after the new run has passed. It writes the new output into a
-hidden sibling folder and swaps it into place when everything is written, so a
-blocked, failed or cancelled rerun leaves the earlier output as it was. Any other
+`--output DIR` (`-o DIR`) must lie outside INPUT and be new or an empty folder of
+your own; `prepare` without it, and without `--dry-run`, stops with a usage error
+that names both. Every folder that Fledge publishes, the output and a
+`--preview-output` folder alike, holds a hidden `.fledge-output` file. To rerun
+into the same folder, add `--force`: Fledge then replaces a folder of yours holding
+that file, and only such a folder, and only after the new run has passed. Any other
 existing folder or file is still refused, and report files (`--json-report`,
 `--html-report`, `--diagnostics`) must lie outside the output folders.
+
+Fledge writes only into folders it has just created itself. For an existing empty
+folder, and for an earlier output it replaces, it writes the new output into a
+hidden sibling folder (`.fledge-staging-…`) and moves it into place once everything
+is written, after checking that the existing folder is still a folder of yours and
+not a link; an empty folder in which anything appeared meanwhile is left alone and
+the run fails. A blocked, failed or cancelled run leaves the existing folder as it
+was. Because of this, the folder that holds DIR must be writable, and DIR cannot be
+a mount point, such as a volume mounted into a container; give a new folder inside
+it instead.
 
 ```sh
 fledge prepare paper -o submission          # first run: new or empty folder

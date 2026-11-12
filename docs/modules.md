@@ -122,7 +122,7 @@ a network connection, and each imports only other modules of this layer. (79 mod
 The boundary to the outside world: restricted tool execution and its sandboxes, the PDF tool
 sessions, the build with `latexmk` and its evidence, the HTTP client for online lookups, project
 import and the submission archive, and settings discovery. They import the domain layer and each
-other, never a check, the job workflow or an output format. (34 modules)
+other, never a check, the job workflow or an output format. (35 modules)
 
 | Module | Responsibility |
 | --- | --- |
@@ -165,6 +165,7 @@ other, never a check, the job workflow or an output format. (34 modules)
 | `build_fonts` | Fonts that a XeLaTeX or LuaLaTeX build loaded from this computer rather than the project or the TeX distribution |
 | `font_cache` | A sealed per-job luaotfload font database that LuaLaTeX builds read instead of rebuilding it |
 | `tool_versions` | Reading what a tool printed when asked for its version, and the lines a report keeps |
+| `publication_folders` | The output marker, ownership checks, exclusive siblings and link-safe moves and removals that publication uses |
 
 ## Checks, transforms and policies
 

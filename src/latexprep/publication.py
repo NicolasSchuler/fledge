@@ -1,11 +1,14 @@
 """Publish verified packages, previews and reports into directories outside the input.
 
-Publication is one transaction. A new directory is created exclusively, an existing empty
-one is filled, and a directory that Fledge published earlier is replaced only when the
-caller allows it: the new output is written into a sibling directory and swapped into
-place once everything is written. When any step fails, exactly what the transaction
-created is removed again and a replaced directory stays as it was. Every published
-directory holds ``OUTPUT_MARKER``, which is how a later run recognises it.
+Publication is one transaction, and it writes only into directories it created itself
+with an exclusive ``mkdir``. A new output directory is created in place. An existing empty
+directory of the user's, and, when the caller allows it, a directory that Fledge published
+earlier, are never written into: the new output goes into a new sibling directory, which
+takes their place once everything is written and the existing directory has been checked
+to be unchanged. When any step fails, exactly what the transaction created is removed
+again, and an existing directory stays as it was. Trees are removed only where the
+platform's removal never follows a link. Every published directory holds
+``OUTPUT_MARKER``, which is how a later run recognises it.
 
 A report that cannot be represented safely is refused up front, before any directory
 exists: the refusal is recorded in the report as a ``report.redaction_limit`` error, never
@@ -15,9 +18,6 @@ raised. A step that raises leaves ``report.artifacts`` to the caller, which clea
 from __future__ import annotations
 
 import json
-import os
-import re
-import secrets
 import shutil
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
@@ -27,9 +27,22 @@ from typing import NamedTuple, Self
 
 from . import __version__
 from .errors import PreparationError, RequestError
-from .file_safety import read_file_prefix
 from .findings import Finding
 from .path_safety import is_contained
+from .publication_folders import (
+    MARKER_TEXT,
+    OUTPUT_MARKER,
+    STAGING_PREFIX,
+    StagedOutput,
+    is_empty_directory,
+    is_fledge_report,
+    is_own_directory,
+    is_replaceable_output,
+    move_back,
+    move_into_place,
+    new_sibling,
+    remove_tree,
+)
 from .redaction import scrub_local_paths
 from .report import WITHHELD_SCOPE, Outcome, Report
 
@@ -48,23 +61,6 @@ _PACKAGE_FILES = (
     ("report", "report.json"),
 )
 _REFUSAL_SUGGESTION = "Use an output path without credential values or reduce report size."
-# The file in every directory publication writes; a later run may replace only such a
-# directory, and only when asked to.
-OUTPUT_MARKER = ".fledge-output"
-_MARKER_TEXT = (
-    "Fledge {version} wrote this folder. A later run with --force may replace it once the "
-    "new run has succeeded; Fledge refuses to replace a folder without this file.\n"
-)
-# How much of an existing report file is read to recognise it as a Fledge report, and the
-# beginnings that recognise one: the JSON report and the HTML page, as Fledge writes them.
-_REPORT_PREFIX_BYTES = 4096
-_REPORT_BEGINNINGS = (
-    re.compile(rb'\A\s*\{\s*"schema_version"\s*:\s*\d+\s*,\s*"command"\s*:\s*"'),
-    re.compile(rb"\A<!doctype html><html[^>]*><head>.*?<title>Fledge [^<]*report", re.DOTALL),
-)
-# The names of the sibling directories a replacement writes into and moves the old output to.
-_STAGING_PREFIX = ".fledge-staging-"
-_REPLACED_PREFIX = ".fledge-replaced-"
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,32 +109,6 @@ class DocumentPackages:
 JobOutput = VerifiedPackage | DocumentPackages | None
 
 
-def is_fledge_output(path: Path) -> bool:
-    """Return whether ``path`` is a real directory that publication wrote: it holds the marker."""
-    marker = path / OUTPUT_MARKER
-    return path.is_dir() and not path.is_symlink() and marker.is_file() and not marker.is_symlink()
-
-
-def is_fledge_report(path: Path) -> bool:
-    """Return whether ``path`` is a regular file that begins like a Fledge JSON or HTML report."""
-    try:
-        beginning = read_file_prefix(path, _REPORT_PREFIX_BYTES)
-    except OSError:
-        return False
-    return any(pattern.match(beginning) for pattern in _REPORT_BEGINNINGS)
-
-
-def _is_empty_directory(path: Path) -> bool:
-    """Return whether ``path`` is a real, readable directory with nothing in it."""
-    if path.is_symlink() or not path.is_dir():
-        return False
-    try:
-        with os.scandir(path) as entries:
-            return next(entries, None) is None
-    except OSError:
-        return False
-
-
 def _existing_destination_error(destination: Path, option: str, *, folder: bool) -> RequestError:
     """Build the refusal of an existing ``destination`` that may not be written to.
 
@@ -150,11 +120,17 @@ def _existing_destination_error(destination: Path, option: str, *, folder: bool)
     Returns:
         The error; it suggests ``--force`` for a directory that Fledge published earlier.
     """
-    if folder and is_fledge_output(destination):
+    if folder and is_replaceable_output(destination):
         return RequestError(
             f"Output already exists: {destination}",
             f"Choose a new {option} path, remove {destination}, or rerun with --force to "
             "replace this earlier Fledge output once the new run has succeeded.",
+        )
+    if folder and destination.is_dir() and not is_own_directory(destination):
+        return RequestError(
+            f"Output folder belongs to another user, or is a link: {destination}",
+            f"Choose a new {option} path or an empty folder of your own; Fledge never writes "
+            "into a folder that someone else controls.",
         )
     alternative = " or an empty folder" if folder else ""
     return RequestError(
@@ -169,10 +145,11 @@ def validate_destination(
 ) -> Path:
     """Resolve an output path outside the input; an error names the ``option`` to change.
 
-    The path must be new, except that a ``folder`` may be an existing empty directory. With
-    ``force``, an earlier Fledge output may be named too: for a ``folder``, a directory
-    that publication wrote (one holding ``OUTPUT_MARKER``); for a file, one that begins
-    like a Fledge report. Such an output is replaced only once the new run has succeeded.
+    The path must be new, except that a ``folder`` may be an existing empty directory that
+    the current user owns. With ``force``, an earlier Fledge output may be named too: for a
+    ``folder``, a directory of the user's that publication wrote (one holding
+    ``OUTPUT_MARKER``); for a file, one that begins like a Fledge report. Such an output is
+    replaced only once the new run has succeeded.
 
     Args:
         source: The input project.
@@ -192,8 +169,8 @@ def validate_destination(
     resolved = destination.resolve()
     if destination.exists() or destination.is_symlink():
         if folder:
-            acceptable = _is_empty_directory(destination) or (
-                force and is_fledge_output(destination)
+            acceptable = is_empty_directory(destination) or (
+                force and is_replaceable_output(destination)
             )
         else:
             acceptable = force and is_fledge_report(destination)
@@ -221,26 +198,14 @@ def validate_destination(
     return resolved
 
 
-class _Replacement(NamedTuple):
-    """An earlier output being replaced: where the new one is written, and where it goes.
-
-    Attributes:
-        staging: The new sibling directory that receives the new output.
-        destination: The earlier output that the new one replaces once it is complete.
-    """
-
-    staging: Path
-    destination: Path
-
-
 class OutputTransaction:
     """Directories one publication writes; a failure removes everything it wrote.
 
-    ``create`` makes a new directory, fills an existing empty one, or, with
-    ``replace_previous``, writes the replacement of an earlier Fledge output into a sibling
-    directory. Leaving the block without an error swaps each replacement into place; a
-    failure removes the new directories, the contents written into empty ones and every
-    sibling, never previous or concurrent data.
+    ``create`` makes a new directory in place. For an existing empty directory, and, with
+    ``replace_previous``, for an earlier Fledge output, it makes a new sibling directory
+    instead, and leaving the block without an error moves each sibling into place. A
+    failure removes the directories the transaction created and nothing else, so previous
+    and concurrent data stay as they were.
 
     Args:
         progress: Receives a message when a failure starts the removal and another for
@@ -260,8 +225,7 @@ class OutputTransaction:
         replace_previous: bool = False,
     ) -> None:
         self._created: list[Path] = []
-        self._filled: list[Path] = []
-        self._replacements: list[_Replacement] = []
+        self._staged: list[StagedOutput] = []
         self._progress = progress or (lambda _message: None)
         self._report = report
         self._replace_previous = replace_previous
@@ -276,67 +240,62 @@ class OutputTransaction:
         traceback: TracebackType | None,
     ) -> None:
         if exc_type is None:
-            self._swap_replacements()
+            self._commit()
             return
         self._roll_back(exc_value)
 
     def _roll_back(self, cause: BaseException | None) -> None:
-        """Remove what the transaction wrote; announce it and name what stays behind.
+        """Remove the directories the transaction created; announce it and name what stays.
 
         Args:
             cause: The error that caused the rollback, which receives a note for each
                 directory that stays behind.
         """
-        if self._created or self._filled or self._replacements:
+        if self._created or self._staged:
             self._progress("Publication failed; removing the partial output")
         # Try every directory: one that cannot be removed must neither hide the error
         # that caused the rollback nor leave the remaining directories behind.
-        targets = [
-            *reversed(self._created),
-            *(replacement.staging for replacement in self._replacements),
-            *(child for path in self._filled for child in _children(path)),
-        ]
-        for path in targets:
+        for path in [*reversed(self._created), *(item.staging for item in self._staged)]:
             try:
-                if path.is_dir() and not path.is_symlink():
-                    shutil.rmtree(path)
-                else:
-                    path.unlink()
+                remove_tree(path)
             except FileNotFoundError:
                 continue
             except OSError as error:
                 self._report_leftover(path, error, cause)
 
-    def _swap_replacements(self) -> None:
-        """Move every replacement into place; on a failure, restore the earlier outputs.
+    def _commit(self) -> None:
+        """Move every staged output into place; on a failure, put the existing ones back.
 
         Raises:
-            PreparationError: A replacement could not be moved into place; every earlier
-                output is back where it was, and nothing new stays published.
+            PreparationError: An existing directory changed, or a staged output could not
+                be moved into place; every existing directory is back where it was, and
+                nothing new stays published.
         """
-        swapped: list[tuple[_Replacement, Path]] = []
-        for replacement in self._replacements:
+        moved: list[tuple[StagedOutput, Path | None]] = []
+        for staged in self._staged:
             try:
-                swapped.append((replacement, _swap(replacement)))
+                moved.append((staged, move_into_place(staged)))
             except OSError as error:
-                for done, earlier in reversed(swapped):
-                    if not _unswap(done, earlier):
+                for done, previous in reversed(moved):
+                    if not move_back(done, previous):
                         self._progress(
-                            f"Could not restore {done.destination}; the earlier output is in "
-                            f"{earlier}."
+                            f"Could not restore {done.destination}; its former contents are "
+                            f"in {previous or 'no folder'}."
                         )
                 self._roll_back(error)
                 if self._report is not None:
                     self._report.artifacts.clear()
                     locate_previews(self._report, ())
                 raise PreparationError(
-                    f"Could not replace the earlier output {replacement.destination} "
-                    f"({error.strerror or type(error).__name__}); it was kept and nothing "
-                    "new was published"
+                    f"Could not move the new output into {staged.destination} "
+                    f"({error.strerror or error}); it was left as it was and nothing new "
+                    "was published"
                 ) from error
-        for _, previous in swapped:
+        for _, previous in moved:
+            if previous is None:
+                continue
             try:
-                shutil.rmtree(previous)
+                remove_tree(previous)
             except OSError as error:
                 self._progress(
                     f"Could not remove the replaced output {previous} ({error}); remove it "
@@ -374,12 +333,13 @@ class OutputTransaction:
             )
 
     def create(self, path: Path, label: str = "Output") -> Path:
-        """Make ``path`` ready for writing and remember it for the rollback.
+        """Make a directory for what belongs in ``path`` and remember it for the rollback.
 
-        Inside a directory the transaction already writes, a subdirectory is made there.
-        Otherwise a new directory is created, an existing empty one is filled, or the
-        replacement of an earlier Fledge output is begun in a sibling directory; each of
-        those top-level directories receives ``OUTPUT_MARKER``.
+        Inside a directory the transaction writes, a subdirectory is made there. Otherwise
+        a new ``path`` is created exclusively; for an existing empty directory, or an
+        earlier Fledge output that may be replaced, a new sibling directory is created
+        instead, to take its place on success. Each such top-level directory receives
+        ``OUTPUT_MARKER``.
 
         Args:
             path: The directory to write.
@@ -387,7 +347,7 @@ class OutputTransaction:
 
         Returns:
             Where to write what belongs in ``path``: ``path`` itself, or the sibling
-            directory of a replacement.
+            directory that takes its place.
 
         Raises:
             PreparationError: Something else appeared at ``path`` while the job ran.
@@ -397,7 +357,7 @@ class OutputTransaction:
             written.mkdir()
             return written
         if path.exists() or path.is_symlink():
-            written = self._reuse(path, label)
+            written = self._stage(path, label)
         else:
             # mkdir is exclusive, so a concurrent creation is never written into.
             try:
@@ -405,124 +365,52 @@ class OutputTransaction:
             except FileExistsError as error:
                 raise PreparationError(f"{label} appeared while the job ran: {path}") from error
             self._created.append(path)
-        _write_new_text(written / OUTPUT_MARKER, _MARKER_TEXT.format(version=__version__))
+        _write_new_text(written / OUTPUT_MARKER, MARKER_TEXT.format(version=__version__))
         return written
 
-    def _reuse(self, path: Path, label: str) -> Path:
-        """Begin writing into the existing directory ``path``: fill it, or stage its replacement.
+    def _stage(self, path: Path, label: str) -> Path:
+        """Create the sibling directory that takes the place of the existing ``path``.
 
         Args:
-            path: The existing directory.
+            path: The existing directory: empty, or an earlier output that may be replaced.
             label: Names the output in the error message.
 
         Returns:
-            ``path`` when it is empty, or a new sibling directory for its replacement.
+            The new sibling directory.
 
         Raises:
-            PreparationError: ``path`` is neither empty nor a replaceable earlier output.
+            PreparationError: ``path`` is neither an empty directory of the user's nor a
+                replaceable earlier output.
         """
-        if _is_empty_directory(path):
-            self._filled.append(path)
-            return path
-        if not (self._replace_previous and is_fledge_output(path)):
+        if is_empty_directory(path):
+            replaces = False
+        elif self._replace_previous and is_replaceable_output(path):
+            replaces = True
+        else:
             raise PreparationError(f"{label} changed while the job ran: {path}")
-        staging = _new_sibling(path, _STAGING_PREFIX)
-        self._replacements.append(_Replacement(staging, path))
+        staging = new_sibling(path, STAGING_PREFIX)
+        self._staged.append(StagedOutput(staging, path, replaces))
         return staging
 
     def _inside_output(self, path: Path) -> bool:
         """Return whether ``path`` lies below a top-level directory this transaction writes."""
-        roots = [
-            *self._created,
-            *self._filled,
-            *(replacement.destination for replacement in self._replacements),
-        ]
+        roots = [*self._created, *(staged.destination for staged in self._staged)]
         return any(path != root and path.is_relative_to(root) for root in roots)
 
     def physical(self, path: Path) -> Path:
-        """Return where to write ``path``: inside the sibling of a replacement, or ``path``.
+        """Return where to write ``path``: inside the sibling that takes its place, or ``path``.
 
         Args:
             path: A path at or below an output of this transaction.
 
         Returns:
-            The corresponding path inside the replacement's sibling directory when
-            ``path`` lies in an output being replaced, otherwise ``path`` unchanged.
+            The corresponding path inside the sibling directory when ``path`` lies in an
+            existing directory whose place a staged output takes, otherwise ``path``.
         """
-        for staging, destination in self._replacements:
-            if path.is_relative_to(destination):
-                return staging / path.relative_to(destination)
+        for staged in self._staged:
+            if path.is_relative_to(staged.destination):
+                return staged.staging / path.relative_to(staged.destination)
         return path
-
-
-def _children(path: Path) -> list[Path]:
-    """List what the directory ``path`` holds; an unreadable directory holds nothing."""
-    try:
-        return sorted(path.iterdir())
-    except OSError:
-        return []
-
-
-def _new_sibling(path: Path, prefix: str) -> Path:
-    """Create a new hidden directory beside ``path`` whose name starts with ``prefix``.
-
-    Returns:
-        The new, empty directory.
-    """
-    while True:
-        sibling = path.parent / f"{prefix}{secrets.token_hex(4)}"
-        try:
-            sibling.mkdir()
-        except FileExistsError:
-            continue
-        return sibling
-
-
-def _swap(replacement: _Replacement) -> Path:
-    """Move an earlier output aside and its complete replacement into its place.
-
-    Args:
-        replacement: The replacement and the earlier output.
-
-    Returns:
-        Where the earlier output now is, a hidden sibling directory.
-
-    Raises:
-        OSError: A move failed; the earlier output is back in place when it can be.
-    """
-    previous = _new_sibling(replacement.destination, _REPLACED_PREFIX)
-    # Renaming a directory onto an empty one replaces it in one step.
-    replacement.destination.replace(previous)
-    try:
-        replacement.staging.rename(replacement.destination)
-    except OSError as error:
-        try:
-            previous.rename(replacement.destination)
-        except OSError:
-            error.add_note(f"The earlier output is now in {previous}.")
-        raise
-    return previous
-
-
-def _unswap(replacement: _Replacement, previous: Path) -> bool:
-    """Undo a completed swap: the replacement goes back beside, the earlier output returns.
-
-    The rollback that follows removes the replacement's sibling, never the earlier output.
-
-    Args:
-        replacement: The replacement that was swapped into place.
-        previous: Where the earlier output was moved.
-
-    Returns:
-        Whether the earlier output is back in place; when a move fails, the directories
-        stay where they are.
-    """
-    try:
-        replacement.destination.rename(replacement.staging)
-        previous.rename(replacement.destination)
-    except OSError:
-        return False
-    return True
 
 
 def _json_text(values: dict[str, object]) -> str:

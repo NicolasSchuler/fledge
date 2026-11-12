@@ -8,6 +8,7 @@ place once complete, so a run that fails or is blocked leaves the earlier output
 from __future__ import annotations
 
 import asyncio
+import os
 import shutil
 from pathlib import Path
 from unittest.mock import patch
@@ -17,14 +18,8 @@ from latexprep.core import run_job
 from latexprep.errors import PreparationError, RequestError
 from latexprep.findings import Finding
 from latexprep.job_context import JobRequest
-from latexprep.publication import (
-    OUTPUT_MARKER,
-    OutputTransaction,
-    is_fledge_output,
-    is_fledge_report,
-    publish_previews,
-    validate_destination,
-)
+from latexprep.publication import OutputTransaction, publish_previews, validate_destination
+from latexprep.publication_folders import OUTPUT_MARKER, is_fledge_output, is_fledge_report
 from latexprep.report import Report
 from tests.support import ProjectTestCase, controlled_backends, minimal_project
 
@@ -130,17 +125,35 @@ class TransactionTests(ProjectTestCase):
         (output / "old.txt").write_text("old\n")
         return output
 
-    def test_a_new_or_empty_folder_receives_the_marker(self) -> None:
+    def victim(self) -> Path:
+        """Create a folder ``victim`` with one file, which no publication may touch."""
+        victim = self.root / "victim"
+        victim.mkdir()
+        (victim / "precious.txt").write_text("keep\n")
+        return victim
+
+    def assert_untouched(self, victim: Path) -> None:
+        """Assert that ``victim`` still holds only its one file, unchanged."""
+        self.assertEqual([path.name for path in victim.iterdir()], ["precious.txt"])
+        self.assertEqual((victim / "precious.txt").read_text(), "keep\n")
+
+    def test_a_new_folder_is_written_in_place_and_an_empty_one_beside_it(self) -> None:
         empty = self.root / "empty"
         empty.mkdir()
         with OutputTransaction() as transaction:
             self.assertEqual(transaction.create(self.root / "new"), self.root / "new")
-            self.assertEqual(transaction.create(empty), empty)
-            (empty / "file.txt").write_text("x\n")
+            staging = transaction.create(empty)
+            self.assertNotEqual(staging, empty)
+            self.assertEqual(staging.parent, empty.parent)
+            (staging / "file.txt").write_text("x\n")
+            # Nothing is written into the existing folder before the block ends.
+            self.assertEqual(list(empty.iterdir()), [])
         for folder in (self.root / "new", empty):
             self.assertTrue(is_fledge_output(folder), folder)
+        self.assertEqual((empty / "file.txt").read_text(), "x\n")
+        self.assertEqual(leftovers(self.root), [])
 
-    def test_rolling_back_an_empty_folder_empties_it_again(self) -> None:
+    def test_rolling_back_leaves_an_empty_folder_as_it_was(self) -> None:
         empty = self.root / "empty"
         empty.mkdir()
         with self.assertRaises(RuntimeError), OutputTransaction() as transaction:
@@ -150,6 +163,112 @@ class TransactionTests(ProjectTestCase):
             raise RuntimeError("publication failed")
         self.assertTrue(empty.is_dir())
         self.assertEqual(list(empty.iterdir()), [])
+        self.assertEqual(leftovers(self.root), [])
+
+    def test_a_link_planted_in_an_empty_folder_fails_the_run_and_is_never_followed(self) -> None:
+        victim = self.victim()
+        empty = self.root / "empty"
+        empty.mkdir()
+        with self.assertRaisesRegex(PreparationError, "nothing new was published"):
+            with OutputTransaction() as transaction:
+                staging = transaction.create(empty)
+                (staging / "sources").mkdir()
+                (staging / "sources" / "main.tex").write_text("new\n")
+                # Someone plants a link where the output's sources will go.
+                (empty / "sources").symlink_to(victim)
+        self.assert_untouched(victim)
+        # The planted link is not the transaction's to delete; it stays, unfollowed.
+        self.assertEqual([path.name for path in empty.iterdir()], ["sources"])
+        self.assertTrue((empty / "sources").is_symlink())
+        self.assertEqual(leftovers(self.root), [])
+
+    def test_a_folder_replaced_by_a_link_is_refused(self) -> None:
+        for replaces in (False, True):
+            with self.subTest(replaces=replaces):
+                victim = self.victim()
+                if replaces:
+                    (victim / OUTPUT_MARKER).write_text("Fledge wrote this folder.\n")
+                    target = self.earlier_output()
+                else:
+                    target = self.root / "output"
+                    target.mkdir()
+                with self.assertRaisesRegex(PreparationError, "no longer a folder of yours"):
+                    with OutputTransaction(replace_previous=replaces) as transaction:
+                        (transaction.create(target) / "new.txt").write_text("new\n")
+                        shutil.rmtree(target)
+                        target.symlink_to(victim)
+                self.assertTrue(target.is_symlink())
+                self.assertEqual(
+                    sorted(path.name for path in victim.iterdir()),
+                    sorted(["precious.txt", *([OUTPUT_MARKER] if replaces else [])]),
+                )
+                self.assertEqual(leftovers(self.root), [])
+                target.unlink()
+                shutil.rmtree(victim)
+
+    def test_rollback_removes_only_what_the_transaction_created(self) -> None:
+        empty = self.root / "empty"
+        empty.mkdir()
+        output = self.earlier_output()
+        with self.assertRaises(RuntimeError):
+            with OutputTransaction(replace_previous=True) as transaction:
+                transaction.create(empty)
+                transaction.create(output)
+                transaction.create(self.root / "new")
+                # Someone else writes into the existing folders meanwhile.
+                (empty / "theirs.txt").write_text("theirs\n")
+                (output / "theirs.txt").write_text("theirs\n")
+                raise RuntimeError("publication failed")
+        self.assertEqual([path.name for path in empty.iterdir()], ["theirs.txt"])
+        self.assertEqual(
+            sorted(path.name for path in output.iterdir()), [OUTPUT_MARKER, "old.txt", "theirs.txt"]
+        )
+        self.assertFalse((self.root / "new").exists())
+        self.assertEqual(leftovers(self.root), [])
+
+    def test_removing_a_replaced_output_never_follows_a_link_in_it(self) -> None:
+        victim = self.victim()
+        output = self.earlier_output()
+        (output / "planted").symlink_to(victim)
+        with OutputTransaction(replace_previous=True) as transaction:
+            (transaction.create(output) / "new.txt").write_text("new\n")
+        self.assert_untouched(victim)
+        self.assertEqual(sorted(path.name for path in output.iterdir()), [OUTPUT_MARKER, "new.txt"])
+        self.assertEqual(leftovers(self.root), [])
+
+    def test_without_safe_tree_removal_nothing_is_removed_and_the_folders_are_named(self) -> None:
+        output = self.earlier_output()
+        messages: list[str] = []
+        with patch("latexprep.publication_folders.SAFE_TREE_REMOVAL", new=False):
+            with OutputTransaction(messages.append, replace_previous=True) as transaction:
+                (transaction.create(output) / "new.txt").write_text("new\n")
+            [replaced] = leftovers(self.root)
+            self.assertTrue(replaced.startswith(".fledge-replaced-"))
+            self.assertIn(
+                f"Could not remove the replaced output {self.root / replaced}", messages[-1]
+            )
+            with self.assertRaises(RuntimeError):
+                with OutputTransaction(messages.append) as transaction:
+                    transaction.create(self.root / "new")
+                    raise RuntimeError("publication failed")
+        self.assertTrue((self.root / "new").is_dir())
+        self.assertIn("remove it manually", messages[-1])
+
+    def test_a_folder_of_another_user_is_neither_accepted_nor_replaced(self) -> None:
+        empty = self.root / "empty"
+        empty.mkdir()
+        output = self.earlier_output()
+        with patch("os.getuid", return_value=os.getuid() + 1):
+            for folder, force in ((empty, False), (output, True)):
+                with self.subTest(folder=folder.name):
+                    with self.assertRaises(RequestError) as raised:
+                        validate_destination(
+                            self.root / "missing", folder, "output", folder=True, force=force
+                        )
+                    self.assertIn("belongs to another user", str(raised.exception))
+                    with self.assertRaisesRegex(PreparationError, "changed while the job ran"):
+                        with OutputTransaction(replace_previous=force) as transaction:
+                            transaction.create(folder)
 
     def test_a_replacement_is_written_beside_and_swapped_in_once_complete(self) -> None:
         output = self.earlier_output()
@@ -186,7 +305,7 @@ class TransactionTests(ProjectTestCase):
             return rename(path, target)
 
         with patch("latexprep.publication.Path.rename", new=refuse_staging):
-            with self.assertRaisesRegex(PreparationError, "it was kept and nothing new"):
+            with self.assertRaisesRegex(PreparationError, "left as it was and nothing new"):
                 with OutputTransaction(report=report, replace_previous=True) as transaction:
                     (transaction.create(output) / "new.txt").write_text("new\n")
         self.assertEqual(sorted(path.name for path in output.iterdir()), [OUTPUT_MARKER, "old.txt"])

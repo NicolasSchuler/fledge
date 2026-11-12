@@ -18,6 +18,7 @@ from click.shell_completion import CompletionItem
 
 from .check_selection import SELECTORS
 from .rules import BY_CODE
+from .text_safety import is_unsafe_character
 
 # The most entries the search for .tex files looks at, and how deep it goes below INPUT.
 _MAX_SCANNED_ENTRIES = 2000
@@ -79,7 +80,9 @@ def _tex_files(root: Path) -> list[str]:
     """List the ``.tex`` files below the folder ``root`` as relative POSIX paths.
 
     The walk visits at most ``_MAX_SCANNED_ENTRIES`` entries and ``_MAX_FOLDER_LEVELS``
-    folder levels, and skips hidden entries and links; an unreadable folder is skipped.
+    folder levels, and skips hidden entries, links and unreadable folders. A name with a
+    control, format or other unsafe character is left out: project names are untrusted,
+    and a line break would split one completion into two.
     """
     found: list[str] = []
     scanned = 0
@@ -94,9 +97,14 @@ def _tex_files(root: Path) -> list[str]:
         )
         for name in sorted(files):
             scanned += 1
-            path = Path(folder) / name
-            if name.lower().endswith(".tex") and not name.startswith(".") and not path.is_symlink():
-                found.append((relative / name).as_posix())
+            relative_name = (relative / name).as_posix()
+            if (
+                name.lower().endswith(".tex")
+                and not name.startswith(".")
+                and not any(map(is_unsafe_character, relative_name))
+                and not (Path(folder) / name).is_symlink()
+            ):
+                found.append(relative_name)
         scanned += len(folders)
         if scanned >= _MAX_SCANNED_ENTRIES:
             break

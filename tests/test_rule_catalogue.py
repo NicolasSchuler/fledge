@@ -156,6 +156,8 @@ class CompletionTests(unittest.TestCase):
                 (root / name).parent.mkdir(parents=True, exist_ok=True)
                 (root / name).write_text("x\n")
             (root / "linked.tex").symlink_to(root / "main.tex")
+            (root / "evil\x1b[31m.tex").write_text("x\n")
+            (root / "two\nlines.tex").write_text("x\n")
             self.assertEqual(
                 self.completions("check", str(root), "--main", ""),
                 ["main.tex", "sections/intro.tex"],
