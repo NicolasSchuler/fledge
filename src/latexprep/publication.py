@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import stat
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -388,8 +389,9 @@ class OutputTransaction:
             replaces = True
         else:
             raise PreparationError(f"{label} changed while the job ran: {path}")
+        mode = stat.S_IMODE(path.lstat().st_mode)
         staging = new_sibling(path, STAGING_PREFIX)
-        self._staged.append(StagedOutput(staging, path, replaces))
+        self._staged.append(StagedOutput(staging, path, replaces, mode))
         return staging
 
     def _inside_output(self, path: Path) -> bool:

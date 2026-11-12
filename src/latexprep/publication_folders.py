@@ -89,6 +89,10 @@ def is_replaceable_output(path: Path) -> bool:
     return is_fledge_output(path) and is_own_directory(path)
 
 
+# A staging or set-aside directory is private while the transaction uses it.
+_PRIVATE_DIRECTORY_MODE = 0o700
+
+
 class StagedOutput(NamedTuple):
     """An output written beside an existing directory, to take its place once complete.
 
@@ -98,11 +102,15 @@ class StagedOutput(NamedTuple):
         destination: The existing directory whose place the output takes.
         replaces: Whether ``destination`` is an earlier Fledge output that is replaced;
             otherwise it is an empty directory.
+        mode: The permission bits of ``destination`` when it was accepted, which the output
+            receives as it takes its place, so a folder the user kept private stays private.
+            Access control lists and extended attributes are not carried over.
     """
 
     staging: Path
     destination: Path
     replaces: bool
+    mode: int
 
 
 def remove_tree(path: Path) -> None:
@@ -126,13 +134,15 @@ def remove_tree(path: Path) -> None:
 def new_sibling(path: Path, prefix: str) -> Path:
     """Create a new hidden directory beside ``path`` whose name starts with ``prefix``.
 
+    The directory is readable by its owner only while the transaction uses it.
+
     Returns:
         The new, empty directory, created exclusively.
     """
     while True:
         sibling = path.parent / f"{prefix}{secrets.token_hex(4)}"
         try:
-            sibling.mkdir()
+            sibling.mkdir(mode=_PRIVATE_DIRECTORY_MODE)
         except FileExistsError:
             continue
         return sibling
@@ -178,6 +188,8 @@ def move_into_place(staged: StagedOutput) -> Path | None:
             is back in place when it can be.
     """
     _require_unchanged(staged)
+    # The output takes the permissions of the directory whose place it takes.
+    staged.staging.chmod(staged.mode)
     if not staged.replaces:
         # rmdir neither follows a link nor removes a directory that is no longer empty.
         staged.destination.rmdir()

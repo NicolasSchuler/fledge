@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import os
 import shutil
+import stat
 from pathlib import Path
 from unittest.mock import patch
 
@@ -151,6 +152,23 @@ class TransactionTests(ProjectTestCase):
         for folder in (self.root / "new", empty):
             self.assertTrue(is_fledge_output(folder), folder)
         self.assertEqual((empty / "file.txt").read_text(), "x\n")
+        self.assertEqual(leftovers(self.root), [])
+
+    def test_a_private_folder_stays_private_when_the_output_takes_its_place(self) -> None:
+        empty = self.root / "private"
+        empty.mkdir()
+        empty.chmod(0o700)
+        with OutputTransaction() as transaction:
+            directory = transaction.create(empty)
+            # While it is written, the staging folder beside it is private too.
+            self.assertEqual(stat.S_IMODE(directory.stat().st_mode) & 0o077, 0)
+            (directory / "report.json").write_text("{}\n")
+        self.assertEqual(stat.S_IMODE(empty.stat().st_mode), 0o700)
+        self.assertTrue((empty / "report.json").is_file())
+        empty.chmod(0o750)
+        with OutputTransaction(replace_previous=True) as transaction:
+            (transaction.create(empty) / "report.json").write_text("{}\n")
+        self.assertEqual(stat.S_IMODE(empty.stat().st_mode), 0o750)
         self.assertEqual(leftovers(self.root), [])
 
     def test_rolling_back_leaves_an_empty_folder_as_it_was(self) -> None:
