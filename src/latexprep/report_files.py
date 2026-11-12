@@ -8,8 +8,11 @@ and the printed report agree. Printing the final report is in ``report_formats``
 
 from __future__ import annotations
 
+import errno
+import os
 import secrets
-from dataclasses import dataclass
+import stat
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
@@ -19,7 +22,45 @@ from .diagnostic_bundle import export_redacted_diagnostic_bundle
 from .findings import Finding
 from .html_report import render_redacted_html
 from .publication import validate_destination
+from .publication_folders import is_fledge_report
 from .report import Outcome, RedactedReport, Report, redact_report, redacted_json
+
+# The permissions a temporary report file is created with: readable by its owner only when
+# it replaces an earlier report, whose permissions it receives once complete; otherwise
+# those of any new file, which the umask narrows.
+_PRIVATE_FILE_MODE = 0o600
+_NEW_FILE_MODE = 0o666
+
+
+class ReportIdentity(NamedTuple):
+    """Tells the earlier report that was validated from a file that took its place.
+
+    Attributes:
+        device: The device that holds the file (``st_dev``).
+        inode: The file's inode number (``st_ino``).
+    """
+
+    device: int
+    inode: int
+
+
+class ChangedReportError(FileExistsError):
+    """A report destination changed while the job ran, so the new report was kept beside it.
+
+    Args:
+        destination: The report file that was not written.
+
+    Attributes:
+        kept: The temporary file that holds the new report.
+    """
+
+    def __init__(self, destination: Path, kept: Path) -> None:
+        super().__init__(
+            errno.EEXIST,
+            f"it changed while the job ran, so it was left as it is; the new report is in {kept}",
+            str(destination),
+        )
+        self.kept = kept
 
 
 @dataclass(slots=True)
@@ -33,16 +74,33 @@ class ReportFiles:
         replace_existing: Whether the JSON and HTML destinations may hold an earlier
             Fledge report, as ``--force`` allows; it is then replaced only once the new
             file is completely written. Otherwise a file is created only where none exists.
+        earlier: The earlier Fledge report at a JSON or HTML destination when its option
+            was validated, by destination; only that file is replaced. A destination
+            without one held nothing.
     """
 
     json: Path | None = None
     html: Path | None = None
     diagnostics: Path | None = None
     replace_existing: bool = False
+    earlier: dict[Path, ReportIdentity] = field(default_factory=dict)
 
     def discard(self) -> None:
         """Forget every destination, so that no report file is written at all."""
         self.json = self.html = self.diagnostics = None
+
+    def remember_earlier_report(self, destination: Path) -> None:
+        """Record which file is at the validated ``destination``, if any, to replace only it.
+
+        Without ``replace_existing`` the destination holds nothing, so nothing is recorded.
+        """
+        if not self.replace_existing:
+            return
+        try:
+            status = destination.lstat()
+        except FileNotFoundError:
+            return
+        self.earlier[destination] = ReportIdentity(status.st_dev, status.st_ino)
 
 
 class RenderedReport(NamedTuple):
@@ -86,8 +144,10 @@ def resolve_report_files(
     files.replace_existing = force
     if json:
         files.json = validate_destination(source, json, "--json-report", force=force)
+        files.remember_earlier_report(files.json)
     if html:
         files.html = validate_destination(source, html, "--html-report", force=force)
+        files.remember_earlier_report(files.html)
     if diagnostics:
         files.diagnostics = validate_destination(source, diagnostics, "--diagnostics")
 
@@ -107,6 +167,16 @@ def record_write_failure(report: Report, option: str, destination: Path, error: 
         record_internal_error(report, error)
         return
     reason = error.strerror if isinstance(error, OSError) and error.strerror else str(error)
+    if isinstance(error, ChangedReportError):
+        suggestion = (
+            f"Check what took the place of {destination} while the job ran; keep the new "
+            f"report from {error.kept}, or rerun the command."
+        )
+    else:
+        suggestion = (
+            f"Choose a {option} path in a folder that exists and is writable, with no file at "
+            "that path yet, then rerun the command."
+        )
     report.outcome = Outcome.ERROR
     report.findings.append(
         Finding(
@@ -114,13 +184,79 @@ def record_write_failure(report: Report, option: str, destination: Path, error: 
             f"Cannot write {option} {destination}: {reason}",
             severity="error",
             status="failed",
-            suggestion=f"Choose a {option} path in a folder that exists and is writable, with "
-            "no file at that path yet, then rerun the command.",
+            suggestion=suggestion,
         )
     )
 
 
-def write_report_text(destination: Path, text: str, *, replace_existing: bool) -> None:
+def _write_temporary(destination: Path, text: str, *, private: bool) -> Path:
+    """Write ``text`` to a new temporary file beside ``destination``.
+
+    Args:
+        destination: The report file the temporary file is to replace.
+        text: The complete text of the report.
+        private: Whether only the owner may read the file, as when it replaces a report
+            that may be private; otherwise it gets the permissions of any new file.
+
+    Returns:
+        The temporary file.
+    """
+    temporary = destination.with_name(f".{destination.name}.{secrets.token_hex(8)}.tmp")
+    descriptor = os.open(
+        temporary,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+        _PRIVATE_FILE_MODE if private else _NEW_FILE_MODE,
+    )
+    try:
+        stream = os.fdopen(descriptor, "w", encoding="utf-8")
+    except BaseException:
+        os.close(descriptor)
+        temporary.unlink(missing_ok=True)
+        raise
+    try:
+        with stream:
+            stream.write(text)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+    return temporary
+
+
+def _earlier_report_mode(destination: Path, earlier: ReportIdentity | None) -> int | None:
+    """Return the permission bits of the validated earlier report that ``destination`` holds.
+
+    Args:
+        destination: The report destination.
+        earlier: The earlier report at ``destination`` when it was validated, if any.
+
+    Returns:
+        The permission bits, or ``None`` when nothing is at ``destination``.
+
+    Raises:
+        FileExistsError: Something else is there: a link, another file, or one that no
+            longer begins like a Fledge report.
+    """
+    try:
+        status = destination.lstat()
+    except FileNotFoundError:
+        return None
+    if (
+        earlier is None
+        or not stat.S_ISREG(status.st_mode)
+        or ReportIdentity(status.st_dev, status.st_ino) != earlier
+        or not is_fledge_report(destination)
+    ):
+        raise FileExistsError(errno.EEXIST, "it changed while the job ran", str(destination))
+    return stat.S_IMODE(status.st_mode)
+
+
+def write_report_text(
+    destination: Path,
+    text: str,
+    *,
+    replace_existing: bool,
+    earlier: ReportIdentity | None = None,
+) -> None:
     """Write one report file, never leaving a partial file at ``destination``.
 
     Args:
@@ -128,17 +264,33 @@ def write_report_text(destination: Path, text: str, *, replace_existing: bool) -
         text: The complete text of the file.
         replace_existing: Whether an earlier report at ``destination`` may be replaced. The
             text then goes to a temporary file beside it, which takes its place only once
-            it is complete; otherwise the file is created only if none exists.
+            it is complete, and only while ``destination`` holds nothing or still holds
+            ``earlier``; otherwise the file is created only if none exists.
+        earlier: The earlier report at ``destination`` when it was validated, if any. The
+            temporary file is private until it receives that report's permissions.
+
+    Raises:
+        ChangedReportError: Something else took the place of ``destination`` while the job
+            ran; it is left as it is, and the temporary file, which the error names, keeps
+            the new report.
+        OSError: The file could not be written.
     """
     if not replace_existing:
         with destination.open("x", encoding="utf-8") as stream:
             stream.write(text)
         return
-    # A new name of its own, created like any file so that it gets the usual permissions.
-    temporary = destination.with_name(f".{destination.name}.{secrets.token_hex(8)}.tmp")
+    temporary = _write_temporary(destination, text, private=earlier is not None)
     try:
-        with temporary.open("x", encoding="utf-8") as stream:
-            stream.write(text)
+        # Checked just before the replacement: nothing that appeared meanwhile is replaced.
+        mode = _earlier_report_mode(destination, earlier)
+    except FileExistsError:
+        raise ChangedReportError(destination, temporary) from None
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+    try:
+        if mode is not None:
+            temporary.chmod(mode)
         temporary.replace(destination)
     except BaseException:
         temporary.unlink(missing_ok=True)
@@ -171,7 +323,12 @@ def save_reports(
     if files.html is not None:
         try:
             html_document = render_redacted_html(public, preview_images=preview_images)
-            write_report_text(files.html, html_document, replace_existing=files.replace_existing)
+            write_report_text(
+                files.html,
+                html_document,
+                replace_existing=files.replace_existing,
+                earlier=files.earlier.get(files.html),
+            )
         except Exception as error:  # noqa: BLE001 - a failed file becomes a finding with its cause
             record_write_failure(report, "--html-report", files.html, error)
             public, html_document = redact_report(report), None
@@ -184,7 +341,12 @@ def save_reports(
     encoded = redacted_json(public)
     if files.json is not None:
         try:
-            write_report_text(files.json, encoded, replace_existing=files.replace_existing)
+            write_report_text(
+                files.json,
+                encoded,
+                replace_existing=files.replace_existing,
+                earlier=files.earlier.get(files.json),
+            )
         except Exception as error:  # noqa: BLE001 - a failed file becomes a finding with its cause
             record_write_failure(report, "--json-report", files.json, error)
             public, html_document = redact_report(report), None

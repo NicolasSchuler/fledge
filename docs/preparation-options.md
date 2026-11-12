@@ -158,6 +158,9 @@ Independent document work uses the same CPU, memory, build and render budgets;
 there is no additional unbounded worker pool. Default build concurrency remains
 one. Every report identifies the document and stage for each finding. A failed
 supplement blocks the entire release while retaining findings for all documents.
+The exit code follows those findings, as for a single document: 3 when a document
+needs a fix, and 4 when Fledge could not check one, for example after a build
+timeout.
 
 ## Preservation and explicit exceptions
 

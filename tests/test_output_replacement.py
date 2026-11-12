@@ -23,9 +23,10 @@ from latexprep.core import run_job
 from latexprep.errors import PreparationError, RequestError
 from latexprep.findings import Finding
 from latexprep.job_context import JobRequest
+from latexprep.pdf_artwork_options import PdfArtworkOptions
 from latexprep.publication import OutputTransaction, publish_previews, validate_destination
 from latexprep.publication_folders import OUTPUT_MARKER, is_fledge_output, is_fledge_report
-from latexprep.report import Report
+from latexprep.report import Outcome, Report
 from tests.support import ProjectTestCase, controlled_backends, minimal_project
 
 PASSED_COMPARISON = [
@@ -149,6 +150,23 @@ class ReportFileRerunTests(ProjectTestCase):
             ["notes.json", "paper", "report.json"],
         )
 
+    def test_a_replaced_report_file_keeps_its_permissions(self) -> None:
+        # Under the usual umask, a report created like any new file would be 0644.
+        self.addCleanup(os.umask, os.umask(0o022))
+        minimal_project(self.root / "paper")
+        report = self.root / "report.json"
+        command = ["inspect", str(self.root / "paper"), "--quiet", "--report", str(report)]
+        runner = CliRunner()
+        first = runner.invoke(cli, command)
+        self.assertIn(first.exit_code, {0, 1}, first.output)
+        report.chmod(0o600)
+        replaced = runner.invoke(cli, [*command, "--force"])
+        self.assertIn(replaced.exit_code, {0, 1}, replaced.output)
+        self.assertEqual(stat.S_IMODE(report.stat().st_mode), 0o600)
+        self.assertEqual(
+            sorted(path.name for path in self.root.iterdir()), ["paper", "report.json"]
+        )
+
 
 class TransactionTests(ProjectTestCase):
     """Filling, replacing and rolling back with :class:`OutputTransaction`."""
@@ -204,6 +222,38 @@ class TransactionTests(ProjectTestCase):
         with OutputTransaction(replace_previous=True) as transaction:
             (transaction.create(empty) / "report.json").write_text("{}\n")
         self.assertEqual(stat.S_IMODE(empty.stat().st_mode), 0o750)
+        self.assertEqual(leftovers(self.root), [])
+
+    def test_a_private_empty_folder_put_back_after_a_failed_swap_stays_private(self) -> None:
+        # Under the usual umask, a folder made with the default mode would be 0755.
+        self.addCleanup(os.umask, os.umask(0o022))
+        private = self.root / "private"
+        private.mkdir()
+        private.chmod(0o700)
+        rename = Path.rename
+
+        def refuse_staging(path: Path, target: Path) -> Path:
+            """Refuse to move a new output into place; move anything else."""
+            if path.name.startswith(".fledge-staging-"):
+                raise PermissionError(13, "Permission denied", str(path))
+            return rename(path, target)
+
+        # The output cannot move into the private folder, which is put back.
+        with patch("latexprep.publication.Path.rename", new=refuse_staging):
+            with self.assertRaisesRegex(PreparationError, "left as it was"):
+                with OutputTransaction() as transaction:
+                    (transaction.create(private) / "new.txt").write_text("new\n")
+        self.assertEqual(stat.S_IMODE(private.stat().st_mode), 0o700)
+        # A second output cannot move into its folder, so the first one moves back out.
+        other = self.root / "other"
+        other.mkdir()
+        with self.assertRaisesRegex(PreparationError, "left as it was"):
+            with OutputTransaction() as transaction:
+                (transaction.create(private) / "new.txt").write_text("new\n")
+                (transaction.create(other) / "new.txt").write_text("new\n")
+                (other / "theirs.txt").write_text("theirs\n")
+        self.assertEqual(stat.S_IMODE(private.stat().st_mode), 0o700)
+        self.assertEqual(list(private.iterdir()), [])
         self.assertEqual(leftovers(self.root), [])
 
     def test_rolling_back_leaves_an_empty_folder_as_it_was(self) -> None:
@@ -451,4 +501,100 @@ class PrepareRerunTests(ProjectTestCase):
         ):
             self.prepare(output, force=True)
         self.assertEqual((output / "report.json").read_text(), earlier)
+        self.assertEqual(leftovers(self.root), [])
+
+
+async def preview_measurement(_pdf, _root, _main, work, *_args, **_options) -> list[Finding]:
+    """Measure like the configured PDF checks: write one grayscale preview into ``work``."""
+    work.mkdir(parents=True)
+    preview = work / "gray.png"
+    preview.write_bytes(b"new preview")
+    return [
+        Finding(
+            "pdf.grayscale_preview",
+            "Generated",
+            severity="info",
+            status="passed",
+            details={"artifacts": [str(preview)]},
+        )
+    ]
+
+
+class PreviewRerunTests(ProjectTestCase):
+    """``check --preview-output DIR --force`` replaces an earlier preview folder only on success.
+
+    A blocked run still writes its previews into a new or empty folder.
+    """
+
+    def setUp(self) -> None:
+        """Write a passing project ``paper``, a ``broken`` one and earlier previews ``previews``.
+
+        ``broken`` inputs a file that does not exist, which the paper must fix.
+        """
+        super().setUp()
+        minimal_project(self.root / "paper")
+        self.write(
+            "broken/main.tex",
+            "\\documentclass{article}\n\\begin{document}\n\\input{absent}\n\\end{document}\n",
+        )
+        self.previews = self.root / "previews"
+        self.previews.mkdir()
+        (self.previews / OUTPUT_MARKER).write_text("Fledge wrote this folder.\n")
+        (self.previews / "page-0001.png").write_bytes(b"earlier preview")
+
+    def check(
+        self, project: str, previews: Path | None = None, messages: list[str] | None = None
+    ) -> Report:
+        """Check ``project`` with grayscale previews and force, with controlled tools.
+
+        Args:
+            project: The project folder in the test directory.
+            previews: The preview output; the earlier previews by default.
+            messages: Receives the progress messages, if given.
+
+        Returns:
+            The report of the job.
+        """
+        settings = Settings(rendered_pdf_artwork=PdfArtworkOptions(grayscale_preview=True))
+        request = JobRequest(
+            "check",
+            self.root / project,
+            settings,
+            preview_output=previews or self.previews,
+            force=True,
+        )
+        progress = messages.append if messages is not None else None
+        with patch(
+            "latexprep.document_tasks.inspect_configured_pdf_checks",
+            side_effect=preview_measurement,
+        ):
+            return asyncio.run(run_job(request, progress, backends=controlled_backends()))
+
+    def test_a_blocked_check_leaves_an_earlier_preview_folder_as_it_was(self) -> None:
+        messages: list[str] = []
+        report = self.check("broken", messages=messages)
+        self.assertEqual(report.outcome, Outcome.BLOCKED)
+        self.assertEqual(
+            sorted(path.name for path in self.previews.iterdir()), [OUTPUT_MARKER, "page-0001.png"]
+        )
+        self.assertEqual((self.previews / "page-0001.png").read_bytes(), b"earlier preview")
+        # The report points at no preview, and the progress says why.
+        self.assertEqual(report.artifacts, {})
+        (preview,) = [item for item in report.findings if item.rule == "pdf.grayscale_preview"]
+        self.assertEqual(preview.details["previews_exported"], 0)
+        self.assertTrue(any("Left the earlier preview output" in item for item in messages))
+        self.assertEqual(leftovers(self.root), [])
+
+    def test_a_blocked_check_still_writes_its_previews_into_a_new_folder(self) -> None:
+        fresh = self.root / "fresh"
+        report = self.check("broken", fresh)
+        self.assertEqual(report.outcome, Outcome.BLOCKED)
+        self.assertEqual((fresh / "page-0001.png").read_bytes(), b"new preview")
+        self.assertTrue(is_fledge_output(fresh))
+
+    def test_a_passing_check_replaces_the_earlier_preview_folder(self) -> None:
+        report = self.check("paper")
+        self.assertTrue(report.outcome.passed, report.outcome)
+        self.assertEqual((self.previews / "page-0001.png").read_bytes(), b"new preview")
+        self.assertTrue((self.previews / "report.json").is_file())
         self.assertEqual(leftovers(self.root), [])

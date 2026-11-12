@@ -89,7 +89,9 @@ not a link; an empty folder in which anything appeared meanwhile is left alone a
 the run fails. A blocked, failed or cancelled run leaves the existing folder as it
 was. Because of this, the folder that holds DIR must be writable, and DIR cannot be
 a mount point, such as a volume mounted into a container; give a new folder inside
-it instead.
+it instead. A blocked, failed or cancelled run also leaves an earlier
+`--preview-output` folder as it was, and writes its previews only into a new or
+empty one.
 
 ```sh
 fledge prepare paper -o submission          # first run: new or empty folder

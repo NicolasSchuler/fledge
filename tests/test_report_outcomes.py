@@ -122,6 +122,17 @@ class BlockedOrNotCheckedTests(unittest.TestCase):
         # A paper problem outside the stopped build still decides.
         self.assertEqual(blocked_outcome([*findings, MISSING_FILE]), Outcome.BLOCKED)
 
+    def test_the_summary_of_several_document_packages_decides_nothing(self):
+        # It fails whenever a document package failed, for the reasons that document's own
+        # findings give.
+        summary = Finding(
+            "package.independent_documents", "A document package failed.", severity="error"
+        )
+        timeout = baseline("build.timeout", "Stopped after 1 s.")
+        self.assertEqual(blocked_outcome([timeout, summary]), Outcome.ERROR)
+        self.assertEqual(blocked_outcome([timeout, summary, MISSING_FILE]), Outcome.BLOCKED)
+        self.assertEqual(blocked_outcome([summary]), Outcome.BLOCKED)
+
     def test_an_accepted_paper_problem_leaves_the_problem_that_prevented_checking(self):
         settings = Settings(
             reporting=ReportingOptions(

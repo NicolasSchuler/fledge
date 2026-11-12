@@ -167,6 +167,19 @@ def _require_unchanged(staged: StagedOutput) -> None:
         )
 
 
+def _restore_empty_directory(staged: StagedOutput) -> None:
+    """Put back the empty directory whose place the output was to take, with its mode.
+
+    ``mkdir`` applies the umask, which only removes permissions, so the directory is never
+    more open than it was; ``chmod`` then restores the recorded bits exactly.
+
+    Raises:
+        OSError: The directory could not be created or given its mode.
+    """
+    staged.destination.mkdir(mode=staged.mode)
+    staged.destination.chmod(staged.mode)
+
+
 def move_into_place(staged: StagedOutput) -> Path | None:
     """Move a complete output from its sibling into the place of the existing directory.
 
@@ -196,9 +209,8 @@ def move_into_place(staged: StagedOutput) -> Path | None:
         try:
             staged.staging.rename(staged.destination)
         except OSError:
-            # Put back the empty directory that the output was to take the place of.
             with suppress(OSError):
-                staged.destination.mkdir()
+                _restore_empty_directory(staged)
             raise
         return None
     previous = new_sibling(staged.destination, REPLACED_PREFIX)
@@ -235,7 +247,7 @@ def move_back(staged: StagedOutput, previous: Path | None) -> bool:
     try:
         staged.destination.rename(staged.staging)
         if previous is None:
-            staged.destination.mkdir()
+            _restore_empty_directory(staged)
         else:
             previous.rename(staged.destination)
     except OSError:

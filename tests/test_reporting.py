@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import os
+import stat
 import tempfile
 import unittest
 from dataclasses import replace
@@ -17,7 +19,13 @@ from latexprep.findings import Finding
 from latexprep.html_report import render_html
 from latexprep.measurement_findings import measurement_finding
 from latexprep.report import Change, ChangeKind, Outcome, Report
-from latexprep.report_files import write_report_text
+from latexprep.report_files import (
+    ChangedReportError,
+    ReportFiles,
+    ReportIdentity,
+    save_reports,
+    write_report_text,
+)
 from latexprep.report_formats import annotation_prefix, working_directory_path
 from latexprep.review_policy import (
     ReportingOptions,
@@ -645,31 +653,124 @@ class SettingsLineTests(unittest.TestCase):
 
 
 class ReportFileReplacementTests(unittest.TestCase):
-    """A report file is created only where none exists, or replaced whole when allowed."""
+    """A report file is created only where none exists, or replaced whole when allowed.
+
+    A replacement takes the place only of nothing or of the earlier report that was
+    validated, and keeps that report's permissions.
+    """
+
+    def setUp(self) -> None:
+        """Create a temporary folder ``root`` for ``report.json``, under the usual umask."""
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.destination = self.root / "report.json"
+        self.addCleanup(os.umask, os.umask(0o022))
+
+    def validated(self) -> ReportIdentity | None:
+        """Validate ``report.json`` for replacement as ``--force`` does; return what it holds."""
+        files = ReportFiles(replace_existing=True)
+        files.remember_earlier_report(self.destination)
+        return files.earlier.get(self.destination)
 
     def test_a_new_file_is_never_written_over_an_existing_one(self):
-        with tempfile.TemporaryDirectory() as directory:
-            destination = Path(directory) / "report.json"
-            write_report_text(destination, "first\n", replace_existing=False)
-            with self.assertRaises(FileExistsError):
-                write_report_text(destination, "second\n", replace_existing=False)
-            self.assertEqual(destination.read_text(), "first\n")
+        write_report_text(self.destination, "first\n", replace_existing=False)
+        with self.assertRaises(FileExistsError):
+            write_report_text(self.destination, "second\n", replace_existing=False)
+        self.assertEqual(self.destination.read_text(), "first\n")
 
     def test_an_allowed_replacement_happens_only_once_the_new_file_is_complete(self):
-        with tempfile.TemporaryDirectory() as directory:
-            destination = Path(directory) / "report.json"
-            destination.write_text("earlier report\n")
-            with (
-                patch("latexprep.report_files.Path.replace", side_effect=OSError("full")),
-                self.assertRaises(OSError),
-            ):
-                write_report_text(destination, "new report\n", replace_existing=True)
-            # A failure leaves the earlier report and no temporary file behind.
-            self.assertEqual(destination.read_text(), "earlier report\n")
-            self.assertEqual(sorted(Path(directory).iterdir()), [destination])
-            write_report_text(destination, "new report\n", replace_existing=True)
-            self.assertEqual(destination.read_text(), "new report\n")
-            self.assertEqual(sorted(Path(directory).iterdir()), [destination])
+        earlier_report = Report("inspect").to_json()
+        self.destination.write_text(earlier_report)
+        earlier = self.validated()
+        with (
+            patch("latexprep.report_files.Path.replace", side_effect=OSError("full")),
+            self.assertRaises(OSError),
+        ):
+            write_report_text(
+                self.destination, "new report\n", replace_existing=True, earlier=earlier
+            )
+        # A failure leaves the earlier report and no temporary file behind.
+        self.assertEqual(self.destination.read_text(), earlier_report)
+        self.assertEqual(sorted(self.root.iterdir()), [self.destination])
+        write_report_text(self.destination, "new report\n", replace_existing=True, earlier=earlier)
+        self.assertEqual(self.destination.read_text(), "new report\n")
+        self.assertEqual(sorted(self.root.iterdir()), [self.destination])
+
+    def test_a_replaced_report_keeps_its_permissions_and_is_private_while_written(self):
+        self.destination.write_text(Report("inspect").to_json())
+        self.destination.chmod(0o640)
+        created_modes = []
+        open_file = os.open
+
+        def recording_open(path, flags, *arguments, **options):
+            """Open like ``os.open`` and record the mode of each file it creates."""
+            if flags & os.O_CREAT:
+                created_modes.append(arguments[0])
+            return open_file(path, flags, *arguments, **options)
+
+        earlier = self.validated()
+        with patch("latexprep.report_files.os.open", side_effect=recording_open):
+            write_report_text(
+                self.destination, "new report\n", replace_existing=True, earlier=earlier
+            )
+        self.assertEqual(created_modes, [0o600])
+        self.assertEqual(stat.S_IMODE(self.destination.stat().st_mode), 0o640)
+        self.assertEqual(self.destination.read_text(), "new report\n")
+
+    def test_a_destination_that_changed_is_left_and_the_new_report_kept_beside_it(self):
+        other = self.root / "other.json"
+
+        def write_a_file() -> None:
+            """Write a file where none was when the destination was validated."""
+            self.destination.write_text("theirs\n")
+
+        def move_another_report_in() -> None:
+            """Move another Fledge report into the place of the validated one."""
+            other.replace(self.destination)
+
+        def link_another_report() -> None:
+            """Put a link to another Fledge report in the place of the validated one."""
+            self.destination.unlink()
+            self.destination.symlink_to(other)
+
+        cases = (
+            ("a file appeared", False, write_a_file),
+            ("another report took the place", True, move_another_report_in),
+            ("a link took the place", True, link_another_report),
+        )
+        for name, earlier_report, change in cases:
+            with self.subTest(name):
+                other.write_text(Report("check").to_json())
+                if earlier_report:
+                    self.destination.write_text(Report("inspect").to_json())
+                earlier = self.validated()
+                change()
+                before = self.destination.lstat()
+                with self.assertRaises(ChangedReportError) as raised:
+                    write_report_text(
+                        self.destination, "new report\n", replace_existing=True, earlier=earlier
+                    )
+                self.assertEqual(self.destination.lstat(), before)
+                kept = raised.exception.kept
+                self.assertEqual(kept.read_text(), "new report\n")
+                self.assertIn(str(kept), raised.exception.strerror)
+                kept.unlink()
+                self.destination.unlink()
+
+    def test_a_refused_replacement_is_recorded_with_where_the_new_report_is(self):
+        files = ReportFiles(json=self.destination, replace_existing=True)
+        # Nothing was at the destination when it was validated; a file appeared since.
+        self.destination.write_text("theirs\n")
+        report = Report("inspect", outcome=Outcome.PASSED)
+        save_reports(report, files, None)
+        self.assertEqual(self.destination.read_text(), "theirs\n")
+        self.assertEqual(report.outcome, Outcome.ERROR)
+        (failure,) = [item for item in report.findings if item.rule == "report.write"]
+        (kept,) = self.root.glob(".report.json.*.tmp")
+        self.assertIn(str(kept), failure.message)
+        self.assertIn(str(kept), failure.suggestion or "")
+        self.assertEqual(json.loads(kept.read_text())["command"], "inspect")
 
 
 class SetupLocationTests(unittest.TestCase):

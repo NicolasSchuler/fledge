@@ -411,11 +411,12 @@ def _withheld_report(command: str, cause: str) -> Report:
 def blocked_outcome(findings: Iterable[Finding]) -> Outcome:
     """Tell a paper that needs a fix from a run that Fledge could not check.
 
-    Only blocking findings count. A build result that merely restates the failure that
-    stopped the build (``Finding.is_build_follow_on``), and a result of the truncated log of a
-    build that a tool, time or resource problem stopped (``follows_stopped_build``), decide
-    nothing. A paper problem wins over a problem that prevented checking, so exit code 3
-    always means that the paper needs a fix.
+    Only blocking findings count. A result that merely restates others reported beside it
+    (``Finding.is_follow_on``: the failure that stopped a build, or the summary of a
+    multi-document preparation), and a result of the truncated log of a build that a tool,
+    time or resource problem stopped (``follows_stopped_build``), decide nothing. A paper
+    problem wins over a problem that prevented checking, so exit code 3 always means that
+    the paper needs a fix.
 
     Args:
         findings: The open findings of a blocked run.
@@ -429,9 +430,7 @@ def blocked_outcome(findings: Iterable[Finding]) -> Outcome:
     deciding = [
         item
         for item in findings
-        if item.is_blocking
-        and not item.is_build_follow_on
-        and not follows_stopped_build(item, stopped)
+        if item.is_blocking and not item.is_follow_on and not follows_stopped_build(item, stopped)
     ]
     if deciding and all(item.prevents_checking for item in deciding):
         return Outcome.ERROR

@@ -447,6 +447,14 @@ GLOSSARY_ARTICLE = _article(
     "description={A maximum-margin classifier}}\n"
     "\\newacronym{gpu}{GPU}{graphics processing unit}\n",
 )
+# A glossary written for xindy without its style file (\noist): makeindex cannot read it,
+# and running makeindex without the style file failed the build.
+XINDY_GLOSSARY_ARTICLE = _article(
+    "We train a \\gls{svm}.\n\\printglossaries",
+    "\\usepackage[xindy]{glossaries}\n\\noist\n\\makeglossaries\n"
+    "\\newglossaryentry{svm}{name={support vector machine},"
+    "description={A maximum-margin classifier}}\n",
+)
 # An index, which latexmk builds itself, and a nomenclature, which needs Fledge's rule.
 INDEX_ARTICLE = _article(
     "Gradient descent\\index{gradient descent} minimises a loss\\index{loss function}.\n"
@@ -550,6 +558,25 @@ class LiveEngineSelectionTests(AsyncLiveProjectTestCase):
         text = pdf_text(self.base / "prepared" / "manuscript.pdf")
         for expected in ("Glossary", "A maximum-margin classifier", "Acronyms", "graphics"):
             self.assertIn(expected, text)
+
+    async def test_a_glossary_written_for_xindy_is_left_unbuilt_and_reported(self) -> None:
+        """Check that a glossary written for xindy is not built, and that TEX012 says why.
+
+        makeindex is not run on it, so the missing style file no longer fails the build;
+        the package ships no empty glossary file in place of the one makeglossaries writes.
+        """
+        self.require_tools("latexmk", "pdflatex", *POPPLER_TOOLS)
+        self.installed_tex_file("glossaries.sty", "tlmgr install glossaries")
+        source = write_project(self.base / "xindy", {"main.tex": XINDY_GLOSSARY_ARTICLE})
+        report = await self.prepare(source, expect=Outcome.PASSED_WITH_ADVISORIES)
+        unbuilt = _finding(report, "TEX012")
+        self.assertIn("main.gls was not built", unbuilt.message)
+        self.assertIn("xindy, which is not available in the isolated build", unbuilt.message)
+        self.assertEqual(
+            sorted(path.name for path in (self.base / "prepared" / "sources").iterdir()),
+            ["main.tex"],
+        )
+        self.assertNotIn("Glossary", pdf_text(self.base / "prepared" / "manuscript.pdf"))
 
     async def test_index_and_nomenclature_are_built(self) -> None:
         """Check that the index and the nomenclature appear in the prepared PDF."""

@@ -70,6 +70,10 @@ FOLLOW_ON_BUILD_RULES = frozenset(
     {"build.failed", "build.missing_pdf", "build.submission_dependencies"}
 )
 _BUILD_FAMILY = "build."
+# The summary of a multi-document preparation, which fails when any document package was
+# not verified. That document's own findings say why, so the summary never decides on its
+# own whether the paper needs a fix or Fledge could not check.
+DOCUMENT_SUMMARY_RULE = "package.independent_documents"
 
 
 class EvidenceKind(StrEnum):
@@ -202,6 +206,17 @@ class Finding:
             and self.rule not in BY_NAME
             and self.rule not in OPERATIONAL_RULE_NAMES
         )
+
+    @property
+    def is_follow_on(self) -> bool:
+        """A result that only restates other results reported beside it.
+
+        These are the build results of ``is_build_follow_on`` and the summary of a
+        multi-document preparation (``DOCUMENT_SUMMARY_RULE``), whose documents' own
+        findings say why a package was not verified. Neither decides on its own whether the
+        paper needs a fix or Fledge could not check.
+        """
+        return self.is_build_follow_on or self.rule == DOCUMENT_SUMMARY_RULE
 
     @property
     def is_scope_disclaimer(self) -> bool:

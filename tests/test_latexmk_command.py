@@ -45,14 +45,11 @@ class GlossaryRuleTests(unittest.TestCase):
             "CALLS": str(self.calls),
         }
 
-    def call(self, rule: str) -> list[str]:
-        """Run the Perl subroutine ``rule`` on ``output/main`` and return makeindex's call.
+    def run_rule(self, rule: str) -> None:
+        """Run the Perl subroutine ``rule`` on ``output/main`` and require it to succeed.
 
         Args:
             rule: The name of the rule's subroutine.
-
-        Returns:
-            The folder makeindex ran in, then its arguments.
         """
         program = (
             "use File::Basename; use Cwd; sub add_cus_dep {} "
@@ -67,6 +64,17 @@ class GlossaryRuleTests(unittest.TestCase):
             timeout=60,
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
+
+    def call(self, rule: str) -> list[str]:
+        """Run the Perl subroutine ``rule`` on ``output/main`` and return makeindex's call.
+
+        Args:
+            rule: The name of the rule's subroutine.
+
+        Returns:
+            The folder makeindex ran in, then its arguments.
+        """
+        self.run_rule(rule)
         call = self.calls.read_text().split("--\n")[-2].splitlines()
         self.calls.unlink()
         return call
@@ -86,6 +94,16 @@ class GlossaryRuleTests(unittest.TestCase):
             arguments,
             ["-q", "-s", "custom.ist", "-l", "-t", "main.alg", "-o", "main.acr", "main.acn"],
         )
+
+    def test_a_style_for_xindy_leaves_the_lists_empty_without_running_makeindex(self) -> None:
+        # makeindex cannot read glossaries written for xindy, and without their style file
+        # (\noist) it fails the build; latexmk fails a rule that makes no output.
+        (self.output / "main.aux").write_text("\\relax\n\\@istfilename{main.xdy}\n")
+        for rule, output in (("fledge_glossary", "main.gls"), ("fledge_acronyms", "main.acr")):
+            with self.subTest(rule=rule):
+                self.run_rule(rule)
+                self.assertFalse(self.calls.exists())
+                self.assertEqual((self.output / output).read_bytes(), b"")
 
     def test_defaults_without_aux_records_and_the_nomenclature(self) -> None:
         _, *arguments = self.call("fledge_glossary")

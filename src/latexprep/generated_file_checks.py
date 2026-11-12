@@ -163,15 +163,20 @@ def check_generated_lists(
     ]
 
 
-def never_created_findings(never_created: tuple[str, ...], main: str) -> list[Finding]:
+def never_created_findings(
+    never_created: tuple[str, ...], main: str, *, xindy: tuple[str, ...] = ()
+) -> list[Finding]:
     """Report the generated lists a build looked for that no tool wrote.
 
     The document wrote entries for each list (the tool's input is not empty), so the
-    PDF lacks it.
+    PDF lacks it. A glossary list written for xindy is not built at all, because the
+    isolated build does not run xindy, and its finding says so.
 
     Args:
         never_created: The never-created files, relative to the build's output folder.
         main: The main file, which the findings name.
+        xindy: The files among them that the build left empty because the glossaries
+            package writes them for xindy.
 
     Returns:
         One warning per file, naming what it holds and the tool that writes it.
@@ -181,18 +186,30 @@ def never_created_findings(never_created: tuple[str, ...], main: str) -> list[Fi
         kind = generated_kind(name)
         if kind is None:
             continue
+        if name in xindy:
+            tool = f"{kind.tool} with xindy"
+            message = (
+                f"The {kind.content} in {name} was not built, so the PDF has none: the "
+                "glossaries package writes it for xindy, which is not available in the "
+                "isolated build."
+            )
+        else:
+            tool = kind.tool
+            message = (
+                f"The build looked for {name}, but no tool wrote it, so the PDF has no "
+                f"{kind.content}: {production_hint(name)}."
+            )
         findings.append(
             Finding(
                 _RULE,
-                f"The build looked for {name}, but no tool wrote it, so the PDF has no "
-                f"{kind.content}: {production_hint(name)}.",
+                message,
                 severity="warning",
                 status="failed",
                 path=main,
                 evidence_kind=EvidenceKind.DIRECT,
-                suggestion=f"Run {kind.tool} locally and ship {name} beside the main file; the "
+                suggestion=f"Run {tool} locally and ship {name} beside the main file; the "
                 "isolated build then reads it instead of an empty list.",
-                details={"never_created": name, "tool": kind.tool},
+                details={"never_created": name, "tool": tool},
             )
         )
     return findings

@@ -33,9 +33,13 @@ MAX_LATEXMK_PASSES = 5
 # rule database shows which rule wrote which file: the glossary (.glo to .gls) and the list
 # of acronyms (.acn to .acr) with the style file and order that the glossaries package
 # recorded in the .aux file, and the nomenclature (.nlo to .nls) with nomencl's style.
-# makeindex runs in the output folder, because the paranoid openout_any setting refuses a
-# path into a parent directory. Only latexmk's base name reaches the commands, as a list
-# argument that no shell interprets.
+# A recorded style ending in .xdy means that the glossaries are written for xindy, which
+# the isolated build does not run and whose input makeindex cannot read. The glossary and
+# acronym rules then leave their list empty instead of running makeindex, because latexmk
+# fails a rule that makes no output; the build evidence reports such a list as not built
+# (``build_dependencies``). makeindex runs in the output folder, because the paranoid
+# openout_any setting refuses a path into a parent directory. Only latexmk's base name
+# reaches the commands, as a list argument that no shell interprets.
 GLOSSARY_RULES = (
     'add_cus_dep("glo", "gls", 0, "fledge_glossary"); '
     'add_cus_dep("acn", "acr", 0, "fledge_acronyms"); '
@@ -50,9 +54,12 @@ GLOSSARY_RULES = (
     "$style = $1 if $line =~ /\\\\\\@istfilename\\{([^{}]+)\\}/; "
     '$order = "-l" if $line =~ /\\\\\\@glsorder\\{letter\\}/; } close($aux); } '
     "return ($style, $order); } "
+    "sub fledge_unbuilt_list { open(my $list, '>', $_[0]) or return 1; close($list); "
+    'warn "Fledge: left $_[0] empty: its glossary is written for xindy\\n"; return 0; } '
     "sub fledge_glossary_index { my ($base, $log, $output, $input) = @_; "
     "my ($name) = File::Basename::fileparse($base); "
     "my ($style, $order) = fledge_glossary_style($base, $name); "
+    'return fledge_unbuilt_list("$base.$output") if $style =~ /\\.xdy\\z/; '
     'return fledge_makeindex($base, "-s", $style, grep({ $_ ne "" } $order), '
     '"-t", "$name.$log", "-o", "$name.$output", "$name.$input"); } '
     'sub fledge_glossary { return fledge_glossary_index($_[0], "glg", "gls", "glo"); } '

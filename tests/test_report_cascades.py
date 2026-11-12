@@ -593,6 +593,26 @@ class FollowOnTests(unittest.TestCase):
         # The TeX error that names the missing file comes first, before TeX's closing line.
         self.assertIn("File `figures/plot' not found", views[1].message)
 
+    def test_the_failed_summary_of_several_documents_follows_their_problem(self):
+        problem = baseline(
+            "build.tex_error",
+            "./extra.tex:3: Undefined control sequence.",
+            path="extra.tex",
+            line=3,
+        )
+        summary = Finding(
+            "package.independent_documents",
+            "At least one selected document package failed verification.",
+            severity="error",
+        )
+        report = Report("prepare", outcome=Outcome.BLOCKED, findings=[summary, problem])
+        views = finding_views(redact_report(report), show_hidden=False)
+        self.assertEqual(
+            [(view.code, view.cause) for view in views],
+            [("BLD009", ""), ("PKG301", "BLD009 extra.tex:3")],
+        )
+        self.assertIn("Blocked: 1 problem to fix. Start with BLD009", render_terminal(report))
+
     def test_the_terminal_report_groups_follow_ons_and_ends_with_the_verdict(self):
         text = render_terminal(self.report())
         self.assertIn("6 errors, 1 warning, 3 incomplete, 0 not applicable, 0 passed results", text)

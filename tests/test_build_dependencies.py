@@ -468,6 +468,36 @@ class SubmissionDependenciesTests(ProjectTestCase):
         self.assertEqual(result.never_created, ("main.nls",))
         self.assertEqual(result.to_details()["never_created"], ["main.nls"])
 
+    def test_a_glossary_written_for_xindy_is_named_as_not_built_and_not_shipped(self):
+        """Name the empty glossary the rule left for xindy; a makeindex glossary is shipped.
+
+        The glossary rule of ``latexmk_command`` leaves ``main.gls`` empty when ``main.aux``
+        records an xindy style, and the document then lacks its glossary.
+        """
+        (self.output / "main.glo").write_text('(indexentry :tkey (("svm" "svm")) :locref "1")\n')
+        (self.output / "main.gls").write_text("")
+        glossary = rule(
+            "cusdep glo gls ../../output/main",
+            "../../output/main.glo",
+            "../../output/main.gls",
+            [("../../output/main.glo", "pdflatex")],
+        )
+        for style, xindy in (("main.xdy", True), ("main.ist", False)):
+            with self.subTest(style=style):
+                (self.output / "main.aux").write_text(f"\\relax\n\\@istfilename{{{style}}}\n")
+                self.evidence(
+                    ("../../output/main.gls",),
+                    generated=("../../output/main.glo",),
+                    extra_rules=glossary,
+                    producers={"../../output/main.gls": "cusdep glo gls ../../output/main"},
+                )
+                result = self.collect()
+                self.assertEqual(result.inputs, {"article/main.tex"}, result.to_details())
+                self.assertIn("main.gls", result.generated_reads)
+                self.assertEqual(result.xindy_lists, ("main.gls",) if xindy else ())
+                self.assertEqual(result.never_created, ("main.gls",) if xindy else ())
+                self.assertEqual("main.gls" in result.generated_files, not xindy)
+
     def test_a_generated_input_without_a_producer_names_the_tool_that_writes_it(self):
         (self.output / "main.gls").write_text("glossary")
         self.evidence(("../../output/main.gls",))

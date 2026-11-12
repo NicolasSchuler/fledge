@@ -595,6 +595,25 @@ class NeverCreatedListTests(ReadinessCase):
         lists = [item for item in report.findings if item.code == "TEX012"]
         self.assertEqual([(item.status, item.stage) for item in lists], [("failed", "baseline")])
 
+    def test_a_glossary_written_for_xindy_says_that_xindy_is_not_available(self) -> None:
+        self.document()
+
+        async def build(tree, main, work, engine, runner, **options):
+            """Build like ``fake_build`` and report a glossary left empty for xindy."""
+            result = await fake_build(tree, main, work, engine, runner, **options)
+            result.tools.submission_dependencies = SubmissionDependencies(
+                {"main.tex"}, never_created=("main.gls",), xindy_lists=("main.gls",)
+            )
+            return result
+
+        backends = controlled_backends(build=build)
+        report = asyncio.run(run_job(JobRequest("check", self.root, Settings()), backends=backends))
+        (finding,) = [item for item in report.findings if item.code == "TEX012"]
+        self.assertEqual((finding.severity, finding.status), ("warning", "failed"))
+        self.assertIn("The glossary in main.gls was not built", finding.message)
+        self.assertIn("xindy, which is not available in the isolated build", finding.message)
+        self.assertIn("Run makeglossaries with xindy locally and ship main.gls", finding.suggestion)
+
 
 class VenueEngineTests(ReadinessCase):
     """The engines the receiving service offers (TEX013)."""

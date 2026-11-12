@@ -527,12 +527,14 @@ async def _baseline_build(context: JobContext, source: Path, main: str) -> Build
     Returns:
         The build result, with a ``source.generated_lists`` warning for every index,
         glossary or nomenclature file that no tool wrote although the document has entries
-        for it.
+        for it, including a glossary written for xindy, which the build does not run.
     """
     result = await build_document(context, source, main, "baseline")
     dependencies = result.tools.submission_dependencies
     if dependencies is not None:
-        result.findings.extend(never_created_findings(dependencies.never_created, main))
+        result.findings.extend(
+            never_created_findings(dependencies.never_created, main, xindy=dependencies.xindy_lists)
+        )
     return result
 
 

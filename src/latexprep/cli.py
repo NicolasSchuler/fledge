@@ -138,7 +138,7 @@ def _internal_failure(error: Exception, during: str = "") -> _InternalFailure:
             ``" while writing the report"``.
 
     Returns:
-        The exception to show, with the error exit code.
+        The exception to show, with the internal-error exit code.
     """
     print_debug_traceback(error)
     return _InternalFailure(
@@ -859,8 +859,8 @@ def _execute(command: JobCommand, arguments: dict[str, Any]) -> int:
 def main(argv: list[str] | None = None) -> int:
     """Return an exit code for console scripts, embedding, and existing callers.
 
-    Whatever goes wrong, the code is never one that means success: a defect is exit
-    code 4, the same as any other error.
+    Whatever goes wrong, the code is never one that means success: a defect in Fledge is
+    exit code 70, distinct from 4, which means that Fledge could not check the input.
 
     Args:
         argv: The command-line arguments without the program name; ``None`` reads them from
@@ -882,7 +882,7 @@ def main(argv: list[str] | None = None) -> int:
         # Output the reader no longer wants; the command itself had finished.
         discard_closed_stdout()
         return 0
-    except Exception as error:  # noqa: BLE001 - last boundary: a defect becomes exit code 4
+    except Exception as error:  # noqa: BLE001 - last boundary: a defect becomes exit code 70
         failure = _internal_failure(error)
         failure.show()
         return failure.exit_code

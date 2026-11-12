@@ -39,6 +39,13 @@ _HEADER = re.compile(
 _INPUT = re.compile(rf'"([^"\r\n]+)" ({_NUMBER}) (-?\d+) ([0-9a-fA-F]{{32}}|0) "([^"\r\n]*)"')
 _PATH_ROW = re.compile(r'"([^"\r\n]+)"')
 _RECORDER_KINDS = frozenset({"PWD", "INPUT", "OUTPUT"})
+# The style file that the glossaries package records in the .aux file; the last record
+# counts, as for the glossary rules of ``latexmk_command``. A style for xindy makes those
+# rules leave the glossary and the list of acronyms empty instead of running makeindex.
+_GLOSSARY_STYLE_RECORD = re.compile(rb"\\@istfilename\{([^{}\r\n]+)\}")
+_XINDY_STYLE_SUFFIX = b".xdy"
+# The suffix of each list those rules leave empty, with the suffix of its tool input.
+_XINDY_LIST_INPUTS = {".gls": ".glo", ".acr": ".acn"}
 
 
 class _DatabaseSection(Enum):
@@ -131,11 +138,14 @@ class SubmissionDependencies:
             directory or project that holds them, for example ``main.bbl`` written by
             BibTeX or Biber.
         generated_files: Where each generated file the build read lies, by its name in
-            ``generated_reads``; preparation ships the index and glossary files from here.
+            ``generated_reads``, except the lists in ``xindy_lists``; preparation ships the
+            index and glossary files from here.
         never_created: The generated files the run looked for that no tool wrote although
             the tool's input has entries, relative to the output directory, such as
             ``main.nls`` when nomencl's makeindex step did not run. The document then lacks
             that list.
+        xindy_lists: The files in ``never_created`` that the build left empty because the
+            glossaries package writes them for xindy, which the isolated build does not run.
     """
 
     inputs: set[str] | None
@@ -146,6 +156,7 @@ class SubmissionDependencies:
     generated_reads: frozenset[str] = frozenset()
     generated_files: Mapping[str, Path] = field(default_factory=dict)
     never_created: tuple[str, ...] = ()
+    xindy_lists: tuple[str, ...] = ()
 
     def to_details(self) -> dict[str, object]:
         """Build the report entry: what was consulted, and the counts or the uncertainty.
@@ -856,6 +867,56 @@ def _has_entries(path: Path) -> bool:
         return False
 
 
+def _xindy_lists(request: DependencyRequest, rules: list[_LatexmkRule]) -> tuple[str, ...]:
+    """Find the glossary lists that the build left empty because they are written for xindy.
+
+    The glossary rules of ``latexmk_command`` write an empty glossary or list of acronyms
+    when the ``.aux`` file next to it records an xindy style. Only lists whose tool input
+    has entries count, as for :func:`_never_created`: the document then lacks the list.
+
+    Args:
+        request: The finished build.
+        rules: The rules of latexmk's database.
+
+    Returns:
+        The lists, relative to the output folder, sorted.
+    """
+    layout, found = request.layout, set()
+    for rule in rules:
+        tool_input = _XINDY_LIST_INPUTS.get(Path(rule.destination).suffix)
+        if not rule.ran or tool_input is None:
+            continue
+        try:
+            path = _absolute_path(rule.destination, layout.cwd)
+        except PreparationError:
+            continue
+        if (
+            path.is_relative_to(layout.output)
+            and _has_entries(path.with_suffix(tool_input))
+            and _records_xindy_style(path.with_suffix(".aux"), layout.output, request.max_bytes)
+        ):
+            found.add(path.relative_to(layout.output).as_posix())
+    return tuple(sorted(found))
+
+
+def _records_xindy_style(aux: Path, root: Path, max_bytes: int) -> bool:
+    """Return whether the last glossary style that ``aux`` records is a style for xindy.
+
+    Args:
+        aux: The ``.aux`` file of the build.
+        root: The directory from which no link may lead to ``aux``.
+        max_bytes: The most bytes read; a larger or unreadable file records no style.
+
+    Returns:
+        Whether the style file named last ends in ``.xdy``.
+    """
+    try:
+        records = _GLOSSARY_STYLE_RECORD.findall(_read_owned_bytes(aux, root, max_bytes))
+    except PreparationError:
+        return False
+    return bool(records) and records[-1].endswith(_XINDY_STYLE_SUFFIX)
+
+
 def collect_submission_dependencies(request: DependencyRequest) -> SubmissionDependencies:
     """Return the original project inputs of a build, or ``None`` with an actionable uncertainty.
 
@@ -876,12 +937,17 @@ def collect_submission_dependencies(request: DependencyRequest) -> SubmissionDep
         classified = _classify_inputs(request, observed)
     except (OSError, UnicodeError, ValueError, PreparationError) as error:
         return SubmissionDependencies(None, uncertainty=(str(error),))
+    xindy = _xindy_lists(request, rules)
     return SubmissionDependencies(
         classified.project_inputs,
         rules=tuple(rule.name for rule in rules if rule.ran),
         generated_inputs=classified.generated_count,
         toolchain_inputs=classified.toolchain_count,
         generated_reads=frozenset(classified.generated_files),
-        generated_files=dict(classified.generated_files),
-        never_created=_never_created(request, rules),
+        # An empty list left for xindy is no generated list to ship.
+        generated_files={
+            name: path for name, path in classified.generated_files.items() if name not in xindy
+        },
+        never_created=tuple(sorted({*_never_created(request, rules), *xindy})),
+        xindy_lists=xindy,
     )

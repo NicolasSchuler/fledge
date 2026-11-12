@@ -780,6 +780,13 @@ class UnexpectedFailureTests(ProjectTestCase):
                 self.assertIn("Internal error (RuntimeError)", err)
                 self.assertNotIn("Traceback", err)
 
+    def test_a_defect_outside_every_command_exits_70(self):
+        # The last boundary of main, beyond the guard of the command group.
+        with patch.object(cli, "main", side_effect=RuntimeError("defect")):
+            code, _, err = self.run_main("inspect")
+        self.assertEqual(code, 70)
+        self.assertIn("Internal error (RuntimeError)", err)
+
     def test_doctor_labels_an_input_output_error_by_whether_the_diagnostics_started(self):
         for target, scope in (
             ("latexprep.doctor_command.load_settings", "request validation"),

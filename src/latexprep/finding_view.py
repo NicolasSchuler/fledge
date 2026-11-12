@@ -19,7 +19,13 @@ from typing import NamedTuple
 
 from .citation_graph import NO_MAIN_SOURCE
 from .execution_records import CONFIG_PATH_KEY, CheckSelectionRecord, read_execution_records
-from .findings import DetailKey, Finding, follows_stopped_build, stopped_build_stages
+from .findings import (
+    DOCUMENT_SUMMARY_RULE,
+    DetailKey,
+    Finding,
+    follows_stopped_build,
+    stopped_build_stages,
+)
 from .operational_titles import OPERATIONAL_TITLES, build_stage_title
 from .report import Outcome, RedactedReport
 from .review_policy import review_marker
@@ -647,15 +653,49 @@ def _restated_source_causes(
     return restated
 
 
+def _document_summary_causes(
+    findings: Sequence[Finding], causes: Mapping[int, int]
+) -> dict[int, int]:
+    """Map the failed summary of several document packages to the first document's problem.
+
+    The summary fails whenever a document package failed, for the reasons that the
+    document's own findings give, so it is never the problem to start with.
+
+    Args:
+        findings: The findings in display order.
+        causes: The causes found so far; a finding already explained is never a cause.
+
+    Returns:
+        The cause of the summary, by index; nothing when no document has a problem.
+    """
+    first = next(
+        (
+            index
+            for index, finding in enumerate(findings)
+            if finding.document and finding.is_blocking and index not in causes
+        ),
+        None,
+    )
+    if first is None:
+        return {}
+    return {
+        index: first
+        for index, finding in enumerate(findings)
+        if finding.rule == DOCUMENT_SUMMARY_RULE and finding.is_blocking
+    }
+
+
 def follow_on_causes(findings: Sequence[Finding]) -> dict[int, int]:
     """Map the index of each result that follows from another one to that result's index.
 
-    Three kinds of result follow from another reported beside them: a TeX error at the
+    Four kinds of result follow from another reported beside them: a TeX error at the
     place of a source error, which names the same problem; the aftermath of a failed
     build (see :func:`_is_build_aftermath`), including every result of the truncated log
     of a build that a tool, time or resource problem stopped, which follows what stopped
-    the build; and a result whose evidence is incomplete because of a source error that it
-    names. A cause is never itself a follow-on: chains resolve to their first cause.
+    the build; a result whose evidence is incomplete because of a source error that it
+    names; and the failed summary of several document packages, which follows the first
+    problem of a document. A cause is never itself a follow-on: chains resolve to their
+    first cause.
 
     Args:
         findings: The findings in display order.
@@ -673,6 +713,7 @@ def follow_on_causes(findings: Sequence[Finding]) -> dict[int, int]:
             if _is_build_aftermath(finding) or follows_stopped_build(finding, stopped):
                 causes[index] = build_cause
     causes.update(_restated_source_causes(findings, causes))
+    causes.update(_document_summary_causes(findings, causes))
     resolved = {}
     for index, cause in causes.items():
         seen = {index}

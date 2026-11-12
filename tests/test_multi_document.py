@@ -5,10 +5,13 @@ from __future__ import annotations
 import tempfile
 import unittest
 import zipfile
+from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+from latexprep.build_result import BuildResult
 from latexprep.config import Settings, load_settings
 from latexprep.core import run_job
 from latexprep.defects import REPORT_DEFECT_SUGGESTION
@@ -20,7 +23,24 @@ from latexprep.pdf_comparison import compare_pdfs
 from latexprep.staging import stage_document
 from latexprep.workflow_options import ComparisonOptions, DocumentOptions, WorkflowOptions
 from tests.pdf_fakes import FakePdfRunner
-from tests.support import controlled_backends, fake_build, minimal_project
+from tests.support import controlled_backends, fake_build, fake_build_result, minimal_project
+
+
+def supplement_failing_with(problem: Finding) -> Callable[..., Awaitable[BuildResult]]:
+    """Return a build backend whose builds of ``extra.tex`` fail with ``problem``.
+
+    Every other build succeeds as :func:`~tests.support.fake_build` does.
+    """
+
+    async def build(tree, main, work, engine, runner, **_options) -> BuildResult:
+        """Fail the build of ``extra.tex`` with ``problem``; build anything else."""
+        if main == "extra.tex":
+            return fake_build_result(
+                work, main, success=False, findings=[replace(problem, path=main)]
+            )
+        return await fake_build(tree, main, work, engine, runner)
+
+    return build
 
 
 class MultiDocumentTests(unittest.IsolatedAsyncioTestCase):
@@ -88,6 +108,32 @@ class MultiDocumentTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(
             any(item.code == "PKG301" and item.status == "failed" for item in report.findings)
         )
+
+    async def test_the_failed_summary_leaves_the_outcome_to_the_document_that_failed(self):
+        """End with exit code 4 when Fledge could not build a document, 3 when one needs a fix.
+
+        The failed PKG301 summary only restates why the document failed.
+        """
+        cases = (
+            ("timeout", Finding("build.timeout", "Stopped after 7 s.", severity="error"), 4),
+            (
+                "paper",
+                Finding("build.tex_error", "Undefined control sequence.", severity="error"),
+                3,
+            ),
+        )
+        for name, problem, exit_code in cases:
+            with self.subTest(name):
+                output = self.base / name
+                backends = controlled_backends(build=supplement_failing_with(problem))
+                report = await run_job(
+                    JobRequest("prepare", self.source, self.settings, output), backends=backends
+                )
+                self.assertEqual(report.outcome.exit_code, exit_code, report.outcome)
+                self.assertIn(
+                    ("PKG301", "failed"), {(item.code, item.status) for item in report.findings}
+                )
+                self.assertFalse(output.exists())
 
     async def test_single_purpose_commands_ignore_configured_documents(self):
         pdf = self.base / "paper.pdf"

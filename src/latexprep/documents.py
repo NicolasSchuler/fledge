@@ -10,7 +10,7 @@ from .config import Settings
 from .defects import REPORT_DEFECT_SUGGESTION, is_expected_failure, summarize_traceback
 from .document_run import run_project
 from .errors import PreparationError
-from .findings import Finding
+from .findings import DOCUMENT_SUMMARY_RULE, Finding
 from .job_context import DOCUMENT_COMMANDS, JobCommand, JobContext, import_input
 from .job_report import is_blocked, job_outcome, select_and_review
 from .publication import DocumentResult
@@ -175,7 +175,8 @@ async def run_documents(context: JobContext, report: Report) -> list[DocumentRes
     The documents run concurrently up to the ``jobs`` setting, one at a time when
     previews are collected serially. A preparation that is not a dry run adds a
     ``package.independent_documents`` finding that fails unless every document package
-    was verified.
+    was verified. That summary never decides the outcome by itself: a document blocked by
+    the paper makes the run blocked, and one that Fledge could not check an error.
 
     Args:
         context: The job.
@@ -209,7 +210,7 @@ async def run_documents(context: JobContext, report: Report) -> list[DocumentRes
     if request.command is JobCommand.PREPARE and not request.dry_run:
         report.findings.append(
             Finding(
-                "package.independent_documents",
+                DOCUMENT_SUMMARY_RULE,
                 f"{len(documents)} selected document packages independently verified."
                 if verified
                 else "At least one selected document package failed verification; "

@@ -50,6 +50,7 @@ from .publication import (
     publish_previews,
     validate_destination,
 )
+from .publication_folders import is_replaceable_output
 from .report import Outcome, Report
 from .rules import MANDATORY_CODES
 from .standalone_checks import check_bibliography, check_formatting, check_standalone_pdf
@@ -324,6 +325,55 @@ def _export_previews(
     return previews
 
 
+def _replaces_earlier_outputs(request: JobRequest, outcome: Outcome) -> bool:
+    """Return whether publication may replace an earlier output: on request, after success.
+
+    A run succeeds when it passes, with or without advisories or accepted exceptions, or
+    when a dry run plans its changes without being blocked. A blocked, failed or
+    cancelled run leaves an earlier output as it was.
+    """
+    return request.force and (outcome.passed or outcome is Outcome.PLANNED)
+
+
+def _publish_explicit_previews(
+    transaction: OutputTransaction,
+    context: JobContext,
+    destination: Path,
+    previews: PreviewPlan,
+    report: Report,
+    check_deadline: Callable[[], None],
+) -> None:
+    """Write the previews into the explicit preview directory, unless it must stay as it was.
+
+    A run that did not succeed may write its previews into a new or empty directory, but
+    an earlier output that the request lets publication replace stays as it was. The
+    report then points at no preview, and the progress says why and what to do instead.
+
+    Args:
+        transaction: The publication, which replaces an earlier output only after success.
+        context: The job, which holds the request and receives the progress.
+        destination: The explicit preview directory.
+        previews: The planned previews.
+        report: The final report.
+        check_deadline: Called before each copy to enforce the job's deadline.
+    """
+    request = context.request
+    if (
+        request.force
+        and not _replaces_earlier_outputs(request, report.outcome)
+        and is_replaceable_output(destination)
+    ):
+        context.emit(
+            f"Left the earlier preview output {destination} as it was: only a run that passes "
+            "replaces it; give a new or empty folder to keep the previews of this run"
+        )
+        # A run that did not succeed publishes nothing else, so no artifact remains.
+        report.artifacts.clear()
+        locate_previews(report, ())
+        return
+    publish_previews(transaction, destination, previews, report, check_deadline)
+
+
 def _bundle_directory(destinations: _Destinations) -> Path:
     """Return the output directory a verified package is published into.
 
@@ -349,8 +399,8 @@ def _publish(
     """Publish everything verified as one transaction; a failure leaves no new output.
 
     Previews go into the bundle only without an explicit preview directory, and are not
-    published to that directory when publication refused the package. A failure also
-    clears the report's artifacts.
+    published to that directory when publication refused the package. An earlier output is
+    replaced only after a run that succeeded. A failure also clears the report's artifacts.
 
     Args:
         report: The report, which records the published artifacts.
@@ -364,7 +414,8 @@ def _publish(
     preview_output = destinations.previews
     # Previews go into the bundle only without an explicit preview directory.
     bundled_previews = previews if preview_output is None else ()
-    with OutputTransaction(emit, report, replace_previous=request.force) as transaction:
+    replace_previous = _replaces_earlier_outputs(request, report.outcome)
+    with OutputTransaction(emit, report, replace_previous=replace_previous) as transaction:
         try:
             refused = False
             if isinstance(outputs, VerifiedPackage):
@@ -400,8 +451,8 @@ def _publish(
                     else "No output was published: the job did not produce a verified package"
                 )
             if preview_output is not None and previews and not refused:
-                publish_previews(
-                    transaction, preview_output, previews, report, execution.check_deadline
+                _publish_explicit_previews(
+                    transaction, context, preview_output, previews, report, execution.check_deadline
                 )
             execution.check_deadline()
         except BaseException:

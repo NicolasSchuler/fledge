@@ -187,7 +187,7 @@ pipx puts commands in `~/.local/bin`. Run `pipx ensurepath`, then open a new ter
 | Installer refuses an existing destination | Choose a fresh `--prefix` and a `--bin-dir` without a `fledge` launcher, or [uninstall](installation.md#upgrade-or-uninstall) first. |
 | Exit code 64 | Invalid command-line syntax; see `fledge COMMAND --help`. [Other exit codes](reports.md#exit-codes). |
 | "Request error" (exit 4) | The command cannot run as given: an unusable `--output` or report path, a missing input, a `--main` that names no document (the message lists the ones found) or an invalid setting value. The `execution.request` finding names the source of the problem and the fix; nothing was built. |
-| `execution.internal` finding, or an `execution.task` finding with a `traceback` detail (exit 4) | A defect, not a problem with your paper. Keep the command and the JSON report when reporting it, and rerun with `--debug` to print the traceback. The other checks' results are still in the report. |
+| `execution.internal` finding, or an `execution.task` finding with a `traceback` detail (exit 70) | A defect, not a problem with your paper. Keep the command and the JSON report when reporting it, and rerun with `--debug` to print the traceback. The other checks' results are still in the report. |
 | Unexpected configuration | Check `execution.config_path` and `execution.preset` in the JSON report; use `--config FILE` or `--isolated`. |
 | Unknown setting or selector | The request error suggests the closest valid name, such as `max_pages` for `max_page`, or the closest codes for a selector. See [choose checks](configuration.md#choose-checks) and `fledge rules`. |
 | Output already exists | Choose a new path outside the input. |

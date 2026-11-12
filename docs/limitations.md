@@ -42,7 +42,8 @@ direct. No Fledge result guarantees that a venue will accept a submission.
 - **Glossaries, lists of acronyms and nomenclatures are built with makeindex,**
   using the style file that the `glossaries` package records and `nomencl`'s style.
   Glossaries that need `xindy` or `bib2gls`, and glossary types other than the main
-  glossary and the acronyms, are not built.
+  glossary and the acronyms, are not built. For a glossary written for `xindy`,
+  `TEX012` says so; run makeglossaries locally and ship the `.gls` file.
 - **A double quote in the temporary directory path** makes `latexmk` refuse to
   build. Fledge reports the failed build; point `TMPDIR` at a path without
   quotes. Spaces and non-ASCII characters in that path are fine.

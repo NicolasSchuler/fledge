@@ -145,6 +145,7 @@ RULES = (
             "tests.test_submission_readiness.GeneratedListTests.test_shipped_lists_pass_and_documents_without_lists_report_nothing",
             "tests.test_submission_readiness.NeverCreatedListTests.test_a_list_the_build_never_got_is_reported_with_its_tool",
             "tests.test_submission_readiness.NeverCreatedListTests.test_the_baseline_build_reports_the_lists_it_never_got",
+            "tests.test_submission_readiness.NeverCreatedListTests.test_a_glossary_written_for_xindy_says_that_xindy_is_not_available",
         ),
         fix=(
             "Run fledge prepare, which ships the index and glossary files its verified build "
