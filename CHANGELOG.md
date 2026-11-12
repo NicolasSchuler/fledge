@@ -39,7 +39,9 @@ The version is defined once, as `__version__` in `src/latexprep/__init__.py`.
 ### Added
 
 - Python 3.14 and 3.15 are supported and tested.
-- Glossaries, acronym lists and nomenclatures are built. `prepare` ships the index,
+- Glossaries, acronym lists and nomenclatures are built, except glossaries written
+  for xindy, which the isolated build does not offer (`TEX012` says so). `prepare`
+  ships the index,
   glossary and nomenclature files its verified build generated, and proves them
   sufficient by rebuilding the archive with makeindex (and, when a `.bbl` ships,
   BibTeX and Biber) blocked. New settings describe the receiving service:
