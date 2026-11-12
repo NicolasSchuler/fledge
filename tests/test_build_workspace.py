@@ -18,6 +18,7 @@ from latexprep.build_workspace import (
     prepare_layout,
 )
 from latexprep.latexmk_command import BiberPlan, controlled_rules
+from latexprep.limits import MAX_WALKED_FOLDER_LEVELS
 from tests.support import ProjectTestCase
 
 _LIMIT = 10_000_000
@@ -64,6 +65,35 @@ class IncludeFolderTests(ProjectTestCase):
         body = "".join(f"\\include{{folder{number}/x}}\n" for number in range(300))
         self.write("main.tex", body)
         self.assertEqual(len(include_folders(self.root)), MAX_INCLUDE_FOLDERS)
+
+    def test_parent_folders_count_against_the_bound(self) -> None:
+        # 256 targets 100 levels deep created 25,856 folders, beyond the workspace's limits.
+        body = "".join(
+            f"\\include{{top{number}/{'level/' * 99}x}}\n" for number in range(MAX_INCLUDE_FOLDERS)
+        )
+        project = self.write_project({"main.tex": body})
+        layout = prepare_layout(project, "main.tex", self.root / "work", _LIMIT)
+        created = [path for path in layout.output.rglob("*") if path.is_dir()]
+        self.assertLessEqual(len(created), MAX_INCLUDE_FOLDERS)
+        self.assertTrue((layout.output / "top0" / ("level/" * 99)).is_dir())
+
+    def test_folders_too_deep_or_too_long_to_create_are_skipped(self) -> None:
+        deepest = "a/" * MAX_WALKED_FOLDER_LEVELS
+        project = self.write_project(
+            {
+                "main.tex": (
+                    # Deeper than a build copy can be: a 600-level target raised ENAMETOOLONG.
+                    f"\\include{{{'b/' * 600}x}}\n\\include{{{deepest}b/x}}\n"
+                    # A name longer than a file system allows.
+                    f"\\include{{{'n' * 300}/x}}\n\\include{{{deepest}x}}\n"
+                    "\\include{chapters/one}\n"
+                ),
+            }
+        )
+        layout = prepare_layout(project, "main.tex", self.root / "work", _LIMIT)
+        self.assertEqual(sorted(path.name for path in layout.output.iterdir()), ["a", "chapters"])
+        self.assertTrue((layout.output / deepest).is_dir())
+        self.assertFalse((layout.output / deepest / "b").exists())
 
 
 class SeededGeneratedFileTests(ProjectTestCase):

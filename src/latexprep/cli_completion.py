@@ -11,6 +11,7 @@ search for ``.tex`` files is bounded and skips hidden folders, links and unreada
 from __future__ import annotations
 
 import os
+import unicodedata
 from pathlib import Path
 
 import click
@@ -18,11 +19,14 @@ from click.shell_completion import CompletionItem
 
 from .check_selection import SELECTORS
 from .rules import BY_CODE
-from .text_safety import is_unsafe_character
 
 # The most entries the search for .tex files looks at, and how deep it goes below INPUT.
 _MAX_SCANNED_ENTRIES = 2000
 _MAX_FOLDER_LEVELS = 4
+# The characters besides letters, digits and combining marks that a completed file name
+# may hold. Click's bash script inserts a completion unquoted, so a file named
+# ``x;touch pwned;.tex`` or ``$(id).tex`` would run a command once the user pressed Enter.
+_PLAIN_NAME_PUNCTUATION = frozenset("_.+-/")
 
 
 def _selector_items(incomplete: str, *, codes_only: bool) -> list[CompletionItem]:
@@ -76,13 +80,28 @@ def complete_check_codes(
     return _selector_items(incomplete, codes_only=True)
 
 
+def _is_plain_name(name: str) -> bool:
+    """Return whether a shell reads ``name`` as one literal word when it is inserted unquoted.
+
+    That is a name of letters, digits, combining marks (as in a decomposed "ü") and
+    ``_.+-/`` only: no space, quote, shell metacharacter, control or format character.
+    """
+    return all(
+        char.isalnum()
+        or char in _PLAIN_NAME_PUNCTUATION
+        or unicodedata.category(char).startswith("M")
+        for char in name
+    )
+
+
 def _tex_files(root: Path) -> list[str]:
     """List the ``.tex`` files below the folder ``root`` as relative POSIX paths.
 
     The walk visits at most ``_MAX_SCANNED_ENTRIES`` entries and ``_MAX_FOLDER_LEVELS``
-    folder levels, and skips hidden entries, links and unreadable folders. A name with a
-    control, format or other unsafe character is left out: project names are untrusted,
-    and a line break would split one completion into two.
+    folder levels, and skips hidden entries, links and unreadable folders. Project names
+    are untrusted, so only a path that :func:`_is_plain_name` accepts is offered: bash
+    inserts a completion as it is, where a shell metacharacter would run a command and a
+    space or line break would split the name.
     """
     found: list[str] = []
     scanned = 0
@@ -101,7 +120,7 @@ def _tex_files(root: Path) -> list[str]:
             if (
                 name.lower().endswith(".tex")
                 and not name.startswith(".")
-                and not any(map(is_unsafe_character, relative_name))
+                and _is_plain_name(relative_name)
                 and not (Path(folder) / name).is_symlink()
             ):
                 found.append(relative_name)

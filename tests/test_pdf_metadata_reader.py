@@ -4,20 +4,39 @@ from __future__ import annotations
 
 import contextlib
 import random
+import time
 import unittest
 import zlib
+from unittest.mock import patch
 
+from latexprep.cancellation import AnalysisCancelled
+from latexprep.config import Settings
+from latexprep.core import run_job
 from latexprep.errors import PreparationError
+from latexprep.job_context import JobRequest
+from latexprep.limits import CANCELLATION_STRIDE_CHARS
 from latexprep.pdf_metadata_reader import (
     MetadataOrigin,
     NotPdfError,
     PdfMetadataLimits,
     read_pdf_metadata,
+    xmp_fields,
 )
-from tests.support import object_stream, pdf_bytes, pdf_stream
+from tests.support import (
+    AsyncProjectTestCase,
+    controlled_backends,
+    object_stream,
+    pdf_bytes,
+    pdf_stream,
+)
 
 DOCUMENT = MetadataOrigin.DOCUMENT
 INCLUDED = MetadataOrigin.INCLUDED
+# The characters of a hostile packet or stream in the scaling tests; the former backtracking
+# patterns needed from seconds to minutes on inputs of this size, linear scans milliseconds.
+_HOSTILE_CHARACTERS = 200_000
+# Each hostile input must be read well within this, even on a loaded machine.
+_MAX_SCAN_SECONDS = 1.0
 XMP = (
     b'<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>'
     b'<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">'
@@ -268,6 +287,111 @@ class HostilePdfTests(unittest.TestCase):
             b"<< /Root 1 0 R /Info 5 0 R >>",
         )
         self.assertEqual(entries(data), [("document", "Info Author", "Real Name")])
+
+    def test_object_stream_entries_that_share_their_bytes_are_refused_quickly(self) -> None:
+        # Each of 2000 entries named the same 100 KB string, which every entry read again and
+        # kept a copy of: 12 s and 250 MB for a 5 KB file. Offsets must now increase.
+        count = 2000
+        header = b" ".join(f"{number} 0".encode() for number in range(10, 10 + count))
+        shared = pdf_stream(
+            f"/Type /ObjStm /N {count} /First {len(header) + 1}".encode(),
+            header + b"\n(" + b"x" * 100_000 + b")",
+            compress=True,
+        )
+        # The counterpart: each object of a well-formed stream is read up to the next one.
+        packed = object_stream({6: b"<< /Author 7 0 R >>", 7: b"(Packed Person)"})
+        data = pdf_bytes(
+            {1: catalog(), 2: PAGES, 3: shared, 5: packed}, b"<< /Root 1 0 R /Info 6 0 R >>"
+        )
+        started = time.perf_counter()
+        result = read_pdf_metadata(data)
+        self.assertLess(time.perf_counter() - started, _MAX_SCAN_SECONDS)
+        self.assertEqual(
+            [(entry.channel, entry.text) for entry in result.entries],
+            [("Info Author", "Packed Person")],
+        )
+        self.assertEqual(result.limitations, ["objects that could not be parsed"])
+
+
+class HostileXmpTests(unittest.TestCase):
+    """XMP packets that made the former patterns backtrack are read in linear time."""
+
+    def test_hostile_packets_are_scanned_in_linear_time(self) -> None:
+        size = _HOSTILE_CHARACTERS
+        packets = {
+            # The tag name was retried with every shorter length against the attributes.
+            "unclosed tag": b"<a" + b"x" * size,
+            # The attribute pattern scanned the run again from each of its characters.
+            "attribute name run": b"<x " + b"y" * size + b">",
+            "unclosed attribute value": b'<x a:b="' + b"c" * size + b">",
+            # Every "<!" or "<?" searched the rest of the packet for its ">".
+            "unterminated declarations": b"<!" * (size // 2),
+            "unterminated instructions": b"<?" * (size // 2),
+        }
+        for label, packet in packets.items():
+            with self.subTest(packet=label):
+                started = time.perf_counter()
+                self.assertEqual(list(xmp_fields(packet)), [])
+                self.assertLess(time.perf_counter() - started, _MAX_SCAN_SECONDS)
+
+    def test_tags_comments_and_attributes_keep_their_meaning(self) -> None:
+        packet = (
+            b'<x:xmpmeta>\n<rdf:Description dc:format="application/pdf" xml:lang="en"/>\n'
+            b"<dc:creator><rdf:Seq><rdf:li>Ann Author</rdf:li></rdf:Seq></dc:creator>\n"
+            b"<!-- a comment --><dc:rights><?php ignored ?>Free</dc:rights>\n"
+            # A comment without its end runs to the end of the packet, as in XML.
+            b"<dc:source>kept<!-- open"
+        )
+        self.assertEqual(
+            list(xmp_fields(packet)),
+            [
+                ("dc:format", "application/pdf"),
+                ("dc:creator", "Ann Author"),
+                ("dc:rights", "Free"),
+                ("dc:source", "kept"),
+            ],
+        )
+
+    def test_a_long_scan_lets_a_cancellation_through(self) -> None:
+        packet = b"<a/>" * (_HOSTILE_CHARACTERS // 4)
+        with patch("latexprep.pdf_metadata_reader.cancellation_point") as point:
+            self.assertEqual(list(xmp_fields(packet)), [])
+        self.assertGreaterEqual(point.call_count, len(packet) // CANCELLATION_STRIDE_CHARS)
+        with (
+            patch(
+                "latexprep.pdf_metadata_reader.cancellation_point",
+                side_effect=AnalysisCancelled("Analysis cancelled"),
+            ),
+            self.assertRaises(AnalysisCancelled),
+        ):
+            list(xmp_fields(packet))
+
+
+class HostileFigureJobTests(AsyncProjectTestCase):
+    """A hostile PDF figure cannot hold a job past its deadline."""
+
+    async def test_a_figure_whose_packet_never_closes_a_tag_is_scanned_in_time(self) -> None:
+        # A 453-byte figure held the former scan, which no deadline could stop, for 40 s.
+        packet = pdf_stream(b"/Type /Metadata /Subtype /XML", b"<a" + b"x" * 60_000, compress=True)
+        source = self.write_project(
+            {
+                "main.tex": (
+                    "\\documentclass{article}\n\\usepackage{graphicx}\n\\begin{document}\n"
+                    "\\includegraphics{fig}\n\\end{document}\n"
+                ),
+                "fig.pdf": pdf_bytes({1: catalog(b"/Metadata 3 0 R "), 2: PAGES, 3: packet}),
+            }
+        )
+        deadline = 5
+        started = time.perf_counter()
+        report = await run_job(
+            JobRequest("inspect", source, Settings(job_timeout_seconds=deadline)),
+            backends=controlled_backends(),
+        )
+        self.assertLess(time.perf_counter() - started, deadline)
+        self.assertNotIn("execution.deadline", {finding.rule for finding in report.findings})
+        [figure] = [finding for finding in report.findings if finding.code == "PRV104"]
+        self.assertEqual(figure.status, "passed")
 
 
 if __name__ == "__main__":

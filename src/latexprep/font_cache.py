@@ -89,7 +89,8 @@ def copy_names_database(sealed: Path, texmf_var: Path) -> None:
 
     luaotfload reads its names database only from the writable cache, so each build needs
     a copy; the font caches themselves are read from the sealed tree. A cache that already
-    has a database keeps it.
+    has a database keeps it. The copy runs outside the sandbox and follows links, so the
+    runner makes it only before any tool has run with ``texmf_var``.
 
     Args:
         sealed: The sealed ``TEXMFVAR`` tree.

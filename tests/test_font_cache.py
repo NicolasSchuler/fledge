@@ -9,6 +9,7 @@ as readable subpaths.
 from __future__ import annotations
 
 import json
+import shutil
 import stat
 import tempfile
 import unittest
@@ -16,7 +17,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from latexprep.command_runner import CommandResult
-from latexprep.errors import PreparationError
+from latexprep.errors import PreparationError, SandboxRefusedError
 from latexprep.font_cache import copy_names_database, has_names_database, seal_font_cache
 from latexprep.runtime import ToolRunner
 from latexprep.sandbox import SeatbeltSandbox
@@ -97,6 +98,30 @@ class ToolEnvironmentCacheTests(unittest.TestCase):
             self.assertNotIn("TEXMFCACHE", plain.variables)
             self.assertEqual(plain.variables["TEXMFVAR"], str(plain.state_directory / "texmf-var"))
 
+    def test_a_tool_state_folder_that_a_tool_replaced_is_refused(self) -> None:
+        # Fledge creates these folders outside the sandbox, so it must not follow a link
+        # that a sandboxed tool of the workspace left in their place.
+        for replaced in ("state folder by a link", "state folder by a file", "cache by a link"):
+            with self.subTest(replaced=replaced), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory).resolve()
+                workspace, outside = root / "work", root / "outside"
+                workspace.mkdir()
+                outside.mkdir()
+                state = workspace / ".tool-state"
+                kept = kept_tex_cache_directory(workspace)
+                if replaced == "state folder by a link":
+                    state.symlink_to(outside)
+                elif replaced == "state folder by a file":
+                    state.write_text("not a folder")
+                else:
+                    state.mkdir()
+                    kept.symlink_to(outside)
+                with self.assertRaises(SandboxRefusedError):
+                    create_tool_environment(
+                        workspace, _CONTEXT, source_date_epoch="0", texmf_var=kept
+                    )
+                self.assertEqual(list(outside.iterdir()), [])
+
 
 class _CapableSandbox(UnconfinedSandbox):
     """An unconfined backend that offers the sealed font cache.
@@ -159,6 +184,23 @@ class FontCachePreparationTests(unittest.IsolatedAsyncioTestCase):
         other = self.root / "other"
         other.mkdir()
         self.assertNotIn("TEXMFCACHE", runner._tool_environment(other, _CONTEXT).variables)
+
+    async def test_the_names_database_is_copied_only_before_a_tool_used_the_cache(self) -> None:
+        runner = _WarmingRunner()
+        await runner.prepare_font_cache(self.root)
+        build = self.root / "build"
+        build.mkdir()
+        kept = runner.keep_tex_cache(build)
+        runner._tool_environment(build, _CONTEXT)
+        self.assertTrue(has_names_database(kept))
+        # The build's tools replaced a folder of the cache with a link that leads out of the
+        # workspace; the copy, which runs outside the sandbox, must not follow it.
+        outside = self.root / "outside"
+        outside.mkdir()
+        shutil.rmtree(kept / "luatex-cache")
+        (kept / "luatex-cache").symlink_to(outside)
+        runner._tool_environment(build, _CONTEXT)
+        self.assertEqual(list(outside.iterdir()), [])
 
     async def test_failed_warm_up_or_unsupported_backend_builds_without_cache(self) -> None:
         failing = _WarmingRunner(writes_database=False)

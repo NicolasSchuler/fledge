@@ -22,11 +22,12 @@ import zlib
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from enum import StrEnum
+from itertools import pairwise
 from typing import Final, NamedTuple
 
 from .cancellation import cancellation_point
 from .errors import PreparationError
-from .limits import MIB
+from .limits import CANCELLATION_STRIDE_CHARS, MIB
 
 
 @dataclass(frozen=True, slots=True)
@@ -204,11 +205,22 @@ _XMP_CONTAINERS: Final = frozenset(
 _XMP_IGNORED_ATTRIBUTES: Final = frozenset(
     {"rdf:about", "rdf:parseType", "rdf:resource", "rdf:nodeID", "xml:lang", "x:xmptk"}
 )
+# One XMP token: an element tag, a comment, processing instruction or declaration, or a run
+# of text. Every repetition is possessive, so the scan stays linear in the packet: a tag
+# that never closes is given up after one pass instead of being retried with every shorter
+# name, and a comment or processing instruction without its ">" runs to the end of the
+# packet instead of being searched for again from every later "<!" or "<?".
 _XMP_TOKEN: Final = re.compile(
-    r"<(?P<close>/)?(?P<name>[A-Za-z_][\w.\-]*(?::[\w.\-]+)?)(?P<attributes>[^<>]*?)(?P<empty>/)?>"
-    r"|<[?!][^>]*>|(?P<text>[^<]+)"
+    r"<(?P<close>/)?(?P<name>[A-Za-z_][\w.\-]*+(?::[\w.\-]++)?+)(?P<attributes>[^<>]*+)>"
+    r"|<[?!][^>]*+>?"
+    r"|(?P<text>[^<]++)"
 )
-_XMP_ATTRIBUTE: Final = re.compile(r"([A-Za-z_][\w.\-]*:[\w.\-]+)\s*=\s*(?:\"([^\"]*)\"|'([^']*)')")
+# One property written as an attribute. The lookbehind lets a match start only where a
+# name can start, so a long run of name characters is read once, not once from each of its
+# characters.
+_XMP_ATTRIBUTE: Final = re.compile(
+    r"(?<![\w.\-])([A-Za-z_][\w.\-]*+:[\w.\-]++)\s*+=\s*+(?:\"([^\"]*+)\"|'([^']*+)')"
+)
 
 
 class _Lexer:
@@ -423,7 +435,9 @@ def xmp_fields(raw: bytes) -> Iterator[tuple[str, str]]:
     The packet is scanned with regular expressions instead of an XML parser, so no entity
     is expanded and no resource is fetched. A text belongs to the innermost element that
     is not an RDF container, so a creator listed in ``rdf:Seq`` is reported as
-    ``dc:creator``. Properties written as attributes are reported under their name.
+    ``dc:creator``. Properties written as attributes are reported under their name. The
+    scan takes time linear in the packet and lets a cancellation through every
+    ``CANCELLATION_STRIDE_CHARS`` characters.
 
     Args:
         raw: The bytes of the packet.
@@ -432,11 +446,14 @@ def xmp_fields(raw: bytes) -> Iterator[tuple[str, str]]:
         The property name and its text, in packet order.
     """
     stack: list[str] = []
+    checkpoint = 0
     for token in _XMP_TOKEN.finditer(_xmp_text(raw)):
+        if token.end() >= checkpoint:
+            cancellation_point()
+            checkpoint = token.end() + CANCELLATION_STRIDE_CHARS
         if token["text"] is not None:
-            text = html.unescape(token["text"]).strip()
             owner = next((name for name in reversed(stack) if name not in _XMP_CONTAINERS), None)
-            if text and owner is not None:
+            if owner is not None and (text := html.unescape(token["text"]).strip()):
                 yield owner, text
             continue
         name = token["name"]
@@ -446,17 +463,19 @@ def xmp_fields(raw: bytes) -> Iterator[tuple[str, str]]:
             while stack and stack.pop() != name:
                 pass
             continue
-        for attribute in _XMP_ATTRIBUTE.finditer(token["attributes"]):
-            key = attribute[1]
-            value = html.unescape(attribute[2] if attribute[2] is not None else attribute[3])
-            if (
-                key not in _XMP_IGNORED_ATTRIBUTES
-                and not key.startswith("xmlns:")
-                and value.strip()
-            ):
-                yield key, value.strip()
-        if not token["empty"] and len(stack) < _MAX_NESTING:
+        attributes = token["attributes"]
+        yield from _xmp_attribute_fields(attributes)
+        if not attributes.endswith("/") and len(stack) < _MAX_NESTING:
             stack.append(name)
+
+
+def _xmp_attribute_fields(attributes: str) -> Iterator[tuple[str, str]]:
+    """Yield the properties that the attributes of one XMP tag hold, with their text."""
+    for attribute in _XMP_ATTRIBUTE.finditer(attributes):
+        key = attribute[1]
+        value = html.unescape(attribute[2] if attribute[2] is not None else attribute[3])
+        if key not in _XMP_IGNORED_ATTRIBUTES and not key.startswith("xmlns:") and value.strip():
+            yield key, value.strip()
 
 
 class _ObjectWalk:
@@ -592,33 +611,64 @@ class _ObjectWalk:
         return data
 
     def _read_object_stream(self, stream: _Stream) -> None:
-        """Read the objects packed in one object stream; defined objects are kept as they are."""
+        """Read the objects packed in one object stream; defined objects are kept as they are.
+
+        The offsets must increase strictly, as the PDF standard requires, and each object is
+        read only up to where the next one starts. Every decompressed byte is therefore read
+        once, so the effort and the objects kept stay within the decompression budget that
+        ``decoded`` counts, however many entries name the same bytes. A stream whose header
+        breaks these rules is skipped as a whole.
+        """
         count, first = stream.dictionary.get("N"), stream.dictionary.get("First")
         if not (isinstance(count, int) and isinstance(first, int)) or count < 0 or first < 0:
             return
         data = self.decoded(stream)
         if data is None:
             return
-        lexer = _Lexer(data)
+        entries = self._object_stream_entries(_Lexer(data), count)
+        if entries is None or any(later[1] <= earlier[1] for earlier, later in pairwise(entries)):
+            self.note("objects that could not be parsed")
+            return
+        starts = [first + offset for _, offset in entries]
+        for index, ((number, _), start, end) in enumerate(
+            zip(entries, starts, [*starts[1:], len(data)], strict=True)
+        ):
+            if not index % 256:
+                cancellation_point()
+            try:
+                value, _ = _Lexer(data[start:end]).value(0)
+            except _Malformed:
+                self.note("objects that could not be parsed")
+                continue
+            self.objects.setdefault(number, value)
+
+    def _object_stream_entries(self, lexer: _Lexer, count: int) -> list[tuple[int, int]] | None:
+        """Read the header of an object stream: each object's number and offset.
+
+        Args:
+            lexer: Reads the decompressed stream.
+            count: How many objects the stream's dictionary says it holds.
+
+        Returns:
+            The number and the offset of each object, or ``None`` when the header is not
+            ``count`` pairs of integers with non-negative offsets.
+
+        Raises:
+            PreparationError: The file holds more objects than the limit.
+        """
         position = 0
-        offsets: list[tuple[int, int]] = []
+        entries: list[tuple[int, int]] = []
         for _ in range(count):
             self.count()
             try:
                 number, position = lexer.value(position)
                 offset, position = lexer.value(position)
             except _Malformed:
-                return
-            if not (isinstance(number, int) and isinstance(offset, int)):
-                return
-            offsets.append((number, offset))
-        for number, offset in offsets:
-            try:
-                value, _ = lexer.value(first + offset)
-            except _Malformed:
-                self.note("objects that could not be parsed")
-                continue
-            self.objects.setdefault(number, value)
+                return None
+            if not (isinstance(number, int) and isinstance(offset, int)) or offset < 0:
+                return None
+            entries.append((number, offset))
+        return entries
 
     def resolve(self, value: object) -> object:
         """Follow a chain of references to the value it names; a broken one names ``None``."""

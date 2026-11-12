@@ -11,11 +11,14 @@ prints when it cannot isolate a command. Choosing and building the sandbox itsel
 
 from __future__ import annotations
 
+import contextlib
 import os
+import stat
 import tempfile
 from pathlib import Path
 from typing import NamedTuple
 
+from .errors import SandboxRefusedError
 from .limits import KIB
 from .toolchain import ToolContext, texlive_root
 
@@ -127,6 +130,27 @@ def kept_tex_cache_directory(workspace: Path) -> Path:
     return tool_state_directory(workspace) / "texmf-var"
 
 
+def _require_plain_folder(path: Path) -> None:
+    """Create the folder ``path`` unless it exists, and refuse a link or a file in its place.
+
+    Fledge writes into a workspace's tool state outside the sandbox, while the sandboxed
+    tools of that workspace may change it, so it never follows a link that one of them
+    left there. Only ``path`` itself is created; its parent is such a folder already.
+
+    Args:
+        path: The folder.
+
+    Raises:
+        SandboxRefusedError: Something other than a folder, such as a link, is at ``path``.
+    """
+    with contextlib.suppress(FileExistsError):
+        path.mkdir()
+    if not stat.S_ISDIR(path.lstat().st_mode):
+        raise SandboxRefusedError(
+            "A tool replaced a folder of its workspace's tool state with a link or a file"
+        )
+
+
 def create_tool_environment(
     workspace: Path,
     context: ToolContext,
@@ -147,24 +171,28 @@ def create_tool_environment(
         context: The toolchain whose search paths become ``PATH`` and whose resource roots
             locate TeX Live.
         source_date_epoch: The value of ``SOURCE_DATE_EPOCH`` for reproducible output.
-        texmf_var: A ``TEXMFVAR`` that outlives the command (see
-            :func:`kept_tex_cache_directory`), or ``None`` for one in the state directory.
+        texmf_var: The ``TEXMFVAR`` that outlives the command, which is the workspace's
+            :func:`kept_tex_cache_directory` and is created when missing, or ``None`` for
+            one in the state directory.
         font_cache: A sealed, read-only luaotfload cache that LuaTeX reads before its own
             writable cache, or ``None``. Its path must not contain ``:``, the separator of
             ``TEXMFCACHE``.
 
     Returns:
         The tool's variables and its new state directory.
+
+    Raises:
+        SandboxRefusedError: The workspace's tool state folder or ``texmf_var`` is a link
+            or a file, as an earlier tool of the workspace may have left it.
     """
     container = tool_state_directory(workspace)
-    container.mkdir(exist_ok=True)
+    _require_plain_folder(container)
+    if texmf_var is not None:
+        _require_plain_folder(texmf_var)
     state = Path(tempfile.mkdtemp(prefix="invocation-", dir=container))
     for name in _STATE_DIRECTORIES:
         (state / name).mkdir()
-    variable_tree = state / "texmf-var"
-    if texmf_var is not None:
-        texmf_var.mkdir(parents=True, exist_ok=True)
-        variable_tree = texmf_var
+    variable_tree = state / "texmf-var" if texmf_var is None else texmf_var
     # HOME is deliberately neither inherited nor repurposed.
     environment = {
         "PATH": os.pathsep.join(context.search_paths),

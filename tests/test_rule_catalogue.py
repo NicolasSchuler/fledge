@@ -168,6 +168,22 @@ class CompletionTests(unittest.TestCase):
             )
             self.assertEqual(self.completions("check", str(root / "main.tex"), "-m", ""), [])
 
+    def test_main_never_offers_a_name_that_bash_would_run_or_split(self) -> None:
+        # Click's bash script inserts a completion unquoted, so these would run a command
+        # or split into several words once the user pressed Enter.
+        hostile = ("x;touch pwned;.tex", "$(id).tex", "`id`.tex", "a b.tex", "o'q.tex", "x|y.tex")
+        # Letters of any script stay, also when a combining mark spells the accent.
+        plain = ("Einführung.tex", "Résumé.tex", "v1.2_final+notes-a.tex")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in (*hostile, *plain):
+                (root / name).write_text("x\n")
+            (root / "$(id)").mkdir()
+            (root / "$(id)" / "inside.tex").write_text("x\n")
+            self.assertEqual(
+                sorted(self.completions("check", str(root), "--main", "")), sorted(plain)
+            )
+
     def test_commands_complete_in_workflow_order(self) -> None:
         self.assertEqual(self.completions("")[:3], ["inspect", "check", "prepare"])
 

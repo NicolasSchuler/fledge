@@ -126,6 +126,11 @@ save the script once and load the file instead, for example
 `source ~/.fledge-complete.zsh` in `~/.zshrc`; save it again after upgrading
 Fledge.
 
+`--main` offers only files whose paths consist of letters, digits and `_.+-/`. Bash
+inserts a completion as it is, so a name with a space, a quote or another shell
+character would split into several words or run as a command; type such a name
+yourself, quoted.
+
 ## What a pass means
 
 A passing `prepare` means the ZIP contains what the build needed, rebuilds
