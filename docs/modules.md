@@ -159,6 +159,11 @@ other, never a check, the job workflow or an output format. (34 modules)
 | `toolchain` | Locate installed tools and the system and distribution resources they may read |
 | `toolchain_help` | Installation guidance when the TeX toolchain a build needs is missing |
 | `zip_validation` | Checks that make a ZIP archive safe to extract, before and while its entries are read |
+| `build_failure_help` | Next steps for build failures that Fledge's own restrictions cause, such as disabled shell escape or bitmap fonts |
+| `engine_selection` | Which TeX engine builds a document and why, and what a project latexmkrc that latexmk ignores would change |
+| `build_fonts` | Fonts that a XeLaTeX or LuaLaTeX build loaded from this computer rather than the project or the TeX distribution |
+| `font_cache` | A sealed per-job luaotfload font database that LuaLaTeX builds read instead of rebuilding it |
+| `tool_versions` | Reading what a tool printed when asked for its version, and the lines a report keeps |
 
 ## Checks, transforms and policies
 

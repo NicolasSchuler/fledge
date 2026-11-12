@@ -210,6 +210,49 @@ class DoctorTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(report.tools["pdflatex"]["version_verified"])
         self.assertFalse(report.tools["pdflatex"]["exercised"])
 
+    async def test_version_probes_run_at_the_same_time(self):
+        original = DoctorRunner.tool_version
+        active, peak = 0, 0
+
+        async def overlapping(runner, argv, workspace):
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            await asyncio.sleep(0.01)
+            try:
+                return await original(runner, argv, workspace)
+            finally:
+                active -= 1
+
+        with patch.object(DoctorRunner, "tool_version", overlapping):
+            report = await run_doctor()
+        self.assertEqual(report.outcome, "passed", report.to_dict())
+        self.assertGreater(peak, 1)
+
+    async def test_fixture_has_a_list_and_failures_keep_the_build_next_step(self):
+        report = await run_doctor()
+        self.assertEqual(report.outcome, "passed", report.to_dict())
+        # The list bullet needs cm-super's outline fonts, as the first real list would.
+        self.assertIn("\\begin{itemize}", self.builds[0][2])
+
+        async def failing(source, main, work, engine, runner, **options):
+            result = fake_build_result(work, main)
+            result.success = False
+            result.findings.append(
+                Finding(
+                    "build.tex_error",
+                    "Font tcrm1000 at 600 not found",
+                    severity="error",
+                    suggestion="Install cm-super.",
+                )
+            )
+            return result
+
+        with patch("latexprep.doctor.build_project", side_effect=failing):
+            report = await run_doctor()
+        failed = next(item for item in report.findings if item.rule == "doctor.fixture_failed")
+        self.assertTrue(failed.next_step.startswith("Install cm-super. Repair the local"))
+
     async def test_unavailable_sandbox_reports_setup_failure_without_build(self):
         with patch.object(DoctorRunner, "run", side_effect=PreparationError("sandbox refused")):
             report = await run_doctor()
@@ -571,7 +614,8 @@ class DoctorCommandTests(unittest.TestCase):
                 result = CliRunner().invoke(cli, ["doctor", "--quiet"])
         self.assertEqual(result.exit_code, 3, result.output)
         self.assertIn("Blocked", result.output)
-        self.assertEqual(run.call_args.args[0].engine, "pdflatex")
+        self.assertEqual(run.call_args.args[0].engine, "auto")
+        self.assertEqual(diagnostic_engines(run.call_args.args[0]), ("pdflatex",))
         discover.assert_not_called()
 
     def test_invalid_config_is_json_request_error(self):

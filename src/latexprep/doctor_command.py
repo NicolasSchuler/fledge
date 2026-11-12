@@ -21,7 +21,7 @@ from .command_options import (
     reject_config_with_isolated,
     settings_file_options,
 )
-from .config import Settings, load_settings
+from .config import load_settings
 from .config_discovery import resolve_config_path
 from .doctor import run_doctor
 from .execution_records import CONFIG_PATH_KEY
@@ -100,7 +100,7 @@ def print_tool_versions(tools: Mapping[str, object], console: Console) -> None:
     "--engine",
     type=click.Choice(ENGINES),
     help="TeX engine to test instead of the configured one "
-    f"(default {Settings().engine} unless a settings file chooses another).",
+    "(default pdflatex unless a settings file chooses another).",
 )
 @settings_file_options
 @debug_option

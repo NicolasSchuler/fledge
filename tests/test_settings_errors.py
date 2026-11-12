@@ -28,7 +28,11 @@ TOP_LEVEL_CASES = (
         ("source_date_epoch",),
         "source_date_epoch must be an integer from 0 to 253402300799",
     ),
-    ('engine = "word"', ("engine",), "engine must be one of pdflatex, xelatex, lualatex"),
+    (
+        'engine = "word"',
+        ("engine",),
+        "engine must be one of auto, pdflatex, xelatex, lualatex",
+    ),
     ('layout = "tidy"', ("layout",), "layout must be one of preserve, flat"),
     (
         "apply_formatting = 1",

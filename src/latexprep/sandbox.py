@@ -13,7 +13,7 @@ import json
 import shutil
 import sys
 from pathlib import Path
-from typing import Protocol
+from typing import NamedTuple, Protocol
 
 from .biber_toolchain import BiberToolchain
 from .errors import SandboxRefusedError
@@ -62,6 +62,8 @@ _LINUX_SYSTEM_RESOURCES = (
 _LINUX_TOOL_PREFIXES = (Path("/usr"), Path("/bin"), Path("/lib"), Path("/lib64"))
 # Only trusted system directories may supply the sandbox program itself.
 _SYSTEM_PROGRAM_PATH = "/usr/bin:/bin"
+# Distinct Seatbelt profiles one backend remembers; a job needs a few dozen.
+_MAX_REMEMBERED_PROFILES = 512
 
 
 class SandboxBackend(ProcessTable, Protocol):
@@ -79,6 +81,11 @@ class SandboxBackend(ProcessTable, Protocol):
     @property
     def requires_sealed_biber(self) -> bool:
         """Whether Biber may run only from a sealed runtime-owned copy."""
+        ...
+
+    @property
+    def supports_font_cache(self) -> bool:
+        """Whether builds may read a sealed, runtime-owned luaotfload font cache."""
         ...
 
     def system_roots(self) -> frozenset[Path]:
@@ -105,6 +112,7 @@ class SandboxBackend(ProcessTable, Protocol):
         context: ToolContext,
         readonly_inputs: tuple[Path, ...],
         biber: BiberToolchain | None,
+        readonly_trees: tuple[Path, ...] = (),
     ) -> list[str]:
         """Return ``command`` confined to ``workspace`` and the declared grants.
 
@@ -115,6 +123,9 @@ class SandboxBackend(ProcessTable, Protocol):
             readonly_inputs: Further paths the command may read.
             biber: A runtime-owned Biber copy whose executable and payload are granted,
                 if any.
+            readonly_trees: Runtime-owned directories outside every workspace that the
+                command may read but not write or execute from, such as the sealed font
+                cache.
 
         Returns:
             The argv that runs the confined command.
@@ -147,13 +158,21 @@ class _EveryToolDeclared:
 class SeatbeltSandbox(_EveryToolDeclared, GroupProcessTable):
     """macOS ``sandbox-exec`` with a generated deny-by-default profile.
 
+    A job runs hundreds of commands with few distinct grants, so the generated profile is
+    remembered per workspace and grants for the life of the backend, which is one job.
+
     Attributes:
         description: How reports name this backend.
         requires_sealed_biber: Biber may run only from a sealed runtime-owned copy.
+        supports_font_cache: Builds may read the sealed luaotfload font cache.
     """
 
     description = "macOS sandbox-exec"
     requires_sealed_biber = True
+    supports_font_cache = True
+
+    def __init__(self) -> None:
+        self._profiles: dict[_ProfileKey, str] = {}
 
     def system_roots(self) -> frozenset[Path]:
         """Return the macOS system resources and the font configurations that exist."""
@@ -170,6 +189,7 @@ class SeatbeltSandbox(_EveryToolDeclared, GroupProcessTable):
         context: ToolContext,
         readonly_inputs: tuple[Path, ...],
         biber: BiberToolchain | None,
+        readonly_trees: tuple[Path, ...] = (),
     ) -> list[str]:
         """Return ``command`` run by ``sandbox-exec`` under a generated profile.
 
@@ -188,32 +208,48 @@ class SeatbeltSandbox(_EveryToolDeclared, GroupProcessTable):
         if any(workspace.is_relative_to(root) for root in roots if root.is_dir()):
             raise SandboxRefusedError("A job workspace cannot be inside a declared toolchain tree")
         isolated = () if biber is None else (biber.executable, biber.payload)
-        profile = _seatbelt_profile(workspace, context, readonly_inputs, isolated)
+        key = _ProfileKey(workspace, context, readonly_inputs, isolated, readonly_trees)
+        profile = self._profiles.get(key)
+        if profile is None:
+            if len(self._profiles) >= _MAX_REMEMBERED_PROFILES:
+                self._profiles.clear()
+            profile = self._profiles[key] = _seatbelt_profile(key)
         return [backend, "-p", profile, *command]
 
 
-def _seatbelt_profile(
-    workspace: Path,
-    context: ToolContext,
-    readonly_inputs: tuple[Path, ...],
-    isolated: tuple[Path, ...],
-) -> str:
-    """Generate the deny-by-default Seatbelt profile for one command.
+class _ProfileKey(NamedTuple):
+    """Everything a Seatbelt profile depends on, so that equal grants share one profile.
 
-    The profile lets the command read the workspace, the resource roots, the executables
-    and the read-only inputs, and the metadata of every parent folder; execute only the
-    declared executables; and write only the workspace and ``/dev/null``.
-
-    Args:
+    Attributes:
         workspace: The only writable directory.
         context: The declared executables and resource roots.
         readonly_inputs: Further paths the command may read.
         isolated: Runtime-owned paths outside every workspace that the command may also
             read and execute.
+        readonly_trees: Runtime-owned directories the command may only read.
+    """
+
+    workspace: Path
+    context: ToolContext
+    readonly_inputs: tuple[Path, ...]
+    isolated: tuple[Path, ...]
+    readonly_trees: tuple[Path, ...]
+
+
+def _seatbelt_profile(key: _ProfileKey) -> str:
+    """Generate the deny-by-default Seatbelt profile for one command.
+
+    The profile lets the command read the workspace, the resource roots, the executables,
+    the read-only inputs and trees, and the metadata of every parent folder; execute only
+    the declared executables; and write only the workspace and ``/dev/null``.
+
+    Args:
+        key: The workspace and the grants of the command.
 
     Returns:
         The profile text.
     """
+    workspace, context, readonly_inputs, isolated, readonly_trees = key
 
     def quote(path: Path) -> str:
         """Quote ``path`` as a profile string."""
@@ -231,9 +267,10 @@ def _seatbelt_profile(
         reads.append(entry)
         mappings.append(entry)
     reads.extend(f"(literal {quote(path)})" for path in sorted(executables | set(readonly_inputs)))
+    reads.extend(f"(subpath {quote(path)})" for path in readonly_trees)
     ancestors = {
         parent
-        for root in roots | {workspace} | set(readonly_inputs) | set(isolated)
+        for root in roots | {workspace} | set(readonly_inputs) | set(isolated) | set(readonly_trees)
         for parent in root.parents
     }
     metadata = " ".join(f"(literal {quote(parent)})" for parent in sorted(ancestors))
@@ -285,10 +322,13 @@ class BubblewrapSandbox(AncestryProcessTable):
     Attributes:
         description: How reports name this backend.
         requires_sealed_biber: Biber need not run from a sealed runtime-owned copy.
+        supports_font_cache: Builds do not yet read a sealed font cache under Bubblewrap,
+            whose read-only binding of it is untested.
     """
 
     description = "Linux Bubblewrap"
     requires_sealed_biber = False
+    supports_font_cache = False
 
     def system_roots(self) -> frozenset[Path]:
         """Return the Linux system resources, both as spelled and resolved."""
@@ -311,6 +351,7 @@ class BubblewrapSandbox(AncestryProcessTable):
         context: ToolContext,
         readonly_inputs: tuple[Path, ...],
         biber: BiberToolchain | None,
+        readonly_trees: tuple[Path, ...] = (),
     ) -> list[str]:
         """Return ``command`` run by Bubblewrap in new namespaces with exact read-only mounts.
 
@@ -350,7 +391,7 @@ class BubblewrapSandbox(AncestryProcessTable):
                 raise SandboxRefusedError(
                     "A job workspace cannot overlap a declared toolchain tree"
                 )
-        if any(path.is_relative_to(workspace) for path in readonly_inputs):
+        if any(path.is_relative_to(workspace) for path in (*readonly_inputs, *readonly_trees)):
             raise SandboxRefusedError("Read-only inputs must be outside the writable workspace")
         # Every namespace below is mandatory. Do not use *-try, share-net, or
         # automatic retries: missing kernel/backend support is a closed failure.
@@ -376,7 +417,10 @@ class BubblewrapSandbox(AncestryProcessTable):
         # the host root are never directory grants. Same-path mounts preserve
         # TeX lookup and interpreter contracts without copying host configuration.
         mounts = (
-            roots | {path for path in context.executables if path.exists()} | set(readonly_inputs)
+            roots
+            | {path for path in context.executables if path.exists()}
+            | set(readonly_inputs)
+            | set(readonly_trees)
         )
         for path in sorted(mounts, key=lambda value: (len(value.parts), str(value))):
             wrapped.extend(("--ro-bind", str(path), str(path)))
@@ -394,10 +438,12 @@ class UnavailableSandbox(_EveryToolDeclared, GroupProcessTable):
     Attributes:
         description: How reports name this backend.
         requires_sealed_biber: No sealed Biber copy is needed, because no command runs.
+        supports_font_cache: No font cache is prepared, because no command runs.
     """
 
     description = "unavailable"
     requires_sealed_biber = False
+    supports_font_cache = False
 
     def system_roots(self) -> frozenset[Path]:
         """Return no system resources."""
@@ -411,6 +457,7 @@ class UnavailableSandbox(_EveryToolDeclared, GroupProcessTable):
         context: ToolContext,
         readonly_inputs: tuple[Path, ...],
         biber: BiberToolchain | None,
+        readonly_trees: tuple[Path, ...] = (),
     ) -> list[str]:
         """Refuse every command.
 

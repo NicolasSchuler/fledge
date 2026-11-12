@@ -72,6 +72,12 @@ _FONT_EXTENSIONS = frozenset({".otf", ".ttf", ".ttc"})
 _FONT_OPTION_KEYS = frozenset({"Path", "Ligatures", "Scale", "Renderer", "Numbers"})
 _FONT_PATH_OPTION = re.compile(r"(?:^|,)\s*Path\s*=\s*(\{[^{}]*\}|[^,]*)")
 
+
+def _has_font_path_option(command: Command) -> bool:
+    """Return whether a font command's options name a ``Path`` (a project font directory)."""
+    return any(_FONT_PATH_OPTION.search(option.value) for option in command.options)
+
+
 # Findings about a source file the graph tried to read but could not parse. Every
 # command and reference in such a file is unknown, so a reader that needs the file's
 # content (a document root, a citation) cannot continue past one.
@@ -510,6 +516,54 @@ class SourceGraph:
         else:
             self.references[location] = FileReference(target, command.name)
 
+    def _project_font_directory(self, visit: _Visit, command: Command) -> str | None:
+        """Return the project directory a font command reads its font from.
+
+        Args:
+            visit: The file that holds the command.
+            command: The supported font command.
+
+        Returns:
+            The project-relative directory, or ``None`` when the font is looked up outside
+            the project or the command's options were reported.
+        """
+        if self._font_lookup_outside_project(command):
+            return None
+        directory = self._font_directory(visit, command)
+        if directory is None:
+            return None
+        return self._project_path(visit, command, directory, self.cwd)
+
+    def _font_lookup_outside_project(self, command: Command) -> bool:
+        r"""Return whether a font command looks its font up outside the project.
+
+        Without a ``Path`` option, fontspec asks the TeX distribution and the system for the
+        font: a family name such as ``\setmainfont{Times New Roman}`` is looked up by name,
+        and a file name that the compilation directory lacks, such as
+        ``texgyretermes-regular.otf``, in the TeX trees. Neither is a project dependency, so
+        neither makes the graph uncertain. A name that a project font file starts with, or a
+        project file the name points to, stays a project lookup.
+
+        Args:
+            command: The font command.
+
+        Returns:
+            Whether the command names no project font.
+        """
+        if not command.arguments or _has_font_path_option(command):
+            return False
+        name = command.arguments[0].value.strip()
+        if not name or "/" in name or not is_literal_text(name):
+            return False
+        if PurePosixPath(name).suffix.lower() in _FONT_EXTENSIONS:
+            return posixpath.normpath(posixpath.join(self.cwd, name)) not in self.files
+        prefix = name.casefold()
+        return not any(
+            PurePosixPath(path).suffix.lower() in _FONT_EXTENSIONS
+            and PurePosixPath(path).name.casefold().startswith(prefix)
+            for path in self.files
+        )
+
     def _font_directory(self, visit: _Visit, command: Command) -> str | None:
         """Return the directory a font command's ``Path`` option names; ``None`` when unsupported.
 
@@ -799,10 +853,7 @@ class SourceGraph:
             return search
         font_directory = None
         if command.name in SUPPORTED_FONT_COMMANDS:
-            directory = self._font_directory(visit, command)
-            if directory is None:
-                return search
-            font_directory = self._project_path(visit, command, directory, self.cwd)
+            font_directory = self._project_font_directory(visit, command)
             if font_directory is None:
                 return search
         source = visit.source

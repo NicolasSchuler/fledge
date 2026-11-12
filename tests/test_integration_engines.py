@@ -431,5 +431,175 @@ class LiveEngineWorkflowTests(AsyncLiveProjectTestCase):
         self.assert_outcome(report, Outcome.BLOCKED if failed else PASSING_OUTCOMES)
 
 
+# A glossary with an entry and an acronym, which the glossary and acronym rules build.
+GLOSSARY_ARTICLE = _article(
+    "We train a \\gls{svm} on a \\gls{gpu}.\n\\printglossaries",
+    "\\usepackage[acronym]{glossaries}\n\\makeglossaries\n"
+    "\\newglossaryentry{svm}{name={support vector machine},"
+    "description={A maximum-margin classifier}}\n"
+    "\\newacronym{gpu}{GPU}{graphics processing unit}\n",
+)
+# An index, which latexmk builds itself, and a nomenclature, which needs Fledge's rule.
+INDEX_ARTICLE = _article(
+    "Gradient descent\\index{gradient descent} minimises a loss\\index{loss function}.\n"
+    "The step size $\\eta$\\nomenclature{$\\eta$}{Learning rate} matters.\n"
+    "\\printnomenclature\n\\printindex",
+    "\\usepackage{makeidx}\n\\usepackage{nomencl}\n\\makeindex\n\\makenomenclature\n",
+)
+
+
+def _finding(report: Report, code: str, stage: str = "baseline") -> Any:
+    """Return the finding of ``code`` that ``stage`` recorded; fail when there is none."""
+    found = [item for item in report.findings if item.code == code and item.stage == stage]
+    if not found:
+        raise AssertionError(f"No {code} finding in {stage}:\n{blocking_summary(report)}")
+    return found[0]
+
+
+@live_test("Set FLEDGE_RUN_INTEGRATION=1 for live engine selection and build-message jobs")
+class LiveEngineSelectionTests(AsyncLiveProjectTestCase):
+    """The magic comment, font lookups, restriction messages, glossaries and font caches."""
+
+    async def test_magic_comment_builds_with_xelatex(self) -> None:
+        """Check that ``% !TEX program = xelatex`` chooses XeLaTeX without any setting.
+
+        docs/configuration.md, "Choose the TeX engine": the comment comes after
+        ``--engine`` and the settings file and before pdfLaTeX, and BLD106 says what chose.
+        """
+        self.require_tools("latexmk", "xelatex", "xdvipdfmx", *POPPLER_TOOLS)
+        self.installed_tex_file("fontspec.sty", "tlmgr install fontspec")
+        source = write_project(
+            self.base / "magic-comment",
+            {
+                "main.tex": "% !TEX program = xelatex\n"
+                + _article(UNICODE_TEXT, "\\usepackage{fontspec}\n")
+            },
+        )
+        report = await run_job(JobRequest("check", source, live_settings()))
+        self.assert_outcome(report)
+        engine = _finding(report, "BLD106")
+        self.assertEqual(
+            (engine.details["engine"], engine.details["source"]), ("xelatex", "magic comment")
+        )
+        self.assertIn("xelatex", report.tools)
+
+    async def test_fontspec_font_lookups_leave_the_checks_conclusive(self) -> None:
+        """Check that fontspec lookups outside the project add no uncertain source finding.
+
+        A TeX Live font file loaded by name, and a family loaded by file name pattern, are
+        not project dependencies, so TEX005, TEX312, PKG302 and the citation checks stay
+        quiet.
+        """
+        self.require_tools("latexmk", "xelatex", "xdvipdfmx", *POPPLER_TOOLS)
+        self.installed_tex_file("fontspec.sty", "tlmgr install fontspec")
+        self.installed_tex_file("texgyretermes-regular.otf", "tlmgr install tex-gyre")
+        self.installed_tex_file("texgyreheros-regular.otf", "tlmgr install tex-gyre")
+        preamble = (
+            "\\usepackage{fontspec}\n\\setmainfont{texgyretermes-regular.otf}\n"
+            "\\setsansfont{texgyreheros}[Extension=.otf, UprightFont=*-regular, "
+            "BoldFont=*-bold]\n"
+        )
+        source = write_project(self.base / "fontspec", {"main.tex": _article("Text.", preamble)})
+        report = await self.prepare(source, live_settings(engine="xelatex"))
+        quiet = {"TEX005", "TEX312", "TEX314", "PKG302", "BIB101", "BIB102", "BIB105", "BIB106"}
+        noisy = [
+            item
+            for item in report.findings
+            if item.code in quiet and item.status not in {"passed", "not_applicable"}
+        ]
+        self.assertEqual(noisy, [], blocking_summary(report))
+
+    async def test_missing_bitmap_font_explains_the_restriction(self) -> None:
+        """Check that a METAFONT-only font fails with the bitmap-font next step.
+
+        docs/troubleshooting.md, "A missing font": builds never generate bitmap fonts.
+        """
+        self.require_tools("latexmk", "pdflatex")
+        self.installed_tex_file("bbm.sty", "tlmgr install bbm-macros bbm")
+        if find_tex_file("bbm10.pfb") is not None:
+            self.skipTest("bbm10 has an outline version here, so no bitmap font is needed")
+        source = write_project(
+            self.base / "bitmap-font",
+            {"main.tex": _article("$\\mathbbm{1}_A$", "\\usepackage{bbm}\n")},
+        )
+        report = await run_job(JobRequest("check", source, live_settings()))
+        self.assert_outcome(report, Outcome.BLOCKED)
+        errors = [item for item in report.findings if item.code == "BLD009"]
+        advice = " ".join(item.suggestion or "" for item in errors)
+        self.assertIn("never generate bitmap fonts", advice, blocking_summary(report))
+        self.assertIn("cm-super", advice)
+
+    async def test_glossary_and_acronyms_are_built(self) -> None:
+        """Check that the glossary and the list of acronyms appear in the prepared PDF.
+
+        latexmk_command adds rules that build them with makeindex; before, both were missing
+        from the PDF and prepare was blocked for lack of dependency evidence.
+        """
+        self.require_tools("latexmk", "pdflatex", "makeindex", *POPPLER_TOOLS)
+        self.installed_tex_file("glossaries.sty", "tlmgr install glossaries")
+        source = write_project(self.base / "glossary", {"main.tex": GLOSSARY_ARTICLE})
+        await self.prepare(source)
+        text = pdf_text(self.base / "prepared" / "manuscript.pdf")
+        for expected in ("Glossary", "A maximum-margin classifier", "Acronyms", "graphics"):
+            self.assertIn(expected, text)
+
+    async def test_index_and_nomenclature_are_built(self) -> None:
+        """Check that the index and the nomenclature appear in the prepared PDF."""
+        self.require_tools("latexmk", "pdflatex", "makeindex", *POPPLER_TOOLS)
+        self.installed_tex_file("nomencl.sty", "tlmgr install nomencl")
+        source = write_project(self.base / "index", {"main.tex": INDEX_ARTICLE})
+        await self.prepare(source)
+        text = pdf_text(self.base / "prepared" / "manuscript.pdf")
+        for expected in ("Nomenclature", "Learning rate", "Index", "gradient descent, 1"):
+            self.assertIn(expected, text)
+
+    @live_test("A live host-font job on macOS (FLEDGE_RUN_INTEGRATION=1)", platform="darwin")
+    async def test_system_font_is_reported_as_host_only(self) -> None:
+        """Check that a macOS system font loaded by name is reported by BLD108.
+
+        The archive rebuilds here, so only the font evidence of the XDV file shows that it
+        would not rebuild elsewhere.
+        """
+        self.require_tools("latexmk", "xelatex", "xdvipdfmx", *POPPLER_TOOLS)
+        self.installed_tex_file("fontspec.sty", "tlmgr install fontspec")
+        font = Path("/System/Library/Fonts/Supplemental/Times New Roman.ttf")
+        if not font.is_file():
+            self.skipTest(f"{font} is not installed")
+        preamble = "\\usepackage{fontspec}\n\\setmainfont{Times New Roman}\n"
+        source = write_project(self.base / "host-font", {"main.tex": _article("Text.", preamble)})
+        report = await run_job(JobRequest("check", source, live_settings(engine="xelatex")))
+        self.assert_outcome(report, Outcome.PASSED_WITH_ADVISORIES)
+        hosted = _finding(report, "BLD108")
+        self.assertEqual(hosted.severity, "warning")
+        self.assertIn(str(font), hosted.details["fonts"])
+
+    @live_test(
+        "A live LuaLaTeX font cache job on macOS (FLEDGE_RUN_INTEGRATION=1)", platform="darwin"
+    )
+    async def test_lualatex_builds_share_the_sealed_font_cache(self) -> None:
+        """Check that a job's LuaLaTeX builds read one sealed font cache, and show the timing.
+
+        The first build warms the luaotfload font database once; the transformed and archive
+        builds then skip the font scan. The stage times are printed, not asserted, because
+        a shared host makes timings unreliable.
+        """
+        self.require_tools("latexmk", "lualatex", *POPPLER_TOOLS)
+        self.installed_tex_file("fontspec.sty", "tlmgr install fontspec")
+        source = write_project(
+            self.base / "lualatex-cache",
+            {"main.tex": _article(UNICODE_TEXT, "\\usepackage{fontspec}\n")},
+        )
+        report = await self.prepare(source, live_settings(engine="lualatex", layout="flat"))
+        roots = report.tools["resource_roots"]
+        self.assertTrue(any("font-cache" in root for root in roots), roots)
+        times = {stage["name"]: stage["elapsed_seconds"] for stage in report.stages}
+        print(  # noqa: T201 - the timing is the point of this live test's output
+            "LuaLaTeX build seconds with the sealed font cache: "
+            + ", ".join(
+                f"{name} {times[name]:.1f}" for name in ("baseline", "transformed", "archive")
+            )
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

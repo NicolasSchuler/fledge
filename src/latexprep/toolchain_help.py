@@ -8,22 +8,36 @@ from dataclasses import replace
 
 from .documentation_links import INSTALLATION_GUIDE
 from .findings import Finding
-from .setting_choices import ENGINES, Engine
+from .setting_choices import ENGINES, Engine, EngineSetting
 
 _TEX_TOOLS = frozenset({"latexmk", *ENGINES})
 
 
-def explain_missing_toolchain(findings: list[Finding], engine: Engine) -> list[Finding]:
+def _build_engine(finding: Finding, setting: EngineSetting) -> Engine:
+    """Return the engine the build of ``finding`` needed: the one it recorded, else the setting.
+
+    The build records the engine it chose; a finding without one falls back to the setting,
+    and ``auto`` to pdfLaTeX, as for a main file without a ``% !TEX program`` comment.
+    """
+    recorded = finding.details.get("engine")
+    for engine in ENGINES:
+        if recorded == engine or (recorded is None and setting == engine):
+            return engine
+    return "pdflatex"
+
+
+def explain_missing_toolchain(findings: list[Finding], engine: EngineSetting) -> list[Finding]:
     """Explain each finding of a missing TeX toolchain, with installation steps for this system.
 
     A finding counts when its rule is ``build.execution_unavailable`` and the tool named in
     its details is ``latexmk`` or a TeX engine. Its message names the tools that are not on
-    ``PATH`` (latexmk and ``engine``, or else the recorded tool), and its suggestion gives
-    installation steps for macOS or for other systems.
+    ``PATH`` (latexmk and the engine of the build, or else the recorded tool), and its
+    suggestion gives installation steps for macOS or for other systems.
 
     Args:
         findings: The findings of a run.
-        engine: The TeX engine the build needs.
+        engine: The engine setting, used when a finding does not record the engine its
+            build chose.
 
     Returns:
         ``findings`` in their order, each finding of an unavailable TeX tool replaced by an
@@ -40,7 +54,8 @@ def explain_missing_toolchain(findings: list[Finding], engine: Engine) -> list[F
         ):
             explained.append(finding)
             continue
-        missing = [name for name in ("latexmk", engine) if shutil.which(name) is None]
+        needed = _build_engine(finding, engine)
+        missing = [name for name in ("latexmk", needed) if shutil.which(name) is None]
         missing = missing or [tool]
         found = " and ".join(missing)
         install = (
@@ -56,7 +71,7 @@ def explain_missing_toolchain(findings: list[Finding], engine: Engine) -> list[F
                 message=(
                     f"The TeX toolchain is unavailable: {found} "
                     f"{'was' if len(missing) == 1 else 'were'} not found on PATH. "
-                    f"Building the PDF for check and prepare needs latexmk and {engine}."
+                    f"Building the PDF for check and prepare needs latexmk and {needed}."
                 ),
                 suggestion=(
                     f"To install TeX, {install}. Installation guide: {INSTALLATION_GUIDE}. "

@@ -28,13 +28,30 @@ direct. No Fledge result guarantees that a venue will accept a submission.
   T1-encoded Computer Modern without the `cm-super` package, ends the build
   with a missing-font finding instead of a PDF with bitmap glyphs. Install the
   Type 1 fonts (`tlmgr install cm-super`) or use a font that has them.
+- **Builds see neither personal TeX trees nor personal fonts.** A class or package
+  in `TEXMFHOME` (such as `~/Library/texmf` or `~/texmf`) or in `TEXMFLOCAL`
+  (`/usr/local/texlive/texmf-local`), and a font installed only for your account
+  (`~/Library/Fonts`, `~/.fonts`), are invisible to the build, as they would be to
+  the receiving service. Put such files into the project. Fonts in the system font
+  folders are visible, and `BLD108` warns that an archive using them will not rebuild
+  on a computer without them.
+- **Only pdfLaTeX, XeLaTeX and LuaLaTeX build documents.** The DVI route (`latex`
+  with `dvips`), upLaTeX and pLaTeX, Tectonic and ConTeXt are not supported. The
+  engine comes from `--engine`, the `engine` setting or a `% !TEX program` comment,
+  never from a project `latexmkrc`, which is not executed.
+- **Glossaries, lists of acronyms and nomenclatures are built with makeindex,**
+  using the style file that the `glossaries` package records and `nomencl`'s style.
+  Glossaries that need `xindy` or `bib2gls`, and glossary types other than the main
+  glossary and the acronyms, are not built.
 - **A double quote in the temporary directory path** makes `latexmk` refuse to
   build. Fledge reports the failed build; point `TMPDIR` at a path without
   quotes. Spaces and non-ASCII characters in that path are fine.
-- **LuaLaTeX builds start without a font cache.** Every build runs with an empty
-  `TEXMFVAR`, so `luaotfload` rebuilds its font database and font caches each
-  time. LuaLaTeX documents therefore build more slowly than with pdfLaTeX or
-  XeLaTeX; raise `timeout_seconds` if a build that loads many fonts is stopped.
+- **LuaLaTeX builds font caches once per job.** On macOS the first LuaLaTeX build
+  of a job lets `luaotfload` build its font database once, which takes a few
+  seconds, and every later build of the job reuses a read-only copy; each build
+  still caches the fonts it loads that the warm-up did not. Under Linux Bubblewrap
+  every LuaLaTeX build still builds the database itself, so raise `timeout_seconds`
+  if a build that loads many fonts is stopped.
 
 ## Venue rules
 

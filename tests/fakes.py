@@ -314,10 +314,12 @@ class UnconfinedSandbox(GroupProcessTable):
     Attributes:
         description: The name of the backend.
         requires_sealed_biber: ``False``: the backend needs no sealed Biber copy.
+        supports_font_cache: ``False``: no sealed font cache is prepared.
     """
 
     description = "unconfined test backend"
     requires_sealed_biber = False
+    supports_font_cache = False
 
     def system_roots(self) -> frozenset[Path]:
         """Return no system roots."""
@@ -338,6 +340,7 @@ class UnconfinedSandbox(GroupProcessTable):
         context: ToolContext,
         readonly_inputs: tuple[Path, ...],
         biber: BiberToolchain | None,
+        readonly_trees: tuple[Path, ...] = (),
     ) -> list[str]:
         """Return ``command`` unwrapped.
 
@@ -466,6 +469,14 @@ class FakeBuildRunner(ToolRunner):
             ``None``, which keeps the plain tool.
         """
         self.biber_preparations += 1
+        return None
+
+    async def prepare_font_cache(self, root: Path) -> Path | None:
+        """Prepare nothing: fake builds never run LuaLaTeX, so no font cache is warmed.
+
+        Returns:
+            ``None``, which builds without a sealed font cache.
+        """
         return None
 
     async def run(

@@ -16,7 +16,6 @@ import asyncio
 import contextlib
 import logging
 import os
-import re
 import shutil
 import stat
 import tempfile
@@ -37,18 +36,31 @@ from .command_runner import (
 )
 from .errors import PreparationError, SandboxRefusedError
 from .file_safety import DirectoryIdentity, FileIdentity, regular_file_identity
+from .font_cache import (
+    WARM_UP_DOCUMENT,
+    WARM_UP_MAIN,
+    FontCachePreparation,
+    copy_names_database,
+    seal_font_cache,
+)
 from .limits import IO_CHUNK_BYTES, MIB
 from .process_control import kill_process_group, start_process
 from .resource_monitor import (
     ActiveCommand,
     ResourceMonitor,
     ResourceStatistics,
-    limit_advice,
     workspace_violation,
 )
 from .sandbox import SandboxBackend, select_sandbox_backend
-from .tool_launch import create_tool_environment, sandbox_refusal, with_ulimits
-from .toolchain import Toolchain, tool_path
+from .tool_launch import (
+    ToolEnvironment,
+    create_tool_environment,
+    kept_tex_cache_directory,
+    sandbox_refusal,
+    with_ulimits,
+)
+from .tool_versions import verified_version
+from .toolchain import Toolchain, ToolContext, tool_path
 
 if TYPE_CHECKING:
     from .resource_budget import ResourceBudget
@@ -61,11 +73,6 @@ logger = logging.getLogger(__name__)
 _UNLEASED_MEMORY_MB = 256
 # How much of a refused command's standard error the refusal message quotes.
 _REFUSAL_QUOTE_CHARS = 1000
-_PDFDETACH_VERSION = re.compile(r"^pdfdetach version \S+")
-# pdfdetach -v prints its version and then exits with this status.
-_PDFDETACH_VERSION_EXIT_STATUS = 99
-# Lines of a tool's version output that a report keeps: the banner and what follows it.
-_VERSION_LINES_KEPT = 3
 
 # Builds the monitor of a runner from its sandbox backend and its statistics.
 MonitorFactory = Callable[[SandboxBackend, ResourceStatistics], ResourceMonitor]
@@ -114,69 +121,6 @@ def _log_tool_end(summary: str, result: CommandResult, seconds: float) -> None:
             seconds,
             f", {failure}" if failure else "",
         )
-
-
-def _unverified_version_message(tool: str, result: CommandResult) -> str:
-    """Explain why ``tool`` gave no usable version, without its location or its raw diagnostics.
-
-    Args:
-        tool: The tool's name.
-        result: How the version command ended.
-
-    Returns:
-        The message, with the cause and what to do next.
-    """
-    advice = f"Run {tool} on its own to see why, or reinstall it, then try again."
-    if result.timed_out:
-        cause = "it did not report its version within the time limit"
-    elif result.output_limited:
-        cause = "it printed more than the output limit while reporting its version"
-    elif result.resource_exceeded:
-        cause = (
-            f"it exceeded a resource limit while reporting its version ({result.resource_exceeded})"
-        )
-        advice = limit_advice(result.resource_exceeded) or advice
-    elif result.returncode:
-        cause = f"it exited with status {result.returncode} when asked for its version"
-    elif "Error:" in result.stderr:
-        cause = "it reported an error when asked for its version"
-    else:
-        cause = "it printed no version"
-    return f"Cannot verify tool {tool}: {cause}. {advice}"
-
-
-def _verified_version(argv: list[str], executable: Path, result: CommandResult) -> ToolVersion:
-    """Check the output of a version command and keep its first lines.
-
-    ``pdfdetach -v`` also succeeds when it exits with its version status after printing
-    its version.
-
-    Args:
-        argv: The version command.
-        executable: The resolved tool.
-        result: How the command ended.
-
-    Returns:
-        The kept version lines, where the tool ran from and its arguments.
-
-    Raises:
-        PreparationError: The command hit a limit, failed, printed nothing or reported an
-            error.
-    """
-    lines = (result.stdout + result.stderr).splitlines()
-    detach_version = (
-        executable.name == "pdfdetach"
-        and argv[1:] == ["-v"]
-        and any(_PDFDETACH_VERSION.match(line) for line in lines)
-    )
-    accepted_exit = result.returncode == 0 or (
-        result.returncode == _PDFDETACH_VERSION_EXIT_STATUS and detach_version
-    )
-    if not (result.within_limits and accepted_exit and lines) or "Error:" in result.stderr:
-        raise PreparationError(_unverified_version_message(Path(argv[0]).name, result))
-    return ToolVersion(
-        tuple(lines[:_VERSION_LINES_KEPT]), result.resolved_command[0], tuple(argv[1:])
-    )
 
 
 class _FrozenInputs:
@@ -445,6 +389,8 @@ class ToolRunner:
         self._frozen = _FrozenInputs()
         self._workspace_claims: set[Path] = set()
         self._biber = BiberPreparation()
+        self._font_cache = FontCachePreparation()
+        self._kept_tex_caches: set[Path] = set()
         # Public so that diagnostics and tests can read the active commands and the job scope.
         self.monitor = monitor_factory(
             self.sandbox,
@@ -475,6 +421,77 @@ class ToolRunner:
     def resource_roots(self) -> frozenset[Path]:
         """Stable toolchain roots; command results carry their exact declared roots."""
         return self.toolchain.resource_roots
+
+    @property
+    def font_cache(self) -> Path | None:
+        """The sealed luaotfload font cache every command may read, once it is prepared."""
+        return self._font_cache.directory
+
+    def keep_tex_cache(self, workspace: Path) -> Path:
+        """Let the commands of ``workspace`` share one ``TEXMFVAR`` that outlives each of them.
+
+        A LuaLaTeX build keeps its font caches there, so that what luaotfload wrote can be
+        read once latexmk has ended. When the sealed font cache is prepared, the kept
+        ``TEXMFVAR`` also receives a copy of its names database.
+
+        Args:
+            workspace: The build's workspace.
+
+        Returns:
+            The shared ``TEXMFVAR``, inside the workspace's tool state.
+        """
+        resolved = workspace.resolve()
+        self._kept_tex_caches.add(resolved)
+        return kept_tex_cache_directory(resolved)
+
+    async def prepare_font_cache(self, root: Path) -> Path | None:
+        """Prepare the sealed luaotfload font cache once per runner, if the backend allows it.
+
+        A failure is logged and remembered, not raised: builds then run as before, only
+        more slowly.
+
+        Args:
+            root: The directory under which the cache is made when no job scope is active.
+
+        Returns:
+            The sealed cache, or ``None`` where the backend offers none or preparing it
+            failed.
+        """
+        if not self.sandbox.supports_font_cache:
+            return None
+        cache = self._font_cache
+        async with cache.lock:
+            if cache.directory is None and cache.failure is None:
+                try:
+                    cache.directory = await self._prepare_font_cache(root)
+                except (OSError, PreparationError) as error:
+                    cache.failure = str(error)
+                    logger.info("font cache: not prepared (%s)", type(error).__name__)
+            return cache.directory
+
+    async def _prepare_font_cache(self, root: Path) -> Path:
+        """Run the warm-up in a runtime-owned folder and seal what it wrote.
+
+        Returns:
+            The sealed ``TEXMFVAR`` tree.
+        """
+        # Like the Biber copy, the cache counts against the job's temporary budget.
+        scope = self.monitor.scope
+        base = (scope.root if scope is not None else root.resolve(strict=True)) / ".toolchain"
+        base.mkdir(exist_ok=True)
+        workspace = Path(tempfile.mkdtemp(prefix="font-cache-", dir=base))
+        (workspace / WARM_UP_MAIN).write_text(WARM_UP_DOCUMENT, encoding="utf-8")
+        texmf_var = self.keep_tex_cache(workspace)
+        started = time.monotonic()
+        # The probe font may be missing; only the names database that the lookup writes
+        # matters, which sealing checks.
+        await self.run(
+            ["lualatex", "-interaction=nonstopmode", "-no-shell-escape", WARM_UP_MAIN],
+            cwd=workspace,
+            workspace=workspace,
+        )
+        logger.debug("font cache: warmed in %.2f s", time.monotonic() - started)
+        return seal_font_cache(texmf_var)
 
     @property
     def tool_versions(self) -> dict[str, ToolVersion]:
@@ -606,7 +623,7 @@ class ToolRunner:
             if key not in self._versions:
                 self.monitor.statistics.version_probes += 1
                 result = await self.run(argv, cwd=workspace, workspace=workspace)
-                self._versions[key] = _verified_version(argv, executable, result)
+                self._versions[key] = verified_version(argv, executable, result)
                 self._version_names[key] = Path(argv[0]).name
             return self._versions[key]
 
@@ -617,12 +634,14 @@ class ToolRunner:
         readonly_inputs: tuple[Path, ...] = (),
     ) -> list[str]:
         """Wrap ``command`` for the sandbox with its validated read-only inputs."""
+        font_cache = self._font_cache.directory
         return self.sandbox.wrap(
             command,
             workspace,
             context=self.toolchain.context(Path(command[0])),
             readonly_inputs=self._frozen.validate(readonly_inputs),
             biber=self._biber.scope(command),
+            readonly_trees=() if font_cache is None else (font_cache,),
         )
 
     @contextlib.asynccontextmanager
@@ -733,9 +752,7 @@ class ToolRunner:
         if memory_mb is not None and memory_mb > maximum:
             raise ValueError("A command memory cap cannot exceed its lease or runtime limit")
         command_memory_mb = maximum if memory_mb is None else memory_mb
-        tool_environment = create_tool_environment(
-            workspace, context, source_date_epoch=self.source_date_epoch
-        )
+        tool_environment = self._tool_environment(workspace, context)
         try:
             environment = tool_environment.variables
             biber = self._biber.scope(command)
@@ -764,6 +781,32 @@ class ToolRunner:
             await complete_despite_cancellation(
                 asyncio.to_thread(_remove_directory, tool_environment.state_directory)
             )
+
+    def _tool_environment(self, workspace: Path, context: ToolContext) -> ToolEnvironment:
+        """Create the environment of one command, with the kept TeX cache of its workspace.
+
+        Args:
+            workspace: The command's resolved workspace.
+            context: The grants of the command's executable.
+
+        Returns:
+            The environment and its fresh state directory.
+        """
+        texmf_var = None
+        font_cache = None
+        if workspace in self._kept_tex_caches:
+            texmf_var = kept_tex_cache_directory(workspace)
+            font_cache = self._font_cache.directory
+        environment = create_tool_environment(
+            workspace,
+            context,
+            source_date_epoch=self.source_date_epoch,
+            texmf_var=texmf_var,
+            font_cache=font_cache,
+        )
+        if texmf_var is not None and font_cache is not None:
+            copy_names_database(font_cache, texmf_var)
+        return environment
 
     async def _execute(self, invocation: _Invocation) -> CommandResult:
         """Start the command and collect its output until it exits or a limit stops it.

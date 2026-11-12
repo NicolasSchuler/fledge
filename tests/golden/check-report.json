@@ -408,7 +408,7 @@
   "match_source_pdf_metadata": [],
   "main": null,
   "layout": "preserve",
-  "engine": "pdflatex",
+  "engine": "auto",
   "bibliography_backend": "auto",
   "apply_formatting": false,
   "normalize_doi": false,

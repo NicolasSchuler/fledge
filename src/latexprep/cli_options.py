@@ -26,7 +26,7 @@ from .command_options import (
 from .config import MAX_CONCURRENCY, MAX_DEFAULT_JOBS, MAX_DEFAULT_RENDER_JOBS, Settings
 from .presets import preset_names
 from .report_formats import OutputFormat
-from .setting_choices import BIBLIOGRAPHY_BACKENDS, ENGINES, LAYOUTS
+from .setting_choices import BIBLIOGRAPHY_BACKENDS, ENGINE_SETTINGS, LAYOUTS
 
 # The defaults that option help quotes, read from the settings so help cannot drift. The
 # parallelism defaults follow the CPU count, so help describes them instead of quoting.
@@ -171,8 +171,9 @@ online_option = click.option(
 )
 engine_option = click.option(
     "--engine",
-    type=click.Choice(ENGINES),
-    help=f"TeX engine that builds the PDF (default {_DEFAULTS.engine}).",
+    type=click.Choice(ENGINE_SETTINGS),
+    help="TeX engine that builds the PDF; auto follows the engine comment in the main "
+    f"file, else uses pdflatex (default {_DEFAULTS.engine}).",
 )
 bibliography_backend_option = click.option(
     "--bibliography-backend",

@@ -177,7 +177,7 @@ class ConfigDiscoveryTests(unittest.TestCase):
         self.assertEqual(selected, nearest)
         settings = load_settings(selected, {})
         self.assertEqual(settings.jobs, 1)
-        self.assertEqual(settings.engine, "pdflatex")
+        self.assertEqual(settings.engine, "auto")
 
     def test_same_directory_hidden_then_plain_then_pyproject(self) -> None:
         pyproject = self.write(self.source / "pyproject.toml", "[tool.latex-prep]\njobs = 1\n")

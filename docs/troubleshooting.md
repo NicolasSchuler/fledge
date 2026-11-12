@@ -97,6 +97,88 @@ appear as `pdf.inspection_unavailable`, and a missing BibTeX or Biber as
 If you run Fledge inside another sandbox, run it outside. `fledge inspect` needs
 no external tools and still works meanwhile.
 
+## Build failed
+
+The first `BLD009` finding usually names the cause, and its next step says what to do when
+one of Fledge's own restrictions caused it: builds never run shell escape, never generate
+bitmap fonts, and see only the project, the TeX distribution and the system font folders.
+A document that builds in your editor can therefore fail here.
+
+### See the whole TeX log
+
+The terminal shows each TeX error with its continuation lines. The last 60 lines of the
+final log are in `details.log_tail` of the `build.failed` finding (or the `build.<stage>`
+finding, such as `build.baseline`). Save the report and print them:
+
+```sh
+fledge check paper --report report.json
+jq -r '.findings[] | select(.details.log_tail) | .details.log_tail' report.json
+```
+
+The HTML report (`--html-report report.html`) shows the same tail. `--debug` adds every
+tool command, its exit status and its duration on stderr.
+
+### A missing class, package or style
+
+`! LaTeX Error: File 'acmart-custom.cls' not found.` means the file is in neither the
+project nor the TeX distribution. Find and install its package:
+
+```sh
+tlmgr search --global --file /acmart-custom.cls
+sudo tlmgr install <package>
+```
+
+On Debian or Ubuntu, `apt-file search acmart-custom.cls` names the `texlive-*` package to
+install. A copy in your personal TeX tree (`TEXMFHOME`, such as `~/Library/texmf` or
+`~/texmf`) or in `TEXMFLOCAL` is invisible to Fledge's builds, as it would be to the
+receiving service: put the file into the project instead.
+
+### A missing font
+
+`Font tcrm1000 at 600 not found` means TeX has only a METAFONT source for the font, and
+Fledge never generates bitmap fonts. For names starting with `ec`, `tc` or `la` (the EC and
+text-companion fonts that T1 encoding and list bullets use), install `cm-super`
+(`sudo tlmgr install cm-super`, or `sudo apt install cm-super`), or load outline fonts with
+`\usepackage{lmodern}`. `fledge doctor` builds a list item, so it finds this before your
+first paper does.
+
+`The font "Fira Code" cannot be found` from fontspec means XeLaTeX or LuaLaTeX could not see
+the font. Builds see the project, the TeX distribution and the system font folders
+(`/System/Library/Fonts` and `/Library/Fonts` on macOS, `/usr/share/fonts` on Linux), not
+fonts installed only for your account. Copy the font files into the project and load them
+by file name, for example `\setmainfont{FiraCode-Regular.ttf}[Path=fonts/]`, if the font's
+license allows. `BLD108` warns about a font that the build found in the system folders:
+the archive rebuilds on your computer but not on one without that font.
+
+### The wrong engine
+
+`The fontspec package requires either XeTeX or LuaTeX` means pdfLaTeX built a document
+written for XeLaTeX or LuaLaTeX. Fledge follows a `% !TEX program = xelatex` comment in the
+first lines of the main file, as most editors do, or `--engine` and the
+[engine setting](configuration.md#choose-the-tex-engine). `BLD106` records which engine
+built the document and why. A project `latexmkrc` is never executed; `BLD107` says what it
+would have changed.
+
+### Shell escape, SVG and EPS figures
+
+minted, the svg package, TikZ externalization and similar packages run external programs,
+which Fledge's builds cannot. For minted, build once locally with `-shell-escape`, using
+the TeX Live release of the receiving service, and keep the `_minted` folder in the project;
+Fledge then uses the cached highlighting. Convert SVG figures to PDF yourself
+(`rsvg-convert -f pdf -o figure.pdf figure.svg`) and EPS figures with
+`epstopdf figure.eps`, then include the PDF files.
+
+### A tool refused because it lives in your home folder
+
+On Linux, Bubblewrap runs only tools installed under the system prefixes (`/usr`, `/bin`,
+`/lib`): a TeX Live or `tex-fmt` installed in your home folder is refused with "Linux tool
+executables must be installed under the supported system prefixes". Install them system-wide,
+for example TeX Live under `/usr/local/texlive`, which is under `/usr`.
+
+### `fledge` is not found after `pipx install`
+
+pipx puts commands in `~/.local/bin`. Run `pipx ensurepath`, then open a new terminal.
+
 ## By symptom
 
 | Problem | Next step |
@@ -110,7 +192,7 @@ no external tools and still works meanwhile.
 | Unknown setting or selector | The request error suggests the closest valid name, such as `max_pages` for `max_page`, or the closest codes for a selector. See [choose checks](configuration.md#choose-checks) and `fledge rules`. |
 | Output already exists | Choose a new path outside the input. |
 | Isolation failure or Biber preparation failure | See [installation](installation.md#tools) and [Biber on macOS](workflow-reference.md#biber-on-macos). |
-| Build failed | Read `details.log_tail` in the JSON or HTML report: the last 60 lines of the TeX log, on the `build.failed` finding, or on the `build.<stage>` finding (for example `build.baseline`) when `latexmk` itself exited normally. |
+| Build failed | See [build failed](#build-failed): the first `BLD009` finding and its next step, and `details.log_tail` in the JSON or HTML report for the last 60 lines of the TeX log. |
 | Missing or incomplete build trace | Resolve the reported build evidence. Preparation cannot choose package contents safely without a complete trace. |
 | A wanted extra file is omitted | List its source-relative path under [`[package] include`](configuration.md#package-contents). `--no-cleanup` does not retain unrelated files. |
 | `project.nonportable_filename` warning | A name that is not valid on every operating system was kept unchanged; rename it if the submission system rejects it. |

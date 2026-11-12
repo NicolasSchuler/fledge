@@ -9,8 +9,12 @@ from __future__ import annotations
 from typing import Literal, get_args
 
 Engine = Literal["pdflatex", "xelatex", "lualatex"]
+# The engine setting: an engine, or "auto" to follow the main file's % !TEX program comment
+# and otherwise build with pdfLaTeX.
+EngineSetting = Literal["auto", "pdflatex", "xelatex", "lualatex"]
 BibliographyBackend = Literal["auto", "bibtex", "biber"]
 Layout = Literal["preserve", "flat"]
 ENGINES: tuple[Engine, ...] = get_args(Engine)
+ENGINE_SETTINGS: tuple[EngineSetting, ...] = get_args(EngineSetting)
 BIBLIOGRAPHY_BACKENDS: tuple[BibliographyBackend, ...] = get_args(BibliographyBackend)
 LAYOUTS: tuple[Layout, ...] = get_args(Layout)

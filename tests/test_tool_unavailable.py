@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -114,12 +115,12 @@ class BuildFindingTests(unittest.IsolatedAsyncioTestCase):
         result = await self.build(ToolUnavailableError(message, "latexmk"))
         [finding] = [item for item in result.findings if item.rule == "build.execution_unavailable"]
         self.assertEqual(finding.message, message)
-        self.assertEqual(finding.details, {"tool": "latexmk"})
+        self.assertEqual(finding.details, {"tool": "latexmk", "engine": "pdflatex"})
 
     async def test_other_unavailable_executions_name_no_tool(self) -> None:
         result = await self.build(PreparationError("Restricted execution is unavailable"))
         [finding] = [item for item in result.findings if item.rule == "build.execution_unavailable"]
-        self.assertEqual(finding.details, {})
+        self.assertEqual(finding.details, {"engine": "pdflatex"})
 
     async def test_a_contract_violation_is_not_reported_as_an_unavailable_toolchain(self) -> None:
         for error in (ValueError("bad argument"), RuntimeError("overlapping workspaces")):
@@ -174,6 +175,17 @@ class MissingToolchainExplanationTests(unittest.TestCase):
             [finding.details.get("missing_tools") for finding in explained],
             [["latexmk", "pdflatex"], ["latexmk", "pdflatex"]],
         )
+
+    def test_the_engine_the_build_chose_wins_over_the_setting(self) -> None:
+        chosen = replace(
+            self.unavailable("latexmk"), details={"tool": "latexmk", "engine": "xelatex"}
+        )
+        with patch("latexprep.toolchain_help.shutil.which", return_value=None):
+            [explained] = explain_missing_toolchain([chosen], "auto")
+            [automatic] = explain_missing_toolchain([self.unavailable("latexmk")], "auto")
+        self.assertEqual(explained.details["missing_tools"], ["latexmk", "xelatex"])
+        self.assertIn("needs latexmk and xelatex", explained.message)
+        self.assertEqual(automatic.details["missing_tools"], ["latexmk", "pdflatex"])
 
     def test_the_message_wording_alone_is_never_parsed(self) -> None:
         finding = self.unavailable(None)

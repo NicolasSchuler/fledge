@@ -19,6 +19,7 @@ from typing import NotRequired, TypedDict
 from .build_result import BuildResult
 from .command_runner import ToolVersion
 from .config import Settings
+from .engine_selection import DEFAULT_ENGINE
 from .errors import PreparationError
 from .findings import Finding, has_blockers
 from .formatting import FormattingOptions, format_project
@@ -39,8 +40,18 @@ from .toolchain import install_hint
 # The built-in PDF stage inspects and compares one document, so these tools are required.
 _PDF_PIPELINE_TOOLS = frozenset(required_inspection_tools() | COMPARISON_TOOLS)
 _BIBLIOGRAPHY_BACKENDS: tuple[BibliographyBackend, ...] = ("bibtex", "biber")
-_DOCUMENT = "\\documentclass{article}\n\\begin{document}\nFledge setup test.\n"
-_REFERENCE = "@article{doctor,author={Example, Alice},title={Setup test},year={2026}}\n"
+# The bullet of the list is set in the text-companion font (TS1), which TeX Live has as
+# Type 1 only in cm-super; without it the fixture fails with the bitmap-font hint, as the
+# first manuscript with a list would.
+_DOCUMENT = (
+    "\\documentclass{article}\n\\begin{document}\nFledge setup test.\n"
+    "\\begin{itemize}\n\\item A list item.\n\\end{itemize}\n"
+)
+# A complete entry, so that BibTeX has no missing journal to note (BLD015).
+_REFERENCE = (
+    "@article{doctor,author={Example, Alice},title={Setup test},"
+    "journal={Journal of Setup Tests},year={2026}}\n"
+)
 _SANDBOX_BACKENDS = {"darwin": "macOS sandbox-exec", "linux": "Linux Bubblewrap"}
 # The PDF findings that show the built-in PDF was inspected, extracted and rendered.
 _PDF_EVIDENCE_RULES = frozenset({"pdf.pages", "pdf.text", "compare.text", "compare.rendering"})
@@ -170,8 +181,9 @@ def _failed_fixture_finding(stage: str, item: Finding, *, required: bool) -> Fin
         f"Built-in setup fixture, {stage}: {item.message}",
         severity="error" if required else "warning",
         status=item.status,
-        suggestion="Repair the local toolchain or execution limits and rerun "
-        "fledge doctor. This result does not diagnose your manuscript." + advisory,
+        suggestion=(item.suggestion + " " if item.suggestion else "")
+        + "Repair the local toolchain or execution limits and rerun fledge doctor. This "
+        "result does not diagnose your manuscript." + advisory,
         details={"stage": stage, "diagnostic_rule": item.rule, **item.details},
     )
 
@@ -179,15 +191,16 @@ def _failed_fixture_finding(stage: str, item: Finding, *, required: bool) -> Fin
 def diagnostic_engines(settings: Settings) -> tuple[Engine, ...]:
     """List every distinct engine selected for configured documents, so each is exercised.
 
+    The setup fixture has no ``% !TEX program`` comment, so the ``auto`` setting builds it
+    with pdfLaTeX, as it would build a manuscript without one.
+
     Returns:
         The engines in sorted order; only ``settings.engine`` without configured documents.
     """
-    return tuple(
-        sorted(
-            {document.engine or settings.engine for document in settings.workflow.documents}
-            or {settings.engine}
-        )
-    )
+    selected = {document.engine or settings.engine for document in settings.workflow.documents} or {
+        settings.engine
+    }
+    return tuple(sorted({DEFAULT_ENGINE if name == "auto" else name for name in selected}))
 
 
 def _build_tool_names(engine: Engine, backend: str | None = None) -> set[str]:
@@ -462,21 +475,33 @@ async def _probe_sandbox(run: _DoctorRun) -> bool:
 
 
 async def _verify_tool_versions(run: _DoctorRun) -> None:
-    """Ask each installed tool, apart from biber, for its version under restricted execution."""
-    for name, inventory in run.tools.items():
-        if not inventory["installed"] or name == "biber":
-            # Biber needs the runtime's sealed toolchain preparation during build.
-            continue
-        work = run.root / f"version-{name}"
-        work.mkdir()
-        try:
-            _record_version(inventory, await run.runner.tool_version(_version_command(name), work))
-        except PreparationError as error:
+    """Ask each installed tool, apart from biber, for its version under restricted execution.
+
+    The probes run at the same time, each in its own folder; their findings are recorded in
+    the order of the tools.
+    """
+    # Biber needs the runtime's sealed toolchain preparation during build.
+    names = [
+        name for name, inventory in run.tools.items() if inventory["installed"] and name != "biber"
+    ]
+    for name in names:
+        (run.root / f"version-{name}").mkdir()
+    outcomes = await asyncio.gather(
+        *(
+            run.runner.tool_version(_version_command(name), run.root / f"version-{name}")
+            for name in names
+        ),
+        return_exceptions=True,
+    )
+    for name, outcome in zip(names, outcomes, strict=True):
+        if isinstance(outcome, ToolVersion):
+            _record_version(run.tools[name], outcome)
+        elif isinstance(outcome, PreparationError):
             run.report.findings.append(
                 Finding(
                     "doctor.tool_unavailable",
                     f"Installed tool {name} could not report its "
-                    f"version under restricted execution: {error}",
+                    f"version under restricted execution: {outcome}",
                     severity="error" if name in run.required else "warning",
                     status="inconclusive",
                     suggestion=f"Repair {name} or its sandbox-accessible resources and rerun "
@@ -484,6 +509,9 @@ async def _verify_tool_versions(run: _DoctorRun) -> None:
                     details={"tool": name, "required": name in run.required},
                 )
             )
+        else:
+            # A defect, a cancellation or a refused sandbox is not an unavailable tool.
+            raise outcome
 
 
 async def _diagnose_formatting(run: _DoctorRun, source: Path) -> None:

@@ -86,7 +86,8 @@ class JobBackendsTests(AsyncProjectTestCase):
         self.assertEqual(report.outcome, "passed")
         build.assert_awaited_once()
         tree, main, work, engine, _runner = build.await_args.args
-        self.assertEqual((main, engine), ("main.tex", "pdflatex"))
+        # The build resolves the automatic engine from the main file's magic comment.
+        self.assertEqual((main, engine), ("main.tex", "auto"))
         self.assertEqual(work.name, "baseline")
         self.assertNotEqual(tree, source, "the job builds its own snapshot, not the input")
         inspect.assert_awaited_once()

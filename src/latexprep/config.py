@@ -55,7 +55,7 @@ from .pdf_structure_checks import StructureOptions
 from .presets import preset_values
 from .resource_monitor import WORKSPACE_TOTAL_FILE_LIMITS
 from .review_policy import ReportingOptions
-from .setting_choices import BibliographyBackend, Engine, Layout
+from .setting_choices import BibliographyBackend, EngineSetting, Layout
 from .source_transform import SourceTransformOptions
 from .submission_options import SubmissionOptions
 from .workflow_options import PackageOptions, WorkflowOptions
@@ -192,7 +192,8 @@ class Settings:
             that a PDF property must match.
         main: The main file, or ``None``.
         layout: The package layout.
-        engine: The TeX engine.
+        engine: The TeX engine, or ``auto`` to follow the main file's ``% !TEX program``
+            comment and otherwise build with pdfLaTeX.
         bibliography_backend: The bibliography tool, or ``auto``.
         apply_formatting: Whether preparation applies the formatting (``--format``).
         normalize_doi: Whether preparation normalizes DOIs.
@@ -262,7 +263,7 @@ class Settings:
     match_source_pdf_metadata: tuple[str, ...] = ()
     main: str | None = None
     layout: Layout = "preserve"
-    engine: Engine = "pdflatex"
+    engine: EngineSetting = "auto"
     bibliography_backend: BibliographyBackend = "auto"
     apply_formatting: bool = False
     normalize_doi: bool = False

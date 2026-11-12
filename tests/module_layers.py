@@ -138,6 +138,11 @@ MODULES_BY_LAYER: dict[str, tuple[str, ...]] = {
         "toolchain",
         "toolchain_help",
         "zip_validation",
+        "build_failure_help",
+        "engine_selection",
+        "build_fonts",
+        "font_cache",
+        "tool_versions",
     ),
     "checks": (
         "author_records",

@@ -4,8 +4,10 @@ latexmk runs with ``-norc`` and a static, application-owned configuration passed
 the command line, so no project, user or system rc file, rule or environment variable
 can change what it does. The configuration also decides which bibliography backend
 may run: an unselected backend, or Biber while its preparation is deferred, is
-replaced by an internal command that fails without launching anything. Running the
-command is ``runtime``'s work and reading its evidence is the other build modules'.
+replaced by an internal command that fails without launching anything. It adds the
+custom rules that build a glossary, a list of acronyms and a nomenclature with makeindex,
+which latexmk runs by itself only for an index. Running the command is ``runtime``'s work
+and reading its evidence is the other build modules'.
 """
 
 from __future__ import annotations
@@ -25,6 +27,39 @@ ENGINE_MODES: dict[Engine, str] = {
 # Passes latexmk may make to settle cross-references, citations and the table of
 # contents; a document that still changes after this many is reported, not looped on.
 MAX_LATEXMK_PASSES = 5
+# Custom rules for the glossaries and nomencl packages, which leave makeindex input that
+# latexmk does not process by itself. Each rule makes exactly its own output, so that the
+# rule database shows which rule wrote which file: the glossary (.glo to .gls) and the list
+# of acronyms (.acn to .acr) with the style file and order that the glossaries package
+# recorded in the .aux file, and the nomenclature (.nlo to .nls) with nomencl's style.
+# makeindex runs in the output folder, because the paranoid openout_any setting refuses a
+# path into a parent directory. Only latexmk's base name reaches the commands, as a list
+# argument that no shell interprets.
+GLOSSARY_RULES = (
+    'add_cus_dep("glo", "gls", 0, "fledge_glossary"); '
+    'add_cus_dep("acn", "acr", 0, "fledge_acronyms"); '
+    'add_cus_dep("nlo", "nls", 0, "fledge_nomenclature"); '
+    "sub fledge_makeindex { my ($base, @arguments) = @_; "
+    "my ($name, $folder) = File::Basename::fileparse($base); my $here = Cwd::getcwd(); "
+    'chdir($folder) or return 1; my $status = system("makeindex", "-q", @arguments); '
+    "chdir($here); return $status; } "
+    "sub fledge_glossary_style { my ($base, $name) = @_; "
+    'my ($style, $order) = ("$name.ist", ""); '
+    'if (open(my $aux, "<", "$base.aux")) { while (my $line = <$aux>) { '
+    "$style = $1 if $line =~ /\\\\\\@istfilename\\{([^{}]+)\\}/; "
+    '$order = "-l" if $line =~ /\\\\\\@glsorder\\{letter\\}/; } close($aux); } '
+    "return ($style, $order); } "
+    "sub fledge_glossary_index { my ($base, $log, $output, $input) = @_; "
+    "my ($name) = File::Basename::fileparse($base); "
+    "my ($style, $order) = fledge_glossary_style($base, $name); "
+    'return fledge_makeindex($base, "-s", $style, grep({ $_ ne "" } $order), '
+    '"-t", "$name.$log", "-o", "$name.$output", "$name.$input"); } '
+    'sub fledge_glossary { return fledge_glossary_index($_[0], "glg", "gls", "glo"); } '
+    'sub fledge_acronyms { return fledge_glossary_index($_[0], "alg", "acr", "acn"); } '
+    "sub fledge_nomenclature { my ($name) = File::Basename::fileparse($_[0]); "
+    'return fledge_makeindex($_[0], "-s", "nomencl.ist", "-t", "$name.nlg", '
+    '"-o", "$name.nls", "$name.nlo"); }'
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,7 +121,7 @@ def controlled_rules(backend: BibliographyBackend, biber: BiberPlan, biber_execu
     # Static trusted configuration overrides no imported rc, rules, or environment.
     rules = (
         f"$max_repeat={MAX_LATEXMK_PASSES}; $bibtex_use=1; "
-        "$use_make_for_missing_files=0; @cus_dep_list=();"
+        f"$use_make_for_missing_files=0; @cus_dep_list=(); {GLOSSARY_RULES}"
     )
     if backend != "auto":
         # Latexmk's documented internal-command adapter returns failure without

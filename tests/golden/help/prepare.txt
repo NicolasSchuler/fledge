@@ -20,8 +20,9 @@ Common options:
                                   configuration.
   --ignore CODE_OR_PREFIX         Skip these checks; same syntax as --select. Repeatable; adds to
                                   checks.ignore from configuration.
-  --engine [pdflatex|xelatex|lualatex]
-                                  TeX engine that builds the PDF (default pdflatex).
+  --engine [auto|pdflatex|xelatex|lualatex]
+                                  TeX engine that builds the PDF; auto follows the engine comment in
+                                  the main file, else uses pdflatex (default auto).
   --reference-pdf PATH            PDF that the build must match page by page, for example the
                                   version you already submitted.
   --max-pages PAGES               Total page limit, including references.  [x>=1]

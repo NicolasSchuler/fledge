@@ -308,8 +308,10 @@ class FlatLayoutTests(ProjectTestCase):
         self.assertIn(b"\\inputminted{python}{example.py}", rewritten)
         self.assertIn(b"Path={./}", rewritten)
         self.assertEqual(len(analyze_sources(self.root, "main.tex").dependencies), 5)
+        # A family name is looked up by the TeX distribution and the system, never in the
+        # project, so it does not stop flattening.
         self.write("main.tex", "\\documentclass{article}\n\\setmainfont{Some System Family}")
-        self.assertTrue(has_blockers(plan_flatten(self.root, "main.tex").findings))
+        self.assertFalse(has_blockers(plan_flatten(self.root, "main.tex").findings))
 
     def test_literal_reader_adapters_preserve_nonfile_arguments(self) -> None:
         readers = (

@@ -211,6 +211,30 @@ keep their existing typed tables. See [the check catalogue](checks.md),
 {download}`constraint settings <../examples/settings.toml>`, and
 {download}`additional check settings <../examples/checks.toml>` for supported policies.
 
+## Choose the TeX engine
+
+Fledge builds with pdfLaTeX, XeLaTeX or LuaLaTeX. The first of these that names an
+engine chooses it:
+
+1. `--engine xelatex` on the command line;
+2. `engine = "xelatex"` in the settings file (or `engine` of a document under
+   `workflow.documents`);
+3. a `% !TEX program = xelatex` comment among the first 20 lines of the main file, as
+   TeXShop, TeXstudio, TeXworks and VS Code write it (`% !TEX TS-program` and TeXShop's
+   `xelatexmk` spelling work too; the name is case-insensitive);
+4. pdfLaTeX.
+
+The default, `engine = "auto"`, leaves the choice to the magic comment. `BLD106` records
+which engine built the document and what chose it; a comment that names a program Fledge
+cannot run, such as `uplatex`, is a warning and the document builds with pdfLaTeX. A
+project `latexmkrc` never chooses the engine, because Fledge runs latexmk with `-norc` and
+never executes that file; `BLD107` says what the file would have changed and suggests
+`--engine` when its `$pdf_mode` selects another engine.
+
+```toml
+engine = "lualatex" # auto (the default), pdflatex, xelatex or lualatex
+```
+
 ## Size, time and memory limits
 
 Fledge bounds what one job may import, write and run. The defaults suit ordinary

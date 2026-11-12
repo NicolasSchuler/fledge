@@ -15,6 +15,7 @@ import re
 import shutil
 from dataclasses import KW_ONLY, dataclass, replace
 from pathlib import Path, PurePosixPath
+from typing import NamedTuple
 
 from .bibliography_controls import read_bibliography_evidence
 from .build_bibliography import (
@@ -32,12 +33,31 @@ from .build_dependencies import (
     SubmissionDependencies,
     collect_submission_dependencies,
 )
-from .build_log import log_findings, log_tail, read_bounded
+from .build_failure_help import explain_build_message
+from .build_fonts import (
+    HOST_FONTS_RULE,
+    host_font_files,
+    host_fonts_finding,
+    luaotfload_font_files,
+    tex_distribution_trees,
+    xdv_font_files,
+)
+from .build_log import bibliography_log_findings, log_findings, log_tail, read_bounded
 from .build_recorder import RecorderEvidence, read_recorder
 from .build_result import BibliographyRecord, BuildResult, ExecutionPolicy
 from .build_workspace import BuildLayout, prepare_layout
 from .cancellation import run_in_thread
 from .command_runner import CommandFailure, CommandResult, RuntimeLimits, ToolVersion
+from .engine_selection import (
+    DEFAULT_ENGINE,
+    ENGINE_LABELS,
+    EngineChoice,
+    choose_engine,
+    engine_finding,
+    find_latexmk_configurations,
+    latexmk_configuration_finding,
+    read_engine_comment,
+)
 from .errors import PreparationError, ToolUnavailableError
 from .findings import Finding
 from .latexmk_command import BiberPlan, controlled_rules, latexmk_command
@@ -52,7 +72,7 @@ from .loaded_options import (
 from .option_config import require_unique_strings, validate_scalars
 from .path_safety import is_relative_posix_path
 from .runtime import ToolRunner
-from .setting_choices import BibliographyBackend, Engine
+from .setting_choices import BibliographyBackend, Engine, EngineSetting
 from .tool_launch import tool_state_directory
 
 # Only these policy-level log errors may be deselected. Tool failures, incomplete
@@ -62,6 +82,10 @@ _MAIN_COMPONENT = re.compile(r"[A-Za-z0-9_.-]+")
 _PDF_HEADER = b"%PDF-"
 # The part of latexmk's standard error a build finding keeps in its details.
 _STDERR_TAIL_CHARS = 4000
+# The closing lines of latexmk's output that are searched for a restriction that explains a
+# failed build, and the prefix of the lines that the PDF driver of XeLaTeX prints.
+_MAX_EXPLAINED_OUTPUT_LINES = 400
+_DRIVER_PREFIX = "xdvipdfmx:"
 _FAILURE_RULES = {
     CommandFailure.TIMEOUT: "build.timeout",
     CommandFailure.OUTPUT_LIMIT: "build.output_limit",
@@ -151,7 +175,7 @@ async def build_project(
     source: Path,
     main: str,
     work: Path,
-    engine: Engine,
+    engine: EngineSetting,
     runner: ToolRunner,
     *,
     bibliography_backend: BibliographyBackend = "auto",
@@ -159,6 +183,9 @@ async def build_project(
     ignored_log_checks: tuple[str, ...] = (),
 ) -> BuildResult:
     """Build ``main`` in isolation, preparing Biber for an automatic strategy only when needed.
+
+    The engine is the setting, else the main file's ``% !TEX program`` comment, else
+    pdfLaTeX; the result says which, and notes a project latexmkrc that latexmk ignores.
 
     On macOS, preparing Biber copies and unpacks a large universal binary, which
     costs seconds per job. Unless the sources mention biblatex, an automatic build
@@ -169,7 +196,7 @@ async def build_project(
         source: The project directory to copy.
         main: The main file, relative to ``source``.
         work: The workspace directory to create.
-        engine: The TeX engine.
+        engine: The engine setting; ``auto`` follows the main file's magic comment.
         runner: The restricted tool runner.
         bibliography_backend: The bibliography strategy.
         inventory_loaded_options: Whether to collect the loaded class and package option
@@ -186,21 +213,59 @@ async def build_project(
         source,
         main,
         work,
-        engine,
+        DEFAULT_ENGINE,
         bibliography_backend=bibliography_backend,
         inventory_loaded_options=inventory_loaded_options,
         ignored_log_checks=ignored_log_checks,
     )
-    plan = await plan_biber(runner, bibliography_backend, source)
+    # The request has validated the main file's name before it is read.
+    choice = choose_engine(engine, await run_in_thread(read_engine_comment, source / main))
+    request = replace(request, engine=choice.engine)
+    result = await _build_with_biber_plan(request, runner)
+    result.findings[0:0] = await run_in_thread(_engine_findings, choice, source, main)
+    return result
+
+
+async def _build_with_biber_plan(request: BuildRequest, runner: ToolRunner) -> BuildResult:
+    """Run the build, first without Biber when the plan defers it.
+
+    Args:
+        request: The build to run.
+        runner: The restricted tool runner.
+
+    Returns:
+        The build result.
+    """
+    plan = await plan_biber(runner, request.bibliography_backend, request.source)
     if not plan.deferred:
         return await _build_once(request, runner, plan)
     try:
         return await _build_once(request, runner, plan)
     except BiberRequired:
-        await run_in_thread(shutil.rmtree, work)
+        await run_in_thread(shutil.rmtree, request.work)
     return await _build_once(
         request, runner, BiberPlan(deferred=False, note=BIBER_PREPARED_AFTER_DEFERRAL)
     )
+
+
+def _engine_findings(choice: EngineChoice, source: Path, main: str) -> list[Finding]:
+    """Say which engine built the document, and what a project latexmkrc would have changed.
+
+    Args:
+        choice: The engine and what chose it.
+        source: The project folder, searched for latexmk configuration files.
+        main: The main file.
+
+    Returns:
+        The engine finding, then one finding per latexmk configuration file.
+    """
+    return [
+        engine_finding(choice, main),
+        *(
+            latexmk_configuration_finding(configuration, choice, main)
+            for configuration in find_latexmk_configurations(source, main)
+        ),
+    ]
 
 
 async def _build_once(request: BuildRequest, runner: ToolRunner, biber: BiberPlan) -> BuildResult:
@@ -233,23 +298,15 @@ async def _build_once(request: BuildRequest, runner: ToolRunner, biber: BiberPla
     policy = ExecutionPolicy(runner.sandbox.description, runner.limits, runner.source_date_epoch)
     result.tools.execution = policy
     try:
-        result.tools.versions["latexmk"] = await runner.tool_version(
-            ["latexmk", "-norc", "-v"], workspace=layout.work
-        )
-        result.tools.versions[request.engine] = await runner.tool_version(
-            [request.engine, "--version"], workspace=layout.work
-        )
+        result.tools.versions.update(await _probe_build_tools(request, runner, layout))
+        await _prepare_engine(request, runner, layout)
         execution = await runner.run(result.command, cwd=layout.cwd, workspace=layout.work)
     except PreparationError as error:
         result.findings.extend(_unavailable_findings(error, request))
         return result
     result.command = execution.resolved_command
     result.tools.execution = replace(policy, duration_seconds=execution.duration_seconds)
-    declared_roots = (
-        tuple(Path(root) for root in execution.resource_roots)
-        if execution.resource_roots
-        else tuple(runner.resource_roots)
-    )
+    declared_roots = _declared_roots(execution, runner)
     result.tools.resource_roots = tuple(sorted(str(root) for root in declared_roots))
     max_output_bytes = runner.limits.max_output_bytes
     log = _read_log(request, layout, max_output_bytes)
@@ -284,16 +341,14 @@ async def _build_once(request: BuildRequest, runner: ToolRunner, biber: BiberPla
     result.tools.versions.update(bibliography.versions)
     pdf = layout.output / f"{request.stem}.pdf"
     complete_pdf = _is_complete_pdf(pdf, runner.limits.max_file_bytes)
-    if not complete_pdf:
-        result.findings.append(
-            Finding(
-                "build.missing_pdf",
-                "No complete new PDF was produced.",
-                severity="error",
-                path=request.main,
-                details={"log_tail": log_tail(result.log)},
-            )
+    result.findings.extend(
+        await run_in_thread(
+            _output_findings,
+            request,
+            layout,
+            _OutputEvidence(recorder.inputs, declared_roots, result.log, complete_pdf),
         )
+    )
     built = complete_pdf and not any(
         item.severity == "error" and item.code not in request.ignored_log_checks
         for item in result.findings
@@ -319,6 +374,150 @@ async def _build_once(request: BuildRequest, runner: ToolRunner, biber: BiberPla
             )
         )
     return result
+
+
+class _OutputEvidence(NamedTuple):
+    """What a finished build left that its output findings read.
+
+    Attributes:
+        recorder_inputs: The files the recorder lists.
+        declared_roots: The declared resource roots.
+        log: The final-pass log.
+        complete_pdf: Whether the build produced a complete PDF.
+    """
+
+    recorder_inputs: frozenset[Path]
+    declared_roots: tuple[Path, ...]
+    log: str
+    complete_pdf: bool
+
+
+def _output_findings(
+    request: BuildRequest, layout: BuildLayout, evidence: _OutputEvidence
+) -> list[Finding]:
+    """Report a missing PDF, or the fonts a XeLaTeX or LuaLaTeX PDF took from this computer.
+
+    Args:
+        request: The build.
+        layout: The build's workspace.
+        evidence: The recorder inputs, declared roots, log and PDF state of the build.
+
+    Returns:
+        The missing-PDF error, the host-font finding, or nothing for a pdfLaTeX PDF.
+    """
+    if not evidence.complete_pdf:
+        return [
+            Finding(
+                "build.missing_pdf",
+                "No complete new PDF was produced.",
+                severity="error",
+                path=request.main,
+                details={"log_tail": log_tail(evidence.log)},
+            )
+        ]
+    if request.engine == "pdflatex":
+        return []
+    return [_host_fonts(request, layout, evidence.recorder_inputs, evidence.declared_roots)]
+
+
+async def _probe_build_tools(
+    request: BuildRequest, runner: ToolRunner, layout: BuildLayout
+) -> dict[str, ToolVersion]:
+    """Verify the versions of latexmk and the engine; the job remembers them.
+
+    The probes run one after the other in the task that holds the build's lease: a command
+    may not run in a task of its own under that lease.
+
+    Args:
+        request: The build, which names the engine.
+        runner: The restricted tool runner.
+        layout: The build's workspace.
+
+    Returns:
+        The version of each tool, by name.
+
+    Raises:
+        PreparationError: A tool is missing or gave no usable version.
+    """
+    return {
+        "latexmk": await runner.tool_version(["latexmk", "-norc", "-v"], workspace=layout.work),
+        request.engine: await runner.tool_version(
+            [request.engine, "--version"], workspace=layout.work
+        ),
+    }
+
+
+async def _prepare_engine(request: BuildRequest, runner: ToolRunner, layout: BuildLayout) -> None:
+    """Keep a LuaLaTeX build's font caches and give it the job's sealed font database.
+
+    The kept caches name the font files luaotfload loaded, which the host-font check reads
+    after the build; the sealed database spares each build the font scan.
+
+    Args:
+        request: The build, which names the engine.
+        runner: The restricted tool runner.
+        layout: The build's workspace.
+    """
+    if request.engine == "lualatex":
+        runner.keep_tex_cache(layout.work)
+        await runner.prepare_font_cache(layout.work.parent)
+
+
+def _declared_roots(execution: CommandResult, runner: ToolRunner) -> tuple[Path, ...]:
+    """Return the directories the build could read from apart from the project.
+
+    Args:
+        execution: The result of the latexmk command, which records its declared roots.
+        runner: The runner, whose roots stand in when the result records none, and whose
+            sealed font cache LuaLaTeX reads.
+
+    Returns:
+        The declared resource roots, with the font cache when there is one.
+    """
+    roots = (
+        tuple(Path(root) for root in execution.resource_roots)
+        if execution.resource_roots
+        else tuple(runner.resource_roots)
+    )
+    return roots if runner.font_cache is None else (*roots, runner.font_cache)
+
+
+def _host_fonts(
+    request: BuildRequest,
+    layout: BuildLayout,
+    recorder_inputs: frozenset[Path],
+    declared_roots: tuple[Path, ...],
+) -> Finding:
+    """Report the fonts a XeLaTeX or LuaLaTeX build loaded from outside its trees.
+
+    Args:
+        request: The build, which names the engine.
+        layout: The build's workspace, whose output holds the XDV file.
+        recorder_inputs: The files the recorder lists, which name LuaLaTeX's font caches.
+        declared_roots: The declared resource roots, among which the TeX distribution is.
+
+    Returns:
+        The host-font finding; an informational, inconclusive one when the XDV file could
+        not be read.
+    """
+    label = ENGINE_LABELS[request.engine]
+    try:
+        files = (
+            xdv_font_files(layout.output / f"{request.stem}.xdv")
+            if request.engine == "xelatex"
+            else luaotfload_font_files(recorder_inputs)
+        )
+    except PreparationError as error:
+        return Finding(
+            HOST_FONTS_RULE,
+            f"The fonts {label} loaded could not be read: {error}.",
+            severity="info",
+            status="inconclusive",
+            path=request.main,
+        )
+    distribution = tex_distribution_trees(declared_roots)
+    hosted = host_font_files(files, distribution=distribution, project=layout.project)
+    return host_fonts_finding(label, hosted, request.main)
 
 
 async def _judge_bibliography(
@@ -395,13 +594,16 @@ def _unavailable_findings(error: PreparationError, request: BuildRequest) -> lis
         An inconclusive ``build.execution_unavailable`` finding, and an unavailable
         option inventory finding when one was wanted.
     """
+    details: dict[str, object] = {"engine": request.engine}
+    if isinstance(error, ToolUnavailableError):
+        details["tool"] = error.tool
     findings = [
         Finding(
             "build.execution_unavailable",
             str(error),
             severity="error",
             status="inconclusive",
-            details={"tool": error.tool} if isinstance(error, ToolUnavailableError) else {},
+            details=details,
         )
     ]
     if request.inventory_loaded_options:
@@ -422,6 +624,9 @@ def _read_log(request: BuildRequest, layout: BuildLayout, max_bytes: int) -> _Lo
     """
     text, complete = read_bounded(layout.output / f"{request.stem}.log", max_bytes)
     findings = log_findings(text, request.main, layout.project, layout.cwd)
+    # BibTeX and Biber write their own warnings to <main>.blg; a build without one ran neither.
+    bibliography_log, _ = read_bounded(layout.output / f"{request.stem}.blg", max_bytes)
+    findings.extend(bibliography_log_findings(bibliography_log, request.main))
     if not complete:
         findings.append(
             Finding(
@@ -548,11 +753,14 @@ def _execution_findings(
     if failure is None:
         return []
     details: dict[str, object] = {"stderr": execution.stderr[-_STDERR_TAIL_CHARS:]}
+    suggestion = _failure_suggestion(failure, limits)
     if failure is CommandFailure.EXIT_STATUS:
         message = f"Build tool exited with status {execution.returncode}."
         # TeX reports the actual cause only in the log: latexmk's own
-        # stderr names the failed rule, not the offending input.
+        # stderr names the failed rule, not the offending input. A converter that the
+        # sandbox blocks, such as XeLaTeX's Ghostscript for EPS figures, shows only there.
         details["log_tail"] = log_tail(log)
+        suggestion = _converter_suggestion(execution.stdout + execution.stderr)
     else:
         reason = execution.failure_reason("The build", limits) or ""
         message = (
@@ -566,10 +774,28 @@ def _execution_findings(
             message,
             severity="error",
             path=main,
-            suggestion=_failure_suggestion(failure, limits),
+            suggestion=suggestion,
             details=details,
         )
     ]
+
+
+def _converter_suggestion(output: str) -> str | None:
+    """Explain a failed exit status from the PDF driver's output, when a restriction caused it.
+
+    Only the driver's own lines count, such as xdvipdfmx failing to run Ghostscript on an EPS
+    figure for XeLaTeX: TeX's errors are findings of the log, which carry their own next step.
+
+    Args:
+        output: What latexmk and the tools it ran printed.
+
+    Returns:
+        The next step for the first explained driver line, or ``None``.
+    """
+    for line in output.splitlines()[-_MAX_EXPLAINED_OUTPUT_LINES:]:
+        if line.lstrip().startswith(_DRIVER_PREFIX) and (suggestion := explain_build_message(line)):
+            return suggestion
+    return None
 
 
 def _is_complete_pdf(pdf: Path, max_bytes: int) -> bool:

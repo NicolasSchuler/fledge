@@ -71,6 +71,7 @@ class SourceGraphFindingTests(ProjectTestCase):
         self.assertEqual(self.report("source.subfile_structure").line, 2)
 
     def test_font_options_outside_the_supported_set_are_reported(self) -> None:
+        self.write("body.ttf", b"font")
         self.write("main.tex", DOCUMENT + "\\setmainfont{body.ttf}[Contextuals=Alternate]\n")
         self.assertEqual(self.report("source.font_options").line, 2)
 
@@ -151,3 +152,56 @@ class SourceGraphSelectionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FontLookupTests(ProjectTestCase):
+    """Font commands without a ``Path`` look fonts up outside the project unless it has them.
+
+    A family name and a font file of the TeX distribution are neither dependencies nor gaps
+    in the graph, so they leave the source and citation checks conclusive; a project font
+    file and a ``Path`` stay project lookups.
+    """
+
+    def findings_and_dependencies(self, command: str) -> tuple[set[str], set[str]]:
+        """Analyse a document whose preamble holds ``command``.
+
+        Args:
+            command: The font command, on the second line of ``main.tex``.
+
+        Returns:
+            The rules of the findings and the project dependencies of the analysis.
+        """
+        self.write("main.tex", DOCUMENT + "\\usepackage{fontspec}\n" + command + "\n")
+        analysis = analyze_sources(self.root, "main.tex")
+        return {item.rule for item in analysis.findings}, set(analysis.dependencies)
+
+    def test_family_names_and_distribution_font_files_are_outside_the_project(self) -> None:
+        for command in (
+            "\\setmainfont{Times New Roman}",
+            "\\setsansfont{Helvetica Neue}[Scale=MatchLowercase, BoldFont={Helvetica Neue Bold}]",
+            "\\setmonofont[Contextuals=Alternate]{Fira Code}",
+            "\\setmainfont{texgyretermes-regular.otf}",
+            "\\fontspec{texgyreheros}[Extension=.otf, UprightFont=*-regular]",
+        ):
+            with self.subTest(command=command):
+                rules, dependencies = self.findings_and_dependencies(command)
+                self.assertEqual(rules, set())
+                self.assertEqual(dependencies, {"main.tex"})
+
+    def test_project_fonts_stay_project_lookups(self) -> None:
+        self.write("fonts/Body-Regular.otf", b"font")
+        self.write("Local.ttf", b"font")
+        rules, dependencies = self.findings_and_dependencies("\\setmainfont{Local.ttf}")
+        self.assertEqual((rules, dependencies), (set(), {"main.tex", "Local.ttf"}))
+        rules, dependencies = self.findings_and_dependencies(
+            "\\setmainfont{Body-Regular.otf}[Path=fonts/]"
+        )
+        self.assertEqual((rules, dependencies), (set(), {"main.tex", "fonts/Body-Regular.otf"}))
+        # A family whose files the project holds may load them, so the graph stays uncertain.
+        self.write("Body-Bold.otf", b"font")
+        rules, _ = self.findings_and_dependencies("\\setmainfont{Body}[Extension=.otf]")
+        self.assertIn("source.unsupported_command", rules)
+        rules, _ = self.findings_and_dependencies("\\setmainfont{Body}[Path=fonts/]")
+        self.assertIn("source.unsupported_command", rules)
+        rules, _ = self.findings_and_dependencies("\\setmainfont{fonts/Missing.otf}")
+        self.assertIn("source.missing_dependency", rules)

@@ -14,13 +14,13 @@ limits and the exact source syntax the scanner supports.
 | Flat layout | Deterministic mapping and explicit filename overrides; literal import/subfile contexts, selected data readers and local font paths; protected naming contracts |
 | Bibliography | Local checks plus opt-in field layout/removal, cited-only proposals, explicit key/merge mappings, guarded metadata edits and preservable key ordering |
 | Formatting and source edits | `tex-fmt` diffs/idempotence, project exclusions, protected regions and blank-line policies; opt-in comment cleanup, standalone input merging and selected BibTeX `.bbl` inlining |
-| Builds | Fresh isolated copies, controlled `latexmk`, explicit bibliography-backend selection, shell escape disabled and recorder-observed package/date/shadow policies |
+| Builds | Fresh isolated copies, controlled `latexmk` with glossary, acronym and nomenclature rules, the engine from `--engine`, the `engine` setting or a `% !TEX program` comment, explicit bibliography-backend selection, shell escape disabled, host-font and log-derived checks, and recorder-observed package/date/shadow policies |
 | PDF | Page/text/region and artwork measurements, explicit heading expectations, bounded Type 3/structure checks, configured contrast samples, grayscale previews and text/render comparisons |
 | Privacy and bundle | Configured identity scans, bounded image-metadata scans, guarded source metadata edits and final-PDF rechecks; filename/type/deliverable/size/template policies |
 | Online references | Separately enabled DOI, Crossref metadata/candidate/notice and public-link checks with request limits; no automatic corrections |
 | Packaging | Build-traced and literal dependencies plus extra files listed in `[package] include`; independent document selections; deterministic ZIP, fresh extraction and rebuild for each; all selected packages must verify before release |
 | Interface | CLI and standalone PDF inspection; terminal/compact/JSON/HTML/CI reports, scoped review decisions, unverified diagnostic exports and a rule catalogue |
-| Concurrency | Shared CPU/memory/build/render admission; overlapping PDF branches and inventories; bounded page-pair and formatting workers; serial mode |
+| Concurrency | Shared CPU/memory/build/render admission; overlapping PDF branches and inventories; bounded page-rendering and formatting workers; serial mode |
 
 ## How package contents are selected
 
@@ -130,8 +130,10 @@ finds candidates there.
 
 ## Execution and resource limits
 
-`--jobs` sets shared CPU slots; the default is 2, with one build and one
-page-pair renderer at a time. `--jobs 1` runs everything serially.
+`--jobs` sets how many operations may run at once on this computer, `--build-jobs`
+how many TeX builds may overlap and `--render-jobs` how many PDF pages may be rendered
+at once; `fledge check --help` shows the defaults. `--jobs 1` runs everything one
+after another.
 
 ```sh
 fledge prepare ./paper --output /tmp/prepared-paper \
@@ -182,6 +184,17 @@ The copy costs about 175 MB of temporary space and about 10 seconds once per job
 Both count against `max_temporary_bytes`; keep that above about 250 MB for Biber
 jobs. If preparation fails and the build needs Biber, Fledge reports a `BLD202`
 finding instead of running Biber unconfined.
+
+## LuaLaTeX font cache on macOS
+
+luaotfload builds a database of every font it can see before LuaLaTeX can load a font
+by name, which takes several seconds. On macOS, the first LuaLaTeX build of a job runs a
+sandboxed warm-up that writes this database into a folder under the job directory, which
+is then made read-only. Each LuaLaTeX build of the job gets a copy of the database and
+reads the warm-up's font caches, so later builds skip the scan. The folder counts against
+`max_temporary_bytes` like the Biber copy. If the warm-up fails, builds run without it,
+only more slowly. A LuaLaTeX build keeps the font caches it writes until the job ends,
+because `BLD108` reads from them which font files the build loaded.
 
 ## Supported source syntax
 

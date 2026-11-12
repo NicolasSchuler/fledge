@@ -117,8 +117,23 @@ def tool_state_directory(workspace: Path) -> Path:
     return workspace / ".tool-state"
 
 
+def kept_tex_cache_directory(workspace: Path) -> Path:
+    """Return the ``TEXMFVAR`` that the commands of ``workspace`` share when it is kept.
+
+    A build that keeps its TeX cache (``ToolRunner.keep_tex_cache``) writes luaotfload's
+    font caches here instead of into the state directory of one command, so they are still
+    there when the build's evidence is read; the workspace is removed with the job.
+    """
+    return tool_state_directory(workspace) / "texmf-var"
+
+
 def create_tool_environment(
-    workspace: Path, context: ToolContext, *, source_date_epoch: str
+    workspace: Path,
+    context: ToolContext,
+    *,
+    source_date_epoch: str,
+    texmf_var: Path | None = None,
+    font_cache: Path | None = None,
 ) -> ToolEnvironment:
     """Create a fresh state directory under ``workspace`` and the environment that uses it.
 
@@ -132,6 +147,11 @@ def create_tool_environment(
         context: The toolchain whose search paths become ``PATH`` and whose resource roots
             locate TeX Live.
         source_date_epoch: The value of ``SOURCE_DATE_EPOCH`` for reproducible output.
+        texmf_var: A ``TEXMFVAR`` that outlives the command (see
+            :func:`kept_tex_cache_directory`), or ``None`` for one in the state directory.
+        font_cache: A sealed, read-only luaotfload cache that LuaTeX reads before its own
+            writable cache, or ``None``. Its path must not contain ``:``, the separator of
+            ``TEXMFCACHE``.
 
     Returns:
         The tool's variables and its new state directory.
@@ -141,6 +161,10 @@ def create_tool_environment(
     state = Path(tempfile.mkdtemp(prefix="invocation-", dir=container))
     for name in _STATE_DIRECTORIES:
         (state / name).mkdir()
+    variable_tree = state / "texmf-var"
+    if texmf_var is not None:
+        texmf_var.mkdir(parents=True, exist_ok=True)
+        variable_tree = texmf_var
     # HOME is deliberately neither inherited nor repurposed.
     environment = {
         "PATH": os.pathsep.join(context.search_paths),
@@ -156,10 +180,10 @@ def create_tool_environment(
         "XDG_CACHE_HOME": str(state / "cache"),
         "TEXMFHOME": str(state / "texmf"),
         "TEXMFCONFIG": str(state / "texmf-config"),
-        "TEXMFVAR": str(state / "texmf-var"),
+        "TEXMFVAR": str(variable_tree),
         "TEXMFOUTPUT": str(state / "tmp"),
         "TEXMFLOCAL": str(state / "texmf"),
-        "VARTEXFONTS": str(state / "texmf-var"),
+        "VARTEXFONTS": str(variable_tree),
         "TEXINPUTS": ".:",
         "BIBINPUTS": ".:",
         "BSTINPUTS": ".:",
@@ -181,11 +205,14 @@ def create_tool_environment(
         "SOURCE_DATE_EPOCH": source_date_epoch,
         "FORCE_SOURCE_DATE": "1",
     }
+    if font_cache is not None:
+        # luaotfload writes into the first writable entry and reads from all of them.
+        environment["TEXMFCACHE"] = f"{font_cache}:{variable_tree}"
     root = texlive_root(context.resource_roots)
     if root is not None:
         search = (
             str(state / "texmf-config"),
-            str(state / "texmf-var"),
+            str(variable_tree),
             str(state / "texmf"),
             *(_distribution_tree(root / name) for name in _DISTRIBUTION_TREES),
         )

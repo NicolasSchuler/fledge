@@ -1,82 +1,167 @@
-"""Findings from the bounded final-pass log of a LaTeX build."""
+"""Findings from the bounded final-pass log of a LaTeX build and its bibliography tool's log.
+
+A message is one log line together with the lines that TeX continues it on, so a package
+error that spans six lines is reported whole. A message that Fledge's own restrictions
+explain (shell escape, bitmap fonts, the fonts and TeX trees a build can see) carries the
+next step that ``build_failure_help`` gives for it.
+"""
 
 from __future__ import annotations
 
 import os
 import re
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
+from .build_failure_help import explain_build_message
 from .file_safety import read_file_prefix
 from .findings import Finding, Severity
 from .path_safety import contained_relative_name, lexically_escapes
 
 
 @dataclass(frozen=True, slots=True)
-class _LogRule:
-    """A log pattern and the finding it produces.
+class LogRule:
+    """A kind of log message and the finding it produces.
+
+    Every rule decides in time linear in the length of the message, so that a long or
+    adversarial log line cannot stall a build check; ``tests/test_build_log.py`` holds a
+    guard for each rule.
 
     Attributes:
         rule: The rule name of the finding.
-        pattern: The compiled expression that a log message must match.
+        matches: Whether a message, given in lower case, is of this kind.
         severity: The severity of the finding.
     """
 
     rule: str
-    pattern: re.Pattern[str]
+    matches: Callable[[str], bool]
     severity: Severity
 
 
-def _rule(rule: str, pattern: str, severity: Severity) -> _LogRule:
-    """Build a log rule whose pattern matches regardless of case.
+def _contains(*phrases: str) -> Callable[[str], bool]:
+    """Match a lower-case message that contains any of ``phrases``."""
+    return lambda text: any(phrase in text for phrase in phrases)
 
-    Args:
-        rule: The rule name of the finding.
-        pattern: The regular expression a log message must match.
-        severity: The severity of the finding.
 
-    Returns:
-        The rule with its pattern compiled.
+def _in_order(first: str, then: str) -> Callable[[str], bool]:
+    """Match a lower-case message where ``first`` occurs, followed later by ``then``.
+
+    At least one character separates the two, as in the pattern ``first.+?then``. Comparing
+    the first occurrence of ``first`` with the last occurrence of ``then`` decides this in
+    linear time, where a lazy regular expression backtracks once for every occurrence of
+    ``first``.
     """
-    return _LogRule(rule, re.compile(pattern, re.IGNORECASE), severity)
+
+    def matches(text: str) -> bool:
+        start = text.find(first)
+        return start != -1 and text.rfind(then) >= start + len(first) + 1
+
+    return matches
 
 
-_LOG_RULES = (
-    _rule(
-        "build.undefined_citation",
-        r"Citation .+? undefined|There were undefined citations",
-        "error",
-    ),
-    _rule(
-        "build.undefined_reference",
-        r"Reference .+? undefined|There were undefined references",
-        "error",
-    ),
-    _rule(
-        "build.duplicate_label", r"Label .+? multiply defined|multiply-defined labels", "warning"
-    ),
-    _rule("build.missing_character", r"Missing character:", "warning"),
-    _rule("build.font_substitution", r"Font Warning:|font shapes were not available", "warning"),
-    _rule("build.overfull_box", r"Overfull \\[hv]box", "warning"),
-    _rule("build.underfull_box", r"Underfull \\[hv]box", "warning"),
-    _rule(
-        "build.rerun_required",
-        r"Rerun to get|Label\(s\) may have changed|Please \(?re\)?run|Please rerun|rerun LaTeX",
-        "error",
-    ),
-    _rule(
-        "build.tex_error",
-        r"^! |^.+?:\d+: .*(?:Error|Undefined control sequence)|Fatal error|Emergency stop",
-        "error",
-    ),
+def _either(*matchers: Callable[[str], bool]) -> Callable[[str], bool]:
+    """Match a message that any of ``matchers`` matches."""
+    return lambda text: any(matches(text) for matches in matchers)
+
+
+def _tex_error(text: str) -> bool:
+    """Match TeX's error lines, located errors, fatal errors and emergency stops.
+
+    A located error is ``file:line: message`` whose message names an error or an undefined
+    control sequence; the file name may itself contain colons.
+    """
+    if text.startswith("! ") or "fatal error" in text or "emergency stop" in text:
+        return True
+    location = _LOCATION_SEPARATOR.search(text, 1)
+    if location is None:
+        return False
+    rest = text[location.end() :]
+    return "error" in rest or "undefined control sequence" in rest
+
+
+def _obsolete_package(text: str) -> bool:
+    """Match a class or package warning that calls something obsolete or deprecated."""
+    warning = text.find(" warning: ")
+    if warning == -1 or not ("package " in text[:warning] or "class " in text[:warning]):
+        return False
+    rest = text[warning:]
+    return any(word in rest for word in _OBSOLESCENCE_WORDS)
+
+
+_LOCATION_SEPARATOR = re.compile(r":\d+: ")
+# Words with which classes and packages announce that a command, option or package is out of
+# date, such as fixltx2e's "is not required with releases after 2015".
+_OBSOLESCENCE_WORDS = (
+    "obsolete",
+    "deprecated",
+    "is not required with releases",
+    "no longer needed",
+    "no longer supported",
+    "old latex 2.09 command",
 )
-# TeX continues a message on an indented or parenthesized next line.
+_RERUN = re.compile(r"rerun to get|label\(s\) may have changed|please \(?re\)?run|rerun latex")
+LOG_RULES = (
+    LogRule(
+        "build.undefined_citation",
+        _either(_in_order("citation ", " undefined"), _contains("there were undefined citations")),
+        "error",
+    ),
+    LogRule(
+        "build.undefined_reference",
+        _either(
+            _in_order("reference ", " undefined"), _contains("there were undefined references")
+        ),
+        "error",
+    ),
+    LogRule(
+        "build.duplicate_label",
+        _either(_in_order("label ", " multiply defined"), _contains("multiply-defined labels")),
+        "warning",
+    ),
+    LogRule("build.missing_character", _contains("missing character:"), "warning"),
+    LogRule(
+        "build.font_substitution",
+        _contains("font warning:", "font shapes were not available"),
+        "warning",
+    ),
+    LogRule("build.overfull_box", _contains("overfull \\hbox", "overfull \\vbox"), "warning"),
+    LogRule("build.underfull_box", _contains("underfull \\hbox", "underfull \\vbox"), "warning"),
+    LogRule("build.rerun_required", lambda text: _RERUN.search(text) is not None, "error"),
+    LogRule("build.tex_error", _tex_error, "error"),
+    LogRule(
+        "build.unused_global_option", _contains("latex warning: unused global option"), "warning"
+    ),
+    LogRule(
+        "build.float_too_large", _contains("latex warning: float too large for page"), "warning"
+    ),
+    LogRule(
+        "build.pdf_string_token",
+        _contains("package hyperref warning: token not allowed in a pdf string"),
+        "info",
+    ),
+    LogRule("build.obsolete_package", _obsolete_package, "info"),
+)
+_TEX_ERROR_RULE = "build.tex_error"
+_RERUN_RULE = "build.rerun_required"
+# TeX continues a message on an indented line, or on one that starts with the name of the
+# package in parentheses, such as ``(fontspec)``.
 _CONTINUATION = re.compile(r"^(?:\s+|\([A-Za-z-]+\))")
+_PACKAGE_PREFIX = re.compile(r"^\([A-Za-z-]+\)\s*")
+# How many continuation lines and characters one message joins at most; a package error
+# rarely has more than six lines, and the finding keeps ``_MAX_MESSAGE_CHARS`` of it.
+_MAX_CONTINUATION_LINES = 12
+_MAX_JOINED_CHARS = 4000
 _INPUT_LINE = re.compile(r"(?:input line|at lines?)\s*(\d+)")
 _COMPILER_LOCATION = re.compile(r"^([^:\n]+):(\d+):")
 _OVERFLOW = re.compile(r"\(([\d.]+)pt too (wide|high)\)")
 _MAX_MESSAGE_CHARS = 2000
+# The bibliography tools' own warnings: BibTeX starts them with "Warning--", Biber writes
+# "WARN - " after its line prefix. Each becomes one finding; a log with more is summarized.
+_BIBTEX_WARNING = "Warning--"
+_BIBER_WARNING = re.compile(r"\bWARN - (.{1,1000})")
+_MAX_BIBLIOGRAPHY_WARNINGS = 20
+_BIBLIOGRAPHY_WARNING_RULE = "build.bibliography_warning"
 
 
 def read_bounded(path: Path, limit: int) -> tuple[str, bool]:
@@ -119,6 +204,9 @@ def log_findings(
 ) -> list[Finding]:
     """Report one finding per distinct rule and message; paths only when the log names them.
 
+    A request to rerun is not reported once a TeX error stopped the build: the error is the
+    cause, and the rerun would only repeat it.
+
     Args:
         log: The text of the final-pass log.
         main: The main document, recorded in each finding's details; without ``project``
@@ -135,26 +223,46 @@ def log_findings(
         project = project.resolve()
     findings: list[Finding] = []
     seen: set[tuple[str, str]] = set()
-    for message in _log_messages(log):
-        for rule in _LOG_RULES:
-            if rule.pattern.search(message) and (rule.rule, message) not in seen:
+    for message in log_messages(log):
+        lowered = message.lower()
+        for rule in LOG_RULES:
+            if (rule.rule, message) not in seen and rule.matches(lowered):
                 seen.add((rule.rule, message))
                 findings.append(_log_finding(rule, message, main, project, cwd))
+    if any(finding.rule == _TEX_ERROR_RULE for finding in findings):
+        findings = [finding for finding in findings if finding.rule != _RERUN_RULE]
     return findings
 
 
-def _log_messages(log: str) -> Iterator[str]:
-    """Yield every stripped log line, joined with the next line when TeX continues there."""
+def log_messages(log: str) -> Iterator[str]:
+    """Yield every stripped log line, joined with the lines that TeX continues it on.
+
+    A continuation line is indented or starts with a package name in parentheses, such as
+    ``(fontspec)``; the package name is dropped from the joined message. At most
+    ``_MAX_CONTINUATION_LINES`` lines and about ``_MAX_JOINED_CHARS`` characters are joined,
+    so the work stays linear in the length of the log.
+
+    Args:
+        log: The log text.
+
+    Yields:
+        One message per log line.
+    """
     lines = log.splitlines()
     for index, line in enumerate(lines):
-        message = line.strip()
-        if index + 1 < len(lines) and _CONTINUATION.match(lines[index + 1]):
-            message += " " + lines[index + 1].strip()
-        yield message
+        parts = [line.strip()]
+        length = len(parts[0])
+        for following in lines[index + 1 : index + 1 + _MAX_CONTINUATION_LINES]:
+            if length >= _MAX_JOINED_CHARS or not _CONTINUATION.match(following):
+                break
+            part = _PACKAGE_PREFIX.sub("", following.strip(), count=1)
+            parts.append(part[: _MAX_JOINED_CHARS - length])
+            length += len(part) + 1
+        yield " ".join(part for part in parts if part)
 
 
 def _log_finding(
-    rule: _LogRule, message: str, main: str, project: Path | None, cwd: Path | None
+    rule: LogRule, message: str, main: str, project: Path | None, cwd: Path | None
 ) -> Finding:
     """Build the finding for one log message that ``rule`` matched.
 
@@ -167,8 +275,9 @@ def _log_finding(
 
     Returns:
         The finding, with the input line, compiler location and box overflow in its
-        details when the message names them, and a path and line only when the compiler
-        location is a project source.
+        details when the message names them, a path and line only when the compiler
+        location is a project source, and the next step for a failure that Fledge's
+        restrictions explain.
     """
     details: dict[str, object] = {"document": main}
     source_path: str | None = None
@@ -190,7 +299,62 @@ def _log_finding(
         path=source_path,
         line=source_line,
         details=details,
+        suggestion=explain_build_message(message) if rule.severity == "error" else None,
     )
+
+
+def bibliography_log_findings(log: str, main: str) -> list[Finding]:
+    """Note the warnings that BibTeX or Biber wrote to their log (``.blg``).
+
+    BibTeX starts a warning with ``Warning--`` and may continue it on lines that start with
+    ``--``; Biber writes ``WARN - `` after its line prefix. Each distinct warning becomes one
+    informational finding, because BibTeX warns about a missing field in nearly every real
+    bibliography; beyond ``_MAX_BIBLIOGRAPHY_WARNINGS``, one more finding counts the rest.
+
+    Args:
+        log: The text of the bibliography tool's log.
+        main: The main document, the path of each finding.
+
+    Returns:
+        The findings, in log order.
+    """
+    warnings: list[str] = []
+    lines = log.splitlines()
+    for index, line in enumerate(lines):
+        text = line.strip()
+        if text.startswith(_BIBTEX_WARNING):
+            warning = text.removeprefix(_BIBTEX_WARNING)
+            following = lines[index + 1].strip() if index + 1 < len(lines) else ""
+            if following.startswith("--"):
+                warning += " " + following.removeprefix("--")
+        elif biber := _BIBER_WARNING.search(text):
+            warning = biber[1]
+        else:
+            continue
+        if warning not in warnings:
+            warnings.append(warning[:_MAX_MESSAGE_CHARS])
+    findings = [
+        Finding(
+            _BIBLIOGRAPHY_WARNING_RULE,
+            f"The bibliography tool warned: {warning}",
+            severity="info",
+            path=main,
+            details={"document": main},
+        )
+        for warning in warnings[:_MAX_BIBLIOGRAPHY_WARNINGS]
+    ]
+    if len(warnings) > _MAX_BIBLIOGRAPHY_WARNINGS:
+        findings.append(
+            Finding(
+                _BIBLIOGRAPHY_WARNING_RULE,
+                f"The bibliography tool wrote {len(warnings) - _MAX_BIBLIOGRAPHY_WARNINGS} more "
+                "warnings; read its .blg log for the rest.",
+                severity="info",
+                path=main,
+                details={"document": main},
+            )
+        )
+    return findings
 
 
 def _source_path(filename: Path, main: str, project: Path | None, cwd: Path | None) -> str | None:
