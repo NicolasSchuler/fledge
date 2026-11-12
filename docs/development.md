@@ -238,8 +238,12 @@ FLEDGE_UPDATE_GOLDEN=1 python -m pytest tests/test_golden_outputs.py
 git diff tests/golden
 ```
 
-The help goldens follow the installed Click and Rich versions; regenerate them after
-a dependency update that changes the layout.
+The help goldens follow the installed Click and Rich versions. When a dependency
+update changes them, first decide whether the new output is right before
+regenerating: Click 8.5.1 began to give arguments a help record, which put a bare
+`INPUT` row among the options of six commands until the help formatter skipped
+arguments. `tests/test_cli_help.py` checks that case independently of the installed
+Click.
 
 ## Continuous integration
 

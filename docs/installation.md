@@ -112,11 +112,14 @@ packages as that job:
 ```sh
 sudo apt-get install bubblewrap latexmk biber poppler-utils \
   texlive-latex-base texlive-latex-recommended texlive-fonts-recommended \
-  texlive-bibtex-extra
+  texlive-bibtex-extra cm-super
 ```
 
-Add `texlive-xetex` or `texlive-luatex` for those engines, and the TeX Live
-packages your paper needs. `tex-fmt` is not packaged by Ubuntu; to use it, put a
+`cm-super` provides the Type 1 versions of the standard text fonts. Without it,
+an ordinary bullet list stops the build with "Font tcrm1000 at 600 not found",
+because Fledge never generates bitmap fonts (see
+[limitations](limitations.md)). Add `texlive-xetex` or `texlive-luatex` for those
+engines, and the TeX Live packages your paper needs. `tex-fmt` is not packaged by Ubuntu; to use it, put a
 [release binary](https://github.com/WGUNDERWOOD/tex-fmt/releases) in a system
 directory such as `/usr/local/bin`.
 

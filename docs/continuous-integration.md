@@ -50,10 +50,11 @@ jobs:
           brew install poppler
           echo "/Library/TeX/texbin" >> "$GITHUB_PATH"
       # Add any other packages your paper needs to the tlmgr install line.
+      # cm-super provides the Type 1 text fonts an ordinary bullet list needs.
       - name: Install TeX packages
         run: |
           sudo /Library/TeX/texbin/tlmgr update --self
-          sudo /Library/TeX/texbin/tlmgr install latexmk biber biblatex hyperref
+          sudo /Library/TeX/texbin/tlmgr install latexmk biber biblatex hyperref cm-super
       - name: Install Fledge
         run: python -m pip install fledge-latex
       - name: Check the paper
@@ -158,7 +159,7 @@ and "Install TeX packages" with these:
           sudo apt-get install --yes --no-install-recommends \
             bubblewrap latexmk biber poppler-utils \
             texlive-latex-base texlive-latex-recommended texlive-fonts-recommended \
-            texlive-bibtex-extra
+            texlive-bibtex-extra cm-super
 ```
 
 Ubuntu splits TeX Live into packages such as `texlive-latex-extra` and

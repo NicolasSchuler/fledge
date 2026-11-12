@@ -7,6 +7,39 @@ breaking changes are listed under their own heading.
 
 The version is defined once, as `__version__` in `src/latexprep/__init__.py`.
 
+## [Unreleased]
+
+### Added
+
+- Python 3.14 and 3.15 are supported and tested.
+
+### Changed
+
+- Builds with a TeX Live installed from TUG, such as MacTeX, BasicTeX or the TeX
+  Live installer, are several times faster: `fledge check` on the example paper
+  takes about 2 seconds instead of 4.6. TeX searched its whole distribution on disk
+  for every file it did not find, because Fledge's search path left out the marker
+  that makes TeX Live use its file index. TeX Live from Debian or Ubuntu packages
+  was not affected.
+- The installation guide and the CI recipe install `cm-super`. Without it, an
+  ordinary bullet list stops the build with "Font tcrm1000 at 600 not found",
+  because builds never generate bitmap fonts.
+
+### Fixed
+
+- With Click 8.5.1, the help of `prepare`, `check`, `inspect`, `fmt`, `bib check`
+  and `pdf check` listed the input argument as an unexplained `INPUT` row among
+  the options.
+- On Python 3.11 and 3.12, a run could print "Unknown child process pid …, will
+  report returncode 255" on standard error, even with `--quiet`, when it stopped a
+  helper process that had just exited.
+- Scan findings that reach the reporting limit show their count as "N+", and the
+  message lists the same matches as `details.matches`.
+- An `@string` macro named `ids` no longer hides a missing `crossref` target
+  (`BIB005`, bibliography relationship targets).
+- A run that ends with exit code 4 because a check had a defect publishes its
+  previews and report again, like a blocked run.
+
 ## [0.3.1] - 2026-10-22
 
 ### Fixed

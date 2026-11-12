@@ -231,6 +231,10 @@ class _FledgeCommand(click.Command):
         """
         common, advanced = [], []
         for parameter in self.get_params(ctx):
+            # The command's text describes its arguments, as in Click's own option
+            # section; since Click 8.5.1 arguments return help records too.
+            if isinstance(parameter, click.Argument):
+                continue
             record = parameter.get_help_record(ctx)
             if record is not None:
                 (advanced if parameter.name in ADVANCED_OPTIONS else common).append(record)

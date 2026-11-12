@@ -123,7 +123,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        python-version: ["3.11", "3.12", "3.13"]
+        python-version: ["3.11", "3.12", "3.13", "3.14", "3.15"]
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -170,11 +170,14 @@ jobs:
           brew install --cask basictex
           brew install poppler tex-fmt
           echo "/Library/TeX/texbin" >> "$GITHUB_PATH"
+      # cm-super provides the Type 1 versions of the Computer Modern text fonts.
+      # Without it, LaTeX's default list bullet, \S and \$ need a bitmap font,
+      # and builds never generate those, so they stop with "Font ... not found".
       - name: Install TeX packages
         run: |
           sudo /Library/TeX/texbin/tlmgr update --self
           sudo /Library/TeX/texbin/tlmgr install latexmk biber biblatex hyperref \
-            import subfiles embedfile
+            import subfiles embedfile cm-super
       - name: Show tool versions
         run: |
           latexmk -v | head -n 2
@@ -190,6 +193,8 @@ jobs:
       - name: Run live integration and sandbox tests
         env:
           FLEDGE_RUN_INTEGRATION: "1"
+          # The live tests write the JSON report of every failing outcome here.
+          FLEDGE_TEST_ARTIFACT_DIR: ${{ runner.temp }}/fledge-test-reports
         run: >-
           python -m pytest
           tests/test_integration.py
@@ -209,6 +214,14 @@ jobs:
           tests/test_runtime_inputs.py
           tests/test_runtime_monitoring.py
           -v -ra --durations=25 -p no:cacheprovider
+      - name: Keep the reports of failing live tests
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: live-macos-failing-reports
+          path: ${{ runner.temp }}/fledge-test-reports
+          if-no-files-found: ignore
+          retention-days: 14
 
   # Live Linux tests: real builds under the Bubblewrap sandbox on a GitHub-hosted
   # Ubuntu runner, with TeX Live, Biber and Poppler from apt, weekly and on manual
@@ -255,14 +268,16 @@ jobs:
       # package carries etoolbox, which biblatex needs; bibtex-extra carries
       # biblatex itself, and latex-extra the import, subfiles and embedfile packages
       # that the live source and engine tests use. The engines xelatex and lualatex
-      # come from their packages.
+      # come from their packages, and cm-super the Type 1 text fonts that default
+      # list bullets need, because builds never generate bitmap fonts.
       - name: Install TeX, PDF tools and Bubblewrap
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
             bubblewrap latexmk biber poppler-utils \
             texlive-latex-base texlive-latex-recommended texlive-fonts-recommended \
-            texlive-bibtex-extra texlive-latex-extra texlive-xetex texlive-luatex
+            texlive-bibtex-extra texlive-latex-extra texlive-xetex texlive-luatex \
+            cm-super
       # Ubuntu does not package tex-fmt, but the formatting step of the live
       # preparation test needs it, and the sandbox accepts only tools under /usr.
       # Install a pinned release binary, verified against its SHA-256, into
@@ -315,6 +330,8 @@ jobs:
       - name: Run live integration tests
         env:
           FLEDGE_RUN_INTEGRATION: "1"
+          # The live tests write the JSON report of every failing outcome here.
+          FLEDGE_TEST_ARTIFACT_DIR: ${{ runner.temp }}/fledge-test-reports
         run: >-
           python -m pytest
           tests/test_integration.py
@@ -334,3 +351,11 @@ jobs:
           tests/test_pdf_checks.py
           tests/test_runtime_backends.py
           -v -ra --durations=25 -p no:cacheprovider
+      - name: Keep the reports of failing live tests
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: live-linux-failing-reports
+          path: ${{ runner.temp }}/fledge-test-reports
+          if-no-files-found: ignore
+          retention-days: 14

@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import re
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import click
 from click.testing import CliRunner
@@ -49,6 +51,32 @@ class HelpTests(unittest.TestCase):
         ):
             self.assertIn(option, advanced)
             self.assertNotIn(f"{option} ", common)
+
+    def test_arguments_never_appear_among_the_options(self):
+        # Click 8.5.1 began to return a help record for arguments. Give every argument one
+        # here, whatever the installed Click does, so the option sections are checked.
+        # Click itself may list such arguments in a section of their own above them.
+        def argument_record(argument, ctx):
+            return (f"ARGUMENT-{argument.name}", "")
+
+        def option_sections(text: str) -> str:
+            heading = re.search(r"^(Common options|Options):$", text, re.MULTILINE)
+            self.assertIsNotNone(heading, text)
+            return text[heading.start() :]
+
+        with patch.object(click.Argument, "get_help_record", argument_record):
+            for command in (
+                ("prepare",),
+                ("check",),
+                ("inspect",),
+                ("fmt",),
+                ("bib", "check"),
+                ("pdf", "check"),
+                ("submission-text",),
+                ("rule",),
+            ):
+                with self.subTest(command=" ".join(command)):
+                    self.assertNotIn("ARGUMENT-", option_sections(self.help_text(*command)))
 
     def test_pdf_check_offers_only_the_options_that_apply_to_a_pdf_that_is_not_built(self):
         text = self.help_text("pdf", "check")

@@ -21,10 +21,17 @@ def kill_process_group(pid: int) -> None:
 
 
 def kill_unfinished(process: asyncio.subprocess.Process) -> None:
-    """Kill the process itself, but not its group, unless it has already exited."""
+    """Kill the process itself, but not its group, unless it has already exited.
+
+    The signal goes through ``os.kill``, as asyncio itself does from Python 3.13 on.
+    ``Process.kill`` polls the child before signalling it, and on Python 3.11 and 3.12
+    that poll can reap a child that has just exited before asyncio's child watcher
+    does; the watcher then prints "Unknown child process pid" on standard error and
+    reports exit status 255 (CPython issue bpo-43578).
+    """
     if process.returncode is None:
         with contextlib.suppress(ProcessLookupError):
-            process.kill()
+            os.kill(process.pid, signal.SIGKILL)
 
 
 async def start_process(
