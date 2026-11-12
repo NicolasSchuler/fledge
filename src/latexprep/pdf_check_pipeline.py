@@ -38,7 +38,7 @@ from .pdf_rule_names import PdfRule
 from .pdf_structure_checks import StructureOptions, inspect_pdf_structure
 from .pdf_tools import SharedPdfSession
 from .resource_budget import ResourceBudget
-from .submission_checks import check_pdf_identity
+from .submission_checks import BuiltPdfRole, check_included_pdf_information, check_pdf_identity
 from .submission_options import SubmissionOptions
 
 
@@ -57,6 +57,10 @@ class PdfCheckSettings:
             PDF identity (PRV002) is unselected.
         match_source_metadata: The metadata fields whose expected PDF value is read from
             the literal source.
+        built_pdf_role: Which PDF of the job is checked: the one ``check`` builds, the
+            baseline that ``prepare`` builds from the unchanged sources, or the PDF that
+            ``prepare`` publishes. What included PDFs left in a baseline that is not
+            published is reported as information only.
     """
 
     max_pages: int | None = None
@@ -67,6 +71,7 @@ class PdfCheckSettings:
     structure: StructureOptions = field(default_factory=StructureOptions)
     privacy: SubmissionOptions = field(default_factory=SubmissionOptions)
     match_source_metadata: tuple[str, ...] = ()
+    built_pdf_role: BuiltPdfRole = "built"
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,14 +214,23 @@ def _with_extraction_failure(finding: Finding, reason: str) -> Finding:
 
 
 async def _inspect_pdf_privacy(context: _PdfCheckContext) -> list[Finding]:
-    """Scan the text and metadata of the PDF for identity terms and secrets, if configured.
+    """Scan the PDF for what included PDFs left in it, then its text and metadata if configured.
 
-    When extraction fails, the findings say why without quoting the tool's message.
+    The scan of included-PDF information always runs; the identity and secret scans of the
+    extracted text and metadata run only when configured. When extraction fails, their
+    findings say why without quoting the tool's message.
     """
     budget = context.budget
     privacy_options = context.settings.privacy
+    included = await _read(
+        budget,
+        "included PDF information",
+        partial(check_included_pdf_information, role=context.settings.built_pdf_role),
+        context.pdf,
+        privacy_options,
+    )
     if not (privacy_options.identity_terms or privacy_options.scan_secrets):
-        return []
+        return included
     failure = None
     try:
         text, metadata = await extract_pdf_evidence(
@@ -235,8 +249,8 @@ async def _inspect_pdf_privacy(context: _PdfCheckContext) -> list[Finding]:
         budget, "PDF privacy", check_pdf_identity, text, metadata, privacy_options
     )
     if failure is None:
-        return findings
-    return [_with_extraction_failure(finding, failure) for finding in findings]
+        return [*included, *findings]
+    return [*included, *(_with_extraction_failure(finding, failure) for finding in findings)]
 
 
 async def _inspect_pdf_artwork(context: _PdfCheckContext) -> list[Finding]:

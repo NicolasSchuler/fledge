@@ -9,17 +9,30 @@ from dataclasses import asdict, fields
 from pathlib import Path
 from unittest.mock import patch
 
+from latexprep.config import Settings
+from latexprep.core import run_job
 from latexprep.errors import PreparationError
 from latexprep.findings import Finding
+from latexprep.job_context import JobRequest
 from latexprep.option_config import read_options
 from latexprep.submission_checks import (
+    BuiltPdfRole,
+    check_included_pdf_information,
     check_pdf_identity,
     check_submission,
     check_submission_archive,
 )
 from latexprep.submission_options import SubmissionOptions
 from latexprep.submission_scan_findings import DEFAULT_SCAN_LIMITS, ScanLimits
-from tests.support import ProjectTestCase
+from tests.support import (
+    AsyncProjectTestCase,
+    ProjectTestCase,
+    controlled_backends,
+    object_stream,
+    pdf_bytes,
+    pdf_stream,
+    single_file_project,
+)
 
 
 class SubmissionTests(ProjectTestCase):
@@ -596,6 +609,149 @@ class SubmissionTests(ProjectTestCase):
         self.assertEqual([item["path"] for item in result.details["matches"]], ["a.dat", "b.dat"])
         self.assertTrue(result.details["match_output_limited"])
         self.assertTrue(result.incomplete)
+
+
+def built_pdf(form_entries: bytes, info: bytes = b"") -> bytes:
+    """Return a PDF that draws one included PDF through a form XObject, as pdfTeX writes it.
+
+    Args:
+        form_entries: Further entries of the form XObject, such as its ``/PTEX.FileName``.
+        info: The entries of the information dictionary that the form's ``/PTEX.InfoDict``
+            names; none when empty.
+
+    Returns:
+        The bytes of the PDF.
+    """
+    reference = b" /PTEX.InfoDict 7 0 R" if info else b""
+    objects = {
+        1: b"<< /Type /Catalog /Pages 2 0 R >>",
+        2: b"<< /Type /Pages /Kids [] /Count 0 >>",
+        3: b"<< /Producer (pdfTeX-1.40.29) /Author (Paper Author) >>",
+        4: pdf_stream(
+            b"/Type /XObject /Subtype /Form /BBox [0 0 10 10]" + reference + b" " + form_entries,
+            b"0 0 10 10 re f",
+        ),
+        5: object_stream({7: b"<< " + info + b" >>"}),
+    }
+    return pdf_bytes(objects, b"<< /Root 1 0 R /Info 3 0 R >>")
+
+
+class IncludedPdfInformationTests(ProjectTestCase):
+    """What included PDFs left in a built PDF: identity terms and home folders (PRV105)."""
+
+    def check(
+        self, data: bytes, terms: tuple[str, ...] = (), role: BuiltPdfRole = "built"
+    ) -> list[Finding]:
+        """Write ``data`` as the built PDF and check it in ``role`` with ``terms`` as terms."""
+        pdf = self.write("build/main.pdf", data)
+        options = SubmissionOptions(identity_terms=terms)
+        return check_included_pdf_information(pdf, options, role=role)
+
+    def test_terms_and_home_folders_copied_from_included_pdfs(self) -> None:
+        data = built_pdf(
+            b"/PTEX.FileName (./figures/plot.pdf) /PTEX.PageNumber 1",
+            b"/Author (Jane Q. Secret) /Title (/Users/jsecret/Private/fig.pdf)",
+        )
+        (finding,) = self.check(data, ("Jane Q. Secret",))
+        self.assertEqual(
+            (finding.code, finding.status, finding.severity), ("PRV105", "failed", "warning")
+        )
+        self.assertEqual(
+            finding.details["matches"],
+            [
+                {"channel": "PTEX.InfoDict Author", "term_index": 1},
+                {"channel": "PTEX.InfoDict Title", "kind": "macOS home folder"},
+            ],
+        )
+        self.assertEqual(finding.details["included_objects"], 1)
+        self.assertEqual(
+            finding.details["channels"],
+            ["PTEX.FileName", "PTEX.InfoDict Author", "PTEX.InfoDict Title"],
+        )
+        self.assertIn("PTEX.InfoDict Author (identity term 1)", finding.message)
+        for value in ("Jane", "jsecret"):
+            self.assertNotIn(value, str(finding))
+        self.assertIn("\\pdfsuppressptexinfo=-1", finding.next_step or "")
+        # The document's own information dictionary is the PDF identity scan's, not this one's.
+        self.assertNotIn("Paper Author", str(finding))
+        (paths_only,) = self.check(data)
+        self.assertEqual(
+            paths_only.details["matches"],
+            [{"channel": "PTEX.InfoDict Title", "kind": "macOS home folder"}],
+        )
+
+    def test_clean_suppressed_and_unreadable_pdfs(self) -> None:
+        (clean,) = self.check(built_pdf(b"/PTEX.FileName (./figures/plot.pdf)"), ("Jane",))
+        self.assertEqual((clean.status, clean.severity), ("passed", "info"))
+        self.assertIn("copied from 1 included PDF", clean.message)
+        # A suppressed build keeps no included-PDF information, so there is nothing to report;
+        # nor is there for bytes that are no PDF at all, which the PDF inspection reports.
+        self.assertEqual(self.check(built_pdf(b"/Group << /S /Transparency >>")), [])
+        self.assertEqual(self.check(b"%PDF-1.7\ncontrolled build result\n"), [])
+        encrypted = pdf_bytes(
+            {1: b"<< /Type /Catalog >>", 2: b"<< >>"}, b"<< /Root 1 0 R /Encrypt 2 0 R >>"
+        )
+        (refused,) = self.check(encrypted)
+        self.assertEqual((refused.status, refused.severity), ("inconclusive", "info"))
+        self.assertIn("encrypted", refused.message)
+        # A missing or linked file is the PDF inspection's to report; one too large to read
+        # leaves this check open.
+        self.assertEqual(check_included_pdf_information(self.root / "absent.pdf"), [])
+        with patch("latexprep.submission_checks._MAX_BUILT_PDF_BYTES", 10):
+            (large,) = self.check(built_pdf(b"/PTEX.FileName (./figures/plot.pdf)"))
+        self.assertEqual((large.status, large.severity), ("inconclusive", "info"))
+        self.assertIn("larger than the scan reads", large.message)
+
+    def test_prepare_notes_its_baseline_and_judges_the_pdf_it_publishes(self) -> None:
+        leaking = built_pdf(b"/PTEX.FileName (./plot.pdf)", b"/Author (Jane Q. Secret)")
+        (baseline,) = self.check(leaking, ("Jane Q. Secret",), role="baseline")
+        # The baseline is built from the unchanged sources and never published: information.
+        self.assertEqual((baseline.status, baseline.severity), ("failed", "info"))
+        self.assertIn("unchanged sources", baseline.message)
+        self.assertIsNone(baseline.suggestion)
+        (published,) = self.check(leaking, ("Jane Q. Secret",), role="published")
+        self.assertEqual((published.status, published.severity), ("failed", "warning"))
+        # A published PDF without copied information records its clean result as a pass.
+        (clean,) = self.check(built_pdf(b"/Group << /S /Transparency >>"), role="published")
+        self.assertEqual((clean.status, clean.severity), ("passed", "info"))
+        self.assertIn("published PDF carries no information", clean.message)
+        self.assertEqual(
+            self.check(built_pdf(b"/Group << /S /Transparency >>"), role="baseline"), []
+        )
+
+
+class IncludedPdfRoleWiringTests(AsyncProjectTestCase):
+    """Which PDF of a job the included-PDF scan judges: check's build, or prepare's output."""
+
+    async def roles(self, command: str) -> list[str]:
+        """Run ``command`` on a controlled project and return the PDF role of each PDF check run.
+
+        Args:
+            command: ``check`` or ``prepare``.
+
+        Returns:
+            The ``built_pdf_role`` of every configured PDF check run, in run order.
+        """
+        seen: list[str] = []
+
+        async def configured(_pdf, _root, _main, _work, _runner, settings, *_args, **_options):
+            seen.append(settings.built_pdf_role)
+            return []
+
+        source = self.root / f"{command}-input"
+        single_file_project(source)
+        with patch(
+            "latexprep.document_tasks.inspect_configured_pdf_checks", side_effect=configured
+        ):
+            await run_job(
+                JobRequest(command, source, Settings(main="main.tex"), self.root / command),
+                backends=controlled_backends(),
+            )
+        return seen
+
+    async def test_prepare_notes_its_baseline_and_judges_the_published_pdf(self) -> None:
+        self.assertEqual(await self.roles("check"), ["built"])
+        self.assertEqual(await self.roles("prepare"), ["baseline", "published"])
 
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@ import os
 import sys
 import tempfile
 import unittest
+import zlib
 from collections import Counter
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from pathlib import Path
@@ -719,3 +720,75 @@ def _object_violations(
         elif isinstance(extra, Mapping):
             problems.extend(_violations(item, extra, root, f"{where}.{name}"))
     return problems
+
+
+def pdf_stream(dictionary: bytes, data: bytes, *, compress: bool = False) -> bytes:
+    """Write the body of a stream object: its dictionary with ``/Length`` and its data.
+
+    Args:
+        dictionary: The dictionary's entries, without ``<<``, ``>>`` or ``/Length``.
+        data: The decoded data.
+        compress: Whether to compress the data with ``/FlateDecode``.
+
+    Returns:
+        The object body, from ``<<`` to ``endstream``.
+    """
+    encoded = zlib.compress(data) if compress else data
+    flate = b" /Filter /FlateDecode" if compress else b""
+    return (
+        b"<< " + dictionary + flate + b" /Length " + str(len(encoded)).encode() + b" >>\n"
+        b"stream\n" + encoded + b"\nendstream"
+    )
+
+
+def object_stream(objects: Mapping[int, bytes]) -> bytes:
+    """Write the body of a compressed object stream that packs ``objects``.
+
+    Args:
+        objects: The body of each packed object, by object number.
+
+    Returns:
+        The stream object body, with ``/Type /ObjStm``, ``/N`` and ``/First``.
+    """
+    offsets: list[bytes] = []
+    bodies = b""
+    for number, body in objects.items():
+        offsets.append(f"{number} {len(bodies)}".encode())
+        bodies += body + b"\n"
+    header = b" ".join(offsets) + b"\n"
+    entries = b"/Type /ObjStm /N " + str(len(objects)).encode()
+    entries += b" /First " + str(len(header)).encode()
+    return pdf_stream(entries, header + bodies, compress=True)
+
+
+def pdf_bytes(
+    objects: Mapping[int, bytes],
+    trailer: bytes = b"<< /Root 1 0 R >>",
+    *,
+    header: bytes = b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n",
+) -> bytes:
+    """Write a PDF file with a classic cross-reference table and trailer.
+
+    Args:
+        objects: The body of each indirect object, without ``obj`` and ``endobj``, by
+            object number.
+        trailer: The trailer dictionary.
+        header: The header lines.
+
+    Returns:
+        The PDF file.
+    """
+    data = bytearray(header)
+    offsets: dict[int, int] = {}
+    for number, body in objects.items():
+        offsets[number] = len(data)
+        data += f"{number} 0 obj\n".encode() + body + b"\nendobj\n"
+    table = len(data)
+    size = max(offsets, default=0) + 1
+    data += f"xref\n0 {size}\n0000000000 65535 f \n".encode()
+    for number in range(1, size):
+        data += (
+            f"{offsets.get(number, 0):010d} 00000 {'n' if number in offsets else 'f'} \n".encode()
+        )
+    data += b"trailer\n" + trailer + f"\nstartxref\n{table}\n%%EOF\n".encode()
+    return bytes(data)

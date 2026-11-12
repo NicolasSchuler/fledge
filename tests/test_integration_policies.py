@@ -13,8 +13,10 @@ time. No assertion here depends on the bytes of a PDF.
 from __future__ import annotations
 
 import json
+import re
 import unittest
 import zipfile
+import zlib
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -25,12 +27,13 @@ from latexprep.job_context import JobRequest
 from latexprep.report import Outcome
 from tests.live_support import (
     LIVE_BUILD_EPOCH,
+    PASSING_OUTCOMES,
     LiveProjectTestCase,
     blocking_summary,
     live_settings,
     run_job_sync,
 )
-from tests.support import live_test, write_project
+from tests.support import directory_contents, live_test, pdf_bytes, pdf_stream, write_project
 
 # The exit code of each outcome, as docs/reports.md "Exit codes" lists them.
 EXIT_CODES = {
@@ -475,6 +478,171 @@ class LiveFailingPolicyTests(LiveProjectTestCase):
         isolated = self.check_json(str(source), "--main", "main.tex", "--isolated")
         self.assertIsNone(isolated["execution"]["config_path"])
         self.assertEqual(_findings(isolated, "TEX013"), [])
+
+
+# A paper whose PDF figure names its author and a home folder in its information dictionary,
+# which pdfTeX and LuaTeX copy into the built PDF unless told not to.
+FIGURE_AUTHOR = "Jane Q. Secret"
+FIGURE_HOME_FOLDER = "/Users/jsecret/"
+FIGURE_PAPER = r"""\documentclass{article}
+\usepackage{graphicx}
+\begin{document}
+Figure~\ref{fig:plot} shows the measurements.
+\begin{figure}[ht]
+\centering
+\includegraphics[width=0.5\linewidth]{figures/plot}
+\caption{The measurements.}\label{fig:plot}
+\end{figure}
+\end{document}
+"""
+_PDF_STREAM = re.compile(rb"stream\r?\n(.*?)\r?\nendstream", re.S)
+
+
+def _named_figure() -> bytes:
+    """Return a one-page vector figure, without fonts, whose metadata names its author."""
+    info = (
+        b"<< /Author ("
+        + FIGURE_AUTHOR.encode()
+        + b") /Title ("
+        + FIGURE_HOME_FOLDER.encode()
+        + b"Private/plot.pdf) /Creator (jsecret-laptop) >>"
+    )
+    return pdf_bytes(
+        {
+            1: b"<< /Type /Catalog /Pages 2 0 R >>",
+            2: b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            3: b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 72 36] /Contents 4 0 R "
+            b"/Resources << >> >>",
+            4: pdf_stream(b"", b"0.2 0.4 0.8 rg 4 4 64 28 re f"),
+            5: info,
+        },
+        b"<< /Root 1 0 R /Info 5 0 R >>",
+    )
+
+
+def _searchable(pdf: Path) -> bytes:
+    """Return a PDF's bytes followed by every stream that inflates, for a plain search.
+
+    The search does not use Fledge's PDF reader, whose findings the tests also check.
+    """
+    data = pdf.read_bytes()
+    parts = [data]
+    for match in _PDF_STREAM.finditer(data):
+        try:
+            parts.append(zlib.decompress(match[1]))
+        except zlib.error:
+            continue
+    return b"\n".join(parts)
+
+
+def _names_figure_author(data: bytes) -> bool:
+    """Return whether ``data`` holds the figure's author or home folder, in either encoding."""
+    return any(
+        needle.encode(encoding) in data
+        for needle in (FIGURE_AUTHOR, FIGURE_HOME_FOLDER)
+        for encoding in ("latin-1", "utf-16-be")
+    )
+
+
+def _stage_statuses(report: dict[str, Any], code: str) -> dict[str, str]:
+    """Return the status of each finding of ``code`` in a JSON report, by its stage."""
+    return {str(item["details"].get("stage")): item["status"] for item in _findings(report, code)}
+
+
+@live_test("Set FLEDGE_RUN_INTEGRATION=1 for live runs of figure-metadata privacy")
+class LiveFigureMetadataPrivacyTests(LiveProjectTestCase):
+    """Real pdfLaTeX and LuaLaTeX builds of a paper whose PDF figure names its author."""
+
+    def paper(self, name: str) -> Path:
+        """Write the paper and its figure as the project ``name`` in the scratch directory."""
+        return write_project(
+            self.base / name, {"main.tex": FIGURE_PAPER, "figures/plot.pdf": _named_figure()}
+        )
+
+    def prepare_with_preset(self, source: Path, engine: str) -> tuple[int, Path, dict[str, Any]]:
+        """Run ``fledge prepare`` with the anonymous-review preset and the figure's author.
+
+        Args:
+            source: The project.
+            engine: The TeX engine.
+
+        Returns:
+            The exit code, the output folder and the JSON report.
+        """
+        config = self.base / f"{engine}.toml"
+        config.write_text(
+            f"source_date_epoch = {LIVE_BUILD_EPOCH}\n"
+            f'[submission_checks]\nidentity_terms = ["{FIGURE_AUTHOR}"]\n',
+            encoding="utf-8",
+        )
+        output, saved = self.base / f"{engine}-output", self.base / f"{engine}.json"
+        result = _invoke(
+            "prepare",
+            *(str(source), "--main", "main.tex", "--engine", engine),
+            *("--preset", "anonymous-review", "--config", str(config)),
+            *("--output", str(output), "--json-report", str(saved), "--quiet"),
+        )
+        self.assertTrue(saved.is_file(), (result.output, result.exception))
+        return result.exit_code, output, json.loads(saved.read_text(encoding="utf-8"))
+
+    def test_figure_metadata_reaches_the_prepared_pdf_without_the_setting(self) -> None:
+        """Check that a PDF figure's author and home folder reach the PDF and are reported.
+
+        docs/checks.md PRV104 and PRV105: without suppression, pdfTeX copies the figure's
+        information dictionary into the built PDF; both checks warn, naming fields only.
+        """
+        report = self.prepare(self.paper("plain")).to_dict()
+        published = _searchable(self.base / "prepared" / "manuscript.pdf")
+        self.assertIn(b"/PTEX.InfoDict", published)
+        self.assertTrue(_names_figure_author(published))
+        for code in ("PRV104", "PRV105"):
+            with self.subTest(code=code):
+                self.assertIn("failed", _stage_statuses(report, code).values())
+                self.assertNotIn("jsecret", json.dumps(_findings(report, code)))
+        # prepare judges the PDF it publishes; its baseline is only information.
+        severities = {
+            item["details"].get("stage"): item["severity"] for item in _findings(report, "PRV105")
+        }
+        self.assertEqual(severities.get("final configured PDF checks"), "warning")
+        self.assertEqual(severities.get("baseline configured PDF checks"), "info")
+        self.assertEqual(_findings(report, "TEX204"), [])
+
+    def test_anonymous_review_preset_keeps_figure_metadata_out_of_the_prepared_pdf(self) -> None:
+        """Check that the preset's prepared PDF holds no /PTEX entries and no identity term.
+
+        docs/checks.md TEX204: the anonymous-review preset adds the suppression line to the
+        prepared main file only; pdfLaTeX and LuaLaTeX then omit the figure's information
+        dictionary and file name, and the original project is unchanged.
+        """
+        for engine in ("pdflatex", "lualatex"):
+            with self.subTest(engine=engine):
+                source = self.paper(engine)
+                before = directory_contents(source)
+                code, output, report = self.prepare_with_preset(source, engine)
+                self.assertIn(report["outcome"], {str(item) for item in PASSING_OUTCOMES})
+                self.assertEqual(code, EXIT_CODES[report["outcome"]])
+                published = _searchable(output / "manuscript.pdf")
+                self.assertNotIn(b"PTEX.", published)
+                self.assertFalse(_names_figure_author(published))
+                self.assertEqual(directory_contents(source), before)
+                self.assertEqual(set(_stage_statuses(report, "TEX204").values()), {"passed"})
+                # The baseline is built from the unchanged sources and still carries the
+                # figure's information, which is only noted; the published PDF is clean, so
+                # PRV105 raises nothing and any advisory outcome has another cause.
+                found = _stage_statuses(report, "PRV105")
+                self.assertEqual(found.get("baseline configured PDF checks"), "failed")
+                self.assertEqual(found.get("final configured PDF checks"), "passed")
+                open_warnings = {
+                    item["code"]
+                    for item in report["findings"]
+                    if item["severity"] == "warning" and item["status"] != "passed"
+                }
+                # Only the figure file itself, which preparation never rewrites, may still
+                # warn; the added line must not leave the manuscript checks of the prepared
+                # sources inconclusive.
+                self.assertLessEqual(open_warnings, {"PRV104"})
+                if report["outcome"] == "passed_with_advisories":
+                    self.assertTrue(open_warnings)
 
 
 if __name__ == "__main__":

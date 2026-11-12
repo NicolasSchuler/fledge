@@ -16,7 +16,9 @@ from .errors import PreparationError
 
 # One-line descriptions for `fledge init --list`; each name has a <name>.toml file.
 PRESETS: dict[str, str] = {
-    "anonymous-review": "Double-blind review: identity hints, your identity terms, float structure",
+    "anonymous-review": (
+        "Double-blind review: identity hints, your identity terms, figure metadata, float structure"
+    ),
     "arxiv": "Public source upload: shipped .bbl, private comments, secrets, unused files, fonts",
     "camera-ready": "Final version: strict PDF fonts and page size, metadata, float structure",
 }

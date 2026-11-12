@@ -5,10 +5,15 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
+from latexprep.config import load_settings
 from latexprep.errors import PreparationError
 from latexprep.findings import has_blockers
-from latexprep.source_transform import SourceTransformOptions, plan_source_transforms
-from latexprep.tex_lexer import ParseLimitExceeded
+from latexprep.source_transform import (
+    SUPPRESS_INCLUDED_PDF_INFORMATION,
+    SourceTransformOptions,
+    plan_source_transforms,
+)
+from latexprep.tex_lexer import ParseLimitExceeded, conditional_spans, scan_source_commands
 from tests.support import ProjectTestCase
 
 
@@ -229,6 +234,68 @@ class SourceTransformTests(ProjectTestCase):
         ):
             with self.subTest(options=options), self.assertRaises(PreparationError):
                 SourceTransformOptions(**options)
+
+
+class SuppressionTests(ProjectTestCase):
+    """The line that keeps included PDFs' information out of the built PDF (TEX204)."""
+
+    def plan(self, **options):
+        """Plan the suppression, with further transformations from ``options``, for ``main.tex``."""
+        return plan_source_transforms(
+            self.root,
+            "main.tex",
+            SourceTransformOptions(suppress_included_pdf_information=True, **options),
+        )
+
+    def test_line_follows_leading_comments_and_shows_in_the_changes(self) -> None:
+        source = (
+            "%!TEX program = lualatex\r\n% private note\r\n\r\n"
+            "\\documentclass{article}\r\n\\begin{document}Text.\\end{document}\r\n"
+        )
+        original = self.write("main.tex", source).read_bytes()
+        plan = self.plan(comment_policy="all")
+        expected = (
+            "%!TEX program = lualatex\r\n%\r\n\r\n"
+            + SUPPRESS_INCLUDED_PDF_INFORMATION
+            + "\r\n\\documentclass{article}\r\n\\begin{document}Text.\\end{document}\r\n"
+        )
+        self.assertEqual(plan.contents["main.tex"].decode(), expected)
+        self.assertEqual(plan.originals["main.tex"], original)
+        self.assertEqual((self.root / "main.tex").read_bytes(), original)
+        (change,) = plan.changes
+        self.assertIn("+" + SUPPRESS_INCLUDED_PDF_INFORMATION, change.diff or "")
+        (finding,) = [item for item in plan.findings if item.code == "TEX204"]
+        self.assertEqual((finding.status, finding.path, finding.line), ("passed", "main.tex", 4))
+        self.assertTrue(finding.details["inserted"])
+        # Both engines' primitives are guarded, so XeLaTeX and older engines ignore the line,
+        # and without an \\if...\\fi conditional the prepared sources stay free of
+        # conditional control flow, which would leave the manuscript checks inconclusive.
+        self.assertIn("\\@ifundefined{pdfvariable}", SUPPRESS_INCLUDED_PDF_INFORMATION)
+        self.assertIn("\\@ifundefined{pdfsuppressptexinfo}", SUPPRESS_INCLUDED_PDF_INFORMATION)
+        commands = scan_source_commands(SUPPRESS_INCLUDED_PDF_INFORMATION)
+        self.assertEqual(conditional_spans(commands), [])
+
+    def test_existing_settings_and_unreadable_main_are_respected(self) -> None:
+        self.write("main.tex", "\\pdfsuppressptexinfo=-1\n\\documentclass{article}\n")
+        plan = self.plan()
+        self.assertEqual((plan.contents, plan.changes), ({}, []))
+        (finding,) = plan.findings
+        self.assertEqual((finding.code, finding.status), ("TEX204", "passed"))
+        self.assertFalse(finding.details["inserted"])
+        # A setting inside a comment does not count.
+        self.write("main.tex", "% \\pdfsuppressptexinfo=-1\n\\documentclass{article}\n")
+        self.assertIn(SUPPRESS_INCLUDED_PDF_INFORMATION.encode(), self.plan().contents["main.tex"])
+        self.write("main.tex", b"\\documentclass{article}caf\xe9")
+        unreadable = self.plan()
+        self.assertTrue(has_blockers(unreadable.findings))
+        self.assertEqual((unreadable.contents, unreadable.changes), ({}, []))
+
+    def test_anonymous_review_preset_suppresses_included_pdf_information(self) -> None:
+        review = load_settings(None, {}, preset="anonymous-review")
+        self.assertTrue(review.source_transforms.suppress_included_pdf_information)
+        self.assertFalse(
+            load_settings(None, {}).source_transforms.suppress_included_pdf_information
+        )
 
 
 if __name__ == "__main__":

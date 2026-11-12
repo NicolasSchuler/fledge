@@ -25,6 +25,7 @@ from latexprep.metadata_privacy import (
 from latexprep.metadata_source_edits import check_sanitized_pdf_metadata, plan_metadata_sanitization
 from latexprep.option_config import read_options
 from latexprep.report import Report
+from tests.support import ProjectTestCase, pdf_bytes, pdf_stream
 
 
 class MetadataPrivacyTests(unittest.TestCase):
@@ -804,6 +805,169 @@ class ImageMetadataTests(unittest.TestCase):
             )
             self.assertEqual(result[0].status, "inconclusive")
             self.assertIn("no OCR", result[0].details["scope"])
+
+
+def figure_pdf(info: bytes, *, xmp: bytes | None = None) -> bytes:
+    """Return a one-page PDF figure whose information dictionary holds ``info``.
+
+    Args:
+        info: The entries of the information dictionary, such as ``b"/Author (Ann)"``.
+        xmp: The catalog's XMP packet, or ``None`` for none.
+
+    Returns:
+        The bytes of the PDF.
+    """
+    objects = {
+        1: b"<< /Type /Catalog /Pages 2 0 R" + (b" /Metadata 5 0 R" if xmp else b"") + b" >>",
+        2: b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        3: b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 10 10] >>",
+        4: b"<< " + info + b" >>",
+    }
+    if xmp is not None:
+        objects[5] = pdf_stream(b"/Type /Metadata /Subtype /XML", xmp, compress=True)
+    return pdf_bytes(objects, b"<< /Root 1 0 R /Info 4 0 R >>")
+
+
+INCLUDING_MAIN = (
+    "\\documentclass{article}\n\\usepackage{graphicx}\n\\begin{document}\n"
+    "\\includegraphics{figures/plot}\n\\end{document}\n"
+)
+CREATOR_XMP = (
+    b'<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF><rdf:Description>'
+    b"<dc:creator><rdf:Seq><rdf:li>Jane Q. Secret</rdf:li></rdf:Seq></dc:creator>"
+    b"</rdf:Description></rdf:RDF></x:xmpmeta>"
+)
+
+
+class PdfFigureMetadataTests(ProjectTestCase):
+    """PDF figures that the document includes: identity terms (PRV103) and home folders (PRV104)."""
+
+    def scan(self, terms=(), *, home_paths=False):
+        """Scan the test project's figures, with ``main.tex`` as the main file.
+
+        Args:
+            terms: The identity terms to look for.
+            home_paths: Whether to report home-folder paths.
+
+        Returns:
+            The findings, by check code.
+        """
+        options = MetadataPrivacyOptions(image_identity_terms=terms)
+        findings = check_image_metadata(
+            self.root, options, main="main.tex", report_home_paths=home_paths
+        )
+        return {finding.code: finding for finding in findings}
+
+    def test_included_pdf_figures_are_scanned_for_identity_terms(self) -> None:
+        self.write("main.tex", INCLUDING_MAIN)
+        self.write(
+            "figures/plot.pdf",
+            figure_pdf(b"/Author (Jane Q. Secret) /Producer (Exporter)", xmp=CREATOR_XMP),
+        )
+        # A PDF the document does not include, such as an old build, is not a figure.
+        self.write("main-old.pdf", figure_pdf(b"/Author (Jane Q. Secret)"))
+        finding = self.scan(("Jane Q. Secret",))["PRV103"]
+        self.assertEqual((finding.status, finding.severity), ("failed", "error"))
+        self.assertEqual(
+            finding.details["matches"],
+            [
+                {"path": "figures/plot.pdf", "channel": "PDF Info Author", "term_index": 1},
+                {"path": "figures/plot.pdf", "channel": "PDF XMP dc:creator", "term_index": 1},
+            ],
+        )
+        self.assertIn("metadata of 1 PDF figure.", finding.message)
+        self.assertEqual(
+            (finding.details["pdf_figures_selected"], finding.details["pdf_figures_scanned"]),
+            (1, 1),
+        )
+        self.assertNotIn("Jane", str(finding))
+        clean = self.scan(("Somebody Else",))["PRV103"]
+        self.assertEqual(clean.status, "passed")
+        self.assertIn("1 PDF figure", clean.message)
+        self.assertIn("PDF files the document does not include", clean.message)
+
+    def test_unreadable_pdf_figures_and_unincluded_pdfs(self) -> None:
+        self.write("main.tex", INCLUDING_MAIN.replace("figures/plot", "figures/plot.pdf"))
+        self.write("figures/plot.pdf", b"this is not a PDF")
+        findings = self.scan(("Jane",), home_paths=True)
+        terms, paths = findings["PRV103"], findings["PRV104"]
+        self.assertEqual((terms.status, terms.severity), ("inconclusive", "error"))
+        self.assertIn("figures/plot.pdf: The file does not start like a PDF", terms.message)
+        # The default path check only informs about a figure it could not read.
+        self.assertEqual((paths.status, paths.severity), ("inconclusive", "info"))
+        self.write(
+            "figures/plot.pdf",
+            pdf_bytes(
+                {1: b"<< /Type /Catalog >>", 2: b"<< >>"}, b"<< /Root 1 0 R /Encrypt 2 0 R >>"
+            ),
+        )
+        self.assertIn("encrypted", self.scan(("Jane",))["PRV103"].message)
+        # Without a main file there is no document, so no PDF counts as a figure.
+        (self.root / "main.tex").unlink()
+        self.assertEqual(self.scan(("Jane",))["PRV103"].details["pdf_figures_selected"], 0)
+
+    def test_home_folder_paths_are_reported_without_names(self) -> None:
+        self.write(
+            "main.tex",
+            INCLUDING_MAIN.replace("\\end{document}", "\\includegraphics{photo}\n\\end{document}"),
+        )
+        self.write("figures/plot.pdf", figure_pdf(b"/Title (/Users/jsecret/Private/plot.pdf)"))
+        self.write("photo.png", png((b"tEXt", b"Source\0C:\\Users\\annwork\\Pictures\\a.png")))
+        finding = self.scan(home_paths=True)["PRV104"]
+        self.assertEqual((finding.status, finding.severity), ("failed", "warning"))
+        self.assertEqual(
+            sorted(
+                (item["path"], item["channel"], item["kind"]) for item in finding.details["matches"]
+            ),
+            [
+                ("figures/plot.pdf", "PDF Info Title", "macOS home folder"),
+                ("photo.png", "PNG tEXt", "Windows user folder"),
+            ],
+        )
+        self.assertNotIn("jsecret", str(finding))
+        self.assertNotIn("annwork", str(finding))
+        self.assertIn("suppress_included_pdf_information", finding.next_step or "")
+        # Identity terms are a separate, configured check.
+        self.assertNotIn("PRV103", self.scan(home_paths=True))
+
+    def test_only_the_figures_the_document_includes_are_scanned(self) -> None:
+        self.write("main.tex", INCLUDING_MAIN)
+        self.write("figures/plot.pdf", figure_pdf(b"/Producer (Exporter)"))
+        # An image the document does not include never ships, so its metadata is left alone.
+        self.write("unused.png", png((b"tEXt", b"Author\0Jane Q. Secret /home/jsecret/a.png")))
+        findings = self.scan(("Jane Q. Secret",), home_paths=True)
+        self.assertEqual(findings["PRV103"].status, "passed")
+        self.assertEqual(findings["PRV104"].status, "passed")
+        self.assertEqual(findings["PRV103"].details["figures"], "included")
+        self.assertEqual(findings["PRV103"].details["images_selected"], 0)
+        self.assertIn("1 PDF figure that the document includes", findings["PRV104"].message)
+        # When the document's figures cannot be determined, every image is scanned instead.
+        self.write(
+            "main.tex",
+            INCLUDING_MAIN.replace("{figures/plot}", "{\\figuredirectory/plot}"),
+        )
+        uncertain = self.scan(("Jane Q. Secret",), home_paths=True)
+        self.assertEqual(uncertain["PRV103"].status, "failed")
+        self.assertEqual(uncertain["PRV104"].status, "failed")
+        self.assertEqual(uncertain["PRV103"].details["figures"], "project")
+        self.assertEqual(
+            [item["path"] for item in uncertain["PRV104"].details["matches"]], ["unused.png"]
+        )
+        passed = self.scan(("Somebody Else",))["PRV103"]
+        self.assertIn("Every PNG and JPEG file of the project was scanned because", passed.message)
+
+    def test_shared_folders_relative_paths_and_no_figures_report_nothing(self) -> None:
+        self.write("main.tex", INCLUDING_MAIN)
+        self.write(
+            "figures/plot.pdf",
+            figure_pdf(b"/Title (/Users/Shared/plot.pdf) /Subject (./figures/plot.pdf)"),
+        )
+        finding = self.scan(home_paths=True)["PRV104"]
+        self.assertEqual((finding.status, finding.severity), ("passed", "info"))
+        self.assertIn("1 PDF figure", finding.message)
+        (self.root / "figures" / "plot.pdf").unlink()
+        self.assertEqual(self.scan(home_paths=True), {})
+        self.assertEqual(self.scan(), {})
 
 
 if __name__ == "__main__":

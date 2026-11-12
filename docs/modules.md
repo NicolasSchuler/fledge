@@ -61,6 +61,7 @@ a network connection, and each imports only other modules of this layer. (79 mod
 | `finding_weight` | How hard a check hits when it does not pass: one mapping from outcome to severity |
 | `findings` | The `Finding`: one check's result, and the constructors for findings that no check produces |
 | `generated_files` | Generated files that TeX reads back (.bbl, .ind, glossaries), what each holds and the tool that writes it |
+| `image_metadata_decoders` | Bounded decoders of the metadata blocks of PNG and JPEG files |
 | `limits` | Unit constants and the limits that more than one module shares |
 | `literal_text` | Literal TeX text without expansion: shared command tables and plain-text reading |
 | `loaded_options_rules` | Data-only catalogue for actual post-document kernel option evidence |
@@ -68,8 +69,8 @@ a network connection, and each imports only other modules of this layer. (79 mod
 | `manuscript_check_rules` | Data-only catalogue for explicitly selected manuscript structure checks |
 | `manuscript_vocabulary` | The command and environment vocabularies the opt-in manuscript policies share |
 | `measurement_findings` | Findings for configured PDF measurements: three-state outcomes that never pass by omission |
-| `metadata_privacy` | Options of the metadata privacy checks: selected source edits and identity terms |
-| `metadata_privacy_rules` | Data-only privacy entries for selected metadata edits and image metadata scans |
+| `metadata_privacy` | Options of the metadata privacy checks: selected source edits, identity terms and home-folder paths |
+| `metadata_privacy_rules` | Data-only privacy entries for selected metadata edits and figure metadata scans |
 | `online_check_rules` | Data-only catalogue entries for explicitly selected remote reference checks |
 | `online_options` | Settings of the online checks, and the vocabulary that every online module shares |
 | `option_config` | Strict TOML conversion for grouped, immutable checker options, and the checks they share |
@@ -80,6 +81,7 @@ a network connection, and each imports only other modules of this layer. (79 mod
 | `pdf_check_options` | The option schema of the configured PDF measurements, and which checks it enables |
 | `pdf_check_rules` | Data-only catalogue for optional PDF measurements and object policies |
 | `pdf_geometry` | Page geometry, colour and render-size arithmetic shared by the PDF measurements |
+| `pdf_metadata_reader` | Bounded reader of a PDF's information dictionary, XMP and what it copied from included PDFs |
 | `pdf_previews` | Optional, bounded PNG previews kept outside serializable job reports |
 | `pdf_rule_names` | The names of the `pdf.*` rules reported for the manuscript PDF and its input figures |
 | `pdf_tool_output` | Parsers for the text and XML that Poppler and MuPDF print about a PDF |
@@ -196,7 +198,7 @@ an output format. (61 modules)
 | `figure_color_space` | The colour space of raster figures against the family a venue requires (`PDF313`) |
 | `flat_layout` | Planning a flat layout: every shipped file at the top level, references rewritten to match |
 | `generated_file_checks` | Shipped generated index, glossary and nomenclature files, and lists a build never got |
-| `image_metadata` | Bounded scan of PNG and JPEG metadata for configured identity terms |
+| `image_metadata` | Bounded scan of figure metadata for identity terms and home-folder paths |
 | `manuscript` | Configurable constraints on the literal declarations of one selected source graph |
 | `manuscript_abstract_checks` | Citations and uppercase abbreviations in the abstract (`MAN003`, `MAN004`) |
 | `manuscript_checks` | Opt-in, publisher-neutral checks of literal manuscript structures |

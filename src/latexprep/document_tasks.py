@@ -35,7 +35,7 @@ from .pdf_check_pipeline import inspect_configured_pdf_checks
 from .scheduler import Task
 from .setting_choices import Engine
 from .source_analysis import analyze_sources
-from .submission_checks import check_submission
+from .submission_checks import BuiltPdfRole, check_submission
 from .submission_options import SubmissionOptions
 from .submission_readiness_checks import check_submission_readiness
 from .workflow_options import ComparisonOptions
@@ -305,8 +305,12 @@ _SOURCE_CHECKS = (
     ),
     SourceCheck(
         TaskName.IMAGE_METADATA_PRIVACY,
-        lambda root, _main, settings, _analysed: check_image_metadata(
-            root, settings.metadata_privacy
+        lambda root, main, settings, analysed: check_image_metadata(
+            root,
+            settings.metadata_privacy,
+            main=main,
+            analysed=analysed,
+            report_home_paths=settings.checks.enabled("PRV104"),
         ),
     ),
     SourceCheck(
@@ -431,7 +435,7 @@ def _online_references(
 
 
 def _configured_pdf_checks(
-    context: JobContext, pdf: Path, root: Path, main: str, directory: str
+    context: JobContext, pdf: Path, root: Path, main: str, directory: str, role: BuiltPdfRole
 ) -> Awaitable[list[Finding]]:
     """Run the configured PDF checks of ``pdf``, with expected values read from ``root``.
 
@@ -441,6 +445,7 @@ def _configured_pdf_checks(
         root: The source tree that the expected values are read from.
         main: The main file.
         directory: The name of the workspace directory, under the job's work directory.
+        role: Which PDF of the job ``pdf`` is; the checks judge the PDF a job ships.
 
     Returns:
         An awaitable of the findings.
@@ -451,7 +456,7 @@ def _configured_pdf_checks(
         main,
         context.work / directory,
         context.runner,
-        pdf_check_settings(context.settings),
+        replace(pdf_check_settings(context.settings), built_pdf_role=role),
         context.budget,
         analysed=context.sources.get(root, main),
     )
@@ -575,11 +580,13 @@ def baseline_pdf_tasks(
         """Make a composite task that starts only after the baseline build succeeded."""
         return Task.composite(name, run, needs_success_of=(TaskName.BASELINE_BUILD,))
 
+    # prepare publishes the PDF rebuilt from its archive, not this baseline.
+    role: BuiltPdfRole = "baseline" if context.request.command is JobCommand.PREPARE else "built"
     tasks = [
         after_baseline(
             TaskName.BASELINE_CONFIGURED_PDF_CHECKS,
             lambda: _configured_pdf_checks(
-                context, baseline_pdf(), snapshot(), main, "additional-baseline"
+                context, baseline_pdf(), snapshot(), main, "additional-baseline", role
             ),
         )
     ]
@@ -701,7 +708,9 @@ def _final_pdf_tasks(context: JobContext, extraction: FinalExtraction) -> list[T
         ),
         Task.composite(
             TaskName.FINAL_CONFIGURED_PDF_CHECKS,
-            lambda: _configured_pdf_checks(context, final_pdf, root, main, "additional-final"),
+            lambda: _configured_pdf_checks(
+                context, final_pdf, root, main, "additional-final", "published"
+            ),
         ),
     ]
     if extraction.reference is not None:

@@ -74,6 +74,32 @@ RULES = (
         mandatory=True,
     ),
     Rule(
+        code="TEX204",
+        name="source.suppress_included_pdf_information",
+        title="Included-PDF information kept out of the built PDF",
+        description=(
+            "Opt-in (source_transforms.suppress_included_pdf_information, set by the "
+            "anonymous-review preset; prepare only): add one line after the leading comments "
+            "of the prepared main file that sets \\pdfsuppressptexinfo=-1 for pdfLaTeX or "
+            "\\pdfvariable suppressoptionalinfo 15 for LuaLaTeX. pdfTeX and LuaTeX otherwise "
+            "copy each included PDF's information dictionary (author, title, creator) and "
+            "file name into the output as /PTEX.InfoDict and /PTEX.FileName. The included "
+            "page's XMP and application data (PieceInfo) are copied regardless; XeLaTeX copies "
+            "none of this. A main file that already sets either value is left unchanged; the "
+            "original project is never edited."
+        ),
+        tests=(
+            "tests.test_source_transform.SuppressionTests.test_line_follows_leading_comments_and_shows_in_the_changes",
+            "tests.test_source_transform.SuppressionTests.test_existing_settings_and_unreadable_main_are_respected",
+        ),
+        fix=(
+            "Review the added line in the prepared copy's diff; remove an existing "
+            "\\pdfsuppressptexinfo setting that contradicts it, or re-export figures whose "
+            "page-level metadata must not be shared."
+        ),
+        mandatory=True,
+    ),
+    Rule(
         code="FMT101",
         name="source.format_protected",
         title="Formatter protected regions",

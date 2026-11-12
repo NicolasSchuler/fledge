@@ -1,10 +1,12 @@
 r"""Opt-in, copy-only source transformations for a bounded literal TeX subset.
 
-Three transformations, each a proposal that is computed without writing anything:
-removing comment bodies, merging literal ``\input`` lines into the main source, and
-inlining a generated ``.bbl`` for a ``\bibliography`` line. Merging and inlining need
-a complete dependency graph (``SourceGraph.is_complete``); comment removal needs every
-source to be readable. A proposal with any blocking finding yields no contents at all.
+Four transformations, each a proposal that is computed without writing anything:
+removing comment bodies, merging literal ``\input`` lines into the main source, inlining
+a generated ``.bbl`` for a ``\bibliography`` line, and adding one line at the start of
+the main source that keeps pdfTeX and LuaTeX from copying the information dictionary and
+file name of each included PDF into the output. Merging and inlining need a complete
+dependency graph (``SourceGraph.is_complete``); comment removal needs every source to be
+readable. A proposal with any blocking finding yields no contents at all.
 
 Every proposal still requires the workflow's baseline/prepared PDF comparison.
 Token expansion, arbitrary catcodes and semantic equivalence are not inferred. What
@@ -13,6 +15,7 @@ must stay untouched is defined by ``tex_protected_regions``.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Literal, NamedTuple
@@ -45,6 +48,24 @@ _PRIVATE = marker_pattern(MarkerCategory.EDIT_MARKER, MarkerCategory.PRIVACY_KEY
 _COMMENT_RULE = "source.comment_removal"
 _MERGE_RULE = "source.merge_inputs"
 _INLINE_RULE = "source.inline_bibliography"
+_SUPPRESSION_RULE = "source.suppress_included_pdf_information"
+# The line that keeps included PDFs' information out of the output. pdfTeX's
+# \pdfsuppressptexinfo and LuaTeX's \pdfvariable suppressoptionalinfo are bit masks whose
+# bits 1, 2, 4 and 8 omit PTEX.Fullbanner, PTEX.FileName, PTEX.PageNumber and PTEX.InfoDict;
+# pdfTeX's -1 sets only those, and LuaTeX's 15 leaves the document's own Creator, Producer,
+# dates and ID in place. LuaTeX is tested first because packages such as luatex85 define a
+# \pdfsuppressptexinfo macro there whose -1 would also drop those entries. XeTeX defines
+# neither, and its xdvipdfmx driver copies none of this information. The engine is tested
+# with the kernel's \@ifundefined, available before \documentclass, rather than a TeX
+# \if...\fi conditional, which the manuscript checks of the prepared sources would read
+# as conditional control flow that hides declarations.
+SUPPRESS_INCLUDED_PDF_INFORMATION = (
+    r"\makeatletter\@ifundefined{pdfvariable}"
+    r"{\@ifundefined{pdfsuppressptexinfo}{}{\pdfsuppressptexinfo=-1\relax}}"
+    r"{\pdfvariable suppressoptionalinfo 15\relax}\makeatother"
+)
+# A main source that already sets either mask is left as it is.
+_SUPPRESSION_SETTINGS = re.compile(r"\\pdfsuppressptexinfo(?![A-Za-z@])|suppressoptionalinfo")
 # Commands that read files or depend on where they run. Input merging moves text into
 # another file, so a command in this set would mean something else after the merge.
 # (``\end`` is judged separately: only ``\end{document}`` is a problem.)
@@ -101,12 +122,17 @@ class SourceTransformOptions:
             ``\bibliography`` line, or ``None`` to inline nothing.
         filename_overrides: Pairs of project-relative paths, each a file and the name it
             takes in a flat layout.
+        suppress_included_pdf_information: Whether to add
+            ``SUPPRESS_INCLUDED_PDF_INFORMATION`` at the start of the main source, so that
+            the built PDF does not carry each included PDF's information dictionary and
+            file name.
     """
 
     comment_policy: CommentPolicy = "retain"
     merge_inputs: bool = False
     inline_bibliography: str | None = None
     filename_overrides: tuple[tuple[str, str], ...] = ()
+    suppress_included_pdf_information: bool = False
 
     def __post_init__(self) -> None:
         validate_scalars(self)
@@ -733,6 +759,77 @@ def _plan_comment_removal(
             _remove_file_comments(graph, texts, name, policy, plan)
 
 
+def _after_leading_comments(text: str) -> int:
+    r"""Return the offset after the leading comment and blank lines of a source.
+
+    A ``%&`` format line and ``% !TEX`` magic comments are read only at the very start of
+    a file, by TeX itself, latexmk and editors, so nothing is inserted before them.
+    """
+    offset = 0
+    for line in text.splitlines(keepends=True):
+        stripped = line.strip()
+        if stripped and not stripped.startswith("%"):
+            break
+        offset += len(line)
+    return offset
+
+
+def _plan_suppression(main: str, texts: dict[str, str], plan: SourceTransformPlan) -> None:
+    """Plan the suppression line at the start of the main source, after its leading comments.
+
+    A main source that already sets either suppression mask outside comments and literal
+    regions is left unchanged, and the finding says so.
+
+    Args:
+        main: The project path of the main source.
+        texts: The proposed text of each source, updated in place.
+        plan: The plan that receives the finding, or the problem when the main source
+            could not be read.
+    """
+    text = texts.get(main)
+    if text is None:
+        _problem(
+            plan,
+            _SUPPRESSION_RULE,
+            "The main source could not be read, so the suppression line cannot be added.",
+            main,
+        )
+        return
+    if _SUPPRESSION_SETTINGS.search(mask_literals(text)):
+        plan.findings.append(
+            Finding(
+                _SUPPRESSION_RULE,
+                f"{main} already sets the suppression of included-PDF information; "
+                "nothing was added.",
+                severity="info",
+                status="passed",
+                path=main,
+                details={"inserted": False},
+            )
+        )
+        return
+    offset = _after_leading_comments(text)
+    newline = "\r\n" if "\r\n" in text else "\n"
+    # A last comment line without a line end would otherwise swallow the inserted line.
+    before = newline if offset and text[offset - 1] not in "\r\n" else ""
+    texts[main] = (
+        text[:offset] + before + SUPPRESS_INCLUDED_PDF_INFORMATION + newline + text[offset:]
+    )
+    line = text.count("\n", 0, offset) + (2 if before else 1)
+    plan.findings.append(
+        Finding(
+            _SUPPRESSION_RULE,
+            f"Planned a line at {main}:{line} that keeps included PDFs' information "
+            "dictionaries and file names out of the PDF built by pdfLaTeX or LuaLaTeX.",
+            severity="info",
+            status="passed",
+            path=main,
+            line=line,
+            details={"inserted": True, "text": SUPPRESS_INCLUDED_PDF_INFORMATION},
+        )
+    )
+
+
 def _materialize(graph: SourceGraph, texts: dict[str, str], plan: SourceTransformPlan) -> None:
     """Turn the proposed texts into bytes, originals, removals and reviewable changes.
 
@@ -797,6 +894,7 @@ def plan_source_transforms(
         options.comment_policy == "retain"
         and not options.merge_inputs
         and not options.inline_bibliography
+        and not options.suppress_included_pdf_information
     ):
         return plan
     graph = SourceGraph.build(root, main)
@@ -818,6 +916,8 @@ def plan_source_transforms(
             _MERGE_RULE if options.merge_inputs else _INLINE_RULE,
             "Transformation exceeded the bounded literal parsing limits.",
         )
+    if options.suppress_included_pdf_information and not has_blockers(plan.findings):
+        _plan_suppression(graph.main, texts, plan)
     if not has_blockers(plan.findings):
         _materialize(graph, texts, plan)
     if has_blockers(plan.findings):

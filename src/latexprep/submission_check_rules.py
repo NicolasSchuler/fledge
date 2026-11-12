@@ -36,6 +36,36 @@ RULES = (
         not_checked_area="anonymity",
     ),
     Rule(
+        code="PRV105",
+        name="privacy.included_pdf_information",
+        title="Included-PDF information in the built PDF",
+        description=(
+            "Default advisory over the PDF a job ships: the PDF that check builds, and in "
+            "prepare the PDF it publishes. pdfTeX and LuaTeX copy each included PDF's "
+            "information dictionary (/PTEX.InfoDict) and file name (/PTEX.FileName), with the "
+            "included page's XMP and application data, into the form XObject that draws it, "
+            "where pdfinfo and the PDF identity scan (PRV002) do not look. Report configured "
+            "identity terms (submission_checks.identity_terms) and home-folder paths found "
+            "there, by field and never by value. The baseline that prepare builds from the "
+            "unchanged sources is not published, so what it carries is reported as "
+            "information only, and a published PDF without such information is a pass. A PDF "
+            "that cannot be read within the bounds only informs."
+        ),
+        tests=(
+            "tests.test_submission_checks.IncludedPdfInformationTests.test_terms_and_home_folders_copied_from_included_pdfs",
+            "tests.test_submission_checks.IncludedPdfInformationTests.test_clean_suppressed_and_unreadable_pdfs",
+            "tests.test_submission_checks.IncludedPdfInformationTests.test_prepare_notes_its_baseline_and_judges_the_pdf_it_publishes",
+            "tests.test_submission_checks.IncludedPdfRoleWiringTests.test_prepare_notes_its_baseline_and_judges_the_published_pdf",
+        ),
+        fix=(
+            "Add \\pdfsuppressptexinfo=-1 (pdfLaTeX) or \\pdfvariable suppressoptionalinfo 15 "
+            "(LuaLaTeX) at the start of the main file, or set "
+            "source_transforms.suppress_included_pdf_information = true for prepare; "
+            "re-export figures whose page-level XMP or application data holds the values."
+        ),
+        reviewable=True,
+    ),
+    Rule(
         code="PRV003",
         name="submission.identity_hints",
         title="Possible identifying language",

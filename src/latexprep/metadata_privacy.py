@@ -1,15 +1,17 @@
 """Options of the metadata privacy checks: selected source edits and identity terms.
 
 Owns ``MetadataEdit`` (one explicit literal replacement in a TeX source), the
-``metadata_privacy`` settings table, and the text normalization both checks match with.
+``metadata_privacy`` settings table, the text normalization the checks match identity
+terms with, and the recognition of home-folder paths in metadata text.
 
 Does not own the checks themselves: ``metadata_source_edits`` proposes the edits and
-rechecks the final PDF properties, and ``image_metadata`` scans PNG and JPEG metadata for
-the identity terms.
+rechecks the final PDF properties, ``image_metadata`` scans the metadata of PNG, JPEG and
+PDF figures, and ``submission_checks`` scans what the built PDF copied from included PDFs.
 """
 
 from __future__ import annotations
 
+import re
 import unicodedata
 from dataclasses import dataclass
 from pathlib import PurePosixPath
@@ -41,6 +43,25 @@ _MAX_EDITS: Final = 256  # selected source metadata edits
 _MAX_IDENTITY_TERMS: Final = 256
 _MAX_TERM_CHARACTERS: Final = 1024  # characters in one identity term
 _MAX_EDIT_TEXT_CHARACTERS: Final = 65536  # characters in an edit's expected or replacement text
+# A home folder in a path: macOS /Users/<name>, Linux /home/<name>, and Windows
+# <drive>:\Users\<name> or Documents and Settings\<name>, with either slash. The shared and
+# default folders name no person.
+_HOME_FOLDER_PATH: Final = re.compile(
+    r"(?<![\w.])(?:"
+    r"(?P<macos>/Users/)"
+    r"|(?P<linux>/home/)"
+    r"|(?P<windows>[A-Za-z]:[\\/]+(?:Users|Documents and Settings)[\\/]+)"
+    r")(?P<name>[^\\/\s:*?\"<>|]+)(?:[\\/]|$)",
+    re.IGNORECASE,
+)
+_SHARED_FOLDER_NAMES: Final = frozenset(
+    {"shared", "public", "default", "default user", "all users", "guest"}
+)
+_HOME_FOLDER_KINDS: Final = {
+    "macos": "macOS home folder",
+    "linux": "Linux home folder",
+    "windows": "Windows user folder",
+}
 _TEX_SPECIAL_CHARACTERS: Final = "\\{}%#$&^~"
 _ALLOWED_WHITESPACE: Final = "\r\n\t"
 
@@ -81,6 +102,26 @@ def normalize_for_matching(value: str) -> str:
         The NFKC-normalized, casefolded text with runs of whitespace as single spaces.
     """
     return " ".join(unicodedata.normalize("NFKC", value).casefold().split())
+
+
+def home_folder_path_kind(value: str) -> str | None:
+    """Name the kind of personal home-folder path in ``value``, such as ``/Users/<name>/``.
+
+    Shared and default folders such as ``/Users/Shared`` name no person and do not count.
+
+    Args:
+        value: Metadata text, such as a title or a file name.
+
+    Returns:
+        ``"macOS home folder"``, ``"Linux home folder"`` or ``"Windows user folder"`` for
+        the first personal path, or ``None`` when ``value`` holds none. The folder's name
+        is never returned, so callers cannot echo it.
+    """
+    for match in _HOME_FOLDER_PATH.finditer(value):
+        if match["name"].strip().casefold() not in _SHARED_FOLDER_NAMES:
+            kind = next(group for group in _HOME_FOLDER_KINDS if match[group])
+            return _HOME_FOLDER_KINDS[kind]
+    return None
 
 
 def is_literal_metadata_text(value: str) -> bool:

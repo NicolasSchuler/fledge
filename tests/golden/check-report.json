@@ -219,7 +219,8 @@
    "comment_policy": "retain",
    "merge_inputs": false,
    "inline_bibliography": null,
-   "filename_overrides": []
+   "filename_overrides": [],
+   "suppress_included_pdf_information": false
   },
   "bibliography_transform": {
    "format_entries": false,
@@ -596,6 +597,7 @@
     "TEX201",
     "TEX202",
     "TEX203",
+    "TEX204",
     "TEX301",
     "TEX302",
     "TEX303",
@@ -979,6 +981,14 @@
     },
     {
      "name": "import project",
+     "cpu": "<measured>",
+     "memory_mb": "<measured>",
+     "kind": null,
+     "queue_seconds": "<seconds>",
+     "elapsed_seconds": "<seconds>"
+    },
+    {
+     "name": "included PDF information",
      "cpu": "<measured>",
      "memory_mb": "<measured>",
      "kind": null,

@@ -42,7 +42,9 @@ report_unused_assets = true # PKG106: leftover files that may also identify you.
 # max_archive_bytes = 0
 
 [metadata_privacy]
-# PRV103: search PNG and JPEG metadata of included images for the same terms.
+# PRV103: search the metadata of PNG and JPEG files and of included PDF figures (author,
+# title, creator, XMP) for the same terms. Home-folder paths such as /Users/<name>/ in
+# figure metadata (PRV104) and in the built PDF (PRV105) are reported without this setting.
 # image_identity_terms = ["Your Name", "Your Institution"]
 
 [manuscript_checks]
@@ -57,6 +59,10 @@ check_float_reference_order = true # MAN015: floats first referenced in source o
 # require_line_numbers = true
 
 [source_transforms]
+# prepare only (TEX204): add a line to the prepared main file that stops pdfLaTeX and
+# LuaLaTeX from copying each included PDF figure's author, title and file name into the
+# PDF reviewers receive. Figure files themselves, and their page-level XMP, are unchanged.
+suppress_included_pdf_information = true
 # prepare only: set to "private" to remove TeX comments containing TODO, FIXME,
 # XXX, "private", "internal", "confidential" or "note to self" from the separate
 # copy, if reviewers receive the source as well as the PDF.

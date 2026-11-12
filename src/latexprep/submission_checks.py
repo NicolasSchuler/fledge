@@ -6,8 +6,9 @@ hints alone use one selected literal dependency graph. No publisher policy or
 template registry is embedded.
 
 This module owns the bundle-level policies: file names, deliverables, template
-references, unused assets, the compressed archive and the PDF identity scan, and it
-orchestrates the content scan. The options are in ``submission_options``, the single
+references, unused assets, the compressed archive, the PDF identity scan and the scan of
+the information that included PDFs left in a built PDF, and it orchestrates the content
+scan. The options are in ``submission_options``, the single
 pass over file contents in ``submission_content_scan``, and the shared finding
 wording in ``submission_scan_findings``.
 """
@@ -19,12 +20,26 @@ import stat
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from typing import Literal
 
 from .analysed_source import AnalysedSource
 from .cancellation import cancellation_point
+from .errors import PreparationError
+from .file_safety import FileTooLargeError, read_regular_file
 from .file_scan import ByteBudget, inventory_files
-from .finding_text import more_suffix, redact_findings
-from .findings import Finding
+from .finding_text import more_suffix, plural, redact_findings
+from .finding_weight import Weight
+from .findings import EvidenceKind, Finding, Status
+from .limits import MIB
+from .metadata_privacy import home_folder_path_kind
+from .pdf_metadata_reader import (
+    MetadataOrigin,
+    NotPdfError,
+    PdfMetadata,
+    PdfMetadataEntry,
+    PdfMetadataLimits,
+    read_pdf_metadata,
+)
 from .redaction import redact_secrets
 from .source_analysis import analyze_sources
 from .submission_content_scan import (
@@ -55,6 +70,29 @@ _VERSION = re.compile(
 _MAX_PDF_METADATA_ENTRIES = 10_000
 # Leading bytes read to tell a PDF ("%PDF-") or ZIP archive ("PK\x03\x04") from other files.
 _SIGNATURE_PREFIX_BYTES = 8
+# Information that included PDFs left in a built PDF: a found term or home folder warns, and
+# a PDF that cannot be read within the bounds only informs, so this default check never turns
+# a large or unusual PDF into an advisory.
+_INCLUDED_INFORMATION_RULE = "privacy.included_pdf_information"
+_INCLUDED_INFORMATION_WEIGHT = Weight("warning", "info", EvidenceKind.HEURISTIC)
+# The baseline of prepare is not published, so what it carries is only information.
+_BASELINE_INFORMATION_WEIGHT = Weight("info", "info", EvidenceKind.HEURISTIC)
+# Which PDF the included-PDF scan reads: the one PDF that check builds (``built``), the
+# baseline that prepare builds from the unchanged sources and does not publish
+# (``baseline``), or the PDF that prepare publishes (``published``).
+BuiltPdfRole = Literal["built", "baseline", "published"]
+# The largest built PDF whose objects are read for included-PDF information: the file is held
+# in memory, so the bound matches the memory a default lease of the shared budget reserves.
+_MAX_BUILT_PDF_BYTES = 64 * MIB
+# Fields named in the message; the details list every match.
+_MAX_LISTED_FIELDS = 3
+_SUPPRESSION_ADVICE = (
+    "Add \\pdfsuppressptexinfo=-1 (pdfLaTeX) or \\pdfvariable suppressoptionalinfo 15 "
+    "(LuaLaTeX) at the start of the main file, or set "
+    "source_transforms.suppress_included_pdf_information = true so that prepare adds it to "
+    "the prepared copy. The included page's XMP and application data are copied regardless: "
+    "re-export a figure whose page-level metadata holds the value."
+)
 _DEFAULT_OPTIONS = SubmissionOptions()
 
 
@@ -646,3 +684,187 @@ def check_pdf_identity(
         )
         results.append(scan_finding(rule, secret_matches, evidence.issues, limits))
     return redact_findings(results, secret_values)
+
+
+def _included_information_matches(
+    entries: Sequence[PdfMetadataEntry], options: SubmissionOptions, limit: int
+) -> tuple[list[dict[str, object]], bool]:
+    """Find identity terms and home-folder paths in the information copied from included PDFs.
+
+    Args:
+        entries: The entries copied from included PDFs.
+        options: The submission options with the identity terms and their matching mode.
+        limit: The most matches kept.
+
+    Returns:
+        Each match's field with the term's index or the kind of path, and whether matches
+        beyond ``limit`` were dropped.
+    """
+    matches: list[dict[str, object]] = []
+    found = 0
+    for entry in entries:
+        cancellation_point()
+        items: list[dict[str, object]] = [
+            {"channel": entry.channel, "term_index": index}
+            for index in (term_matches(entry.text, options) if options.identity_terms else [])
+        ]
+        if kind := home_folder_path_kind(entry.text):
+            items.append({"channel": entry.channel, "kind": kind})
+        found += len(items)
+        matches.extend(items[: max(0, limit - len(matches))])
+    return matches, found > len(matches)
+
+
+def _described_match(match: Mapping[str, object]) -> str:
+    """Describe one match by its field and what was found, never by the value."""
+    found = match.get("kind") or f"identity term {match.get('term_index')}"
+    return f"{match['channel']} ({found})"
+
+
+def _included_information_finding(
+    status: Status,
+    message: str,
+    details: dict[str, object],
+    suggestion: str | None = None,
+    *,
+    weight: Weight = _INCLUDED_INFORMATION_WEIGHT,
+) -> Finding:
+    """Build a ``privacy.included_pdf_information`` finding, by default with the advisory weight."""
+    return Finding(
+        _INCLUDED_INFORMATION_RULE,
+        message,
+        severity=weight.severity(status),
+        status=status,
+        evidence_kind=weight.evidence_kind,
+        incomplete=status == "inconclusive",
+        suggestion=suggestion,
+        details={
+            "scope": "Information that pdfTeX and LuaTeX copied from included PDFs into form "
+            "XObjects: /PTEX.FileName, /PTEX.InfoDict, and the included page's XMP and "
+            "PieceInfo; configured identity terms and home-folder paths, reported by field "
+            "and never by value.",
+            **details,
+        },
+    )
+
+
+def check_included_pdf_information(
+    pdf: Path,
+    options: SubmissionOptions = _DEFAULT_OPTIONS,
+    *,
+    role: BuiltPdfRole = "built",
+    limits: PdfMetadataLimits | None = None,
+) -> list[Finding]:
+    """Report identity terms and home-folder paths that included PDFs left in a built PDF.
+
+    pdfTeX and LuaTeX copy each included PDF's information dictionary (``/PTEX.InfoDict``)
+    and file name (``/PTEX.FileName``), with the included page's XMP and application data,
+    into the form XObject that draws it. Poppler's ``pdfinfo`` reports none of them, so the
+    PDF identity scan does not see them.
+
+    The PDF that a job ships is the one judged. The baseline of ``prepare`` is built from
+    the unchanged sources and never published, so what it carries is reported as
+    information that cannot change the outcome; the published PDF is judged on its own.
+
+    Args:
+        pdf: The built PDF.
+        options: The submission options; their identity terms are searched, and are empty
+            when the PDF identity check is not selected.
+        role: Which PDF ``pdf`` is: the one ``check`` builds, the baseline of ``prepare``,
+            or the PDF ``prepare`` publishes.
+        limits: The bounds of reading the PDF; the defaults when ``None``.
+
+    Returns:
+        One ``privacy.included_pdf_information`` finding. A PDF that is missing, unreadable
+        or not a PDF the reader can walk gives none, because the PDF inspection reports it,
+        and so does a PDF without information from an included PDF, unless it is the
+        published one, whose clean result is recorded as a pass.
+    """
+    try:
+        metadata = read_pdf_metadata(read_regular_file(pdf, _MAX_BUILT_PDF_BYTES), limits)
+    except FileTooLargeError:
+        reason = "the PDF is larger than the scan reads"
+    except PreparationError as error:
+        if isinstance(error, NotPdfError):
+            return []
+        reason = str(error)
+    except OSError:
+        return []
+    else:
+        return _included_information_findings(metadata, options, role)
+    return [
+        _included_information_finding(
+            "inconclusive",
+            f"Information copied from included PDFs could not be checked: {reason}.",
+            {"issues": [reason]},
+        )
+    ]
+
+
+def _included_information_findings(
+    metadata: PdfMetadata, options: SubmissionOptions, role: BuiltPdfRole
+) -> list[Finding]:
+    """Judge the information that included PDFs left in a PDF whose metadata was read.
+
+    Args:
+        metadata: The metadata read from the PDF.
+        options: The submission options with the identity terms and their matching mode.
+        role: Which PDF of the job the metadata was read from.
+
+    Returns:
+        A finding naming the fields with a term or home-folder path (a warning, or for the
+        baseline of ``prepare`` information), a passed one when there is none, or no
+        finding when no included PDF left information in a PDF that is not published.
+    """
+    entries = [entry for entry in metadata.entries if entry.origin is MetadataOrigin.INCLUDED]
+    if not entries:
+        if role != "published":
+            return []
+        return [
+            _included_information_finding(
+                "passed",
+                "The published PDF carries no information copied from included PDFs.",
+                {"matches": [], "included_objects": metadata.included_objects},
+            )
+        ]
+    limit = DEFAULT_SCAN_LIMITS.max_matches
+    matches, limited = _included_information_matches(entries, options, limit)
+    details: dict[str, object] = {
+        "matches": matches,
+        "match_output_limited": limited,
+        "included_objects": metadata.included_objects,
+        "channels": sorted({entry.channel for entry in entries}),
+        "limitations": metadata.limitations,
+    }
+    copied = plural(metadata.included_objects, "included PDF")
+    if not matches:
+        return [
+            _included_information_finding(
+                "passed",
+                f"The PDF carries information copied from {copied}; none of it holds a "
+                "configured identity term or a home-folder path.",
+                details,
+            )
+        ]
+    shown = ", ".join(_described_match(match) for match in matches[:_MAX_LISTED_FIELDS])
+    fields = f"{shown}{more_suffix(len(matches) - _MAX_LISTED_FIELDS)}"
+    if role == "baseline":
+        return [
+            _included_information_finding(
+                "failed",
+                "The PDF built from the unchanged sources carries information copied from "
+                f"{copied} that may identify its authors: {fields}. prepare does not publish "
+                "this PDF; the PDF it publishes is checked on its own.",
+                details,
+                weight=_BASELINE_INFORMATION_WEIGHT,
+            )
+        ]
+    return [
+        _included_information_finding(
+            "failed",
+            f"The PDF carries information copied from {copied} that may identify its authors: "
+            f"{fields}.",
+            details,
+            _SUPPRESSION_ADVICE,
+        )
+    ]
