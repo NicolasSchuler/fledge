@@ -76,7 +76,7 @@ def _entry_info(entry: ProjectEntry) -> zipfile.ZipInfo:
     if hasattr(zipfile.ZipInfo, "compress_level"):  # Python 3.13+
         info.compress_level = _COMPRESSION_LEVEL
     else:  # No public per-entry level setter before Python 3.13.
-        info._compresslevel = _COMPRESSION_LEVEL  # ty: ignore[unresolved-attribute]
+        info._compresslevel = _COMPRESSION_LEVEL  # ty: ignore[missing-attribute]
     info.file_size = entry.size
     mode = stat.S_IFDIR | _DIRECTORY_MODE if entry.is_dir else stat.S_IFREG | _FILE_MODE
     info.external_attr = mode << 16 | (DOS_DIRECTORY_ATTRIBUTE if entry.is_dir else 0)
