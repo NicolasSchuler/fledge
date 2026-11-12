@@ -360,7 +360,15 @@ class LiveEngineWorkflowTests(AsyncLiveProjectTestCase):
             with zipfile.ZipFile(package / "submission.zip") as archive:
                 self.assertIn(f"{name.title()} body text.", archive.read("main.tex").decode())
             report = _read_json(package / "report.json")
-            self.assertEqual(report["settings"]["engine"], document_engine, name)
+            # The paper keeps the automatic engine setting; BLD106 names the engine it chose.
+            setting = "auto" if name == "paper" else document_engine
+            self.assertEqual(report["settings"]["engine"], setting, name)
+            chosen = {
+                item["details"].get("engine")
+                for item in report["findings"]
+                if item["code"] == "BLD106"
+            }
+            self.assertEqual(chosen, {document_engine}, name)
             # Each document's builds ran with its own engine only.
             self.assertEqual(set(engines.values()) & set(report["tools"]), {document_engine})
         supplement = _read_json(output / "supplement" / "report.json")["findings"]

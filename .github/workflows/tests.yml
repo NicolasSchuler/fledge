@@ -173,11 +173,14 @@ jobs:
       # cm-super provides the Type 1 versions of the Computer Modern text fonts.
       # Without it, LaTeX's default list bullet, \S and \$ need a bitmap font,
       # and builds never generate those, so they stop with "Font ... not found".
+      # The engine tests also need TeX Gyre (fontspec), glossaries with its
+      # dependencies, nomencl, and bbm, whose fonts exist only as METAFONT sources.
       - name: Install TeX packages
         run: |
           sudo /Library/TeX/texbin/tlmgr update --self
           sudo /Library/TeX/texbin/tlmgr install latexmk biber biblatex hyperref \
-            import subfiles embedfile cm-super
+            import subfiles embedfile cm-super tex-gyre glossaries mfirstuc \
+            tracklang xfor nomencl bbm-macros bbm
       - name: Show tool versions
         run: |
           latexmk -v | head -n 2
@@ -268,8 +271,9 @@ jobs:
       # package carries etoolbox, which biblatex needs; bibtex-extra carries
       # biblatex itself, and latex-extra the import, subfiles and embedfile packages
       # that the live source and engine tests use. The engines xelatex and lualatex
-      # come from their packages, and cm-super the Type 1 text fonts that default
-      # list bullets need, because builds never generate bitmap fonts.
+      # come from their packages, cm-super the Type 1 text fonts that default list
+      # bullets need, because builds never generate bitmap fonts, and tex-gyre the
+      # OpenType fonts of the fontspec test.
       - name: Install TeX, PDF tools and Bubblewrap
         run: |
           sudo apt-get update
@@ -277,7 +281,7 @@ jobs:
             bubblewrap latexmk biber poppler-utils \
             texlive-latex-base texlive-latex-recommended texlive-fonts-recommended \
             texlive-bibtex-extra texlive-latex-extra texlive-xetex texlive-luatex \
-            cm-super
+            cm-super tex-gyre
       # Ubuntu does not package tex-fmt, but the formatting step of the live
       # preparation test needs it, and the sandbox accepts only tools under /usr.
       # Install a pinned release binary, verified against its SHA-256, into
