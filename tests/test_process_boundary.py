@@ -46,6 +46,24 @@ CLEAN_ARTICLE = "\\documentclass{article}\n\\begin{document}\nHello.\n\\end{docu
 UNFINISHED_ARTICLE = (
     "\\documentclass{article}\n\\begin{document}\nTODO finish this.\n\\end{document}\n"
 )
+# An abstract that cites, which MAN003 forbids when ``forbid_abstract_citations`` is set.
+CITING_ABSTRACT = (
+    "\\documentclass{article}\n\\begin{document}\n\\begin{abstract}\nAs \\cite{knuth} "
+    "shows.\n\\end{abstract}\nText.\n\\bibliographystyle{plain}\n\\bibliography{refs}\n"
+    "\\end{document}\n"
+)
+REFERENCES = "@book{knuth, author={D. Knuth}, title={T}, year={1984}, publisher={AW}}\n"
+ACCEPTED_ABSTRACT_CITATION = (
+    "[manuscript_checks]\nforbid_abstract_citations = true\n\n"
+    '[[reporting.accepted_exceptions]]\ncode = "MAN003"\n'
+    'reason = "The venue allows a citation in the abstract."\n'
+)
+# Runs the command line with a defect injected into the job, as a child process does.
+DEFECT_SCRIPT = (
+    "import sys\nfrom unittest import mock\nfrom latexprep import cli\n"
+    "with mock.patch('latexprep.cli.run_job', side_effect=RuntimeError('injected defect')):\n"
+    "    sys.exit(cli.main(sys.argv[1:]))\n"
+)
 # A fenced ``sh`` block of a Markdown page.
 SHELL_BLOCK = re.compile(r"^```sh\n(.*?)^```$", re.DOTALL | re.MULTILINE)
 # A Select Graphic Rendition sequence, which sets colours and text attributes.
@@ -171,17 +189,30 @@ class ExitCodeAndStreamTests(ProjectTestCase):
     """What a calling shell sees: the exit status, the report on stdout, progress on stderr."""
 
     def setUp(self) -> None:
-        """Write a clean and an unfinished project and a settings file that expects ``report``."""
+        """Write the projects and settings files whose runs end in each documented outcome.
+
+        A clean, an unfinished and a two-document project; one whose abstract cites, with a
+        settings file that forbids that and accepts the exception; and a settings file that
+        expects the ``report`` class.
+        """
         super().setUp()
         self.clean = self.write_project({"main.tex": CLEAN_ARTICLE}, "clean")
         self.unfinished = self.write_project({"main.tex": UNFINISHED_ARTICLE}, "unfinished")
+        self.two_documents = self.write_project(
+            {"a.tex": CLEAN_ARTICLE, "b.tex": CLEAN_ARTICLE}, "two-documents"
+        )
+        self.citing = self.write_project(
+            {"main.tex": CITING_ABSTRACT, "refs.bib": REFERENCES}, "citing"
+        )
+        self.accepted = self.write("accepted.toml", ACCEPTED_ABSTRACT_CITATION)
         self.settings = self.write("settings.toml", 'expected_document_class = "report"\n')
 
     def test_each_outcome_reaches_the_shell_as_its_documented_exit_code(self) -> None:
         """Check that each outcome reaches the shell as its documented exit code.
 
-        docs/reports.md, "Exit codes": 0 passed, 1 passed with advisories, 3 blocked and 4
-        error, with the JSON report still printed, and 64 for invalid syntax, with no report;
+        docs/reports.md, "Exit codes": 0 passed, 1 passed with advisories, 2 passed because of
+        accepted exceptions, 3 blocked (the paper needs a fix) and 4 error (Fledge could not
+        check), with the JSON report still printed, and 64 for invalid syntax, with no report;
         ``rules --json`` and ``rule CODE --json`` print JSON and exit with 0.
         """
         cases: tuple[tuple[str, list[str | Path], int, dict[str, object] | None], ...] = (
@@ -198,6 +229,12 @@ class ExitCodeAndStreamTests(ProjectTestCase):
                 {"outcome": "passed_with_advisories"},
             ),
             (
+                "an accepted exception passes with its own code",
+                ["inspect", self.citing, "--config", self.accepted, *JSON_REPORT],
+                2,
+                {"outcome": "accepted_exceptions"},
+            ),
+            (
                 "a violated setting from --config blocks",
                 ["inspect", self.clean, "--config", self.settings, *JSON_REPORT],
                 3,
@@ -208,6 +245,15 @@ class ExitCodeAndStreamTests(ProjectTestCase):
                 ["inspect", self.root / "absent", "--isolated", *JSON_REPORT],
                 4,
                 {"command": "inspect", "outcome": "error"},
+            ),
+            (
+                "an input with two documents and no main file could not be checked",
+                ["inspect", self.two_documents, "--isolated", *JSON_REPORT],
+                4,
+                {
+                    "outcome": "error",
+                    "scope": "source and bibliography checks; compilation and PDF checks not run",
+                },
             ),
             ("an unknown option", ["inspect", self.clean, "--no-such-flag"], 64, None),
             ("inspect without its input", ["inspect"], 64, None),
@@ -222,6 +268,51 @@ class ExitCodeAndStreamTests(ProjectTestCase):
                     self.assert_usage_error(completed)
                 else:
                     self.assert_json_on_stdout_alone(completed, expected)
+
+    def test_a_defect_in_fledge_reaches_the_shell_as_exit_code_70(self) -> None:
+        """Check that a defect in Fledge ends with exit code 70 and a JSON report.
+
+        docs/reports.md, "Exit codes": an internal error exits with 70, never with a code
+        that a problem with the input or the paper uses, and the JSON report records it as
+        ``internal_error`` with an ``execution.internal`` finding.
+        """
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                DEFECT_SCRIPT,
+                "inspect",
+                str(self.clean),
+                "--isolated",
+                *JSON_REPORT,
+            ],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            cwd=self.root,
+            env=child_environment(),
+            timeout=TIMEOUT_SECONDS,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 70, completed.stderr)
+        self.assert_json_on_stdout_alone(completed, {"outcome": "internal_error"})
+        rules = {item["rule"] for item in json.loads(completed.stdout)["findings"]}
+        self.assertIn("execution.internal", rules)
+
+    def test_a_terminal_request_error_is_one_error_and_hint_on_stderr(self) -> None:
+        """Check that a rejected request prints a short error on stderr and nothing on stdout.
+
+        docs/reports.md, "Exit codes": a request that cannot run exits with 4; the terminal
+        format names the problem and the next step on stderr instead of printing a report.
+        """
+        completed = run_fledge(
+            ["inspect", self.root / "absent", "--isolated", "--offline"], cwd=self.root
+        )
+        self.assertEqual(completed.returncode, 4, completed.stderr)
+        self.assertEqual(completed.stdout, b"")
+        lines = completed.stderr.decode().splitlines()
+        self.assertEqual(len(lines), 2, lines)
+        self.assertTrue(lines[0].startswith("Error: Input does not exist: "), lines)
+        self.assertTrue(lines[1].startswith("Hint: "), lines)
 
     def assert_usage_error(self, completed: subprocess.CompletedProcess[bytes]) -> None:
         """Assert that ``completed`` ended as invalid syntax does.
@@ -329,18 +420,18 @@ class UnreadableSourceTests(ProjectTestCase):
     ) -> None:
         """Check that the run ends with a report, no traceback and unchanged originals.
 
-        docs/reports.md, "Exit codes": an input problem exits with 4 (``error``) and a check
-        that cannot read a file blocks with 3; the JSON report is still printed and stderr
-        holds no traceback. docs/quickstart.md: the original project is never changed.
+        docs/reports.md, "Exit codes": an input that cannot be read exits with 4 (``error``);
+        the JSON report is still printed and stderr holds no traceback. docs/quickstart.md:
+        the original project is never changed.
 
-        Observed: 4. The import copies every file of the project before any check runs and
-        cannot read this one, so the run stops with ``execution.request`` and the scope
-        "run did not finish".
+        An unreadable input means that Fledge could not check: the import copies every file of
+        the project before any check runs and cannot read this one, so the run stops with
+        ``execution.request`` and the scope "run did not finish".
         """
         completed = self.inspect()
-        self.assertIn(completed.returncode, (3, 4), completed.stderr)
+        self.assertEqual(completed.returncode, 4, completed.stderr)
         report = json.loads(completed.stdout)
-        self.assertEqual(report["outcome"], {3: "blocked", 4: "error"}[completed.returncode])
+        self.assertEqual(report["outcome"], "error")
         self.assertNotIn(b"Traceback", completed.stderr)
         self.assertEqual(stat.S_IMODE(self.unreadable.stat().st_mode), 0)
         self.unreadable.chmod(0o644)

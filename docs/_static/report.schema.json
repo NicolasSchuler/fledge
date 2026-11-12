@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://nicolasschuler.github.io/fledge/_static/report.schema.json",
   "title": "Fledge JSON report",
-  "description": "Stable fields of a Fledge report at schema_version 2. New fields may appear within a version; consumers should ignore fields they do not know. The version increases only when a field is removed, renamed or changes meaning. Contents of settings, tools, execution, stages, package_contents and finding details are descriptive and may grow.",
+  "description": "Stable fields of a Fledge report at schema_version 3. New fields may appear within a version; consumers should ignore fields they do not know. The version increases only when a field is removed, renamed or changes meaning. Contents of settings, tools, execution, stages, package_contents and finding details are descriptive and may grow.",
   "type": "object",
   "required": [
     "schema_version",
@@ -21,14 +21,14 @@
   ],
   "properties": {
     "schema_version": {
-      "const": 2
+      "const": 3
     },
     "command": {
       "description": "The command that produced the report.",
       "enum": ["inspect", "check", "prepare", "bib", "fmt", "pdf", "doctor"]
     },
     "outcome": {
-      "description": "Read this first; the exit code is derived from it.",
+      "description": "Read this first; the exit code is derived from it: 0 passed or planned, 1 passed_with_advisories, 2 accepted_exceptions, 3 blocked (the paper needs a fix), 4 error (Fledge could not check), 70 internal_error (a defect in Fledge), 130 cancelled.",
       "enum": [
         "passed",
         "planned",
@@ -36,6 +36,7 @@
         "accepted_exceptions",
         "blocked",
         "error",
+        "internal_error",
         "cancelled"
       ]
     },
@@ -131,7 +132,8 @@
           "type": "string"
         },
         "severity": {
-          "enum": ["error", "warning", "info"]
+          "description": "A suggestion is optional advice that never changes the outcome.",
+          "enum": ["error", "warning", "info", "suggestion"]
         },
         "status": {
           "enum": ["failed", "inconclusive", "skipped", "passed", "not_applicable"]

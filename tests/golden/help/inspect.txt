@@ -34,6 +34,9 @@ Advanced options:
   --diagnostics PATH             Save a ZIP of the redacted report and diffs to share when asking
                                  for help; it is not a verified submission.
   --json-report, --report PATH   Also save the JSON report to a new file outside the input.
+  --force                        Replace an output or preview folder, or a report file, that Fledge
+                                 wrote earlier, once the new run has succeeded; any other existing
+                                 folder or file is still refused.
   --jobs N                       How many operations may run at once; 1 runs them one after another
                                  (default: the number of CPUs, at most 4).  [1<=x<=64]
   --job-timeout-seconds SECONDS  Longest the whole run may take, in seconds, including time spent

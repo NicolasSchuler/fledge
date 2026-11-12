@@ -22,6 +22,7 @@ PRESET_KEY = "preset"
 CHECK_SELECTION_KEY = "check_selection"
 NOT_CHECKED_KEY = "not_checked"
 PDF_PREVIEWS_KEY = "pdf_previews"
+SILENCED_SUGGESTIONS_KEY = "silenced_suggestions"
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,12 +84,14 @@ class ExecutionRecords:
         preset: The preset the run used, or ``None``.
         check_selection: The check selectors the run used, or ``None`` when not recorded.
         not_checked: The opt-in areas the run left unchecked.
+        silenced_suggestions: How many suggestions a ``% fledge: ignore`` comment silenced.
     """
 
     config_path: str | None = None
     preset: str | None = None
     check_selection: CheckSelectionRecord | None = None
     not_checked: tuple[NotCheckedArea, ...] = ()
+    silenced_suggestions: int = 0
 
 
 def record_settings_source(
@@ -107,6 +110,15 @@ def record_check_selection(execution: dict[str, object], selection: CheckSelecti
 def record_not_checked(execution: dict[str, object], areas: Sequence[NotCheckedArea]) -> None:
     """Record the opt-in areas a run left unchecked, which may be none."""
     execution[NOT_CHECKED_KEY] = [area.to_report() for area in areas]
+
+
+def record_silenced_suggestions(
+    execution: dict[str, object], silenced: Sequence[Mapping[str, object]]
+) -> None:
+    """Add suggestions that comments in the sources silenced to the run's record of them."""
+    records = execution.setdefault(SILENCED_SUGGESTIONS_KEY, [])
+    if isinstance(records, list):
+        records.extend(dict(item) for item in silenced)
 
 
 def record_pdf_previews(execution: dict[str, object], summary: Mapping[str, object]) -> None:
@@ -167,4 +179,7 @@ def read_execution_records(execution: Mapping[str, object]) -> ExecutionRecords:
         preset=_text(execution.get(PRESET_KEY)),
         check_selection=read_check_selection(execution.get(CHECK_SELECTION_KEY)),
         not_checked=read_not_checked(execution.get(NOT_CHECKED_KEY)),
+        silenced_suggestions=len(silenced)
+        if isinstance(silenced := execution.get(SILENCED_SUGGESTIONS_KEY), list)
+        else 0,
     )

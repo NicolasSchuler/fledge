@@ -55,9 +55,9 @@ Advanced options:
   --json-report, --report PATH    Also save the JSON report to a new file outside the input.
   --preview-output DIR            Folder for the grayscale page previews that the settings ask for:
                                   new or empty, and outside the input.
-  --force                         Replace an output or preview folder that Fledge wrote earlier,
-                                  once the new run has succeeded; any other existing folder is still
-                                  refused.
+  --force                         Replace an output or preview folder, or a report file, that Fledge
+                                  wrote earlier, once the new run has succeeded; any other existing
+                                  folder or file is still refused.
   --jobs N                        How many operations may run at once; 1 runs them one after another
                                   (default: the number of CPUs, at most 4).  [1<=x<=64]
   --build-jobs N                  How many TeX builds may run at once (default 1).  [1<=x<=64]

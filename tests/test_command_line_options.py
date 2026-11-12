@@ -188,6 +188,8 @@ class OptionTableTests(ProjectTestCase):
             "html_report": (("--html-report", str(root / "r.html")), saved_file("r.html")),
             "diagnostics": (("--diagnostics", str(root / "d.zip")), saved_file("d.zip")),
             "report": (("--report", str(root / "r.json")), saved_file("r.json")),
+            # --force covers report files, which every job command writes.
+            "force": (("--force",), request_field("force", True)),
             "jobs": (("--jobs", "3"), setting("jobs", 3)),
             "job_timeout_seconds": (
                 ("--job-timeout-seconds", "45"),
@@ -219,7 +221,6 @@ class OptionTableTests(ProjectTestCase):
                 ("--preview-output", str(root / "previews")),
                 request_field("preview_output", root / "previews"),
             ),
-            "force": (("--force",), request_field("force", True)),
             "build_jobs": (("--build-jobs", "2"), setting("build_jobs", 2)),
             "render_jobs": (("--render-jobs", "2"), setting("render_jobs", 2)),
         }
@@ -359,7 +360,7 @@ class CommandShapeTests(ProjectTestCase):
             ("inspect",): ("--show-files", "--preview-output", "--build-jobs", "--render-jobs"),
             ("check",): ("--show-files",),
             ("bib", "check"): ("--show-files", "--preview-output", "--build-jobs"),
-            ("fmt",): ("--show-files", "--preview-output", "--render-jobs", "--force"),
+            ("fmt",): ("--show-files", "--preview-output", "--render-jobs"),
             ("pdf", "check"): ("--show-files", "--build-jobs", "--engine", "--main"),
         }
         for path, removed in cases.items():

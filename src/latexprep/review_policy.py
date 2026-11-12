@@ -14,7 +14,7 @@ from .errors import SettingsError
 from .findings import DetailKey, Finding
 from .option_config import POSITIVE_INTEGER, Bounds, require_records, require_text, validate_scalars
 from .path_safety import is_relative_posix_path
-from .report import Outcome, Report
+from .report import Outcome, Report, blocked_outcome
 from .rules import BY_CODE, REVIEWABLE_CODES
 from .text_safety import is_unsafe_character
 
@@ -214,8 +214,8 @@ def _decisions(options: ReportingOptions) -> list[tuple[str, ReviewRule]]:
     ]
 
 
-def has_unaccepted_blockers(findings: Sequence[Finding], options: ReportingOptions) -> bool:
-    """Return whether a blocking finding remains that no eligible accepted exception covers.
+def unaccepted_blockers(findings: Sequence[Finding], options: ReportingOptions) -> list[Finding]:
+    """List the blocking findings that no eligible accepted exception covers.
 
     Only the explicit current decisions are evaluated; stored review metadata grants no
     authority.
@@ -225,16 +225,30 @@ def has_unaccepted_blockers(findings: Sequence[Finding], options: ReportingOptio
         options: The current review decisions.
 
     Returns:
-        ``True`` if such a blocking finding remains.
+        The blocking findings that remain, in their original order.
     """
-    return any(
-        finding.is_blocking
+    return [
+        finding
+        for finding in findings
+        if finding.is_blocking
         and not any(
             _matches(finding, rule) and _eligible(finding, "accepted_exception")
             for rule in options.accepted_exceptions
         )
-        for finding in findings
-    )
+    ]
+
+
+def has_unaccepted_blockers(findings: Sequence[Finding], options: ReportingOptions) -> bool:
+    """Return whether a blocking finding remains that no eligible accepted exception covers.
+
+    Args:
+        findings: The findings to evaluate.
+        options: The current review decisions.
+
+    Returns:
+        ``True`` if such a blocking finding remains.
+    """
+    return bool(unaccepted_blockers(findings, options))
 
 
 def reviewed_findings(findings: Sequence[Finding], options: ReportingOptions) -> list[Finding]:
@@ -306,16 +320,17 @@ def apply_reviews(report: Report, options: ReportingOptions) -> Report:
         options: The review decisions.
 
     Returns:
-        A copy of ``report`` with reviewed findings. A passing outcome becomes blocked
-        when an unaccepted blocker remains, ``accepted_exceptions`` when an eligible
-        exception matches, and passed with advisories when a passed run has open
-        warnings.
+        A copy of ``report`` with reviewed findings. A passing outcome becomes blocked, or
+        an error when only problems that prevented checking remain (see
+        :func:`~latexprep.report.blocked_outcome`), when an unaccepted blocker remains;
+        ``accepted_exceptions`` when an eligible exception matches; and passed with
+        advisories when a passed run has open warnings.
     """
     findings = reviewed_findings(report.findings, options)
     outcome = report.outcome
     if outcome in {Outcome.PASSED, Outcome.PASSED_WITH_ADVISORIES, Outcome.ACCEPTED_EXCEPTIONS}:
-        if has_unaccepted_blockers(findings, options):
-            outcome = Outcome.BLOCKED
+        if blockers := unaccepted_blockers(findings, options):
+            outcome = blocked_outcome(blockers)
         elif any(
             _matches(finding, decision) and _eligible(finding, "accepted_exception")
             for finding in findings

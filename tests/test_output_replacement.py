@@ -8,12 +8,16 @@ place once complete, so a run that fails or is blocked leaves the earlier output
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import shutil
 import stat
 from pathlib import Path
 from unittest.mock import patch
 
+from click.testing import CliRunner
+
+from latexprep.cli import cli
 from latexprep.config import Settings
 from latexprep.core import run_job
 from latexprep.errors import PreparationError, RequestError
@@ -113,6 +117,37 @@ class DestinationTests(ProjectTestCase):
                 self.earlier / "paper", self.earlier, "output", folder=True, force=True
             )
         self.assertIn("Output contains the input", str(raised.exception))
+
+
+class ReportFileRerunTests(ProjectTestCase):
+    """A rerun replaces an earlier report file only with ``--force``, and only once complete."""
+
+    def test_a_report_file_is_replaced_only_with_force(self) -> None:
+        minimal_project(self.root / "paper")
+        report = self.root / "report.json"
+        command = ["inspect", str(self.root / "paper"), "--quiet", "--report", str(report)]
+        runner = CliRunner()
+        first = runner.invoke(cli, command)
+        self.assertIn(first.exit_code, {0, 1}, first.output)
+        self.assertEqual(json.loads(report.read_text())["command"], "inspect")
+        refused = runner.invoke(cli, command)
+        self.assertEqual(refused.exit_code, 4, refused.output)
+        self.assertIn("--force", refused.stderr)
+        replaced = runner.invoke(cli, [*command, "--force"])
+        self.assertIn(replaced.exit_code, {0, 1}, replaced.output)
+        self.assertEqual(json.loads(report.read_text())["command"], "inspect")
+        # A file that is not a Fledge report is never replaced, even with --force.
+        notes = self.root / "notes.json"
+        notes.write_text('{"mine": true}\n')
+        kept = runner.invoke(
+            cli, ["inspect", str(self.root / "paper"), "--quiet", "--report", str(notes), "--force"]
+        )
+        self.assertEqual(kept.exit_code, 4, kept.output)
+        self.assertEqual(json.loads(notes.read_text()), {"mine": True})
+        self.assertEqual(
+            sorted(path.name for path in self.root.iterdir()),
+            ["notes.json", "paper", "report.json"],
+        )
 
 
 class TransactionTests(ProjectTestCase):

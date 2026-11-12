@@ -22,6 +22,7 @@ from .cancellation import cancellation_point
 from .errors import PreparationError
 from .expanded_document import commands_before_end, reachable_sources
 from .findings import Finding
+from .source_file_commands import IMPORT_COMMANDS, TRAVERSED_COMMANDS
 from .source_graph import (
     INCOMPLETE_GRAPH_RULES,
     ROOT_AMBIGUOUS_RULE,
@@ -80,6 +81,12 @@ _FILTERS = frozenset(
 )
 # Source findings that leave no selected document; each is a blocking error.
 _ROOT_FAILURES = frozenset({ROOT_AMBIGUOUS_RULE, ROOT_MISSING_RULE, "source.main_invalid"})
+# The uncertainty of a graph without a selected main source; reports name its cause by it.
+NO_MAIN_SOURCE = "A unique readable main source could not be selected"
+# The file commands whose file can hold citations or bibliography declarations: what TeX
+# reads as source, and the bibliography resources. A dependency problem of any other file
+# command, such as a missing figure or data file, leaves the citation evidence complete.
+_CITATION_READING_COMMANDS = TRAVERSED_COMMANDS | IMPORT_COMMANDS | {"subfile"} | _RESOURCE_COMMANDS
 
 
 @dataclass(frozen=True, slots=True)
@@ -309,21 +316,58 @@ def require_directory(root: Path, purpose: str) -> None:
 def graph_failures(inspection: SourceGraph, selected: set[str]) -> list[Finding]:
     """List the unresolved source findings that leave the selected sources incomplete.
 
+    A problem with a file that cannot hold citations or bibliography declarations, such
+    as a missing figure, is not a gap in the citation evidence and is left out.
+
     Args:
         inspection: The source graph of the manuscript.
         selected: The selected sources, by relative path.
 
     Returns:
         The findings about the selected sources or the main file whose rules mark an
-        incomplete graph and that did not pass.
+        incomplete graph, that did not pass and that can hide citations.
     """
     scope = selected | {inspection.main}
     # A resolved lookup-order or conditional dependency is evidence, not a gap.
     return [
         item
         for item in inspection.findings
-        if item.path in scope and item.rule in INCOMPLETE_GRAPH_RULES and item.status != "passed"
+        if item.path in scope
+        and item.rule in INCOMPLETE_GRAPH_RULES
+        and item.status != "passed"
+        and _can_hide_citations(item)
     ]
+
+
+def citation_source_errors(inspection: SourceGraph) -> list[Finding]:
+    """List the blocking source errors that leave the citation evidence of the main incomplete.
+
+    These are the errors that bibliography checks only restate (see
+    ``Uncertainty.already_reported``) about files that can hide citations, such as a
+    missing input file. Without a selected main source there are none: checks that work
+    without one, such as ``bib check``, then cover every bibliography file instead.
+
+    Args:
+        inspection: The source graph of the manuscript.
+
+    Returns:
+        The findings, in the graph's order.
+    """
+    selected = reachable_sources(inspection)
+    if inspection.main not in selected:
+        return []
+    return [item for item in graph_failures(inspection, selected) if item.is_blocking]
+
+
+def _can_hide_citations(finding: Finding) -> bool:
+    """Return whether a source-graph problem can hide citations or bibliography declarations.
+
+    A finding that names the file command it concerns can hide them only when that
+    command reads TeX source or declares a bibliography resource; a finding without a
+    command is assumed to.
+    """
+    command = finding.details.get("command")
+    return not isinstance(command, str) or command in _CITATION_READING_COMMANDS
 
 
 def citation_keys(value: str) -> list[str] | None:
@@ -451,7 +495,7 @@ def build_citation_graph(inspection: SourceGraph) -> CitationGraph:
     if inspection.main not in selected:
         graph.uncertainties.append(
             Uncertainty(
-                "A unique readable main source could not be selected",
+                NO_MAIN_SOURCE,
                 already_reported=not inspection.main
                 and any(
                     item.rule in _ROOT_FAILURES and item.is_blocking for item in inspection.findings

@@ -42,16 +42,23 @@ user's project.
 ## Read the results
 
 Prefer `--output-format compact --quiet`: the first line is
-`OUTCOME | counts | scope`, then one line per finding (lines starting with
-`not run:` name checks skipped because an earlier step failed):
+`OUTCOME | counts | scope`, then the document and the `settings:` in effect, one
+line per finding (lines starting with `not run:` name checks skipped because an
+earlier step failed or the run was cancelled), and a last line starting with
+`verdict:` that names the problem to start with:
 
 ```text
 TEX005 error/failed sections/intro.tex:12 | Missing source dependencies: Literal dependency 'fig/plot' is missing from the project. | evidence: … | next: Include the missing dependency or correct the literal file path.
+build.failed error/failed main.tex [baseline] | caused by: TEX005 sections/intro.tex:12 | Build failed: Build tool exited with status 12.
+verdict: Blocked: 1 problem to fix. Start with TEX005 (Missing source dependencies) at sections/intro.tex:12.
 ```
 
 Each finding has a code (or a rule name for operational diagnostics), a
 `severity/status`, a location, the message, optional evidence and a suggested
-next step. Use `--json` when you need complete evidence (`findings[].details`),
+next step. A line with `caused by:` follows from the finding it names, which
+comes before it: fix the cause and rerun instead of working on each follow-on.
+Lines after `suggestions:` are optional style advice that never changes the
+outcome; mention them, but do not edit the paper for them unless the user asks. Use `--json` when you need complete evidence (`findings[].details`),
 the applied `changes` with diffs, or tool versions. Progress goes to stderr; with
 `--quiet` stdout contains only the report.
 
@@ -62,9 +69,10 @@ Exit codes:
 | 0 | `passed` / `planned` | Done (`planned` = dry run, no bundle). |
 | 1 | `passed_with_advisories` | Usable; review the warnings with the user. |
 | 2 | `accepted_exceptions` | Passed only because of explicit review decisions in the config. |
-| 3 | `blocked` | Fix the `error` findings first; no bundle was written. |
-| 4 | `error` | Bad input, configuration or tool problem; read the `execution.*` finding. |
+| 3 | `blocked` | The paper needs a fix: start with the finding the `verdict:` names; no bundle was written. |
+| 4 | `error` | Fledge could not check: a missing tool, the sandbox, a time limit, an unreadable input, no single main file or invalid settings. Report it to the user; do not edit the paper for it. |
 | 64 | (none) | Invalid command line; fix the flags. |
+| 70 | `internal_error` | A defect in Fledge; report it with the command and the JSON report. |
 | 130 | `cancelled` | Interrupted. |
 
 Explain any code with `fledge rule CODE` (add `--json` for structured output);

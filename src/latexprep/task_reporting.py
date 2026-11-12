@@ -8,7 +8,7 @@ outcome is.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple
@@ -22,7 +22,9 @@ from .build_log import log_tail
 from .build_result import BuildResult
 from .config import Settings
 from .document_tasks import BASELINE_STAGE, TaskName
+from .execution_records import record_silenced_suggestions
 from .findings import Finding, has_blockers
+from .inline_suppressions import split_silenced_suggestions
 from .job_report import record_findings
 from .package_inputs import InputSelectionResult
 from .package_inventory import (
@@ -172,11 +174,27 @@ class TaskReporter:
             if self._main is None:
                 # Main selection already reported the same ambiguity with its candidates.
                 findings = [item for item in findings if item.rule not in _ROOT_SELECTION_RULES]
-            self.report.findings.extend(findings)
+            self.report.findings.extend(self._unsilenced(findings))
         elif result.name in _UNTAGGED_FINDING_TASKS:
-            self.report.findings.extend(result.value)
+            self.report.findings.extend(self._unsilenced(result.value))
         else:
-            record_findings(self.report, result.value, result.name)
+            record_findings(self.report, self._unsilenced(result.value), result.name)
+
+    def _unsilenced(self, findings: Iterable[Finding]) -> list[Finding]:
+        """Drop the suggestions that a comment in the original sources silences, recording them.
+
+        Args:
+            findings: The findings of a task that read the original sources.
+
+        Returns:
+            The findings without the silenced suggestions.
+        """
+        kept, silenced = split_silenced_suggestions(list(findings), self._source_root)
+        if silenced:
+            record_silenced_suggestions(
+                self.report.execution, [item.to_report() for item in silenced]
+            )
+        return kept
 
     def _collect_input_selection(self, selection: InputSelection) -> None:
         """Record the changes, inventory and findings of the preparation input selection.

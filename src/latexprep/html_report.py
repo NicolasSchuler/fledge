@@ -12,7 +12,15 @@ from collections.abc import Mapping
 from functools import cache
 from importlib import resources
 
-from .finding_view import finding_views, not_run_summaries, size_label
+from .finding_view import (
+    FindingView,
+    finding_views,
+    not_run_summaries,
+    result_counts,
+    size_label,
+    suggestion_views,
+    verdict_line,
+)
 from .html_report_previews import pdf_previews_html
 from .html_report_regions import regions_html
 from .html_text import escape_html
@@ -105,45 +113,66 @@ def _package_contents_html(report: RedactedReport) -> str:
     return "".join(parts)
 
 
-def _findings_html(report: RedactedReport) -> list[str]:
+def _finding_html(view: FindingView, index: int, report: RedactedReport) -> list[str]:
+    """Show one finding as an article; a follow-on is marked and names its cause.
+
+    Args:
+        view: The finding's view.
+        index: The number of the article, which gives it its ``id``.
+        report: The redacted report, for the region diagrams.
+
+    Returns:
+        The HTML parts of the article.
+    """
+    finding = view.finding
+    css = ' class="follow-on"' if view.cause else ""
+    parts = [
+        f'<article id="finding-{index}"{css}><h3>{escape_html(view.code)} — '
+        f"{escape_html(view.title)}</h3><p>{escape_html(finding.severity)} / "
+        f"{escape_html(view.status_label)}</p>",
+        f'<p class="location">{escape_html(view.location)}</p>',
+    ]
+    if view.cause:
+        parts.append(
+            f'<p class="cause">Follows from {escape_html(view.cause)}; it usually clears '
+            "once that is fixed.</p>"
+        )
+    parts.append(f"<p>{escape_html(view.message)}</p>")
+    if view.evidence:
+        parts.append(f"<p>Evidence: {escape_html(view.evidence)}</p>")
+    if view.review:
+        parts.append(f'<p class="review">{escape_html(view.review)}. Original result retained.</p>')
+    if view.next_step:
+        parts.append(f"<p><strong>Next action:</strong> {escape_html(view.next_step)}</p>")
+    parts.append(regions_html(finding, report))
+    parts.append(
+        "<details><summary>Recorded evidence</summary><pre>"
+        + escape_html(
+            json.dumps(
+                {"evidence_kind": finding.evidence_kind, **finding.details},
+                indent=2,
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        )
+        + "</pre></details></article>"
+    )
+    return parts
+
+
+def _findings_html(report: RedactedReport, views: list[FindingView]) -> list[str]:
     """Show every finding, including hidden ones, and the checks that did not run.
+
+    Args:
+        report: The redacted report.
+        views: The finding views of every finding but the suggestions.
 
     Returns:
         The HTML parts of the findings section.
     """
     parts = ["<h2>Findings and actions</h2>"]
-    for index, view in enumerate(finding_views(report, show_hidden=True), 1):
-        finding = view.finding
-        parts.extend(
-            [
-                f'<article id="finding-{index}"><h3>{escape_html(view.code)} — '
-                f"{escape_html(view.title)}</h3><p>{escape_html(finding.severity)} / "
-                f"{escape_html(view.status_label)}</p>",
-                f'<p class="location">{escape_html(view.location)}</p>',
-                f"<p>{escape_html(view.message)}</p>",
-            ]
-        )
-        if view.evidence:
-            parts.append(f"<p>Evidence: {escape_html(view.evidence)}</p>")
-        if view.review:
-            parts.append(
-                f'<p class="review">{escape_html(view.review)}. Original result retained.</p>'
-            )
-        if view.next_step:
-            parts.append(f"<p><strong>Next action:</strong> {escape_html(view.next_step)}</p>")
-        parts.append(regions_html(finding, report))
-        parts.append(
-            "<details><summary>Recorded evidence</summary><pre>"
-            + escape_html(
-                json.dumps(
-                    {"evidence_kind": finding.evidence_kind, **finding.details},
-                    indent=2,
-                    ensure_ascii=False,
-                    sort_keys=True,
-                )
-            )
-            + "</pre></details></article>"
-        )
+    for index, view in enumerate(views, 1):
+        parts.extend(_finding_html(view, index, report))
     if not_run := not_run_summaries(report):
         parts.append(
             "<section><h3>Checks that did not run</h3>"
@@ -152,6 +181,28 @@ def _findings_html(report: RedactedReport) -> list[str]:
         )
     if not report.findings:
         parts.append("<p>No findings were recorded within this scope.</p>")
+    return parts
+
+
+def _suggestions_html(report: RedactedReport, first_index: int) -> list[str]:
+    """Show the suggestions in a section of their own, or nothing without suggestions.
+
+    Args:
+        report: The redacted report.
+        first_index: The number of the first suggestion's article.
+
+    Returns:
+        The HTML parts of the suggestions section.
+    """
+    views = suggestion_views(report, show_hidden=True)
+    if not views:
+        return []
+    parts = [
+        '<h2 id="suggestions">Suggestions</h2><p>Optional advice; suggestions never change '
+        "the result or the exit code.</p>"
+    ]
+    for index, view in enumerate(views, first_index):
+        parts.extend(_finding_html(view, index, report))
     return parts
 
 
@@ -237,6 +288,7 @@ def render_redacted_html(
     Returns:
         The HTML document.
     """
+    views = finding_views(report, show_hidden=True)
     header = [
         '<!doctype html><html lang="en"><head><meta charset="utf-8">',
         '<meta name="viewport" content="width=device-width,initial-scale=1">',
@@ -246,6 +298,8 @@ def render_redacted_html(
         f"<style>{load_stylesheet()}</style></head><body>",
         f"<header><h1>{escape_html(report.outcome.replace('_', ' ').capitalize())}</h1>",
         f"<p>{escape_html(report.scope)}</p>",
+        f'<p class="counts">{escape_html(result_counts(report))}</p>',
+        f'<p class="verdict">{escape_html(verdict_line(report, views))}</p>',
         "<p>Results cover the stated checks. Review decisions retain the original evidence; "
         "they do not prove compliance or supply missing verification.</p>",
     ]
@@ -256,7 +310,8 @@ def render_redacted_html(
         *header,
         pdf_previews_html(report, preview_images or {}),
         _package_contents_html(report),
-        *_findings_html(report),
+        *_findings_html(report, views),
+        *_suggestions_html(report, len(views) + 1),
         *_changes_html(report),
         _run_details_html(report),
         "</main></body></html>\n",

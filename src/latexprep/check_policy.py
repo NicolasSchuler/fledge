@@ -3,7 +3,9 @@
 Selection can remove an optional policy, but cannot supply its missing arguments,
 grant network permission, cancel a requested edit, or weaken preparation guards.
 Operational results (which have no code), explicit inventories and the findings of
-mandatory rules (``Rule.mandatory``) always remain visible.
+mandatory rules (``Rule.mandatory``) always remain visible. Suggestions
+(``Rule.suggestion``) are the opposite: they are off unless a selector other than ``ALL``
+selects them.
 """
 
 from __future__ import annotations
@@ -14,7 +16,7 @@ from typing import Any
 
 from .check_selection import CheckSelection
 from .findings import Finding
-from .rules import MANDATORY_CODES
+from .rules import BY_NAME, MANDATORY_CODES
 
 # Each row clears every activation field for one check together. This matters for
 # dataclasses that reject a half-configured pair (regions/coverage, for example). Public
@@ -296,24 +298,70 @@ def unselected_policy_updates(
     return updates
 
 
+def suggestion_selected(selection: CheckSelection, code: str) -> bool:
+    """Return whether a selector other than ``ALL`` enables the suggestion ``code``.
+
+    Suggestions are off by default: ``ALL`` does not switch them on, a code, a family or
+    a prefix does, and ``ignore`` still wins as it does for every check.
+
+    Args:
+        selection: The check selection.
+        code: A public check code.
+
+    Returns:
+        Whether the suggestion is enabled.
+    """
+    explicit = tuple(selector for selector in selection.select if selector != "ALL")
+    return CheckSelection(select=explicit, ignore=selection.ignore).enabled(code)
+
+
+def _is_suggestion(finding: Finding) -> bool:
+    """Return whether ``finding`` is a suggestion, by its severity or by its rule."""
+    rule = BY_NAME.get(finding.rule)
+    return finding.is_suggestion or (rule is not None and rule.suggestion)
+
+
+def _selected_suggestion(finding: Finding, selection: CheckSelection) -> Finding | None:
+    """Return a suggestion, with the suggestion severity, when its code is selected explicitly.
+
+    Args:
+        finding: A finding that :func:`_is_suggestion` accepts.
+        selection: The check selection.
+
+    Returns:
+        The finding, or ``None`` when it has no code or is not selected.
+    """
+    if finding.code is None or not suggestion_selected(selection, finding.code):
+        return None
+    # A suggestion never changes the outcome, whatever severity its producer gave it.
+    return finding if finding.is_suggestion else replace(finding, severity="suggestion")
+
+
 def selected_findings(findings: Iterable[Finding], selection: CheckSelection) -> list[Finding]:
     """Keep selected public checks and every mandatory or uncoded diagnostic.
 
     Consult the selection for any registered code rather than an optional-check
-    allowlist, so new rule families cannot silently disappear from reports.
+    allowlist, so new rule families cannot silently disappear from reports. A suggestion
+    is kept only when a selector other than ``ALL`` selects it (see
+    :func:`suggestion_selected`), and always with the ``suggestion`` severity.
 
     Args:
         findings: The findings to filter.
         selection: The check selection.
 
     Returns:
-        The findings without a code, those of mandatory rules and those of enabled
-        checks, in their original order.
+        The findings without a code, those of mandatory rules, those of enabled checks
+        and the explicitly selected suggestions, in their original order.
     """
-    return [
-        finding
-        for finding in findings
-        if finding.code is None
-        or finding.code in MANDATORY_CODES
-        or selection.enabled(finding.code)
-    ]
+    kept = []
+    for finding in findings:
+        if _is_suggestion(finding):
+            if (suggestion := _selected_suggestion(finding, selection)) is not None:
+                kept.append(suggestion)
+        elif (
+            finding.code is None
+            or finding.code in MANDATORY_CODES
+            or selection.enabled(finding.code)
+        ):
+            kept.append(finding)
+    return kept

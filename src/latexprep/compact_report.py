@@ -10,15 +10,37 @@ from __future__ import annotations
 from .execution_records import read_execution_records
 from .finding_view import (
     DEFAULT_RENDER_OPTIONS,
+    FindingView,
     RenderOptions,
     change_summary,
     finding_views,
     not_run_summaries,
     result_counts,
     selection_description,
+    settings_description,
+    suggestion_views,
+    verdict_line,
 )
 from .report import RedactedReport, Report, redact_report
-from .terminal_report import one_line
+from .terminal_report import one_line, silenced_suggestions_line
+
+
+def _record(view: FindingView) -> str:
+    """Write one finding as one line: code, severity and status, place, then the texts."""
+    line = (
+        f"{one_line(view.code)} {view.finding.severity}/{view.status_label} "
+        f"{one_line(view.location)}"
+    )
+    if view.cause:
+        line += f" | caused by: {one_line(view.cause)}"
+    line += f" | {one_line(view.title)}: {one_line(view.message)}"
+    if view.evidence:
+        line += f" | evidence: {one_line(view.evidence)}"
+    if view.next_step:
+        line += f" | next: {one_line(view.next_step)}"
+    if view.review:
+        line += f" | review: {one_line(view.review)}"
+    return line
 
 
 def render_redacted_compact(
@@ -26,10 +48,14 @@ def render_redacted_compact(
 ) -> str:
     """Render a report that was already redacted as short plain records.
 
+    The first line holds the outcome, the counts and the scope, and the last the verdict.
+    A result that follows from another comes right after it and says ``caused by:``;
+    suggestions follow the findings after a ``suggestions:`` line.
+
     Args:
         report: The redacted report.
         options: Rendering choices; ``show_passed`` also lists the findings that are
-            hidden by default.
+            hidden by default, and ``settings_file`` names the settings file.
 
     Returns:
         The records joined by newlines, one physical line per finding.
@@ -40,20 +66,19 @@ def render_redacted_compact(
         lines.append(one_line(selection))
     if report.main:
         lines.append(f"document: {one_line(report.main)}")
-    for view in finding_views(report, show_hidden=options.show_passed):
-        line = (
-            f"{one_line(view.code)} {view.finding.severity}/{view.status_label} "
-            f"{one_line(view.location)}"
-            f" | {one_line(view.title)}: {one_line(view.message)}"
-        )
-        if view.evidence:
-            line += f" | evidence: {one_line(view.evidence)}"
-        if view.next_step:
-            line += f" | next: {one_line(view.next_step)}"
-        if view.review:
-            line += f" | review: {one_line(view.review)}"
-        lines.append(line)
+    if settings := settings_description(report, options):
+        lines.append(one_line(settings[:1].lower() + settings[1:]))
+    views = finding_views(report, show_hidden=options.show_passed)
+    lines.extend(_record(view) for view in views)
     lines.extend(f"not run: {one_line(line)}" for line in not_run_summaries(report))
+    suggestions = suggestion_views(report, show_hidden=options.show_passed)
+    if suggestions or records.silenced_suggestions:
+        lines.append(
+            f"suggestions: {len(suggestions)} (they never change the outcome or the exit code)"
+        )
+        lines.extend(_record(view) for view in suggestions)
+        if records.silenced_suggestions:
+            lines.append(silenced_suggestions_line(records.silenced_suggestions))
     if report.changes:
         lines.append(
             f"changes: {len(report.changes)} ({one_line(change_summary(report))}; "
@@ -61,6 +86,7 @@ def render_redacted_compact(
         )
     for name, path in report.artifacts.items():
         lines.append(f"{one_line(name)}: {one_line(path)}")
+    lines.append(f"verdict: {one_line(verdict_line(report, views))}")
     return "\n".join(lines)
 
 

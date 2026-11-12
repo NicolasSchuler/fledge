@@ -391,9 +391,9 @@ class ReportPublicationSafetyTests(unittest.IsolatedAsyncioTestCase):
                 )
             published = json.loads((previews / "report.json").read_text(encoding="utf-8"))
             self.assertTrue((previews / "page-0001.png").is_file())
-        # The error outcome is the defect's; the report itself was represented safely.
-        self.assertEqual(report.outcome, "error")
-        self.assertEqual(published["outcome"], "error")
+        # The internal-error outcome is the defect's; the report was represented safely.
+        self.assertEqual(report.outcome, "internal_error")
+        self.assertEqual(published["outcome"], "internal_error")
         self.assertNotIn("report.redaction_limit", {item.rule for item in report.findings})
 
     async def test_a_job_without_publication_sanitizes_its_report_once(self):

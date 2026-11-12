@@ -175,10 +175,10 @@ def record_internal_error(report: Report, error: Exception) -> None:
     """Record a defect with its error type and frames; ``--debug`` also prints the traceback.
 
     Args:
-        report: The report to record in; its outcome becomes an error.
+        report: The report to record in; its outcome becomes an internal error.
         error: The unexpected error.
     """
-    report.outcome = Outcome.ERROR
+    report.outcome = Outcome.INTERNAL_ERROR
     report.findings.append(
         internal_error_finding(
             error,

@@ -7,8 +7,12 @@ document, selects preparation inputs or publishes anything.
 
 from __future__ import annotations
 
+from .analysed_source import AnalysedSource
 from .bibliography_checks import check_bibliography_coverage_and_fields
 from .bibliography_integrity import check_bibliography_integrity
+from .bibliography_results import SOURCE_ERROR_NOTE_RULE
+from .citation_graph import citation_source_errors
+from .findings import Finding
 from .formatting import format_project
 from .job_context import JobContext, import_input, pdf_check_settings
 from .job_report import job_outcome
@@ -80,7 +84,18 @@ async def check_bibliography(context: JobContext, report: Report) -> None:
             snapshot, main, options=settings.online_checks, budget=context.budget, analysed=analysed
         )
     )
+    if any(item.rule == SOURCE_ERROR_NOTE_RULE for item in report.findings):
+        # No source check runs here, so the source errors the note restates are added: the
+        # report then shows the cause and stays blocked by it.
+        report.findings.extend(
+            await context.thread_operation("source errors", _restated_source_errors, analysed)
+        )
     report.outcome = job_outcome(report, settings)
+
+
+def _restated_source_errors(analysed: AnalysedSource) -> list[Finding]:
+    """Return the blocking source findings that left bibliography checks incomplete."""
+    return citation_source_errors(analysed.graph)
 
 
 async def check_formatting(context: JobContext, report: Report) -> None:

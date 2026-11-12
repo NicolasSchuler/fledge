@@ -240,8 +240,8 @@ formatting_check_option = click.option(
 force_option = click.option(
     "--force",
     is_flag=True,
-    help="Replace an output or preview folder that Fledge wrote earlier, once the new run "
-    "has succeeded; any other existing folder is still refused.",
+    help="Replace an output or preview folder, or a report file, that Fledge wrote earlier, "
+    "once the new run has succeeded; any other existing folder or file is still refused.",
 )
 json_option = click.option(
     "--json",
@@ -344,6 +344,7 @@ inspect_options = compose_options(
     online_option,
     _settings_and_report,
     _report_files,
+    force_option,
     _run_limits,
     debug_option,
 )
@@ -408,6 +409,7 @@ bibliography_check_options = compose_options(
     online_option,
     _settings_and_report,
     _report_files,
+    force_option,
     _run_limits,
     debug_option,
 )
@@ -417,6 +419,7 @@ formatting_options = compose_options(
     formatting_diff_option,
     _settings_and_report,
     _report_files,
+    force_option,
     _run_limits,
     debug_option,
 )

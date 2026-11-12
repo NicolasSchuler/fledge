@@ -22,19 +22,25 @@ from .finding_view import (
     DEFAULT_RENDER_OPTIONS,
     FindingView,
     RenderOptions,
+    cancellation_line,
     change_summary,
     finding_views,
     not_run_summaries,
     result_counts,
     selection_description,
+    settings_description,
     size_label,
+    suggestion_views,
+    verdict_line,
 )
-from .findings import Finding
+from .findings import REQUEST_ERROR_RULE, Finding
 from .report import Outcome, RedactedReport, Report, redact_report
 from .text_safety import sanitize_terminal_text
 
 # Larger change sets are summarized by kind; every entry remains in the JSON report.
 MAX_LISTED_CHANGES = 20
+# The longest message of a follow-on result printed under its cause; JSON keeps it whole.
+FOLLOW_ON_MESSAGE_CHARS = 160
 # The largest compressed entries named in a package summary.
 LARGEST_ENTRY_COUNT = 3
 OUTCOME_STYLES: dict[Outcome, str] = {
@@ -44,6 +50,7 @@ OUTCOME_STYLES: dict[Outcome, str] = {
     Outcome.ACCEPTED_EXCEPTIONS: "bold yellow",
     Outcome.BLOCKED: "bold red",
     Outcome.ERROR: "bold red",
+    Outcome.INTERNAL_ERROR: "bold red",
     Outcome.CANCELLED: "bold yellow",
 }
 
@@ -228,60 +235,103 @@ def _print_package_contents(report: RedactedReport, console: Console, *, show_fi
         _print_package(package, console, show_files=show_files)
 
 
-def _print_summary(report: RedactedReport, records: ExecutionRecords, console: Console) -> None:
-    """Print the outcome panel, the check selection and the selected document.
-
-    A request error is printed without a panel or scope.
+def _print_summary(
+    report: RedactedReport, records: ExecutionRecords, options: RenderOptions, console: Console
+) -> None:
+    """Print the outcome panel, the check selection, the selected document and the settings.
 
     Args:
         report: The redacted report.
         records: The execution records of the report.
+        options: The rendering options, which may name the settings file.
         console: The console to print on.
     """
-    outcome = report.outcome.replace("_", " ").capitalize()
     style = OUTCOME_STYLES[report.outcome]
-    request_error = report.is_request_error
-    summary = Text()
-    summary.append("Request error" if request_error else outcome, style=style)
-    if not request_error:
-        summary.append(f" — {one_line(report.scope)}")
+    summary = Text(report.outcome.replace("_", " ").capitalize(), style=style)
+    summary.append(f" — {one_line(report.scope)}")
     summary.append(f"\n{result_counts(report)}", style="dim")
-    if request_error:
-        console.print(summary)
-    else:
-        console.print(Panel(summary, border_style=style, padding=(0, 1), expand=False))
+    console.print(Panel(summary, border_style=style, padding=(0, 1), expand=False))
     if selection := selection_description(records.check_selection):
         console.print(Text(sanitize_terminal_text(selection), style="dim"))
     if report.main:
         console.print(Text(f"Document: {one_line(report.main)}"))
+    if settings := settings_description(report, options):
+        console.print(Text(one_line(settings), style="dim"))
+
+
+def _print_heading(view: FindingView, console: Console) -> None:
+    """Print the code, title and ``[SEVERITY / status]`` of a finding as one line."""
+    color = _finding_style(view.finding)
+    heading = Text(one_line(f"{view.code}  {view.title}"), style=f"bold {color}")
+    heading.append(f"  [{view.finding.severity.upper()} / {view.status_label}]", style=color)
+    console.print(heading)
+
+
+def _print_view(view: FindingView, console: Console) -> None:
+    """Print one finding in full: heading, place, message, evidence, next step and review."""
+    console.print()
+    _print_heading(view, console)
+    if view.location:
+        _detail(console, "Where", one_line(view.location), style="dim")
+    console.print(Padding(Text(sanitize_terminal_text(view.message)), (0, 0, 0, 2), expand=False))
+    if view.evidence:
+        _detail(console, "Evidence", one_line(view.evidence))
+    if view.next_step:
+        _detail(console, "Next", view.next_step)
+    if view.review:
+        _detail(console, "Review", view.review, style="yellow")
+
+
+def _print_follow_ons(views: list[FindingView], console: Console) -> None:
+    """Print the results that follow from the finding above them, two short lines each.
+
+    Args:
+        views: The follow-on views of one cause, in display order.
+        console: The console to print on.
+    """
+    console.print(
+        Padding(
+            Text("Follow-on results, which usually clear once this is fixed:", style="cyan"),
+            (0, 0, 0, 2),
+        )
+    )
+    for view in views:
+        heading = Text(one_line(f"{view.code}  {view.title}"), style=_finding_style(view.finding))
+        heading.append(f"  [{view.finding.severity.upper()} / {view.status_label}]")
+        console.print(Padding(heading, (0, 0, 0, 4)), overflow="fold")
+        detail = Text(f"{one_line(view.location)}: ", style="dim")
+        detail.append(_clipped_message(view.message))
+        console.print(Padding(detail, (0, 0, 0, 6)), overflow="fold")
+
+
+def _clipped_message(message: str) -> str:
+    """Shorten a follow-on's message to one line of at most ``FOLLOW_ON_MESSAGE_CHARS``."""
+    text = one_line(message)
+    return (
+        text if len(text) <= FOLLOW_ON_MESSAGE_CHARS else text[: FOLLOW_ON_MESSAGE_CHARS - 1] + "…"
+    )
 
 
 def _print_findings(report: RedactedReport, views: list[FindingView], console: Console) -> None:
-    """Print each finding view, then what could not run because a prerequisite failed.
+    """Print each finding with its follow-ons, then what could not run or finish.
 
     A note that no issues were found follows when every view is of an always-listed rule.
 
     Args:
         report: The redacted report.
-        views: The finding views to print.
+        views: The finding views to print, each cause followed by its follow-ons.
         console: The console to print on.
     """
-    for view in views:
-        console.print()
-        color = _finding_style(view.finding)
-        heading = Text(one_line(f"{view.code}  {view.title}"), style=f"bold {color}")
-        heading.append(f"  [{view.finding.severity.upper()} / {view.status_label}]", style=color)
-        console.print(heading)
-        _detail(console, "Where", one_line(view.location), style="dim")
-        console.print(
-            Padding(Text(sanitize_terminal_text(view.message)), (0, 0, 0, 2), expand=False)
-        )
-        if view.evidence:
-            _detail(console, "Evidence", one_line(view.evidence))
-        if view.next_step:
-            _detail(console, "Next", view.next_step)
-        if view.review:
-            _detail(console, "Review", view.review, style="yellow")
+    index = 0
+    while index < len(views):
+        _print_view(views[index], console)
+        follow_ons = []
+        index += 1
+        while index < len(views) and views[index].cause:
+            follow_ons.append(views[index])
+            index += 1
+        if follow_ons:
+            _print_follow_ons(follow_ons, console)
     if all(view.finding.rule in ALWAYS_LISTED_RULES for view in views):
         console.print(Text("No issues found within this command's stated scope."))
     not_run = not_run_summaries(report)
@@ -289,6 +339,39 @@ def _print_findings(report: RedactedReport, views: list[FindingView], console: C
         console.print()
     for line in not_run:
         console.print(Text(sanitize_terminal_text(line), style="yellow"))
+
+
+def _print_suggestions(views: list[FindingView], silenced: int, console: Console) -> None:
+    """Print the suggestions in a section of their own, which never changes the result.
+
+    Args:
+        views: The suggestion views.
+        silenced: How many suggestions a ``% fledge: ignore`` comment silenced; nothing is
+            printed without suggestions or silenced ones.
+        console: The console to print on.
+    """
+    if not views and not silenced:
+        return
+    console.print(
+        Text("\nSuggestions (they never change the result or the exit code)", style="bold")
+    )
+    for view in views:
+        line = Text(one_line(f"{view.code}  {view.title}"), style="cyan")
+        line.append(f"  {one_line(view.location)}", style="dim")
+        console.print(Padding(line, (0, 0, 0, 2)), overflow="fold")
+        console.print(Padding(Text(sanitize_terminal_text(view.message)), (0, 0, 0, 4)))
+        if view.next_step:
+            console.print(
+                Padding(Text(sanitize_terminal_text(f"Next: {view.next_step}")), (0, 0, 0, 4))
+            )
+    if silenced:
+        console.print(Padding(Text(silenced_suggestions_line(silenced), style="dim"), (0, 0, 0, 2)))
+
+
+def silenced_suggestions_line(count: int) -> str:
+    """Say how many suggestions comments in the sources silenced."""
+    noun = "suggestion" if count == 1 else "suggestions"
+    return f"{count} {noun} silenced by % fledge: ignore comments in the sources."
 
 
 def _print_changes(report: RedactedReport, options: RenderOptions, console: Console) -> None:
@@ -304,10 +387,11 @@ def _print_changes(report: RedactedReport, options: RenderOptions, console: Cons
     """
     if not report.changes:
         return
+    count = len(report.changes)
     console.print(
         Text(
-            f"\n{len(report.changes)} proposed/applied changes (original input unchanged): "
-            f"{one_line(change_summary(report))}",
+            f"\n{count} change{'s' if count != 1 else ''} to the separate copy (your files are "
+            f"unchanged): {one_line(change_summary(report))}",
             style="bold",
         )
     )
@@ -334,25 +418,63 @@ def _print_changes(report: RedactedReport, options: RenderOptions, console: Cons
 
 
 def _print_artifacts_and_hints(
-    report: RedactedReport, records: ExecutionRecords, views: list[FindingView], console: Console
+    report: RedactedReport,
+    records: ExecutionRecords,
+    views: list[FindingView],
+    options: RenderOptions,
+    console: Console,
 ) -> None:
-    """Print published files, the opt-in checks left off, and how to explain a check.
+    """Print published files, the opt-in checks left off, how to explain a check, the verdict.
+
+    The opt-in checks left off are named only after a run that passed.
 
     Args:
         report: The redacted report.
         records: The execution records of the report.
         views: The finding views; a hint to explain a check follows when one of them has a
             code and did not pass.
+        options: The rendering options, which may name the settings file.
         console: The console to print on.
     """
     if report.artifacts:
         console.print(Text("\nArtifacts", style="bold cyan"))
         for name, path in report.artifacts.items():
             console.print(Text(one_line(f"{name}: {path}")), overflow="fold")
-    if summary := not_checked_summary(records.not_checked, records.config_path):
+    settings_file = options.settings_file or records.config_path
+    if report.outcome.passed and (
+        summary := not_checked_summary(records.not_checked, settings_file)
+    ):
         console.print(Text(f"\n{sanitize_terminal_text(summary)}", style="dim"))
-    if any(view.finding.code and view.finding.status != "passed" for view in views):
-        console.print(Text("\nExplain a check: fledge rule CODE", style="dim"))
+    coded = next(
+        (view.code for view in views if view.finding.code and view.finding.status != "passed"),
+        None,
+    )
+    if coded:
+        console.print(Text(f"\nExplain a check: fledge rule {one_line(coded)}", style="dim"))
+    style = OUTCOME_STYLES[report.outcome]
+    console.print(Text(f"\n{one_line(verdict_line(report, views))}", style=style))
+
+
+def brief_status(report: RedactedReport) -> str | None:
+    """Word the short status that replaces the terminal report, when one does.
+
+    A rejected request is shown as ``Error:`` and ``Hint:`` lines and a cancelled run as
+    one line, because neither says anything about the paper.
+
+    Returns:
+        The status text, or ``None`` when the full report is shown.
+    """
+    if report.is_request_error:
+        lines = []
+        for finding in report.findings:
+            if finding.rule == REQUEST_ERROR_RULE:
+                lines.append(f"Error: {one_line(finding.message)}")
+                if finding.next_step:
+                    lines.append(f"Hint: {one_line(finding.next_step)}")
+        return "\n".join(lines)
+    if report.outcome is Outcome.CANCELLED:
+        return one_line(cancellation_line(report))
+    return None
 
 
 def print_redacted_report(
@@ -360,18 +482,29 @@ def print_redacted_report(
 ) -> None:
     """Print the styled terminal report of a report that was already redacted.
 
+    A rejected request or a cancelled run prints only its brief status (see
+    :func:`brief_status`).
+
     Args:
         report: The redacted report.
         console: The console to print on.
         options: The rendering options.
     """
+    if (status := brief_status(report)) is not None:
+        console.print(Text(status), overflow="fold")
+        return
     records = read_execution_records(report.execution)
     views = finding_views(report, show_hidden=options.show_passed)
-    _print_summary(report, records, console)
+    _print_summary(report, records, options, console)
     _print_findings(report, views, console)
+    _print_suggestions(
+        suggestion_views(report, show_hidden=options.show_passed),
+        records.silenced_suggestions,
+        console,
+    )
     _print_changes(report, options, console)
     _print_package_contents(report, console, show_files=options.show_files)
-    _print_artifacts_and_hints(report, records, views, console)
+    _print_artifacts_and_hints(report, records, views, options, console)
 
 
 def print_report(

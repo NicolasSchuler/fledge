@@ -100,6 +100,10 @@ class Task:
         return (*self.needs_success_of, *self.waits_for)
 
 
+# Why a task that was queued or running when the run was cancelled did not finish.
+CANCELLED_RUNNING = "Cancelled while queued or running"
+
+
 class TaskStatus(StrEnum):
     """How a scheduled task ended; serialized as its string value in stage records.
 
@@ -377,11 +381,7 @@ class _Execution:
         await cancel_and_drain(self.running)
         for future, task in self.running.items():
             if future.cancelled():
-                self._record(
-                    TaskResult(
-                        task.name, TaskStatus.CANCELLED, error="Cancelled while queued or running"
-                    )
-                )
+                self._record(TaskResult(task.name, TaskStatus.CANCELLED, error=CANCELLED_RUNNING))
             elif future.exception() is None:
                 self._record(future.result())
             else:

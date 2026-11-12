@@ -99,8 +99,11 @@ Fledge's own workflows; a tool such as Dependabot can keep them current.
   is reported as a build failure; add it to the `tlmgr install` line.
   Pin the version of Fledge, for example `fledge-latex==0.3.1`, if you want the
   same checks on every run.
-- **`--output-format ci`** prints each finding as a GitHub annotation, and
-  `--quiet` leaves out the progress messages. Fledge also reads a `fledge.toml` in
+- **`--output-format ci`** prints each finding as a GitHub annotation titled with
+  its code and title, and a final notice with the verdict; `--quiet` leaves out the
+  progress messages. When the paper is a folder of the repository, such as `paper`,
+  the annotations name its files from the repository root (`paper/main.tex`), so
+  they attach to the right lines. Fledge also reads a `fledge.toml` in
   the repository, so [settings and presets](configuration.md) apply in CI exactly
   as they do on your machine.
 - **Reports and output** go to the runner's temporary directory because Fledge
@@ -123,8 +126,9 @@ on 0, 1 and 2 and fails on everything else:
 | 0 | Everything in scope passed | Passes |
 | 1 | Passed with advisories: warnings need review | Passes; the warnings stay visible as annotations |
 | 2 | Passed only because of exceptions you accepted in `fledge.toml` | Passes |
-| 3 | Blocked: a required check failed or lacked evidence | Fails |
-| 4, 64, 130 | Error (including an internal failure), invalid command line, or interrupted | Fails |
+| 3 | Blocked: the paper needs a fix | Fails |
+| 4 | Fledge could not check: a missing TeX package or tool, a time limit, an unreadable input or invalid settings | Fails; fix the runner or the workflow, not the paper |
+| 64, 70, 130 | Invalid command line, an internal error in Fledge, or interrupted | Fails |
 
 To fail the job on advisories as well, change `-le 2` to `-le 0`. The
 [reports page](reports.md#exit-codes) explains every code.

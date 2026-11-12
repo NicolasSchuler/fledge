@@ -119,9 +119,9 @@ def _existing_destination_error(destination: Path, option: str, *, folder: bool)
         folder: Whether ``destination`` names a directory rather than a file.
 
     Returns:
-        The error; it suggests ``--force`` for a directory that Fledge published earlier.
+        The error; it suggests ``--force`` for a directory or report that Fledge wrote earlier.
     """
-    if folder and is_replaceable_output(destination):
+    if is_replaceable_output(destination) if folder else is_fledge_report(destination):
         return RequestError(
             f"Output already exists: {destination}",
             f"Choose a new {option} path, remove {destination}, or rerun with --force to "

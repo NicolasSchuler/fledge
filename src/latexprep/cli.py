@@ -55,7 +55,7 @@ from .config_discovery import resolve_config_path
 from .core import run_job
 from .doctor_command import doctor_command
 from .errors import PreparationError, RequestError, SettingsError
-from .execution_records import record_settings_source
+from .execution_records import CONFIG_PATH_KEY, record_settings_source
 from .finding_view import RenderOptions
 from .findings import cancelled_finding
 from .init_command import init_command
@@ -63,7 +63,12 @@ from .job_context import JobCommand, JobRequest
 from .pdf_previews import PdfPreviewStore
 from .report import UNFINISHED_SCOPE, USAGE_EXIT_CODE, Outcome, Report
 from .report_files import ReportFiles, resolve_report_files, save_reports
-from .report_formats import OutputFormat, write_redacted_report
+from .report_formats import (
+    OutputFormat,
+    annotation_prefix,
+    working_directory_path,
+    write_redacted_report,
+)
 from .rule_catalogue_view import print_rule_explanation, print_rule_table, rule_payload
 from .rule_definition import RULE_SCHEMA_VERSION
 from .rules import BY_CODE, get_rule
@@ -115,13 +120,13 @@ def _usage_exit_code() -> Generator[None]:
 
 
 class _InternalFailure(click.ClickException):
-    """A defect outside every command's own guard: one plain line and the error exit code.
+    """A defect outside every command's own guard: one plain line and the internal-error code.
 
     Attributes:
-        exit_code: The exit code of the error outcome.
+        exit_code: The exit code of the internal-error outcome.
     """
 
-    exit_code = Outcome.ERROR.exit_code
+    exit_code = Outcome.INTERNAL_ERROR.exit_code
 
 
 def _internal_failure(error: Exception, during: str = "") -> _InternalFailure:
@@ -673,17 +678,31 @@ def _run(
         return asyncio.run(run_job(request, progress, report))
 
 
+def _shown_settings_file(report: Report) -> str | None:
+    """Name the settings file a run uses as a path the user can open, before redaction.
+
+    The job returns its report with local paths generalized; the reader of this run is on
+    this machine and is shown the real place, relative to the working directory.
+
+    Returns:
+        The path, or ``None`` when the run uses no settings file.
+    """
+    config_path = report.execution.get(CONFIG_PATH_KEY)
+    return working_directory_path(config_path) if isinstance(config_path, str) else None
+
+
 def _deliver_report(
     report: Report,
     files: ReportFiles,
     output_format: OutputFormat,
     options: CommandOptions,
     pdf_previews: PdfPreviewStore | None,
+    settings_file: str | None = None,
 ) -> int:
     """Save the requested report files, print the final report and return the exit code.
 
     A reader that closes stdout early does not change the exit code; a defect while the
-    report is written ends in the error exit code.
+    report is written ends in the internal-error exit code.
 
     Args:
         report: The finished report.
@@ -691,9 +710,11 @@ def _deliver_report(
         output_format: The format of the printed report.
         options: The options of the command, which choose what the printed report shows.
         pdf_previews: The page previews for an HTML report, if any.
+        settings_file: The settings file as the printed report names it, if any.
 
     Returns:
-        The exit code of the outcome of the report, or the error exit code after a defect.
+        The exit code of the outcome of the report, or the internal-error exit code after
+        a defect.
     """
     preview_images = pdf_previews.images if pdf_previews else None
     try:
@@ -706,6 +727,8 @@ def _deliver_report(
                 show_passed=options.show_passed,
                 show_diff=options.diff,
                 show_files=options.show_files,
+                settings_file=settings_file,
+                annotation_prefix=annotation_prefix(options.source),
             ),
             preview_images=preview_images,
             document={OutputFormat.JSON: rendered.json, OutputFormat.HTML: rendered.html}.get(
@@ -715,8 +738,8 @@ def _deliver_report(
     except BrokenPipeError:
         # The reader of stdout stopped early, for example `| head`; the verdict is known.
         discard_closed_stdout()
-    except Exception as error:  # noqa: BLE001 - a rendering defect ends in the error exit code
-        # A defect while rendering must still end in the error exit code, never in a pass.
+    except Exception as error:  # noqa: BLE001 - a rendering defect ends in the internal-error code
+        # A defect while rendering must still end in the internal-error code, never in a pass.
         failure = _internal_failure(error, " while writing the report")
         failure.show()
         return failure.exit_code
@@ -797,6 +820,7 @@ def _execute(command: JobCommand, arguments: dict[str, Any]) -> int:
     files = ReportFiles()
     pdf_previews = None
     job_started = False
+    settings_file = None
     try:
         resolve_report_files(
             options.source,
@@ -804,9 +828,11 @@ def _execute(command: JobCommand, arguments: dict[str, Any]) -> int:
             html=options.html_report,
             diagnostics=options.diagnostics,
             files=files,
+            force=options.force,
         )
         _check_input_and_outputs(options, files)
         settings = _load_command_settings(options, report)
+        settings_file = _shown_settings_file(report)
         if files.html is not None or output_format is OutputFormat.HTML:
             pdf_previews = PdfPreviewStore()
         job_started = True
@@ -823,7 +849,7 @@ def _execute(command: JobCommand, arguments: dict[str, Any]) -> int:
             job_started=job_started,
         )
     try:
-        return _deliver_report(report, files, output_format, options, pdf_previews)
+        return _deliver_report(report, files, output_format, options, pdf_previews, settings_file)
     except KeyboardInterrupt:
         # The job has finished; whatever it published stays, so the message must say so.
         click.echo(_interrupted_report_message(report), err=True)

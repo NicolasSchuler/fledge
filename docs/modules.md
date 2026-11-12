@@ -32,7 +32,7 @@ The vocabulary and the pure logic everything else shares: findings, the report, 
 catalogue of check codes and its data-only `*_rules.py` modules, settings choices and option
 schemas, the bounded TeX and BibTeX readers, the literal source graph, text, path and file
 helpers, and the cancellation and resource-budget primitives. None starts a process or opens
-a network connection, and each imports only other modules of this layer. (79 modules)
+a network connection, and each imports only other modules of this layer. (81 modules)
 
 | Module | Responsibility |
 | --- | --- |
@@ -62,6 +62,7 @@ a network connection, and each imports only other modules of this layer. (79 mod
 | `findings` | The `Finding`: one check's result, and the constructors for findings that no check produces |
 | `generated_files` | Generated files that TeX reads back (.bbl, .ind, glossaries), what each holds and the tool that writes it |
 | `image_metadata_decoders` | Bounded decoders of the metadata blocks of PNG and JPEG files |
+| `inline_suppressions` | Suggestions that a `% fledge: ignore CODE` comment in the sources silences |
 | `limits` | Unit constants and the limits that more than one module shares |
 | `literal_text` | Literal TeX text without expansion: shared command tables and plain-text reading |
 | `loaded_options_rules` | Data-only catalogue for actual post-document kernel option evidence |
@@ -73,6 +74,7 @@ a network connection, and each imports only other modules of this layer. (79 mod
 | `metadata_privacy_rules` | Data-only privacy entries for selected metadata edits and figure metadata scans |
 | `online_check_rules` | Data-only catalogue entries for explicitly selected remote reference checks |
 | `online_options` | Settings of the online checks, and the vocabulary that every online module shares |
+| `operational_titles` | The titles reports show for operational results, which have no catalogue entry |
 | `option_config` | Strict TOML conversion for grouped, immutable checker options, and the checks they share |
 | `package_headers` | Literal release metadata of the class and package files a build loaded |
 | `path_safety` | Relative-path validation and containment checks for paths from settings, archives and tools |

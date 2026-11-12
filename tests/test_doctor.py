@@ -168,7 +168,7 @@ class DoctorTests(unittest.IsolatedAsyncioTestCase):
                     patch.object(ResourceMonitor, "sample_job", final_sample),
                 ):
                     report = await run_doctor()
-                self.assertEqual(report.outcome, "blocked")
+                self.assertEqual(report.outcome, "error")
                 self.assertTrue(all(stage["status"] == "passed" for stage in report.stages))
                 self.assertTrue(report.tools["pdflatex"]["exercised"])
                 self.assertEqual(report.execution["observed"]["resource_exceeded"], failure)
@@ -186,7 +186,7 @@ class DoctorTests(unittest.IsolatedAsyncioTestCase):
             side_effect=lambda name: None if name == "pdflatex" else f"/test-tools/{name}",
         ):
             report = await run_doctor()
-        self.assertEqual(report.outcome, "blocked")
+        self.assertEqual(report.outcome, "error")
         self.assertFalse(report.tools["pdflatex"]["installed"])
         self.assertFalse(report.tools["latexmk"]["exercised"])
         self.assertEqual(self.builds, [])
@@ -205,7 +205,7 @@ class DoctorTests(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(DoctorRunner, "tool_version", failed):
             report = await run_doctor()
-        self.assertEqual(report.outcome, "blocked")
+        self.assertEqual(report.outcome, "error")
         self.assertTrue(report.tools["pdflatex"]["installed"])
         self.assertFalse(report.tools["pdflatex"]["version_verified"])
         self.assertFalse(report.tools["pdflatex"]["exercised"])
@@ -256,7 +256,7 @@ class DoctorTests(unittest.IsolatedAsyncioTestCase):
     async def test_unavailable_sandbox_reports_setup_failure_without_build(self):
         with patch.object(DoctorRunner, "run", side_effect=PreparationError("sandbox refused")):
             report = await run_doctor()
-        self.assertEqual(report.outcome, "blocked")
+        self.assertEqual(report.outcome, "error")
         self.assertEqual(self.builds, [])
         self.assertTrue(report.tools["pdflatex"]["installed"])
         self.assertFalse(report.tools["pdflatex"]["version_verified"])
@@ -267,7 +267,7 @@ class DoctorTests(unittest.IsolatedAsyncioTestCase):
     async def test_timeout_preserves_installed_evidence_without_claiming_pass(self):
         with patch.object(DoctorRunner, "run", side_effect=JobDeadlineExceeded):
             report = await run_doctor()
-        self.assertEqual(report.outcome, "blocked")
+        self.assertEqual(report.outcome, "error")
         self.assertTrue(report.tools["pdflatex"]["installed"])
         self.assertTrue(any(item.rule == "execution.deadline" for item in report.findings))
         self.assertEqual(self.builds, [])
@@ -278,7 +278,7 @@ class DoctorTests(unittest.IsolatedAsyncioTestCase):
         rules = {item.rule for item in report.findings}
         self.assertNotIn("execution.deadline", rules)
         self.assertIn("doctor.execution_unavailable", rules)
-        self.assertEqual(report.outcome, "blocked")
+        self.assertEqual(report.outcome, "error")
 
     async def test_failed_sandbox_probe_names_the_command_failure_in_plain_words(self):
         failed = CommandResult(1, "", "bwrap: no user namespaces", resolved_command=["true"])
@@ -300,7 +300,7 @@ class DoctorTests(unittest.IsolatedAsyncioTestCase):
 
         with patch("latexprep.doctor.build_project", side_effect=wait):
             report = await run_doctor(Settings(job_timeout_seconds=1))
-        self.assertEqual(report.outcome, "blocked")
+        self.assertEqual(report.outcome, "error")
         self.assertTrue(cancelled.is_set())
         self.assertEqual(report.execution["resources"]["active_cpu"], 0)
         self.assertTrue(any(item.rule == "execution.deadline" for item in report.findings))
@@ -329,7 +329,7 @@ class DoctorTests(unittest.IsolatedAsyncioTestCase):
 
         with patch("latexprep.doctor.build_project", side_effect=failed):
             report = await run_doctor()
-        self.assertEqual(report.outcome, "blocked")
+        self.assertEqual(report.outcome, "error")
         failure = next(item for item in report.findings if item.rule == "doctor.fixture_failed")
         self.assertIn("Built-in setup fixture", failure.message)
         self.assertIn("does not diagnose your manuscript", failure.next_step)
@@ -345,7 +345,7 @@ class DoctorTests(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(DoctorRunner, "run", failing):
             report = await run_doctor()
-        self.assertEqual(report.outcome, "blocked")
+        self.assertEqual(report.outcome, "error")
         self.assertTrue(report.tools["pdflatex"]["exercised"])
         self.assertTrue(report.tools["pdftoppm"]["version_verified"])
         self.assertFalse(report.tools["pdftoppm"]["exercised"])

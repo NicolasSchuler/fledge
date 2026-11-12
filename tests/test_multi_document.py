@@ -136,7 +136,8 @@ class MultiDocumentTests(unittest.IsolatedAsyncioTestCase):
         for item in failed:
             self.assertIn("workflow.documents", item.suggestion)
             self.assertNotIn("--main", item.suggestion)
-        self.assertEqual(report.outcome, "blocked")
+        # A document the settings do not select correctly could not be checked.
+        self.assertEqual(report.outcome, "error")
 
     async def test_a_defect_in_one_document_is_reported_as_a_defect(self):
         with patch("latexprep.documents.run_project", side_effect=ValueError("unexpected value")):
@@ -146,7 +147,7 @@ class MultiDocumentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(item.suggestion, REPORT_DEFECT_SUGGESTION)
         self.assertTrue(item.details["traceback"])
         self.assertTrue(all("/" not in frame for frame in item.details["traceback"]))
-        self.assertEqual(report.outcome, "blocked")
+        self.assertEqual(report.outcome, "internal_error")
 
     async def test_unrepresentable_multi_document_report_is_refused_without_output(self):
         output = self.base / "out?token=findings&"

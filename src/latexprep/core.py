@@ -36,7 +36,7 @@ from .job_context import (
     JobRequest,
 )
 from .job_execution import JobDeadlineExceeded, JobExecution
-from .job_report import is_blocked, select_and_review
+from .job_report import is_blocked, select_and_review, settled_outcome
 from .publication import (
     DocumentPackages,
     JobOutput,
@@ -465,10 +465,10 @@ async def run_job(
             if _block_on_resource_failure(report, execution):
                 outputs = None
             if has_task_defect(report.findings):
-                # A defect in a check is not a problem with the input: it ends in the error
-                # outcome, whatever the other tasks found, and no package is published.
+                # A defect in a check is not a problem with the input: it ends as an
+                # internal error, whatever the other tasks found, and no package is published.
                 # Previews still go to an explicit preview directory, as for a blocked run.
-                report.outcome = Outcome.ERROR
+                report.outcome = Outcome.INTERNAL_ERROR
                 outputs = None
             execution.check_deadline()
             previews: PreviewPlan = ()
@@ -481,6 +481,8 @@ async def run_job(
                     publishable=_is_publishable(outputs, report, settings),
                 )
             select_and_review(report, settings)
+            # Settled before publication writes any report, so every copy agrees.
+            report.outcome = settled_outcome(report, settings)
             reviewed = True
             # All asynchronous readers, tool children and the monitor are drained.
             # Publication is the final synchronous critical section, never an early branch.
@@ -506,4 +508,7 @@ async def run_job(
     except asyncio.CancelledError:
         report.outcome = Outcome.CANCELLED
         raise
+    # A run that Fledge could not check ends as an error and a defect as an internal error,
+    # never as a paper that needs a fix.
+    report.outcome = settled_outcome(report, settings)
     return report.redacted_copy()

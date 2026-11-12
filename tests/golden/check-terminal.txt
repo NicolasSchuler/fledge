@@ -21,4 +21,6 @@ font embedding, image resolution, 93 other opt-in checks. Set them in fledge.tom
 init --preset anonymous-review|arxiv|camera-ready); see
 https://nicolasschuler.github.io/fledge/configuration.html
 
-Explain a check: fledge rule CODE
+Explain a check: fledge rule BIB102
+
+Passed with 1 warning to review.

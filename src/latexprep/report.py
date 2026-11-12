@@ -9,16 +9,27 @@ modules; the findings it collects are in :mod:`latexprep.findings`.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from dataclasses import KW_ONLY, asdict, dataclass, field
 from enum import StrEnum
 from typing import Any, Literal, NewType, NotRequired, TypedDict
 
-from .findings import REQUEST_ERROR_RULE, SEVERITIES, STATUSES, EvidenceKind, Finding
+from .findings import (
+    REQUEST_ERROR_RULE,
+    SEVERITIES,
+    STATUSES,
+    EvidenceKind,
+    Finding,
+    follows_stopped_build,
+    stopped_build_stages,
+)
 from .redaction import redact_data, scrub_local_paths
 
 # Increases only when a JSON report field is removed, renamed or changes meaning;
 # new fields may appear within a version. docs/_static/report.schema.json describes it.
-REPORT_SCHEMA_VERSION = 2
+# Version 3 added the ``internal_error`` outcome and the ``suggestion`` severity, and moved
+# runs that Fledge could not check from ``blocked`` to ``error``.
+REPORT_SCHEMA_VERSION = 3
 REPORT_COMMANDS: frozenset[str] = frozenset(
     {"inspect", "check", "prepare", "bib", "fmt", "pdf", "doctor"}
 )
@@ -41,9 +52,11 @@ class Outcome(StrEnum):
         PLANNED: A ``--dry-run`` plan; nothing was verified.
         PASSED_WITH_ADVISORIES: Required checks passed; warnings need review.
         ACCEPTED_EXCEPTIONS: Passed only because of reviewed exceptions in the settings.
-        BLOCKED: A required check failed or lacked evidence.
-        ERROR: An input, configuration, execution or report-writing problem, or an
-            internal error.
+        BLOCKED: The paper needs a fix: a required check failed or its evidence is
+            incomplete because of the sources.
+        ERROR: Fledge could not check: a tool, the sandbox, a time or resource limit, the
+            input, the settings or writing the report failed.
+        INTERNAL_ERROR: A defect in Fledge stopped the run.
         CANCELLED: The run was interrupted.
     """
 
@@ -53,17 +66,30 @@ class Outcome(StrEnum):
     ACCEPTED_EXCEPTIONS = "accepted_exceptions"
     BLOCKED = "blocked"
     ERROR = "error"
+    INTERNAL_ERROR = "internal_error"
     CANCELLED = "cancelled"
 
     @property
     def exit_code(self) -> int:
         """The process exit code of the outcome.
 
-        0 passed or planned, 1 advisories, 2 exceptions, 3 blocked, 4 error, 130 cancelled.
+        0 passed or planned, 1 advisories, 2 exceptions, 3 blocked, 4 error, 70 internal
+        error, 130 cancelled.
         """
         return _EXIT_CODE_BY_OUTCOME[self]
 
+    @property
+    def passed(self) -> bool:
+        """Whether the run passed, with or without advisories or accepted exceptions."""
+        return self in {
+            Outcome.PASSED,
+            Outcome.PASSED_WITH_ADVISORIES,
+            Outcome.ACCEPTED_EXCEPTIONS,
+        }
 
+
+# A defect in Fledge (BSD sysexits EX_SOFTWARE); distinct from every input problem.
+INTERNAL_ERROR_EXIT_CODE = 70
 _EXIT_CODE_BY_OUTCOME: dict[Outcome, int] = {
     Outcome.PASSED: 0,
     Outcome.PLANNED: 0,
@@ -71,6 +97,7 @@ _EXIT_CODE_BY_OUTCOME: dict[Outcome, int] = {
     Outcome.ACCEPTED_EXCEPTIONS: 2,
     Outcome.BLOCKED: 3,
     Outcome.ERROR: 4,
+    Outcome.INTERNAL_ERROR: INTERNAL_ERROR_EXIT_CODE,
     Outcome.CANCELLED: 130,
 }
 
@@ -192,11 +219,16 @@ class Report:
 
     @property
     def is_request_error(self) -> bool:
-        """Whether the request was rejected, so no check result describes the project."""
+        """Whether a rejected request or an input problem stopped the run before any check.
+
+        Then the report holds nothing but request errors, so no check result describes the
+        project: the input does not exist or cannot be read, an option or a setting is
+        invalid, or the machine failed while the run started.
+        """
         return (
-            self.outcome is Outcome.ERROR
-            and self.scope == REQUEST_SCOPE
-            and any(finding.rule == REQUEST_ERROR_RULE for finding in self.findings)
+            self.outcome == Outcome.ERROR
+            and bool(self.findings)
+            and all(finding.rule == REQUEST_ERROR_RULE for finding in self.findings)
         )
 
     def redacted_copy(self) -> Report:
@@ -376,18 +408,51 @@ def _withheld_report(command: str, cause: str) -> Report:
     )
 
 
+def blocked_outcome(findings: Iterable[Finding]) -> Outcome:
+    """Tell a paper that needs a fix from a run that Fledge could not check.
+
+    Only blocking findings count. A build result that merely restates the failure that
+    stopped the build (``Finding.is_build_follow_on``), and a result of the truncated log of a
+    build that a tool, time or resource problem stopped (``follows_stopped_build``), decide
+    nothing. A paper problem wins over a problem that prevented checking, so exit code 3
+    always means that the paper needs a fix.
+
+    Args:
+        findings: The open findings of a blocked run.
+
+    Returns:
+        ``Outcome.ERROR`` when every deciding blocking finding prevented checking, and
+        ``Outcome.BLOCKED`` otherwise, also when no blocking finding decides.
+    """
+    findings = list(findings)
+    stopped = stopped_build_stages(findings)
+    deciding = [
+        item
+        for item in findings
+        if item.is_blocking
+        and not item.is_build_follow_on
+        and not follows_stopped_build(item, stopped)
+    ]
+    if deciding and all(item.prevents_checking for item in deciding):
+        return Outcome.ERROR
+    return Outcome.BLOCKED
+
+
 def outcome_from_findings(findings: list[Finding], *, blocked: bool) -> Outcome:
-    """Classify a completed run: blocked, passed with open warnings, or passed.
+    """Classify a completed run: blocked, not checkable, passed with open warnings, or passed.
+
+    Suggestions never change the outcome.
 
     Args:
         findings: The findings of the run; a warning that did not pass is open.
         blocked: Whether the run is blocked, whatever the findings say.
 
     Returns:
-        ``Outcome.BLOCKED``, ``Outcome.PASSED_WITH_ADVISORIES`` or ``Outcome.PASSED``.
+        ``Outcome.BLOCKED`` or ``Outcome.ERROR`` as :func:`blocked_outcome` decides for a
+        blocked run, otherwise ``Outcome.PASSED_WITH_ADVISORIES`` or ``Outcome.PASSED``.
     """
     if blocked:
-        return Outcome.BLOCKED
+        return blocked_outcome(findings)
     if any(item.severity == "warning" and item.status != "passed" for item in findings):
         return Outcome.PASSED_WITH_ADVISORIES
     return Outcome.PASSED

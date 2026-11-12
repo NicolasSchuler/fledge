@@ -246,7 +246,8 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
             result = await run_job(
                 JobRequest("check", base / "input", Settings()), backends=backends
             )
-            self.assertEqual(result.outcome, "blocked")
+            # Two documents and no main file: Fledge could not check, exit code 4.
+            self.assertEqual(result.outcome, "error")
             build.assert_not_called()
 
 

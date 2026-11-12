@@ -2,22 +2,29 @@
 
 from __future__ import annotations
 
+import os
+import tempfile
 import unittest
 from dataclasses import replace
 from html.parser import HTMLParser
 from pathlib import Path
+from unittest.mock import patch
 
 from latexprep.ci_annotations import render_ci_annotations
+from latexprep.compact_report import render_compact
 from latexprep.finding_view import RenderOptions, evidence_excerpt
 from latexprep.findings import Finding
 from latexprep.html_report import render_html
 from latexprep.measurement_findings import measurement_finding
 from latexprep.report import Change, ChangeKind, Outcome, Report
+from latexprep.report_files import write_report_text
+from latexprep.report_formats import annotation_prefix, working_directory_path
 from latexprep.review_policy import (
     ReportingOptions,
     ReviewRule,
     apply_reviews,
 )
+from latexprep.terminal_report import render_terminal
 
 
 class _Elements(HTMLParser):
@@ -155,7 +162,7 @@ class RenderTests(unittest.TestCase):
             ],
         )
         annotation = render_ci_annotations(report)
-        self.assertEqual(len(annotation.splitlines()), 1)
+        self.assertEqual(len(annotation.splitlines()), 2)
         self.assertNotIn("Credential_1", annotation)
         self.assertNotIn("\x1b", annotation)
         self.assertIn("%0A::error::injected%0D%1B", annotation)
@@ -182,11 +189,12 @@ class RenderTests(unittest.TestCase):
             ],
         )
         annotations = render_ci_annotations(report)
-        self.assertEqual(len(annotations.splitlines()), 2)
+        # Two open findings and the closing verdict.
+        self.assertEqual(len(annotations.splitlines()), 3)
         for hidden in ("Offline run", "No backend", "1 page"):
             self.assertNotIn(hidden, annotations)
         everything = render_ci_annotations(report, options=RenderOptions(show_passed=True))
-        self.assertEqual(len(everything.splitlines()), 5)
+        self.assertEqual(len(everything.splitlines()), 6)
         self.assertIn("info/not applicable: No backend.", everything)
         self.assertTrue(report.findings[0].is_scope_disclaimer)
         self.assertFalse(report.findings[3].is_scope_disclaimer)
@@ -275,7 +283,7 @@ class RenderTests(unittest.TestCase):
             ],
         )
         annotation = render_ci_annotations(report)
-        self.assertEqual(len(annotation.splitlines()), 1)
+        self.assertEqual(len(annotation.splitlines()), 2)
         self.assertIn("| Evidence: ", annotation)
         self.assertIn("b%0A::error::injected.tex:3", annotation)
         self.assertNotIn(secret, annotation)
@@ -375,9 +383,11 @@ class RenderTests(unittest.TestCase):
         report = apply_reviews(Report("check", findings=copies), options)
         self.assertEqual(report.outcome, Outcome.BLOCKED)
         annotations = render_ci_annotations(report).splitlines()
-        self.assertEqual(len(annotations), 2)
+        # The two copies and the closing verdict.
+        self.assertEqual(len(annotations), 3)
         self.assertTrue(any(line.startswith("::error ") for line in annotations))
         self.assertTrue(any("Accepted exception" in line for line in annotations))
+        self.assertTrue(annotations[-1].startswith("::notice title=Fledge check::Blocked: "))
         self.assertEqual(render_html(report).count("Citation"), 2)
 
 
@@ -506,6 +516,189 @@ class HtmlPageStructureTests(unittest.TestCase):
         self.assertIn(css, render_html(self.report()))
         manifest = (Path(__file__).resolve().parents[1] / "MANIFEST.in").read_text()
         self.assertIn("include src/latexprep/report.css", manifest.splitlines())
+
+
+class CiAnnotationTitleAndPathTests(unittest.TestCase):
+    """CI annotations name the check, locate files in the repository and end with a verdict."""
+
+    def report(self) -> Report:
+        """Return a blocked report: a missing file, the TeX error it caused, a suggestion."""
+        return Report(
+            "check",
+            outcome=Outcome.BLOCKED,
+            findings=[
+                Finding(
+                    "source.missing_dependency",
+                    "Missing figures/plot.",
+                    severity="error",
+                    path="main.tex",
+                    line=4,
+                ),
+                Finding(
+                    "build.tex_error",
+                    "LaTeX Error: File `figures/plot' not found.",
+                    severity="error",
+                    path="main.tex",
+                    line=4,
+                ),
+                Finding(
+                    "source.edit_marker",
+                    "Consider rewording.",
+                    severity="suggestion",
+                    path="main.tex",
+                    line=9,
+                ),
+            ],
+        )
+
+    def test_titles_files_follow_ons_suggestions_and_the_verdict(self):
+        lines = render_ci_annotations(
+            self.report(), options=RenderOptions(annotation_prefix="paper")
+        ).splitlines()
+        self.assertEqual(len(lines), 4, lines)
+        self.assertTrue(
+            lines[0].startswith(
+                "::error title=TEX005 Missing source dependencies,file=paper/main.tex,line=4::"
+            ),
+            lines[0],
+        )
+        # The TeX error that restates the missing file is a notice that names its cause.
+        self.assertTrue(lines[1].startswith("::notice title=BLD009 TeX errors in build log,"))
+        self.assertIn("::Follows from TEX005 main.tex:4. error/failed: ", lines[1])
+        self.assertTrue(
+            lines[2].startswith("::notice title=TEX001 Unfinished text markers (suggestion),")
+        )
+        self.assertEqual(
+            lines[3],
+            "::notice title=Fledge check::Blocked: 1 problem to fix. Start with TEX005 "
+            "(Missing source dependencies) at main.tex:4.",
+        )
+
+    def test_the_prefix_is_the_project_relative_to_the_repository_root(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            (root / "paper" / "chapters").mkdir(parents=True)
+            (root / "paper.zip").write_bytes(b"PK")
+            with patch.dict(os.environ, {"GITHUB_WORKSPACE": str(root)}):
+                self.assertEqual(annotation_prefix(root / "paper"), "paper")
+                self.assertEqual(annotation_prefix(root / "paper" / "chapters"), "paper/chapters")
+                self.assertEqual(annotation_prefix(root), "")
+                # Paths inside a ZIP and outside the repository cannot be located in it.
+                self.assertEqual(annotation_prefix(root / "paper.zip"), "")
+                self.assertEqual(annotation_prefix(root.parent), "")
+
+
+class SettingsLineTests(unittest.TestCase):
+    """The terminal and compact headers say which settings file and preset were used."""
+
+    def test_the_settings_file_and_preset_or_the_defaults_are_named(self):
+        cases = (
+            (
+                {"config_path": "~/paper/fledge.toml", "preset": "arxiv"},
+                None,
+                "Settings: ~/paper/fledge.toml + preset arxiv",
+            ),
+            (
+                {"config_path": "~/paper/fledge.toml", "preset": None},
+                "fledge.toml",
+                "Settings: fledge.toml",
+            ),
+            ({"config_path": None, "preset": None}, None, "Settings: defaults (no settings file)"),
+            (
+                {"config_path": None, "preset": "camera-ready"},
+                None,
+                "Settings: preset camera-ready",
+            ),
+        )
+        for execution, shown, expected in cases:
+            with self.subTest(expected):
+                report = Report("inspect", outcome=Outcome.PASSED, execution=execution)
+                options = RenderOptions(settings_file=shown)
+                self.assertIn(expected, render_terminal(report, options=options).splitlines())
+                self.assertIn(
+                    expected[:1].lower() + expected[1:],
+                    render_compact(report, options=options).splitlines(),
+                )
+
+    def test_a_report_that_does_not_record_its_settings_has_no_settings_line(self):
+        report = Report("pdf", outcome=Outcome.PASSED)
+        self.assertNotIn("Settings:", render_terminal(report))
+        self.assertNotIn("settings:", render_compact(report))
+
+    def test_the_settings_file_is_named_from_the_working_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            (root / "a" / "b" / "c" / "d").mkdir(parents=True)
+            with patch("latexprep.report_formats.Path.cwd", return_value=root / "a" / "b"):
+                self.assertEqual(
+                    working_directory_path(root / "a" / "b" / "fledge.toml"), "fledge.toml"
+                )
+                self.assertEqual(
+                    working_directory_path(root / "a" / "b" / "c" / "fledge.toml"), "c/fledge.toml"
+                )
+                self.assertEqual(working_directory_path(root / "fledge.toml"), "../../fledge.toml")
+            with patch(
+                "latexprep.report_formats.Path.cwd", return_value=root / "a" / "b" / "c" / "d"
+            ):
+                far = root / "fledge.toml"
+                self.assertEqual(working_directory_path(far), str(far))
+
+
+class ReportFileReplacementTests(unittest.TestCase):
+    """A report file is created only where none exists, or replaced whole when allowed."""
+
+    def test_a_new_file_is_never_written_over_an_existing_one(self):
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "report.json"
+            write_report_text(destination, "first\n", replace_existing=False)
+            with self.assertRaises(FileExistsError):
+                write_report_text(destination, "second\n", replace_existing=False)
+            self.assertEqual(destination.read_text(), "first\n")
+
+    def test_an_allowed_replacement_happens_only_once_the_new_file_is_complete(self):
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "report.json"
+            destination.write_text("earlier report\n")
+            with (
+                patch("latexprep.report_files.Path.replace", side_effect=OSError("full")),
+                self.assertRaises(OSError),
+            ):
+                write_report_text(destination, "new report\n", replace_existing=True)
+            # A failure leaves the earlier report and no temporary file behind.
+            self.assertEqual(destination.read_text(), "earlier report\n")
+            self.assertEqual(sorted(Path(directory).iterdir()), [destination])
+            write_report_text(destination, "new report\n", replace_existing=True)
+            self.assertEqual(destination.read_text(), "new report\n")
+            self.assertEqual(sorted(Path(directory).iterdir()), [destination])
+
+
+class SetupLocationTests(unittest.TestCase):
+    """Setup diagnostics without a project do not say that their results are in one."""
+
+    def report(self, project: str | None) -> Report:
+        """Return a doctor report, run for ``project`` or without one."""
+        return Report(
+            "doctor",
+            outcome=Outcome.PASSED,
+            execution={"project": project},
+            findings=[
+                Finding("doctor.sandbox", "Restricted execution started.", status="passed"),
+                Finding(
+                    "doctor.fixture_passed",
+                    "Fixture passed.",
+                    status="passed",
+                    details={"stage": "pdflatex: compilation"},
+                ),
+            ],
+        )
+
+    def test_where_names_no_project_when_none_was_given(self):
+        options = RenderOptions(show_passed=True)
+        text = render_terminal(self.report(None), options=options)
+        self.assertNotIn("project", text)
+        self.assertIn("Where: pdflatex: compilation", text)
+        named = render_terminal(self.report("paper"), options=options)
+        self.assertIn("Where: project [pdflatex: compilation]", named)
 
 
 if __name__ == "__main__":

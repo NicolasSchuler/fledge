@@ -8,6 +8,7 @@ and the printed report agree. Printing the final report is in ``report_formats``
 
 from __future__ import annotations
 
+import secrets
 from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple
@@ -29,11 +30,15 @@ class ReportFiles:
         json: The ``--json-report`` destination.
         html: The ``--html-report`` destination.
         diagnostics: The ``--diagnostics`` destination.
+        replace_existing: Whether the JSON and HTML destinations may hold an earlier
+            Fledge report, as ``--force`` allows; it is then replaced only once the new
+            file is completely written. Otherwise a file is created only where none exists.
     """
 
     json: Path | None = None
     html: Path | None = None
     diagnostics: Path | None = None
+    replace_existing: bool = False
 
     def discard(self) -> None:
         """Forget every destination, so that no report file is written at all."""
@@ -60,6 +65,7 @@ def resolve_report_files(
     html: Path | None,
     diagnostics: Path | None,
     files: ReportFiles,
+    force: bool = False,
 ) -> None:
     """Validate each requested destination against ``source`` and record it in ``files``.
 
@@ -69,15 +75,19 @@ def resolve_report_files(
         html: The requested ``--html-report`` file, if any.
         diagnostics: The requested ``--diagnostics`` file, if any.
         files: Receives each validated destination.
+        force: Whether ``--force`` lets the JSON and HTML reports replace an earlier Fledge
+            report; the new report then replaces it only once it is complete. A
+            diagnostic file is always new.
 
     Raises:
         RequestError: A destination is not a new file outside ``source`` in an existing
             folder; ``files`` keeps the destinations validated before it.
     """
+    files.replace_existing = force
     if json:
-        files.json = validate_destination(source, json, "--json-report")
+        files.json = validate_destination(source, json, "--json-report", force=force)
     if html:
-        files.html = validate_destination(source, html, "--html-report")
+        files.html = validate_destination(source, html, "--html-report", force=force)
     if diagnostics:
         files.diagnostics = validate_destination(source, diagnostics, "--diagnostics")
 
@@ -110,6 +120,31 @@ def record_write_failure(report: Report, option: str, destination: Path, error: 
     )
 
 
+def write_report_text(destination: Path, text: str, *, replace_existing: bool) -> None:
+    """Write one report file, never leaving a partial file at ``destination``.
+
+    Args:
+        destination: The validated destination.
+        text: The complete text of the file.
+        replace_existing: Whether an earlier report at ``destination`` may be replaced. The
+            text then goes to a temporary file beside it, which takes its place only once
+            it is complete; otherwise the file is created only if none exists.
+    """
+    if not replace_existing:
+        with destination.open("x", encoding="utf-8") as stream:
+            stream.write(text)
+        return
+    # A new name of its own, created like any file so that it gets the usual permissions.
+    temporary = destination.with_name(f".{destination.name}.{secrets.token_hex(8)}.tmp")
+    try:
+        with temporary.open("x", encoding="utf-8") as stream:
+            stream.write(text)
+        temporary.replace(destination)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
 def save_reports(
     report: Report, files: ReportFiles, preview_images: dict | None
 ) -> tuple[RedactedReport, RenderedReport]:
@@ -136,8 +171,7 @@ def save_reports(
     if files.html is not None:
         try:
             html_document = render_redacted_html(public, preview_images=preview_images)
-            with files.html.open("x", encoding="utf-8") as stream:
-                stream.write(html_document)
+            write_report_text(files.html, html_document, replace_existing=files.replace_existing)
         except Exception as error:  # noqa: BLE001 - a failed file becomes a finding with its cause
             record_write_failure(report, "--html-report", files.html, error)
             public, html_document = redact_report(report), None
@@ -150,8 +184,7 @@ def save_reports(
     encoded = redacted_json(public)
     if files.json is not None:
         try:
-            with files.json.open("x", encoding="utf-8") as stream:
-                stream.write(encoded)
+            write_report_text(files.json, encoded, replace_existing=files.replace_existing)
         except Exception as error:  # noqa: BLE001 - a failed file becomes a finding with its cause
             record_write_failure(report, "--json-report", files.json, error)
             public, html_document = redact_report(report), None

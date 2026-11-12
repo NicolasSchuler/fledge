@@ -312,7 +312,8 @@ class ParallelWorkflowTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertFalse(output.exists())
         self.assertTrue(stopped.is_set())
-        self.assertEqual(report.outcome, "blocked")
+        # The TODO marker is only an advisory, so the deadline decides: Fledge could not check.
+        self.assertEqual(report.outcome, "error")
         self.assertTrue(any(f.rule == "execution.deadline" for f in report.findings))
         stages = {stage["name"]: stage["status"] for stage in report.stages}
         self.assertEqual(stages["source checks"], "cancelled")
@@ -371,15 +372,15 @@ class ParallelWorkflowTests(unittest.IsolatedAsyncioTestCase):
         frames = finding.details["traceback"]
         self.assertTrue(frames)
         self.assertTrue(all("/" not in frame for frame in frames), frames)
-        # A defect is an error (exit code 4), not a problem with the input (blocked, 3).
-        self.assertEqual(report.outcome, Outcome.ERROR)
-        self.assertEqual(report.outcome.exit_code, 4)
+        # A defect is an internal error (exit code 70), not a problem with the input.
+        self.assertEqual(report.outcome, Outcome.INTERNAL_ERROR)
+        self.assertEqual(report.outcome.exit_code, 70)
         # The other checks still ran and their results stay in the report.
         stages = {stage["name"]: stage["status"] for stage in report.stages}
         self.assertEqual(stages["source checks"], "succeeded")
         self.assertEqual(stages["bibliography checks"], "failed")
 
-    async def test_an_expected_failure_in_a_check_stays_a_blocked_run(self):
+    async def test_an_expected_failure_in_a_check_could_not_be_checked(self):
         def refuse(_root, _main=None, **_options):
             raise PreparationError("the bibliography cannot be read")
 
@@ -394,7 +395,8 @@ class ParallelWorkflowTests(unittest.IsolatedAsyncioTestCase):
             if f.rule == "execution.task" and f.details.get("task") == "bibliography checks"
         ]
         self.assertNotIn("traceback", finding.details)
-        self.assertEqual(report.outcome, Outcome.BLOCKED)
+        # An input or machine problem: Fledge could not check (4), not a defect (70).
+        self.assertEqual(report.outcome, Outcome.ERROR)
 
     async def test_repeated_cancellation_keeps_workspace_until_children_stop(self):
         started, cleaning, release, cleaned = (asyncio.Event() for _ in range(4))
@@ -449,7 +451,7 @@ class ParallelWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 backends=backends,
             )
             self.assertFalse(output.exists())
-        self.assertEqual(report.outcome, "blocked")
+        self.assertEqual(report.outcome, "error")
         self.assertTrue(any(f.rule == "execution.resources" for f in report.findings))
 
 

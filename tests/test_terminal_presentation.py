@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 from io import StringIO
 from unittest.mock import patch
 
@@ -121,6 +122,8 @@ class TerminalPresentationTests(unittest.TestCase):
                 "codes": ["PDF001"],
             }
         ]
+        # The opt-in areas left unchecked are named only after a run that passed.
+        passed = replace(report, outcome=Outcome.PASSED_WITH_ADVISORIES)
         for width, color in ((width, color) for width in (60, 80, 120) for color in (False, True)):
             with self.subTest(width=width, color=color):
                 text = Text.from_ansi(render(report, width, color=color)).plain
@@ -130,9 +133,12 @@ class TerminalPresentationTests(unittest.TestCase):
                 self.assertIn("[red]literal[/red]", joined)
                 self.assertIn("ACTIONEND", joined)
                 self.assertIn(report.artifacts["report"], joined)
-                self.assertIn("Notchecked", joined)
+                self.assertNotIn("Notchecked", joined)
                 self.assertNotIn("…", text)
                 self.assertNotIn("\x1b", text)
+                text = Text.from_ansi(render(passed, width, color=color)).plain
+                self.assertTrue(all(len(line) <= width for line in text.splitlines()), text)
+                self.assertIn("Notchecked(needsyoursettings):pagelimit", "".join(text.split()))
 
     def test_wrapped_detail_lines_keep_indentation_and_short_lines_keep_no_padding(self):
         report = Report(
@@ -225,7 +231,15 @@ class TerminalPresentationTests(unittest.TestCase):
 
     def test_compact_records_keep_their_existing_scope(self):
         report = Report("prepare", outcome=Outcome.PLANNED, package_contents=[package("proposed")])
-        self.assertEqual(len(render_compact(report).splitlines()), 1)
+        # The outcome line and the verdict; the package inventory stays in the JSON report.
+        self.assertEqual(
+            render_compact(report).splitlines(),
+            [
+                "planned | 0 errors, 0 warnings, 0 incomplete, 0 not applicable, "
+                "0 passed results | scope: source analysis",
+                "verdict: Planned: a dry run; nothing was verified or written.",
+            ],
+        )
         self.assertNotIn("Package contents", render_compact(report))
 
 

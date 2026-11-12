@@ -7,20 +7,69 @@ free-form ``details``; the report that collects findings is in :mod:`latexprep.r
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import KW_ONLY, dataclass, field
 from enum import StrEnum
 from typing import Literal, get_args
 
 from .errors import RequestError
-from .rules import BY_NAME, code_for
+from .rules import BY_NAME, OPERATIONAL_RULE_NAMES, code_for
 
-Severity = Literal["error", "warning", "info"]
+# ``suggestion`` is optional style advice: it is reported in a section of its own and never
+# changes the outcome or the exit code.
+Severity = Literal["error", "warning", "info", "suggestion"]
 Status = Literal["failed", "inconclusive", "skipped", "passed", "not_applicable"]
 SEVERITIES: frozenset[str] = frozenset(get_args(Severity))
 STATUSES: frozenset[str] = frozenset(get_args(Status))
 # The finding rule that marks a request rejected before or while the job ran.
 REQUEST_ERROR_RULE = "execution.request"
+# The finding rule of a defect in Fledge itself.
+INTERNAL_ERROR_RULE = "execution.internal"
+
+# Results that mean Fledge could not check the paper, not that the paper needs a fix: the
+# request, a missing, refused or failing tool, the sandbox, a time or resource limit, and an
+# input that does not say which document to check. A blocked run whose only open blocking
+# findings are these ends as ``error`` (exit code 4) instead of ``blocked`` (3).
+COULD_NOT_CHECK_RULES = frozenset(
+    {
+        REQUEST_ERROR_RULE,
+        "execution.deadline",
+        "execution.resources",
+        # A check or a document that stopped on an input or machine problem, such as an
+        # unreadable file; a defect in Fledge is told apart by its traceback.
+        "execution.task",
+        "package.document",
+        "build.execution_unavailable",
+        "build.timeout",
+        "build.output_limit",
+        "build.resource_limit",
+        "build.log_unavailable",
+        "compare.unavailable",
+        "compare.tools",
+        "source.formatter_available",
+        "source.format_execution",
+        # The input does not select exactly one readable document to check.
+        "project.main_selection",
+        "source.root_ambiguous",
+        "source.root_missing",
+        "source.main_invalid",
+        # The bibliography tool that the build needed could not be used.
+        "build.bibliography_tool",
+    }
+)
+# Diagnostics of a measurement that could not run carry this suffix, such as
+# ``pdf.fonts_unavailable``; they also mean that Fledge could not check.
+_UNAVAILABLE_SUFFIX = "_unavailable"
+# Setup diagnostics test the tools with a built-in document and never describe a manuscript.
+_SETUP_FAMILY = "doctor."
+# Results that only restate another failure reported beside them: a build that exited with
+# an error or left no PDF, and the dependency evidence such a build could not provide.
+# Together with the ``build.<stage>`` findings of rebuild stages that did not succeed, they
+# never decide on their own whether the paper needs a fix or Fledge could not check.
+FOLLOW_ON_BUILD_RULES = frozenset(
+    {"build.failed", "build.missing_pdf", "build.submission_dependencies"}
+)
+_BUILD_FAMILY = "build."
 
 
 class EvidenceKind(StrEnum):
@@ -120,6 +169,41 @@ class Finding:
         return self.severity == "error" and self.status in {"failed", "inconclusive", "skipped"}
 
     @property
+    def is_suggestion(self) -> bool:
+        """Optional advice, which never changes the outcome or the exit code."""
+        return self.severity == "suggestion"
+
+    @property
+    def prevents_checking(self) -> bool:
+        """A result that says Fledge could not check something, not that the paper needs a fix.
+
+        These are the rules in ``COULD_NOT_CHECK_RULES``, every diagnostic of a measurement
+        that could not run (a rule name ending in ``_unavailable``) and every result of the
+        setup diagnostics (``doctor.*``).
+        """
+        return (
+            self.rule in COULD_NOT_CHECK_RULES
+            or self.rule.endswith(_UNAVAILABLE_SUFFIX)
+            or self.rule.startswith(_SETUP_FAMILY)
+        )
+
+    @property
+    def is_build_follow_on(self) -> bool:
+        """A build result that only restates the failure that stopped the build.
+
+        These are the rules in ``FOLLOW_ON_BUILD_RULES`` and the ``build.<stage>`` findings
+        of rebuild stages that did not succeed, the only ``build.`` names that are neither
+        catalogued nor operational.
+        """
+        if self.rule in FOLLOW_ON_BUILD_RULES:
+            return True
+        return (
+            self.rule.startswith(_BUILD_FAMILY)
+            and self.rule not in BY_NAME
+            and self.rule not in OPERATIONAL_RULE_NAMES
+        )
+
+    @property
     def is_scope_disclaimer(self) -> bool:
         """An informational note that a check was out of scope; shown only on request."""
         return self.severity == "info" and self.status in {"skipped", "not_applicable"}
@@ -152,6 +236,42 @@ class Finding:
             )
         definition = BY_NAME.get(self.rule)
         return definition.fix if definition and self.status == "failed" else None
+
+
+def stopped_build_stages(findings: Iterable[Finding]) -> frozenset[str]:
+    """Return the stages whose build a tool, time or resource problem stopped.
+
+    Such a build left a truncated log, so the other build results of its stage only
+    follow from what stopped it (see :func:`follows_stopped_build`).
+
+    Args:
+        findings: The findings of a run.
+
+    Returns:
+        The stages, with an empty name for a finding without one.
+    """
+    return frozenset(
+        item.stage or ""
+        for item in findings
+        if item.is_blocking and item.prevents_checking and item.rule.startswith(_BUILD_FAMILY)
+    )
+
+
+def follows_stopped_build(finding: Finding, stages: frozenset[str]) -> bool:
+    """Return whether ``finding`` is a build result of a stage whose build was stopped.
+
+    Args:
+        finding: Any finding.
+        stages: The stopped stages, as :func:`stopped_build_stages` returns them.
+
+    Returns:
+        Whether the finding only reflects the truncated log of a stopped build.
+    """
+    return (
+        finding.rule.startswith(_BUILD_FAMILY)
+        and not finding.prevents_checking
+        and (finding.stage or "") in stages
+    )
 
 
 def has_blockers(findings: list[Finding]) -> bool:
@@ -198,7 +318,7 @@ def internal_error_finding(
         The finding.
     """
     return Finding(
-        "execution.internal",
+        INTERNAL_ERROR_RULE,
         f"Internal error ({type(error).__name__}): {error}",
         severity="error",
         status="inconclusive",

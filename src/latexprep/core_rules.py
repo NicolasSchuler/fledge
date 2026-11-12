@@ -435,8 +435,9 @@ RULES = (
             "note that lists them, instead of repeating the cause once per check."
         ),
         tests=(
-            "tests.test_report_cascades.BibliographyCascadeTests.test_missing_figure_yields_one_bibliography_note",
+            "tests.test_report_cascades.BibliographyCascadeTests.test_missing_input_file_yields_one_bibliography_note",
             "tests.test_report_cascades.BibliographyCascadeTests.test_ambiguous_main_yields_one_bibliography_note",
+            "tests.test_report_cascades.BibliographyCascadeTests.test_missing_figure_leaves_the_bibliography_checks_complete",
         ),
         fix="Fix the reported source error; these bibliography checks then run in full.",
         mandatory=True,

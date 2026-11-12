@@ -18,6 +18,8 @@ from .findings import EvidenceKind, Finding, Severity, Status
 
 # The uncertainty that follows from other causes; a note names a cause instead.
 SELECTION_UNAVAILABLE = "No complete bibliography resource selection is available"
+# The rule of the one note that replaces the summaries restating a source error (BIB009).
+SOURCE_ERROR_NOTE_RULE = "bibliography.source_error"
 
 
 def located_finding(
@@ -264,9 +266,9 @@ class ResultCollector:
         # An unavailable selection only follows from the causes; name a cause instead.
         reported = [reason for reason in reported if reason != SELECTION_UNAVAILABLE] or reported
         note = Finding(
-            "bibliography.source_error",
+            SOURCE_ERROR_NOTE_RULE,
             f"Bibliography checks {', '.join(codes)} were inconclusive because of a source "
-            f"error reported above: {reported[0].rstrip('.')}.",
+            f"error: {reported[0].rstrip('.')}.",
             severity="warning",
             status="inconclusive",
             evidence_kind=EvidenceKind.DERIVED,

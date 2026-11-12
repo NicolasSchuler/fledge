@@ -1,12 +1,16 @@
 """Report output formats and the one dispatch commands use to write a final report.
 
-A report is redacted once and every format is rendered from that one redacted copy.
+A report is redacted once and every format is rendered from that one redacted copy. The
+places a report names for its reader, the settings file and the files of CI annotations,
+are worked out here from the real paths, before redaction generalizes them.
 """
 
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping
 from enum import StrEnum
+from pathlib import Path
 from typing import assert_never
 
 import click
@@ -17,7 +21,12 @@ from .compact_report import render_redacted_compact
 from .finding_view import DEFAULT_RENDER_OPTIONS, RenderOptions
 from .html_report import render_redacted_html
 from .report import RedactedReport, Report, redact_report, redacted_json
-from .terminal_report import print_redacted_report, render_redacted_terminal
+from .terminal_report import brief_status, print_redacted_report, render_redacted_terminal
+
+# A path that climbs more directories than this from the working directory is shown whole.
+_MAX_PARENT_STEPS = 2
+# The repository root of a GitHub Actions job, which annotation paths are relative to.
+_WORKSPACE_VARIABLE = "GITHUB_WORKSPACE"
 
 
 class OutputFormat(StrEnum):
@@ -117,6 +126,11 @@ def write_redacted_report(
             rendered here. The terminal format does not use it.
     """
     if output_format is OutputFormat.TERMINAL:
+        if (status := brief_status(report)) is not None:
+            # A rejected request or a cancelled run says nothing about the paper: one short
+            # message on stderr, as for a usage error, and nothing on stdout.
+            click.echo(status, err=True)
+            return
         print_redacted_report(report, console, options=options)
         return
     if document is None:
@@ -155,3 +169,47 @@ def write_report(
         preview_images=preview_images,
         document=document,
     )
+
+
+def working_directory_path(path: str | Path) -> str:
+    """Name a file as the user can open it from the working directory.
+
+    Args:
+        path: An absolute path.
+
+    Returns:
+        The path relative to the working directory when it is inside it or at most
+        ``_MAX_PARENT_STEPS`` directories above, otherwise the absolute path.
+    """
+    absolute = Path(path)
+    try:
+        relative = Path(os.path.relpath(absolute, Path.cwd()))
+    except ValueError:  # another drive on Windows
+        return str(absolute)
+    if relative.parts.count("..") > _MAX_PARENT_STEPS:
+        return str(absolute)
+    return relative.as_posix()
+
+
+def annotation_prefix(source: Path) -> str:
+    """Return the directory of a project relative to the repository root, for CI annotations.
+
+    GitHub resolves the file of an annotation relative to the repository root, which is
+    ``GITHUB_WORKSPACE`` in a job and the working directory elsewhere, while findings
+    name files relative to the project.
+
+    Args:
+        source: The input of the run.
+
+    Returns:
+        The project directory relative to the root, in POSIX form; empty when the input
+        is a ZIP, is the root itself or lies outside it.
+    """
+    if not source.is_dir():
+        return ""
+    root = Path(os.environ.get(_WORKSPACE_VARIABLE) or Path.cwd()).resolve()
+    try:
+        relative = source.resolve().relative_to(root)
+    except ValueError:
+        return ""
+    return "" if relative == Path() else relative.as_posix()

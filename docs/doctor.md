@@ -40,8 +40,8 @@ Only enabled additional PDF measurements cause advisory probes of their optional
 tools, such as `qpdf`, MuPDF or `pdftohtml`. These probes establish installation
 and version availability only. They do not exercise those measurements or prove
 support for the manuscript's PDF structures. Missing optional tools produce
-advisories; missing required tools block the diagnostic result. Either finding
-names the package that provides the tool and how to install it.
+advisories; missing required tools fail the diagnostic with exit code 4. Either
+finding names the package that provides the tool and how to install it.
 
 The JSON report distinguishes a tool found on `PATH`, a version verified under
 isolation, and a tool exercised by the built-in fixture. A present executable
@@ -54,6 +54,10 @@ A pass covers this built-in fixture and the named engines. It does not establish
 that your custom classes, fonts, bibliography packages or actual manuscript will
 build. Use `fledge check PROJECT` for project-specific evidence.
 
-The normal exit codes apply: `0` passed, `1` passed with advisories, `3` blocked,
-`4` invalid request or operational error, and `130` cancelled. `--quiet` suppresses
-progress and retains the final report. `--json` prints the JSON report.
+The normal [exit codes](reports.md#exit-codes) apply: `0` passed, `1` passed with
+advisories, `4` a failed diagnostic (a missing or unusable required tool, a sandbox
+that cannot start, a failing built-in fixture, a time or resource limit) or an
+invalid request, `70` an internal error, and `130` cancelled. The doctor never
+ends with `3`, which means that a paper needs a fix, because it does not examine
+one. `--quiet` suppresses progress and retains the final report. `--json` prints
+the JSON report.

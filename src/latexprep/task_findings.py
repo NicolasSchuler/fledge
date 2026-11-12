@@ -8,7 +8,9 @@ finding. Report renderers read these findings back, so the shape is a contract:
   prerequisites, so a renderer can group everything one root failure prevented.
 - ``inconclusive`` (error): the task ran and failed. ``details["task"]`` names it. A
   failure that is a defect in Fledge, not a problem with the input, also carries
-  ``details["traceback"]``, the path-free frames, and the report-this-defect advice.
+  ``details["traceback"]``, the path-free frames, and the report-this-defect advice. A
+  task the user cancelled carries ``details["cancelled"]``: ``running`` when it was queued
+  or running, ``waiting`` when its prerequisites had not completed.
 
 This module only builds and reads those findings; it does not decide when to report.
 """
@@ -19,12 +21,13 @@ from collections.abc import Iterable
 
 from .defects import REPORT_DEFECT_SUGGESTION
 from .findings import Finding
-from .scheduler import TaskResult
+from .scheduler import CANCELLED_RUNNING, TaskResult, TaskStatus
 
 TASK_RULE = "execution.task"
 TASK_DETAIL = "task"
 BLOCKED_BY_DETAIL = "blocked_by"
 TRACEBACK_DETAIL = "traceback"
+CANCELLED_DETAIL = "cancelled"
 
 
 def blocked_task_finding(result: TaskResult) -> Finding:
@@ -62,6 +65,8 @@ def failed_task_finding(result: TaskResult) -> Finding:
     details: dict[str, object] = {TASK_DETAIL: result.name}
     if result.defect_frames:
         details[TRACEBACK_DETAIL] = list(result.defect_frames)
+    if result.status is TaskStatus.CANCELLED:
+        details[CANCELLED_DETAIL] = "running" if result.error == CANCELLED_RUNNING else "waiting"
     return Finding(
         TASK_RULE,
         f"{result.name}: {result.error}",
@@ -92,3 +97,19 @@ def blocked_prerequisites(finding: Finding) -> tuple[str, ...]:
     if not isinstance(prerequisites, list):
         return ()
     return tuple(str(item) for item in prerequisites)
+
+
+def cancelled_task(finding: Finding) -> str | None:
+    """Return how a cancelled task was interrupted: ``running`` or ``waiting``.
+
+    Args:
+        finding: Any finding.
+
+    Returns:
+        The value of ``details["cancelled"]`` of a task finding, or ``None`` for any other
+        finding.
+    """
+    value = finding.details.get(CANCELLED_DETAIL)
+    if finding.rule != TASK_RULE or value not in {"running", "waiting"}:
+        return None
+    return str(value)

@@ -143,4 +143,6 @@ def print_rule_explanation(rule: Rule, console: Console, *, defaults: Settings) 
     console.print(Text(rule.description))
     console.print(Text(_activation_line(rule_activation(rule, defaults))))
     console.print(Text(f"Next: {rule.fix}"))
+    if rule.reference_url:
+        console.print(Text(f"Reference: {rule.reference_url}"))
     console.print(Text(f"Diagnostic name: {rule.name}"))

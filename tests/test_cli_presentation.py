@@ -45,11 +45,17 @@ class PresentationTests(unittest.TestCase):
         self.assertIn("Next:", text)
         self.assertIn("ERROR / inconclusive", text)
         self.assertIn("[bold]literal[/bold]", text)
-        self.assertNotIn("pdf / pages", text)
-        self.assertIn(
-            "pdf / pages", render_terminal(report, options=RenderOptions(show_passed=True))
-        )
+        self.assertNotIn("PDF pages", text)
+        self.assertIn("PDF pages", render_terminal(report, options=RenderOptions(show_passed=True)))
         self.assertNotIn("\x1b", text)
+        # Both open errors are problems of their own; the report ends with where to start.
+        self.assertTrue(
+            text.endswith(
+                "Blocked: 2 problems to fix. Start with TEX105 (Abstract word count) "
+                "at intro.tex:3."
+            ),
+            text,
+        )
 
     def test_compact_preserves_complete_messages_on_one_line_and_no_terminal_escapes(self):
         message = "Unexpected [red]literal[/red]\nsecond line " + "long " * 100 + "THE END"
@@ -67,7 +73,8 @@ class PresentationTests(unittest.TestCase):
             ],
         )
         text = render_compact(report)
-        self.assertEqual(len(text.splitlines()), 2)
+        self.assertEqual(len(text.splitlines()), 3)
+        self.assertTrue(text.splitlines()[-1].startswith("verdict: Blocked: 1 problem to fix."))
         self.assertIn("TEX005 error/failed chapter.tex:19", text)
         self.assertIn("[red]literal[/red]\\nsecond line", text)
         self.assertIn("THE END", text)
@@ -134,7 +141,8 @@ class PresentationTests(unittest.TestCase):
         compact = render_compact(report, options=RenderOptions(show_passed=True))
         self.assertNotIn("never-shown.tex", compact)
         self.assertNotIn("\x1b", compact)
-        self.assertEqual(len(compact.splitlines()), 1 + len(report.findings))
+        # The outcome line, one line per finding and the verdict.
+        self.assertEqual(len(compact.splitlines()), 2 + len(report.findings))
         line = next(row for row in compact.splitlines() if row.startswith("TEX"))
         self.assertIn(" | evidence: a.tex:3, b.tex:9, c.tex:1 (+2 more) | ", line)
         self.assertLess(line.index("evidence:"), line.index("next:"))
@@ -184,9 +192,10 @@ class PresentationTests(unittest.TestCase):
         self.assertNotIn("No bibliography backend", text)
         self.assertIn("Fonts unavailable", text)
         self.assertIn("1 incomplete, 2 not applicable, 1 passed result", text)
+        # Each result is counted once: an error that reached no decision is incomplete.
         self.assertEqual(
             render_compact(report).splitlines()[0].split(" | ")[1],
-            "1 error, 0 warnings, 1 incomplete, 2 not applicable, 1 passed result",
+            "0 errors, 0 warnings, 1 incomplete, 2 not applicable, 1 passed result",
         )
         shown = render_terminal(report, options=RenderOptions(show_passed=True))
         self.assertIn("Online checks were not requested", shown)
@@ -200,7 +209,7 @@ class PresentationTests(unittest.TestCase):
         quiet = render_terminal(only_notes)
         self.assertIn("No issues found", quiet)
         self.assertNotIn("fledge rule", quiet)
-        self.assertEqual(len(render_compact(only_notes).splitlines()), 1)
+        self.assertEqual(len(render_compact(only_notes).splitlines()), 2)
         self.assertIn("0 incomplete, 2 not applicable", render_compact(only_notes))
 
     def test_many_changes_are_summarized_by_kind_unless_diffs_are_requested(self):
@@ -215,7 +224,7 @@ class PresentationTests(unittest.TestCase):
         report = Report("prepare", outcome=Outcome.PLANNED, changes=changes)
         text = render_terminal(report)
         self.assertIn(
-            "50 proposed/applied changes (original input unchanged): "
+            "50 changes to the separate copy (your files are unchanged): "
             "exclude: 37, move: 12, rewrite: 1",
             text,
         )
@@ -235,7 +244,7 @@ class PresentationTests(unittest.TestCase):
         )
         compact = render_compact(report)
         self.assertIn("changes: 50 (exclude: 37, move: 12, rewrite: 1; use --json", compact)
-        self.assertEqual(len(compact.splitlines()), 2)
+        self.assertEqual(len(compact.splitlines()), 3)
 
     def test_formatting_diff_is_shown_only_when_requested(self):
         report = Report(

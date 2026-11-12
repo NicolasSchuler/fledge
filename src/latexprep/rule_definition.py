@@ -13,8 +13,8 @@ RULE_SCHEMA_VERSION = 1
 class Rule:
     """One catalogued check.
 
-    ``mandatory``, ``reviewable`` and ``not_checked_area`` are facts about how the rule is
-    treated, so no module keeps a list of codes of its own.
+    ``mandatory``, ``reviewable``, ``not_checked_area`` and ``suggestion`` are facts about
+    how the rule is treated, so no module keeps a list of codes of its own.
 
     Attributes:
         code: The stable public identifier (``TEX001``), never reused.
@@ -34,6 +34,11 @@ class Rule:
             or accept.
         not_checked_area: The opt-in area (``coverage_hints``) that a run reports as not
             checked while none of the area's checks is configured.
+        suggestion: Marks optional advice. Its findings have the ``suggestion`` severity,
+            never change the outcome or the exit code, are reported in a section of their
+            own, and appear only when a selector other than ``ALL`` selects the rule.
+        reference_url: A page that explains the advice or the convention behind the
+            check, shown by ``fledge rule CODE``.
     """
 
     code: str
@@ -46,6 +51,8 @@ class Rule:
     mandatory: bool = False
     reviewable: bool = False
     not_checked_area: str | None = None
+    suggestion: bool = False
+    reference_url: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         """Return the rule as plain data for ``fledge rules --json`` and ``fledge rule --json``."""

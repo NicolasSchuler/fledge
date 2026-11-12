@@ -18,6 +18,9 @@ td,th{text-align:left;vertical-align:top;border:1px solid #cad1d6;padding:.4rem}
 .context{background:#edf0f3}
 .review{border-left:4px solid #9a6200;padding:.5rem}
 .location{color:#42515e}
+.follow-on{margin-left:2rem;border-style:dashed}
+.cause,.counts{color:#42515e}
+.verdict{font-weight:600}
 svg{max-height:400px;max-width:100%;width:340px}
 .paper{fill:white;stroke:#526474;stroke-width:1}
 .region{fill:#eaa43b;fill-opacity:.3;stroke:#9a4900;stroke-width:1}
@@ -37,6 +40,7 @@ a:focus-visible,summary:focus-visible{outline:3px solid #006b9a;outline-offset:3
 caption{text-align:left;font-weight:600;padding:.5rem 0}
 @media(max-width:650px){body{margin:1rem auto;padding:0 .5rem}
 article,section{padding:.65rem}
+.follow-on{margin-left:1rem}
 .page-pair{grid-template-columns:1fr}
 .file-table{overflow-x:auto}
 .file-table table{min-width:480px}}
@@ -47,7 +51,7 @@ td,th{border-color:#3b4650}
 .removed{background:#4d2327}
 .added{background:#1f4128}
 .context{background:#27303a}
-.location{color:#a9b6c2}
+.location,.cause,.counts{color:#a9b6c2}
 a{color:#7fbaf2}
 .paper{fill:#1b2128;stroke:#8696a5}
 .region{fill:#eaa43b;fill-opacity:.35;stroke:#f2b866}
@@ -65,6 +69,8 @@ a{color:inherit}
 <header>
 <h1>Passed with advisories</h1>
 <p>selected source, bibliography, privacy, isolated build and PDF checks</p>
+<p class="counts">0 errors, 1 warning, 1 incomplete, 3 not applicable, 3 passed results</p>
+<p class="verdict">Passed with 1 warning to review.</p>
 <p>Results cover the stated checks. Review decisions retain the original evidence; they do not prove compliance or supply missing verification.</p>
 <p>Document: main.tex</p>
 </header>

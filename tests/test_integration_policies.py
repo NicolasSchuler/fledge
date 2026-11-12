@@ -42,6 +42,7 @@ EXIT_CODES = {
     "accepted_exceptions": 2,
     "blocked": 3,
     "error": 4,
+    "internal_error": 70,
 }
 
 TWO_PAGES = r"""\documentclass{article}

@@ -15,12 +15,16 @@ from latexprep.compact_report import render_compact
 from latexprep.config import Settings
 from latexprep.core import run_job
 from latexprep.coverage_hints import not_checked_areas, not_checked_summary
+from latexprep.errors import RequestError
 from latexprep.execution_records import record_not_checked, record_settings_source
-from latexprep.finding_view import RenderOptions
-from latexprep.findings import Finding
+from latexprep.finding_view import RenderOptions, finding_views
+from latexprep.findings import Finding, cancelled_finding, request_error_finding
+from latexprep.html_report import render_html
 from latexprep.job_context import JobRequest
-from latexprep.report import Outcome, Report
+from latexprep.report import REQUEST_SCOPE, Outcome, Report, redact_report
+from latexprep.scheduler import CANCELLED_RUNNING, TaskResult, TaskStatus
 from latexprep.submission_options import SubmissionOptions
+from latexprep.task_findings import failed_task_finding
 from latexprep.terminal_report import render_terminal
 from tests.support import controlled_backends, write_project
 
@@ -157,7 +161,8 @@ class DuplicateFindingTests(unittest.TestCase):
         )
         report = Report("prepare", findings=[marker, recheck])
         terminal = render_terminal(report)
-        self.assertEqual(terminal.count("TEX001"), 1, terminal)
+        # Headings carry two spaces after the code; the closing hint names the code once more.
+        self.assertEqual(terminal.count("TEX001  "), 1, terminal)
         self.assertNotIn("final source checks", terminal)
         self.assertIn("0 errors, 1 warning,", terminal)
         self.assertEqual(render_compact(report).count("TEX001"), 1)
@@ -173,7 +178,7 @@ class DuplicateFindingTests(unittest.TestCase):
             details={"stage": "final source checks"},
         )
         terminal = render_terminal(Report("prepare", findings=[initial, changed]))
-        self.assertEqual(terminal.count("TEX001"), 2, terminal)
+        self.assertEqual(terminal.count("TEX001  "), 2, terminal)
         self.assertIn("[final source checks]", terminal)
 
     def test_build_log_findings_list_every_stage_once(self):
@@ -186,7 +191,7 @@ class DuplicateFindingTests(unittest.TestCase):
             for stage in ("baseline", "transformed", "archive")
         ]
         terminal = render_terminal(Report("prepare", findings=findings))
-        self.assertEqual(terminal.count("BLD003"), 1, terminal)
+        self.assertEqual(terminal.count("BLD003  "), 1, terminal)
         self.assertIn("[baseline, transformed, archive]", terminal)
 
     def test_distinct_locations_stay_separate(self):
@@ -317,11 +322,27 @@ class BibliographyCascadeTests(unittest.TestCase):
             notes[0].details["inconclusive_checks"], ["BIB101", "BIB102", "BIB105", "BIB106"]
         )
 
-    def test_missing_figure_yields_one_bibliography_note(self):
-        main = CITING.replace("\\begin{document}\n", "\\begin{document}\n\\includegraphics{gone}\n")
+    def test_missing_input_file_yields_one_bibliography_note(self):
+        main = CITING.replace("\\begin{document}\n", "\\begin{document}\n\\input{gone}\n")
         project = write_project(self.root / "paper", {"main.tex": main, "refs.bib": BIB})
         findings = check_bibliography_coverage_and_fields(project, "main.tex", self.options)
         self.assert_one_note(findings, "Literal dependency 'gone' is missing")
+
+    def test_missing_figure_leaves_the_bibliography_checks_complete(self):
+        """Check that a missing figure, which cannot hide a citation, leaves the checks complete.
+
+        The citation coverage still decides, so a misspelled key fails instead of becoming
+        inconclusive behind the figure.
+        """
+        main = CITING.replace("\\begin{document}\n", "\\begin{document}\n\\includegraphics{gone}\n")
+        project = write_project(self.root / "paper", {"main.tex": main, "refs.bib": BIB})
+        findings = check_bibliography_coverage_and_fields(project, "main.tex", self.options)
+        self.assertFalse(any(item.rule == "bibliography.source_error" for item in findings))
+        self.assertTrue(any(item.code == "BIB101" and item.status == "passed" for item in findings))
+        misspelled = main.replace("\\cite{knuth}", "\\cite{knuht}")
+        project = write_project(self.root / "typo", {"main.tex": misspelled, "refs.bib": BIB})
+        findings = check_bibliography_coverage_and_fields(project, "main.tex", self.options)
+        self.assertTrue(any(item.code == "BIB101" and item.status == "failed" for item in findings))
 
     def test_ambiguous_main_yields_one_bibliography_note(self):
         project = write_project(
@@ -365,7 +386,8 @@ class MainSelectionTests(unittest.TestCase):
         ]
         self.assertEqual([item.rule for item in roots], ["project.main_selection"])
         self.assertIn("a.tex, b.tex", roots[0].message)
-        self.assertEqual(report.outcome, "blocked")
+        # An input that does not say which document to check is not a paper problem.
+        self.assertEqual(report.outcome, "error")
 
 
 class NotCheckedFooterTests(unittest.TestCase):
@@ -477,6 +499,221 @@ class NotCheckedFooterTests(unittest.TestCase):
     def test_reports_without_the_field_have_no_footer(self):
         self.assertNotIn("Not checked", render_terminal(Report("pdf", outcome=Outcome.PASSED)))
         self.assertIsNone(not_checked_summary(()))
+
+
+def baseline(rule: str, message: str, **fields: object) -> Finding:
+    """Return a finding of the baseline build of ``main.tex``, an error unless said otherwise."""
+    values: dict[str, object] = {"severity": "error", **fields}
+    return Finding(rule, message, details={"document": "main.tex", "stage": "baseline"}, **values)
+
+
+def missing_figure_run() -> list[Finding]:
+    """Return the findings of a check whose missing figure stopped the build.
+
+    The paper also cites a misspelled key and holds a TODO marker, two problems of their
+    own.
+    """
+    return [
+        Finding(
+            "source.missing_dependency",
+            "Literal dependency 'figures/plot' is missing from the project.",
+            severity="error",
+            path="sections/figs.tex",
+            line=2,
+            details={"command": "includegraphics"},
+        ),
+        baseline(
+            "build.tex_error",
+            "./sections/figs.tex:2: LaTeX Error: File `figures/plot' not found.",
+            path="sections/figs.tex",
+            line=2,
+        ),
+        baseline(
+            "build.tex_error",
+            "./sections/figs.tex:2:  ==> Fatal error occurred, no output PDF file produced!",
+            path="sections/figs.tex",
+            line=2,
+        ),
+        baseline("build.failed", "Build tool exited with status 12.", path="main.tex"),
+        baseline("build.missing_pdf", "No complete new PDF was produced.", path="main.tex"),
+        Finding(
+            "build.baseline",
+            "Required baseline build did not succeed",
+            severity="error",
+            status="inconclusive",
+        ),
+        baseline(
+            "build.submission_dependencies",
+            "Build dependency evidence is incomplete.",
+            severity="warning",
+            status="inconclusive",
+            path="main.tex",
+        ),
+        baseline(
+            "build.undefined_citation",
+            "Citation resolution was not checked: the build stopped on a TeX error.",
+            severity="warning",
+            status="inconclusive",
+        ),
+        Finding(
+            "bibliography.citation_coverage",
+            "Citation key 'knuth1948' has no entry.",
+            severity="error",
+            path="sections/results.tex",
+            line=5,
+        ),
+        Finding("source.edit_marker", "TODO", path="sections/figs.tex", line=3),
+    ]
+
+
+class FollowOnTests(unittest.TestCase):
+    """A blocked report starts with its causes, each followed by the results it explains."""
+
+    def report(self) -> Report:
+        """Return the blocked preparation report of :func:`missing_figure_run`."""
+        return Report("prepare", outcome=Outcome.BLOCKED, findings=missing_figure_run())
+
+    def test_follow_ons_come_after_their_cause_and_name_it(self):
+        views = finding_views(redact_report(self.report()), show_hidden=False)
+        self.assertEqual(
+            [(view.code, view.cause) for view in views],
+            [
+                ("TEX005", ""),
+                ("BLD009", "TEX005 sections/figs.tex:2"),
+                ("build.failed", "TEX005 sections/figs.tex:2"),
+                ("build.missing_pdf", "TEX005 sections/figs.tex:2"),
+                ("BLD009", "TEX005 sections/figs.tex:2"),
+                ("build.baseline", "TEX005 sections/figs.tex:2"),
+                ("BLD001", "TEX005 sections/figs.tex:2"),
+                ("build.submission_dependencies", "TEX005 sections/figs.tex:2"),
+                ("BIB101", ""),
+                ("TEX001", ""),
+            ],
+        )
+        # The TeX error that names the missing file comes first, before TeX's closing line.
+        self.assertIn("File `figures/plot' not found", views[1].message)
+
+    def test_the_terminal_report_groups_follow_ons_and_ends_with_the_verdict(self):
+        text = render_terminal(self.report())
+        self.assertIn("6 errors, 1 warning, 3 incomplete, 0 not applicable, 0 passed results", text)
+        self.assertLess(text.index("TEX005  "), text.index("Follow-on results"))
+        self.assertLess(text.index("Follow-on results"), text.index("BIB101  "))
+        self.assertTrue(
+            text.endswith(
+                "Blocked: 2 problems to fix. Start with TEX005 (Missing source dependencies) "
+                "at sections/figs.tex:2. Nothing was published."
+            ),
+            text,
+        )
+
+    def test_compact_and_html_mark_follow_ons_and_carry_the_verdict(self):
+        compact = render_compact(self.report()).splitlines()
+        self.assertEqual(
+            sum("| caused by: TEX005 sections/figs.tex:2 |" in row for row in compact), 7
+        )
+        self.assertTrue(compact[-1].startswith("verdict: Blocked: 2 problems to fix."))
+        html = render_html(self.report())
+        self.assertEqual(html.count('class="follow-on"'), 7)
+        self.assertIn('<p class="counts">6 errors, 1 warning, 3 incomplete', html)
+        self.assertIn('<p class="verdict">Blocked: 2 problems to fix.', html)
+
+    def test_a_stopped_build_follows_its_cause_and_could_not_be_checked(self):
+        findings = [
+            baseline("build.timeout", "The build was stopped after 1 s.", path="main.tex"),
+            baseline("build.missing_pdf", "No complete new PDF was produced.", path="main.tex"),
+            baseline("build.undefined_citation", "Citation `knuth' undefined."),
+            baseline("build.rerun_required", "Rerun to get cross-references right."),
+        ]
+        report = Report("check", outcome=Outcome.ERROR, findings=findings)
+        views = finding_views(redact_report(report), show_hidden=False)
+        self.assertEqual(views[0].code, "build.timeout")
+        self.assertTrue(all(view.cause == "build.timeout main.tex" for view in views[1:]))
+        self.assertTrue(render_terminal(report).endswith("Could not check: Build timed out."))
+
+
+class BriefStatusTests(unittest.TestCase):
+    """A rejected request and a cancelled run print a short status instead of a report."""
+
+    def test_a_rejected_request_is_one_error_and_one_hint(self):
+        error = RequestError("Input does not exist: paper", "Pass the project folder or ZIP.")
+        report = Report(
+            "check",
+            outcome=Outcome.ERROR,
+            scope=REQUEST_SCOPE,
+            findings=[request_error_finding(error, "unused")],
+            execution={"not_checked": [{"area": "page_limit", "label": "page limit"}]},
+        )
+        self.assertEqual(
+            render_terminal(report),
+            "Error: Input does not exist: paper\nHint: Pass the project folder or ZIP.",
+        )
+
+    def test_a_cancelled_run_is_one_line_naming_the_running_task(self):
+        report = Report(
+            "check",
+            outcome=Outcome.CANCELLED,
+            findings=[
+                cancelled_finding("Cancelled; no verified output was published"),
+                failed_task_finding(
+                    TaskResult("baseline build", TaskStatus.CANCELLED, error=CANCELLED_RUNNING)
+                ),
+                failed_task_finding(
+                    TaskResult(
+                        "source checks",
+                        TaskStatus.CANCELLED,
+                        error="Cancelled before prerequisites completed",
+                    )
+                ),
+            ],
+        )
+        self.assertEqual(
+            render_terminal(report), "Cancelled during baseline build; nothing was published."
+        )
+        compact = render_compact(report).splitlines()
+        self.assertIn(
+            "not run: 2 checks did not finish because the run was cancelled: baseline build, "
+            "source checks",
+            compact,
+        )
+        self.assertFalse(any(row.startswith("execution.task") for row in compact))
+        self.assertEqual(
+            compact[-1], "verdict: Cancelled during baseline build; nothing was published."
+        )
+
+
+class BibliographyCommandTests(unittest.TestCase):
+    """``bib check`` blocks an undefined citation, also beside an unrelated problem."""
+
+    def bib_check(self, main: str) -> Report:
+        """Run ``bib check`` on a project of ``main`` and the reference list ``BIB``."""
+        with tempfile.TemporaryDirectory() as directory:
+            source = write_project(Path(directory) / "paper", {"main.tex": main, "refs.bib": BIB})
+            return asyncio.run(run_job(JobRequest("bib", source, Settings())))
+
+    def test_a_missing_figure_does_not_hide_a_misspelled_citation(self):
+        main = CITING.replace("\\cite{knuth}", "\\cite{knuht}").replace(
+            "\\begin{document}\n", "\\begin{document}\n\\includegraphics{gone}\n"
+        )
+        report = self.bib_check(main)
+        self.assertEqual(report.outcome, "blocked")
+        codes = {(item.code, item.status) for item in report.findings}
+        self.assertIn(("BIB101", "failed"), codes)
+        self.assertNotIn("BIB009", {item.code for item in report.findings})
+
+    def test_the_source_error_behind_incomplete_checks_is_shown_and_blocks(self):
+        main = CITING.replace("\\cite{knuth}", "\\cite{knuht}").replace(
+            "\\begin{document}\n", "\\begin{document}\n\\input{gone}\n"
+        )
+        report = self.bib_check(main)
+        self.assertEqual(report.outcome, "blocked")
+        codes = {item.code for item in report.findings}
+        self.assertIn("BIB009", codes)
+        self.assertIn("TEX005", codes)
+        views = finding_views(redact_report(report), show_hidden=False)
+        self.assertEqual(views[0].code, "TEX005")
+        self.assertTrue(
+            any(view.code == "BIB009" and view.cause.startswith("TEX005") for view in views)
+        )
 
 
 if __name__ == "__main__":

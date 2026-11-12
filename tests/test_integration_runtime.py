@@ -61,7 +61,11 @@ POPPLER_TOOLS = ("pdfinfo", "pdftotext", "pdftoppm", "pdffonts", "pdfdetach", "p
 # rename must fail these tests rather than follow silently.
 BASELINE_STAGE = "baseline"
 BASELINE_ANNOUNCEMENT = "Starting baseline build"
-CANCELLED_MESSAGE = "Cancelled; no verified output was published"
+# The one line an interrupted terminal run prints on stderr names the tasks that were
+# running, among them the baseline build.
+CANCELLED_MESSAGE = re.compile(
+    r"^Cancelled during .*baseline build.*; nothing was published\.$", re.M
+)
 # Rich draws a transient progress display instead of plain stage lines when either is set.
 FORCED_TERMINAL_VARIABLES = frozenset({"FORCE_COLOR", "TTY_COMPATIBLE"})
 # Generous waits: other builds may share the machine, and no test asserts how long a step took.
@@ -275,9 +279,12 @@ def _insert_lines(path: Path, *, after: int, lines: Iterable[str]) -> None:
 
 
 def _annotations(stdout: str) -> set[tuple[str, str, str, int]]:
-    """Collect the level, title, file and line of each GitHub annotation with a file and line."""
+    """Collect the level, code, file and line of each GitHub annotation with a file and line.
+
+    The title of an annotation is the check code followed by the check's title.
+    """
     return {
-        (match["level"], match["title"], match["file"], int(match["line"]))
+        (match["level"], match["title"].split()[0], match["file"], int(match["line"]))
         for match in map(ANNOTATION.match, stdout.splitlines())
         if match
     }
@@ -394,14 +401,14 @@ class RuntimeIntegrationTests(LiveProjectTestCase):
 
         Verifies docs/configuration.md (the deadline bounds the whole job, so the build is
         cancelled rather than timed out), docs/workflow-reference.md (cancellation drains
-        running tools: no TeX process survives) and docs/reports.md (a blocked run writes no
-        bundle).
+        running tools: no TeX process survives) and docs/reports.md (a run that Fledge could
+        not check ends as an error and writes no bundle).
         """
         run = self._prepare_endless_document("deadline", tool_timeout=600, job_timeout=5)
         findings = run.report.findings
         self.assertIn("execution.deadline", {finding.rule for finding in findings})
         self.assertNotIn("build.timeout", {finding.rule for finding in findings})
-        self.assert_outcome(run.report, Outcome.BLOCKED)
+        self.assert_outcome(run.report, Outcome.ERROR)
         stages = {stage["name"]: stage["status"] for stage in run.report.stages}
         self.assertEqual(stages.get(BASELINE_STAGE), "cancelled", stages)
         self.assertFalse(run.output.exists())
@@ -414,8 +421,8 @@ class RuntimeIntegrationTests(LiveProjectTestCase):
         A build longer than ``timeout_seconds`` is stopped and reported as ``build.timeout``.
 
         Verifies docs/configuration.md (the limit bounds one tool command, not the job: no
-        ``execution.deadline``), docs/reports.md (blocked, no bundle) and that the stopped
-        build leaves no TeX process behind.
+        ``execution.deadline``), docs/reports.md (a timeout is an error, exit code 4, and
+        writes no bundle) and that the stopped build leaves no TeX process behind.
         """
         run = self._prepare_endless_document("tooltimeout", tool_timeout=5, job_timeout=600)
         self.assertTrue(run.tex_seen, "No TeX process was seen working on the document")
@@ -426,7 +433,7 @@ class RuntimeIntegrationTests(LiveProjectTestCase):
             (timeout.stage, timeout.path, timeout.severity, timeout.status),
             (BASELINE_STAGE, run.main, "error", "failed"),
         )
-        self.assert_outcome(run.report, Outcome.BLOCKED)
+        self.assert_outcome(run.report, Outcome.ERROR)
         self.assertFalse(run.output.exists())
 
     # fmt with the real formatter.
@@ -517,16 +524,16 @@ class RuntimeIntegrationTests(LiveProjectTestCase):
             )
         return path
 
-    def test_doctor_blocks_when_poppler_is_missing(self) -> None:
-        """Check that a missing required tool blocks the diagnostic result with exit code 3.
+    def test_doctor_fails_with_exit_code_4_when_poppler_is_missing(self) -> None:
+        """Check that a missing required tool fails the diagnostic result with exit code 4.
 
         Verifies docs/doctor.md: Poppler's ``pdfinfo`` is a core tool, a missing required tool
-        blocks, and the report records the tool as not installed.
+        fails the diagnostic with exit code 4, and the report records the tool as not installed.
         """
         process = _run_command("doctor", "--json", "--quiet", PATH=self._path_without_poppler())
         report = self._json_report(process)
-        self.assertEqual(process.returncode, 3, blocking_summary(report))
-        self.assert_outcome(report, Outcome.BLOCKED)
+        self.assertEqual(process.returncode, 4, blocking_summary(report))
+        self.assert_outcome(report, Outcome.ERROR)
         self.assertFalse(report["tools"]["pdfinfo"]["installed"])
         self.assertFalse(report["tools"]["pdfinfo"]["exercised"])
         # The finding names the missing tool and the package that provides it (Poppler),
@@ -566,10 +573,10 @@ class RuntimeIntegrationTests(LiveProjectTestCase):
     def test_interrupt_during_the_build_exits_130_without_output_or_tex_process(self) -> None:
         """Check that SIGINT during the baseline build cancels ``prepare`` with exit code 130.
 
-        Verifies docs/reports.md (130 means interrupted; no bundle is written), the
-        cancellation message of the final report, and docs/workflow-reference.md
-        (cancellation drains running tools, so no TeX process survives). The message is
-        asserted in the final report on stdout.
+        Verifies docs/reports.md (130 means interrupted; no bundle is written; the terminal
+        format prints one line on stderr and no report on stdout) and
+        docs/workflow-reference.md (cancellation drains running tools, so no TeX process
+        survives).
         """
         self.require_tools(*TEX_TOOLS, "pgrep")
         base = self.scratch_directory("interrupt")
@@ -594,7 +601,8 @@ class RuntimeIntegrationTests(LiveProjectTestCase):
         stdout, rest = process.communicate(timeout=INTERRUPT_WAIT_SECONDS)
         diagnostics = (stdout + progress + rest).decode(errors="replace")
         self.assertEqual(process.returncode, 130, diagnostics)
-        self.assertIn(CANCELLED_MESSAGE, stdout.decode(), diagnostics)
+        self.assertEqual(stdout, b"", diagnostics)
+        self.assertRegex((progress + rest).decode(errors="replace"), CANCELLED_MESSAGE)
         self.assertFalse(output.exists())
         self.assertEqual(_survivors(pattern), [], "A TeX process outlived the interrupted job")
 

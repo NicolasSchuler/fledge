@@ -1,5 +1,5 @@
 {
- "schema_version": 2,
+ "schema_version": 3,
  "command": "check",
  "outcome": "passed_with_advisories",
  "scope": "selected source, bibliography, privacy, isolated build and PDF checks",

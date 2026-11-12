@@ -155,7 +155,8 @@ class WorkflowPreviewTests(unittest.IsolatedAsyncioTestCase):
                     JobRequest("prepare", self.source, settings, output, preview_output=previews),
                     backends=backends,
                 )
-            self.assertEqual(result.outcome, "blocked")
+            # The job ran out of time, so Fledge could not check: an error, not a blocked paper.
+            self.assertEqual(result.outcome, "error")
             self.assertFalse(output.exists())
             self.assertFalse(previews.exists())
             self.assertEqual(result.artifacts, {})

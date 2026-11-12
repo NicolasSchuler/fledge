@@ -18,37 +18,91 @@ the warning needs a human decision.
 
 ```text
 Passed with advisories — selected preparation checks, visual/text preservation and fresh ZIP rebuild
-0 errors, 1 warning, 0 incomplete, 4 not applicable, 23 passed results
+0 errors, 1 warning, 0 incomplete, 4 not applicable, 26 passed results
 Document: main.tex
+Settings: defaults (no settings file)
 
 TEX001  Unfinished text markers  [WARNING / failed]
-  Where: sections/results.tex:4
+  Where: sections/results.tex:6
   Possible unfinished editing or placeholder text: 'TODO'.
   Next: Finish or remove the marked draft text after reviewing its context.
-sources: /private/tmp/submission-advisory-final/sources
-archive: /private/tmp/submission-advisory-final/submission.zip
-pdf: /private/tmp/submission-advisory-final/manuscript.pdf
-report: /private/tmp/submission-advisory-final/report.json
+
+Artifacts
+sources: /private/tmp/submission/sources
+archive: /private/tmp/submission/submission.zip
+pdf: /private/tmp/submission/manuscript.pdf
+report: /private/tmp/submission/report.json
 
 Not checked (needs your settings): anonymity, page limit, ZIP size limit, forbidden packages, strict font embedding, image resolution, 93 other opt-in checks. Set them in fledge.toml (start with fledge init --preset anonymous-review|arxiv|camera-ready); see https://nicolasschuler.github.io/fledge/configuration.html
 
-Explain a check: fledge rule CODE
+Explain a check: fledge rule TEX001
+
+Passed with 1 warning to review. The submission was written.
 ```
 
-The first line gives the outcome and scope, the second the counts. Each finding
-then shows its code and name, `[SEVERITY / status]`, where it is, what was
-observed and the next step. A finding repeated in several stages is shown once
-with all stage names in brackets; the counts line counts it once. Passed results
-and scope notes are counted but listed only with `--show-passed`.
-The example above omits the terminal's decorative borders and file summary.
+The first line gives the outcome and scope, the second the counts, which count
+every result once: errors and warnings are checks that failed, *incomplete*
+results reached no decision, whatever their severity, and scope notes count as
+not applicable. A finding repeated in several stages is shown once with all
+stage names in brackets and counted once. The `Settings:` line names the
+settings file the run used, as a path you can open from the current directory,
+and the preset, or says that the defaults applied. Each finding then shows its
+code and title, `[SEVERITY / status]`, where it is, what was observed and the
+next step. Passed results and scope notes are counted but listed only with
+`--show-passed`. The example above omits the terminal's decorative borders and
+file summary. The last line is the verdict.
+
+A blocked report starts with what to fix. One mistake often produces several
+findings: a missing figure stops the build, so the build fails, leaves no PDF,
+and TeX reports the missing file again. Each such result is listed under the
+finding that caused it, so the problems to fix stand out:
+
+```text
+TEX005  Missing source dependencies  [ERROR / failed]
+  Where: sections/figs.tex:2
+  Literal dependency 'figures/plot' is missing from the project; looked for ...
+  Next: Add the file to the project or correct the name in \includegraphics.
+  Follow-on results, which usually clear once this is fixed:
+    BLD009  TeX errors in build log  [ERROR / failed]
+      main.tex: sections/figs.tex:2 [baseline]: ./sections/figs.tex:2: LaTeX Error: File `figures/plot' not found.
+    build.failed  Build failed  [ERROR / failed]
+      main.tex [baseline]: Build tool exited with status 12.
+    ...
+
+BIB101  Source citation coverage  [ERROR / failed]
+  Where: main.tex: sections/results.tex:5 [bibliography coverage and fields]
+  Citation key 'knuth1948' has no entry in this root's inspected resources.
+...
+Blocked: 2 problems to fix. Start with TEX005 (Missing source dependencies) at sections/figs.tex:2.
+```
+
+A result follows from another when it names the same problem at the same file
+and line, when it is the aftermath of a failed build (the build failed, left no
+PDF, a rebuild stage did not succeed, TeX's closing "Fatal error occurred" line,
+or a citation the stopped build could not resolve), or when its evidence is
+incomplete because of a source error it names. Within each severity, failed
+results come before incomplete ones. Results without a code, such as
+`build.failed`, are shown with a title such as *Build failed*.
 
 When a failed step prevents later checks, one line per failed step names the
-checks that did not run, as in the [blocked example](quickstart.md#3-read-the-result).
-The final **Not checked** line lists opt-in areas that did not run because they
-need your settings, or because selection turned them off. Without a settings
-file it suggests starting from a [preset](configuration.md#start-from-a-preset);
-with one, it names that file as the place to add them. This line appears in
-terminal output only; JSON reports list the same areas in `execution.not_checked`.
+checks that did not run. The **Not checked** line appears only after a run that
+passed. It lists opt-in areas that did not run because they need your settings,
+or because selection turned them off. Without a settings file it suggests
+starting from a [preset](configuration.md#start-from-a-preset); with one, it
+names that file as the place to add them. This line appears in terminal output
+only; JSON reports list the same areas in `execution.not_checked`.
+
+A request that cannot run, such as a missing input, an invalid setting or an
+unusable output path, prints two lines on stderr and nothing on stdout:
+
+```text
+Error: Input does not exist: paper
+Hint: Pass the path of the paper's LaTeX source folder or ZIP file; check the spelling and the current directory.
+```
+
+An interrupted run (Ctrl-C) prints one line on stderr, such as `Cancelled during
+baseline build; nothing was published.` The JSON report keeps every detail of
+both.
 
 ## What is in the submission?
 
@@ -80,26 +134,35 @@ table. Both include original source paths, final paths and selection reasons.
 | 0 | `planned` | No | A `--dry-run` plan; nothing was verified |
 | 1 | `passed_with_advisories` | Yes | Required checks passed; warnings need review |
 | 2 | `accepted_exceptions` | Yes | Passed only because of reviewed exceptions in your configuration |
-| 3 | `blocked` | No | A required check failed or lacked evidence |
-| 4 | `error` | No | Input, configuration, execution or report-writing problem, or an internal error |
+| 3 | `blocked` | No | The paper needs a fix: a required check failed or its evidence is incomplete because of the sources |
+| 4 | `error` | No | Fledge could not check: a tool, the sandbox, a time or resource limit, the input, the settings or writing the report failed |
 | 64 | none | No | Invalid command-line syntax; no report |
+| 70 | `internal_error` | No | A defect in Fledge |
 | 130 | `cancelled` | No | Interrupted |
 
 The *Bundle written?* column applies to `prepare --output`; `inspect` and
-`check` never write a bundle.
+`check` never write a bundle. Suggestions never change the exit code.
 
-An unexpected failure inside Fledge never ends with 0, 1 or 2: it exits with 4 and
-prints one line on stderr. The JSON report then holds a finding with the rule
-`execution.internal` that records the `error_type` and the innermost `frames`
-(`file.py:line in function`, without directories). Pass `--debug` or set
-`FLEDGE_DEBUG=1` to print the full traceback when you report the defect. A crash
-while printing or saving the report also exits with 4.
+Exit code 3 always means that the paper needs a fix. A missing or unusable tool
+(TeX, Poppler, `tex-fmt`), a sandbox that cannot start, a tool or job time limit,
+a resource limit, an input that cannot be read, an input that does not say which
+document to check (several or no main files) and a check that stopped on such a
+problem end with 4 instead, as does every failed `fledge doctor` diagnostic.
+When the paper needs a fix and Fledge also could not run some checks, the run is
+blocked (3) and the report lists both.
 
-A defect inside one check does not stop the others. The report keeps their results
-and adds an `execution.task` finding for the failed check, whose
-`details.traceback` lists the innermost frames, and the run exits with 4 rather than 3.
-A check that fails because of your input or machine, such as an unreadable file,
-blocks the run with 3 instead.
+An unexpected failure inside Fledge ends with 70 and prints one line on stderr.
+The JSON report then holds a finding with the rule `execution.internal` that
+records the `error_type` and the innermost `frames` (`file.py:line in
+function`, without directories). Pass `--debug` or set `FLEDGE_DEBUG=1` to
+print the full traceback when you report the defect. A crash while printing or
+saving the report also exits with 70.
+
+A defect inside one check does not stop the others. The report keeps their
+results and adds an `execution.task` finding for the failed check, whose
+`details.traceback` lists the innermost frames, and the run exits with 70. A
+check that stops because of your input or machine, such as an unreadable file,
+records an `execution.task` finding without a traceback and exits with 4.
 
 **Why advisories exit with 1.** A TODO marker or an unused bibliography entry
 does not stop the release, but nobody has looked at it yet. A
@@ -111,10 +174,12 @@ failed and your configuration says that is acceptable, with a written reason. A
 separate code lets automation tell "clean" from "clean because we decided so".
 The original failure stays in the report.
 
-**In CI**, treat 0 as success and 3, 4, 64 and 130 as failure. Choose a policy for
-the others: accept 1 and surface its annotations (`--output-format ci`), or fail
-on it if you want zero warnings; accept 2 only when the exceptions are committed
-in the repository's `fledge.toml`. For example, to accept 0, 1 and 2:
+**In CI**, treat 0 as success and 3, 4, 64, 70 and 130 as failure. Choose a
+policy for the others: accept 1 and surface its annotations (`--output-format
+ci`), or fail on it if you want zero warnings; accept 2 only when the exceptions
+are committed in the repository's `fledge.toml`. A 4 points at the runner (a
+missing TeX package or tool, a time limit) rather than at the paper. For
+example, to accept 0, 1 and 2:
 
 ```sh
 status=0
@@ -124,7 +189,7 @@ fledge check paper --output-format ci --quiet || status=$?
 
 For automation that needs more than the exit code, read `command` and `outcome`
 from the JSON report. An internal error still writes the report, as an
-`execution.internal` finding with exit 4.
+`execution.internal` finding with outcome `internal_error`.
 
 ## The JSON report
 
@@ -135,7 +200,7 @@ findings, settings and tool details removed:
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "command": "prepare",
   "outcome": "blocked",
   "scope": "selected source, bibliography, privacy, isolated build and PDF checks",
@@ -192,7 +257,7 @@ findings, settings and tool details removed:
 
 | Field | What it holds |
 | --- | --- |
-| `schema_version` | The report format version, currently `2` |
+| `schema_version` | The report format version, currently `3` |
 | `outcome`, `scope` | The result and what it covers |
 | `findings` | Every result, including passed ones and scope notes |
 | `changes` | Proposed or applied edits, with diffs |
@@ -201,7 +266,7 @@ findings, settings and tool details removed:
 | `stages` | Each build and verification step with its status and elapsed seconds |
 | `artifacts` | Paths of the published output, as written; empty when blocked |
 | `package_contents` | Per-document inventory, verification status, selection reasons and measured file/ZIP sizes |
-| `execution` | Configuration file, preset, check selection, opt-in checks that did not run (`not_checked`), resource use and timing |
+| `execution` | Configuration file, preset, check selection, opt-in checks that did not run (`not_checked`), suggestions that source comments silenced (`silenced_suggestions`), resource use and timing |
 
 Every other path in a report, such as the settings file, a reference PDF or a tool
 location, shows your home directory as `~` and the system temporary directory as
@@ -235,8 +300,13 @@ The JSON of `fledge rules`, `fledge rule CODE` and `fledge submission-text` has
 its own `schema_version`, currently `1`, with the same rule: it increases only when
 a field is removed, renamed or changes meaning. `fledge rules --json` lists the
 checks under `rules`; each check says whether it is `mandatory` (check selection never
-removes its findings) and whether it is `reviewable` (an explicit review decision may
-suppress or accept it).
+removes its findings), whether it is `reviewable` (an explicit review decision may
+suppress or accept it), whether it is a `suggestion` and, as `reference_url`, which
+page explains it, if any.
+
+Version 3 added the outcome `internal_error` (exit 70) and the severity
+`suggestion`, and moved runs that Fledge could not check, such as a missing tool,
+a timeout or an ambiguous main file, from `blocked` to `error`.
 
 Version 2 renamed the finding fields `evidence` to `evidence_kind` and
 `suggestion` to `next_step`, and added `incomplete`. Hyphenated rule names such
@@ -257,17 +327,68 @@ fledge check /path/to/paper --output-format compact --quiet
 ```
 
 HTML is a self-contained offline page with source diffs and, when PDF
-comparisons find differences, page previews. It follows the light or dark setting of
-the reader's browser, prints cleanly, and its title names the command and document. Compact output writes
-one line per finding, which suits pasting into an AI agent; checks that did not
-run after a failed step appear on lines starting with `not run:`. HTML and CI
-output also show a finding repeated in several stages once, but have no Not
-checked line. Reports redact known
-credential patterns but do not sanitize your sources, so read a report before
-sharing it. The [workflow reference](workflow-reference.md#report-formats)
-describes every format and the redaction rules, and
+comparisons find differences, page previews. Its header shows the counts and the
+verdict, and a result that follows from another is indented and names its cause.
+It follows the light or dark setting of the reader's browser, prints cleanly, and
+its title names the command and document.
+
+Compact output writes one line per finding, which suits pasting into an AI
+agent. The first line holds the outcome, the counts and the scope, then come the
+document and a `settings:` line. A result that follows from another comes right
+after it and carries `| caused by: CODE file:line |`; checks that did not run
+after a failed step, or because the run was cancelled, appear on lines starting
+with `not run:`; suggestions follow a `suggestions:` line; the last line starts
+with `verdict:`.
+
+CI output writes one GitHub annotation per finding, titled with the code and the
+title (`title=TEX005 Missing source dependencies`). A result that follows from
+another, a suggestion and a passed result are notices, so the errors and warnings
+that need a decision stand out, and a final notice carries the verdict. GitHub
+resolves an annotation's file relative to the repository root, so when the
+project is a folder of the repository, such as `paper`, its files are named
+`paper/main.tex`: relative to `GITHUB_WORKSPACE` in a GitHub Actions job and to
+the current directory elsewhere. Files inside a ZIP input keep their paths.
+
+HTML and CI output also show a finding repeated in several stages once, but have
+no Not checked line. Reports redact known credential patterns but do not sanitize
+your sources, so read a report before sharing it. The
+[workflow reference](workflow-reference.md#report-formats) describes every format
+and the redaction rules, and
 [preparation options](preparation-options.md#preservation-and-explicit-exceptions)
 describes accepted exceptions and suppressions.
+
+## Suggestions
+
+A suggestion is optional advice, such as a style convention, that leaves the
+decision to you. Suggestions never change the outcome or the exit code. Every
+format shows them in a section of their own, after the findings, and counts them
+separately; in JSON their `severity` is `suggestion`.
+
+Suggestions are off by default: `ALL` in the check selection does not switch them
+on. Select a suggestion by its code, family or prefix beside `ALL` in
+`[checks] select` of the settings file, or with `--select` on the command line,
+which replaces the configured selection. An `--ignore` or `[checks] ignore` entry
+still wins. `fledge rules --json` marks each suggestion with `"suggestion": true`,
+and `fledge rule CODE` names the page that explains it.
+
+To silence one suggestion where it occurs, put a TeX comment
+`% fledge: ignore CODE`, with the code the report shows, at the end of its line,
+or alone on the line just before it. Several codes are separated by commas or
+spaces:
+
+```latex
+% fledge: ignore CODE
+The sentence the suggestion is about.
+Another sentence the suggestions are about. % fledge: ignore CODE, OTHERCODE
+```
+
+A `\%` is text, not a comment. Such comments silence suggestions only. Warnings
+and errors decide the outcome, so their exceptions belong in the settings file,
+where they carry a reason and are reviewed (see
+[preparation options](preparation-options.md#preservation-and-explicit-exceptions)).
+A silenced suggestion leaves the findings; the terminal and compact reports count
+it, and the JSON report lists it under `execution.silenced_suggestions`. The
+comments stay in the submitted sources unless comment removal is selected.
 
 ## Visual PDF differences
 
