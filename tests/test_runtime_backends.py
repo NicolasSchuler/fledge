@@ -82,6 +82,42 @@ class TeXLiveRuntimeTests(unittest.TestCase):
                     self.assertIn(str(distribution / "texmf-dist"), environment["TEXMF"])
                     self.assertTrue(Path(environment["TEXMFHOME"]).is_relative_to(workspace))
 
+    def test_indexed_distribution_trees_are_searched_through_their_file_index(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            workspace = base / "workspace"
+            workspace.mkdir()
+            distribution = base / "texlive" / "2026"
+            executable = distribution / "bin/universal-darwin/pdftex"
+            executable.parent.mkdir(parents=True)
+            executable.write_bytes(b"installed engine fixture")
+            # texmf-dist and texmf-var carry an ls-R index; texmf-config has none.
+            for tree in ("texmf-dist", "texmf-var", "texmf-config"):
+                (distribution / tree).mkdir()
+            for tree in ("texmf-dist", "texmf-var"):
+                (distribution / tree / "ls-R").write_text("% ls-R -- filename database.\n")
+            context = ToolContext(
+                executable,
+                frozenset({executable}),
+                frozenset({executable, distribution}),
+                (str(executable.parent),),
+            )
+            tool = create_tool_environment(workspace, context, source_date_epoch="0")
+            texmf = tool.variables["TEXMF"]
+            self.assertTrue(texmf.startswith("{") and texmf.endswith("}"))
+            state = tool.state_directory
+            self.assertEqual(
+                texmf[1:-1].split(","),
+                [
+                    str(state / "texmf-config"),
+                    str(state / "texmf-var"),
+                    str(state / "texmf"),
+                    str(distribution / "texmf-config"),
+                    f"!!{distribution / 'texmf-var'}",
+                    f"!!{distribution / 'texmf-dist'}",
+                ],
+            )
+
     def test_other_directory_names_do_not_expand_distribution_grants(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory).resolve()

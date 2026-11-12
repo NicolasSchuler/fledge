@@ -32,6 +32,8 @@ _TEX_LOG_LINE_COLUMNS = 1000
 _TEX_ERROR_CONTEXT_COLUMNS = 254
 _TEX_ERROR_HALF_CONTEXT_COLUMNS = 238
 _STATE_DIRECTORIES = ("tmp", "config", "cache", "texmf", "texmf-config", "texmf-var")
+# The trees of a TeX Live distribution directory, in search order.
+_DISTRIBUTION_TREES = ("texmf-config", "texmf-var", "texmf-dist")
 
 
 class ToolEnvironment(NamedTuple):
@@ -182,19 +184,35 @@ def create_tool_environment(
     root = texlive_root(context.resource_roots)
     if root is not None:
         search = (
-            state / "texmf-config",
-            state / "texmf-var",
-            state / "texmf",
-            root / "texmf-config",
-            root / "texmf-var",
-            root / "texmf-dist",
+            str(state / "texmf-config"),
+            str(state / "texmf-var"),
+            str(state / "texmf"),
+            *(_distribution_tree(root / name) for name in _DISTRIBUTION_TREES),
         )
         environment.update(
             {
                 "TEXMFCNF": str(root / "texmf-dist/web2c"),
                 "TEXMFSYSCONFIG": str(root / "texmf-config"),
                 "TEXMFSYSVAR": str(root / "texmf-var"),
-                "TEXMF": "{" + ",".join(map(str, search)) + "}",
+                "TEXMF": "{" + ",".join(search) + "}",
             }
         )
     return ToolEnvironment(environment, state)
+
+
+def _distribution_tree(tree: Path) -> str:
+    """Return the ``TEXMF`` entry of a TeX Live distribution tree.
+
+    A tree with an ``ls-R`` file index is searched through that index only (the ``!!``
+    prefix), as TeX Live's own ``texmf.cnf`` does. Without the prefix, the TeX path
+    library walks the whole tree on disk for every file it does not find, which makes
+    each TeX pass several times slower on a full distribution. A tree without an index
+    keeps the disk search, so no file becomes unreachable.
+
+    Args:
+        tree: A tree of the distribution, such as ``texmf-dist``.
+
+    Returns:
+        ``!!`` followed by the tree when it has an ``ls-R`` file, otherwise the tree.
+    """
+    return f"!!{tree}" if (tree / "ls-R").is_file() else str(tree)
