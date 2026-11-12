@@ -1,8 +1,9 @@
 # Fledge preset "arxiv": a starting point for a public arXiv source upload.
 #
 # This is not an arXiv policy and passing it does not certify that arXiv will
-# accept the submission. Fledge maintains no venue rules: the settings below only
-# switch on generic checks that matter when the source itself is published. Read
+# accept the submission. Fledge maintains no venue rules: the settings below switch
+# on generic checks that matter when the source itself is published, and record
+# what arXiv's help pages said in November 2026 about the tools it runs. Read
 # arXiv's current submission instructions, fill in the commented placeholders
 # with the values that apply to you, and delete anything you do not want.
 #
@@ -35,15 +36,26 @@ report_unused_assets = true # PKG106: files outside the selected dependency grap
 # PKG102: allowed filename characters, if you want to check them. Copy the set
 # from arXiv's current instructions.
 # filename_allowed_characters = ""
-# TEX009: arXiv does not run BibTeX or Biber, so a missing generated <main>.bbl
-# beside the main file is a warning here. prepare ships an existing one that the
-# build used; build locally first so that it exists.
-require_bbl = true
-check_bbl_coverage = true # BIB109: the shipped .bbl contains every cited key.
-# BIB110 (biblatex only): arXiv reads the shipped .bbl with its own biblatex, which
-# rejects other .bbl format versions. Look up the TeX Live release in arXiv's
-# current instructions and enter the format its biblatex writes (the second line
-# of a .bbl built with that release; TeX Live 2026 writes "3.3").
+# What arXiv runs itself. It runs BibTeX or Biber when no .bbl is uploaded, and an
+# uploaded .bbl takes precedence over that run, so prepare ships the .bib files and
+# no .bbl. To upload a .bbl on purpose, set venue_runs_bibliography_tools = false:
+# prepare then ships the .bbl its verified build generated and a missing one is a
+# warning (TEX009); check_bbl_coverage (BIB109) and biblatex_bbl_format_version
+# (BIB110) then check that .bbl.
+venue_runs_bibliography_tools = true
+# arXiv runs neither makeindex nor makeglossaries. prepare ships the index, glossary
+# and nomenclature files its verified build generated; a missing one is a warning
+# (TEX012).
+venue_runs_index_tools = false
+# arXiv's processors are tex, pdftex, latex (DVI), pdflatex and xelatex, not
+# LuaLaTeX (TEX013). arXiv converts no figures, and Fledge's isolated build cannot
+# convert EPS either (TEX011): include PDF, PNG or JPEG figures.
+venue_engines = ["pdflatex", "xelatex"]
+# check_bbl_coverage = true # BIB109: the shipped .bbl contains every cited key.
+# BIB110 (biblatex only): arXiv reads an uploaded .bbl with its own biblatex, which
+# rejects other .bbl format versions. Look up the TeX Live release you select in
+# arXiv's current instructions and enter the format its biblatex writes (the second
+# line of a .bbl built with that release; TeX Live 2026 writes "3.3").
 # biblatex_bbl_format_version = ""
 
 [source_transforms]
@@ -55,7 +67,8 @@ comment_policy = "private"
 
 [build_checks]
 # BLD105: TeX Live year arXiv compiles with; warns if your local release differs.
-# expected_texlive_year = 0
+# arXiv offered TeX Live 2023 and 2025 in November 2026, with 2025 the default.
+# expected_texlive_year = 2025
 
 # ---------------------------------------------------------------------------
 # Venue-specific additions

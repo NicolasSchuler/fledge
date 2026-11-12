@@ -74,6 +74,46 @@ honors `% tex-fmt: off`; the other prefixes protect regions in Fledge's checks. 
 unmatched marker makes the result inconclusive.
 Filename overrides require `layout = "flat"` and retain flattening safety checks.
 
+## Generated files
+
+A build writes some of its content with external tools and reads it back on a later
+pass: the bibliography (`<main>.bbl`, written by BibTeX or Biber), the index (`.ind`,
+by makeindex), the glossary lists (`.gls`, `.acr` and `.sls`, by makeglossaries) and
+the nomenclature (`.nls`). A service that does not run the tool needs the file shipped
+beside the main file. Three settings say what the receiving service does itself:
+
+```toml
+[submission_checks]
+venue_runs_bibliography_tools = true # false: ship the generated .bbl; a missing one warns (TEX009)
+venue_runs_index_tools = true # false: a missing index or glossary file warns (TEX012)
+venue_engines = ["pdflatex", "xelatex"] # a build with another engine warns (TEX013)
+```
+
+`prepare` always ships the index, glossary and nomenclature files its verified build
+generated, because arXiv runs neither makeindex nor makeglossaries; a service that runs
+them only regenerates the files. It ships the generated `.bbl` only when
+`venue_runs_bibliography_tools = false`. arXiv runs BibTeX and Biber itself when no
+`.bbl` is uploaded, and an uploaded `.bbl` takes precedence over that run, so a stale
+one would replace the bibliography. A supplied `.bbl` that the build regenerated is
+otherwise left out, and the package inventory says why. A file listed in
+`package.include` is shipped as supplied instead of the generated one, and a `.bbl`
+that the build reads without regenerating it, because no `.bib` file exists, is an
+ordinary input and always ships.
+
+When generated files ship, the rebuild of the archive runs without the tools that
+wrote them: neither BibTeX nor Biber runs, and makeindex is replaced by a command that
+writes nothing. The rebuilt PDF must still match the prepared one, which proves that
+the shipped files suffice. Cleanup never removes generated files from the copy, and the
+flat layout keeps their names. The `arxiv` preset sets `venue_runs_index_tools = false`
+and `venue_engines = ["pdflatex", "xelatex"]`; arXiv's processors are tex, pdftex, latex
+(DVI), pdflatex and xelatex, not LuaLaTeX.
+
+A build also reports a list it looked for that no tool wrote, although the document
+has entries for it, such as a nomenclature when nomencl's makeindex step did not run
+(`TEX012`): the PDF lacks that list. EPS and PS figures block preparation unless their
+converted PDF is shipped (`TEX011`): no engine converts them in the isolated build, and
+TeX Live 2023 and earlier print the file name in place of the figure without an error.
+
 ## Independent manuscript and supplement packages
 
 ```toml

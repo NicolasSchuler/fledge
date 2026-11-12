@@ -46,12 +46,16 @@ class ShippedSources:
         pdf: The PDF of the build that was matched against the baseline.
         path_mapping: The source-to-package names of a flattening; empty for the preserved
             layout.
+        kept_generated: The suffixes of the generated files the package carries from the
+            verified build. The archive rebuild runs without the tools that write them, so
+            its match with ``pdf`` proves that the shipped files suffice.
     """
 
     root: Path
     main: str
     pdf: Path
     path_mapping: Mapping[str, str]
+    kept_generated: frozenset[str] = frozenset()
 
     @property
     def layout(self) -> PackageLayout:
@@ -203,7 +207,14 @@ class PackageVerification:
             The verified package, or ``None``.
         """
         context, settings, report = self.context, self.context.settings, self.reporter.report
-        final = await build_stage(context, self.reporter, extracted.root, shipped.main, ARCHIVE)
+        final = await build_stage(
+            context,
+            self.reporter,
+            extracted.root,
+            shipped.main,
+            ARCHIVE,
+            kept_generated=shipped.kept_generated,
+        )
         final_pdf = final.pdf
         if not final.success or final_pdf is None:
             return None

@@ -17,6 +17,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, NamedTuple
 
+from latexprep.bbl_checks import BblOptions
 from latexprep.core import run_job
 from latexprep.findings import Finding
 from latexprep.job_context import JobRequest
@@ -35,6 +36,19 @@ SHELL_ESCAPE_PROBE = "\\ifnum\\pdfshellescape=0 ShellEscapeOff\\else ShellEscape
 # converted PDF that was therefore never written.
 EPSTOPDF_REFUSED = re.compile(r"runsystem\(r?epstopdf [^\n]*\)\.\.\.disabled")
 CONVERTED_EPS_MISSING = re.compile(r"File `[^'\n]*-eps-converted-to\.pdf' not found")
+# A paper with an index, and a stale index from an earlier local build beside it.
+INDEXED_MAIN = r"""\documentclass{article}
+\usepackage{makeidx}
+\makeindex
+\begin{document}
+Gradient descent\index{gradient descent} minimises a loss\index{loss function}.
+\printindex
+\end{document}
+"""
+STALE_INDEX = r"""\begin{theindex}
+  \item stale entry, 9
+\end{theindex}
+"""
 
 
 def _document(body: str, preamble: str = "") -> str:
@@ -437,15 +451,16 @@ class LiveSourceProjectTests(AsyncLiveProjectTestCase):
             self.assertNotIn(folder, main)
 
     async def test_eps_figure_fails_the_build_instead_of_hanging(self) -> None:
-        """Check that the build of an EPS figure fails instead of hanging.
+        """Check that an EPS figure blocks preparation on every TeX Live release, without hanging.
 
-        An EPS figure needs epstopdf, which needs shell escape. Documented claim: pdfLaTeX
-        converts EPS only through epstopdf with shell escape, which the isolated build
-        disables, and TEX011 says so (docs/checks.md). Observed: the log tail of
+        An EPS figure needs epstopdf, which needs shell escape. Documented claim: no engine
+        converts EPS in the isolated build, and TEX011 blocks such a figure
+        (docs/checks.md). TeX Live 2024 and later also fail the build: the log tail of
         build.failed shows TeX refusing the epstopdf command
         ("runsystem(repstopdf ...)...disabled") and pdftex.def's error for the converted
-        "-eps-converted-to.pdf" file that was never written; there is no timeout or job
-        deadline, and the job is blocked.
+        "-eps-converted-to.pdf" file that was never written. TeX Live 2023, the release of
+        Ubuntu 24.04, prints the file name instead of the figure and builds, which only
+        TEX011 catches. There is no timeout or job deadline.
         """
         figure = _document("\\includegraphics{figures/plot.eps}", "\\usepackage{graphicx}\n")
         prepared = await self.prepare_files(
@@ -455,17 +470,45 @@ class LiveSourceProjectTests(AsyncLiveProjectTestCase):
         report = prepared.report
         self.assertEqual(_with_rule(report, "execution.deadline"), [])
         self.assertEqual(_with_rule(report, "build.timeout"), [])
+        self.assertEqual(
+            _results(_with_code(report, "TEX011")), {("error", "failed", "figures/plot.eps")}
+        )
         logs = [
             str(item.details.get("log_tail", "")) for item in _with_rule(report, "build.failed")
         ]
-        refused = [
-            log
-            for log in logs
-            if EPSTOPDF_REFUSED.search(log) and CONVERTED_EPS_MISSING.search(log)
-        ]
-        self.assertTrue(refused, logs)
-        advisory = _with_code(report, "TEX011")
-        self.assertEqual(_results(advisory), {("info", "failed", "figures/plot.eps")})
+        if logs:
+            refused = [
+                log
+                for log in logs
+                if EPSTOPDF_REFUSED.search(log) and CONVERTED_EPS_MISSING.search(log)
+            ]
+            self.assertTrue(refused, logs)
+        self.assert_unchanged(prepared)
+
+    async def test_index_ships_the_file_the_verified_build_generated(self) -> None:
+        """Ship the index the verified build generated, and prove it suffices without makeindex.
+
+        arXiv runs no makeindex, so prepare ships main.ind beside main.tex: the one its
+        build generated, not the stale supplied one, which the build workspace seeds into
+        the aux folder and makeindex rewrites. The archive rebuild runs with makeindex
+        replaced, so it reads the shipped index, and must still match the prepared PDF; the
+        readiness check of the final extraction finds the index shipped (TEX012).
+        """
+        self.require_tools("makeindex")
+        prepared = await self.prepare_files(
+            "indexed",
+            {"main.tex": INDEXED_MAIN, "main.ind": STALE_INDEX},
+            bbl_checks=BblOptions(venue_runs_index_tools=False),
+        )
+        archive = self.assert_published(prepared)
+        self.assertEqual(sorted(archive), ["main.ind", "main.tex"])
+        self.assertIn(b"gradient descent", archive["main.ind"])
+        self.assertNotIn(b"stale entry", archive["main.ind"])
+        report = prepared.report
+        self.assertEqual(_results(_with_code(report, "TEX012")), {("info", "passed", "main.ind")})
+        archive_stage = next(item for item in report.stages if item["name"] == "archive")
+        self.assertIn("fledge_generated_file_kept", " ".join(archive_stage["command"]))
+        self.assertIn("gradient descent", pdf_text(prepared.output / "manuscript.pdf"))
         self.assert_unchanged(prepared)
 
 

@@ -77,8 +77,13 @@ class PresetContentTests(unittest.TestCase):
         self.assertTrue(arxiv.submission_checks.scan_private_comments)
         self.assertTrue(arxiv.submission_checks.report_unused_assets)
         self.assertEqual(arxiv.source_transforms.comment_policy, "private")
-        self.assertTrue(arxiv.bbl_checks.require_bbl)
-        self.assertTrue(arxiv.bbl_checks.check_bbl_coverage)
+        # arXiv runs BibTeX and Biber when no .bbl is uploaded, but neither makeindex nor
+        # makeglossaries, and it offers no LuaLaTeX.
+        self.assertFalse(arxiv.bbl_checks.require_bbl)
+        self.assertFalse(arxiv.bbl_checks.check_bbl_coverage)
+        self.assertTrue(arxiv.bbl_checks.venue_runs_bibliography_tools)
+        self.assertFalse(arxiv.bbl_checks.venue_runs_index_tools)
+        self.assertEqual(arxiv.bbl_checks.venue_engines, ("pdflatex", "xelatex"))
         self.assertIsNone(arxiv.build_checks.expected_texlive_year)
         review = load_settings(None, {}, preset="anonymous-review")
         self.assertTrue(review.submission_checks.scan_identity_hints)
@@ -117,7 +122,7 @@ class PresetContentTests(unittest.TestCase):
         for table in ("[included_figure_artwork]", "[rendered_pdf_artwork]"):
             section = camera.split(table, 1)[1].split("\n[", 1)[0]
             self.assertIn('# required_color_space = ""', section)
-        self.assertIn("require_bbl = true", preset_text("arxiv"))
+        self.assertIn("venue_runs_index_tools = false", preset_text("arxiv"))
 
     def test_unknown_preset_error_lists_valid_names(self):
         with self.assertRaisesRegex(PreparationError, "anonymous-review, arxiv, camera-ready"):

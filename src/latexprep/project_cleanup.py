@@ -2,9 +2,11 @@
 
 Known debris is operating-system and version-control metadata, files that LaTeX
 rebuilds (auxiliary and diagnostic output) and editor backup or swap files. Only
-those are proposed; ``.bbl`` is never among them, because a submission usually needs
-the generated bibliography, and every input the build observed is protected whatever
-its name. Applying the proposal is the caller's work; the walk is ``project``'s.
+those are proposed. The generated files that TeX reads back (``.bbl``, ``.ind`` and the
+glossary and nomenclature lists of ``generated_files``) are never among them, because a
+service that does not run BibTeX, makeindex or makeglossaries needs them, and every
+input the build observed is protected whatever its name. Applying the proposal is the
+caller's work; the walk is ``project``'s.
 """
 
 from __future__ import annotations
@@ -40,9 +42,7 @@ _AUXILIARY_SUFFIXES = (
     ".xdv",
     ".idx",
     ".ilg",
-    ".ind",
     ".glo",
-    ".gls",
     ".glg",
     ".ist",
     ".brf",
@@ -64,7 +64,8 @@ def cleanup_reason(path: str) -> str | None:
     *directories, name = path.split("/")
     if metadata_prefix(path, is_dir=False) or name in {"Thumbs.db", "desktop.ini"}:
         return "Operating-system or version-control metadata."
-    # Never ``.bbl``: a submission usually needs the generated bibliography.
+    # Never a generated file TeX reads back (.bbl, .ind, .gls and the like): a service
+    # that does not run the tool that writes it needs it.
     if name.endswith(_AUXILIARY_SUFFIXES) or any(
         directory.startswith("_minted") for directory in directories
     ):

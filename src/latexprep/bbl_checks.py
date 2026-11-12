@@ -1,14 +1,18 @@
 r"""Shipped generated bibliography (.bbl): presence, citation coverage and biblatex format.
 
-Most venues run BibTeX or Biber themselves, so a missing .bbl is only a scope note
-unless the user requires one. Coverage and format checks run only when configured,
-and their missing evidence is inconclusive, not a pass. No source is modified.
+Most venues run BibTeX or Biber themselves when no .bbl is uploaded (arXiv among them,
+which gives an uploaded .bbl precedence), so a missing .bbl is only a scope note unless
+the user requires one or says that the receiving service runs neither tool. Coverage and
+format checks run only when configured, and their missing evidence is inconclusive, not
+a pass. No source is modified.
 
 This module owns reading the keys out of a generated .bbl (BibTeX's ``\bibitem`` form
 and biblatex's ``\entry`` form), the checks that compare them with the citations of
 the selected manuscript, and their options, ``BblOptions``, which a settings file writes
-in the ``[submission_checks]`` table. The .bib files themselves are read by
-``bibtex_syntax``.
+in the ``[submission_checks]`` table. The same options say which generated files the
+receiving service rebuilds itself and which engines it offers, which decides what
+preparation ships (``package_inputs``) and how the other readiness checks weigh a missing
+file. The .bib files themselves are read by ``bibtex_syntax``.
 """
 
 from __future__ import annotations
@@ -27,8 +31,9 @@ from .file_scan import MAX_SCAN_MATCHES
 from .finding_text import list_locations, more_suffix
 from .findings import EvidenceKind, Finding
 from .literal_text import PACKAGE_COMMANDS, first_argument_names
-from .option_config import require_text, validate_scalars
+from .option_config import require_text, require_unique_strings, validate_scalars
 from .rules import code_for
+from .setting_choices import ENGINES, Engine
 from .source_graph import SourceGraph
 from .tex_lexer import MAX_SOURCE_BYTES
 
@@ -66,10 +71,10 @@ def validate_bbl_format_version(value: object) -> None:
 
 @dataclass(frozen=True)
 class BblOptions:
-    """Which checks of the shipped .bbl run: presence, citation coverage and biblatex format.
+    """Which checks of the shipped .bbl run, and what the receiving service does itself.
 
-    Construction raises ``SettingsError`` when a flag is not a boolean or the format
-    version is malformed.
+    Construction raises ``SettingsError`` when a flag is not a boolean, the format version
+    is malformed or an engine is unknown or repeated.
 
     Attributes:
         check_bbl_coverage: Whether to compare the shipped .bbl's keys with the citations.
@@ -77,15 +82,33 @@ class BblOptions:
         biblatex_bbl_format_version: The biblatex .bbl format version the target service
             expects, as on the second line of a biblatex .bbl; ``None`` skips the format
             check.
+        venue_runs_bibliography_tools: Whether the receiving service runs BibTeX or Biber
+            when no .bbl is uploaded. When it does not, preparation ships the .bbl its
+            verified build generated and a missing .bbl fails as with ``require_bbl``.
+        venue_runs_index_tools: Whether the receiving service runs makeindex and
+            makeglossaries. When it does not, as at arXiv, a missing generated index or
+            glossary file is a warning; preparation ships the ones its build generated
+            either way.
+        venue_engines: The engines the receiving service compiles with; empty when not
+            known. A document built with another engine gets a warning.
     """
 
     check_bbl_coverage: bool = False
     require_bbl: bool = False
     biblatex_bbl_format_version: str | None = None
+    venue_runs_bibliography_tools: bool = True
+    venue_runs_index_tools: bool = True
+    venue_engines: tuple[Engine, ...] = ()
 
     def __post_init__(self) -> None:
         validate_scalars(self)
         validate_bbl_format_version(self.biblatex_bbl_format_version)
+        require_unique_strings("venue_engines", self.venue_engines, choices=ENGINES)
+
+    @property
+    def bbl_required(self) -> bool:
+        """Whether a missing .bbl fails: required explicitly, or the venue rebuilds none."""
+        return self.require_bbl or not self.venue_runs_bibliography_tools
 
 
 class Backend(StrEnum):
@@ -335,17 +358,19 @@ def _without_bib(main: str, options: BblOptions) -> list[Finding]:
     ]
 
 
-def _missing_bbl_consequence(*, require_bbl: bool) -> str:
-    """Explain what a missing .bbl means, and how to require one when it is not required."""
-    if require_bbl:
+def _missing_bbl_consequence(*, required: bool) -> str:
+    """Explain what a missing .bbl means, and how to say that the venue needs one."""
+    if required:
         return (
-            "Services that compile without running BibTeX or Biber, such as arXiv, would "
-            "render empty citations."
+            "A service that compiles without running BibTeX or Biber renders empty "
+            "citations; prepare ships the .bbl its verified build generated when "
+            "submission_checks.venue_runs_bibliography_tools = false."
         )
     return (
-        "Only services that compile without running BibTeX or Biber, such as arXiv, "
-        "need it; set submission_checks.require_bbl = true (the arxiv preset does) to "
-        "require it."
+        "Only a service that compiles without running BibTeX or Biber needs it; arXiv "
+        "runs them when no .bbl is uploaded. For a service that does not, set "
+        "submission_checks.venue_runs_bibliography_tools = false and prepare ships the "
+        ".bbl its verified build generated."
     )
 
 
@@ -372,6 +397,7 @@ def _presence(graph: SourceGraph, selected: set[str], plan: _Plan, options: BblO
         "expected_bbl": plan.expected,
         "other_bbl_files": others[:MAX_SCAN_MATCHES],
         "require_bbl": options.require_bbl,
+        "venue_runs_bibliography_tools": options.venue_runs_bibliography_tools,
         "scope": "Literal bibliography declarations in the selected source graph; the shipped "
         "file set is the supplied or prepared directory.",
     }
@@ -390,17 +416,18 @@ def _presence(graph: SourceGraph, selected: set[str], plan: _Plan, options: BblO
         if others
         else ""
     )
-    # Most venues run BibTeX or Biber themselves, so without an explicit
-    # requirement (for services such as arXiv) a missing .bbl is only a scope
-    # note, listed on request rather than as a failed result.
+    # Most venues run BibTeX or Biber themselves, so unless a .bbl is required, or the
+    # venue is said to run neither, a missing .bbl is only a scope note, listed on
+    # request rather than as a failed result.
+    required = options.bbl_required
     path, line = _first_declaration(graph, selected, {"bibliography", "addbibresource"})
     return Finding(
         _BBL_RULE,
         f"{plan.main} reads {', '.join(plan.bib[:_MAX_LISTED])} through "
         f"{plan.backend.display_name}, but {plan.expected} is not in the package. "
-        f"{_missing_bbl_consequence(require_bbl=options.require_bbl)}{elsewhere}",
-        severity="warning" if options.require_bbl else "info",
-        status="failed" if options.require_bbl else "not_applicable",
+        f"{_missing_bbl_consequence(required=required)}{elsewhere}",
+        severity="warning" if required else "info",
+        status="failed" if required else "not_applicable",
         path=path or plan.main,
         line=line,
         evidence_kind=EvidenceKind.DERIVED,

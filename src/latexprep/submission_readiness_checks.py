@@ -1,15 +1,18 @@
-"""Cheap, deterministic submission-readiness advisories over the literal source graph.
+"""Cheap, deterministic submission-readiness checks over the literal source graph.
 
-The default-on observations here (missing generated bibliography, hyperref load
-order, EPS figures and private-note comment markers) are advisories: they never
-encode a publisher's acceptance rules and never block preparation. A missing
-generated bibliography is only a note unless the user requires one. Policies that
-need a user value (shipped bibliography coverage, raster figure colour space) run
-only when explicitly configured; their missing evidence is inconclusive, not a
-pass. No source is modified.
+The default-on observations here (missing generated bibliography, index or glossary
+files, hyperref load order and private-note comment markers) are advisories: they never
+encode a publisher's acceptance rules and never block preparation. A missing generated
+file is only a note unless the settings say that the receiving service does not run the
+tool that writes it. EPS figures are the exception that blocks: the isolated build
+cannot convert them, and an old TeX Live drops them without an error. Policies that need
+a user value (shipped bibliography coverage, raster figure colour space, the engines a
+service offers) run only when explicitly configured; their missing evidence is
+inconclusive, not a pass. No source is modified.
 
-This module owns the private-comment scan, the hyperref load order and the EPS note,
-and runs the others: the shipped-bibliography checks (``bbl_checks``) and the figure
+This module owns the private-comment scan, the hyperref load order, the EPS check and
+the engine note, and runs the others: the shipped-bibliography checks (``bbl_checks``),
+the generated index and glossary files (``generated_file_checks``) and the figure
 colour-space policy (``figure_color_space``).
 """
 
@@ -29,10 +32,12 @@ from .expanded_document import ExpandedDocument, Location, reachable_sources
 from .figure_color_space import FIGURE_COLOR_SPACES, color_space_finding
 from .file_scan import MAX_SCAN_MATCHES, ByteBudget, inventory_files
 from .finding_text import location_label, more_suffix
-from .finding_weight import NOTE, Weight
+from .finding_weight import Weight
 from .findings import EvidenceKind, Finding
+from .generated_file_checks import check_generated_lists
 from .literal_text import PACKAGE_COMMANDS, first_argument_names, plain_text
 from .redaction import redact_secrets
+from .setting_choices import Engine
 from .source_graph import SourceGraph
 from .tex_commands import ROOT_SUFFIXES
 from .tex_comments import marked_comments, tex_comments
@@ -44,6 +49,13 @@ _DEFAULT_BBL_OPTIONS = BblOptions()
 # A comment scan that finds markers warns; one that could not read every file only informs.
 _PRIVATE_MARKER_WEIGHT = Weight("warning", "info", EvidenceKind.HEURISTIC)
 _HYPERREF_WEIGHT = Weight("warning", "warning", EvidenceKind.DERIVED)
+# An EPS figure the isolated build cannot convert blocks: an old TeX Live drops it silently.
+_EPS_WEIGHT = Weight("error", "error", EvidenceKind.DERIVED)
+_ENGINE_NAMES: dict[Engine, str] = {
+    "pdflatex": "pdfLaTeX",
+    "xelatex": "XeLaTeX",
+    "lualatex": "LuaLaTeX",
+}
 
 # Each package documents that it must be loaded after hyperref. Keep this list
 # small: an entry is only added with a documented load-order requirement.
@@ -231,30 +243,77 @@ def _figures(graph: SourceGraph, selected: set[str]) -> list[str]:
     )
 
 
-def _eps_finding(figures: list[str], main: str) -> list[Finding]:
-    """Report the EPS and PS figures among the included figures.
+def converted_figure_name(figure: str) -> str:
+    """Return the name epstopdf gives the PDF it converts ``figure`` to, beside the figure.
+
+    epstopdf's default suffix is ``-<extension>-converted-to``, so ``figs/plot.eps``
+    becomes ``figs/plot-eps-converted-to.pdf``.
+
+    Args:
+        figure: The EPS or PS figure, relative to the project.
+
+    Returns:
+        The converted figure, relative to the project.
+    """
+    path = PurePosixPath(figure)
+    return path.with_name(f"{path.stem}-{path.suffix[1:]}-converted-to.pdf").as_posix()
+
+
+def _eps_finding(figures: list[str], shipped: set[str], main: str) -> list[Finding]:
+    """Report the EPS and PS figures among the included figures; block those not converted.
+
+    No engine converts EPS in the isolated build: pdfLaTeX and LuaLaTeX need shell escape
+    for epstopdf and XeLaTeX needs Ghostscript, and both are disabled. TeX Live 2023 and
+    earlier then print the file name in place of the figure without an error, so the
+    build alone cannot be relied on to fail. A figure whose epstopdf output is shipped
+    builds with TeX Live 2024 and later, which use that file, and only warns.
 
     Args:
         figures: The names of the included figures.
+        shipped: The project's files, which may hold the converted PDFs.
         main: The main file, the finding's path when several figures are listed.
 
     Returns:
-        A note naming the EPS and PS figures, or no finding when there are none.
+        A blocking finding naming the figures without a converted PDF, otherwise a
+        warning for figures included through their converted PDFs, or no finding when
+        there are no EPS or PS figures.
     """
     eps = [name for name in figures if PurePosixPath(name).suffix.lower() in {".eps", ".ps"}]
     if not eps:
         return []
-    shown = ", ".join(eps[:_MAX_LISTED]) + more_suffix(len(eps) - _MAX_LISTED)
+    unconverted = [name for name in eps if converted_figure_name(name) not in shipped]
+    listed = unconverted or eps
+    shown = ", ".join(listed[:_MAX_LISTED]) + more_suffix(len(listed) - _MAX_LISTED)
+    if unconverted:
+        message = (
+            f"EPS/PS figures cannot be converted in the isolated build ({len(unconverted)}): "
+            f"{shown}. pdfLaTeX and LuaLaTeX convert them only through epstopdf, which needs "
+            "shell escape, and XeLaTeX only through Ghostscript; both are disabled. TeX Live "
+            "2023 and earlier then print the file name in place of the figure without an error."
+        )
+    else:
+        message = (
+            f"EPS/PS figures are included through their converted PDFs ({len(eps)}): {shown}. "
+            "TeX Live 2024 and later use a shipped <name>-eps-converted-to.pdf; earlier releases "
+            "and XeLaTeX ignore it without shell escape and lose the figure."
+        )
     return [
         Finding(
             "source.eps_figures",
-            f"EPS/PS figures are included ({len(eps)}): {shown}. pdfLaTeX and LuaLaTeX convert "
-            "them only through epstopdf with shell escape, which Fledge's isolated build "
-            "disables; arXiv converts EPS itself, other services may not.",
-            severity=NOTE.severity("failed"),
+            message,
+            severity=_EPS_WEIGHT.severity("failed") if unconverted else "warning",
             status="failed",
-            path=eps[0] if len(eps) == 1 else main,
-            details={"figures": eps[:MAX_SCAN_MATCHES]},
+            path=listed[0] if len(listed) == 1 else main,
+            evidence_kind=_EPS_WEIGHT.evidence_kind,
+            suggestion="Convert each figure to PDF (for example with epstopdf), include the PDF "
+            "(\\includegraphics{figs/plot} finds figs/plot.pdf) and ship it with the sources.",
+            details={
+                "figures": eps[:MAX_SCAN_MATCHES],
+                "unconverted": unconverted[:MAX_SCAN_MATCHES],
+                "converted": [converted_figure_name(name) for name in eps[:MAX_SCAN_MATCHES]]
+                if not unconverted
+                else [],
+            },
         )
     ]
 
@@ -352,12 +411,57 @@ def _private_markers(root: Path, author_initials: frozenset[str]) -> Finding:
     )
 
 
+def _venue_engine(engine: Engine | None, offered: tuple[Engine, ...], main: str) -> list[Finding]:
+    """Report whether the receiving service offers the engine the document builds with.
+
+    Args:
+        engine: The engine the document builds with, or ``None`` when not known.
+        offered: The engines the service compiles with; empty when not configured.
+        main: The main file, which the finding names.
+
+    Returns:
+        A warning when the engine is not offered, a pass when it is, or nothing when the
+        service's engines or the document's engine are not known.
+    """
+    if not offered or engine is None:
+        return []
+    names = ", ".join(_ENGINE_NAMES[item] for item in offered)
+    details: dict[str, object] = {"engine": engine, "venue_engines": list(offered)}
+    if engine in offered:
+        return [
+            Finding(
+                "source.venue_engine",
+                f"The document builds with {_ENGINE_NAMES[engine]}, which the receiving "
+                "service offers.",
+                severity="info",
+                status="passed",
+                path=main,
+                details=details,
+            )
+        ]
+    return [
+        Finding(
+            "source.venue_engine",
+            f"The document builds with {_ENGINE_NAMES[engine]}, but the receiving service "
+            f"compiles only with {names} (submission_checks.venue_engines).",
+            severity="warning",
+            status="failed",
+            path=main,
+            evidence_kind=EvidenceKind.DERIVED,
+            suggestion=f"Build with an engine the service offers ({names}), or submit where "
+            f"{_ENGINE_NAMES[engine]} is offered.",
+            details=details,
+        )
+    ]
+
+
 def check_submission_readiness(
     root: Path,
     main: str | None,
     bbl_options: BblOptions = _DEFAULT_BBL_OPTIONS,
     *,
     required_color_space: str | None = None,
+    engine: Engine | None = None,
     analysed: AnalysedSource | None = None,
 ) -> list[Finding]:
     """Run default advisories and the readiness policies configured in ``bbl_options``.
@@ -367,9 +471,12 @@ def check_submission_readiness(
     Args:
         root: The project root to check.
         main: The main file as the caller named it; ``None`` selects the single document root.
-        bbl_options: The shipped-bibliography policies.
+        bbl_options: The shipped-bibliography policies and what the receiving service runs
+            and offers.
         required_color_space: The colour space raster figures must use, from the figure
             artwork settings, or ``None`` for no colour-space policy.
+        engine: The engine the document builds with, compared with the engines the
+            receiving service offers, or ``None`` when not known.
         analysed: The source analysis of the same root and main file, shared with other
             checks, or ``None`` to analyse here.
 
@@ -391,9 +498,15 @@ def check_submission_readiness(
         return findings
     selected = reachable_sources(graph)
     findings.extend(check_bbl(root, graph, selected, bbl_options))
+    findings.extend(
+        check_generated_lists(
+            graph, selected, venue_runs_index_tools=bbl_options.venue_runs_index_tools
+        )
+    )
     findings.extend(_hyperref_order(document))
     figures = _figures(graph, selected)
-    findings.extend(_eps_finding(figures, graph.main))
+    findings.extend(_eps_finding(figures, set(graph.files), graph.main))
+    findings.extend(_venue_engine(engine, bbl_options.venue_engines, graph.main))
     if required_color_space is not None:
         findings.append(color_space_finding(root, graph, figures, required_color_space, graph.main))
     return findings

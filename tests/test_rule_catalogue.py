@@ -101,7 +101,9 @@ class RuleExplanationTests(unittest.TestCase):
     def test_a_mistyped_code_suggests_the_closest_codes(self) -> None:
         result = CliRunner().invoke(cli, ["rule", "TEX01"])
         self.assertEqual(result.exit_code, USAGE_EXIT_CODE, result.output)
-        self.assertIn("did you mean TEX001, TEX010, TEX011?", result.stderr)
+        # TEX01 starts several codes (TEX010 and up), and is also one zero short of TEX001.
+        self.assertIn("run 'fledge rules TEX01' to list them", result.stderr)
+        self.assertIn("did you mean TEX001", result.stderr)
         for typed, first in (("tex01", "TEX001"), ("TEX0001", "TEX001"), ("tx001", "TEX001")):
             with self.subTest(typed=typed):
                 with self.assertRaisesRegex(ValueError, f"did you mean {first}"):

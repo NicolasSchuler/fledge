@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from latexprep.build_dependencies import (
     DependencyRequest,
@@ -28,6 +29,8 @@ def rule(
     *,
     generated: tuple[str, ...] = (),
     rewritten: tuple[str, ...] = (),
+    missing: tuple[str, ...] = (),
+    ran: bool = True,
 ) -> str:
     """Return one rule of a latexmk database (``.fdb_latexmk``).
 
@@ -38,14 +41,17 @@ def rule(
         inputs: The path and producing rule of each input; an empty producer for none.
         generated: The files the rule generates besides ``destination``.
         rewritten: The files the rule rewrites before reading them.
+        missing: Inputs recorded as absent, with size -1 and no producer.
+        ran: Whether latexmk ran the rule; a rule it never ran has run time 0.
 
     Returns:
         The text of the rule: its header line, its inputs, and its generated and rewritten
         files.
     """
     return (
-        f'["{name}"] 1 "{source}" "{destination}" "main" 1 0\n'
+        f'["{name}"] {1 if ran else 0} "{source}" "{destination}" "main" {1 if ran else 0} 0\n'
         + "".join(f'  "{path}" 1 10 {"0" * 32} "{producer}"\n' for path, producer in inputs)
+        + "".join(f'  "{path}" 0 -1 0 ""\n' for path in missing)
         + "  (generated)\n"
         + "".join(f'  "{path}"\n' for path in (destination, *generated))
         + "  (rewritten before read)\n"
@@ -90,6 +96,7 @@ class SubmissionDependenciesTests(ProjectTestCase):
         rewritten: tuple[str, ...] = (),
         extra_rules: str = "",
         producers: dict[str, str] | None = None,
+        missing: tuple[str, ...] = (),
     ) -> None:
         """Write the recorder trace and the latexmk database of a build of ``main.tex``.
 
@@ -100,6 +107,7 @@ class SubmissionDependenciesTests(ProjectTestCase):
             rewritten: The files the pdflatex rule rewrote before reading them.
             extra_rules: Database rules written before the pdflatex rule.
             producers: The rule that produced each input, by input path.
+            missing: Files the pdflatex rule looked for that never existed (size -1).
         """
         names = ("main.tex", *inputs)
         self.fls.write_text(
@@ -117,6 +125,7 @@ class SubmissionDependenciesTests(ProjectTestCase):
                 [(name, (producers or {}).get(name, "")) for name in names],
                 generated=generated,
                 rewritten=rewritten,
+                missing=missing,
             )
         )
 
@@ -126,6 +135,7 @@ class SubmissionDependenciesTests(ProjectTestCase):
         complete: bool = True,
         max_bytes: int = 2_097_152,
         tool_state: Path | None = None,
+        seeded: dict[Path, str] | None = None,
     ):
         """Collect the submission dependencies of the build from its evidence.
 
@@ -133,11 +143,15 @@ class SubmissionDependenciesTests(ProjectTestCase):
             complete: Whether the recorder is reported complete.
             max_bytes: The byte limit of reading the recorder trace and of the collection.
             tool_state: The tool state directory of the build, if any.
+            seeded: The supplied generated files copied into the output folder before the
+                build, each mapped to the project-relative name of the file it copies.
 
         Returns:
             The collected dependencies.
         """
-        layout = BuildLayout(self.source, self.project.parent, self.project, self.output, self.cwd)
+        layout = BuildLayout(
+            self.source, self.project.parent, self.project, self.output, self.cwd, seeded or {}
+        )
         return collect_submission_dependencies(
             DependencyRequest(
                 layout=layout,
@@ -355,6 +369,144 @@ class SubmissionDependenciesTests(ProjectTestCase):
         self.assertIsNone(self.collect(max_bytes=1000).inputs)
         self.evidence(("x" * 4097,))
         self.assert_incomplete("oversized path")
+
+    def test_a_seeded_bbl_that_no_rule_regenerated_stands_for_the_supplied_file(self):
+        """Count the supplied .bbl as an input when the build read its seeded copy unchanged.
+
+        latexmk records a BibTeX rule it never ran (run time 0) when no .bib exists; the
+        copy of the supplied ``main.bbl`` in the output folder is then what the build read.
+        """
+        self.original("article/main.bbl")
+        seeded = self.output / "main.bbl"
+        seeded.write_text("source content")
+        never_ran = rule(
+            "bibtex ../../output/main",
+            "../../output/main.aux",
+            "../../output/main.bbl",
+            [],
+            missing=("../../output/main.aux", "refs.bib"),
+            ran=False,
+        )
+        self.evidence(
+            ("../../output/main.aux", "../../output/main.bbl"),
+            generated=("../../output/main.aux",),
+            extra_rules=never_ran,
+            producers={
+                "../../output/main.aux": "pdflatex",
+                "../../output/main.bbl": "bibtex ../../output/main",
+            },
+        )
+        self.assert_incomplete("no build rule generated it")
+        result = self.collect(seeded={seeded: "article/main.bbl"})
+        self.assertEqual(result.inputs, {"article/main.tex", "article/main.bbl"}, result)
+        self.assertEqual(result.rules, ("pdflatex",))
+        self.assertEqual(result.generated_reads, {"main.aux"})
+
+    def test_a_seeded_bbl_that_bibtex_regenerated_is_a_generated_read(self):
+        self.original("article/main.bbl")
+        self.original("refs.bib")
+        seeded = self.output / "main.bbl"
+        seeded.write_text("regenerated")
+        bibliography = rule(
+            "bibtex ../../output/main",
+            "../../output/main.aux",
+            "../../output/main.bbl",
+            [("../../output/main.aux", "pdflatex"), ("../refs.bib", "")],
+        )
+        self.evidence(
+            ("../../output/main.aux", "../../output/main.bbl"),
+            generated=("../../output/main.aux",),
+            extra_rules=bibliography,
+            producers={
+                "../../output/main.aux": "pdflatex",
+                "../../output/main.bbl": "bibtex ../../output/main",
+            },
+        )
+        result = self.collect(seeded={seeded: "article/main.bbl"})
+        self.assertEqual(result.inputs, {"article/main.tex", "refs.bib"}, result)
+        self.assertEqual(result.generated_reads, {"main.aux", "main.bbl"})
+        self.assertEqual(result.generated_files["main.bbl"], seeded)
+
+    def test_a_working_directory_bibtex_rule_that_never_ran_is_ignored(self):
+        """Ignore the rule latexmk 4.83 creates for a supplied .bbl beside the main file.
+
+        That release names the rule ``bibtex main`` after the supplied file and gives it a
+        source, ``main.aux`` in the working directory, that does not exist, so it never
+        runs; the supplied ``main.bbl`` the build read is an original input.
+        """
+        self.original("article/main.bbl")
+        stale = rule("bibtex main", "main.aux", "main.bbl", [], missing=("main.aux",), ran=False)
+        self.evidence(
+            ("main.bbl", "../../output/main.aux"),
+            generated=("../../output/main.aux",),
+            extra_rules=stale,
+            producers={"main.bbl": "bibtex main", "../../output/main.aux": "pdflatex"},
+        )
+        result = self.collect()
+        self.assertEqual(result.inputs, {"article/main.tex", "article/main.bbl"}, result)
+        self.assertEqual(result.rules, ("pdflatex",))
+
+    def test_a_failed_rule_still_makes_the_evidence_incomplete(self):
+        failed = rule("bibtex main", "main.aux", "main.bbl", [("main.aux", "")]).replace(
+            '"main" 1 0', '"main" 1 2'
+        )
+        self.evidence(extra_rules=failed)
+        self.assert_incomplete("did not complete successfully")
+
+    def test_inputs_that_never_existed_are_skipped_and_a_missing_list_is_named(self):
+        """Skip size -1 rows, and record a list whose tool input has entries as never created.
+
+        TeX looked for ``main.nls`` and ``main.ind``; neither was written. Only the
+        nomenclature is missing from the document: ``main.nlo`` has entries, while the empty
+        ``main.idx`` means an empty index.
+        """
+        (self.output / "main.nlo").write_text("\\item [{$\\eta$}]\n")
+        (self.output / "main.idx").write_text("")
+        self.evidence(missing=("../../output/main.nls", "../../output/main.ind"))
+        result = self.collect()
+        self.assertEqual(result.inputs, {"article/main.tex"}, result.to_details())
+        self.assertEqual(result.never_created, ("main.nls",))
+        self.assertEqual(result.to_details()["never_created"], ["main.nls"])
+
+    def test_a_generated_input_without_a_producer_names_the_tool_that_writes_it(self):
+        (self.output / "main.gls").write_text("glossary")
+        self.evidence(("../../output/main.gls",))
+        self.assert_incomplete("main.gls holds the glossary, which makeglossaries writes")
+        self.evidence(("main.ind",))
+        self.assert_incomplete("main.ind holds the index, which makeindex writes from main.idx")
+
+    def test_each_toolchain_input_is_resolved_once_whatever_the_number_of_roots(self):
+        """Resolve a toolchain input once, not once per root: TeX Live trees are deep in links."""
+        inputs = []
+        for number in range(3):
+            path = self.toolchain / f"package{number}.sty"
+            path.write_text("system package")
+            inputs.append(str(path))
+        self.evidence(tuple(inputs))
+        layout = BuildLayout(self.source, self.project.parent, self.project, self.output, self.cwd)
+        roots = (*(self.root / f"root{number}" for number in range(5)), self.toolchain)
+        resolved: list[Path] = []
+        original = Path.resolve
+
+        def counted(path: Path, *, strict: bool = False) -> Path:
+            """Record which path is resolved, then resolve it."""
+            resolved.append(path)
+            return original(path, strict=strict)
+
+        request = DependencyRequest(
+            layout=layout,
+            main="article/main.tex",
+            engine="pdflatex",
+            recorder=read_recorder_trace(self.fls, self.output, self.cwd, 2_097_152),
+            recorder_complete=True,
+            resource_roots=roots,
+            max_bytes=2_097_152,
+        )
+        with patch.object(Path, "resolve", counted):
+            result = collect_submission_dependencies(request)
+        self.assertEqual(result.toolchain_inputs, 3, result.to_details())
+        for name in inputs:
+            self.assertEqual(resolved.count(Path(name)), 1, name)
 
 
 if __name__ == "__main__":

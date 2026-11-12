@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import PurePosixPath
 
 from .build_workspace import BuildLayout
+from .generated_files import BIBLIOGRAPHY_SUFFIX, INDEX_SUFFIXES
 from .setting_choices import BibliographyBackend, Engine
 
 ENGINE_MODES: dict[Engine, str] = {
@@ -105,7 +106,13 @@ def latexmk_command(engine: Engine, main: str, layout: BuildLayout, rules: str) 
     ]
 
 
-def controlled_rules(backend: BibliographyBackend, biber: BiberPlan, biber_executable: str) -> str:
+def controlled_rules(
+    backend: BibliographyBackend,
+    biber: BiberPlan,
+    biber_executable: str,
+    *,
+    kept_generated: frozenset[str] = frozenset(),
+) -> str:
     """Write the Perl configuration for ``-e``: fixed settings and the bibliography gates.
 
     Args:
@@ -114,15 +121,31 @@ def controlled_rules(backend: BibliographyBackend, biber: BiberPlan, biber_execu
         biber: Whether Biber is deferred for this build.
         biber_executable: The application-generated path of the prepared Biber, used when
             Biber may run.
+        kept_generated: The suffixes of shipped generated files (``generated_files``)
+            that the build must read as they are: with ``.bbl``, neither BibTeX nor Biber
+            runs, and with an index or glossary suffix, makeindex is replaced by an
+            internal command that succeeds without writing anything and the glossary
+            and nomenclature rules are left out.
 
     Returns:
         The configuration as one line of Perl.
     """
     # Static trusted configuration overrides no imported rc, rules, or environment.
+    bibtex_use = 0 if BIBLIOGRAPHY_SUFFIX in kept_generated else 1
     rules = (
-        f"$max_repeat={MAX_LATEXMK_PASSES}; $bibtex_use=1; "
-        f"$use_make_for_missing_files=0; @cus_dep_list=(); {GLOSSARY_RULES}"
+        f"$max_repeat={MAX_LATEXMK_PASSES}; $bibtex_use={bibtex_use}; "
+        "$use_make_for_missing_files=0; @cus_dep_list=();"
     )
+    if kept_generated & frozenset(INDEX_SUFFIXES):
+        # The build workspace seeds the shipped files into the aux folder, so latexmk finds
+        # the destination it expects and TeX reads the shipped file. The glossary and
+        # nomenclature rules are left out: they would run makeindex themselves.
+        rules += (
+            " sub fledge_generated_file_kept { return 0; } "
+            "$makeindex='internal fledge_generated_file_kept';"
+        )
+    else:
+        rules += f" {GLOSSARY_RULES}"
     if backend != "auto":
         # Latexmk's documented internal-command adapter returns failure without
         # launching the unselected backend. All code is application-owned; no

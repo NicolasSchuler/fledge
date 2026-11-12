@@ -2,9 +2,11 @@
 
 Packaging uses DEFLATE level 9, the DOS epoch and Unix modes 0644 for files and 0755
 for folders, independent of source timestamps and modes, and sorts entries by name, so
-the same files always give the same bytes (with the same zlib version). Every file is
-read through the link-refusing walk of ``project``, and an archive is never written
-over an existing file. Reading an archive back is ``project``'s work.
+the same files always give the same bytes (with the same zlib version). Images that are
+already compressed (PNG and JPEG) are stored without recompression: deflating them again
+costs time and saves almost nothing. Every file is read through the link-refusing walk
+of ``project``, and an archive is never written over an existing file. Reading an
+archive back is ``project``'s work.
 """
 
 from __future__ import annotations
@@ -31,6 +33,8 @@ from .project_names import ProjectEntry
 from .zip_validation import DOS_DIRECTORY_ATTRIBUTE
 
 _COMPRESSION_LEVEL = 9
+# Suffixes of formats whose content is already compressed; such entries are stored.
+_STORED_SUFFIXES = frozenset({".png", ".jpg", ".jpeg"})
 _FILE_MODE = 0o644
 _DIRECTORY_MODE = 0o755
 # The "created by" system code of a ZIP entry that carries Unix modes.
@@ -67,16 +71,24 @@ def create_archive(root: Path, archive: Path) -> None:
         ) from error
 
 
+def _is_stored(entry: ProjectEntry) -> bool:
+    """Return whether ``entry`` is a file in an already-compressed format, stored as it is."""
+    return not entry.is_dir and Path(entry.path).suffix.lower() in _STORED_SUFFIXES
+
+
 def _entry_info(entry: ProjectEntry) -> zipfile.ZipInfo:
-    """Build the archive record of one entry: fixed date, modes and compression level."""
+    """Build the archive record of one entry: fixed date, modes and compression method."""
     info = zipfile.ZipInfo(entry.path + ("/" if entry.is_dir else ""))
     info.create_system = _UNIX_SYSTEM
-    info.compress_type = zipfile.ZIP_DEFLATED
-    # Byte-identical archives also require the same zlib version.
-    if hasattr(zipfile.ZipInfo, "compress_level"):  # Python 3.13+
-        info.compress_level = _COMPRESSION_LEVEL
-    else:  # No public per-entry level setter before Python 3.13.
-        info._compresslevel = _COMPRESSION_LEVEL  # ty: ignore[missing-attribute]
+    if _is_stored(entry):
+        info.compress_type = zipfile.ZIP_STORED
+    else:
+        info.compress_type = zipfile.ZIP_DEFLATED
+        # Byte-identical archives also require the same zlib version.
+        if hasattr(zipfile.ZipInfo, "compress_level"):  # Python 3.13+
+            info.compress_level = _COMPRESSION_LEVEL
+        else:  # No public per-entry level setter before Python 3.13.
+            info._compresslevel = _COMPRESSION_LEVEL  # ty: ignore[missing-attribute]
     info.file_size = entry.size
     mode = stat.S_IFDIR | _DIRECTORY_MODE if entry.is_dir else stat.S_IFREG | _FILE_MODE
     info.external_attr = mode << 16 | (DOS_DIRECTORY_ATTRIBUTE if entry.is_dir else 0)

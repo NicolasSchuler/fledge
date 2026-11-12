@@ -171,7 +171,7 @@ a{color:inherit}
 <h3>TEX009 — Generated bibliography shipped with the sources</h3>
 <p>info / not applicable</p>
 <p class="location">main.tex:5 [submission readiness]</p>
-<p>main.tex reads references.bib through BibTeX, but main.bbl is not in the package. Only services that compile without running BibTeX or Biber, such as arXiv, need it; set submission_checks.require_bbl = true (the arxiv preset does) to require it.</p>
+<p>main.tex reads references.bib through BibTeX, but main.bbl is not in the package. Only a service that compiles without running BibTeX or Biber needs it; arXiv runs them when no .bbl is uploaded. For a service that does not, set submission_checks.venue_runs_bibliography_tools = false and prepare ships the .bbl its verified build generated.</p>
 <details>
 <summary>Recorded evidence</summary>
 <pre>{
@@ -184,7 +184,8 @@ a{color:inherit}
   &quot;other_bbl_files&quot;: [],
   &quot;require_bbl&quot;: false,
   &quot;scope&quot;: &quot;Literal bibliography declarations in the selected source graph; the shipped file set is the supplied or prepared directory.&quot;,
-  &quot;stage&quot;: &quot;submission readiness&quot;
+  &quot;stage&quot;: &quot;submission readiness&quot;,
+  &quot;venue_runs_bibliography_tools&quot;: true
 }</pre>
 </details>
 </article>
@@ -1013,7 +1014,10 @@ a{color:inherit}
       &quot;scan_identity_hints&quot;: false,
       &quot;scan_private_comments&quot;: false,
       &quot;scan_secrets&quot;: false,
-      &quot;template_references&quot;: []
+      &quot;template_references&quot;: [],
+      &quot;venue_engines&quot;: [],
+      &quot;venue_runs_bibliography_tools&quot;: true,
+      &quot;venue_runs_index_tools&quot;: true
     },
     &quot;tab_size&quot;: 2,
     &quot;timeout_seconds&quot;: 120,

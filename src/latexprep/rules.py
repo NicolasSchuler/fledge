@@ -208,9 +208,12 @@ def get_rule(code: str) -> Rule:
         return rule
     starting = _codes_starting_with(code) if _CODE_SHAPE.fullmatch(code) else []
     if len(starting) > _MAX_SUGGESTIONS:
+        # A prefix of many codes may still be a typo of another code, such as TEX01 for TEX001.
+        others = [item for item in closest_rule_codes(code) if item not in starting]
+        hint = f", or did you mean {', '.join(others)}?" if others else ""
         raise ValueError(
             f"{code!r} is the start of {len(starting)} check codes, not one check; run "
-            f"'fledge rules {code.upper()}' to list them"
+            f"'fledge rules {code.upper()}' to list them{hint}"
         )
     close = closest_rule_codes(code)
     hint = f" (did you mean {', '.join(close)}?)" if close else ""

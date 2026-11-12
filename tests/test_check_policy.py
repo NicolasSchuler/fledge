@@ -603,7 +603,7 @@ class CheckPolicyTests(ProjectTestCase):
             "PKG005",
         }
         # Cheap deterministic advisories that run by default without any option.
-        default_advisories = {"TEX009", "TEX010", "TEX011", "PRV007"}
+        default_advisories = {"TEX009", "TEX010", "TEX011", "TEX012", "TEX013", "PRV007"}
         self.assertFalse(gated & MANDATORY_CODES)
         self.assertFalse(default_advisories & (gated | MANDATORY_CODES))
         self.assertEqual(

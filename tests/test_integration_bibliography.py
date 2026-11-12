@@ -18,6 +18,7 @@ import zipfile
 from collections.abc import Iterable
 from pathlib import Path
 
+from latexprep.bbl_checks import BblOptions
 from latexprep.bibliography_transform import BibliographyTransformOptions
 from latexprep.config import Settings
 from latexprep.report import Report
@@ -342,6 +343,40 @@ class LiveBibliographyPreparationTests(AsyncLiveProjectTestCase):
                 ARCHIVE_STAGE: ("not_applicable", []),
             },
         )
+        self.assertEqual(directory_contents(source), originals)
+
+    async def test_a_venue_without_bibtex_gets_the_bbl_the_verified_build_generated(self) -> None:
+        """Ship the .bbl the verified build generated where the venue runs no BibTeX.
+
+        Verifies docs/preparation-options.md, "Generated files": with
+        submission_checks.venue_runs_bibliography_tools = false, prepare ships main.bbl
+        beside main.tex, the one its build generated from refs.bib rather than the stale
+        supplied one, which the build workspace seeds into the aux folder and BibTeX
+        rewrites. The archive rebuild runs without BibTeX, so it reads the shipped main.bbl,
+        and must still match the prepared PDF; the final TEX009 finds the .bbl shipped.
+        """
+        self.require_tools("latexmk", "pdflatex", "bibtex", *POPPLER_TOOLS)
+        stale = (
+            "\\begin{thebibliography}{1}\n\\bibitem{stale} Stale entry.\n\\end{thebibliography}\n"
+        )
+        source = write_project(
+            self.base / "bibtex",
+            {"main.tex": BIBTEX_MAIN, "refs.bib": BIBTEX_REFERENCES, "main.bbl": stale},
+        )
+        originals = directory_contents(source)
+        settings = live_settings(
+            bibliography_backend="bibtex",
+            bbl_checks=BblOptions(venue_runs_bibliography_tools=False),
+        )
+        report = await self.prepare(source, settings)
+        shipped = _shipped_files(self.base / "prepared")
+        self.assertEqual(sorted(shipped), ["main.bbl", "main.tex", "refs.bib"])
+        self.assertIn("\\bibitem{first}", shipped["main.bbl"])
+        self.assertNotIn("Stale entry", shipped["main.bbl"])
+        self.assert_passed(report, ("TEX009",), FINAL_SOURCE_CHECKS_STAGE)
+        self.assert_passed(report, ("CMP002", "CMP003"), BASELINE_VERSUS_PREPARED_STAGE)
+        archive = next(item for item in report.stages if item["name"] == ARCHIVE_STAGE)
+        self.assertIn("$bibtex_use=0", " ".join(archive["command"]))
         self.assertEqual(directory_contents(source), originals)
 
 

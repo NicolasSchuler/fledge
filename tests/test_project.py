@@ -153,6 +153,23 @@ class ProjectTests(unittest.TestCase):
         result = import_project(archive, self.base / "fresh", unwrap=False, exclude_metadata=False)
         self.assertEqual(self.tree(result.root), self.tree(self.source))
 
+    def test_already_compressed_images_are_stored_and_the_rest_is_deflated(self) -> None:
+        payload = b"repetitive " * 200
+        for name in ("main.tex", "figures/plot.png", "figures/photo.JPG", "figures/scan.jpeg"):
+            self.write_file(name, payload)
+        archive = self.base / "submission.zip"
+        create_archive(self.source, archive)
+        with zipfile.ZipFile(archive) as zipped:
+            methods = {info.filename: info.compress_type for info in zipped.infolist()}
+            self.assertEqual(zipped.read("figures/plot.png"), payload)
+        self.assertEqual(methods["main.tex"], zipfile.ZIP_DEFLATED)
+        for name in ("figures/plot.png", "figures/photo.JPG", "figures/scan.jpeg"):
+            self.assertEqual(methods[name], zipfile.ZIP_STORED, name)
+        # The same files give the same bytes.
+        again = self.base / "again.zip"
+        create_archive(self.source, again)
+        self.assertEqual(archive.read_bytes(), again.read_bytes())
+
     def test_metadata_exclusions_are_reported_and_originals_remain(self) -> None:
         self.write_file("main.tex")
         self.write_file(".git/config", b"private")
@@ -614,7 +631,7 @@ class ProjectTests(unittest.TestCase):
         self.assertTrue(all(change.kind == "exclude" and change.reason for change in changes))
         self.assertEqual(self.tree(self.source), before)
 
-    def test_cleanup_proposes_common_latex_build_debris_but_never_bbl(self) -> None:
+    def test_cleanup_proposes_common_latex_build_debris_but_never_generated_files(self) -> None:
         debris = [
             "main.out",
             "slides.nav",
@@ -623,9 +640,7 @@ class ProjectTests(unittest.TestCase):
             "main.xdv",
             "main.idx",
             "main.ilg",
-            "main.ind",
             "main.glo",
-            "main.gls",
             "main.glg",
             "main.ist",
             "main.brf",
@@ -644,7 +659,9 @@ class ProjectTests(unittest.TestCase):
             "_minted-main/nested/cache.json",
             "chapters/_minted-chapter/code.pygtex",
         ]
-        kept = ["main.bbl", "main.tex", "refs.bib", "main.pdf", "minted-notes.txt", "main.aux.txt"]
+        # The generated files TeX reads back: services without the tool need them shipped.
+        generated = ["main.bbl", "main.ind", "main.gls", "main.acr", "main.nls", "main.sls"]
+        kept = [*generated, "main.tex", "refs.bib", "main.pdf", "minted-notes.txt", "main.aux.txt"]
         for name in [*debris, *kept]:
             self.write_file(name)
         changes = plan_cleanup(self.source, set())
@@ -652,10 +669,10 @@ class ProjectTests(unittest.TestCase):
         self.assertTrue(all(change.kind == "exclude" and change.reason for change in changes))
 
     def test_observed_dependencies_protect_debris_like_names(self) -> None:
-        for name in ("data/table.out", "_minted-main/needed.pygtex", "main.ind", "main.idx"):
+        for name in ("data/table.out", "_minted-main/needed.pygtex", "main.ilg", "main.idx"):
             self.write_file(name)
         changes = plan_cleanup(
-            self.source, {"data/table.out", "_minted-main/needed.pygtex", "./main.ind"}
+            self.source, {"data/table.out", "_minted-main/needed.pygtex", "./main.ilg"}
         )
         self.assertEqual([change.path for change in changes], ["main.idx"])
 

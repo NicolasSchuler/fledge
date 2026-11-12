@@ -96,6 +96,20 @@ class GlossaryRuleTests(unittest.TestCase):
             arguments, ["-q", "-s", "nomencl.ist", "-t", "main.nlg", "-o", "main.nls", "main.nlo"]
         )
 
+    def test_shipped_index_files_leave_the_glossary_rules_out(self) -> None:
+        # The archive rebuild reads shipped index and glossary files as they are, so no
+        # rule may run makeindex, including the glossary rules that call it themselves.
+        plan = BiberPlan(deferred=False, note=None)
+        for kept in (frozenset({".ind"}), frozenset({".gls", ".acr"}), frozenset({".nls"})):
+            with self.subTest(kept=sorted(kept)):
+                rules = controlled_rules("auto", plan, "biber", kept_generated=kept)
+                self.assertNotIn("add_cus_dep", rules)
+                self.assertIn("$makeindex='internal fledge_generated_file_kept'", rules)
+        bibliography_only = controlled_rules(
+            "auto", plan, "biber", kept_generated=frozenset({".bbl"})
+        )
+        self.assertIn(GLOSSARY_RULES, bibliography_only)
+
     def test_rules_are_part_of_every_configuration_and_compile(self) -> None:
         rules = controlled_rules("auto", BiberPlan(deferred=False, note=None), "biber")
         self.assertIn('add_cus_dep("glo", "gls", 0, "fledge_glossary")', rules)

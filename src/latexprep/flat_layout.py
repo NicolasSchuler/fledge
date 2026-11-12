@@ -22,6 +22,7 @@ from typing import NamedTuple
 
 from .errors import PreparationError
 from .findings import Finding
+from .generated_files import GENERATED_SUFFIXES
 from .project_files import path_comparison_key
 from .report import Change, ChangeKind
 from .source_analysis import lint_sources
@@ -48,8 +49,9 @@ _RESERVED_NAMES = {
     *(f"COM{number}" for number in range(1, 10)),
     *(f"LPT{number}" for number in range(1, 10)),
 }
-# Files whose name is part of a contract with TeX or a bibliography tool, besides the main file.
-_IDENTITY_SUFFIXES = frozenset({".sty", ".cls", ".bst", ".bbl"})
+# Files whose name is part of a contract with TeX or a bibliography tool, besides the main
+# file: TeX reads a generated bibliography, index or glossary under the main file's name.
+_IDENTITY_SUFFIXES = frozenset({".sty", ".cls", ".bst", *GENERATED_SUFFIXES})
 
 
 class NamePriority(IntEnum):
@@ -220,9 +222,7 @@ def _override_findings(
         elif PurePosixPath(output).suffix != PurePosixPath(name).suffix:
             message = "A filename override must preserve the file extension."
         elif name in fixed and output != PurePosixPath(name).name:
-            message = (
-                "Renaming a main, class, style or generated bibliography identity is unsupported."
-            )
+            message = "Renaming a main, class, style or generated file identity is unsupported."
             status = "inconclusive"
         if message:
             findings.append(
@@ -267,7 +267,7 @@ def _name_candidates(
                 findings.append(
                     Finding(
                         "flatten.identity_name",
-                        "This root, class, style, or generated bibliography filename "
+                        "This root, class, style, or generated file name "
                         "cannot be sanitized without changing its naming contract.",
                         severity="error",
                         path=name,
@@ -335,7 +335,7 @@ def flat_filenames(
 ) -> FlatNames:
     """Choose a portable top-level name for every file.
 
-    The main file, classes, styles and generated bibliographies keep their names, and an
+    The main file, classes, styles and generated files keep their names, and an
     explicit override replaces a name; two required names that collide are an error.
     Other files take their sanitized name when it is unique, else their directories
     joined into it, with a counter added if names still collide.

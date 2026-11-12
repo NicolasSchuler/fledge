@@ -419,37 +419,39 @@ class LiveFailingPolicyTests(LiveProjectTestCase):
             self.assertTrue(statuses, f"{code} did not run")
             self.assertLessEqual(statuses, {"passed", "failed"}, code)
 
-    def test_arxiv_preset_requires_a_shipped_bbl_that_covers_every_citation(self) -> None:
-        """Check that the arxiv preset requires a shipped ``main.bbl`` that covers every citation.
+    def test_arxiv_preset_checks_a_bbl_only_when_one_is_meant_for_arxiv(self) -> None:
+        """Check that the arxiv preset needs no .bbl, and checks one that is meant to be uploaded.
 
-        docs/configuration.md "Start from a preset" and docs/checks.md TEX009 and BIB109: with
-        the arxiv preset a BibTeX project without a generated main.bbl passes only with
-        advisories (TEX009 is a warning, exit code 1); a main.bbl holding the cited key passes
-        TEX009 and BIB109, and one that lacks it fails BIB109.
+        docs/configuration.md "Start from a preset" and docs/checks.md TEX009 and BIB109:
+        arXiv runs BibTeX when no .bbl is uploaded, so with the arxiv preset a BibTeX project
+        without a generated main.bbl gets only a not-applicable TEX009 note. A settings file
+        that says arXiv should use an uploaded .bbl (venue_runs_bibliography_tools = false)
+        makes the missing main.bbl a warning, and with check_bbl_coverage a main.bbl holding
+        the cited key passes TEX009 and BIB109 while one that lacks it fails BIB109.
         """
         source = self.copy_nested_paper()
-        config = self.settings_file()
-        arguments = (
-            str(source),
-            "--main",
-            "main.tex",
-            "--preset",
-            "arxiv",
-            "--config",
-            str(config),
+        arguments = (str(source), "--main", "main.tex", "--preset", "arxiv", "--config")
+        with self.subTest(bbl="not needed"):
+            report = self.check_json(*arguments, str(self.settings_file()))
+            self.assert_status(report, "TEX009", "not_applicable", severity="info")
+            self.assertEqual(_findings(report, "BIB109"), [])
+            self.assert_status(report, "TEX013", "passed")
+        uploaded = self.settings_file(
+            "[submission_checks]\nvenue_runs_bibliography_tools = false\n"
+            "check_bbl_coverage = true\n"
         )
         with self.subTest(bbl="missing"):
-            report = self.check_json(*arguments)
+            report = self.check_json(*arguments, str(uploaded))
             self.assert_outcome(report, Outcome.PASSED_WITH_ADVISORIES)
             self.assert_status(report, "TEX009", "failed", severity="warning")
         with self.subTest(bbl="covering"):
             (source / "main.bbl").write_text(COVERING_BBL, encoding="utf-8")
-            report = self.check_json(*arguments)
+            report = self.check_json(*arguments, str(uploaded))
             for code in ("TEX009", "BIB109"):
                 self.assert_status(report, code, "passed")
         with self.subTest(bbl="stale"):
             (source / "main.bbl").write_text(STALE_BBL, encoding="utf-8")
-            report = self.check_json(*arguments)
+            report = self.check_json(*arguments, str(uploaded))
             self.assert_status(report, "BIB109", "failed")
 
     def test_init_preset_file_is_discovered_until_a_run_is_isolated(self) -> None:
@@ -457,8 +459,9 @@ class LiveFailingPolicyTests(LiveProjectTestCase):
 
         docs/configuration.md "Start from a preset" and "Discovery and precedence": the
         fledge.toml that ``fledge init --preset arxiv`` writes is discovered by a later check
-        without --preset (execution.config_path names it, execution.preset is null) and makes
-        TEX009 a warning; --isolated skips discovery, so TEX009 is again a not-applicable note.
+        without --preset (execution.config_path names it, execution.preset is null) and checks
+        the engine against the ones arXiv offers (TEX013); --isolated skips discovery, so
+        TEX013 is not reported.
         """
         source = self.copy_nested_paper()
         written = CliRunner().invoke(cli, ["init", str(source), "--preset", "arxiv"])
@@ -468,11 +471,10 @@ class LiveFailingPolicyTests(LiveProjectTestCase):
         config_path = discovered["execution"]["config_path"]
         self.assertTrue(str(config_path).endswith(f"/{source.name}/fledge.toml"), config_path)
         self.assertIsNone(discovered["execution"]["preset"])
-        self.assert_status(discovered, "TEX009", "failed", severity="warning")
+        self.assert_status(discovered, "TEX013", "passed")
         isolated = self.check_json(str(source), "--main", "main.tex", "--isolated")
         self.assertIsNone(isolated["execution"]["config_path"])
-        self.assert_status(isolated, "TEX009", "not_applicable")
-        self.assertNotIn("warning", {item["severity"] for item in _findings(isolated, "TEX009")})
+        self.assertEqual(_findings(isolated, "TEX013"), [])
 
 
 if __name__ == "__main__":

@@ -8,13 +8,15 @@ import zipfile
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+from latexprep.bbl_checks import BblOptions
 from latexprep.bibliography_transform import BibliographyTransformOptions
+from latexprep.build_dependencies import SubmissionDependencies
+from latexprep.build_result import BuildResult, BuildTools
 from latexprep.check_selection import CheckSelection
 from latexprep.config import Settings
 from latexprep.core import run_job
 from latexprep.errors import PreparationError
 from latexprep.job_context import JobRequest
-from latexprep.package_inputs import generated_bibliography_inputs
 from latexprep.report import Report
 from latexprep.source_transform import SourceTransformOptions
 from latexprep.submission_options import SubmissionOptions
@@ -22,31 +24,44 @@ from latexprep.workflow_options import DocumentOptions, WorkflowOptions
 from tests.support import RecordedBuild, controlled_backends, directory_contents
 
 
-class GeneratedBibliographyInputTests(unittest.TestCase):
-    """Which generated bibliography files the build read count as package inputs."""
+class GeneratedFileBuild:
+    """A build backend that also generates files in its output folder and reports reading them.
 
-    def test_only_regular_files_beside_the_main_file_with_its_name_are_retained(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            (root / "paper").mkdir()
-            for name in ("paper/main.bbl", "paper/main.run.xml", "main.bbl", "paper/other.bbl"):
-                (root / name).write_text("generated\n")
-            reads = frozenset({"main.bbl", "main.run.xml", "other.bbl"})
-            self.assertEqual(
-                generated_bibliography_inputs(root, "paper/main.tex", reads),
-                {"paper/main.bbl", "paper/main.run.xml"},
-            )
-            self.assertEqual(
-                generated_bibliography_inputs(root, "paper/main.tex", {"main.bbl"}),
-                {"paper/main.bbl"},
-            )
-            self.assertEqual(generated_bibliography_inputs(root, "main.tex", reads), {"main.bbl"})
-            (root / "paper/main.bbl").unlink()
-            (root / "paper/main.bbl").symlink_to(root / "main.bbl")
-            self.assertEqual(
-                generated_bibliography_inputs(root, "paper/main.tex", reads),
-                {"paper/main.run.xml"},
-            )
+    Attributes:
+        inputs: The project inputs every build records.
+        generated: The text of each generated file, by name in the output folder.
+        calls: The workspace name and the options of each build.
+        visits: The workspace name and the project contents of each build.
+    """
+
+    def __init__(self, inputs: set[str], generated: dict[str, str]) -> None:
+        self.inputs = inputs
+        self.generated = generated
+        self.calls: list[tuple[str, dict[str, object]]] = []
+        self.visits: list[tuple[str, dict[str, bytes]]] = []
+
+    async def __call__(self, tree, main, work, _engine, _runner, **options) -> BuildResult:
+        self.calls.append((work.name, options))
+        self.visits.append((work.name, directory_contents(tree)))
+        output = work / "output"
+        output.mkdir(parents=True)
+        files = {}
+        for name, text in self.generated.items():
+            (output / name).write_text(text)
+            files[name] = output / name
+        pdf = output / "main.pdf"
+        pdf.write_bytes(b"%PDF-controlled generated-file fixture\n")
+        dependencies = SubmissionDependencies(
+            set(self.inputs), generated_reads=frozenset(files), generated_files=files
+        )
+        return BuildResult(
+            success=True,
+            pdf=pdf,
+            recorder_project_inputs=set(self.inputs),
+            submission_inputs=set(self.inputs),
+            tools=BuildTools(submission_dependencies=dependencies),
+            generated_reads=frozenset(files),
+        )
 
 
 class DependencyPackagingTests(unittest.IsolatedAsyncioTestCase):
@@ -224,43 +239,62 @@ class DependencyPackagingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(set(build.visits[1][2]), selected)
         self.assertEqual(build.visits[-1][2], archived)
 
-    async def test_supplied_generated_bibliography_ships_when_the_build_consumed_it(self):
+    async def test_generated_files_ship_from_the_verified_build_for_services_without_the_tools(
+        self,
+    ):
+        """Ship the index the build generated always, and its .bbl only where it is needed.
+
+        arXiv runs neither makeindex nor makeglossaries, so the index the verified build
+        generated ships beside the main file; the supplied .bbl does not ship while the
+        venue runs BibTeX itself. Where it does not, the build's .bbl ships instead of the
+        stale supplied one. The archive rebuild then runs without the tools whose files
+        are shipped, and so proves that they suffice.
+        """
         self.write(
             "paper/main.tex",
-            "\\documentclass{article}\n\\usepackage{biblatex}\n\\addbibresource{refs.bib}\n"
-            "\\begin{document}\n\\cite{kept}\n\\printbibliography\n\\end{document}\n",
+            "\\documentclass{article}\n\\usepackage{makeidx}\n\\makeindex\n"
+            "\\begin{document}\nText\\index{text} \\cite{kept}.\n"
+            "\\bibliographystyle{plain}\n\\bibliography{refs}\n\\printindex\n\\end{document}\n",
         )
         self.write("paper/refs.bib", "@misc{kept,title={Kept}}\n")
-        self.write("paper/main.bbl", "\\datalist[entry]{nty/global//global/global}\n")
-        self.write("paper/main.run.xml", "<requests/>\n")
-        self.write("paper/main.aux", "\\relax\n")
-        self.write("old/main.bbl", "stale bibliography beside another file\n")
+        self.write("paper/main.bbl", "stale supplied bibliography\n")
+        self.write("paper/main.ind", "stale supplied index\n")
         selected = {"paper/main.tex", "paper/refs.bib"}
-        # The build regenerates both files in its output directory and reads those.
-        build = RecordedBuild(
-            {"paper/main.tex": (selected, selected, selected)},
-            generated_reads=frozenset({"main.bbl", "main.run.xml", "main.aux"}),
-        )
-        report, output = await self.prepare(Settings(main="paper/main.tex"), build)
-        self.assert_released(report)
-        retained = {"paper/main.bbl", "paper/main.run.xml"}
-        archived = self.archive_contents(output)
-        self.assertEqual(set(archived), selected | retained)
-        self.assertEqual(archived["paper/main.bbl"], (self.source / "paper/main.bbl").read_bytes())
-        self.assertEqual(build.visits[-1][2], archived)
-        inventories = [
-            item
-            for item in report.findings
-            if item.rule == "package.dependencies" and item.status == "passed"
-        ]
-        self.assertTrue(inventories, report.findings)
-        for inventory in inventories:
-            self.assertEqual(inventory.details["generated_bibliography"], sorted(retained))
-            self.assertIn("paper/main.bbl", inventory.message)
-        bbl = [item for item in report.findings if item.code == "TEX009"]
-        self.assertTrue(bbl and all(item.status == "passed" for item in bbl), bbl)
+        generated = {"main.bbl": "generated bibliography\n", "main.ind": "generated index\n"}
+        for venue_runs_tools, shipped in ((True, {".ind"}), (False, {".bbl", ".ind"})):
+            with self.subTest(venue_runs_bibliography_tools=venue_runs_tools):
+                build = GeneratedFileBuild(selected, generated)
+                settings = Settings(
+                    main="paper/main.tex",
+                    bbl_checks=BblOptions(venue_runs_bibliography_tools=venue_runs_tools),
+                )
+                report, output = await self.prepare(settings, build, name=f"out-{venue_runs_tools}")
+                self.assert_released(report)
+                archived = self.archive_contents(output)
+                expected = {"paper/main.tex", "paper/refs.bib", "paper/main.ind"}
+                if not venue_runs_tools:
+                    expected.add("paper/main.bbl")
+                    self.assertEqual(archived["paper/main.bbl"], b"generated bibliography\n")
+                self.assertEqual(set(archived), expected)
+                self.assertEqual(archived["paper/main.ind"], b"generated index\n")
+                # Only the archive rebuild keeps the shipped files as they are.
+                kept = {name: options.get("kept_generated") for name, options in build.calls}
+                self.assertEqual(kept["archive-build"], frozenset(shipped))
+                self.assertEqual({name for name, value in kept.items() if value}, {"archive-build"})
+                self.assertEqual(build.visits[-1][1], archived)
+                selections = [
+                    item
+                    for item in report.findings
+                    if item.rule == "package.dependencies" and item.status == "passed"
+                ]
+                self.assertTrue(selections, report.findings)
+                for selection in selections:
+                    self.assertIn("paper/main.ind", selection.details["generated_files"])
+                    self.assertIn("generated by the verified build", selection.message)
+                lists = [item for item in report.findings if item.code == "TEX012"]
+                self.assertTrue(lists and lists[-1].status == "passed", lists)
 
-    async def test_generated_bibliography_the_build_did_not_read_is_not_shipped(self):
+    async def test_a_supplied_bbl_is_not_shipped_where_the_venue_runs_bibtex(self):
         self.write(
             "main.tex",
             "\\documentclass{article}\n\\begin{document}\n\\cite{kept}\n"
@@ -270,10 +304,7 @@ class DependencyPackagingTests(unittest.IsolatedAsyncioTestCase):
         self.write("main.bbl", "\\begin{thebibliography}{1}\\end{thebibliography}\n")
         self.write("main.run.xml", "<requests/>\n")
         selected = {"main.tex", "refs.bib"}
-        for reads, expected in (
-            (frozenset(), selected),
-            (frozenset({"main.bbl"}), selected | {"main.bbl"}),
-        ):
+        for reads in (frozenset(), frozenset({"main.bbl"})):
             with self.subTest(reads=sorted(reads)):
                 build = RecordedBuild(
                     {"main.tex": (selected, selected, selected)}, generated_reads=reads
@@ -282,7 +313,7 @@ class DependencyPackagingTests(unittest.IsolatedAsyncioTestCase):
                     Settings(main="main.tex"), build, name=f"out-{len(reads)}"
                 )
                 self.assert_released(report)
-                self.assertEqual(set(self.archive_contents(output)), expected)
+                self.assertEqual(set(self.archive_contents(output)), selected)
 
     async def test_static_and_recorded_inputs_preserve_transitive_local_resources(self):
         files = {
@@ -333,6 +364,32 @@ class DependencyPackagingTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assert_dependency_blocked(report, output)
                 self.assertEqual(build.counts["main.tex"], len(traces))
+
+    async def test_incomplete_evidence_names_its_reason_in_the_blocking_finding(self):
+        """Quote the dependency uncertainty in PKG302, so the terminal shows why it blocks."""
+        self.write("main.tex", "\\documentclass{article}\n\\begin{document}Body.\\end{document}\n")
+        reason = "Dependency rule 'bibtex main' did not complete successfully"
+
+        async def build(tree, main, work, _engine, _runner, **_options):
+            """Build a PDF whose dependency evidence is incomplete for ``reason``."""
+            work.mkdir(parents=True)
+            pdf = work / "built.pdf"
+            pdf.write_bytes(b"%PDF-controlled incomplete evidence\n")
+            dependencies = SubmissionDependencies(None, uncertainty=(reason,))
+            return BuildResult(
+                success=True,
+                pdf=pdf,
+                recorder_project_inputs={"main.tex"},
+                tools=BuildTools(submission_dependencies=dependencies),
+            )
+
+        report, output = await self.prepare(Settings(main="main.tex"), build)
+        self.assert_dependency_blocked(report, output)
+        blocking = [item for item in report.findings if item.code == "PKG302" and item.is_blocking]
+        self.assertTrue(blocking, report.findings)
+        for finding in blocking:
+            self.assertIn(reason, finding.message)
+            self.assertEqual(finding.details["uncertainty"], [reason])
 
     async def test_unsupported_selected_dependencies_are_advisory_against_a_complete_trace(self):
         self.write("body.tex", "Body.\n")

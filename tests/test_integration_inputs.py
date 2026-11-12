@@ -325,11 +325,12 @@ class InputPreparationTests(AsyncLiveProjectTestCase):
 
         Documented in the workflow reference ("How package contents are selected"): cleanup
         removes OS and version-control metadata, editor backups and rebuildable auxiliary
-        files, never a .bbl; a main.bbl beside main.tex whose name the build regenerated is
-        shipped as supplied, and the package inventory lists it under
-        details.generated_bibliography. The inventory gives each excluded file its reason
+        files, never a .bbl; a main.bbl beside main.tex that the build regenerated is not
+        shipped while the receiving service runs BibTeX itself (the default), and its
+        inventory row says so. The inventory gives each excluded file its reason
         (reports.md, "What is in the submission?"), and the original project is never
-        changed (quickstart).
+        changed (quickstart). latexmk 4.83 once failed this build on Linux, because it
+        created a BibTeX rule for the supplied main.bbl in the working directory.
         """
         missing = [tool for tool in LOCAL_BUILD_TOOLS if shutil.which(tool) is None]
         if missing:
@@ -344,14 +345,16 @@ class InputPreparationTests(AsyncLiveProjectTestCase):
         originals = directory_contents(project)
         report = await self.prepare_released(project, live_settings(layout="flat"), "prepared")
         shipped = _archive_files(self.base / "prepared" / "submission.zip")
-        self.assertEqual(sorted(shipped), ["main.bbl", "main.tex", "refs.bib"])
-        self.assertEqual(shipped["main.bbl"], originals["main.bbl"])
+        self.assertEqual(sorted(shipped), ["main.tex", "refs.bib"])
         selections = [
             item for item in report.findings if item.code == "PKG302" and item.status == "passed"
         ]
         self.assertTrue(selections, blocking_summary(report))
-        for selection in selections:
-            self.assertIn("main.bbl", selection.details.get("generated_bibliography", []))
+        bbl = _inventory_rows(report)["main.bbl"]
+        self.assertEqual(bbl["status"], "excluded", bbl)
+        self.assertTrue(
+            any("Rebuilt by the verified build" in reason for reason in bbl["reasons"]), bbl
+        )
         self.assert_excluded_for_their_reasons(report)
         self.assertEqual(directory_contents(project), originals)
 

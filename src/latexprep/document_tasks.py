@@ -21,8 +21,10 @@ from .build_checks import check_local_package_shadows
 from .build_result import BuildResult
 from .cancellation import run_in_thread
 from .config import Settings
+from .engine_selection import choose_engine, read_engine_comment
 from .errors import PreparationError
 from .findings import Finding
+from .generated_file_checks import never_created_findings
 from .image_metadata import check_image_metadata
 from .job_context import JobCommand, JobContext, pdf_check_settings
 from .latexmk_build import SELECTABLE_BUILD_ERRORS
@@ -31,6 +33,7 @@ from .manuscript_checks import check_manuscript_policies
 from .online_checks import check_online_references
 from .pdf_check_pipeline import inspect_configured_pdf_checks
 from .scheduler import Task
+from .setting_choices import Engine
 from .source_analysis import analyze_sources
 from .submission_checks import check_submission
 from .submission_options import SubmissionOptions
@@ -100,7 +103,14 @@ class TaskName(StrEnum):
 BASELINE_STAGE = "baseline"
 
 
-async def build_document(context: JobContext, tree: Path, main: str, directory: str) -> BuildResult:
+async def build_document(
+    context: JobContext,
+    tree: Path,
+    main: str,
+    directory: str,
+    *,
+    kept_generated: frozenset[str] = frozenset(),
+) -> BuildResult:
     """Build ``main`` from ``tree`` in the new workspace directory ``directory``.
 
     The build uses the job's backend, settings and runner, and ignores the build log
@@ -111,11 +121,14 @@ async def build_document(context: JobContext, tree: Path, main: str, directory: 
         tree: The source tree to build.
         main: The main file to build.
         directory: The name of the workspace directory, under the job's work directory.
+        kept_generated: The suffixes of shipped generated files whose tools the build must
+            not run; passed to the backend only when there are some.
 
     Returns:
         The build result.
     """
     settings = context.settings
+    options: dict[str, object] = {"kept_generated": kept_generated} if kept_generated else {}
     return await context.backends.build(
         tree,
         main,
@@ -127,6 +140,7 @@ async def build_document(context: JobContext, tree: Path, main: str, directory: 
         ignored_log_checks=tuple(
             code for code in sorted(SELECTABLE_BUILD_ERRORS) if not settings.checks.enabled(code)
         ),
+        **options,
     )
 
 
@@ -215,8 +229,26 @@ def source_readiness_findings(
         main,
         settings.bbl_checks,
         required_color_space=settings.included_figure_artwork.required_color_space,
+        engine=_document_engine(root, main, settings),
         analysed=analysed,
     )
+
+
+def _document_engine(root: Path, main: str | None, settings: Settings) -> Engine | None:
+    """Return the engine the document builds with, chosen as the build chooses it.
+
+    Args:
+        root: The source tree.
+        main: The main file, or ``None``.
+        settings: The job settings.
+
+    Returns:
+        The engine setting, else the main file's ``% !TEX program`` comment, else pdfLaTeX;
+        ``None`` when the setting is ``auto`` and there is no main file to read.
+    """
+    if main is None:
+        return None if settings.engine == "auto" else settings.engine
+    return choose_engine(settings.engine, read_engine_comment(root / main)).engine
 
 
 def _selected_main(main: str | None) -> str:
@@ -479,6 +511,26 @@ def source_analysis_tasks(
     return tasks
 
 
+async def _baseline_build(context: JobContext, source: Path, main: str) -> BuildResult:
+    """Build the unchanged sources, adding the lists the build looked for but never got.
+
+    Args:
+        context: The job.
+        source: The source tree to build.
+        main: The main file to build.
+
+    Returns:
+        The build result, with a ``source.generated_lists`` warning for every index,
+        glossary or nomenclature file that no tool wrote although the document has entries
+        for it.
+    """
+    result = await build_document(context, source, main, "baseline")
+    dependencies = result.tools.submission_dependencies
+    if dependencies is not None:
+        result.findings.extend(never_created_findings(dependencies.never_created, main))
+    return result
+
+
 def baseline_build_task(context: JobContext, source: Path, main: str) -> Task:
     """Build the task that builds ``main`` from ``source`` in the ``baseline`` directory.
 
@@ -486,7 +538,7 @@ def baseline_build_task(context: JobContext, source: Path, main: str) -> Task:
     """
     return Task(
         TaskName.BASELINE_BUILD,
-        lambda: build_document(context, source, main, "baseline"),
+        lambda: _baseline_build(context, source, main),
         memory_mb=context.settings.build_memory_mb,
         kind="build",
         is_success=lambda value: value.success and value.pdf is not None,

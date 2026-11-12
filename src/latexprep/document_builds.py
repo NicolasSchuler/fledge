@@ -71,7 +71,13 @@ class _RepeatedBaseline(NamedTuple):
 
 
 async def _leased_build(
-    context: JobContext, lease_name: str, tree: Path, main: str, directory: str
+    context: JobContext,
+    lease_name: str,
+    tree: Path,
+    main: str,
+    directory: str,
+    *,
+    kept_generated: frozenset[str] = frozenset(),
 ) -> _TimedBuild:
     """Build under a build lease; report the build's own time and the wait for the lease.
 
@@ -81,6 +87,8 @@ async def _leased_build(
         tree: The source tree to build.
         main: The main file to build.
         directory: The name of the new workspace directory of the build.
+        kept_generated: The suffixes of the shipped generated files whose tools the build
+            must not run.
 
     Returns:
         The build result with both times.
@@ -89,19 +97,25 @@ async def _leased_build(
         lease_name, memory_mb=context.settings.build_memory_mb, kind="build"
     ) as lease:
         started = time.monotonic()
-        result = await build_document(context, tree, main, directory)
+        result = await build_document(context, tree, main, directory, kept_generated=kept_generated)
         elapsed = time.monotonic() - started
     return _TimedBuild(result, elapsed, lease.queue_seconds)
 
 
 async def build_stage(
-    context: JobContext, reporter: TaskReporter, tree: Path, main: str, stage: BuildStage
+    context: JobContext,
+    reporter: TaskReporter,
+    tree: Path,
+    main: str,
+    stage: BuildStage,
+    *,
+    kept_generated: frozenset[str] = frozenset(),
 ) -> BuildResult:
     """Build one staged tree under a build lease and record it like the baseline.
 
     A successful build without submission-input evidence adds an inconclusive
-    ``package.dependencies`` error, and the local package shadow check runs when the
-    settings enable it.
+    ``package.dependencies`` error that quotes why, and the local package shadow check
+    runs when the settings enable it.
 
     Args:
         context: The job.
@@ -109,13 +123,22 @@ async def build_stage(
         tree: The staged source tree.
         main: The main file to build.
         stage: The stage that names the build and its workspace directory.
+        kept_generated: The suffixes of the shipped generated files whose tools the build
+            must not run, so that it reads the shipped files.
 
     Returns:
         The build result.
     """
     settings, report = context.settings, reporter.report
     context.emit(f"Rebuilding {stage.label} sources")
-    timed = await _leased_build(context, f"{stage.label} build", tree, main, stage.directory)
+    timed = await _leased_build(
+        context,
+        f"{stage.label} build",
+        tree,
+        main,
+        stage.directory,
+        kept_generated=kept_generated,
+    )
     result = timed.result
     # Every build records its time, like the scheduled baseline build.
     built = reporter.record_build(
@@ -128,15 +151,20 @@ async def build_stage(
         f"{stage.label} build: {'succeeded' if built else 'failed'} ({timed.elapsed_seconds:.1f}s)"
     )
     if result.success and result.submission_inputs is None:
+        dependencies = result.tools.submission_dependencies
+        uncertainty = dependencies.uncertainty if dependencies is not None else ()
+        reason = f": {uncertainty[0].rstrip('.')}" if uncertainty else ""
         record_findings(
             report,
             [
                 Finding(
                     "package.dependencies",
-                    "Complete build dependency evidence is unavailable.",
+                    f"Complete build dependency evidence is unavailable{reason}.",
                     severity="error",
                     status="inconclusive",
-                    suggestion="Resolve the submission dependency diagnostic and retry.",
+                    suggestion="Resolve the reason above, or the submission dependency "
+                    "diagnostic, and retry.",
+                    details={"uncertainty": list(uncertainty)},
                 )
             ],
             stage.label,

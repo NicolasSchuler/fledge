@@ -1,4 +1,4 @@
-"""Data-only catalogue for cheap submission-readiness advisories and their opt-in policies."""
+"""Data-only catalogue for cheap submission-readiness checks and their opt-in policies."""
 
 from .rule_definition import Rule
 
@@ -10,13 +10,14 @@ RULES = (
         description=(
             "Default check: the selected document reads a .bib file through BibTeX "
             "(\\bibliography) or biblatex (\\addbibresource), but no generated .bbl with the "
-            "main file's name sits beside the main file. Services that compile without running "
-            "BibTeX or Biber, arXiv among them, then produce empty citations; most other "
-            "services run the bibliography backend themselves, so by default the missing file "
-            "is recorded as a not-applicable scope note, listed only with --show-passed and "
-            "in JSON or HTML reports, and does not change the outcome. Opt-in "
-            "submission_checks.require_bbl = true (set by the arxiv preset) reports it as a "
-            "warning."
+            "main file's name sits beside the main file. A service that compiles without "
+            "running BibTeX or Biber then produces empty citations. Most services run the "
+            "bibliography backend themselves when no .bbl is uploaded (arXiv does, and gives "
+            "an uploaded .bbl precedence), so by default the missing file is recorded as a "
+            "not-applicable scope note, listed only with --show-passed and in JSON or HTML "
+            "reports, and does not change the outcome. With "
+            "submission_checks.venue_runs_bibliography_tools = false, or require_bbl = true, "
+            "it is a warning, and prepare ships the .bbl its verified build generated."
         ),
         tests=(
             "tests.test_submission_readiness.BibliographyBblTests.test_bib_without_bbl_is_a_note_and_bbl_passes",
@@ -24,10 +25,11 @@ RULES = (
             "tests.test_submission_readiness.BibliographyBblTests.test_no_bib_resource_or_no_main_reports_nothing",
         ),
         fix=(
-            "Only needed when the receiving service does not run BibTeX or Biber: build "
-            "locally and keep the generated <main>.bbl next to the main file; prepare retains "
-            "an existing <main>.bbl in the package automatically. Biber-generated .bbl files "
-            "must match the biblatex version of the compiling service. For BibTeX, "
+            "Only needed when the receiving service does not run BibTeX or Biber: set "
+            "submission_checks.venue_runs_bibliography_tools = false, and prepare ships the "
+            "<main>.bbl its verified build generated; for check, build locally and keep the "
+            "generated <main>.bbl next to the main file. Biber-generated .bbl files must match "
+            "the biblatex version of the compiling service. For BibTeX, "
             "source_transforms.inline_bibliography (TEX203) can inline the .bbl instead."
         ),
     ),
@@ -59,8 +61,9 @@ RULES = (
             "Opt-in (submission_checks.biblatex_bbl_format_version): compare the format "
             "version on the second line of a shipped biblatex <main>.bbl, such as "
             "'% $ biblatex bbl format version 3.3 $', with the version used by the service that "
-            "compiles the upload without running Biber, arXiv among them. biblatex there "
-            "reports a wrong format version for any other value. BibTeX .bbl files and "
+            "reads the shipped .bbl instead of running Biber (arXiv does when one is uploaded). "
+            "biblatex there reports a wrong format version for any other value. BibTeX .bbl "
+            "files and "
             "documents without a literal .bib resource are not applicable; without a shipped "
             "<main>.bbl the result is an inconclusive warning "
             "that defers to TEX009. Only the header is compared, not the entries."
@@ -102,16 +105,69 @@ RULES = (
         name="source.eps_figures",
         title="EPS/PS figures in a PDF-producing build",
         description=(
-            "Default note: the selected document includes .eps or .ps graphics. pdfLaTeX and "
-            "LuaLaTeX convert them only through epstopdf, which needs shell escape (disabled in "
-            "Fledge's isolated build). arXiv converts EPS itself; other services may not."
+            "Default check: the selected document includes .eps or .ps graphics. No engine "
+            "converts them in Fledge's isolated build: pdfLaTeX and LuaLaTeX convert EPS only "
+            "through epstopdf, which needs shell escape, and XeLaTeX only through Ghostscript, "
+            "and both are disabled. TeX Live 2023 and earlier then print the file name in "
+            "place of the figure without an error, so the build may pass with the figure "
+            "missing; arXiv converts no figures either. A figure without its converted PDF "
+            "beside it blocks. A shipped <name>-eps-converted-to.pdf, which TeX Live 2024 and "
+            "later use, only warns, because earlier releases and XeLaTeX ignore it."
         ),
         tests=(
-            "tests.test_submission_readiness.FigureTests.test_eps_figures_are_reported_as_information",
+            "tests.test_submission_readiness.FigureTests.test_eps_figures_block_unless_their_converted_pdf_is_shipped",
         ),
         fix=(
-            "Convert the figures to PDF (for example with epstopdf) and include the PDF files, "
-            "or confirm that the receiving service compiles EPS through latex and dvips."
+            "Convert each figure to PDF (for example with epstopdf), include the PDF "
+            "(\\includegraphics{figs/plot} finds figs/plot.pdf) and ship it with the sources."
+        ),
+    ),
+    Rule(
+        code="TEX012",
+        name="source.generated_lists",
+        title="Generated index and glossary files shipped with the sources",
+        description=(
+            "Default check: the selected document prints an index (\\printindex), a glossary "
+            "or list of acronyms (\\printglossary, \\printglossaries, \\printacronyms) or a "
+            "nomenclature (\\printnomenclature), but the generated file TeX reads for it "
+            "(<main>.ind, .gls, .acr or .nls, or <name>.ind for a named index) is not beside "
+            "the main file. A service that runs neither makeindex nor makeglossaries, arXiv "
+            "among them, then prints the list empty. prepare ships the files its verified "
+            "build generated, so the prepared package has them. A missing file is a "
+            "not-applicable scope note unless submission_checks.venue_runs_index_tools = false "
+            "(set by the arxiv preset) makes it a warning. A preparation build that read no "
+            "such file although the document wrote entries for it reports the file and the "
+            "tool that would write it."
+        ),
+        tests=(
+            "tests.test_submission_readiness.GeneratedListTests.test_missing_index_and_glossary_files_are_notes_by_default",
+            "tests.test_submission_readiness.GeneratedListTests.test_a_venue_without_index_tools_makes_a_missing_file_a_warning",
+            "tests.test_submission_readiness.GeneratedListTests.test_shipped_lists_pass_and_documents_without_lists_report_nothing",
+            "tests.test_submission_readiness.NeverCreatedListTests.test_a_list_the_build_never_got_is_reported_with_its_tool",
+            "tests.test_submission_readiness.NeverCreatedListTests.test_the_baseline_build_reports_the_lists_it_never_got",
+        ),
+        fix=(
+            "Run fledge prepare, which ships the index and glossary files its verified build "
+            "generated; for check, build locally and keep the generated files next to the "
+            "main file."
+        ),
+    ),
+    Rule(
+        code="TEX013",
+        name="source.venue_engine",
+        title="Engine offered by the receiving service",
+        description=(
+            "Default check that reports only when submission_checks.venue_engines lists the "
+            "engines the receiving service compiles with: the document builds with another "
+            "engine. The arxiv preset lists pdflatex and xelatex, because arXiv's processors "
+            "are tex, pdftex, latex (DVI), pdflatex and xelatex, not LuaLaTeX."
+        ),
+        tests=(
+            "tests.test_submission_readiness.VenueEngineTests.test_an_engine_the_venue_does_not_offer_warns",
+        ),
+        fix=(
+            "Build with an engine the service offers (for example --engine pdflatex), or "
+            "submit where the document's engine is offered."
         ),
     ),
     Rule(

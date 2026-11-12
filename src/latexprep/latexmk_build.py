@@ -15,7 +15,7 @@ import re
 import shutil
 from dataclasses import KW_ONLY, dataclass, replace
 from pathlib import Path, PurePosixPath
-from typing import NamedTuple
+from typing import NamedTuple, TypedDict, Unpack
 
 from .bibliography_controls import read_bibliography_evidence
 from .build_bibliography import (
@@ -113,6 +113,8 @@ class BuildRequest:
             and package option inventory.
         ignored_log_checks: The deselected policy-level log errors, from
             ``SELECTABLE_BUILD_ERRORS``, that do not fail the build.
+        kept_generated: The suffixes of shipped generated files that the build reads as
+            they are, without running the tools that write them.
     """
 
     source: Path
@@ -123,6 +125,7 @@ class BuildRequest:
     bibliography_backend: BibliographyBackend = "auto"
     inventory_loaded_options: bool = False
     ignored_log_checks: tuple[str, ...] = ()
+    kept_generated: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
         validate_scalars(self)
@@ -171,16 +174,31 @@ class _LogEvidence:
     findings: list[Finding]
 
 
+class BuildOptions(TypedDict, total=False):
+    """The optional settings of :func:`build_project`, as the fields of ``BuildRequest``.
+
+    Attributes:
+        bibliography_backend: The bibliography strategy; ``auto`` when absent.
+        inventory_loaded_options: Whether to collect the loaded class and package option
+            inventory.
+        ignored_log_checks: The deselected policy-level log errors.
+        kept_generated: The suffixes of shipped generated files that the build reads as
+            they are, without running the tools that write them.
+    """
+
+    bibliography_backend: BibliographyBackend
+    inventory_loaded_options: bool
+    ignored_log_checks: tuple[str, ...]
+    kept_generated: frozenset[str]
+
+
 async def build_project(
     source: Path,
     main: str,
     work: Path,
     engine: EngineSetting,
     runner: ToolRunner,
-    *,
-    bibliography_backend: BibliographyBackend = "auto",
-    inventory_loaded_options: bool = False,
-    ignored_log_checks: tuple[str, ...] = (),
+    **options: Unpack[BuildOptions],
 ) -> BuildResult:
     """Build ``main`` in isolation, preparing Biber for an automatic strategy only when needed.
 
@@ -198,10 +216,7 @@ async def build_project(
         work: The workspace directory to create.
         engine: The engine setting; ``auto`` follows the main file's magic comment.
         runner: The restricted tool runner.
-        bibliography_backend: The bibliography strategy.
-        inventory_loaded_options: Whether to collect the loaded class and package option
-            inventory.
-        ignored_log_checks: The deselected policy-level log errors.
+        **options: The optional settings of the build (see ``BuildOptions``).
 
     Returns:
         The build result; tool and evidence failures are findings in it.
@@ -209,15 +224,7 @@ async def build_project(
     Raises:
         PreparationError: The request is invalid, or the build copy cannot be prepared.
     """
-    request = BuildRequest(
-        source,
-        main,
-        work,
-        DEFAULT_ENGINE,
-        bibliography_backend=bibliography_backend,
-        inventory_loaded_options=inventory_loaded_options,
-        ignored_log_checks=ignored_log_checks,
-    )
+    request = BuildRequest(source, main, work, DEFAULT_ENGINE, **options)
     # The request has validated the main file's name before it is read.
     choice = choose_engine(engine, await run_in_thread(read_engine_comment, source / main))
     request = replace(request, engine=choice.engine)
@@ -291,7 +298,12 @@ async def _build_once(request: BuildRequest, runner: ToolRunner, biber: BiberPla
     biber_setup = await prepare_biber(
         request.bibliography_backend, runner, biber, layout.work.parent
     )
-    rules = controlled_rules(request.bibliography_backend, biber, biber_setup.executable)
+    rules = controlled_rules(
+        request.bibliography_backend,
+        biber,
+        biber_setup.executable,
+        kept_generated=request.kept_generated,
+    )
     result = BuildResult(
         success=False, command=latexmk_command(request.engine, request.main, layout, rules)
     )

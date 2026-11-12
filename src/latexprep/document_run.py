@@ -9,7 +9,7 @@ main-file selection (``main_selection``) live in their own modules.
 from __future__ import annotations
 
 from dataclasses import KW_ONLY, dataclass, field, replace
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from .build_result import BuildResult
 from .config import Settings
@@ -26,7 +26,12 @@ from .formatting import format_project
 from .job_context import JobCommand, JobContext, import_input
 from .job_report import is_blocked, job_outcome, record_findings
 from .main_selection import select_main
-from .package_inputs import InputEvidence, generated_bibliography_inputs, select_package_inputs
+from .package_inputs import (
+    build_evidence,
+    select_package_inputs,
+    shipped_generated_files,
+    shipped_generated_suffixes,
+)
 from .package_verification import PackageVerification, ShippedSources
 from .publication import VerifiedPackage
 from .report import Outcome, Report
@@ -262,13 +267,19 @@ class DocumentRun:
             destination,
             main,
             # Absent evidence (None) is a blocking diagnostic in select_package_inputs.
-            InputEvidence(
-                baseline.submission_inputs,
+            build_evidence(
+                baseline,
                 self.retained | inline_bibliography_files(self.settings),
-                baseline.generated_reads,
+                self._shipped_suffixes(),
             ),
         )
         return InputSelection(destination, *selected)
+
+    def _shipped_suffixes(self) -> frozenset[str]:
+        """Return the suffixes of the generated files the package carries from its build."""
+        return shipped_generated_suffixes(
+            venue_runs_bibliography_tools=self.settings.bbl_checks.venue_runs_bibliography_tools
+        )
 
     async def _prepare(self, baseline: BuildResult, main: str) -> VerifiedPackage | None:
         """Transform, ship and verify the document.
@@ -326,9 +337,6 @@ class DocumentRun:
         analysis = self.completed[TaskName.SOURCE_CHECKS].value
         if analysis:
             dependencies.update(analysis.dependencies)
-        # Cleanup must not remove a selected generated bibliography (.run.xml is otherwise
-        # rebuildable debris); the build reads the regenerated copy, not the supplied one.
-        dependencies.update(generated_bibliography_inputs(snapshot, main, baseline.generated_reads))
         transformed = await context.thread_operation(
             "transform sources",
             transform_sources,
@@ -384,13 +392,19 @@ class DocumentRun:
             return None
         context.emit("Selecting the transformed document's inputs for submission")
         shipment = context.work / "shipment"
+        evidence = build_evidence(staged, self.retained, self._shipped_suffixes())
         selected = await context.thread_operation(
             "select submission inputs",
             select_package_inputs,
             prepared,
             shipment,
             main,
-            InputEvidence(staged.submission_inputs, self.retained, staged.generated_reads),
+            evidence,
+        )
+        # The archive rebuild runs without the tools whose files the package carries, which
+        # proves that the shipped files suffice.
+        kept_generated = frozenset(
+            PurePosixPath(name).suffix for name in shipped_generated_files(main, evidence)
         )
         self.reporter.record_selection(selected, _SELECT_SUBMISSION_INPUTS_STAGE)
         if is_blocked(report, settings):
@@ -427,7 +441,9 @@ class DocumentRun:
         )
         if is_blocked(report, settings):
             return None
-        return ShippedSources(flattened.root, flattened.main, pdf, flattened.path_mapping)
+        return ShippedSources(
+            flattened.root, flattened.main, pdf, flattened.path_mapping, kept_generated
+        )
 
     def _note_online_checks_not_reached(self) -> None:
         """Say when selected online checks never ran because the final extraction was not reached.

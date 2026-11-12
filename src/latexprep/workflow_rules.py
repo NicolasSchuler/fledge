@@ -33,7 +33,7 @@ RULES = (
             "then decide. A passed note lists the selection."
         ),
         tests=(
-            "tests.test_dependency_packaging.DependencyPackagingTests.test_supplied_generated_bibliography_ships_when_the_build_consumed_it",
+            "tests.test_dependency_packaging.DependencyPackagingTests.test_generated_files_ship_from_the_verified_build_for_services_without_the_tools",
             "tests.test_dependency_packaging.DependencyPackagingTests.test_unsupported_selected_dependencies_are_advisory_against_a_complete_trace",
         ),
         fix=(

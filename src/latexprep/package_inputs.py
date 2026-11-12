@@ -6,28 +6,48 @@ asks to keep. ``select_package_inputs`` takes that union, checks that every file
 plain, regular, contained file, and copies it into a new destination. It owns the
 choice and the copy; the reasons behind each file are recorded as inventory rows
 (``package_inventory``), and recorded inputs come from the build, not from here.
+
+Besides the project's files, a package carries the generated files that a receiving
+service may not rebuild (``generated_files``): the index, glossary and nomenclature
+files the verified build generated always, because arXiv runs neither makeindex nor
+makeglossaries, and the generated ``.bbl`` only when the settings say that the service
+runs neither BibTeX nor Biber. They are copied from the build's output folder to sit
+beside the main file, where TeX looks for them.
 """
 
 from __future__ import annotations
 
 import shutil
-from collections.abc import Set
-from dataclasses import dataclass, replace
+from collections.abc import Mapping, Set
+from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from typing import NamedTuple
 
+from .build_result import BuildResult
 from .cancellation import cancellation_point
 from .findings import Finding
-from .package_inventory import UNUSED_REASON, InventoryRow, selection_inventory
+from .generated_files import BIBLIOGRAPHY_SUFFIX, GENERATED_SUFFIXES, INDEX_SUFFIXES, generated_kind
+from .package_inventory import InventoryRow, selection_inventory, unused_reason
 from .path_safety import is_contained, is_relative_posix_path
 from .report import Change, ChangeKind
 from .source_analysis import SourceAnalysis, analyze_selected_sources
 
-# Generated bibliography files that the TeX run reads: the .bbl, which services
-# compiling without BibTeX or Biber (arXiv among them) use instead of the .bib,
-# and biblatex's .run.xml control file, which biblatex reads back on later passes.
-GENERATED_BIBLIOGRAPHY_SUFFIXES = (".bbl", ".run.xml")
 _RULE = "package.dependencies"
+
+
+def shipped_generated_suffixes(*, venue_runs_bibliography_tools: bool) -> frozenset[str]:
+    """Return the suffixes of the generated files a package carries from its verified build.
+
+    Args:
+        venue_runs_bibliography_tools: Whether the receiving service runs BibTeX or Biber
+            when no .bbl is uploaded; only when it does not is the .bbl shipped.
+
+    Returns:
+        The index, glossary and nomenclature suffixes, and ``.bbl`` when it is shipped.
+    """
+    return frozenset(INDEX_SUFFIXES) | (
+        frozenset() if venue_runs_bibliography_tools else frozenset({BIBLIOGRAPHY_SUFFIX})
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,13 +58,18 @@ class InputEvidence:
         observed: The inputs the build recorded; ``None`` means no complete trace exists,
             which is different from an empty set.
         explicit: The files the settings ask to keep.
-        generated_reads: The names of generated bibliography files the build read, which
-            decide whether a supplied copy is kept.
+        generated_files: Where each generated file the build read lies, by its name
+            relative to the folder that holds it.
+        shipped_suffixes: The suffixes of the generated files the package carries from
+            the build (see :func:`shipped_generated_suffixes`).
+        uncertainty: Why the trace is incomplete, when ``observed`` is ``None``.
     """
 
     observed: Set[str] | None
     explicit: Set[str]
-    generated_reads: Set[str] = frozenset()
+    generated_files: Mapping[str, Path] = field(default_factory=dict)
+    shipped_suffixes: frozenset[str] = frozenset(INDEX_SUFFIXES)
+    uncertainty: tuple[str, ...] = ()
 
 
 class InputSelectionResult(NamedTuple):
@@ -62,45 +87,100 @@ class InputSelectionResult(NamedTuple):
     inventory: list[InventoryRow]
 
 
-def generated_bibliography_inputs(root: Path, main: str, generated_reads: Set[str]) -> set[str]:
-    """Find the supplied <main>.bbl and <main>.run.xml beside the main file that the build read.
-
-    The build regenerates these files in its output directory, so the recorder
-    shows that a file of the same name was read rather than the supplied copy.
-    A supplied copy is retained only when this build read one with its name,
-    so a stale file from an unrelated configuration does not ship. Links and
-    non-regular files are never retained.
+def build_evidence(
+    result: BuildResult, explicit: Set[str], shipped_suffixes: frozenset[str]
+) -> InputEvidence:
+    """Gather what one finished build shows about the files a package needs.
 
     Args:
-        root: The project folder.
-        main: The main file, relative to ``root``.
-        generated_reads: The names of the generated bibliography files the build read.
+        result: The build.
+        explicit: The files the settings ask to keep.
+        shipped_suffixes: The suffixes of the generated files the package carries.
 
     Returns:
-        The supplied copies to retain, relative to ``root``.
+        The evidence, with the build's generated files and, without a complete trace,
+        why it is incomplete.
     """
-    main_path = PurePosixPath(main)
-    read = {PurePosixPath(name).name for name in generated_reads}
-    retained: set[str] = set()
-    for suffix in GENERATED_BIBLIOGRAPHY_SUFFIXES:
-        name = main_path.stem + suffix
-        candidate = (main_path.parent / name).as_posix()
-        if name in read and is_contained(root, root / candidate, regular_file=True):
-            retained.add(candidate)
-    return retained
+    dependencies = result.tools.submission_dependencies
+    return InputEvidence(
+        result.submission_inputs,
+        explicit,
+        generated_files=dict(dependencies.generated_files) if dependencies else {},
+        shipped_suffixes=shipped_suffixes,
+        uncertainty=dependencies.uncertainty if dependencies else (),
+    )
 
 
-def _missing_trace() -> InputSelectionResult:
-    """Return the result of a build without a complete trace: one error, nothing selected."""
+def shipped_generated_files(main: str, evidence: InputEvidence) -> dict[str, Path]:
+    """Return the generated files the package carries from the build, by package name.
+
+    A generated file is shipped when the build read it from directly inside the folder
+    that held it, its suffix is shipped, and it is a regular, unlinked file. It goes
+    beside the main file, where TeX looks for it, unless the settings keep a supplied
+    file of that name, which is then shipped instead.
+
+    Args:
+        main: The main file, relative to the project.
+        evidence: What is known about the build.
+
+    Returns:
+        The build's file to copy, by its project-relative name in the package.
+    """
+    folder = PurePosixPath(main).parent
+    shipped: dict[str, Path] = {}
+    for name, path in sorted(evidence.generated_files.items()):
+        if "/" in name or PurePosixPath(name).suffix not in evidence.shipped_suffixes:
+            continue
+        target = (folder / name).as_posix()
+        if target in evidence.explicit or path.is_symlink() or not path.is_file():
+            continue
+        shipped[target] = path
+    return shipped
+
+
+def _regenerated_supplied_files(main: str, evidence: InputEvidence) -> set[str]:
+    """Return the names beside the main file of generated files the build rewrote.
+
+    A supplied file of such a name was not what the build read; when it is not shipped
+    from the build, its inventory row says why.
+
+    Args:
+        main: The main file, relative to the project.
+        evidence: What is known about the build.
+
+    Returns:
+        The project-relative names.
+    """
+    folder = PurePosixPath(main).parent
+    return {
+        (folder / name).as_posix()
+        for name in evidence.generated_files
+        if "/" not in name and PurePosixPath(name).suffix in GENERATED_SUFFIXES
+    }
+
+
+def _missing_trace(uncertainty: tuple[str, ...]) -> InputSelectionResult:
+    """Return the result of a build without a complete trace: one error, nothing selected.
+
+    Args:
+        uncertainty: Why the trace is incomplete; the first reason is quoted.
+
+    Returns:
+        The result, with no changes and no inventory.
+    """
+    reason = f" ({uncertainty[0].rstrip('.')})" if uncertainty else ""
     return InputSelectionResult(
         [],
         [
             Finding(
                 _RULE,
-                "Complete build dependency evidence is unavailable; no input set was selected.",
+                f"Complete build dependency evidence is unavailable{reason}; no input set was "
+                "selected.",
                 severity="error",
                 status="inconclusive",
-                suggestion="Resolve the build's submission dependency diagnostic and retry.",
+                suggestion="Resolve the reason above, or the build's submission dependency "
+                "diagnostic, and retry.",
+                details={"uncertainty": list(uncertainty)},
             )
         ],
         [],
@@ -184,56 +264,66 @@ def _unusable_inputs(root: Path, included: Set[str]) -> list[Finding]:
     return findings
 
 
-def _copy_inputs(root: Path, destination: Path, included: Set[str]) -> None:
-    """Copy the selected inputs into ``destination``, which must not exist yet.
+def _copy_inputs(
+    root: Path, destination: Path, included: Set[str], built: Mapping[str, Path]
+) -> None:
+    """Copy the selected inputs and the shipped generated files into ``destination``.
 
     Args:
         root: The project folder.
-        destination: The folder to create and copy into.
+        destination: The folder to create and copy into; it must not exist yet.
         included: The selected inputs, relative to ``root``.
+        built: The build's generated files to copy, by their name in ``destination``.
     """
     destination.mkdir()
-    for name in sorted(included):
+    sources = {name: root / name for name in included} | dict(built)
+    for name in sorted(sources):
         cancellation_point()
         target = destination / name
         target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(root / name, target)
+        shutil.copyfile(sources[name], target)
+
+
+def _shipped_generated_text(built: Set[str]) -> str:
+    """Say which generated files the package carries from the build, and for whom."""
+    if not built:
+        return ""
+    tools = sorted(
+        {kind.tool for name in built if (kind := generated_kind(name)) is not None}, key=len
+    )
+    return (
+        f" Shipped {', '.join(sorted(built))}, generated by the verified build, for services "
+        f"that do not run {' or '.join(tools)}."
+    )
 
 
 def _selection_finding(
-    included: Set[str],
-    omitted: int,
-    evidence: InputEvidence,
-    bibliography: Set[str],
+    included: Set[str], omitted: int, evidence: InputEvidence, built: Set[str]
 ) -> Finding:
     """Return the finding that sums up a successful selection.
 
     Args:
-        included: The selected inputs.
+        included: The selected project inputs and shipped generated files.
         omitted: The number of project files that were left out.
         evidence: The evidence of the selection; its explicit files go into the details.
-        bibliography: The supplied generated bibliography files retained beyond the
-            recorded and explicit inputs.
+        built: The generated files the package carries from the build.
 
     Returns:
         A passed info finding.
     """
-    retained_bibliography = (
-        f" Retained the generated bibliography {', '.join(sorted(bibliography))} for services "
-        "that compile without BibTeX or Biber."
-        if bibliography
-        else ""
-    )
     return Finding(
         _RULE,
         f"Selected {len(included)} project inputs; omitted {omitted} unrelated files."
-        + retained_bibliography,
+        + _shipped_generated_text(built),
         severity="info",
         status="passed",
         details={
             "included": sorted(included),
             "explicit": sorted(evidence.explicit),
-            "generated_bibliography": sorted(bibliography),
+            "generated_files": sorted(built),
+            "generated_bibliography": sorted(
+                name for name in built if name.endswith(BIBLIOGRAPHY_SUFFIX)
+            ),
             "scope": "Supported literal dependencies and recorded inputs for the selected "
             "build configuration; not minimality across other TeX executions.",
         },
@@ -243,10 +333,10 @@ def _selection_finding(
 def select_package_inputs(
     root: Path, destination: Path, main: str, evidence: InputEvidence
 ) -> InputSelectionResult:
-    """Copy supported literal and observed inputs plus explicit retained files.
+    """Copy supported literal and observed inputs, explicit retained files and generated files.
 
-    A supplied generated bibliography beside the main file is retained when the
-    build consumed a regenerated file of the same name (``evidence.generated_reads``).
+    The generated files the package carries from the build are chosen by
+    :func:`shipped_generated_files`.
 
     A missing trace is different from an empty dependency set. An incomplete
     literal graph is advisory once the trace is complete, because the recorded
@@ -265,28 +355,30 @@ def select_package_inputs(
     """
     observed = evidence.observed
     if observed is None or main not in observed:
-        return _missing_trace()
+        return _missing_trace(evidence.uncertainty)
     analysis = analyze_selected_sources(root, main)
     findings = _graph_advisories(analysis)
-    generated = generated_bibliography_inputs(root, main, evidence.generated_reads)
-    bibliography = generated - observed - evidence.explicit
-    included = analysis.dependencies | observed | evidence.explicit | bibliography
+    built = shipped_generated_files(main, evidence)
+    included = (analysis.dependencies | observed | evidence.explicit) - set(built)
     unusable = _unusable_inputs(root, included)
     if unusable:
         return InputSelectionResult([], [*findings, *unusable], [])
     files = {path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file()}
+    shipped = included | set(built)
+    regenerated = _regenerated_supplied_files(main, evidence) - shipped
     changes = [
-        Change(name, kind=ChangeKind.EXCLUDE, reason=UNUSED_REASON)
-        for name in sorted(files - included)
+        Change(name, kind=ChangeKind.EXCLUDE, reason=unused_reason(name, regenerated))
+        for name in sorted(files - shipped)
     ]
-    _copy_inputs(root, destination, included)
+    _copy_inputs(root, destination, included, built)
     inventory = selection_inventory(
         root,
         files=files,
         literal=analysis.dependencies,
         observed=set(observed),
         explicit=set(evidence.explicit),
-        generated=generated,
+        built=set(built),
+        regenerated=regenerated,
     )
-    findings.append(_selection_finding(included, len(changes), evidence, bibliography))
+    findings.append(_selection_finding(shipped, len(changes), evidence, set(built)))
     return InputSelectionResult(changes, findings, inventory)

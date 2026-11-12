@@ -8,15 +8,18 @@ import unittest
 import zlib
 
 from latexprep.bbl_checks import BblOptions, validate_bbl_format_version
-from latexprep.config import load_settings
+from latexprep.build_dependencies import SubmissionDependencies
+from latexprep.config import Settings, load_settings
 from latexprep.core import run_job
 from latexprep.document_tasks import source_readiness_findings
 from latexprep.errors import PreparationError
 from latexprep.figure_color_space import JpegColor, jpeg_color_family, png_color_family
 from latexprep.findings import Finding
+from latexprep.generated_file_checks import never_created_findings
 from latexprep.job_context import JobRequest
 from latexprep.manuscript_check_options import ManuscriptCheckOptions
 from latexprep.manuscript_checks import check_manuscript_policies
+from latexprep.setting_choices import Engine
 from latexprep.submission_readiness_checks import check_submission_readiness
 from tests.support import ProjectTestCase, controlled_backends, fake_build
 
@@ -83,6 +86,7 @@ class ReadinessCase(ProjectTestCase):
         rule: str,
         main: str | None = "main.tex",
         required_color_space: str | None = None,
+        engine: Engine | None = None,
         **options: object,
     ) -> list[Finding]:
         """Run the submission-readiness checks and return the findings of ``rule``.
@@ -92,6 +96,7 @@ class ReadinessCase(ProjectTestCase):
             main: The main file, or ``None`` to select the single document root.
             required_color_space: The colour space raster figures must use, or ``None`` for no
                 policy.
+            engine: The engine the document builds with, or ``None`` when not known.
             **options: The fields of the :class:`BblOptions` to use.
 
         Returns:
@@ -102,6 +107,7 @@ class ReadinessCase(ProjectTestCase):
             main,
             BblOptions(**options),  # type: ignore[arg-type]
             required_color_space=required_color_space,
+            engine=engine,
         )
         return [item for item in readiness if item.rule == rule]
 
@@ -138,7 +144,8 @@ class BibliographyBblTests(ReadinessCase):
         self.assertTrue(missing.is_scope_disclaimer)
         self.assertEqual((missing.path, missing.line), ("main.tex", 5))
         self.assertIn("main.bbl is not in the package", missing.message)
-        self.assertIn("submission_checks.require_bbl", missing.message)
+        self.assertIn("submission_checks.venue_runs_bibliography_tools = false", missing.message)
+        self.assertIn("arXiv runs them when no .bbl is uploaded", missing.message)
         self.assertEqual(missing.details["backend"], "bibtex")
         self.assertFalse(missing.details["require_bbl"])
         self.write("old/paper.bbl", "\\begin{thebibliography}{1}\\end{thebibliography}")
@@ -157,8 +164,12 @@ class BibliographyBblTests(ReadinessCase):
         self.assertEqual(
             (required.code, required.severity, required.status), ("TEX009", "warning", "failed")
         )
-        self.assertIn("would render empty citations", required.message)
+        self.assertIn("renders empty citations", required.message)
         self.assertTrue(required.details["require_bbl"])
+        # A venue that runs neither BibTeX nor Biber needs the .bbl just as much.
+        venue = self.one("source.bibliography_bbl", venue_runs_bibliography_tools=False)
+        self.assertEqual((venue.severity, venue.status), ("warning", "failed"))
+        self.assertFalse(venue.details["venue_runs_bibliography_tools"])
         self.write("main.bbl", "\\begin{thebibliography}{1}\\end{thebibliography}")
         shipped = self.one("source.bibliography_bbl", require_bbl=True)
         self.assertEqual((shipped.severity, shipped.status), ("info", "passed"))
@@ -330,18 +341,17 @@ class BibliographyBblTests(ReadinessCase):
         ):
             load_settings(config, {})
 
-    def test_arxiv_preset_without_a_bbl_is_an_advisory_not_a_block(self) -> None:
+    def test_arxiv_preset_needs_no_bbl_because_arxiv_runs_bibtex(self) -> None:
+        """Record a missing .bbl only as a note: arXiv runs BibTeX when no .bbl is uploaded."""
         self.write("refs.bib", "@book{knuth, title={The TeXbook}, year={1984}}")
         self.document(body="Text \\cite{knuth}.\n\\bibliography{refs}")
         settings = load_settings(None, {}, preset="arxiv")
         backends = controlled_backends(build=fake_build)
         report = asyncio.run(run_job(JobRequest("check", self.root, settings), backends=backends))
         bbl = {item.code: item for item in report.findings if item.code in {"TEX009", "BIB109"}}
-        self.assertEqual((bbl["TEX009"].severity, bbl["TEX009"].status), ("warning", "failed"))
-        self.assertEqual(
-            (bbl["BIB109"].severity, bbl["BIB109"].status), ("warning", "inconclusive")
-        )
-        self.assertEqual(report.outcome, "passed_with_advisories", report.findings)
+        self.assertEqual((bbl["TEX009"].severity, bbl["TEX009"].status), ("info", "not_applicable"))
+        self.assertNotIn("BIB109", bbl)
+        self.assertNotIn(report.outcome, {"blocked", "error"}, report.findings)
 
     def test_bbl_coverage_is_inconclusive_for_dynamic_citations(self) -> None:
         self.write("refs.bib", "@book{knuth, title={T}}")
@@ -389,7 +399,13 @@ class HyperrefOrderTests(ReadinessCase):
 class FigureTests(ReadinessCase):
     """EPS figures, and the raster colour space policy read from PNG and JPEG headers."""
 
-    def test_eps_figures_are_reported_as_information(self) -> None:
+    def test_eps_figures_block_unless_their_converted_pdf_is_shipped(self) -> None:
+        """Block an EPS figure the isolated build cannot convert, for every engine.
+
+        TeX Live 2023 prints the file name instead of the figure without an error, so the
+        source check must block. A shipped epstopdf output only warns, and a PDF that the
+        extension search finds first replaces the EPS figure altogether.
+        """
         self.write("figs/plot.eps", "%!PS-Adobe-3.0 EPSF-3.0\n")
         self.write("photo.pdf", b"%PDF-1.5\n")
         self.document(
@@ -397,12 +413,23 @@ class FigureTests(ReadinessCase):
         )
         finding = self.one("source.eps_figures")
         self.assertEqual(
-            (finding.code, finding.severity, finding.status), ("TEX011", "info", "failed")
+            (finding.code, finding.severity, finding.status), ("TEX011", "error", "failed")
         )
         self.assertEqual(
-            (finding.path, finding.details["figures"]), ("figs/plot.eps", ["figs/plot.eps"])
+            (finding.path, finding.details["unconverted"]), ("figs/plot.eps", ["figs/plot.eps"])
         )
         self.assertIn("shell escape", finding.message)
+        self.assertIn("Ghostscript", finding.message)
+        self.assertIn("TeX Live 2023", finding.message)
+        self.assertIn("\\includegraphics{figs/plot} finds figs/plot.pdf", finding.suggestion)
+        # The epstopdf output beside the figure: TeX Live 2024 and later use it.
+        self.write("figs/plot-eps-converted-to.pdf", b"%PDF-1.5\n")
+        converted = self.one("source.eps_figures")
+        self.assertEqual((converted.severity, converted.status), ("warning", "failed"))
+        self.assertEqual(converted.details["converted"], ["figs/plot-eps-converted-to.pdf"])
+        # A PDF named like the figure is found first, so no EPS figure is included.
+        self.write("figs/plot.pdf", b"%PDF-1.5\n")
+        self.assertEqual(self.findings("source.eps_figures"), [])
         self.document("\\usepackage{graphicx}\n", "\\includegraphics{photo.pdf}")
         self.assertEqual(self.findings("source.eps_figures"), [])
 
@@ -481,6 +508,132 @@ class FigureTests(ReadinessCase):
         self.assertIn("cannot be read here", result.message)
         with self.assertRaises(PreparationError):
             check_submission_readiness(self.root, "main.tex", required_color_space="srgb")
+
+
+class GeneratedListTests(ReadinessCase):
+    """The generated index, glossary and nomenclature files a document prints (TEX012)."""
+
+    LISTS = (
+        "\\usepackage{makeidx}\n\\usepackage{glossaries}\n\\usepackage{nomencl}\n"
+        "\\makeindex\n\\makeglossaries\n\\makenomenclature\n"
+    )
+    BODY = (
+        "Text\\index{text}.\n\\printglossaries\n\\printglossary[type=acronym]\n"
+        "\\printnomenclature\n\\printindex\n\\printindex[authors]"
+    )
+
+    def test_missing_index_and_glossary_files_are_notes_by_default(self) -> None:
+        self.document(self.LISTS, self.BODY)
+        missing = self.one("source.generated_lists")
+        self.assertEqual(
+            (missing.code, missing.severity, missing.status), ("TEX012", "info", "not_applicable")
+        )
+        self.assertTrue(missing.is_scope_disclaimer)
+        self.assertEqual(
+            missing.details["expected"],
+            ["authors.ind", "main.acr", "main.gls", "main.ind", "main.nls"],
+        )
+        self.assertEqual(missing.details["missing"], missing.details["expected"])
+        self.assertEqual((missing.path, missing.line), ("main.tex", 10))
+        self.assertIn("arXiv runs neither", missing.message)
+        self.assertIn("prepare ships the files its verified build generated", missing.message)
+
+    def test_a_venue_without_index_tools_makes_a_missing_file_a_warning(self) -> None:
+        self.document(self.LISTS, self.BODY)
+        for name in ("main.gls", "main.acr", "main.nls", "authors.ind"):
+            self.write(name, "generated\n")
+        warning = self.one("source.generated_lists", venue_runs_index_tools=False)
+        self.assertEqual((warning.severity, warning.status), ("warning", "failed"))
+        self.assertEqual(warning.details["missing"], ["main.ind"])
+        self.assertIn("main.ind is not in the package", warning.message)
+        self.assertIn("would be empty there", warning.message)
+
+    def test_shipped_lists_pass_and_documents_without_lists_report_nothing(self) -> None:
+        self.write(
+            "paper/main.tex", PREAMBLE + "\\begin{document}\n\\printindex\n\\end{document}\n"
+        )
+        self.write("paper/main.ind", "\\begin{theindex}\\end{theindex}\n")
+        shipped = self.one("source.generated_lists", main="paper/main.tex")
+        self.assertEqual((shipped.severity, shipped.status), ("info", "passed"))
+        self.assertEqual(shipped.path, "paper/main.ind")
+        # A glossary type of its own definition, or a list without a print command, is
+        # not checked; noidx glossaries are sorted by TeX and need no generated file.
+        self.document(
+            "\\usepackage{glossaries}\n",
+            "\\printglossary[type=symbols]\n\\printnoidxglossaries\n\\makeindex",
+        )
+        self.assertEqual(self.findings("source.generated_lists"), [])
+
+
+class NeverCreatedListTests(ReadinessCase):
+    """A list the build looked for that no tool wrote is reported with its tool (TEX012)."""
+
+    def test_a_list_the_build_never_got_is_reported_with_its_tool(self) -> None:
+        (finding,) = never_created_findings(("main.nls", "notes.txt"), "main.tex")
+        self.assertEqual(
+            (finding.code, finding.severity, finding.status), ("TEX012", "warning", "failed")
+        )
+        self.assertIn("so the PDF has no nomenclature", finding.message)
+        self.assertIn("makeindex with nomencl's style", finding.message)
+        self.assertIn("main.nlo", finding.message)
+        self.assertIn("ship main.nls beside the main file", finding.suggestion)
+        self.assertEqual(never_created_findings((), "main.tex"), [])
+
+    def test_the_baseline_build_reports_the_lists_it_never_got(self) -> None:
+        self.document()
+
+        async def build(tree, main, work, engine, runner, **options):
+            """Build like ``fake_build`` and report a nomenclature that no tool wrote."""
+            result = await fake_build(tree, main, work, engine, runner, **options)
+            result.tools.submission_dependencies = SubmissionDependencies(
+                {"main.tex"}, never_created=("main.nls",)
+            )
+            return result
+
+        backends = controlled_backends(build=build)
+        report = asyncio.run(run_job(JobRequest("check", self.root, Settings()), backends=backends))
+        lists = [item for item in report.findings if item.code == "TEX012"]
+        self.assertEqual([(item.status, item.stage) for item in lists], [("failed", "baseline")])
+
+
+class VenueEngineTests(ReadinessCase):
+    """The engines the receiving service offers (TEX013)."""
+
+    def test_an_engine_the_venue_does_not_offer_warns(self) -> None:
+        self.document()
+        arxiv = ("pdflatex", "xelatex")
+        warning = self.one("source.venue_engine", engine="lualatex", venue_engines=arxiv)
+        self.assertEqual(
+            (warning.code, warning.severity, warning.status), ("TEX013", "warning", "failed")
+        )
+        self.assertIn("LuaLaTeX", warning.message)
+        self.assertIn("pdfLaTeX, XeLaTeX", warning.message)
+        offered = self.one("source.venue_engine", engine="xelatex", venue_engines=arxiv)
+        self.assertEqual((offered.severity, offered.status), ("info", "passed"))
+        # Nothing is reported while the venue's engines are not configured.
+        self.assertEqual(self.findings("source.venue_engine", engine="lualatex"), [])
+        with self.assertRaisesRegex(PreparationError, "venue_engines"):
+            BblOptions(venue_engines=("context",))  # type: ignore[arg-type]
+
+    def test_the_automatic_engine_follows_the_main_files_engine_comment(self) -> None:
+        config = self.root / "fledge.toml"
+        config.write_text('[submission_checks]\nvenue_engines = ["pdflatex", "xelatex"]\n')
+        settings = load_settings(config, {})
+        self.assertEqual(settings.engine, "auto")
+        for comment, expected in (
+            ("% !TEX program = lualatex\n", ("warning", "failed")),
+            ("", ("info", "passed")),
+        ):
+            with self.subTest(comment=comment or "none"):
+                self.write(
+                    "main.tex", comment + PREAMBLE + "\\begin{document}\nT.\n\\end{document}\n"
+                )
+                findings = [
+                    item
+                    for item in source_readiness_findings(self.root, "main.tex", settings)
+                    if item.rule == "source.venue_engine"
+                ]
+                self.assertEqual([(item.severity, item.status) for item in findings], [expected])
 
 
 class PrivateMarkerTests(ReadinessCase):

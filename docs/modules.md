@@ -60,6 +60,7 @@ a network connection, and each imports only other modules of this layer. (79 mod
 | `finding_text` | Wording and bookkeeping shared by the checks that build findings |
 | `finding_weight` | How hard a check hits when it does not pass: one mapping from outcome to severity |
 | `findings` | The `Finding`: one check's result, and the constructors for findings that no check produces |
+| `generated_files` | Generated files that TeX reads back (.bbl, .ind, glossaries), what each holds and the tool that writes it |
 | `limits` | Unit constants and the limits that more than one module shares |
 | `literal_text` | Literal TeX text without expansion: shared command tables and plain-text reading |
 | `loaded_options_rules` | Data-only catalogue for actual post-document kernel option evidence |
@@ -105,7 +106,7 @@ a network connection, and each imports only other modules of this layer. (79 mod
 | `structure_rules` | Data-only catalogue for explicit author and PDF structure checks |
 | `submission_check_rules` | Data-only catalogue entries for configurable local submission checks |
 | `submission_options` | The `[submission_checks]` settings: what to scan a submission bundle for, and how |
-| `submission_readiness_rules` | Data-only catalogue for cheap submission-readiness advisories and their opt-in policies |
+| `submission_readiness_rules` | Data-only catalogue for cheap submission-readiness checks and their opt-in policies |
 | `tex_commands` | TeX source vocabularies: file suffixes, math markers and command families |
 | `tex_comments` | Comments of a TeX source with their line numbers, and the private notes among them |
 | `tex_lexer` | Bounded lexical subset of LaTeX shared by source inspection, checks and transformations |
@@ -193,6 +194,7 @@ an output format. (61 modules)
 | `check_policy` | Maps the selected checks onto the options that activate them before dispatch |
 | `figure_color_space` | The colour space of raster figures against the family a venue requires (`PDF313`) |
 | `flat_layout` | Planning a flat layout: every shipped file at the top level, references rewritten to match |
+| `generated_file_checks` | Shipped generated index, glossary and nomenclature files, and lists a build never got |
 | `image_metadata` | Bounded scan of PNG and JPEG metadata for configured identity terms |
 | `manuscript` | Configurable constraints on the literal declarations of one selected source graph |
 | `manuscript_abstract_checks` | Citations and uppercase abbreviations in the abstract (`MAN003`, `MAN004`) |
@@ -233,7 +235,7 @@ an output format. (61 modules)
 | `source_transform` | Opt-in, copy-only source transformations for a bounded literal TeX subset |
 | `submission_checks` | Bounded, local submission-policy checks; never edit sources or execute TeX |
 | `submission_content_scan` | The single pass over every supplied file that finds identity terms, secrets and notes |
-| `submission_readiness_checks` | Cheap, deterministic submission-readiness advisories over the literal source graph |
+| `submission_readiness_checks` | Cheap, deterministic submission-readiness checks over the literal source graph |
 | `submission_scan_findings` | Findings for the matches of a submission scan, and the wording they share |
 | `submission_text` | Bounded, source-only submission fields; unresolved content remains visible |
 

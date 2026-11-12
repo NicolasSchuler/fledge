@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from pathlib import Path
@@ -22,6 +23,7 @@ from typing import NamedTuple
 from .build_workspace import BuildLayout
 from .errors import PreparationError
 from .file_safety import FileTooLargeError, read_regular_file
+from .generated_files import BIBLIOGRAPHY_SUFFIX, generated_kind, production_hint
 from .path_safety import is_link_free_regular_file
 from .setting_choices import Engine
 
@@ -63,15 +65,22 @@ class _LatexmkRule:
         name: The rule name, such as the engine.
         source: The rule's source file as written.
         destination: The rule's destination file as written.
+        ran: Whether latexmk ran the rule. latexmk also records rules it created but
+            never ran, such as a BibTeX rule while no .bib file exists; those generated
+            nothing.
         inputs: Each input file as written, with the name of the rule that produces it,
             empty when no rule does.
+        missing: The inputs latexmk recorded as absent (size -1), as written: files the
+            run looked for that never existed, such as a nomenclature no tool wrote.
         generated: The files listed as generated or rewritten, as written.
     """
 
     name: str
     source: str
     destination: str
+    ran: bool = True
     inputs: list[tuple[str, str]] = field(default_factory=list)
+    missing: list[str] = field(default_factory=list)
     generated: set[str] = field(default_factory=set)
 
 
@@ -121,6 +130,12 @@ class SubmissionDependencies:
         generated_reads: The generated files the build read, relative to the output
             directory or project that holds them, for example ``main.bbl`` written by
             BibTeX or Biber.
+        generated_files: Where each generated file the build read lies, by its name in
+            ``generated_reads``; preparation ships the index and glossary files from here.
+        never_created: The generated files the run looked for that no tool wrote although
+            the tool's input has entries, relative to the output directory, such as
+            ``main.nls`` when nomencl's makeindex step did not run. The document then lacks
+            that list.
     """
 
     inputs: set[str] | None
@@ -129,13 +144,16 @@ class SubmissionDependencies:
     toolchain_inputs: int = 0
     uncertainty: tuple[str, ...] = ()
     generated_reads: frozenset[str] = frozenset()
+    generated_files: Mapping[str, Path] = field(default_factory=dict)
+    never_created: tuple[str, ...] = ()
 
     def to_details(self) -> dict[str, object]:
         """Build the report entry: what was consulted, and the counts or the uncertainty.
 
         Returns:
             The report entry; the rules, project inputs and counts appear only when the
-            evidence is complete.
+            evidence is complete, and the never-created generated files only when there
+            are some.
         """
         details: dict[str, object] = {
             "complete": self.inputs is not None,
@@ -149,6 +167,8 @@ class SubmissionDependencies:
                 generated_inputs=self.generated_inputs,
                 toolchain_inputs=self.toolchain_inputs,
             )
+        if self.never_created:
+            details["never_created"] = list(self.never_created)
         details["uncertainty"] = list(self.uncertainty)
         return details
 
@@ -395,7 +415,11 @@ def read_recorder_trace(path: Path, root: Path, cwd: Path, max_bytes: int) -> Re
 
 
 def _rule_from_header(header: re.Match[str], rules: list[_LatexmkRule]) -> _LatexmkRule:
-    """Start the rule a database header line names, if it is a new rule that ran successfully.
+    """Start the rule a database header line names, if it is a new rule that did not fail.
+
+    A rule latexmk never ran (run time zero) is kept and marked as such: latexmk records
+    one, for example, for a supplied .bbl while no .bib file exists, or for a backend it
+    is told not to run.
 
     Args:
         header: The match of the header line.
@@ -406,16 +430,16 @@ def _rule_from_header(header: re.Match[str], rules: list[_LatexmkRule]) -> _Late
 
     Raises:
         PreparationError: The name repeats, ``_MAX_RULES`` rules were already read, the
-            rule's last run did not succeed, or it has no source or destination.
+            rule's last run failed, or it has no source or destination.
     """
     name, run_time, source, destination, _base, _check_time, last_result = header.groups()
     if any(rule.name == name for rule in rules) or len(rules) >= _MAX_RULES:
         raise PreparationError("Dependency database contains duplicate or too many rules")
-    if float(run_time) <= 0 or last_result != "0":
+    if last_result != "0":
         raise PreparationError(f"Dependency rule {name!r} did not complete successfully")
     if not source or not destination:
         raise PreparationError(f"Dependency rule {name!r} has no source or destination")
-    return _LatexmkRule(name, source, destination)
+    return _LatexmkRule(name, source, destination, ran=float(run_time) > 0)
 
 
 def _read_rule_row(
@@ -445,7 +469,11 @@ def _read_rule_row(
             filename, _time, size, _digest, producer = record.groups()
             if int(size) < -1:
                 raise PreparationError(f"Invalid dependency input size at line {number}")
-            rule.inputs.append((filename, producer))
+            # Size -1: the file did not exist when latexmk last checked, so it was not read.
+            if int(size) == -1:
+                rule.missing.append(filename)
+            else:
+                rule.inputs.append((filename, producer))
         case _DatabaseSection.GENERATED | _DatabaseSection.REWRITTEN if (
             record := _PATH_ROW.fullmatch(row)
         ):
@@ -464,14 +492,14 @@ def _check_rule_graph(rules: list[_LatexmkRule], section: _DatabaseSection) -> N
             ends the database.
 
     Raises:
-        PreparationError: There are no rules, the last rule is incomplete, a rule has no
-            inputs, or an input names a producer that is not a rule of the database.
+        PreparationError: There are no rules, the last rule is incomplete, a rule that ran
+            has no inputs, or an input names a producer that is not a rule of the database.
     """
     if not rules or section is not _DatabaseSection.REWRITTEN:
         raise PreparationError("Dependency database lacks complete rule sections")
     names = {rule.name for rule in rules}
     for rule in rules:
-        if not rule.inputs:
+        if rule.ran and not rule.inputs:
             raise PreparationError(f"Dependency rule {rule.name!r} has no recorded inputs")
         for _filename, producer in rule.inputs:
             if producer and producer not in names:
@@ -523,21 +551,27 @@ class _ObservedPaths:
     generated: set[Path]
 
 
-class _ClassifiedInputs(NamedTuple):
+@dataclass(slots=True)
+class _ClassifiedInputs:
     """The inputs of a build, sorted by where they came from.
 
     Attributes:
         project_inputs: The original project files, relative to the project.
-        generated_reads: The generated files read, relative to the project or the output
-            folder that holds them.
+        generated_files: The generated files read, by their name relative to the project or
+            the output folder that holds them, with their absolute paths.
         generated_count: The number of generated or tool-written inputs.
         toolchain_count: The number of inputs below a toolchain or tool-state directory.
     """
 
-    project_inputs: set[str]
-    generated_reads: set[str]
-    generated_count: int
-    toolchain_count: int
+    project_inputs: set[str] = field(default_factory=set)
+    generated_files: dict[str, Path] = field(default_factory=dict)
+    generated_count: int = 0
+    toolchain_count: int = 0
+
+    def add_generated(self, name: str, path: Path) -> None:
+        """Count the generated file ``name`` at ``path`` as read."""
+        self.generated_count += 1
+        self.generated_files[name] = path
 
 
 def _expected_primary(request: DependencyRequest) -> Path:
@@ -598,6 +632,8 @@ def _read_primary_rule(request: DependencyRequest) -> list[_LatexmkRule]:
     primary = next((rule for rule in rules if rule.name == request.engine), None)
     if primary is None or _absolute_path(primary.source, layout.cwd) != main_path:
         raise PreparationError("Dependency database does not identify the selected main and engine")
+    if not primary.ran:
+        raise PreparationError(f"Dependency rule {primary.name!r} did not run")
     if _absolute_path(primary.destination, layout.cwd) != _expected_primary(request):
         raise PreparationError("Dependency database primary output does not match the build")
     if main_path not in {_absolute_path(path, layout.cwd) for path, _ in primary.inputs}:
@@ -608,9 +644,11 @@ def _read_primary_rule(request: DependencyRequest) -> list[_LatexmkRule]:
 def _merge_rule_evidence(
     request: DependencyRequest, rules: list[_LatexmkRule], observed: _ObservedPaths
 ) -> None:
-    """Add every rule's sources, inputs and outputs to what the recorder showed.
+    """Add the sources, inputs and outputs of every rule that ran to what the recorder showed.
 
-    An input that a rule produces counts as generated.
+    An input that a rule produces counts as generated, unless that rule never ran: then
+    the file the build read is whatever existed before, such as a supplied ``.bbl``. A
+    rule that never ran contributes nothing.
 
     Args:
         request: The finished build.
@@ -622,7 +660,10 @@ def _merge_rule_evidence(
             counts as generated, or a path fails the checks of :func:`_absolute_path`.
     """
     cwd = request.layout.cwd
+    never_ran = {rule.name for rule in rules if not rule.ran}
     for rule in rules:
+        if not rule.ran:
+            continue
         observed.inputs.add(_absolute_path(rule.source, cwd))
         destinations = {_absolute_path(path, cwd) for path in rule.generated}
         if _absolute_path(rule.destination, cwd) not in destinations:
@@ -631,10 +672,104 @@ def _merge_rule_evidence(
         for filename, producer in rule.inputs:
             path = _absolute_path(filename, cwd)
             observed.inputs.add(path)
-            if producer:
+            if producer and producer not in never_ran:
                 observed.generated.add(path)
     if request.layout.project / request.main in observed.generated:
         raise PreparationError("The selected main source was marked as a generated file")
+
+
+def _supplied_original(layout: BuildLayout, relative: str) -> bool:
+    """Return whether ``relative`` is a regular, link-free file in the build copy and the source.
+
+    Args:
+        layout: The build's layout.
+        relative: The project-relative name.
+
+    Returns:
+        ``True`` when both copies are plain files.
+    """
+    return is_link_free_regular_file(
+        layout.project, layout.project / relative
+    ) and is_link_free_regular_file(layout.source, layout.source / relative)
+
+
+def _with_production_hint(problem: str, name: str) -> str:
+    """Append what the generated file ``name`` holds and which tool writes it to ``problem``.
+
+    Args:
+        problem: The sentence that names the problem, without a final period.
+        name: The file, as the message names it.
+
+    Returns:
+        The message, with the hint and the remedy when ``name`` is a generated file.
+    """
+    hint = production_hint(name)
+    if hint is None:
+        return problem
+    return f"{problem}; {hint}: ship {name} beside the main file, or let the build run that tool"
+
+
+def _classify_project_path(
+    layout: BuildLayout, path: Path, observed: _ObservedPaths, result: _ClassifiedInputs
+) -> None:
+    """Count an input inside the build copy as generated or as an original project file.
+
+    Args:
+        layout: The build's layout.
+        path: The input, below ``layout.project``.
+        observed: Every path the build read and generated.
+        result: The classification so far; updated in place.
+
+    Raises:
+        PreparationError: The input is neither generated nor a plain original file.
+    """
+    relative = path.relative_to(layout.project).as_posix()
+    if path in observed.generated:
+        result.add_generated(relative, path)
+    elif _supplied_original(layout, relative):
+        result.project_inputs.add(relative)
+    else:
+        raise PreparationError(
+            _with_production_hint(
+                "Observed project input is missing, generated without evidence, "
+                f"or unsafe: {relative}",
+                relative,
+            )
+        )
+
+
+def _classify_output_path(
+    layout: BuildLayout, path: Path, observed: _ObservedPaths, result: _ClassifiedInputs
+) -> None:
+    """Count an input inside the output folder as generated or as a seeded supplied file.
+
+    A copy that ``build_workspace`` seeded and no rule rewrote stands for the supplied
+    file it copies, which the build therefore needs.
+
+    Args:
+        layout: The build's layout.
+        path: The input, below ``layout.output``.
+        observed: Every path the build read and generated.
+        result: The classification so far; updated in place.
+
+    Raises:
+        PreparationError: No rule generated the input and it is no seeded copy of a
+            plain supplied file.
+    """
+    name = path.relative_to(layout.output).as_posix()
+    if path in observed.generated:
+        result.add_generated(name, path)
+        return
+    original = layout.seeded.get(path)
+    if original is not None and _supplied_original(layout, original):
+        result.project_inputs.add(original)
+        return
+    raise PreparationError(
+        _with_production_hint(
+            f"The build read {name} from its output folder, but no build rule generated it",
+            name,
+        )
+    )
 
 
 def _classify_inputs(request: DependencyRequest, observed: _ObservedPaths) -> _ClassifiedInputs:
@@ -660,36 +795,65 @@ def _classify_inputs(request: DependencyRequest, observed: _ObservedPaths) -> _C
     if request.tool_state is not None:
         roots += (request.tool_state.resolve(),)
     owned = set(request.owned_inputs)
-    project_inputs: set[str] = set()
-    generated_reads: set[str] = set()
-    generated_count = toolchain_count = 0
+    result = _ClassifiedInputs()
     for path in sorted(observed.inputs):
         if path.is_relative_to(layout.project):
-            relative = path.relative_to(layout.project).as_posix()
-            if path in observed.generated:
-                generated_count += 1
-                generated_reads.add(relative)
-            elif is_link_free_regular_file(layout.project, path) and is_link_free_regular_file(
-                layout.source, layout.source / relative
-            ):
-                project_inputs.add(relative)
-            else:
-                raise PreparationError(
-                    "Observed project input is missing, generated without evidence, "
-                    f"or unsafe: {relative}"
-                )
-        elif path in observed.generated and path.is_relative_to(layout.output):
-            generated_count += 1
-            generated_reads.add(path.relative_to(layout.output).as_posix())
+            _classify_project_path(layout, path, observed, result)
+        elif path.is_relative_to(layout.output):
+            _classify_output_path(layout, path, observed, result)
         elif path in owned and is_link_free_regular_file(layout.project.parent, path):
-            generated_count += 1
-        elif any(path.resolve().is_relative_to(root) for root in roots):
-            toolchain_count += 1
+            result.generated_count += 1
         else:
-            raise PreparationError(
-                f"Observed input is outside declared source/toolchain paths: {path}"
-            )
-    return _ClassifiedInputs(project_inputs, generated_reads, generated_count, toolchain_count)
+            # Resolved once per input, not once per root: a TeX Live tree is deep in links.
+            resolved = path.resolve()
+            if not any(resolved.is_relative_to(root) for root in roots):
+                raise PreparationError(
+                    f"Observed input is outside declared source/toolchain paths: {path}"
+                )
+            result.toolchain_count += 1
+    return result
+
+
+def _never_created(request: DependencyRequest, rules: list[_LatexmkRule]) -> tuple[str, ...]:
+    """Find the index and glossary files the run looked for that no tool wrote.
+
+    Only files whose tool input has entries count: a ``main.nls`` is missing from the
+    document when ``main.nlo`` holds entries, not when the nomenclature is empty.
+    Bibliographies are left to the citation checks of the build log.
+
+    Args:
+        request: The finished build.
+        rules: The rules of latexmk's database.
+
+    Returns:
+        The never-created files, relative to the output folder or, outside it, to the
+        project, sorted.
+    """
+    layout, found = request.layout, set()
+    for rule in rules:
+        if not rule.ran:
+            continue
+        for filename in rule.missing:
+            kind = generated_kind(filename)
+            if kind is None or Path(filename).suffix == BIBLIOGRAPHY_SUFFIX:
+                continue
+            try:
+                path = _absolute_path(filename, layout.cwd)
+            except PreparationError:
+                continue
+            if any(_has_entries(path.with_suffix(suffix)) for suffix in kind.tool_inputs):
+                base = layout.output if path.is_relative_to(layout.output) else layout.project
+                if path.is_relative_to(base):
+                    found.add(path.relative_to(base).as_posix())
+    return tuple(sorted(found))
+
+
+def _has_entries(path: Path) -> bool:
+    """Return whether ``path`` is a non-empty regular file, unlinked."""
+    try:
+        return path.is_file() and not path.is_symlink() and path.stat().st_size > 0
+    except OSError:
+        return False
 
 
 def collect_submission_dependencies(request: DependencyRequest) -> SubmissionDependencies:
@@ -714,8 +878,10 @@ def collect_submission_dependencies(request: DependencyRequest) -> SubmissionDep
         return SubmissionDependencies(None, uncertainty=(str(error),))
     return SubmissionDependencies(
         classified.project_inputs,
-        rules=tuple(rule.name for rule in rules),
+        rules=tuple(rule.name for rule in rules if rule.ran),
         generated_inputs=classified.generated_count,
         toolchain_inputs=classified.toolchain_count,
-        generated_reads=frozenset(classified.generated_reads),
+        generated_reads=frozenset(classified.generated_files),
+        generated_files=dict(classified.generated_files),
+        never_created=_never_created(request, rules),
     )
