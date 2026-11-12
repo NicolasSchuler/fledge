@@ -8,11 +8,9 @@ previews, and repeated baseline builds.
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import json
 import re
-import shutil
 import tempfile
 import unittest
 import zipfile
@@ -23,19 +21,21 @@ from click.testing import CliRunner
 
 from latexprep.cli import cli
 from latexprep.config import Settings
-from latexprep.core import run_job
 from latexprep.job_context import JobRequest
 from latexprep.pdf_artwork_options import PdfArtworkOptions
 from latexprep.png_support import iter_png_chunks, read_png_header
-from latexprep.report import Report
+from latexprep.report import Outcome, Report
 from latexprep.workflow_options import WorkflowOptions
+from tests.live_support import (
+    LIVE_BUILD_EPOCH,
+    LIVE_JOB_TIMEOUT_SECONDS,
+    LiveProjectTestCase,
+    blocking_summary,
+    finding_statuses,
+    live_settings,
+    run_job_sync,
+)
 from tests.support import live_test, write_file, write_project
-
-EPOCH = 1_700_000_000
-# Other live builds may share the machine, so a job gets the documented default deadline.
-JOB_TIMEOUT_SECONDS = 600
-FIXTURE = Path(__file__).resolve().parents[1] / "examples" / "nested-paper"
-PASSING = frozenset({"passed", "passed_with_advisories"})
 
 # The stages that comparison findings record, as reports and review decisions name them.
 # Written out rather than imported, so that renaming a stage fails these tests.
@@ -67,8 +67,8 @@ _MAX_PNG_CHUNKS = 4096
 # Settings for `fledge prepare`: a guarded edit of the cited entry's title, which changes the
 # rendered reference list, so the baseline and prepared PDFs differ in text and pixels.
 TITLE_EDIT = f"""\
-source_date_epoch = {EPOCH}
-job_timeout_seconds = {JOB_TIMEOUT_SECONDS}
+source_date_epoch = {LIVE_BUILD_EPOCH}
+job_timeout_seconds = {LIVE_JOB_TIMEOUT_SECONDS}
 
 [[bibliography_transform.field_edits]]
 key = "knuth1984"
@@ -116,51 +116,6 @@ UNSTABLE_DOCUMENT = _marker_document("\\pdfuniformdeviate 1000000")
 STABLE_DOCUMENT = _marker_document("123456")
 
 
-def _settings(**options: Any) -> Settings:
-    """Return settings pinned for reproducible PDFs, with ``main.tex`` as the main file.
-
-    They carry the fixed epoch and the live job deadline.
-
-    Args:
-        **options: Further settings.
-
-    Returns:
-        The settings.
-    """
-    return Settings(
-        main="main.tex",
-        source_date_epoch=EPOCH,
-        job_timeout_seconds=JOB_TIMEOUT_SECONDS,
-        **options,
-    )
-
-
-def _run(request: JobRequest) -> Report:
-    """Run one job to its end on a new event loop, as the command line does.
-
-    Returns:
-        The report of the job.
-    """
-    return asyncio.run(run_job(request))
-
-
-def _problems(report: Report) -> list[tuple[str | None, str, str, str | None, str]]:
-    """List the findings that keep a run from passing cleanly, for assertion messages.
-
-    Args:
-        report: The report of the run.
-
-    Returns:
-        The code, rule, status, stage and message of each finding that is not informational
-        and did not pass.
-    """
-    return [
-        (item.code, item.rule, item.status, item.stage, item.message)
-        for item in report.findings
-        if item.severity != "info" and item.status != "passed"
-    ]
-
-
 def _comparison_results(report: Report, stage: str | None) -> dict[str, list[str]]:
     """Collect the status of each comparison result recorded at ``stage``, by rule.
 
@@ -184,11 +139,6 @@ def _comparison_results(report: Report, stage: str | None) -> dict[str, list[str
         ):
             results.setdefault(item.rule, []).append(item.status)
     return results
-
-
-def _statuses(report: Report, code: str) -> list[str]:
-    """List the status of every finding with ``code``, in report order."""
-    return [item.status for item in report.findings if item.code == code]
 
 
 def _as_reported(path: Path) -> str:
@@ -220,24 +170,8 @@ class _CommandRun(NamedTuple):
 
 
 @live_test("Set FLEDGE_RUN_INTEGRATION=1 for live PDF comparison, review and preview checks")
-class LiveComparisonTests(unittest.TestCase):
+class LiveComparisonTests(LiveProjectTestCase):
     """Reference PDFs, accepted comparison exceptions, grayscale previews and repeated baselines."""
-
-    def setUp(self) -> None:
-        """Create a temporary base directory."""
-        temporary = tempfile.TemporaryDirectory(prefix="fledge-comparisons-")
-        self.addCleanup(temporary.cleanup)
-        self.base = Path(temporary.name).resolve()
-
-    def copy_fixture(self) -> Path:
-        """Copy examples/nested-paper, which cites ``knuth1984`` from a BibTeX file.
-
-        Returns:
-            The copy, ``paper`` in the base directory.
-        """
-        source = self.base / "paper"
-        shutil.copytree(FIXTURE, source)
-        return source
 
     def replace_once(self, path: Path, old: str, new: str) -> None:
         """Replace ``old`` with ``new`` in the file at ``path``, asserting that it occurs once.
@@ -251,7 +185,9 @@ class LiveComparisonTests(unittest.TestCase):
         self.assertEqual(text.count(old), 1, f"{path.name} must contain {old!r} once")
         path.write_text(text.replace(old, new), encoding="utf-8")
 
-    def prepare(self, source: Path, name: str, settings: Settings | None = None) -> Report:
+    def prepare_published(
+        self, source: Path, name: str, settings: Settings | None = None
+    ) -> Report:
         """Prepare ``source`` into the new directory ``name``; the run must pass.
 
         Asserts that the run publishes a ``submission.zip``.
@@ -264,15 +200,13 @@ class LiveComparisonTests(unittest.TestCase):
         Returns:
             The report of the job.
         """
-        output = self.base / name
-        report = _run(JobRequest("prepare", source, settings or _settings(), output))
-        self.assertIn(report.outcome, PASSING, _problems(report))
-        self.assertTrue((output / "submission.zip").is_file())
+        report = self.prepare(source, settings, name)
+        self.assertTrue((self.base / name / "submission.zip").is_file())
         return report
 
     def check(self, source: Path, reference: Path) -> Report:
         """Check ``source`` against the reference PDF ``reference`` and return the report."""
-        return _run(JobRequest("check", source, _settings(), reference_pdf=reference))
+        return run_job_sync(JobRequest("check", source, live_settings(), reference_pdf=reference))
 
     def prepare_with_cli(self, source: Path, name: str, settings_text: str) -> _CommandRun:
         """Run ``fledge prepare`` in-process with HTML and JSON reports.
@@ -416,16 +350,16 @@ class LiveComparisonTests(unittest.TestCase):
         supplied reference PDFs are compared exactly, and a difference blocks the run.
         """
         # Each phase needs the PDFs prepared before it, so only the comparisons are subtests.
-        source = self.copy_fixture()
-        original = Path(self.prepare(source, "original").artifacts["pdf"])
+        source = self.copy_nested_paper()
+        original = Path(self.prepare_published(source, "original").artifacts["pdf"])
         with self.subTest(phase="check against the PDF of the same sources"):
             report = self.check(source, original)
             self.assertEqual(
                 _comparison_results(report, REFERENCE_VERSUS_BASELINE),
                 ALL_MATCH,
-                _problems(report),
+                blocking_summary(report),
             )
-            self.assertIn(report.outcome, PASSING, _problems(report))
+            self.assert_outcome(report)
 
         self.replace_once(source / "main.tex", "A small submission", "A short submission")
         with self.subTest(phase="check after changing one word"):
@@ -433,17 +367,23 @@ class LiveComparisonTests(unittest.TestCase):
             self.assertEqual(
                 _comparison_results(report, REFERENCE_VERSUS_BASELINE), WORDING_CHANGED
             )
-            self.assertEqual(report.outcome, "blocked")
+            self.assert_outcome(report, Outcome.BLOCKED)
 
-        revised = Path(self.prepare(source, "revised").artifacts["pdf"])
+        revised = Path(self.prepare_published(source, "revised").artifacts["pdf"])
         with self.subTest(phase="pdf check of two different PDFs"):
-            report = _run(JobRequest("pdf", revised, _settings(), reference_pdf=original))
-            self.assertEqual(_comparison_results(report, None), WORDING_CHANGED, _problems(report))
-            self.assertEqual(report.outcome, "blocked")
+            report = run_job_sync(
+                JobRequest("pdf", revised, live_settings(), reference_pdf=original)
+            )
+            self.assertEqual(
+                _comparison_results(report, None), WORDING_CHANGED, blocking_summary(report)
+            )
+            self.assert_outcome(report, Outcome.BLOCKED)
         with self.subTest(phase="pdf check of one PDF against itself"):
-            report = _run(JobRequest("pdf", original, _settings(), reference_pdf=original))
-            self.assertEqual(_comparison_results(report, None), ALL_MATCH, _problems(report))
-            self.assertIn(report.outcome, PASSING, _problems(report))
+            report = run_job_sync(
+                JobRequest("pdf", original, live_settings(), reference_pdf=original)
+            )
+            self.assertEqual(_comparison_results(report, None), ALL_MATCH, blocking_summary(report))
+            self.assert_outcome(report)
 
     def test_an_accepted_comparison_exception_releases_the_reviewed_edit(self) -> None:
         """Check that accepted exceptions release an intended change and keep its evidence visible.
@@ -457,11 +397,11 @@ class LiveComparisonTests(unittest.TestCase):
         ``execution.pdf_previews``. Without the decisions the same edit blocks (exit 3) and
         nothing is written.
         """
-        source = self.copy_fixture()
+        source = self.copy_nested_paper()
         with self.subTest(phase="with review decisions"):
             accepted = self.prepare_with_cli(source, "accepted", TITLE_EDIT + REVIEW_DECISIONS)
             self.assertEqual(accepted.exit_code, 2, accepted.console)
-            self.assertEqual(accepted.report["outcome"], "accepted_exceptions")
+            self.assert_outcome(accepted.report, Outcome.ACCEPTED_EXCEPTIONS)
             with zipfile.ZipFile(accepted.output / "submission.zip") as archive:
                 bibliography = archive.read("references/library.bib").decode("utf-8")
             self.assertIn(REVISED_TITLE, bibliography)
@@ -472,7 +412,7 @@ class LiveComparisonTests(unittest.TestCase):
         with self.subTest(phase="without review decisions"):
             refused = self.prepare_with_cli(source, "refused", TITLE_EDIT)
             self.assertEqual(refused.exit_code, 3, refused.console)
-            self.assertEqual(refused.report["outcome"], "blocked")
+            self.assert_outcome(refused.report, Outcome.BLOCKED)
             self.assertFalse(refused.output.exists())
             blocking = {
                 (finding["code"], finding["status"])
@@ -492,10 +432,10 @@ class LiveComparisonTests(unittest.TestCase):
         preparation output; PDF311 records each retained preview.
         """
         source = write_project(self.base / "two-pages", {"main.tex": TWO_PAGES})
-        settings = _settings(rendered_pdf_artwork=PdfArtworkOptions(grayscale_preview=True))
+        settings = live_settings(rendered_pdf_artwork=PdfArtworkOptions(grayscale_preview=True))
         directory = self.base / "gray-pages"
-        report = _run(JobRequest("check", source, settings, preview_output=directory))
-        self.assertIn(report.outcome, PASSING, _problems(report))
+        report = run_job_sync(JobRequest("check", source, settings, preview_output=directory))
+        self.assert_outcome(report)
         exported = sorted(directory.glob("*.png"))
         self.assertEqual(len(exported), 2, exported)
         self.assert_grayscale_pngs(exported)
@@ -503,7 +443,7 @@ class LiveComparisonTests(unittest.TestCase):
         self.assertEqual(pages, [1, 2])
         self.assert_previews_name(report, exported)
 
-        report = self.prepare(source, "prepared", settings)
+        report = self.prepare_published(source, "prepared", settings)
         bundled = sorted((self.base / "prepared" / "previews").glob("*.png"))
         self.assert_grayscale_pngs(bundled)
         self.assert_previews_name(report, bundled)
@@ -520,21 +460,21 @@ class LiveComparisonTests(unittest.TestCase):
         identical page counts, text and exact renders before any transformation; a
         mismatch blocks the run (exit 3), so no bundle is written.
         """
-        settings = _settings(workflow=WorkflowOptions(baseline_runs=2))
+        settings = live_settings(workflow=WorkflowOptions(baseline_runs=2))
         unstable = write_project(self.base / "unstable", {"main.tex": UNSTABLE_DOCUMENT})
         output = self.base / "unstable-output"
-        report = _run(JobRequest("prepare", unstable, settings, output))
-        self.assertEqual(_statuses(report, "CMP101"), ["failed"], _problems(report))
+        report = run_job_sync(JobRequest("prepare", unstable, settings, output))
+        self.assertEqual(finding_statuses(report, "CMP101"), ["failed"], blocking_summary(report))
         self.assertEqual(
             _comparison_results(report, FIRST_BASELINE_REPEAT)["compare.text"], ["failed"]
         )
-        self.assertEqual(report.outcome, "blocked")
+        self.assert_outcome(report, Outcome.BLOCKED)
         self.assertFalse(output.exists())
         self.assertEqual(report.artifacts, {})
 
         stable = write_project(self.base / "stable", {"main.tex": STABLE_DOCUMENT})
-        report = self.prepare(stable, "stable-output", settings)
-        self.assertEqual(_statuses(report, "CMP101"), ["passed"], _problems(report))
+        report = self.prepare_published(stable, "stable-output", settings)
+        self.assertEqual(finding_statuses(report, "CMP101"), ["passed"], blocking_summary(report))
         self.assertEqual(_comparison_results(report, FIRST_BASELINE_REPEAT), ALL_MATCH)
 
 

@@ -12,10 +12,7 @@ time. No assertion here depends on the bytes of a PDF.
 
 from __future__ import annotations
 
-import asyncio
 import json
-import shutil
-import tempfile
 import unittest
 import zipfile
 from pathlib import Path
@@ -24,14 +21,17 @@ from typing import Any, NamedTuple
 from click.testing import CliRunner, Result
 
 from latexprep.cli import cli
-from latexprep.config import Settings
-from latexprep.core import run_job
 from latexprep.job_context import JobRequest
+from latexprep.report import Outcome
+from tests.live_support import (
+    LIVE_BUILD_EPOCH,
+    LiveProjectTestCase,
+    blocking_summary,
+    live_settings,
+    run_job_sync,
+)
 from tests.support import live_test, write_project
 
-EPOCH = 1_700_000_000
-# The quick start's example: nested sources that cite knuth1984 from a BibTeX database.
-NESTED_PAPER = Path(__file__).resolve().parents[1] / "examples" / "nested-paper"
 # The exit code of each outcome, as docs/reports.md "Exit codes" lists them.
 EXIT_CODES = {
     "passed": 0,
@@ -139,40 +139,9 @@ def _matches(report: dict[str, Any], code: str) -> list[dict[str, Any]]:
     ]
 
 
-def _problems(report: dict[str, Any]) -> list[tuple[str, str, str, str]]:
-    """List the unresolved errors and warnings of a JSON report, to explain a failed assertion.
-
-    Args:
-        report: The JSON report.
-
-    Returns:
-        The code (or the rule of a finding without one), severity, status and message of each
-        error or warning that did not pass.
-    """
-    return [
-        (item["code"] or item["rule"], item["severity"], item["status"], item["message"])
-        for item in report["findings"]
-        if item["severity"] in {"error", "warning"} and item["status"] != "passed"
-    ]
-
-
 @live_test("Set FLEDGE_RUN_INTEGRATION=1 for live runs of failing policies and presets")
-class LiveFailingPolicyTests(unittest.TestCase):
+class LiveFailingPolicyTests(LiveProjectTestCase):
     """Real builds that a policy or preset blocks or passes only with advisories."""
-
-    def setUp(self) -> None:
-        """Create a temporary base directory."""
-        temporary = tempfile.TemporaryDirectory(prefix="fledge-policies-")
-        self.addCleanup(temporary.cleanup)
-        self.base = Path(temporary.name).resolve()
-
-    def nested_paper(self) -> Path:
-        """Copy the quick start's example project to a private ``paper`` directory.
-
-        Returns:
-            The copy.
-        """
-        return Path(shutil.copytree(NESTED_PAPER, self.base / "paper"))
 
     def settings_file(self, tables: str = "") -> Path:
         """Write a settings file outside the project that pins the PDF dates.
@@ -184,7 +153,7 @@ class LiveFailingPolicyTests(unittest.TestCase):
             The path of the settings file.
         """
         path = self.base / "settings.toml"
-        path.write_text(f"source_date_epoch = {EPOCH}\n{tables}", encoding="utf-8")
+        path.write_text(f"source_date_epoch = {LIVE_BUILD_EPOCH}\n{tables}", encoding="utf-8")
         return path
 
     def check_json(self, *arguments: str) -> dict[str, Any]:
@@ -204,7 +173,7 @@ class LiveFailingPolicyTests(unittest.TestCase):
             report = json.loads(result.stdout)
         except json.JSONDecodeError:
             self.fail(f"No JSON report (exit code {result.exit_code}): {result.output}")
-        self.assertEqual(result.exit_code, EXIT_CODES[report["outcome"]], _problems(report))
+        self.assertEqual(result.exit_code, EXIT_CODES[report["outcome"]], blocking_summary(report))
         return report
 
     def assert_status(
@@ -220,7 +189,7 @@ class LiveFailingPolicyTests(unittest.TestCase):
                 any.
         """
         found = _findings(report, code)
-        self.assertTrue(found, f"{code} was not reported; problems: {_problems(report)}")
+        self.assertTrue(found, f"{code} was not reported; problems: {blocking_summary(report)}")
         for item in found:
             self.assertEqual(item["status"], status, item)
             if severity is not None:
@@ -235,7 +204,7 @@ class LiveFailingPolicyTests(unittest.TestCase):
         Returns:
             The command's result and the paths it was given.
         """
-        source = self.nested_paper()
+        source = self.copy_nested_paper()
         results = source / "sections" / "results.tex"
         text = results.read_text(encoding="utf-8")
         self.assertIn(r"\cite{knuth1984}", text)
@@ -307,7 +276,8 @@ class LiveFailingPolicyTests(unittest.TestCase):
         self.assert_compact_blocked_report(run.result.stdout.splitlines())
         self.assertFalse(run.output.exists())
         report = json.loads(run.report.read_text(encoding="utf-8"))
-        self.assertEqual((report["command"], report["outcome"]), ("prepare", "blocked"))
+        self.assertEqual(report["command"], "prepare")
+        self.assert_outcome(report, Outcome.BLOCKED)
         self.assertEqual(report["artifacts"], {})
         self.assert_status(report, "BIB101", "failed", severity="error")
         self.assertEqual(
@@ -353,12 +323,10 @@ class LiveFailingPolicyTests(unittest.TestCase):
         """
         source = write_project(self.base / "paper", {"main.tex": TWO_PAGES})
         output = self.base / "submission"
-        settings = Settings(
-            main="main.tex", max_pages=1, source_date_epoch=EPOCH, job_timeout_seconds=600
-        )
-        report = asyncio.run(run_job(JobRequest("prepare", source, settings, output)))
-        problems = _problems(report.to_dict())
-        self.assertEqual(report.outcome, "blocked", problems)
+        settings = live_settings(max_pages=1)
+        report = run_job_sync(JobRequest("prepare", source, settings, output))
+        problems = blocking_summary(report)
+        self.assert_outcome(report, Outcome.BLOCKED)
         page_limit = [item for item in report.findings if item.code == "PDF001"]
         self.assertTrue(page_limit, problems)
         for item in page_limit:
@@ -381,7 +349,7 @@ class LiveFailingPolicyTests(unittest.TestCase):
         """
         source = write_project(self.base / "paper", {"main.tex": TWO_PAGES})
         report = self.check_json(str(source), "--max-pages", "1", "--isolated")
-        self.assertEqual(report["outcome"], "blocked", _problems(report))
+        self.assert_outcome(report, Outcome.BLOCKED)
         self.assertEqual(report["settings"]["max_pages"], 1)
         self.assert_status(report, "PDF001", "failed", severity="error")
 
@@ -399,7 +367,7 @@ class LiveFailingPolicyTests(unittest.TestCase):
         report = self.check_json(
             str(source), "--main", "main.tex", "--preset", "camera-ready", "--config", str(config)
         )
-        self.assertIn(report["outcome"], {"passed", "passed_with_advisories"}, _problems(report))
+        self.assert_outcome(report)
         self.assertEqual(report["execution"]["preset"], "camera-ready")
         for code in (
             "PDF102",
@@ -434,7 +402,7 @@ class LiveFailingPolicyTests(unittest.TestCase):
             "--config",
             str(config),
         )
-        self.assertEqual(report["outcome"], "blocked", _problems(report))
+        self.assert_outcome(report, Outcome.BLOCKED)
         self.assertEqual(report["execution"]["preset"], "anonymous-review")
         self.assert_status(report, "PRV001", "failed")
         named = {
@@ -459,7 +427,7 @@ class LiveFailingPolicyTests(unittest.TestCase):
         advisories (TEX009 is a warning, exit code 1); a main.bbl holding the cited key passes
         TEX009 and BIB109, and one that lacks it fails BIB109.
         """
-        source = self.nested_paper()
+        source = self.copy_nested_paper()
         config = self.settings_file()
         arguments = (
             str(source),
@@ -472,7 +440,7 @@ class LiveFailingPolicyTests(unittest.TestCase):
         )
         with self.subTest(bbl="missing"):
             report = self.check_json(*arguments)
-            self.assertEqual(report["outcome"], "passed_with_advisories", _problems(report))
+            self.assert_outcome(report, Outcome.PASSED_WITH_ADVISORIES)
             self.assert_status(report, "TEX009", "failed", severity="warning")
         with self.subTest(bbl="covering"):
             (source / "main.bbl").write_text(COVERING_BBL, encoding="utf-8")
@@ -492,7 +460,7 @@ class LiveFailingPolicyTests(unittest.TestCase):
         without --preset (execution.config_path names it, execution.preset is null) and makes
         TEX009 a warning; --isolated skips discovery, so TEX009 is again a not-applicable note.
         """
-        source = self.nested_paper()
+        source = self.copy_nested_paper()
         written = CliRunner().invoke(cli, ["init", str(source), "--preset", "arxiv"])
         self.assertEqual(written.exit_code, 0, written.output)
         self.assertTrue((source / "fledge.toml").is_file())

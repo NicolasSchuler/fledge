@@ -15,7 +15,6 @@ import os
 import shutil
 import subprocess
 import sys
-import tempfile
 import unittest
 import zipfile
 from collections import Counter
@@ -30,18 +29,20 @@ from latexprep.project_cleanup import cleanup_reason
 from latexprep.report import ChangeKind, Report
 from latexprep.source_transform import SourceTransformOptions
 from tests import SOURCE_ROOT
+from tests.live_support import (
+    LIVE_BUILD_EPOCH,
+    LIVE_JOB_TIMEOUT_SECONDS,
+    AsyncLiveProjectTestCase,
+    blocking_summary,
+    live_settings,
+)
 from tests.support import directory_contents, live_test, write_project
 
-EPOCH = 1_700_000_000
-# Generous, because other builds may share the host; no assertion depends on timing.
-JOB_TIMEOUT_SECONDS = 600
 # A command-line run may use the whole job deadline, plus interpreter start and reporting.
-CLI_TIMEOUT_SECONDS = JOB_TIMEOUT_SECONDS + 120
+CLI_TIMEOUT_SECONDS = LIVE_JOB_TIMEOUT_SECONDS + 120
 # How often the temporary directory of a running command-line job is listed. A job keeps
 # its workspace for its whole run, seconds at the least, so no listing interval misses it.
 LISTING_INTERVAL_SECONDS = 0.05
-NESTED_PAPER = SOURCE_ROOT.parent / "examples" / "nested-paper"
-RELEASED = frozenset({"passed", "passed_with_advisories"})
 # The exit code of each outcome that releases a bundle (docs/reports.md, "Exit codes").
 RELEASED_EXIT_CODES = {0: "passed", 1: "passed_with_advisories"}
 # Edits that preparing an already prepared output must not make again.
@@ -134,38 +135,9 @@ CLEANED_DEBRIS = (
 IMPORT_METADATA = (".DS_Store", ".git", "Icon\r")
 # The reason the inventory records for such metadata (src/latexprep/project.py).
 METADATA_REASON = "Version-control or operating-system metadata is excluded from the snapshot."
-CLI_SETTINGS = f"source_date_epoch = {EPOCH}\njob_timeout_seconds = {JOB_TIMEOUT_SECONDS}\n"
-
-
-def _settings(**options: Any) -> Settings:
-    """Return settings for main.tex with a fixed epoch and a deadline that tolerates a loaded host.
-
-    Args:
-        **options: Further settings.
-
-    Returns:
-        The settings.
-    """
-    return Settings(
-        main="main.tex", source_date_epoch=EPOCH, job_timeout_seconds=JOB_TIMEOUT_SECONDS, **options
-    )
-
-
-def _unresolved(report: Report) -> list[tuple[object, ...]]:
-    """List the findings that block a release or await review, to explain a failed assertion.
-
-    Args:
-        report: The report of the job.
-
-    Returns:
-        The code, rule, severity, status, stage and message of each finding that is not
-        informational and did not pass.
-    """
-    return [
-        (item.code, item.rule, item.severity, item.status, item.details.get("stage"), item.message)
-        for item in report.findings
-        if item.severity != "info" and item.status != "passed"
-    ]
+CLI_SETTINGS = (
+    f"source_date_epoch = {LIVE_BUILD_EPOCH}\njob_timeout_seconds = {LIVE_JOB_TIMEOUT_SECONDS}\n"
+)
 
 
 def _finding_keys(report: Report) -> Counter[tuple[object, ...]]:
@@ -235,24 +207,10 @@ def _write_macos_zip(folder: Path, archive: Path) -> None:
 
 
 @live_test("Set FLEDGE_RUN_INTEGRATION=1 for live preparation of awkward inputs")
-class InputPreparationTests(unittest.IsolatedAsyncioTestCase):
+class InputPreparationTests(AsyncLiveProjectTestCase):
     """Real TeX, Poppler, tex-fmt, Biber and sandbox runs on inputs as authors supply them."""
 
-    def setUp(self) -> None:
-        """Create a temporary base directory."""
-        temporary = tempfile.TemporaryDirectory(prefix="fledge-inputs-")
-        self.addCleanup(temporary.cleanup)
-        self.base = Path(temporary.name).resolve()
-
-    def copy_nested_paper(self, name: str) -> Path:
-        """Copy examples/nested-paper, a BibTeX project that builds cleanly, to ``name``.
-
-        Returns:
-            The fresh copy in the base directory.
-        """
-        return Path(shutil.copytree(NESTED_PAPER, self.base / name))
-
-    async def prepare(self, source: Path, settings: Settings, output_name: str) -> Report:
+    async def prepare_released(self, source: Path, settings: Settings, output_name: str) -> Report:
         """Prepare ``source`` into the new directory ``output_name``, which must be released.
 
         Args:
@@ -263,14 +221,13 @@ class InputPreparationTests(unittest.IsolatedAsyncioTestCase):
         Returns:
             The report of the job.
         """
-        output = self.base / output_name
-        report = await run_job(JobRequest("prepare", source, settings, output))
-        self.assert_published(report, output)
+        report = await self.prepare(source, settings, output_name, expect=None)
+        self.assert_published(report, self.base / output_name)
         return report
 
     def assert_published(self, report: Report, output: Path) -> None:
         """Assert that the run released its bundle, and released it into ``output``."""
-        self.assertIn(report.outcome, RELEASED, _unresolved(report))
+        self.assert_outcome(report)
         archive = output / "submission.zip"
         self.assertEqual(report.artifacts.get("archive"), str(archive))
         self.assertTrue(archive.is_file())
@@ -288,9 +245,9 @@ class InputPreparationTests(unittest.IsolatedAsyncioTestCase):
         folder = self.copy_nested_paper("paper")
         archive = self.base / f"{WRAPPER}.zip"
         _write_macos_zip(folder, archive)
-        settings = _settings(layout="flat")
-        from_zip = await self.prepare(archive, settings, "prepared-from-zip")
-        await self.prepare(folder, settings, "prepared-from-folder")
+        settings = live_settings(layout="flat")
+        from_zip = await self.prepare_released(archive, settings, "prepared-from-zip")
+        await self.prepare_released(folder, settings, "prepared-from-folder")
         self.assertEqual(
             (self.base / "prepared-from-zip" / "submission.zip").read_bytes(),
             (self.base / "prepared-from-folder" / "submission.zip").read_bytes(),
@@ -320,20 +277,20 @@ class InputPreparationTests(unittest.IsolatedAsyncioTestCase):
         """
         project = self.copy_nested_paper("paper")
         (project / "sections" / "results.tex").write_text(ANNOTATED_RESULTS, encoding="utf-8")
-        settings = _settings(
+        settings = live_settings(
             layout="flat",
             apply_formatting=True,
             source_transforms=SourceTransformOptions(comment_policy="private"),
         )
-        first = await self.prepare(project, settings, "prepared-first")
-        await self.prepare(project, settings, "prepared-second")
+        first = await self.prepare_released(project, settings, "prepared-first")
+        await self.prepare_released(project, settings, "prepared-second")
         first_archive = self.base / "prepared-first" / "submission.zip"
         second_archive = self.base / "prepared-second" / "submission.zip"
         first_files = _archive_files(first_archive)
         self.assert_private_comments_removed(first, first_files)
         self.assertEqual(sorted(first_files), sorted(_archive_files(second_archive)))
         self.assertEqual(first_archive.read_bytes(), second_archive.read_bytes())
-        again = await self.prepare(
+        again = await self.prepare_released(
             self.base / "prepared-first" / "sources", settings, "prepared-again"
         )
         repeated = [(c.path, c.kind) for c in again.changes if c.kind in SOURCE_EDITS]
@@ -385,14 +342,14 @@ class InputPreparationTests(unittest.IsolatedAsyncioTestCase):
             stale.write(STALE_LABEL)
         write_project(project, WORKING_DIRECTORY_DEBRIS)
         originals = directory_contents(project)
-        report = await self.prepare(project, _settings(layout="flat"), "prepared")
+        report = await self.prepare_released(project, live_settings(layout="flat"), "prepared")
         shipped = _archive_files(self.base / "prepared" / "submission.zip")
         self.assertEqual(sorted(shipped), ["main.bbl", "main.tex", "refs.bib"])
         self.assertEqual(shipped["main.bbl"], originals["main.bbl"])
         selections = [
             item for item in report.findings if item.code == "PKG302" and item.status == "passed"
         ]
-        self.assertTrue(selections, _unresolved(report))
+        self.assertTrue(selections, blocking_summary(report))
         for selection in selections:
             self.assertIn("main.bbl", selection.details.get("generated_bibliography", []))
         self.assert_excluded_for_their_reasons(report)
@@ -433,7 +390,7 @@ class InputPreparationTests(unittest.IsolatedAsyncioTestCase):
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
-            timeout=JOB_TIMEOUT_SECONDS,
+            timeout=LIVE_JOB_TIMEOUT_SECONDS,
             check=False,
         )
         missing = [name for name in LOCAL_BUILD_OUTPUT if not (scratch / name).is_file()]
@@ -458,7 +415,7 @@ class InputPreparationTests(unittest.IsolatedAsyncioTestCase):
         no double quote, because latexmk refuses any path that contains one.
         """
         project = self.copy_nested_paper('My Paper (draft) "v2" ünï')
-        await self.prepare(project, _settings(), 'Prepared (final) "v2" ünï')
+        await self.prepare_released(project, live_settings(), 'Prepared (final) "v2" ünï')
         originals = directory_contents(project)
         temporary = self.base / "job space (tmp) ünï"
         temporary.mkdir()
@@ -513,12 +470,7 @@ class InputPreparationTests(unittest.IsolatedAsyncioTestCase):
             report = json.loads(completed.stdout)
         except json.JSONDecodeError:
             self.fail(f"Exit {completed.returncode} without a JSON report: {completed.stderr!r}")
-        unresolved = [
-            (item["code"], item["rule"], item["status"], item["message"])
-            for item in report["findings"]
-            if item["severity"] != "info" and item["status"] != "passed"
-        ]
-        self.assertIn(completed.returncode, RELEASED_EXIT_CODES, unresolved)
+        self.assertIn(completed.returncode, RELEASED_EXIT_CODES, blocking_summary(report))
         self.assertEqual(report["outcome"], RELEASED_EXIT_CODES[completed.returncode])
         self.assertEqual(report["command"], arguments[0])
         self.assertTrue(workspaces, "No job workspace appeared in TMPDIR during the run")
@@ -543,8 +495,8 @@ class InputPreparationTests(unittest.IsolatedAsyncioTestCase):
         reports = {}
         for jobs in (1, 4):
             project = self.copy_nested_paper(f"paper-jobs-{jobs}")
-            reports[jobs] = await self.prepare(
-                project, _settings(layout="flat", jobs=jobs), f"prepared-jobs-{jobs}"
+            reports[jobs] = await self.prepare_released(
+                project, live_settings(layout="flat", jobs=jobs), f"prepared-jobs-{jobs}"
             )
         serial, parallel = _finding_keys(reports[1]), _finding_keys(reports[4])
         self.assertEqual(
@@ -565,7 +517,7 @@ class InputPreparationTests(unittest.IsolatedAsyncioTestCase):
                 {"main.tex": BIBLATEX_MAIN, "refs.bib": BIBLIOGRAPHY},
             ),
         )
-        settings = (_settings(), _settings(bibliography_backend="biber"))
+        settings = (live_settings(), live_settings(bibliography_backend="biber"))
         outputs = (self.base / "prepared-bibtex", self.base / "prepared-biber")
         reports = await asyncio.gather(
             *(

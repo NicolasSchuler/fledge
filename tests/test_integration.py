@@ -4,11 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import shutil
-import struct
 import tempfile
 import unittest
 import zipfile
-import zlib
 from pathlib import Path
 
 from latexprep.command_runner import RuntimeLimits
@@ -18,26 +16,12 @@ from latexprep.job_context import JobRequest
 from latexprep.manuscript import ManuscriptOptions
 from latexprep.pdf_inspection import PdfInspectionOptions, inspect_pdf
 from latexprep.runtime import ToolRunner
+from tests.live_support import NESTED_PAPER, AsyncLiveProjectTestCase, png_bytes
 from tests.support import live_test
 
 
-def write_png(path: Path, rgb: bytes) -> None:
-    """Write a valid 1 x 1 RGB PNG to ``path`` whose one pixel has the color bytes ``rgb``."""
-
-    def chunk(kind: bytes, data: bytes) -> bytes:
-        payload = kind + data
-        return struct.pack(">I", len(data)) + payload + struct.pack(">I", zlib.crc32(payload))
-
-    path.write_bytes(
-        b"\x89PNG\r\n\x1a\n"
-        + chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0))
-        + chunk(b"IDAT", zlib.compress(b"\0" + rgb))
-        + chunk(b"IEND", b"")
-    )
-
-
 @live_test("Set FLEDGE_RUN_INTEGRATION=1 for live restricted-tool integration checks")
-class LiveIntegrationTests(unittest.IsolatedAsyncioTestCase):
+class LiveIntegrationTests(AsyncLiveProjectTestCase):
     """Live runs of a nested example paper and of confined processes, with no tool doubles.
 
     The paper's sources, bibliography, images, formatting and ZIP rebuild go through the
@@ -49,11 +33,10 @@ class LiveIntegrationTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory(prefix="latex-prep-live-") as directory:
             base = Path(directory).resolve()
             source = base / "paper"
-            fixture = Path(__file__).resolve().parents[1] / "examples/nested-paper"
-            shutil.copytree(fixture, source)
+            shutil.copytree(NESTED_PAPER, source)
             (source / "figures").mkdir()
-            write_png(source / "figures/chart.png", b"\xff\x00\x00")
-            write_png(source / "appendix/chart.png", b"\x00\x00\xff")
+            (source / "figures/chart.png").write_bytes(png_bytes(b"\xff\x00\x00"))
+            (source / "appendix/chart.png").write_bytes(png_bytes(b"\x00\x00\xff"))
             main = source / "main.tex"
             main.write_text(
                 main.read_text().replace(
@@ -102,7 +85,7 @@ class LiveIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     base / "prepared",
                 )
             )
-            self.assertIn(report.outcome, {"passed", "passed_with_advisories"}, report.to_dict())
+            self.assert_outcome(report)
             self.assertFalse(marker.exists())
             self.assertEqual(
                 originals,

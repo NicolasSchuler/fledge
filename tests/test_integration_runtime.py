@@ -8,7 +8,6 @@ process still working on it after the job has ended.
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
 import json
 import os
@@ -19,7 +18,6 @@ import shutil
 import signal
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 import unittest
@@ -30,14 +28,12 @@ from typing import IO, Any, NamedTuple
 from click.testing import CliRunner, Result
 
 from latexprep.cli import cli
-from latexprep.config import Settings
-from latexprep.core import run_job
 from latexprep.job_context import JobRequest
-from latexprep.report import Report
+from latexprep.report import Outcome, Report
 from tests import SOURCE_ROOT
+from tests.live_support import LiveProjectTestCase, blocking_summary, live_settings, run_job_sync
 from tests.support import directory_contents, live_test, write_project
 
-EPOCH = 1_700_000_000
 REPOSITORY = SOURCE_ROOT.parent
 # \loop\iftrue\repeat calls itself in tail position: TeX grows no stack and writes no output,
 # so only a time limit or a signal ends the build.
@@ -292,19 +288,6 @@ def _error_annotations(stdout: str) -> list[str]:
     return [line for line in stdout.splitlines() if line.startswith("::error")]
 
 
-def _unresolved(report: dict[str, Any]) -> list[tuple[str, str, str]]:
-    """List the findings of a JSON report that did not pass, for assertion messages.
-
-    Returns:
-        The rule, status and message of each such finding.
-    """
-    return [
-        (finding["rule"], finding["status"], finding["message"])
-        for finding in report["findings"]
-        if finding["status"] != "passed"
-    ]
-
-
 def _path_without(tool: str) -> str:
     """Return ``PATH`` without each directory that provides ``tool``; other entries are kept."""
     return os.pathsep.join(
@@ -356,19 +339,8 @@ class _EndlessRun(NamedTuple):
 
 
 @live_test("Set FLEDGE_RUN_INTEGRATION=1 for live runtime tests with TeX, Poppler and tex-fmt")
-class RuntimeIntegrationTests(unittest.TestCase):
+class RuntimeIntegrationTests(LiveProjectTestCase):
     """Time limits, interruption, ``fmt``, ``doctor`` and the CI recipe with the real tools."""
-
-    def _directory(self, topic: str) -> Path:
-        """Create a temporary directory named after ``topic``, removed after the test."""
-        temporary = tempfile.TemporaryDirectory(prefix=f"fledge-{topic}-")
-        self.addCleanup(temporary.cleanup)
-        return Path(temporary.name).resolve()
-
-    def _require_tools(self, *names: str) -> None:
-        """Skip the test unless every one of ``names`` is on ``PATH``."""
-        if missing := [name for name in names if shutil.which(name) is None]:
-            self.skipTest(f"Not on PATH: {', '.join(missing)} (see docs/installation.md)")
 
     @staticmethod
     def _invoke(*arguments: str) -> Result:
@@ -400,21 +372,18 @@ class RuntimeIntegrationTests(unittest.TestCase):
         Returns:
             What the job left behind.
         """
-        self._require_tools(*TEX_TOOLS, "pgrep")
-        base = self._directory(topic)
+        self.require_tools(*TEX_TOOLS, "pgrep")
+        base = self.scratch_directory(topic)
         main = _unique_main(topic)
         pattern = main.removesuffix(".tex")
         self.addCleanup(_kill_matching, pattern)
         source = write_project(base / "paper", {main: ENDLESS_DOCUMENT})
         output = base / "submission"
-        settings = Settings(
-            main=main,
-            timeout_seconds=tool_timeout,
-            job_timeout_seconds=job_timeout,
-            source_date_epoch=EPOCH,
+        settings = live_settings(
+            main=main, timeout_seconds=tool_timeout, job_timeout_seconds=job_timeout
         )
         with _ProcessWatch(pattern) as watch:
-            report = asyncio.run(run_job(JobRequest("prepare", source, settings, output)))
+            report = run_job_sync(JobRequest("prepare", source, settings, output))
         self.assertEqual(_survivors(pattern), [], "A TeX process outlived the job")
         return _EndlessRun(report, main, output, watch.seen)
 
@@ -432,7 +401,7 @@ class RuntimeIntegrationTests(unittest.TestCase):
         findings = run.report.findings
         self.assertIn("execution.deadline", {finding.rule for finding in findings})
         self.assertNotIn("build.timeout", {finding.rule for finding in findings})
-        self.assertEqual(run.report.outcome, "blocked")
+        self.assert_outcome(run.report, Outcome.BLOCKED)
         stages = {stage["name"]: stage["status"] for stage in run.report.stages}
         self.assertEqual(stages.get(BASELINE_STAGE), "cancelled", stages)
         self.assertFalse(run.output.exists())
@@ -457,7 +426,7 @@ class RuntimeIntegrationTests(unittest.TestCase):
             (timeout.stage, timeout.path, timeout.severity, timeout.status),
             (BASELINE_STAGE, run.main, "error", "failed"),
         )
-        self.assertEqual(run.report.outcome, "blocked")
+        self.assert_outcome(run.report, Outcome.BLOCKED)
         self.assertFalse(run.output.exists())
 
     # fmt with the real formatter.
@@ -472,8 +441,10 @@ class RuntimeIntegrationTests(unittest.TestCase):
         docs/workflow-reference.md (compact output summarizes the change instead of printing
         the patch).
         """
-        self._require_tools("tex-fmt")
-        project = write_project(self._directory("fmt") / "messy", {"main.tex": BADLY_FORMATTED})
+        self.require_tools("tex-fmt")
+        project = write_project(
+            self.scratch_directory("fmt") / "messy", {"main.tex": BADLY_FORMATTED}
+        )
         before = directory_contents(project)
         options = ("--diff", "--quiet", "--isolated")
         terminal = self._invoke("fmt", str(project), *options)
@@ -498,8 +469,10 @@ class RuntimeIntegrationTests(unittest.TestCase):
 
         FMT001 passes and the exit code is 0.
         """
-        self._require_tools("tex-fmt")
-        project = write_project(self._directory("fmt") / "clean", {"main.tex": WELL_FORMATTED})
+        self.require_tools("tex-fmt")
+        project = write_project(
+            self.scratch_directory("fmt") / "clean", {"main.tex": WELL_FORMATTED}
+        )
         before = directory_contents(project)
         options = ("--diff", "--quiet", "--isolated", "--show-passed", "--output-format", "compact")
         result = self._invoke("fmt", str(project), *options)
@@ -519,11 +492,11 @@ class RuntimeIntegrationTests(unittest.TestCase):
         code 0 or 1 to match, and the JSON report records latexmk, pdflatex and pdfinfo as
         found on PATH, version verified under isolation and exercised by the built-in fixture.
         """
-        self._require_tools(*TEX_TOOLS, *POPPLER_TOOLS)
+        self.require_tools(*TEX_TOOLS, *POPPLER_TOOLS)
         result = self._invoke("doctor", "--json", "--quiet")
         report = json.loads(result.stdout)
         exit_codes = {"passed": 0, "passed_with_advisories": 1}
-        self.assertIn(report["outcome"], exit_codes, _unresolved(report))
+        self.assert_outcome(report, exit_codes)
         self.assertEqual(result.exit_code, exit_codes[report["outcome"]])
         for name in ("latexmk", "pdflatex", "pdfinfo"):
             with self.subTest(tool=name):
@@ -535,7 +508,7 @@ class RuntimeIntegrationTests(unittest.TestCase):
 
     def _path_without_poppler(self) -> str:
         """Return ``PATH`` without Poppler; skip where TeX shares its directory, as on Ubuntu."""
-        self._require_tools(*TEX_TOOLS, "pdfinfo")
+        self.require_tools(*TEX_TOOLS, "pdfinfo")
         path = _path_without("pdfinfo")
         if hidden := [name for name in TEX_TOOLS if shutil.which(name, path=path) is None]:
             self.skipTest(
@@ -552,8 +525,8 @@ class RuntimeIntegrationTests(unittest.TestCase):
         """
         process = _run_command("doctor", "--json", "--quiet", PATH=self._path_without_poppler())
         report = self._json_report(process)
-        self.assertEqual(process.returncode, 3, _unresolved(report))
-        self.assertEqual(report["outcome"], "blocked")
+        self.assertEqual(process.returncode, 3, blocking_summary(report))
+        self.assert_outcome(report, Outcome.BLOCKED)
         self.assertFalse(report["tools"]["pdfinfo"]["installed"])
         self.assertFalse(report["tools"]["pdfinfo"]["exercised"])
         # The finding names the missing tool and the package that provides it (Poppler),
@@ -598,8 +571,8 @@ class RuntimeIntegrationTests(unittest.TestCase):
         (cancellation drains running tools, so no TeX process survives). The message is
         asserted in the final report on stdout.
         """
-        self._require_tools(*TEX_TOOLS, "pgrep")
-        base = self._directory("interrupt")
+        self.require_tools(*TEX_TOOLS, "pgrep")
+        base = self.scratch_directory("interrupt")
         main = _unique_main("interrupt")
         pattern = main.removesuffix(".tex")
         source = write_project(base / "paper", {main: ENDLESS_DOCUMENT})
@@ -647,7 +620,7 @@ class RuntimeIntegrationTests(unittest.TestCase):
         self.assertNotIn(COMMENTED_TODO_LINE, annotated, check.stdout)
         self.assertEqual(_error_annotations(check.stdout), [])
         saved = json.loads((reports / "check.json").read_text(encoding="utf-8"))
-        self.assertEqual(saved["outcome"], "passed_with_advisories", _unresolved(saved))
+        self.assert_outcome(saved, Outcome.PASSED_WITH_ADVISORIES)
         self.assertGreater((reports / "check.html").stat().st_size, 0)
 
     def _assert_prepare_step(self, project: Path, reports: Path) -> None:
@@ -682,8 +655,8 @@ class RuntimeIntegrationTests(unittest.TestCase):
         stays unchanged. TEX001 ignores comments (docs/checks.md), so only the TODO in active
         text is annotated.
         """
-        self._require_tools(*TEX_TOOLS, "bibtex", *POPPLER_TOOLS)
-        base = self._directory("ci")
+        self.require_tools(*TEX_TOOLS, "bibtex", *POPPLER_TOOLS)
+        base = self.scratch_directory("ci")
         project = base / "paper"
         shutil.copytree(REPOSITORY / "examples" / "nested-paper", project)
         _insert_lines(

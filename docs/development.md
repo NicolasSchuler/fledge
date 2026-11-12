@@ -188,7 +188,7 @@ def read_regular_file(path: Path, limit: int) -> bytes:
 
 ## Test structure and seams
 
-Tests are `unittest.TestCase` classes, run by pytest. Shared fixtures live in three
+Tests are `unittest.TestCase` classes, run by pytest. Shared fixtures live in four
 support modules, never in a test module: a rule in
 `tests/test_module_boundaries.py` rejects every way of importing one test module from
 another (`from tests.test_x import ...`, `from tests import ...` naming a test module, and
@@ -209,6 +209,16 @@ another (`from tests.test_x import ...`, `from tests import ...` naming a test m
 - `tests/pdf_fakes.py` holds the PDF tool output fixtures (`trace_xml`, `object_json`,
   `color_trace`, `structured_pdf_objects`) and the runners built on `FakeCommandRunner`
   (`DetailRunner`, `ArtworkRunner`, `FakePdfRunner`, `ConfigurablePdfRunner`).
+- `tests/live_support.py` holds what the opt-in live tests share: the constants
+  `LIVE_BUILD_EPOCH`, `LIVE_JOB_TIMEOUT_SECONDS`, `PASSING_OUTCOMES` and `NESTED_PAPER`;
+  `live_settings()`, `run_job_sync()`, `finding_statuses()`, `png_bytes()` and `pdf_text()`;
+  and the `LiveProjectTestCase` and `AsyncLiveProjectTestCase` bases, which add a scratch
+  directory `base`, `require_tools`, `installed_tex_file`, `copy_nested_paper`, `prepare`
+  and `assert_outcome`. A failed `assert_outcome` lists each unresolved finding with its
+  code, rule name, stage, status, message and `details.uncertainty`. When the environment
+  variable `FLEDGE_TEST_ARTIFACT_DIR` names a directory, it first saves the whole report
+  there as `<test id>.json`, so a CI job can upload what a failed live test saw.
+  `tests/test_live_support.py` checks the message and the artifact without TeX.
 
 A job that would run TeX or the PDF tools takes its tool-driven operations from a
 `DocumentBackends` value (`run_job(..., backends=...)`): the build, the PDF

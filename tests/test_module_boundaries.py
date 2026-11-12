@@ -248,7 +248,8 @@ class TestSuiteBoundaryTests(unittest.TestCase):
         self.assertEqual(
             violations,
             [],
-            "Move the shared fixture into tests/support.py, tests/fakes.py or tests/pdf_fakes.py.",
+            "Move the shared fixture into tests/support.py, tests/fakes.py, tests/pdf_fakes.py "
+            "or, for live tests, tests/live_support.py.",
         )
 
     def test_every_form_of_importing_a_test_module_is_caught(self) -> None:
@@ -266,6 +267,10 @@ class TestSuiteBoundaryTests(unittest.TestCase):
             "from tests import SOURCE_ROOT",
             "from . import support",
             "from .support import live_test",
+            "from . import live_support",
+            "from .live_support import LiveProjectTestCase",
+            "from tests.live_support import live_settings",
+            "import tests.live_support",
         ):
             with self.subTest(source=source):
                 self.assertEqual(_imported_test_modules(source), [])

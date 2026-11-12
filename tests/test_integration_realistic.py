@@ -5,35 +5,14 @@ Each project once blocked inspection or preparation although TeX built it cleanl
 
 from __future__ import annotations
 
-import struct
-import tempfile
 import unittest
 import zipfile
-import zlib
-from pathlib import Path
 
-from latexprep.config import Settings
 from latexprep.core import run_job
 from latexprep.job_context import JobRequest
-from latexprep.report import Report
+from latexprep.report import Outcome
+from tests.live_support import AsyncLiveProjectTestCase, live_settings, png_bytes
 from tests.support import live_test, write_project
-
-EPOCH = 1_700_000_000
-
-
-def _png() -> bytes:
-    """Return a valid PNG of one RGB pixel."""
-
-    def chunk(kind: bytes, data: bytes) -> bytes:
-        payload = kind + data
-        return struct.pack(">I", len(data)) + payload + struct.pack(">I", zlib.crc32(payload))
-
-    return (
-        b"\x89PNG\r\n\x1a\n"
-        + chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0))
-        + chunk(b"IDAT", zlib.compress(b"\0\x00\x80\xff"))
-        + chunk(b"IEND", b"")
-    )
 
 
 def _pdf() -> bytes:
@@ -103,7 +82,7 @@ BIBLIOGRAPHY = """@book{knuth1984,
 
 
 @live_test("Set FLEDGE_RUN_INTEGRATION=1 for live TeX checks")
-class RealisticProjectTests(unittest.IsolatedAsyncioTestCase):
+class RealisticProjectTests(AsyncLiveProjectTestCase):
     """``check`` and ``prepare`` of a paper with a template class and ordinary constructs."""
 
     def setUp(self) -> None:
@@ -113,9 +92,6 @@ class RealisticProjectTests(unittest.IsolatedAsyncioTestCase):
         bibliography, and ``figures`` holds a macOS ``Icon`` file whose name ends in a
         carriage return.
         """
-        temporary = tempfile.TemporaryDirectory(prefix="fledge-realistic-")
-        self.addCleanup(temporary.cleanup)
-        self.base = Path(temporary.name).resolve()
         self.source = write_project(
             self.base / "paper",
             {
@@ -123,30 +99,16 @@ class RealisticProjectTests(unittest.IsolatedAsyncioTestCase):
                 "journal.cls": TEMPLATE_CLASS,
                 "sections/intro.tex": "\\section{Introduction}\nAn interval $x \\in (0, 1]$.\n",
                 "figures/plot.pdf": _pdf(),
-                "figures/plot.png": _png(),
+                "figures/plot.png": png_bytes(b"\x00\x80\xff"),
                 "refs.bib": BIBLIOGRAPHY,
                 "old/refs-backup.bib": BIBLIOGRAPHY,
                 "figures/Icon\r": b"",
             },
         )
 
-    def problems(self, report: Report) -> list[tuple[str | None, str, str, str]]:
-        """List the errors of ``report`` that did not pass, for assertion messages.
-
-        Returns:
-            The code, rule, status and message of each such finding.
-        """
-        return [
-            (item.code, item.rule, item.status, item.message)
-            for item in report.findings
-            if item.severity == "error" and item.status != "passed"
-        ]
-
     async def test_check_is_not_blocked_by_ordinary_constructs(self) -> None:
-        report = await run_job(
-            JobRequest("check", self.source, Settings(main="main.tex", source_date_epoch=EPOCH))
-        )
-        self.assertIn(report.outcome, {"passed", "passed_with_advisories"}, self.problems(report))
+        report = await run_job(JobRequest("check", self.source, live_settings()))
+        self.assert_outcome(report)
 
     async def test_preserve_and_flat_preparation_complete(self) -> None:
         for layout in ("preserve", "flat"):
@@ -156,13 +118,11 @@ class RealisticProjectTests(unittest.IsolatedAsyncioTestCase):
                     JobRequest(
                         "prepare",
                         self.source,
-                        Settings(main="main.tex", layout=layout, source_date_epoch=EPOCH),
+                        live_settings(layout=layout),
                         output,
                     )
                 )
-                self.assertIn(
-                    report.outcome, {"passed", "passed_with_advisories"}, self.problems(report)
-                )
+                self.assert_outcome(report)
                 with zipfile.ZipFile(output / "submission.zip") as archive:
                     names = set(archive.namelist())
                 self.assertNotIn("old/refs-backup.bib", names)
@@ -174,10 +134,8 @@ class RealisticProjectTests(unittest.IsolatedAsyncioTestCase):
             self.base / "clean",
             {"main.tex": "\\documentclass{article}\n\\begin{document}\nHello.\n\\end{document}\n"},
         )
-        report = await run_job(
-            JobRequest("check", clean, Settings(main="main.tex", source_date_epoch=EPOCH))
-        )
-        self.assertEqual(report.outcome, "passed", report.to_dict()["findings"])
+        report = await run_job(JobRequest("check", clean, live_settings()))
+        self.assert_outcome(report, Outcome.PASSED)
 
     async def test_biblatex_with_biber_prepares(self) -> None:
         project = write_project(
@@ -194,11 +152,11 @@ class RealisticProjectTests(unittest.IsolatedAsyncioTestCase):
             JobRequest(
                 "prepare",
                 project,
-                Settings(main="main.tex", bibliography_backend="biber", source_date_epoch=EPOCH),
+                live_settings(bibliography_backend="biber"),
                 self.base / "prepared-biblatex",
             )
         )
-        self.assertIn(report.outcome, {"passed", "passed_with_advisories"}, self.problems(report))
+        self.assert_outcome(report)
 
 
 if __name__ == "__main__":

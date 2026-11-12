@@ -13,11 +13,12 @@ from latexprep.core import run_job
 from latexprep.job_context import JobRequest
 from latexprep.source_transform import SourceTransformOptions
 from latexprep.workflow_options import DocumentOptions, WorkflowOptions
+from tests.live_support import AsyncLiveProjectTestCase
 from tests.support import live_test
 
 
 @live_test("Enable FLEDGE_RUN_INTEGRATION for real restricted TeX tools")
-class LiveRemainingWorkflowTests(unittest.IsolatedAsyncioTestCase):
+class LiveRemainingWorkflowTests(AsyncLiveProjectTestCase):
     """Independent flat packages with bibliography transforms and source cleanup."""
 
     async def test_two_independent_flat_packages_with_bibliography_and_source_cleanup(self):
@@ -62,7 +63,7 @@ class LiveRemainingWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 job_timeout_seconds=300,
             )
             report = await run_job(JobRequest("prepare", source, settings, base / "output"))
-            self.assertIn(report.outcome, {"passed", "passed_with_advisories"}, report.to_dict())
+            self.assert_outcome(report)
             self.assertEqual(
                 originals,
                 {

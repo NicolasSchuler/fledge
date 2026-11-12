@@ -13,7 +13,6 @@ import asyncio
 import re
 import shutil
 import subprocess
-import tempfile
 import unittest
 import zipfile
 from collections.abc import Iterable
@@ -21,16 +20,16 @@ from pathlib import Path
 
 from latexprep.bibliography_transform import BibliographyTransformOptions
 from latexprep.config import Settings
-from latexprep.core import run_job
-from latexprep.job_context import JobRequest
-from latexprep.report import Outcome, Report
+from latexprep.report import Report
 from latexprep.source_transform import SourceTransformOptions
+from tests.live_support import (
+    LIVE_JOB_TIMEOUT_SECONDS,
+    AsyncLiveProjectTestCase,
+    finding_statuses,
+    live_settings,
+)
 from tests.support import directory_contents, live_test, write_project
 
-EPOCH = 1_700_000_000
-# Other live builds may share the host, and Biber preparation alone takes about ten seconds.
-JOB_TIMEOUT_SECONDS = 600
-PASSING_OUTCOMES = frozenset({Outcome.PASSED, Outcome.PASSED_WITH_ADVISORIES})
 # The Poppler tools of the PDF inspection and of the baseline-versus-prepared comparison.
 POPPLER_TOOLS = ("pdfinfo", "pdftotext", "pdftoppm")
 
@@ -137,11 +136,8 @@ def _biber_settings() -> Settings:
 
     Only cited entries are kept, and the fixed epoch and the live job deadline apply.
     """
-    return Settings(
-        main="main.tex",
+    return live_settings(
         bibliography_backend="biber",
-        source_date_epoch=EPOCH,
-        job_timeout_seconds=JOB_TIMEOUT_SECONDS,
         bibliography_transform=BibliographyTransformOptions(
             format_entries=True,
             remove_fields=("file",),
@@ -156,11 +152,8 @@ def _biber_settings() -> Settings:
 
 def _inlining_settings() -> Settings:
     """Return BibTeX settings that inline the supplied ``main.bbl``, with the fixed epoch."""
-    return Settings(
-        main="main.tex",
+    return live_settings(
         bibliography_backend="bibtex",
-        source_date_epoch=EPOCH,
-        job_timeout_seconds=JOB_TIMEOUT_SECONDS,
         source_transforms=SourceTransformOptions(inline_bibliography="main.bbl"),
     )
 
@@ -192,41 +185,6 @@ def _shipped_files(output: Path) -> dict[str, str]:
     """
     with zipfile.ZipFile(output / "submission.zip") as archive:
         return {name: archive.read(name).decode("utf-8") for name in archive.namelist()}
-
-
-def _problems(report: Report) -> list[tuple[str | None, str, str, str | None, str]]:
-    """List the findings that block or advise, shown when an outcome is not the expected one.
-
-    Args:
-        report: The report of the job.
-
-    Returns:
-        The code, rule, status, stage and message of each finding that is not informational
-        and did not pass.
-    """
-    return [
-        (item.code, item.rule, item.status, item.stage, item.message)
-        for item in report.findings
-        if item.severity != "info" and item.status != "passed"
-    ]
-
-
-def _statuses(report: Report, code: str, stage: str | None = None) -> list[str]:
-    """List the status of every finding with ``code``; only those of ``stage`` when one is given.
-
-    Args:
-        report: The report of the job.
-        code: The finding code.
-        stage: The stage to select, or ``None`` for every stage.
-
-    Returns:
-        The statuses in report order.
-    """
-    return [
-        item.status
-        for item in report.findings
-        if item.code == code and (stage is None or item.stage == stage)
-    ]
 
 
 def _backend_checks(report: Report) -> dict[str | None, tuple[str, object]]:
@@ -267,41 +225,14 @@ def _run_latexmk(project: Path, scratch: Path) -> subprocess.CompletedProcess[st
         stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
-        timeout=JOB_TIMEOUT_SECONDS,
+        timeout=LIVE_JOB_TIMEOUT_SECONDS,
         check=False,
     )
 
 
 @live_test("Set FLEDGE_RUN_INTEGRATION=1 for live TeX, Biber and Poppler preparation checks")
-class LiveBibliographyPreparationTests(unittest.IsolatedAsyncioTestCase):
+class LiveBibliographyPreparationTests(AsyncLiveProjectTestCase):
     """Real ``prepare`` jobs that transform the bibliography and must render like the baseline."""
-
-    def setUp(self) -> None:
-        """Create a temporary base directory."""
-        temporary = tempfile.TemporaryDirectory(prefix="fledge-bibliography-")
-        self.addCleanup(temporary.cleanup)
-        self.base = Path(temporary.name).resolve()
-
-    def require_tools(self, *names: str) -> None:
-        """Skip the test unless every one of ``names`` is installed."""
-        missing = [name for name in names if shutil.which(name) is None]
-        if missing:
-            self.skipTest("Required installed tools are absent: " + ", ".join(missing))
-
-    async def prepare(self, source: Path, settings: Settings) -> tuple[Report, dict[str, str]]:
-        """Prepare ``source`` into ``prepared`` and require a passing outcome.
-
-        Args:
-            source: The project to prepare.
-            settings: The settings of the job.
-
-        Returns:
-            The report and the text of each shipped file by archive name.
-        """
-        output = self.base / "prepared"
-        report = await run_job(JobRequest("prepare", source, settings, output))
-        self.assertIn(report.outcome, PASSING_OUTCOMES, _problems(report))
-        return report, _shipped_files(output)
 
     def assert_passed(self, report: Report, codes: Iterable[str], stage: str | None = None) -> None:
         """Assert that each code has exactly one finding (in ``stage`` when given) and it passed.
@@ -313,7 +244,7 @@ class LiveBibliographyPreparationTests(unittest.IsolatedAsyncioTestCase):
         """
         codes = tuple(codes)
         self.assertEqual(
-            {code: _statuses(report, code, stage) for code in codes},
+            {code: finding_statuses(report, code, stage) for code in codes},
             {code: ["passed"] for code in codes},
             f"stage: {stage}",
         )
@@ -355,7 +286,8 @@ class LiveBibliographyPreparationTests(unittest.IsolatedAsyncioTestCase):
             self.base / "biblatex", {"main.tex": BIBLATEX_MAIN, "refs.bib": BIBLATEX_REFERENCES}
         )
         originals = directory_contents(source)
-        report, shipped = await self.prepare(source, _biber_settings())
+        report = await self.prepare(source, _biber_settings())
+        shipped = _shipped_files(self.base / "prepared")
         self.assertEqual(sorted(shipped), ["main.tex", "refs.bib"])
         self.assertEqual(_entries(shipped["refs.bib"]), SHIPPED_ENTRIES)
         self.assertNotIn("private/", shipped["refs.bib"])
@@ -391,7 +323,8 @@ class LiveBibliographyPreparationTests(unittest.IsolatedAsyncioTestCase):
         )
         bibliography = await self.generate_bbl(source)
         originals = directory_contents(source)
-        report, shipped = await self.prepare(source, _inlining_settings())
+        report = await self.prepare(source, _inlining_settings())
+        shipped = _shipped_files(self.base / "prepared")
         self.assertEqual(sorted(shipped), ["main.tex"])
         main = shipped["main.tex"]
         self.assertIn(r"\begin{thebibliography}", main)

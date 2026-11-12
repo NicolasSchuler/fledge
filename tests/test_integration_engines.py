@@ -9,9 +9,6 @@ from __future__ import annotations
 
 import json
 import shutil
-import subprocess
-import tempfile
-import unicodedata
 import unittest
 import zipfile
 from pathlib import Path
@@ -21,13 +18,19 @@ from latexprep.config import Settings, load_settings
 from latexprep.core import run_job
 from latexprep.job_context import JobRequest
 from latexprep.pdf_inspection import PdfInspectionOptions
-from latexprep.report import Report
+from latexprep.report import Outcome, Report
+from tests.live_support import (
+    LIVE_BUILD_EPOCH,
+    LIVE_JOB_TIMEOUT_SECONDS,
+    PASSING_OUTCOMES,
+    AsyncLiveProjectTestCase,
+    blocking_summary,
+    find_tex_file,
+    live_settings,
+    pdf_text,
+)
 from tests.support import live_test, write_project
 
-EPOCH = 1_700_000_000
-# Other live builds may share the host, and LuaLaTeX starts slowly; never assert timings.
-JOB_TIMEOUT_SECONDS = 600
-PASSING_OUTCOMES = frozenset({"passed", "passed_with_advisories"})
 # Page count, extracted text and rendered pages: the three checks of every PDF comparison.
 COMPARISON_CODES = ("CMP001", "CMP002", "CMP003")
 ALL_COMPARISONS_PASSED = dict.fromkeys(COMPARISON_CODES, "passed")
@@ -134,65 +137,9 @@ POLICY_CASES = (
 )
 
 
-def _settings(**values: Any) -> Settings:
-    """Return settings with the fixed build date and the deadline these live jobs need.
-
-    Args:
-        **values: Further settings.
-
-    Returns:
-        The settings.
-    """
-    return Settings(source_date_epoch=EPOCH, job_timeout_seconds=JOB_TIMEOUT_SECONDS, **values)
-
-
 def _article(body: str, preamble: str = "") -> str:
     """Return the text of an article with ``preamble`` and ``body``."""
     return f"\\documentclass{{article}}\n{preamble}\\begin{{document}}\n{body}\n\\end{{document}}\n"
-
-
-def _tex_file_found(name: str) -> bool:
-    """Return whether ``kpsewhich`` finds the TeX file ``name``: a package, font or bitmap font.
-
-    Returns:
-        Whether ``kpsewhich`` is installed and found the file.
-    """
-    kpsewhich = shutil.which("kpsewhich")
-    if kpsewhich is None:
-        return False
-    probe = subprocess.run([kpsewhich, name], capture_output=True, check=False, timeout=60)
-    return probe.returncode == 0
-
-
-def _pdf_text(pdf: Path) -> str:
-    """Return the text Poppler extracts from ``pdf``, composed (NFC) so letters compare equal.
-
-    Returns:
-        The text that ``pdftotext`` extracts, in NFC.
-
-    Raises:
-        subprocess.CalledProcessError: ``pdftotext`` failed.
-    """
-    extracted = subprocess.run(
-        [shutil.which("pdftotext") or "pdftotext", "-enc", "UTF-8", str(pdf), "-"],
-        capture_output=True,
-        check=True,
-        timeout=120,
-    )
-    return unicodedata.normalize("NFC", extracted.stdout.decode("utf-8"))
-
-
-def _blocking(report: Report) -> list[tuple[str | None, str, str, str | None, str]]:
-    """List the blocking findings of ``report``, to explain a failed assertion.
-
-    Returns:
-        The code, rule, status, stage and message of each blocking finding.
-    """
-    return [
-        (item.code, item.rule, item.status, item.stage, item.message)
-        for item in report.findings
-        if item.is_blocking
-    ]
 
 
 def _comparison_statuses(
@@ -226,20 +173,8 @@ def _read_json(path: Path) -> dict[str, Any]:
 
 
 @live_test("Set FLEDGE_RUN_INTEGRATION=1 for live XeLaTeX, LuaLaTeX and PDF policy jobs")
-class LiveEngineWorkflowTests(unittest.IsolatedAsyncioTestCase):
+class LiveEngineWorkflowTests(AsyncLiveProjectTestCase):
     """Real ``prepare`` and ``check`` jobs with XeLaTeX, LuaLaTeX and mixed-engine packages."""
-
-    def setUp(self) -> None:
-        """Create a temporary base directory."""
-        temporary = tempfile.TemporaryDirectory(prefix="fledge-engines-")
-        self.addCleanup(temporary.cleanup)
-        self.base = Path(temporary.name).resolve()
-
-    def require_tools(self, *names: str) -> None:
-        """Skip the test unless every one of ``names`` is installed."""
-        missing = [name for name in names if shutil.which(name) is None]
-        if missing:
-            self.skipTest("Required installed tools are absent: " + ", ".join(missing))
 
     def require_build_tools(self, *engines: str) -> None:
         """Skip unless latexmk, the engines and the Poppler tools of the checks are installed."""
@@ -264,7 +199,7 @@ class LiveEngineWorkflowTests(unittest.IsolatedAsyncioTestCase):
         Returns:
             The project directory.
         """
-        fontspec = _tex_file_found("fontspec.sty")
+        fontspec = find_tex_file("fontspec.sty") is not None
         if not fontspec:
             with self.subTest(variant="fontspec"):
                 self.skipTest(
@@ -308,9 +243,9 @@ class LiveEngineWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.require_build_tools(engine)
         source = self.write_unicode_article(engine)
         output = self.base / f"{engine}-prepared"
-        settings = _settings(engine=engine, layout="flat", main="main.tex")
+        settings = live_settings(engine=engine, layout="flat")
         report = await run_job(JobRequest("prepare", source, settings, output))
-        self.assertIn(report.outcome, PASSING_OUTCOMES, _blocking(report))
+        self.assert_outcome(report)
         self.assert_engine_version(report, engine)
         # Every build established the inputs the submission needs; none was incomplete.
         self.assertTrue(report.tools["submission_dependencies"]["complete"], report.tools)
@@ -320,7 +255,7 @@ class LiveEngineWorkflowTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(_comparison_statuses(findings, stage), ALL_COMPARISONS_PASSED, stage)
         pdf = output / "manuscript.pdf"
         self.assertTrue(pdf.read_bytes().startswith(b"%PDF-"))
-        self.assertIn(UNICODE_TEXT, _pdf_text(pdf))
+        self.assertIn(UNICODE_TEXT, pdf_text(pdf))
         with zipfile.ZipFile(output / "submission.zip") as archive:
             names = archive.namelist()
             sources = [
@@ -352,7 +287,7 @@ class LiveEngineWorkflowTests(unittest.IsolatedAsyncioTestCase):
         settings = self.load_document_settings(reference, engine)
         output = self.base / "output"
         report = await run_job(JobRequest("prepare", source, settings, output))
-        self.assertIn(report.outcome, PASSING_OUTCOMES, _blocking(report))
+        self.assert_outcome(report)
         self.assert_published_packages(output, engine)
         # The supplement no longer matches its reference, so neither package is released.
         shutil.copyfile(output / "paper" / "manuscript.pdf", reference)
@@ -369,9 +304,9 @@ class LiveEngineWorkflowTests(unittest.IsolatedAsyncioTestCase):
             The copied reference PDF, ``settings/refs/supplement.pdf``.
         """
         output = self.base / "supplement-alone"
-        settings = _settings(engine=engine, main="main.tex")
+        settings = live_settings(engine=engine)
         report = await run_job(JobRequest("prepare", supplement, settings, output))
-        self.assertIn(report.outcome, PASSING_OUTCOMES, _blocking(report))
+        self.assert_outcome(report)
         reference = self.base / "settings" / "refs" / "supplement.pdf"
         reference.parent.mkdir(parents=True)
         shutil.copyfile(output / "manuscript.pdf", reference)
@@ -392,7 +327,9 @@ class LiveEngineWorkflowTests(unittest.IsolatedAsyncioTestCase):
         """
         path = reference.parent.parent / "fledge.toml"
         path.write_text(
-            DOCUMENT_SETTINGS.format(epoch=EPOCH, timeout=JOB_TIMEOUT_SECONDS, engine=engine),
+            DOCUMENT_SETTINGS.format(
+                epoch=LIVE_BUILD_EPOCH, timeout=LIVE_JOB_TIMEOUT_SECONDS, engine=engine
+            ),
             encoding="utf-8",
         )
         settings = load_settings(path, {})
@@ -446,7 +383,7 @@ class LiveEngineWorkflowTests(unittest.IsolatedAsyncioTestCase):
         """
         output = self.base / "output-mismatched"
         report = await run_job(JobRequest("prepare", source, settings, output))
-        self.assertEqual(report.outcome, "blocked", _blocking(report))
+        self.assert_outcome(report, Outcome.BLOCKED)
         self.assertFalse(output.exists())
         findings = report.to_dict()["findings"]
         supplied = _comparison_statuses(findings, SUPPLIED_VERSUS_BASELINE, "supplement")
@@ -478,19 +415,19 @@ class LiveEngineWorkflowTests(unittest.IsolatedAsyncioTestCase):
         Skips when ``kpsewhich`` does not find the case's required file. Only the failed
         policies may block the run.
         """
-        if case.required_file is not None and not _tex_file_found(case.required_file):
+        if case.required_file is not None and find_tex_file(case.required_file) is None:
             self.skipTest(case.missing_reason)
         files = {"main.tex": _article(case.body, case.preamble), **dict(case.extra_files)}
         source = write_project(self.base / f"policy-{case.name}", files)
-        settings = _settings(main="main.tex", pdf=case.options)
+        settings = live_settings(pdf=case.options)
         report = await run_job(JobRequest("check", source, settings))
         statuses = {item.code: item.status for item in report.findings if item.code in POLICY_CODES}
-        self.assertEqual(statuses, case.expected, _blocking(report))
+        self.assertEqual(statuses, case.expected, blocking_summary(report))
         failed = {code for code, status in case.expected.items() if status == "failed"}
         # The policy itself blocks the run, not a build or tool problem.
         blocking = {item.code for item in report.findings if item.is_blocking}
-        self.assertEqual(blocking, failed, _blocking(report))
-        self.assertIn(report.outcome, {"blocked"} if failed else PASSING_OUTCOMES)
+        self.assertEqual(blocking, failed, blocking_summary(report))
+        self.assert_outcome(report, Outcome.BLOCKED if failed else PASSING_OUTCOMES)
 
 
 if __name__ == "__main__":

@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-import shutil
-import tempfile
 import unittest
 import xml.etree.ElementTree as ET
-from pathlib import Path
 
 from latexprep.latexmk_build import build_project
 from latexprep.runtime import ToolRunner
+from tests.live_support import LIVE_BUILD_EPOCH, AsyncLiveProjectTestCase
 from tests.support import live_test
 
 
@@ -25,7 +23,7 @@ class DiagnosticRunner(ToolRunner):
     """
 
     def __init__(self):
-        super().__init__(source_date_epoch=1_700_000_000)
+        super().__init__(source_date_epoch=LIVE_BUILD_EPOCH)
         self.diagnostics = []
 
     async def run(self, argv, cwd, workspace, **kwargs):
@@ -55,26 +53,15 @@ class DiagnosticRunner(ToolRunner):
 
 
 @live_test("Enable FLEDGE_RUN_INTEGRATION for real restricted TeX/Biber tools")
-class LiveBackendIntegrationTests(unittest.IsolatedAsyncioTestCase):
+class LiveBackendIntegrationTests(AsyncLiveProjectTestCase):
     """Real Biber, XeLaTeX and LuaLaTeX builds through ``build_project`` in the sandbox."""
 
     async def asyncSetUp(self):
-        """Create a temporary root with an empty ``source`` folder and a diagnostic runner."""
-        self.temporary = tempfile.TemporaryDirectory(prefix="latex-prep-backends-")
-        self.root = Path(self.temporary.name).resolve()
+        """Create an empty ``source`` folder in the scratch directory and a diagnostic runner."""
+        self.root = self.base
         self.source = self.root / "source"
         self.source.mkdir()
         self.runner = DiagnosticRunner()
-
-    async def asyncTearDown(self):
-        """Remove the temporary root."""
-        self.temporary.cleanup()
-
-    def require_tools(self, *names):
-        """Skip the test unless every one of ``names`` is installed."""
-        missing = [name for name in names if shutil.which(name) is None]
-        if missing:
-            self.skipTest("Required installed tools are absent: " + ", ".join(missing))
 
     async def test_biber_produces_real_bibliography_and_backend_evidence(self):
         self.require_tools("latexmk", "pdflatex", "biber")

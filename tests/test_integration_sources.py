@@ -11,30 +11,20 @@ from __future__ import annotations
 
 import re
 import shutil
-import struct
-import subprocess
-import tempfile
-import unicodedata
 import unittest
 import zipfile
-import zlib
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from latexprep.config import Settings
 from latexprep.core import run_job
 from latexprep.findings import Finding
 from latexprep.job_context import JobRequest
-from latexprep.report import Report
+from latexprep.report import Outcome, Report
 from latexprep.submission_options import SubmissionOptions
+from tests.live_support import AsyncLiveProjectTestCase, live_settings, pdf_text, png_bytes
 from tests.support import live_test, write_project
 
-EPOCH = 1_700_000_000
-# Builds on a loaded host can be slow; the job deadline only has to catch a hang.
-JOB_TIMEOUT_SECONDS = 600
-# The outcomes that publish a bundle (docs/reports.md, "Exit codes").
-PUBLISHED_OUTCOMES = frozenset({"passed", "passed_with_advisories"})
 SHELL_ESCAPE_PREFLIGHT = SubmissionOptions(check_shell_escape=True)
 # How to install a package that BasicTeX and Ubuntu's base TeX Live packages lack.
 LATEX_EXTRA = "install the TeX Live package {0} (tlmgr install {0}; texlive-latex-extra on Ubuntu)"
@@ -63,25 +53,6 @@ def _document(body: str, preamble: str = "") -> str:
         + "\\begin{document}\n"
         + body
         + "\n\\end{document}\n"
-    )
-
-
-def _png() -> bytes:
-    """Return a valid 1 x 1 RGB PNG.
-
-    Returns:
-        The bytes of the PNG file.
-    """
-
-    def chunk(kind: bytes, data: bytes) -> bytes:
-        payload = kind + data
-        return struct.pack(">I", len(data)) + payload + struct.pack(">I", zlib.crc32(payload))
-
-    return (
-        b"\x89PNG\r\n\x1a\n"
-        + chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0))
-        + chunk(b"IDAT", zlib.compress(b"\0\xff\x00\x00"))
-        + chunk(b"IEND", b"")
     )
 
 
@@ -170,26 +141,6 @@ class Prepared(NamedTuple):
     originals: dict[str, bytes]
 
 
-def _settings(**options: Any) -> Settings:
-    """Return the settings of a live job on ``main.tex``, with ``options`` added.
-
-    The settings fix ``source_date_epoch`` at ``EPOCH`` and the job deadline at
-    ``JOB_TIMEOUT_SECONDS``.
-
-    Args:
-        **options: Further keyword arguments for :class:`Settings`.
-
-    Returns:
-        The settings.
-    """
-    return Settings(
-        main="main.tex",
-        source_date_epoch=EPOCH,
-        job_timeout_seconds=JOB_TIMEOUT_SECONDS,
-        **options,
-    )
-
-
 def _snapshot(root: Path) -> dict[str, bytes]:
     """Read every file under ``root``.
 
@@ -251,66 +202,11 @@ def _results(findings: list[Finding]) -> set[tuple[str, str, str | None]]:
     return {(item.severity, item.status, item.path) for item in findings}
 
 
-def _problems(report: Report) -> list[tuple[str | None, str, str, str]]:
-    """Describe the blocking findings of ``report``, which explain an unexpected outcome.
-
-    Returns:
-        The (code, rule, status, message) of each blocking finding.
-    """
-    return [
-        (item.code, item.rule, item.status, item.message)
-        for item in report.findings
-        if item.is_blocking
-    ]
-
-
-def _pdf_text(pdftotext: str, pdf: Path) -> str:
-    """Return the text pdftotext extracts from ``pdf``.
-
-    NFKC normalization turns a ligature back into its letters, in case a Poppler version
-    extracts the ff of "Off" as the single character U+FB00.
-
-    Args:
-        pdftotext: The path of the ``pdftotext`` program.
-        pdf: The PDF to read.
-
-    Returns:
-        The extracted text, decoded as UTF-8 and NFKC-normalized.
-    """
-    extracted = subprocess.run(
-        [pdftotext, "-enc", "UTF-8", str(pdf), "-"], capture_output=True, check=True, timeout=60
-    )
-    return unicodedata.normalize("NFKC", extracted.stdout.decode("utf-8"))
-
-
-def _installed_tex_file(name: str) -> Path | None:
-    """Find the TeX file ``name`` with kpsewhich.
-
-    Returns:
-        Where kpsewhich finds the file, or ``None`` when kpsewhich is not installed or does
-        not find it.
-    """
-    kpsewhich = shutil.which("kpsewhich")
-    if kpsewhich is None:
-        return None
-    found = subprocess.run(
-        [kpsewhich, name], capture_output=True, text=True, check=False, timeout=60
-    )
-    location = found.stdout.strip()
-    return Path(location) if found.returncode == 0 and location else None
-
-
 @live_test("Set FLEDGE_RUN_INTEGRATION=1 for live TeX checks of hostile and structured sources")
-class LiveSourceProjectTests(unittest.IsolatedAsyncioTestCase):
+class LiveSourceProjectTests(AsyncLiveProjectTestCase):
     """Live TeX preparations of hostile constructs, structured sources and an EPS figure."""
 
-    def setUp(self) -> None:
-        """Create a temporary base folder for the test's projects."""
-        temporary = tempfile.TemporaryDirectory(prefix="fledge-sources-")
-        self.addCleanup(temporary.cleanup)
-        self.base = Path(temporary.name).resolve()
-
-    async def prepare(
+    async def prepare_files(
         self, name: str, files: Mapping[str, str | bytes], **options: Any
     ) -> Prepared:
         """Write ``files`` as the project ``name`` and prepare it into a new folder.
@@ -319,7 +215,7 @@ class LiveSourceProjectTests(unittest.IsolatedAsyncioTestCase):
             name: The project's folder under the base folder; the output folder is
                 ``<name>-prepared`` beside it.
             files: The project's files by relative path, as text or bytes.
-            **options: Further settings for :func:`_settings`.
+            **options: Further settings for :func:`live_settings`.
 
         Returns:
             The report, both folders and the project's files before the job.
@@ -327,26 +223,10 @@ class LiveSourceProjectTests(unittest.IsolatedAsyncioTestCase):
         source = write_project(self.base / name, files)
         originals = _snapshot(source)
         output = self.base / f"{name}-prepared"
-        report = await run_job(JobRequest("prepare", source, _settings(**options), output))
+        report = await self.prepare(
+            source, live_settings(**options), f"{name}-prepared", expect=None
+        )
         return Prepared(report, source, output, originals)
-
-    def installed(self, name: str, install: str) -> Path:
-        """Find the TeX file ``name``; skip the test, saying how to install it, when it is absent.
-
-        Args:
-            name: The TeX file to look up with kpsewhich.
-            install: How to install the file, which the reason for the skip states.
-
-        Returns:
-            Where kpsewhich finds the file.
-
-        Raises:
-            unittest.SkipTest: kpsewhich does not find the file.
-        """
-        location = _installed_tex_file(name)
-        if location is None:
-            self.skipTest(f"kpsewhich does not find {name}: {install}")
-        return location
 
     def assert_unchanged(self, prepared: Prepared) -> None:
         """Assert that the project is byte for byte what it was before the job."""
@@ -360,7 +240,7 @@ class LiveSourceProjectTests(unittest.IsolatedAsyncioTestCase):
         Returns:
             The content of each entry of the published ZIP by name.
         """
-        self.assertIn(prepared.report.outcome, PUBLISHED_OUTCOMES, _problems(prepared.report))
+        self.assert_outcome(prepared.report)
         return _archive(prepared.output)
 
     def assert_blocked(self, prepared: Prepared) -> None:
@@ -369,7 +249,7 @@ class LiveSourceProjectTests(unittest.IsolatedAsyncioTestCase):
         See docs/workflow.md, step "Publish": the report has no artifacts and the output
         folder does not exist.
         """
-        self.assertEqual(prepared.report.outcome, "blocked")
+        self.assert_outcome(prepared.report, Outcome.BLOCKED)
         self.assertEqual(prepared.report.artifacts, {})
         self.assertFalse(prepared.output.exists())
 
@@ -388,12 +268,11 @@ class LiveSourceProjectTests(unittest.IsolatedAsyncioTestCase):
         Observed outcome: passed_with_advisories. TeX skips the disabled command, so the
         build succeeds, and PRV006 is a warning.
         """
-        pdftotext = shutil.which("pdftotext")
-        if pdftotext is None:
+        if shutil.which("pdftotext") is None:
             self.skipTest("pdftotext (Poppler) is not on PATH to read the typeset shell escape")
         marker = self.base / "shell-escape-marker"
         body = f"\\immediate\\write18{{touch {marker}}}\n{SHELL_ESCAPE_PROBE}"
-        prepared = await self.prepare(
+        prepared = await self.prepare_files(
             "shell-escape",
             {"main.tex": _document(body)},
             submission_checks=SHELL_ESCAPE_PREFLIGHT,
@@ -401,8 +280,8 @@ class LiveSourceProjectTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(marker.exists())
         self.assert_unchanged(prepared)
         report = prepared.report
-        self.assertEqual(report.outcome, "passed_with_advisories", _problems(report))
-        text = _pdf_text(pdftotext, prepared.output / "manuscript.pdf")
+        self.assert_outcome(report, Outcome.PASSED_WITH_ADVISORIES)
+        text = pdf_text(prepared.output / "manuscript.pdf", normalization="NFKC")
         self.assertIn("ShellEscapeOff", text)
         self.assertNotIn("ShellEscapeOn", text)
         preflight = _with_code(report, "PRV006")
@@ -419,7 +298,7 @@ class LiveSourceProjectTests(unittest.IsolatedAsyncioTestCase):
         mandatory (docs/checks.md, docs/check-backlog.md); a blocked run publishes nothing
         (docs/workflow.md, step "Publish").
         """
-        prepared = await self.prepare(
+        prepared = await self.prepare_files(
             "absolute-input",
             {"main.tex": _document("\\input{/etc/hosts}\nText.")},
             submission_checks=SHELL_ESCAPE_PREFLIGHT,
@@ -445,7 +324,7 @@ class LiveSourceProjectTests(unittest.IsolatedAsyncioTestCase):
             "\\immediate\\write\\out{x}\n"
             "\\immediate\\closeout\\out\nText."
         )
-        prepared = await self.prepare(
+        prepared = await self.prepare_files(
             "absolute-write",
             {"main.tex": _document(body)},
             submission_checks=SHELL_ESCAPE_PREFLIGHT,
@@ -468,8 +347,8 @@ class LiveSourceProjectTests(unittest.IsolatedAsyncioTestCase):
         (docs/workflow-reference.md, "Supported source syntax"), and the prepared PDF must
         match the baseline's rendered pages (CMP003, docs/checks.md).
         """
-        self.installed("import.sty", LATEX_EXTRA.format("import"))
-        prepared = await self.prepare("import", IMPORT_PROJECT, layout="flat")
+        self.installed_tex_file("import.sty", LATEX_EXTRA.format("import"))
+        prepared = await self.prepare_files("import", IMPORT_PROJECT, layout="flat")
         archive = self.assert_published(prepared)
         self.assertEqual(sorted(archive), ["detail.tex", "intro.tex", "main.tex"])
         main, intro = archive["main.tex"].decode(), archive["intro.tex"].decode()
@@ -489,22 +368,22 @@ class LiveSourceProjectTests(unittest.IsolatedAsyncioTestCase):
         passed_with_advisories, from the inconclusive bibliography checks of subfile
         content that docs/check-backlog.md lists as unsupported.
         """
-        self.installed("subfiles.cls", LATEX_EXTRA.format("subfiles"))
-        self.installed("subfiles.sty", LATEX_EXTRA.format("subfiles"))
+        self.installed_tex_file("subfiles.cls", LATEX_EXTRA.format("subfiles"))
+        self.installed_tex_file("subfiles.sty", LATEX_EXTRA.format("subfiles"))
         files = {"main.tex": SUBFILES_MAIN, "sections/intro.tex": SUBFILE}
-        prepared = await self.prepare("subfiles", files, layout="flat")
+        prepared = await self.prepare_files("subfiles", files, layout="flat")
         archive = self.assert_published(prepared)
         self.assertEqual(sorted(archive), ["intro.tex", "main.tex"])
         self.assertIn("\\documentclass[main.tex]{subfiles}", archive["intro.tex"].decode())
         self.assertNotIn("sections/", archive["main.tex"].decode())
         self.assert_rendering_unchanged(prepared.report)
         self.assert_unchanged(prepared)
-        original = await run_job(JobRequest("inspect", prepared.source, _settings()))
+        original = await run_job(JobRequest("inspect", prepared.source, live_settings()))
         unresolved = [item for item in _with_code(original, "TEX005") if item.status != "passed"]
         self.assertEqual(unresolved, [])
         # Without the subfile the same check fails, so its silence above is not vacuous.
         missing = write_project(self.base / "subfile-missing", {"main.tex": SUBFILES_MAIN})
-        control = await run_job(JobRequest("inspect", missing, _settings()))
+        control = await run_job(JobRequest("inspect", missing, live_settings()))
         self.assertEqual(_results(_with_code(control, "TEX005")), {("error", "failed", "main.tex")})
 
     async def test_local_class_style_and_bibliography_style_in_subdirectories(self) -> None:
@@ -515,19 +394,19 @@ class LiveSourceProjectTests(unittest.IsolatedAsyncioTestCase):
         style identities constrain renaming (docs/workflow-reference.md, "Supported source
         syntax"); the preserve layout keeps the project's folders.
         """
-        bst = self.installed("plain.bst", "it ships with BibTeX (TeX Live package bibtex)")
+        bst = self.installed_tex_file("plain.bst", "it ships with BibTeX (TeX Live package bibtex)")
         files = {
             "main.tex": STYLED_MAIN,
             "styles/journal.cls": JOURNAL_CLASS,
             "styles/macros.sty": MACROS_PACKAGE,
             "styles/custom.bst": bst.read_bytes(),
-            "figures/plot.png": _png(),
+            "figures/plot.png": png_bytes(),
             "chapters/one.tex": "\\section{One}\nChapter text.\n",
             "refs.bib": BIBLIOGRAPHY,
         }
         for layout in ("preserve", "flat"):
             with self.subTest(layout=layout):
-                prepared = await self.prepare(f"styled-{layout}", files, layout=layout)
+                prepared = await self.prepare_files(f"styled-{layout}", files, layout=layout)
                 archive = self.assert_published(prepared)
                 if layout == "flat":
                     self.assert_flat_styled_project(archive)
@@ -569,7 +448,7 @@ class LiveSourceProjectTests(unittest.IsolatedAsyncioTestCase):
         deadline, and the job is blocked.
         """
         figure = _document("\\includegraphics{figures/plot.eps}", "\\usepackage{graphicx}\n")
-        prepared = await self.prepare(
+        prepared = await self.prepare_files(
             "eps-figure", {"main.tex": figure, "figures/plot.eps": EPS_FIGURE}
         )
         self.assert_blocked(prepared)

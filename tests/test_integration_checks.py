@@ -20,11 +20,12 @@ from latexprep.pdf_checks import inspect_pdf_details
 from latexprep.resource_budget import ResourceBudget
 from latexprep.runtime import ToolRunner
 from latexprep.submission_options import SubmissionOptions
+from tests.live_support import LIVE_BUILD_EPOCH, AsyncLiveProjectTestCase
 from tests.support import live_test
 
 
 @live_test("Set FLEDGE_RUN_INTEGRATION=1 for the live configured-check preparation workflow")
-class LiveConfiguredChecksTests(unittest.IsolatedAsyncioTestCase):
+class LiveConfiguredChecksTests(AsyncLiveProjectTestCase):
     """Configured checks in a real ``prepare`` job with flattening and an archive rebuild."""
 
     async def test_configured_checks_survive_flattening_and_exact_archive_rebuild(self) -> None:
@@ -80,7 +81,7 @@ The complete fixture is included in this source package.
                 job_timeout_seconds=180,
                 max_bytes=8_388_608,
                 max_temporary_bytes=134_217_728,
-                source_date_epoch=1_700_000_000,
+                source_date_epoch=LIVE_BUILD_EPOCH,
                 build_checks=BuildCheckOptions(
                     overfull_tolerance_pt=1,
                     inventory_loaded_packages=True,
@@ -111,12 +112,7 @@ The complete fixture is included in this source package.
             pending_before = asyncio.all_tasks()
             output = base / "prepared"
             report = await run_job(JobRequest("prepare", source, settings, output))
-            problems = [
-                (item.code, item.status, item.details.get("stage"), item.message)
-                for item in report.findings
-                if item.severity == "error" or item.status == "inconclusive"
-            ]
-            self.assertIn(report.outcome, {"passed", "passed_with_advisories"}, problems)
+            self.assert_outcome(report)
             self.assertEqual(asyncio.all_tasks() - pending_before, set())
             self.assertEqual(
                 original_bytes,
