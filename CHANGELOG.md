@@ -9,9 +9,81 @@ The version is defined once, as `__version__` in `src/latexprep/__init__.py`.
 
 ## [Unreleased]
 
+### Breaking changes
+
+- **Exit codes separate a paper that needs a fix from a run that could not check
+  it.** Exit code 3 (`blocked`) now means only that the paper needs a fix. Missing or
+  unusable tools, sandbox failures, timeouts, resource limits, unreadable input, two
+  or no main files and failed `doctor` diagnostics end with exit code 4 (`error`).
+  Defects in Fledge end with the new exit code 70 and outcome `internal_error`. JSON
+  reports are now `schema_version` 3.
+- **A request error prints two lines on standard error**, `Error:` and `Hint:`,
+  instead of a full report on standard output; `--json` still prints the report.
+- **The engine follows the main file.** The `engine` setting defaults to `auto`,
+  which follows a `% !TEX program = xelatex`, `lualatex` or `pdflatex` comment and
+  otherwise uses pdfLaTeX; reports show `"engine": "auto"`.
+- **Each command offers only the options it uses.** `inspect` no longer accepts
+  `--show-files`, `--preview-output`, `--build-jobs` and `--render-jobs`, and
+  `--show-files` belongs to `prepare` only. Out-of-range numbers, `prepare` without
+  `--output` or `--dry-run`, and a `--select` the command cannot run are usage
+  errors (exit code 64).
+- **`prepare` ships a regenerated `.bbl` only where the venue needs it.** A supplied
+  `.bbl` that the build regenerated is left out unless
+  `submission_checks.venue_runs_bibliography_tools = false`; the `arxiv` preset no
+  longer requires a `.bbl`, because arXiv runs BibTeX and Biber when none is shipped.
+- **EPS and PostScript figures block preparation** (`TEX011`) unless their converted
+  PDF is shipped, because no engine can convert them inside the sandbox.
+- **Default runs scan the metadata of the document's figures** (`PRV104`, `PRV105`)
+  and may end with advisories (exit code 1).
+
 ### Added
 
 - Python 3.14 and 3.15 are supported and tested.
+- Glossaries, acronym lists and nomenclatures are built. `prepare` ships the index,
+  glossary and nomenclature files its verified build generated, and proves them
+  sufficient by rebuilding the archive with makeindex (and, when a `.bbl` ships,
+  BibTeX and Biber) blocked. New settings describe the receiving service:
+  `venue_runs_bibliography_tools`, `venue_runs_index_tools` and `venue_engines`.
+- `--force` replaces an output or preview folder, or a JSON or HTML report, that
+  Fledge wrote earlier, once the new run has succeeded; an existing empty output
+  folder is accepted without it.
+- Short options `-m`, `-o` and `-q`; examples in the help; shell completion of check
+  codes and `--main`; `--preset`, `--select` and `--ignore` for `pdf check` and
+  `bib check`; `prepare --diff`; a `.tex` file given as INPUT is read as its folder
+  plus `--main`, and `--main` accepts a path from the current folder.
+- `init` writes the main file it detected, or lists the candidates.
+- `fledge rules` takes a family such as `TEX` and shows which checks run by default;
+  its JSON gains `activation` and `enabled_by`. `fledge rule` suggests close codes.
+  `doctor` lists tool versions.
+- Blocked reports group follow-on results under their cause and end with a verdict
+  that names what to fix first. A `Settings:` line names the settings file and the
+  preset. CI annotations have readable titles and paths relative to the workspace
+  and end with a verdict notice, and the HTML report header shows the counts.
+- A `suggestion` severity for style advice: off unless selected, reported in its own
+  section, never changing the outcome, and silenced in the sources with
+  `% fledge: ignore CODE`. Checks can carry a reference link.
+- Build failures caused by Fledge's own restrictions get specific next steps: missing
+  packages (`tlmgr` or the Debian package), fonts that exist only as METAFONT sources
+  (`cm-super`), shell-escape packages such as minted, the svg package, EPS figures,
+  personal fonts and fontspec under pdfLaTeX. `doctor` tests a bullet list, so a
+  missing `cm-super` is found before the first paper.
+- New checks:
+  - `BLD011`: an unused class option, such as a misspelled `twocolumn`.
+  - `BLD012`: a float that is too large for the page.
+  - `BLD013`: a token that hyperref cannot put into a PDF string (information).
+  - `BLD014`: an obsolete package or command (information).
+  - `BLD015`: BibTeX and Biber warnings (information).
+  - `BLD106`: the engine and what chose it.
+  - `BLD107`: a project latexmkrc, which is never executed.
+  - `BLD108`: fonts loaded from this computer, which a ZIP cannot carry.
+  - `TEX012`: generated lists that a venue needs.
+  - `TEX013`: an engine the venue does not offer.
+  - `PRV104`: home-folder paths in figure metadata.
+  - `PRV105`: identity terms and home-folder paths that included PDFs leave in the
+    shipped PDF.
+- `source_transforms.suppress_included_pdf_information` (`TEX204`, enabled by the
+  `anonymous-review` preset) adds one line to the prepared main file, so pdfLaTeX
+  and LuaLaTeX omit the information and file names of included PDFs.
 
 ### Changed
 
@@ -21,9 +93,23 @@ The version is defined once, as `__version__` in `src/latexprep/__init__.py`.
   for every file it did not find, because Fledge's search path left out the marker
   that makes TeX Live use its file index. TeX Live from Debian or Ubuntu packages
   was not affected.
+- LuaLaTeX builds on macOS reuse one sealed font database per job: a LuaLaTeX
+  `prepare` takes about 11 seconds instead of 49.
+- The default parallelism follows the CPU count: `jobs` is at most 4 and
+  `render_jobs` at most half the CPUs, up to 4.
 - The installation guide and the CI recipe install `cm-super`. Without it, an
   ordinary bullet list stops the build with "Font tcrm1000 at 600 not found",
   because builds never generate bitmap fonts.
+- What Fledge says about arXiv is corrected: arXiv runs BibTeX and Biber when no
+  `.bbl` is shipped, converts no figures and does not offer LuaLaTeX. The `arxiv`
+  preset ships generated index files and lists the engines arXiv offers.
+- `PRV103` also scans PDF figures, and the figure scans read only the figures the
+  document includes (every PNG and JPEG file only when that set is uncertain).
+- Check selectors ignore case, commands are listed in workflow order, the progress
+  line shows the running stage and its time, and redirected progress shows phases
+  only. Ctrl-C prints one line, and the "Not checked" hint follows passing runs only.
+- PNG and JPEG files are stored uncompressed in the ZIP, and dependency evidence is
+  classified faster.
 
 ### Fixed
 
@@ -33,12 +119,34 @@ The version is defined once, as `__version__` in `src/latexprep/__init__.py`.
 - On Python 3.11 and 3.12, a run could print "Unknown child process pid …, will
   report returncode 255" on standard error, even with `--quiet`, when it stopped a
   helper process that had just exited.
+- On Linux with latexmk 4.83 (Ubuntu 24.04), `\include{chapters/one}` stopped with
+  "Emergency stop", and a project that shipped `main.bbl` was blocked with `PKG302`.
+- Recorded inputs that never existed, such as `main.nls`, no longer block
+  preparation, and `PKG302` names its reason in the terminal.
+- `bib check` no longer passes an undefined citation when an unrelated source file
+  is missing; it shows that error and stays blocked.
+- Font family names in fontspec commands no longer make source, packaging and
+  citation checks inconclusive.
+- Long TeX errors are no longer cut off at the first line break, `BLD008` is no
+  longer reported after a TeX error stopped the build, and a log pattern that took
+  quadratic time is gone.
+- Report counts no longer overlap.
 - Scan findings that reach the reporting limit show their count as "N+", and the
   message lists the same matches as `details.matches`.
 - An `@string` macro named `ids` no longer hides a missing `crossref` target
   (`BIB005`, bibliography relationship targets).
 - A run that ends with exit code 4 because a check had a defect publishes its
   previews and report again, like a blocked run.
+
+### Security
+
+- Fledge writes output only into folders it has just created. An existing empty
+  folder, or an earlier output replaced with `--force`, takes the new output's place
+  only after checks that it is still an unchanged folder of the user's; removals
+  never follow links, the folder's permissions are kept, and a folder of another
+  user is refused.
+- Project file names that `init`, shell completion and the `.tex` input note print
+  are escaped, so a file name cannot send control sequences to the terminal.
 
 ## [0.3.1] - 2026-10-22
 
