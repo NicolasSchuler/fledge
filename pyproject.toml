@@ -28,7 +28,10 @@ classifiers = [
     "Topic :: Text Processing :: Markup :: LaTeX",
 ]
 requires-python = ">=3.11"
-dependencies = ["click>=8.1,<9", "rich>=13.7,<15"]
+# Click 8.1 is below the floor: its test runner mixes standard error into standard output, and
+# 201 tests fail. 8.2.2 is excluded: an absent boolean flag has the value False there, which
+# overrides the settings file. The lowest-dependencies CI job runs the tests on the floor.
+dependencies = ["click>=8.2.0,!=8.2.2,<9", "rich>=13.7,<15"]
 
 [project.urls]
 Repository = "https://github.com/NicolasSchuler/fledge"
@@ -39,8 +42,15 @@ Changelog = "https://github.com/NicolasSchuler/fledge/blob/main/CHANGELOG.md"
 [project.optional-dependencies]
 docs = ["sphinx>=8,<10", "myst-parser>=4,<6"]
 build = ["build>=1.2,<2"]
-# pytest 9 reports unittest subTest failures individually; xdist runs the suite in parallel.
-dev = ["ruff>=0.9,<1", "ty>=0.0.1,<0.1", "pytest>=9,<10", "pytest-xdist>=3.6,<4"]
+# pytest 9 reports unittest subTest failures individually; xdist runs the suite in parallel;
+# pytest-cov 7 measures the child processes through coverage's own subprocess patch.
+dev = [
+    "ruff>=0.9,<1",
+    "ty>=0.0.1,<0.1",
+    "pytest>=9,<10",
+    "pytest-xdist>=3.6,<4",
+    "pytest-cov>=7,<8",
+]
 
 [project.scripts]
 fledge = "latexprep.cli:main"
@@ -73,6 +83,24 @@ xfail_strict = true
 # names itself in CI logs instead of silently consuming the job timeout.
 faulthandler_timeout = 300
 
+[tool.coverage.run]
+branch = true
+source = ["latexprep"]
+# Each process writes its own data file and pytest-cov combines them. The patch starts
+# measurement in the children that tests launch (`python -m latexprep` in
+# tests/test_process_boundary.py), whose entry point no in-process test reaches.
+parallel = true
+patch = ["subprocess"]
+
+[tool.coverage.report]
+# The coverage gate (lines and branches together) of `pytest --cov`, a ratchet that sits a little
+# below the measured 95.3% so a change that leaves code untested fails the unit job. Raise it
+# after a change that lifts the total: run the full suite with `--cov`, then set this to the
+# whole percentage just below the new total. A partial run needs `--cov-fail-under=0`.
+fail_under = 94
+show_missing = true
+skip_covered = true
+
 [tool.ruff]
 target-version = "py311"
 line-length = 100
@@ -80,6 +108,8 @@ line-length = 100
 [tool.ruff.lint]
 select = [
     "E", "F", "I", "UP", "B",
+    # An invalid escape sequence such as "\d" in a plain string: a SyntaxWarning in Python 3.12+.
+    "W605",
     # Style and simplification rules with real signal.
     "C4", "PIE", "PERF", "PTH", "SIM", "RUF", "PGH", "T20",
     # Every blind `except Exception` must be a justified boundary that reports its cause.

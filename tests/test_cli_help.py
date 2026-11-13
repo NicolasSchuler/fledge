@@ -59,6 +59,14 @@ class HelpTests(unittest.TestCase):
         def argument_record(argument, ctx):
             return (f"ARGUMENT-{argument.name}", "")
 
+        # `submission-text` and `rule` have no advanced options, so Fledge leaves their option
+        # section to Click. A Click that never gives an argument a record would list the
+        # patched one among the options, so those two are checked only where Click itself
+        # keeps arguments out of the option sections (8.5.1 and later).
+        context = click.Context(click.Command("probe"))
+        click_handles_argument_records = click.Argument(["x"]).get_help_record(context) is not None
+        rendered_by_click = {("submission-text",), ("rule",)}
+
         def option_sections(text: str) -> str:
             heading = re.search(r"^(Common options|Options):$", text, re.MULTILINE)
             self.assertIsNotNone(heading, text)
@@ -75,6 +83,8 @@ class HelpTests(unittest.TestCase):
                 ("submission-text",),
                 ("rule",),
             ):
+                if command in rendered_by_click and not click_handles_argument_records:
+                    continue
                 with self.subTest(command=" ".join(command)):
                     self.assertNotIn("ARGUMENT-", option_sections(self.help_text(*command)))
 

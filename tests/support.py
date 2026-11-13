@@ -7,15 +7,17 @@ redefining ``write``/``build`` helpers or importing one test module from another
 from __future__ import annotations
 
 import base64
+import contextlib
 import os
 import sys
 import tempfile
 import unittest
 import zlib
 from collections import Counter
-from collections.abc import Awaitable, Callable, Iterable, Mapping
+from collections.abc import Awaitable, Callable, Generator, Iterable, Mapping
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any, TypeVar, cast
+from unittest.mock import patch
 
 from latexprep.build_result import BuildResult, BuildTools
 from latexprep.command_runner import CommandRunner
@@ -36,7 +38,7 @@ except ImportError:  # the suite also runs under `python -m unittest`
         return target
 
 
-_T = TypeVar("_T")
+_T = TypeVar("_T", bound=Callable[..., Any])
 
 MINIMAL_PDF = b"%PDF-controlled-test\n"
 MINIMAL_DOCUMENT = "\\documentclass{article}\n\\begin{document}Hello.\\end{document}\n"
@@ -199,7 +201,7 @@ async def fake_build(tree, main, work, engine, runner, **_options) -> BuildResul
     return fake_build_result(work, main)
 
 
-def _backend(behaviour: object) -> Callable[..., Awaitable[object]]:
+def _backend(behaviour: object) -> Callable[..., Awaitable[Any]]:
     """Return an async backend that does what ``behaviour`` says.
 
     A callable is the backend itself (an async function or an ``AsyncMock``), an exception
@@ -207,9 +209,9 @@ def _backend(behaviour: object) -> Callable[..., Awaitable[object]]:
     are copied so one job cannot change what the next receives.
     """
     if callable(behaviour):
-        return behaviour
+        return cast("Callable[..., Awaitable[Any]]", behaviour)
 
-    async def backend(*_arguments: object, **_options: object) -> object:
+    async def backend(*_arguments: object, **_options: object) -> Any:
         """Raise or return ``behaviour``, whatever the arguments."""
         if isinstance(behaviour, BaseException):
             raise behaviour
@@ -391,7 +393,7 @@ async def format_with(
     work: Path,
     runner: CommandRunner,
     settings: Settings | None = None,
-    **options: object,
+    **options: Any,
 ) -> FormattingResult:
     """Format with the formatting settings of ``settings``, as the job core passes them.
 
@@ -792,3 +794,47 @@ def pdf_bytes(
         )
     data += b"trailer\n" + trailer + f"\nstartxref\n{table}\n%%EOF\n".encode()
     return bytes(data)
+
+
+@contextlib.contextmanager
+def recorded_findings() -> Generator[list[tuple[str, str]]]:
+    """Record the rule and status of every ``Finding`` that code builds inside the block.
+
+    Findings built in any thread count, and so do copies made with ``dataclasses.replace``.
+    The catalogue checks of ``tests/test_rules.py`` use it to see which rules a test reaches.
+
+    Yields:
+        The (rule name, status) of each finding built so far, in order of construction.
+    """
+    original = Finding.__init__
+    seen: list[tuple[str, str]] = []
+
+    def recording_init(self: Finding, *args: Any, **kwargs: Any) -> None:
+        original(self, *args, **kwargs)
+        seen.append((self.rule, self.status))
+
+    with patch.object(Finding, "__init__", recording_init):
+        yield seen
+
+
+def clean_case(*codes: str) -> Callable[[_T], _T]:
+    """Mark a test as the clean case of the checks ``codes``: it must not trigger them.
+
+    The check runs on input that is allowed, such as a matching case, a closed construct or
+    a value inside its limit, and the test asserts that no finding of the check appears. The
+    catalogue check in ``tests/test_rules.py`` reads this decorator from the source, so it
+    must be written as ``@clean_case("TEX007")``, and it runs the test to confirm that no
+    finding of those checks fails.
+
+    Args:
+        *codes: The check codes the test is the clean case of.
+
+    Returns:
+        The decorator, which returns the test unchanged.
+    """
+
+    def decorate(target: _T) -> _T:
+        """Return ``target``; the decorator only marks the test for the source scan."""
+        return target
+
+    return decorate

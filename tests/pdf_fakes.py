@@ -412,6 +412,17 @@ class PdfToolRunner(FakeCommandRunner):
     """
 
     defaults: ClassVar[dict[str, object]] = {}
+    # Set from ``defaults`` and the keyword arguments of the constructor.
+    info: str
+    geometry: str
+    xml: str
+    objects: str
+    trace: str
+    text: str
+    fonts: str
+    raster: bytes
+    rgb: bytes
+    stderr: str
 
     def __init__(self, **values: object) -> None:
         super().__init__()

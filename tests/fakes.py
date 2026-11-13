@@ -156,7 +156,9 @@ class FakeCommandRunner:
         calls it with the call when it is a function.
         """
         script = self.replies.get(call.tool, self.default)
-        return script(call) if callable(script) else script
+        if isinstance(script, str | Reply | CommandResult):
+            return script
+        return script(call)
 
     def version_output(self, call: ToolCall) -> str:
         """Return what a version probe of the call's tool prints."""

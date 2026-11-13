@@ -42,12 +42,22 @@ class BblKeysTests(unittest.TestCase):
         )
 
     def test_a_large_bbl_is_read_in_linear_time(self):
-        text = "".join(f"\\bibitem{{key{index}}} Entry {index}.\n" for index in range(20_000))
-        started = time.monotonic()
-        keys = bbl_keys(text)
-        self.assertEqual(len(keys.keys), 20_000)
-        # Copying the rest of the text for every \bibitem would take minutes here.
-        self.assertLess(time.monotonic() - started, 5)
+        # Copying the rest of the text for every \bibitem would make four times the items
+        # cost sixteen times as much, where a linear read costs four. The test compares the
+        # processor time of two sizes instead of timing one, so a loaded machine slows both.
+        def processor_seconds(items: int) -> float:
+            text = "".join(f"\\bibitem{{key{index}}} Entry {index}.\n" for index in range(items))
+            best = float("inf")
+            for _ in range(3):
+                started = time.process_time()
+                keys = bbl_keys(text)
+                best = min(best, time.process_time() - started)
+                self.assertEqual(len(keys.keys), items)
+            return best
+
+        small = processor_seconds(5_000)
+        large = processor_seconds(20_000)
+        self.assertLess(large, 10 * max(small, 2e-4))
 
 
 if __name__ == "__main__":

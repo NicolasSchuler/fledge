@@ -66,13 +66,25 @@ status; the deployed site is at <https://nicolasschuler.github.io/fledge/>.
 
 ```sh
 python -m pytest tests -n auto
+python -m pytest tests -n auto --cov
 ruff check src tests docs/conf.py scripts
 ruff format --check src tests docs/conf.py scripts
-ty check src/latexprep
+ty check src/latexprep tests/support.py tests/fakes.py tests/pdf_fakes.py tests/live_support.py
 ```
 
+The second command measures branch coverage, including the child processes that
+`tests/test_process_boundary.py` starts, and fails when the total falls below
+`fail_under` in `[tool.coverage.report]` of `pyproject.toml`. That number is a ratchet
+that sits a little below the measured total, so a change that leaves new code untested
+fails the unit job. After a change that lifts the total, run the full suite with `--cov`
+and set `fail_under` to the whole percentage just below the new total. A run of a few
+test files needs `--cov-fail-under=0`, because it covers little of the package.
+`ty` also checks the shared test support modules, whose doubles stand in for the
+package's adapters; the test modules themselves are not type-checked.
+
 Ruff enforces, besides formatting and import order, the rule families `B`, `UP`, `C4`,
-`PIE`, `PERF`, `PTH`, `SIM`, `RUF`, `PGH`, `T20`, `BLE`, `ARG`, `G`, `LOG` and `D` (the
+`PIE`, `PERF`, `PTH`, `SIM`, `RUF`, `PGH`, `T20`, `BLE`, `ARG`, `G`, `LOG`, `W605`
+(an invalid escape sequence in a string) and `D` (the
 [docstring convention](#docstring-convention) below), the
 keyword-only rule for boolean parameters (`FBT001`, `FBT002`) and ceilings on complexity
 (10), branches (12), statements (50) and arguments (8); `[tool.ruff.lint]` in
@@ -220,6 +232,29 @@ another (`from tests.test_x import ...`, `from tests import ...` naming a test m
   there as `<test id>.json`, so a CI job can upload what a failed live test saw.
   `tests/test_live_support.py` checks the message and the artifact without TeX.
 
+Three more test modules keep the suite honest about what it proves:
+
+- `tests/test_rules.py` runs the test linked to every check in the catalogue and fails
+  when that test builds no finding of the check, so a stale link cannot pass. It also
+  asks for a clean case for every check: a test marked `@clean_case("CODE")` (from
+  `tests/support.py`) that runs the check on input it must accept, or a linked test that
+  builds a passed result. `CHECKS_WITHOUT_CLEAN_CASE` lists the checks that have neither
+  yet; the list can only shrink, because the test also fails for a listed check that now
+  has one. The clean cases live in `tests/test_clean_cases.py`; a new check starts with
+  its clean case instead of an entry in that list.
+- `tests/test_generated_inputs.py` feeds the readers of untrusted project content inputs
+  drawn from a seeded `random.Random`: damaged ZIP archives, PNG and JPEG metadata, text
+  for the TeX lexer, edit lists and paths. It asserts invariants (only the documented
+  errors, nothing left behind, offsets and containment kept), not exact results. A seed
+  is fixed so that a failure repeats; raise a count locally to look for a defect.
+- `tests/test_ci_workflows.py` fails when a CI safeguard is removed: the coverage gate,
+  the alert on a failed scheduled run, the tests before a release, the run on the oldest
+  declared dependencies.
+
+A test that checks speed compares the processor time of two input sizes and asserts a
+bound on the growth, as `tests/test_literal_text.py` and `tests/test_bbl_checks.py` do;
+it never asserts an absolute time, which a loaded runner turns into a failure.
+
 A job that would run TeX or the PDF tools takes its tool-driven operations from a
 `DocumentBackends` value (`run_job(..., backends=...)`): the build, the PDF
 inspection and the PDF comparison. The defaults run the real tools. Tests pass
@@ -260,7 +295,8 @@ Click.
 The [Tests workflow](https://github.com/NicolasSchuler/fledge/actions/workflows/tests.yml)
 runs on pushes to `main`, pull requests, manual dispatch and weekly. Every run:
 
-- lints with Ruff (`check` and `format --check`) and checks types with `ty`;
+- lints with Ruff (`check` and `format --check`) and checks types with `ty`, for the
+  package and the shared test support modules;
 - lints `install.sh` with ShellCheck;
 - builds the documentation with `-n -W`, as the Deploy documentation workflow does,
   so a broken link fails the pull request instead of the merge;
@@ -269,31 +305,64 @@ runs on pushes to `main`, pull requests, manual dispatch and weekly. Every run:
   [offline example](examples.md) with that installation, and runs
   `tests/test_docs.py` and `tests/test_packaging.py` from the extracted source
   archive, so a file missing from either distribution fails the pull request;
-- runs the unit tests with pytest on macOS and Ubuntu with Python 3.11, 3.12 and 3.13.
+- runs the unit tests with pytest on macOS and Ubuntu with Python 3.11 to 3.15. The
+  Ubuntu cell with Python 3.13 also measures coverage and applies the coverage gate
+  (see [Run checks](#run-checks)) and writes the report to the job summary;
+- runs the unit tests on the oldest versions of the dependencies that `pyproject.toml`
+  declares (`lowest-dependencies`, Python 3.11, installed with
+  `uv pip install --resolution lowest-direct`), so a floor that no longer works fails
+  here. Click 8.1 fails 201 tests, because its test runner mixes standard error into
+  standard output, and Click 8.2.2 gives an absent boolean flag the value `False`,
+  which overrides the settings file; the floor is therefore `click>=8.2.0,!=8.2.2`.
 
-Manual and weekly runs add two live jobs that run the opt-in integration tests
+Manual and weekly runs add live jobs that run the opt-in integration tests
 (`FLEDGE_RUN_INTEGRATION=1`) without tool doubles. Each lists its test files by
 hand, and `tests/test_packaging.py` fails when a test file with live tests
-is missing from both lists:
+is missing from both lists. A failing live test writes the JSON report of the run to
+`FLEDGE_TEST_ARTIFACT_DIR`, and the job uploads that directory as an artifact:
 
 - `live-macos` installs BasicTeX, Poppler, `tex-fmt` and Biber and also runs the
   macOS sandbox tests.
-- `live-linux` installs TeX Live, Biber, Poppler and Bubblewrap from apt plus a
-  pinned `tex-fmt` release, and runs the integration tests under Bubblewrap. It
-  leaves out `test_runtime_inputs.py` and `test_runtime_monitoring.py`, whose live tests
+- `live-linux` runs the integration tests under Bubblewrap in two legs, which differ
+  only in where TeX Live comes from, so that an effect of the TeX Live version does not
+  pass for an effect of the platform. `ubuntu-packages` installs TeX Live 2023, Biber,
+  Poppler and Bubblewrap from apt plus a pinned `tex-fmt` release. `current-from-tug`
+  installs the current TeX Live release from tug.org under `/usr/local/texlive`, which
+  the Linux sandbox accepts as a system prefix: scheme small without documentation or
+  sources, plus the packages the live tests need (those of the macOS job, the XeTeX and
+  LuaTeX engines, and the recommended LaTeX, font and bibtex-extra collections that the
+  apt leg gets from its packages), about 280 MB in all. It runs the installer only after
+  checking its SHA-512 and the signature of that hash by the TeX Live signing key, whose
+  primary fingerprint the workflow pins, and its install step has a timeout of 25
+  minutes. It uses the same Poppler, Bubblewrap and `tex-fmt`. Both legs leave out
+  `test_runtime_inputs.py` and `test_runtime_monitoring.py`, whose live tests
   run only on macOS, and
-  adds `test_runtime_backends.py` for the live Bubblewrap isolation test.
-  It first passed on 2026-10-12. What the documentation says about Linux rests
+  add `test_runtime_backends.py` for the live Bubblewrap isolation test.
+  The apt leg first passed on 2026-10-12. What the documentation says about Linux rests
   on this job, so a failure is a real result that must not be ignored: fix the
   cause or correct those statements. On Ubuntu 24.04 it sets
   `kernel.apparmor_restrict_unprivileged_userns=0` on the disposable runner, a
   CI setting that users must decide on for their own hosts (see
   [installation](installation.md#linux)).
 
+When a weekly run fails, the `alert-on-scheduled-failure` job opens an issue titled
+"Scheduled CI run failed", or comments on the one that is open, and names the failed
+jobs and the run. GitHub notifies only the person who last edited a cron line, so without
+that issue nobody else hears of a failure. The job is the only one with `issues: write`
+and checks out no code. Close the issue when the cause is fixed.
+
+GitHub disables the scheduled runs of a public repository after 60 days without activity
+in it, such as a commit or a pull request. The workflow then shows as disabled in the
+Actions tab and no run fails, so the alert job above never fires and the weekly live jobs
+stop until someone enables the workflow again. After a quiet spell, check that the Tests
+workflow shows a scheduled run from the last week; a commit to the default branch keeps
+the repository active, and **Enable workflow** in the Actions tab restarts a disabled
+schedule.
+
 Every third-party action in every workflow is pinned to a commit SHA, and
 Dependabot (`.github/dependabot.yml`) proposes a grouped update each week. The
 [Release workflow](https://github.com/NicolasSchuler/fledge/actions/workflows/release.yml)
-publishes to PyPI; see [release to PyPI](#release-to-pypi).
+runs the unit tests, then builds and publishes to PyPI; see [release to PyPI](#release-to-pypi).
 
 To run Fledge on a paper repository rather than on Fledge itself, see
 [check your paper in CI](continuous-integration.md).
@@ -419,8 +488,12 @@ carries but that describes the run or the tool environment rather than the manus
 belongs in `OPERATIONAL_RULE_NAMES` instead; a test fails for an emitted name that is
 neither catalogued nor operational. Link
 the rule to a unit test that runs the actual checker on a meaningful fixture and
-asserts both the code and the intended behavior. Include a valid counterpart, a
-violating case, and an unavailable or ambiguous evidence case when applicable.
+asserts both the code and the intended behavior; `tests/test_rules.py` runs every linked
+test and fails when it builds no finding of the rule. Include a valid counterpart, a
+violating case, and an unavailable or ambiguous evidence case when applicable. The valid
+counterpart is the clean case: mark the test `@clean_case("CODE")` (see "Test structure
+and seams"), or have a linked test build a passed result, because the same test fails for
+a check with neither.
 Reuse an existing behavior test when it already proves the contract; do not add
 a test that only constructs a `Finding`. Keep evidence types and failure states
 intact when changing execution order, and check scheduling and serial/parallel

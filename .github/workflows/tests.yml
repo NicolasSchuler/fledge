@@ -37,8 +37,12 @@ jobs:
         run: ruff check src tests docs/conf.py scripts
       - name: Check formatting
         run: ruff format --check src tests docs/conf.py scripts
+      # The shared test support modules are checked with the package, because the doubles that
+      # they build stand in for its adapters; the test modules themselves are not.
       - name: Check types
-        run: ty check src/latexprep
+        run: >-
+          ty check src/latexprep tests/support.py tests/fakes.py tests/pdf_fakes.py
+          tests/live_support.py
 
   # Shell scripts are linted here because the installer is the one shell program shipped.
   shellcheck:
@@ -124,6 +128,11 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
         python-version: ["3.11", "3.12", "3.13", "3.14", "3.15"]
+        include:
+          # One cell measures coverage, so the other nine run without its overhead.
+          - os: ubuntu-latest
+            python-version: "3.13"
+            coverage: true
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -144,7 +153,45 @@ jobs:
       # spreads them over one worker process per CPU. `-ra` (also set in
       # pyproject.toml) summarises every failure, error and skip reason.
       - name: Run unit tests
+        if: ${{ !matrix.coverage }}
         run: python -m pytest tests -n auto -ra -p no:cacheprovider
+      # `[tool.coverage]` in pyproject.toml sets branch coverage, the package to measure,
+      # the measurement of the child processes that tests start, and `fail_under`, the
+      # coverage gate: a change that leaves enough code untested fails here.
+      - name: Run unit tests with the coverage gate
+        if: ${{ matrix.coverage }}
+        run: python -m pytest tests -n auto -ra -p no:cacheprovider --cov
+      - name: Show the coverage report in the job summary
+        if: ${{ !cancelled() && matrix.coverage }}
+        run: python -m coverage report --format=markdown --fail-under=0 >> "$GITHUB_STEP_SUMMARY"
+
+  # The oldest versions that pyproject.toml declares, so a floor that no longer works
+  # fails here and not on the machine of a user who has that version.
+  lowest-dependencies:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.11"
+      # uv resolves the lowest version of each direct dependency and the highest of
+      # the rest; the test tools are installed afterwards, at their newest.
+      - name: Install the lowest declared versions of the dependencies
+        run: |
+          python -m pip install --disable-pip-version-check uv
+          uv venv "$RUNNER_TEMP/lowest"
+          uv pip install --python "$RUNNER_TEMP/lowest/bin/python" --resolution lowest-direct -e .
+          uv pip install --python "$RUNNER_TEMP/lowest/bin/python" \
+            'pytest>=9,<10' 'pytest-xdist>=3.6,<4'
+          uv pip list --python "$RUNNER_TEMP/lowest/bin/python"
+      - name: Run unit tests
+        run: >-
+          "$RUNNER_TEMP/lowest/bin/python" -m pytest tests -n auto -ra -p no:cacheprovider
 
   live-macos:
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
@@ -227,16 +274,25 @@ jobs:
           retention-days: 14
 
   # Live Linux tests: real builds under the Bubblewrap sandbox on a GitHub-hosted
-  # Ubuntu runner, with TeX Live, Biber and Poppler from apt, weekly and on manual
-  # dispatch. The job first passed on 2026-10-12, and what the documentation says
-  # about Linux rests on it; the runner is pinned to the Ubuntu release the
-  # documentation names. A failure here is a real result, so the job is not
-  # allowed to fail silently (no continue-on-error).
+  # Ubuntu runner, weekly and on manual dispatch, with two TeX Live installations so that
+  # an effect of the TeX Live version does not pass for an effect of the platform:
+  #   - `ubuntu-packages`: TeX Live 2023 from apt, with Biber and Poppler. The job first
+  #     passed in this form on 2026-10-12, and what the documentation says about Linux
+  #     rests on it.
+  #   - `current-from-tug`: the current TeX Live release, installed from tug.org (a small
+  #     scheme plus the packages the tests need, without documentation and sources) under
+  #     /usr/local/texlive, which the Linux sandbox accepts as a system prefix.
+  # The runner is pinned to the Ubuntu release the documentation names. A failure here is
+  # a real result, so the job is not allowed to fail silently (no continue-on-error).
   live-linux:
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
     runs-on: ubuntu-24.04
     continue-on-error: false
-    timeout-minutes: 60
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        texlive: [ubuntu-packages, current-from-tug]
     env:
       DEBIAN_FRONTEND: noninteractive
     steps:
@@ -265,23 +321,89 @@ jobs:
           else
             echo "kernel.apparmor_restrict_unprivileged_userns is absent; nothing to relax."
           fi
+      - name: Install Bubblewrap and Poppler
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends bubblewrap poppler-utils
       # Debian-layout TeX Live packages: the Linux sandbox grants only system
       # prefixes such as /usr/share/texlive and /var/lib/texmf (see
-      # _LINUX_SYSTEM_RESOURCES in src/latexprep/runtime.py). The latex-recommended
+      # _LINUX_SYSTEM_RESOURCES in src/latexprep/sandbox.py). The latex-recommended
       # package carries etoolbox, which biblatex needs; bibtex-extra carries
       # biblatex itself, and latex-extra the import, subfiles and embedfile packages
       # that the live source and engine tests use. The engines xelatex and lualatex
       # come from their packages, cm-super the Type 1 text fonts that default list
       # bullets need, because builds never generate bitmap fonts, and tex-gyre the
       # OpenType fonts of the fontspec test.
-      - name: Install TeX, PDF tools and Bubblewrap
+      - name: Install TeX Live, Biber and latexmk from Ubuntu
+        if: ${{ matrix.texlive == 'ubuntu-packages' }}
         run: |
-          sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
-            bubblewrap latexmk biber poppler-utils \
+            latexmk biber \
             texlive-latex-base texlive-latex-recommended texlive-fonts-recommended \
             texlive-bibtex-extra texlive-latex-extra texlive-xetex texlive-luatex \
             cm-super tex-gyre
+      # A small scheme plus the packages the live tests need: those of the macOS job, the
+      # XeTeX and LuaTeX engines, and what the Ubuntu leg gets from its apt packages
+      # (recommended LaTeX and font packages, bibtex-extra). That is about 280 MB to
+      # download, where scheme-full is about 1.7 GB (compressed, without documentation) and
+      # installs slowly on a hosted runner. Documentation and source files are left out. The release is whichever one
+      # tug.org serves now, which is the point of this leg; it installs under
+      # /usr/local/texlive/<year>.
+      # The installer is checked before it runs: its SHA-512 from the same mirror, and the
+      # signature of that hash file by the TeX Live signing key. TEXLIVE_SIGNING_KEY pins
+      # the fingerprint of the primary key; tug.org renews the signing subkey every year, so
+      # the subkey is not pinned. The fingerprint was taken from the keyring and from
+      # tlpkg/gpg/tl-key-extension.txt of the installer on 2026-11-13, so the pin guards
+      # against a later substitution of the installer or its key, not against a bad first
+      # observation; compare it with the key that tug.org publishes if it ever has to change.
+      # The step has its own timeout, so a slow mirror fails here and not at the job's limit.
+      - name: Install the current TeX Live from tug.org
+        if: ${{ matrix.texlive == 'current-from-tug' }}
+        timeout-minutes: 25
+        env:
+          TEXLIVE_SIGNING_KEY: C78B82D8C79512F79CC0D7C80D5E5D9106BAB6BC
+        run: |
+          installer="$(mktemp -d)"
+          mirror="$(curl --fail --silent --show-error --location --output /dev/null \
+            --write-out '%{url_effective}' https://mirror.ctan.org/systems/texlive/tlnet/)"
+          echo "Using the mirror $mirror"
+          for name in install-tl-unx.tar.gz install-tl-unx.tar.gz.sha512 \
+            install-tl-unx.tar.gz.sha512.asc; do
+            curl --fail --silent --show-error --location --retry 3 \
+              --output "$installer/$name" "${mirror}${name}"
+          done
+          cd "$installer"
+          sha512sum --check --strict install-tl-unx.tar.gz.sha512
+          mkdir unpacked
+          tar -xzf install-tl-unx.tar.gz -C unpacked --strip-components=1
+          export GNUPGHOME="$installer/gnupg"
+          mkdir -m 700 "$GNUPGHOME"
+          gpg --batch --quiet --import unpacked/tlpkg/gpg/pubring.gpg
+          status="$(gpg --batch --status-fd 1 \
+            --verify install-tl-unx.tar.gz.sha512.asc install-tl-unx.tar.gz.sha512 2>/dev/null)"
+          if ! grep -Eq "^\[GNUPG:\] VALIDSIG .* ${TEXLIVE_SIGNING_KEY}\$" <<< "$status"; then
+            echo "::error::The hash of the TeX Live installer is not signed by the TeX Live signing key."
+            exit 1
+          fi
+          cat > texlive.profile <<'PROFILE'
+          selected_scheme scheme-small
+          instopt_adjustpath 0
+          tlpdbopt_autobackup 0
+          tlpdbopt_desktop_integration 0
+          tlpdbopt_file_assocs 0
+          tlpdbopt_install_docfiles 0
+          tlpdbopt_install_srcfiles 0
+          PROFILE
+          sudo perl unpacked/install-tl --no-interaction --repository "$mirror" \
+            --profile texlive.profile
+          bin_directory="$(echo /usr/local/texlive/*/bin/x86_64-linux)"
+          sudo env "PATH=$bin_directory:$PATH" tlmgr --repository "$mirror" install \
+            collection-latexrecommended collection-fontsrecommended collection-bibtexextra \
+            collection-xetex collection-luatex \
+            latexmk biber biblatex hyperref import subfiles embedfile cm-super tex-gyre \
+            glossaries mfirstuc tracklang xfor nomencl bbm-macros bbm
+          test -x "$bin_directory/pdflatex"
+          echo "$bin_directory" >> "$GITHUB_PATH"
       # Ubuntu does not package tex-fmt, but the formatting step of the live
       # preparation test needs it, and the sandbox accepts only tools under /usr.
       # Install a pinned release binary, verified against its SHA-256, into
@@ -309,6 +431,7 @@ jobs:
           biber --version
           pdfinfo -v
           tex-fmt --version
+          command -v pdflatex
       # Start Bubblewrap with the namespaces and capability drop Fledge requires,
       # before any test runs, so a kernel or AppArmor refusal is reported as such
       # and not as many failed builds.
@@ -359,7 +482,46 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: live-linux-failing-reports
+          name: live-linux-${{ matrix.texlive }}-failing-reports
           path: ${{ runner.temp }}/fledge-test-reports
           if-no-files-found: ignore
           retention-days: 14
+
+  # A failed weekly run notifies nobody by itself: GitHub mails only the person who last
+  # edited the cron line. This job opens an issue, or comments on the open one, so the
+  # maintainers are notified. It is the only job with `issues: write`, and it checks out no
+  # code. Close the issue once the cause is fixed; the next failure opens a new one.
+  alert-on-scheduled-failure:
+    if: ${{ !cancelled() && github.event_name == 'schedule' && contains(needs.*.result, 'failure') }}
+    needs:
+      - lint
+      - shellcheck
+      - docs
+      - package
+      - unit
+      - lowest-dependencies
+      - live-macos
+      - live-linux
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Open or update the issue about the failed scheduled run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          NEEDS: ${{ toJSON(needs) }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          title="Scheduled CI run failed"
+          failed="$(jq -r 'to_entries[] | select(.value.result == "failure") | "- `" + .key + "`"' <<< "$NEEDS")"
+          body="$(printf 'The scheduled run of the Tests workflow failed.\n\nFailed jobs:\n%s\n\nRun: %s\n' "$failed" "$RUN_URL")"
+          number="$(gh issue list --state open --search "\"$title\" in:title" --json number,title \
+            --jq "[.[] | select(.title == \"$title\")][0].number // empty")"
+          if [ -n "$number" ]; then
+            gh issue comment "$number" --body "$body"
+          else
+            gh issue create --title "$title" --body "$body"
+          fi

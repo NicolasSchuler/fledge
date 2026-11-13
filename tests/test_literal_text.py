@@ -9,20 +9,40 @@ from unittest.mock import patch
 from latexprep.literal_text import is_placeholder_text, plain_argument_text, scan_literal_text
 from latexprep.tex_lexer import scan_commands
 
-# Enough escapes after a stray dollar sign to make a backtracking pattern take seconds
-# (it doubles per escape pair), while a linear scan needs well under a millisecond.
-STRAY_DOLLAR_REPEATS = 12
-LINEAR_TIME_LIMIT_SECONDS = 1.0
+# A backtracking pattern after a stray dollar sign doubles its work for each escape pair, so
+# twice the repeats cost a thousand times the work, where a linear scan costs twice. The test
+# compares the processor time of two sizes instead of timing one: a loaded machine slows both.
+SMALL_REPEATS = 6
+LARGE_REPEATS = 12
+# Linear growth gives about 2, noise a few times more, and backtracking about 64.
+MAX_GROWTH_FACTOR = 20
+# Measurements below this are noise of the clock, whatever the machine does.
+MIN_MEASURED_SECONDS = 2e-4
+
+
+def stray_dollar_value(repeats: int) -> str:
+    """Return text with a stray dollar sign followed by ``repeats`` commands and plain words."""
+    return "The price is 5$ and see " + "text \\cite{a} \\emph{b} " * repeats
+
+
+def processor_seconds(value: str) -> float:
+    """Return the least processor time of three scans of ``value``."""
+    best = float("inf")
+    for _ in range(3):
+        started = time.process_time()
+        scan_literal_text(value)
+        best = min(best, time.process_time() - started)
+    return best
 
 
 class LiteralTextTests(unittest.TestCase):
     """:func:`scan_literal_text`, :func:`plain_argument_text` and :func:`is_placeholder_text`."""
 
     def test_a_stray_dollar_before_many_commands_is_scanned_in_linear_time(self) -> None:
-        value = "The price is 5$ and see " + "text \\cite{a} \\emph{b} " * STRAY_DOLLAR_REPEATS
-        started = time.perf_counter()
-        result = scan_literal_text(value)
-        self.assertLess(time.perf_counter() - started, LINEAR_TIME_LIMIT_SECONDS)
+        small = processor_seconds(stray_dollar_value(SMALL_REPEATS))
+        large = processor_seconds(stray_dollar_value(LARGE_REPEATS))
+        self.assertLess(large, MAX_GROWTH_FACTOR * max(small, MIN_MEASURED_SECONDS))
+        result = scan_literal_text(stray_dollar_value(LARGE_REPEATS))
         self.assertIn("unbalanced math delimiters", result.unresolved)
         self.assertIn("text", result.text)
 
