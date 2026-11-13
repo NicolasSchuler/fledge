@@ -19,6 +19,7 @@ from typing import Literal
 from .expanded_document import (
     CONTENT_INPUT_COMMANDS,
     commands_before_end,
+    package_code_sources,
     unresolved_non_content_file,
 )
 from .literal_text import (
@@ -32,7 +33,7 @@ from .literal_text import (
     plain_text,
     scan_literal_text,
 )
-from .source_graph import INCOMPLETE_GRAPH_RULES, UNPARSED_SOURCE_RULES, SourceGraph
+from .source_graph import INCOMPLETE_GRAPH_RULES, SourceGraph
 from .source_loading import ParsedSource
 from .tex_commands import MATH_MARKER
 from .tex_lexer import CONTROL_SEQUENCE, Command, conditional_spans, in_conditional
@@ -290,10 +291,11 @@ def graph_reasons(graph: SourceGraph, selected: set[str], content: set[str]) -> 
 
     Returns:
         The reasons: an uninspected main source, subfiles, repeated inclusions, and
-        incomplete-graph findings within the scope of the selection. Inside a class or
-        package file that is not content, only a file the scan could not read at all
-        counts: what it cannot follow in readable package code is a gap of the dependency
-        graph, not of the literal declarations and content these checks read.
+        incomplete-graph findings within the scope of the selection. Findings inside
+        package code (``package_code_sources``) are left out: they are gaps of the
+        dependency graph, not of the literal declarations and content these checks read. A
+        class or package file that could not be read at all is not package code, so it
+        still counts.
     """
     reasons: list[str] = []
     if graph.main not in selected:
@@ -315,12 +317,12 @@ def graph_reasons(graph: SourceGraph, selected: set[str], content: set[str]) -> 
         | {graph.main}
         | {target for (name, _, _), (target, _) in graph.references.items() if name in selected}
     )
-    package_code = scope - content - {graph.main}
+    package_code = package_code_sources(graph, selected)
     reasons.extend(
         f"{item.path}: {item.message}"
         for item in graph.findings
         if item.path in scope
-        and (item.path not in package_code or item.rule in UNPARSED_SOURCE_RULES)
+        and item.path not in package_code
         and item.rule in INCOMPLETE_GRAPH_RULES
         and item.status != "passed"
         and not unresolved_non_content_file(item)

@@ -40,6 +40,9 @@ from .tex_lexer import (
 # Commands that splice another manuscript source into the document. Class and
 # style files are package evidence, not manuscript content.
 CONTENT_INPUT_COMMANDS = frozenset({"input", "include", *IMPORT_COMMANDS})
+# Commands whose targets hold document text: content inputs and subfiles. A selected source
+# reached only through class and package commands is package code.
+_DOCUMENT_TEXT_COMMANDS = CONTENT_INPUT_COMMANDS | {"subfile"}
 
 
 def commands_before_end(source: ParsedSource) -> list[Command]:
@@ -100,6 +103,24 @@ def reachable_sources(graph: SourceGraph, kinds: Container[str] | None = None) -
             reached.add(target)
             pending.append(target)
     return reached & graph.visited
+
+
+def package_code_sources(graph: SourceGraph, selected: set[str]) -> set[str]:
+    r"""Return the selected class and package files that hold no document text.
+
+    Document text follows ``\input``, ``\include``, ``\import`` and ``\subfile`` from the
+    main file. A project ``.cls`` or ``.sty`` reached only through ``\documentclass``,
+    ``\usepackage`` and their relatives runs as preamble code: what the scan cannot follow
+    inside it leaves the dependency graph incomplete, but not the document text.
+
+    Args:
+        graph: The literal source graph.
+        selected: The selected sources, by relative path.
+
+    Returns:
+        The selected sources that no document-text command reaches, never the main file.
+    """
+    return selected - reachable_sources(graph, _DOCUMENT_TEXT_COMMANDS) - {graph.main}
 
 
 class Location(NamedTuple):
@@ -388,7 +409,7 @@ def unresolved_non_content_file(finding: Finding) -> bool:
     )
 
 
-def _graph_gaps(graph: SourceGraph, selected: set[str], content: set[str]) -> list[str]:
+def _graph_gaps(graph: SourceGraph, selected: set[str]) -> list[str]:
     """List the gaps in the spliced text: every unresolved ``source.*`` finding in scope.
 
     That is a superset of ``INCOMPLETE_GRAPH_RULES``, which names only the findings that make
@@ -396,17 +417,16 @@ def _graph_gaps(graph: SourceGraph, selected: set[str], content: set[str]) -> li
     search-path form, are gaps here as well. A main source outside ``selected`` and subfile
     targets are gaps too, and missing figure or bibliography files are not.
 
-    The scope is the content sources, the ones the splice copies. A class or package file
-    in the project runs as preamble code and its text is never spliced, so what the scan
-    cannot follow inside it says nothing about the manuscript text; it still makes the
-    dependency graph incomplete for flat layout and source transformations.
+    Package code (``package_code_sources``) is left out: its text is never spliced, so
+    what the scan cannot follow inside it says nothing about the manuscript text; it still
+    makes the dependency graph incomplete for flat layout and source transformations.
     """
     gaps = []
     if graph.main not in selected:
         gaps.append("no inspectable selected main source")
     if graph.subfile_targets:
         gaps.append("subfile body/preamble content interpretation is not supported by this check")
-    scope = content | {graph.main}
+    scope = (selected - package_code_sources(graph, selected)) | {graph.main}
     gaps.extend(
         f"{finding.path}: {finding.message}"
         for finding in graph.findings
@@ -434,8 +454,7 @@ def expand_document(
     """
     graph = graph or SourceGraph.build(root, main)
     selected = reachable_sources(graph)
-    content = reachable_sources(graph, CONTENT_INPUT_COMMANDS)
-    splice = _Splice(graph, _graph_gaps(graph, selected, content))
+    splice = _Splice(graph, _graph_gaps(graph, selected))
     parse_limit_exceeded = False
     try:
         if graph.main in selected:

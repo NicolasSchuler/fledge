@@ -156,5 +156,73 @@ class PackageCodeScopeTests(ProjectTestCase):
         )
 
 
+class PackageCodeLimitTests(ProjectTestCase):
+    """What package code may not hide: subfiles, unreadable files and citation gaps."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.write("refs.bib", "@misc{key, title={T}, year={2026}}\n")
+
+    def citation_gaps(self) -> list[str]:
+        """Return the citation-evidence gaps of ``main.tex``."""
+        graph = build_citation_graph(SourceGraph.build(self.root, "main.tex"))
+        return [item.message for item in graph.uncertainties]
+
+    def test_an_unsupported_subfile_keeps_its_gaps(self) -> None:
+        self.write(
+            "main.tex",
+            "\\documentclass{article}\n\\usepackage{subfiles}\n\\begin{document}\n"
+            "\\subfile{part}\n\\bibliography{refs}\n\\end{document}\n",
+        )
+        self.write("part.tex", "\\section{Part}\\cite{key}\n")
+        self.assertTrue(expand_document(self.root, "main.tex").graph_uncertainty)
+        options = ManuscriptOptions(forbidden_packages=("showframe",))
+        results = {item.rule: item for item in check_manuscript(self.root, "main.tex", options)}
+        self.assertEqual(results["manuscript.forbidden_packages"].status, "inconclusive")
+        self.assertTrue(any(gap.startswith("part.tex") for gap in self.citation_gaps()))
+
+    def test_an_unreadable_input_or_class_file_is_a_citation_gap(self) -> None:
+        for main, name, data in (
+            ("\\documentclass{article}", "chapter.tex", b"\\cite{key}\xff\n"),
+            ("\\documentclass{venue}", "venue.cls", b"\\LoadClass{article}\xff\n"),
+        ):
+            with self.subTest(name=name):
+                self.write(
+                    "main.tex",
+                    main + "\n\\begin{document}\n\\input{chapter}\n"
+                    "\\bibliography{refs}\n\\end{document}\n",
+                )
+                self.write("chapter.tex", "Text.\n")
+                self.write(name, data)
+                self.assertTrue(any(gap.startswith(name) for gap in self.citation_gaps()))
+                self.write("venue.cls", "\\LoadClass{article}\n")
+
+    def test_package_code_keeps_conditional_resources_and_ignores_definition_bodies(
+        self,
+    ) -> None:
+        self.write(
+            "main.tex",
+            "\\documentclass{article}\n\\usepackage{mine}\n\\begin{document}\nText.\n"
+            "\\end{document}\n",
+        )
+        self.write(
+            "mine.sty",
+            "\\ifx\\a\\b\\RequirePackage{biblatex}\\addbibresource{refs.bib}\\fi\n",
+        )
+        self.assertTrue(self.citation_gaps())
+        # A definition body runs only where the macro is used, so it records nothing.
+        self.write("mine.sty", "\\newcommand{\\citeall}{\\nocite{*}}\n")
+        graph = build_citation_graph(SourceGraph.build(self.root, "main.tex"))
+        self.assertFalse(graph.nocite_all)
+        self.assertEqual(graph.uncertainties, [])
+        # Using that macro in the document text is a gap there.
+        self.write(
+            "main.tex",
+            "\\documentclass{article}\n\\usepackage{mine}\n\\begin{document}\n"
+            "\\citeall\n\\end{document}\n",
+        )
+        self.assertTrue(any(gap.startswith("main.tex") for gap in self.citation_gaps()))
+
+
 if __name__ == "__main__":
     unittest.main()

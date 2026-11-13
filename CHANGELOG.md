@@ -32,6 +32,13 @@ The version is defined once, as `__version__` in `src/latexprep/__init__.py`.
   toolchain packages loaded inside their macros no longer raise `TEX309`, and a final
   `\endinput` followed only by comments no longer counts as unresolved. An unclear
   declaration leaves `TEX103` incomplete only when it could name a forbidden package.
+  Package code still counts where it can change the manuscript's citations: a
+  conditional or grouped citation or bibliography resource in a `.sty` keeps the
+  citation evidence incomplete, and subfiles are document text, not package code.
+- **An unreadable input or class file leaves the citation evidence incomplete.** A
+  file that `\input` or `\documentclass` names but that cannot be read (invalid
+  UTF-8, too large, a link) was left out of the citation checks without a gap, so
+  `BIB101` could pass without having read it.
 - **`PRV003` no longer reports a class or style file's own definitions.** A shipped
   `IEEEtran.cls` defines `\thanks`, which matched as an acknowledgement hint eight times.
   `.cls`, `.sty`, `.def`, `.cfg` and `.bst` files are no longer searched for identity
