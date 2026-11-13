@@ -474,6 +474,19 @@ class BibliographyCheckTests(ProjectTestCase):
         self.assertEqual(len(rows), 3)
         self.assertTrue(all(row.status == "inconclusive" for row in rows))
 
+    def test_a_dblp_escaped_underscore_in_a_url_is_named(self) -> None:
+        self.manuscript()
+        self.write(
+            "references.bib",
+            "@misc{dblp,url={http://papers.nips.cc/paper\\_files/paper/2023/hash/a.html}}\n"
+            "@misc{mixed,url={http://example.org/a\\_b\\%20}}",
+        )
+        rows = {row.details["entry"]: row for row in self.rows("url_syntax")}
+        self.assertEqual({row.status for row in rows.values()}, {"inconclusive"})
+        self.assertIn("TeX escape \\_", rows["dblp"].message)
+        self.assertIn("write a plain _", rows["dblp"].message)
+        self.assertIn("markup", rows["mixed"].message)
+
     def test_capitalization_is_opt_in_and_respects_nested_braces(self) -> None:
         self.manuscript()
         self.write(

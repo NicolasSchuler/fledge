@@ -69,7 +69,7 @@ def main_selection_error(main: str, roots: list[str]) -> RequestError:
         else "no file with \\documentclass was found in the input"
     )
     return RequestError(
-        f"main must name a source file inside the project: {main}",
+        f"main must name a source file inside the project: {main!r}",
         "Set --main (or main in the configuration) to a .tex path relative to the input "
         f"folder or ZIP root; {found}.",
     )

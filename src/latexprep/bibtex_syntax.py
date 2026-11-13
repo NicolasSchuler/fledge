@@ -703,6 +703,22 @@ def describe_read_failure(error: Exception) -> str:
     return str(error)
 
 
+def has_only_escaped_underscores(value: str) -> bool:
+    r"""Return whether the only TeX markup in a value is ``\_``, the escape DBLP exports use.
+
+    A style that typesets the field as TeX prints ``\_`` as an underscore; one that reads
+    a DOI or URL verbatim, such as biblatex, keeps the backslash in the link.
+    """
+    return "\\_" in value and not any(char in value.replace("\\_", "") for char in "{}\\%")
+
+
+# Why a DOI or URL with ``\_`` is not read as written, and what to write instead.
+ESCAPED_UNDERSCORE_REASON = (
+    "the TeX escape \\_ for an underscore, as DBLP exports write it; a style that reads the "
+    "field verbatim, such as biblatex, keeps the backslash, so write a plain _"
+)
+
+
 def field_literal(bib_field: Field, *, max_chars: int | None = _MAX_FIELD_CHARS) -> str | None:
     """Return the stripped value of a field holding one literal (or number) without escapes.
 
@@ -788,6 +804,8 @@ def read_doi(bib_field: Field) -> DoiReading:
     value = atom.value[left:right]
     prefix = _DOI_PREFIX.match(value)
     identifier = value[prefix.end() :] if prefix else value
+    if has_only_escaped_underscores(value) and value.isascii():
+        return DoiReading(uncertainty=f"The DOI contains {ESCAPED_UNDERSCORE_REASON}.")
     if any(char in value for char in "{}\\%") or not value.isascii():
         return DoiReading(
             uncertainty="DOI markup, escapes, or non-ASCII text requires manual inspection."

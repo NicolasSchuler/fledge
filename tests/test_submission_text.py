@@ -335,3 +335,86 @@ class SubmissionTextTests(ProjectTestCase):
         handler = submission_text._Converter._HANDLERS["emph"]
         with self.assertRaisesRegex(RuntimeError, "emph"):
             submission_text._handler_table((["emph"], handler), (["emph"], handler))
+
+
+# A venue class written the way llncs.cls and IEEEtran.cls are: it defines the abstract
+# environment, \keywords and \\, and ends a definition with a primitive \let.
+VENUE_CLASS = r"""\ProvidesClass{venue}
+\LoadClass{article}
+\renewenvironment{abstract}{\small\quotation}{\endquotation}
+\def\keywords#1{\par\textbf{Keywords:} #1}
+\def\\{\newline}
+\newcommand\venue@reset{\let\venue@x\relax\let}
+"""
+
+
+class SubmissionTextVenueTests(ProjectTestCase):
+    """Fields of papers written for venue classes, with title notes and conditionals."""
+
+    def fields(self, preamble: str, body: str) -> dict[str, object]:
+        """Write a paper for the venue class and return its fields by name."""
+        self.write("venue.cls", VENUE_CLASS)
+        self.write(
+            "main.tex",
+            "\\documentclass{venue}\n"
+            + preamble
+            + "\\begin{document}\n"
+            + body
+            + "\n\\end{document}\n",
+        )
+        return read_submission_text(self.root, "main.tex")
+
+    def test_a_venue_class_does_not_make_its_fields_locally_defined(self) -> None:
+        fields = self.fields(
+            "\\title{Bridging Explanations\\\\ and Logics}\n",
+            "\\maketitle\n\\begin{abstract}\nA $20.5\\%$ gain.\n"
+            "\\keywords{Logic, Abduction}\n\\end{abstract}\n",
+        )
+        self.assertEqual(
+            {name: (item.status, item.draft) for name, item in fields.items()},
+            {
+                "title": ("ready", "Bridging Explanations and Logics"),
+                "abstract": ("ready", "A 20.5% gain."),
+                "keywords": ("ready", "Logic, Abduction"),
+            },
+        )
+
+    def test_a_camera_ready_title_note_is_dropped(self) -> None:
+        fields = self.fields(
+            "\\title{TraceGate \\ifdefined\\cameraready \\thanks{Funded by KIT.} \\fi Debugging}\n",
+            "\\maketitle\n\\ifdefined\\cameraready Acknowledgment.\\fi\n",
+        )
+        self.assertEqual(
+            (fields["title"].status, fields["title"].draft), ("ready", "TraceGate Debugging")
+        )
+        self.assertEqual(fields["title"].issues, [])
+
+    def test_a_conditional_with_different_texts_stays_unresolved(self) -> None:
+        fields = self.fields(
+            "\\title{A \\ifdefined\\cameraready Final\\else Draft\\fi{} Title}\n", "\\maketitle\n"
+        )
+        self.assertEqual(fields["title"].status, "unresolved")
+        self.assertIn("Conditional text needs manual review: \\ifdefined", fields["title"].issues)
+
+    def test_constant_conditionals_take_their_branch(self) -> None:
+        self.assertEqual(convert_text(r"A \iftrue B\else C\fi"), ("A B", []))
+        self.assertEqual(convert_text(r"A \iffalse B\fi D"), ("A D", []))
+        self.assertEqual(convert_text(r"$5%$")[0], "$5%$")
+
+    def test_quiet_suppresses_the_note_about_a_tex_input(self) -> None:
+        self.write("main.tex", "\\documentclass{article}\\title{T}\n")
+        runner = CliRunner()
+        args = [str(self.root / "main.tex"), "--isolated", "--field", "title"]
+        loud, quiet = (
+            runner.invoke(submission_text_command, args),
+            runner.invoke(submission_text_command, [*args, "-q"]),
+        )
+        self.assertEqual((loud.exit_code, quiet.exit_code), (0, 0), (loud.output, quiet.output))
+        self.assertTrue(loud.stderr)
+        self.assertEqual((quiet.stdout, quiet.stderr), ("T\n", ""))
+
+    def test_a_redefinition_in_the_authors_own_package_still_counts(self) -> None:
+        self.write("mymacros.sty", "\\ProvidesPackage{mymacros}\n\\renewcommand{\\&}{and}\n")
+        fields = self.fields("\\usepackage{mymacros}\n\\title{Cats \\& Dogs}\n", "\\maketitle\n")
+        self.assertEqual(fields["title"].status, "unresolved")
+        self.assertIn("Locally defined command needs manual review: \\&", fields["title"].issues)

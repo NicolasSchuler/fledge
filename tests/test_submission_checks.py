@@ -367,7 +367,7 @@ class SubmissionTests(ProjectTestCase):
         options = SubmissionOptions(scan_identity_hints=True, identity_terms=("Jane Smith",))
         self.write("main.tex", "\\documentclass{venue}\nText.\n")
         definitions = "\\let\\venue@thanks\\thanks\n\\long\\def\\thanks#1{\\footnotemark}\n"
-        for name in ("venue.cls", "venue.sty", "venue.bst"):
+        for name in ("venue.cls", "venue.sty", "venue.bst", "venue.dtx", "venue.ins"):
             with self.subTest(name=name):
                 self.write(name, definitions + "% Maintained by Jane Smith\n")
                 self.assertEqual(self.result("submission.identity_hints", options).status, "passed")

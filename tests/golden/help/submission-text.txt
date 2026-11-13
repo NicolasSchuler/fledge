@@ -12,6 +12,8 @@ Options:
                                   Print only this field as one line of text ready to paste; the exit
                                   code is 3 when it is not ready.
   --json                          Return all fields and readiness details.
+  -q, --quiet                     Suppress progress messages on stderr; the final report is still
+                                  printed.
   --config PATH                   Use this TOML settings file instead of discovering project
                                   configuration.
   --isolated                      Ignore discovered configuration and use defaults.

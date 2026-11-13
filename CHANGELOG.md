@@ -28,7 +28,7 @@ The version is defined once, as `__version__` in `src/latexprep/__init__.py`.
   the `anonymous-review` preset blocked on them. Such files are now package code: what
   the scan cannot follow in them still keeps flat layout and source transformations
   from using the file, but not the checks of text, citations and declarations. Their
-  run-time commands are one `TEX312` finding per file instead of one per command,
+  findings are one per check and file (one `TEX312`, one `TEX307`) instead of one per command,
   toolchain packages loaded inside their macros no longer raise `TEX309`, and a final
   `\endinput` followed only by comments no longer counts as unresolved. An unclear
   declaration leaves `TEX103` incomplete only when it could name a forbidden package.
@@ -41,14 +41,59 @@ The version is defined once, as `__version__` in `src/latexprep/__init__.py`.
   `BIB101` could pass without having read it.
 - **`PRV003` no longer reports a class or style file's own definitions.** A shipped
   `IEEEtran.cls` defines `\thanks`, which matched as an acknowledgement hint eight times.
-  `.cls`, `.sty`, `.def`, `.cfg` and `.bst` files are no longer searched for identity
-  hints; the identity terms you list (`PRV001`) are still searched there.
+  `.cls`, `.sty`, `.def`, `.cfg`, `.bst`, `.dtx` and `.ins` files are no longer searched
+  for identity hints; the identity terms you list (`PRV001`) are still searched there.
 - **Older DOIs with angle brackets are valid (`BIB006`).** SICI-style DOIs such as
   `10.1175/1520-0469(1963)020<0130:DNF>2.0.CO;2` were reported as malformed. Online
   lookups percent-encode the brackets.
 - **Article-number page ranges are supported (`BIB105`).** ACM-style values such as
   `263:1--263:52` were inconclusive as an unsupported notation; they are now checked
   like other ranges. A range across two article numbers stays inconclusive.
+- **A file of the TeX installation is not a missing dependency (`TEX005`).**
+  `\input{glyphtounicode}`, which ACM's `acmart.cls` and many IEEE papers use, read a
+  file of TeX Live, but `TEX005` reported it missing and blocked both `inspect` and
+  `prepare`, with no way to ignore it. A bare `\input` name that no project file has is
+  now looked up in the TeX installation with `kpsewhich`, once per run and inside the
+  sandbox; a name the installation lacks too is still an error, which now says so.
+- **Citations and figures in captions, footnotes, boxes and subfigures no longer make
+  the checks inconclusive.** `\textbf{\cite{x}}`, `\caption{… \cite{x}}` or
+  `\resizebox{…}{!}{\begin{tabular}…\cite{x}…}` left citation coverage (`BIB101`,
+  `BIB102`, `BIB105`, `BIB106`) inconclusive, and `\includegraphics` inside `\subfloat`
+  or `\resizebox` raised `TEX309` and then made the float, class-option and package
+  checks (`MAN002`, `MAN011`–`MAN015`, `TEX102`, `TEX103`, `PKG106`) inconclusive, which
+  blocked most papers under `--preset anonymous-review`. A command that runs where it
+  stands, as the argument of a typesetting command does, is now read like text outside
+  any group; the argument of an unknown macro, of a command or environment the project
+  redefines, and a definition body are still gaps. A figure or plot data file that the
+  scan cannot place never hides text or citations.
+- **Venue classes that test or style citation commands keep citation coverage
+  complete.** `\ifx\citeauthoryear\undefined` in `llncs.cls` and
+  `\if@ACM@natbib\citestyle{acmnumeric}\fi` in `acmart.cls` made `BIB101`–`BIB106`
+  inconclusive for every LNCS and ACM paper. A name a definition or test only names is
+  not run, and style switches such as `\citestyle` add no citation; a redefinition of
+  `\cite` is still a gap. Text after `\string`, as in an error message of
+  `acmart.cls`, is no longer read as a `\documentclass`, which caused a false input
+  cycle (`TEX320`).
+- **Large pages such as an A0 poster can be prepared.** The PDF comparison refused pages
+  that did not fit its raster limits at 144 DPI, so `prepare` could not check a poster.
+  It now compares such a document at the highest resolution that fits, down to 36 DPI,
+  and reports the resolution it used.
+- **Without a main file, documents are not compared with each other (`TEX003`,
+  `TEX004`).** A project with a paper and its marked-up revision got a duplicate-label
+  warning for every label. Label and reference checks now need a selected document.
+- **`fledge submission-text` gives ready fields for papers on venue classes.** A
+  shipped `llncs.cls` or `IEEEtran.cls` made the abstract and keywords "locally
+  defined", `\thanks{…}` stayed in the title (with the funding text), and any
+  conditional anywhere made every field unresolved. Class and package definitions no
+  longer count, `\thanks` and the LNCS `\keywords` inside an abstract are left out, a
+  conditional whose branches give the same text is resolved, and `$20.5\%$` reads as
+  20.5%. The command also accepts `-q`.
+
+### Changed
+
+- **Clearer evidence for DBLP's escaped underscores (`BIB006`, `BIB106`).** A DOI or URL
+  that contains `\_` now says that a style reading the field verbatim keeps the backslash,
+  and to write a plain underscore, instead of a generic note about markup.
 
 ## [0.4.0] - 2026-11-13
 

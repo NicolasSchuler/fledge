@@ -219,7 +219,7 @@ class ResultCollector:
             messages = uncertainty_messages(bounded)
             summary = item_finding(
                 spec.rule,
-                f"{spec.description} is incomplete: {uncertainties[0].message}.",
+                f"{spec.description} is incomplete: {uncertainties[0].message.rstrip('.')}.",
                 "inconclusive",
                 severity=spec.severity,
                 incomplete=True,

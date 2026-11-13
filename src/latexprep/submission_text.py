@@ -16,8 +16,23 @@ from .expanded_document import (
 )
 from .literal_text import KEYWORD_ENVIRONMENTS, TEXT_WRAPPERS
 from .tex_commands import MACRO_DEFINITION_COMMANDS, PRIMITIVE_DEFINITION_COMMANDS
-from .tex_lexer import MAX_ARGUMENT_CHARS, Argument, read_group, skip_space
-from .tex_spans import definition_spans, in_conditional, in_half_open_span, merge_spans
+from .tex_lexer import (
+    MAX_ARGUMENT_CHARS,
+    Argument,
+    Command,
+    ParseLimitExceeded,
+    read_group,
+    scan_source_commands,
+    skip_space,
+)
+from .tex_spans import (
+    conditional_branches,
+    definition_spans,
+    in_conditional,
+    in_half_open_span,
+    merge_spans,
+    opens_conditional,
+)
 from .text_safety import escape_single_line_text, is_unsafe_character
 
 FieldName = Literal["title", "abstract", "keywords"]
@@ -75,6 +90,11 @@ _LIGATURES = (("---", "—"), ("--", "–"), ("``", "“"), ("''", "”"))
 # so a bracket after them is ordinary text.
 _LINE_BREAK_COMMANDS = frozenset({"\\", "linebreak"})
 _MAX_GROUP_DEPTH = 32
+# Prefixes of a definition, which define nothing themselves.
+_PREFIXES = frozenset({"global", "long", "protected", "outer"})
+# Characters after a primitive definition that it cannot make active: groups, parameters
+# and comments.
+_NEVER_ACTIVE = frozenset("{}#%")
 
 
 @dataclass(frozen=True, slots=True)
@@ -222,6 +242,8 @@ class _Converter:
         self.out: list[str] = []
         self.issues: list[str] = []
         self._grouped = value
+        # The lexer's view of the field, read once a conditional needs it.
+        self._commands: list[Command] | None = None
 
     def convert(self) -> tuple[str, list[str]]:
         """Convert the text, reporting what needs manual review.
@@ -361,9 +383,12 @@ class _Converter:
         for name, symbol in _GREEK.items():
             if name not in self.context.redefined_commands:
                 math = re.sub(r"\\" + name + r"\b", symbol, math)
-        # No scripts, fractions, macros, displays, or implicit symbol substitutions.
-        if end < len(value) and math.strip() and _PLAIN_MATH.fullmatch(math):
-            self.out.append(math)
+        # No scripts, fractions, macros, displays, or implicit symbol substitutions. An
+        # escaped percent sign, as in $20.5\%$, reads as plain text; a bare one starts a
+        # comment.
+        plain = math.replace("\\%", "")
+        if end < len(value) and plain.strip() and _PLAIN_MATH.fullmatch(plain):
+            self.out.append(math.replace("\\%", "%"))
         else:
             self.out.append(fragment)
             self.issues.append("Mathematics needs manual conversion: " + fragment)
@@ -405,12 +430,79 @@ class _Converter:
         stop = token.end()
         cursor = skip_space(self.value, stop)
         word = _ControlWord(position, token.group(1), stop, cursor, self._group(cursor))
+        if word.name.startswith("if") and (end := self._conditional(word)) is not None:
+            return end
         if word.name in self.context.redefined_commands:
             return self._redefined(word)
         handler = self._HANDLERS.get(word.name)
         if handler is None:
             return self._unsupported(word, self._after_argument(word))
         return handler(self, word)
+
+    def _conditional(self, word: _ControlWord) -> int | None:
+        r"""Convert a conditional whose branches give the same text, or report it.
+
+        ``\iftrue`` and ``\iffalse`` take their branch. Any other conditional, such as
+        ``\ifdefined\cameraready\thanks{…}\fi``, is resolved when every branch converts to
+        the same text without issues, since then its test does not matter; otherwise it is
+        kept verbatim and reported.
+
+        Args:
+            word: The control sequence, whose name starts with ``if``.
+
+        Returns:
+            The offset after the matching ``\fi``, or ``None`` when ``word`` opens no
+            conditional whose branches can be read, which leaves it to the other handlers.
+        """
+        if self._commands is None:
+            try:
+                self._commands = scan_source_commands(self.value)
+            except ParseLimitExceeded:
+                self._commands = []
+        index = next(
+            (index for index, item in enumerate(self._commands) if item.start == word.start), None
+        )
+        if index is None or not opens_conditional(self._commands[index]):
+            return None
+        found = conditional_branches(self._commands, index)
+        if found is None:
+            return None
+        branches, end = found
+        if word.name == "iftrue":
+            branches = branches[:1]
+        elif word.name == "iffalse":
+            branches = branches[1:]
+        elif len(branches) == 1:
+            # Without \else, the conditional may give nothing at all.
+            branches.append((end, end))
+        texts = [self._branch_text(start, stop) for start, stop in branches] or [("", [])]
+        if len({text for text, _ in texts}) == 1 and not any(issues for _, issues in texts):
+            self.out.append(texts[0][0])
+        else:
+            self.out.append(self.value[word.start : end])
+            self.issues.append("Conditional text needs manual review: \\" + word.name)
+        return end
+
+    def _branch_text(self, start: int, stop: int) -> tuple[str, list[str]]:
+        """Convert one branch of a conditional in a context of its own."""
+        context = self.context.nested(literal_punctuation=self.context.literal_punctuation)
+        return _Converter(self.value[start:stop], context).convert()
+
+    def _note(self, word: _ControlWord) -> int:
+        r"""Drop a note that is not text of this field.
+
+        That is a title note, ``\thanks{…}``, or the ``\keywords{…}`` that LNCS papers
+        place inside their abstract, which is read as its own field.
+
+        Args:
+            word: The note command.
+
+        Returns:
+            The offset after its argument; a note without one is kept and reported.
+        """
+        if word.argument is None:
+            return self._unsupported(word, word.stop)
+        return word.argument.end + 1
 
     def _after_argument(self, word: _ControlWord) -> int:
         """Return the offset after the group following ``word``, or after its name without one."""
@@ -561,7 +653,7 @@ class _Converter:
         return cursor
 
     def _font_switch(self, word: _ControlWord) -> int:
-        r"""Drop a font switch; ``\normalfont`` restores ordinary punctuation for its group.
+        r"""Drop a font or paragraph switch; ``\normalfont`` restores ordinary punctuation.
 
         Args:
             word: The font switch.
@@ -583,7 +675,8 @@ class _Converter:
         (_SYMBOLS, _symbol),
         ("%&#_{}$", _escaped_character),
         (("par", "newline", "linebreak", "\\", " ", ",", ";", "sep", "and"), _space),
-        (("em", "itshape", "bfseries", "normalfont", "protect"), _font_switch),
+        (("em", "itshape", "bfseries", "normalfont", "protect", "noindent"), _font_switch),
+        (("thanks", "keywords"), _note),
     )
 
 
@@ -625,10 +718,15 @@ class _Declaration(NamedTuple):
 
 
 def _local_definitions(document: ExpandedDocument) -> tuple[frozenset[str], frozenset[str]]:
-    """Return the commands, environments and active characters that the project itself defines.
+    r"""Return the commands, environments and active characters that the project itself defines.
 
     A supported spelling does not establish meaning when the local project defines
-    it. Conditional or order-dependent activation is not inferred.
+    it. Conditional or order-dependent activation is not inferred. The document class,
+    such as a shipped ``llncs.cls``, defines how ``\title`` or ``\\`` is typeset, not what
+    the field says, so its definitions do not count; those of the author's own ``.sty``
+    and ``.tex`` files do. A prefix such
+    as ``\global`` defines nothing itself, and a primitive definition followed by a brace,
+    a parameter or a comment makes no character active.
 
     Args:
         document: The expanded document whose selected sources are scanned.
@@ -641,10 +739,10 @@ def _local_definitions(document: ExpandedDocument) -> tuple[frozenset[str], froz
     active_characters: set[str] = set()
     for path in document.selected:
         source = document.graph.sources.get(path)
-        if source is None:
+        if source is None or path.endswith(".cls"):
             continue
         for command in source.commands:
-            if command.name not in MACRO_DEFINITION_COMMANDS:
+            if command.name not in MACRO_DEFINITION_COMMANDS or command.name in _PREFIXES:
                 continue
             if command.arguments and command.name not in PRIMITIVE_DEFINITION_COMMANDS:
                 target = command.arguments[0].value.strip()
@@ -653,7 +751,12 @@ def _local_definitions(document: ExpandedDocument) -> tuple[frozenset[str], froz
             token = _TEXT_CONTROL_SEQUENCE.match(target)
             if token is not None:
                 redefined.add(token.group(1))
-            elif target and command.name in PRIMITIVE_DEFINITION_COMMANDS:
+            elif (
+                target
+                and command.name in PRIMITIVE_DEFINITION_COMMANDS
+                and target[0] not in _NEVER_ACTIVE
+                and not target[0].isalnum()
+            ):
                 active_characters.add(target[0])
             elif "environment" in command.name.casefold() and re.fullmatch(r"[A-Za-z]+", target):
                 redefined.add(target)
@@ -865,7 +968,9 @@ def read_submission_text(root: Path, main: str | None = None) -> dict[str, Submi
     reader = _FieldReader(
         document,
         _original_text(document),
-        list(document.presence_uncertainty),
+        # A conditional matters to a field only where it encloses a declaration of it, which
+        # that declaration reports, or a file input, which is a graph gap.
+        list(document.graph_uncertainty),
         redefined,
         active_characters,
     )

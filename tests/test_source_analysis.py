@@ -172,6 +172,18 @@ class SourceAnalysisTests(ProjectTestCase):
                     {"source.edit_marker", "source.unresolved_reference"},
                 )
 
+    def test_labels_of_separate_documents_are_not_compared_without_a_main_file(self) -> None:
+        paper = "\\documentclass{article}\n\\section{A}\\label{sec:a}\nTODO \\ref{sec:a}\n"
+        self.write("paper.tex", paper)
+        self.write("paper-diff.tex", paper + "\\ref{sec:only-in-the-paper}\n")
+        rules = [item.rule for item in analyze_sources(self.root).findings]
+        self.assertNotIn("source.duplicate_label", rules)
+        self.assertNotIn("source.unresolved_reference", rules)
+        # Editing markers do not depend on the document, so they are still reported.
+        self.assertEqual(rules.count("source.edit_marker"), 2)
+        selected = {item.rule for item in analyze_sources(self.root, "paper-diff.tex").findings}
+        self.assertIn("source.unresolved_reference", selected)
+
     def test_every_reference_command_resolves_its_labels(self) -> None:
         # cleveref ranges and lists, cpageref, subcaption and zref-clever refer to labels too.
         references = (

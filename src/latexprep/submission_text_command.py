@@ -20,6 +20,7 @@ from .cli_options import FledgeCommand
 from .command_options import (
     debug_option,
     main_option,
+    quiet_option,
     reject_config_with_isolated,
     settings_file_options,
 )
@@ -115,6 +116,7 @@ def _print_one_field(name: str, fields: dict[str, SubmissionField]) -> None:
 @click.option(
     "--json", "json_output", is_flag=True, help="Return all fields and readiness details."
 )
+@quiet_option
 @settings_file_options
 @debug_option
 def submission_text_command(
@@ -123,6 +125,7 @@ def submission_text_command(
     field: str | None,
     *,
     json_output: bool,
+    quiet: bool,
     config: Path | None,
     isolated: bool,
 ) -> None:
@@ -135,7 +138,7 @@ def submission_text_command(
         raise click.UsageError("--json returns all fields; do not combine it with --field")
     reject_config_with_isolated(config, isolated=isolated)
     source, main, note = choose_input(source, main)
-    if note is not None:
+    if note is not None and not quiet:
         click.echo(note, err=True)
     try:
         fields = _read_fields(source, main, config, isolated=isolated)

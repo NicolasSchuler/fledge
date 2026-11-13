@@ -41,8 +41,9 @@ from .tex_commands import (
 from .tex_comments import tex_comments
 from .tex_lexer import blank_regions, source_regions
 
-# Class, package and style files, which define document commands instead of using them.
-_PACKAGE_CODE_SUFFIXES = frozenset({".cls", ".sty", ".def", ".cfg", ".bst"})
+# Class, package and style files, which define document commands instead of using them,
+# and the documented package sources (.dtx) and installers (.ins) they are generated from.
+_PACKAGE_CODE_SUFFIXES = frozenset({".cls", ".sty", ".def", ".cfg", ".bst", ".dtx", ".ins"})
 # File types read as UTF-8 text; every other file is matched by name only.
 _TEXT_EXTENSIONS = {
     ".tex",

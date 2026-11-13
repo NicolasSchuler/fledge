@@ -196,6 +196,9 @@ class BibliographyTests(unittest.TestCase):
         self.assertEqual(sum(item.rule == "bibliography.invalid_doi" for item in findings), 1)
         self.assertEqual(sum(item.rule == "bibliography.doi_unresolved" for item in findings), 4)
         self.assertEqual({item.code for item in findings}, {"BIB006"})
+        # DBLP's escaped underscore is named, with what to write instead.
+        [escaped] = [item for item in findings if "TeX escape" in item.message]
+        self.assertIn("write a plain _", escaped.message)
 
     def test_literal_relationships_and_builtin_months_are_checked(self) -> None:
         self.write(

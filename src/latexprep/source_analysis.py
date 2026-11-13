@@ -204,13 +204,18 @@ def _duplicate_label_findings(labels: dict[str, list[tuple[str, int]]]) -> list[
 def lint_sources(graph: SourceGraph) -> list[Finding]:
     """Find heuristic manuscript issues: editing markers, duplicate labels, unresolved references.
 
-    With a selected main file, only sources visited from it are checked.
+    With a selected main file, only sources visited from it are checked. Labels and
+    references belong to one document, so without a main file they are not checked: a
+    project with several documents, such as a paper and its marked-up revision, would
+    otherwise see each label defined twice and resolve references against other documents.
     """
     findings: list[Finding] = []
     labels: dict[str, list[tuple[str, int]]] = defaultdict(list)
     references: list[tuple[str, str, int]] = []
     for name, source in _manuscript_sources(graph):
         findings.extend(_edit_findings(name, source))
+        if graph.main is None:
+            continue
         for label, line in _defined_labels(source):
             labels[label].append((name, line))
         references.extend((label, name, line) for label, line in _referenced_labels(source))

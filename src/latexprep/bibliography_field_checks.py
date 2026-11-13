@@ -19,7 +19,13 @@ from urllib.parse import urlsplit
 from .bibliography_index import LocatedEntry
 from .bibliography_options import BibliographyOptions
 from .bibliography_results import ResultCollector, SummarySpec, item_finding
-from .bibtex_syntax import Entry, Field, field_literal
+from .bibtex_syntax import (
+    ESCAPED_UNDERSCORE_REASON,
+    Entry,
+    Field,
+    field_literal,
+    has_only_escaped_underscores,
+)
 from .cancellation import cancellation_point
 from .citation_graph import Uncertainty
 from .findings import EvidenceKind, Finding, Status
@@ -281,6 +287,14 @@ def _doi_presence(reference: LocatedEntry) -> Finding | None:
     )
 
 
+def _escapes_only_underscores(bib_fields: list[Field]) -> bool:
+    r"""Return whether the fields are one literal whose only markup is ``\_``."""
+    if len(bib_fields) != 1 or len(bib_fields[0].atoms) != 1:
+        return False
+    atom = bib_fields[0].atoms[0]
+    return atom.kind == "literal" and has_only_escaped_underscores(atom.value)
+
+
 def _field_syntax(reference: LocatedEntry, rule: str, bib_fields: list[Field]) -> Finding | None:
     """Run one literal field syntax check on an entry's fields of that name.
 
@@ -295,11 +309,12 @@ def _field_syntax(reference: LocatedEntry, rule: str, bib_fields: list[Field]) -
     """
     name, verdict_of, evidence = _FIELD_CHECKS[rule]
     value = field_literal(bib_fields[0]) if len(bib_fields) == 1 else None
-    verdict = (
-        Verdict("inconclusive", "macro, concatenation, markup or repeated field")
-        if value is None
-        else verdict_of(value)
-    )
+    if value is not None:
+        verdict = verdict_of(value)
+    elif rule == "url_syntax" and _escapes_only_underscores(bib_fields):
+        verdict = Verdict("inconclusive", ESCAPED_UNDERSCORE_REASON)
+    else:
+        verdict = Verdict("inconclusive", "macro, concatenation, markup or repeated field")
     if verdict.status == "passed":
         return None
     return item_finding(
