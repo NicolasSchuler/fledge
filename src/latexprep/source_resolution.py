@@ -1,4 +1,4 @@
-"""Turning the file name in a command into the project file TeX would read.
+r"""Turning the file name in a command into the project file TeX would read.
 
 ``resolve_reference`` follows TeX's lookup: the name is joined to each directory the
 command may search, each default suffix is tried before the bare name, and the first
@@ -8,31 +8,130 @@ file are reported with the paths that were tried. It owns that lookup and the wo
 of its findings. It does not walk files (``source_graph``) or judge commands
 (``source_command_checks``), and it records nothing itself: the caller applies the
 returned ``Resolution``.
+
+A bare ``\input{name}`` that the project lacks may name a file of the TeX installation,
+such as ``glyphtounicode.tex``. The job asks the installation once about such names
+(``tex_installation``) and makes the answer current with :func:`installed_inputs_known`;
+without an answer the name is reported missing, as before.
 """
 
 from __future__ import annotations
 
 import posixpath
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Generator, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import NamedTuple
 
+from .cancellation import cancellation_point
 from .findings import EvidenceKind, Finding
 from .path_safety import lexically_escapes
-from .project_files import path_comparison_key
+from .project_files import is_parsed_source, path_comparison_key, project_files
 from .source_file_commands import (
     DEFAULT_SUFFIXES_BY_FILE_COMMAND,
+    INSTALLATION_INPUT_COMMANDS,
     TOOLCHAIN_FILE_COMMANDS,
     is_literal_text,
 )
 from .source_findings import NEEDED_FOR_RESTRUCTURING, GraphFindings, listed_names
+from .source_loading import LoadBudget, load_source
 from .tex_lexer import Command
 
 COPY_INTO_PROJECT = (
     "Copy the file into the project and refer to it by a path relative to the project folder."
 )
+# A file name the TeX installation may hold: letters, digits and ``.-_+``, no directory.
+_INSTALLATION_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,127}")
+
+
+@dataclass(frozen=True, slots=True)
+class InstalledInputs:
+    """What the TeX installation said about bare input names that the project lacks.
+
+    Attributes:
+        asked: The file names the installation was asked about, each with its suffix.
+        found: The subset that the installation holds.
+    """
+
+    asked: frozenset[str]
+    found: frozenset[str]
+
+
+_installed_inputs: ContextVar[InstalledInputs | None] = ContextVar(
+    "latexprep_installed_inputs", default=None
+)
+
+
+@contextmanager
+def installed_inputs_known(answer: InstalledInputs | None) -> Generator[None]:
+    """Make ``answer`` the installation's answer for the source graphs built inside.
+
+    Args:
+        answer: What the installation said, or ``None`` when it was not asked.
+
+    Yields:
+        Nothing; the answer applies until the block ends.
+    """
+    token = _installed_inputs.set(answer)
+    try:
+        yield
+    finally:
+        _installed_inputs.reset(token)
+
+
+def installation_file_name(reference: str) -> str | None:
+    r"""Return the file name an ``\input`` reference asks the TeX installation for.
+
+    Args:
+        reference: The name as ``\input`` writes it.
+
+    Returns:
+        The name with ``.tex`` when it has no suffix, or ``None`` when the reference has a
+        directory or characters no installation file name has.
+    """
+    value = reference.strip()
+    if not _INSTALLATION_NAME.fullmatch(value) or value.endswith("."):
+        return None
+    return value if PurePosixPath(value).suffix else value + ".tex"
+
+
+def installation_candidates(root: Path) -> list[str]:
+    r"""Return the bare ``\input`` names in the project's sources that no project file has.
+
+    Only these may be files of the TeX installation. The sources are lexed, not walked:
+    the analysis builds the one source graph later, with the installation's answer. A
+    name that some project file has is left to that graph's lookup.
+
+    Args:
+        root: The project folder.
+
+    Returns:
+        The distinct file names, with their suffixes, in project order.
+    """
+    files = project_files(root)
+    project_names = {PurePosixPath(name).name for name in files}
+    budget, ignored = LoadBudget(), GraphFindings([], [])
+    names: dict[str, None] = {}
+    for name, path in files.items():
+        cancellation_point()
+        source = load_source(name, path, budget, ignored) if is_parsed_source(name, path) else None
+        for command in source.commands if source else ():
+            if (
+                command.name not in INSTALLATION_INPUT_COMMANDS
+                or command.named
+                or not command.arguments
+            ):
+                continue
+            value = command.arguments[0].value.strip()
+            file_name = installation_file_name(value)
+            if file_name and not {value, file_name} & project_names:
+                names[file_name] = None
+    return list(names)
+
+
 # Commands that also look for the name from each enclosing directory, as TeX does when a
 # file is read from a subdirectory that was entered by an earlier \input or \subfile.
 _CONTEXT_SEARCHING_COMMANDS = frozenset(
@@ -305,7 +404,12 @@ def _report_ambiguity(reference: Reference, found: list[str], findings: GraphFin
 
 
 def _report_missing(
-    reference: Reference, candidates: list[str], tree: ProjectTree, findings: GraphFindings
+    reference: Reference,
+    candidates: list[str],
+    tree: ProjectTree,
+    findings: GraphFindings,
+    *,
+    installation_asked: bool = False,
 ) -> None:
     """Report a file that does not exist: a case-only mismatch, or one absent altogether.
 
@@ -315,6 +419,8 @@ def _report_missing(
         tree: The project files, searched for names that differ only in case or Unicode
             normalization.
         findings: Where the error is recorded.
+        installation_asked: Whether the TeX installation was asked for the name and lacks
+            it too.
     """
     command = reference.command
     keys = {path_comparison_key(candidate) for candidate in candidates}
@@ -334,7 +440,8 @@ def _report_missing(
     tried = list(dict.fromkeys(candidates))
     findings.error(
         "source.missing_dependency",
-        f"Literal dependency {reference.value!r} is missing from the project; "
+        f"Literal dependency {reference.value!r} is missing from the project"
+        f"{' and from the TeX installation' if installation_asked else ''}; "
         f"looked for {listed_names(tried)}.",
         reference.path,
         command.line,
@@ -378,5 +485,15 @@ def resolve_reference(
         value = reference.value
         basename = value if PurePosixPath(value).suffix else value + suffix
         return Resolution(system=SystemReference(reference.path, command, value, basename))
+    installed = _installed_inputs.get()
+    name = installation_file_name(reference.value)
+    if command.name in INSTALLATION_INPUT_COMMANDS and installed is not None and name:
+        if name in installed.found:
+            return Resolution(
+                system=SystemReference(reference.path, command, reference.value, name)
+            )
+        if name in installed.asked:
+            _report_missing(reference, candidates, tree, findings, installation_asked=True)
+            return Resolution()
     _report_missing(reference, candidates, tree, findings)
     return Resolution()

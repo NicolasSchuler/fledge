@@ -147,6 +147,7 @@ MODULES_BY_LAYER: dict[str, tuple[str, ...]] = {
         "resource_monitor",
         "runtime",
         "sandbox",
+        "tex_installation",
         "tool_launch",
         "toolchain",
         "toolchain_help",

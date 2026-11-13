@@ -168,6 +168,7 @@ other, never a check, the job workflow or an output format. (41 modules)
 | `resource_monitor` | Process, memory and storage accounting for restricted tool commands |
 | `runtime` | Fail-closed local tool execution: the sandboxed `ToolRunner` |
 | `sandbox` | Restricted execution backends: macOS Seatbelt and Linux Bubblewrap |
+| `tex_installation` | Ask the TeX installation which files it holds, through kpsewhich under isolation |
 | `tool_launch` | What every tool command starts with: resource-limit wrapper, environment and refusal check |
 | `toolchain` | Locate installed tools and the system and distribution resources they may read |
 | `toolchain_help` | Installation guidance when the TeX toolchain a build needs is missing |

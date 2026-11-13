@@ -251,7 +251,7 @@ These 73 guards protect reading, transforming, building and publishing the prepa
 
 | Code | Check and scope | Typical fix |
 | --- | --- | --- |
-| `TEX005` | **Missing source dependencies.** Detect absent files named by supported literal source commands. | Include the missing dependency or correct the literal file path. |
+| `TEX005` | **Missing source dependencies.** Detect absent files named by supported literal source commands. A bare \input name that the project lacks, such as glyphtounicode, is first looked up in the TeX installation. | Include the missing dependency or correct the literal file path. |
 | `TEX006` | **External source paths.** Reject absolute paths and literal file references escaping the imported project. | Copy the dependency into the project and use a project-relative path. |
 | `TEX007` | **Dependency filename case.** Detect case mismatches without guessing which file a case-sensitive submission system will load. | Make the reference match the filename's exact letter case. |
 | `PKG001` | **Colliding protected filenames.** Block flattening when class, style, bibliography or root filenames cannot retain their required identities. | Keep the hierarchy, or resolve colliding protected filenames in the source project. |

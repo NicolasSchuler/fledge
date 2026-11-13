@@ -305,6 +305,28 @@ class LiveSourceProjectTests(AsyncLiveProjectTestCase):
         named = {match["path"] for item in preflight for match in item.details["matches"]}
         self.assertEqual(named, {"main.tex"})
 
+    async def test_an_input_of_the_tex_installation_is_not_a_missing_dependency(self) -> None:
+        r"""Check that ``\input{glyphtounicode}`` from TeX Live is no TEX005 error.
+
+        Documented claim: a bare ``\input`` name that the project lacks is looked up in the
+        TeX installation before it is reported missing (docs/checks.md, TEX005). A name the
+        installation lacks too is still an error.
+        """
+        self.require_tools("kpsewhich")
+        prepared = await self.prepare_files(
+            "installation-input",
+            {"main.tex": _document("Text.", "\\input{glyphtounicode}\n\\pdfgentounicode=1\n")},
+        )
+        self.assertEqual(_with_code(prepared.report, "TEX005"), [])
+        self.assert_published(prepared)
+        missing = await self.prepare_files(
+            "installation-missing",
+            {"main.tex": _document("Text.", "\\input{fledge-no-such-input}\n")},
+        )
+        self.assert_blocked(missing)
+        [error] = _with_code(missing.report, "TEX005")
+        self.assertIn("and from the TeX installation", error.message)
+
     async def test_absolute_input_outside_the_project_blocks(self) -> None:
         """Check that TEX006 blocks the job for a literal absolute input outside the project.
 

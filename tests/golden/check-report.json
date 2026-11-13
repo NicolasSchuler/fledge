@@ -1002,6 +1002,14 @@
      "elapsed_seconds": "<seconds>"
     },
     {
+     "name": "installation input names",
+     "cpu": "<measured>",
+     "memory_mb": "<measured>",
+     "kind": null,
+     "queue_seconds": "<seconds>",
+     "elapsed_seconds": "<seconds>"
+    },
+    {
      "name": "manuscript checks",
      "cpu": "<measured>",
      "memory_mb": "<measured>",

@@ -68,9 +68,14 @@ RULES = (
         name="source.missing_dependency",
         aliases=("source-missing-dependency",),
         title="Missing source dependencies",
-        description="Detect absent files named by supported literal source commands.",
+        description=(
+            "Detect absent files named by supported literal source commands. A bare "
+            "\\input name that the project lacks, such as glyphtounicode, is first looked up "
+            "in the TeX installation."
+        ),
         tests=(
             "tests.test_source_analysis.SourceAnalysisTests.test_absolute_outside_and_missing_dependencies_are_errors",
+            "tests.test_tex_installation.InstallationResolutionTests.test_a_name_the_installation_lacks_is_missing_from_both",
         ),
         fix="Include the missing dependency or correct the literal file path.",
         mandatory=True,

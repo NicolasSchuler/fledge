@@ -26,6 +26,7 @@ from .option_config import (
 from .package_headers import PACKAGE_FILENAME, LoadedPackage, parse_declared_date
 from .resource_budget import ResourceBudget
 from .setting_choices import ENGINES
+from .tex_installation import installed_files
 
 # The first TeX Live release was 1996; the upper bound only rejects an obvious typo.
 MIN_TEXLIVE_YEAR = 1996
@@ -599,28 +600,11 @@ async def _system_lookup(name: str, leaf: Path, runner: CommandRunner) -> list[s
         One absolute path, or no path when ``kpsewhich`` finds none.
 
     Raises:
-        PreparationError: The lookup did not complete within its limits, exited with a
-            status other than 0 or 1, or returned several paths or a relative one.
+        PreparationError: As ``installed_files`` raises it.
         OSError: A lookup folder cannot be created.
     """
-    (leaf / "version").mkdir()
-    await runner.tool_version(["kpsewhich", "--version"], leaf / "version")
-    command_work = leaf / "lookup"
-    command_work.mkdir()
-    execution = await runner.run(
-        ["kpsewhich", "--format=tex", name], cwd=command_work, workspace=command_work
-    )
-    # kpsewhich exits with status 1 when it finds no file.
-    if not execution.within_limits or execution.returncode not in {0, 1}:
-        raise PreparationError(
-            f"System package lookup did not complete: {execution.failure_reason('kpsewhich')}"
-        )
-    paths = execution.stdout.strip().splitlines()
-    if execution.returncode == 1 and not paths:
-        return []
-    if len(paths) != 1 or not Path(paths[0]).is_absolute():
-        raise PreparationError("System package lookup returned ambiguous evidence")
-    return paths
+    found = await installed_files([name], leaf, runner)
+    return [found[name]] if name in found else []
 
 
 async def _local_package_shadow(

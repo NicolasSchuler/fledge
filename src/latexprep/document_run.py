@@ -40,6 +40,7 @@ from .publication import VerifiedPackage
 from .report import Outcome, Report
 from .review_policy import BASELINE_VERSUS_PREPARED_STAGE
 from .scheduler import Scheduler, Task, TaskResult
+from .source_resolution import InstalledInputs, installation_candidates, installed_inputs_known
 from .staging import (
     apply_contents,
     flatten_sources,
@@ -48,6 +49,7 @@ from .staging import (
     trees_identical,
 )
 from .task_reporting import InputSelection, PackageLayout, TaskReporter
+from .tex_installation import ask_installation
 
 _SELECT_SUBMISSION_INPUTS_STAGE = "select submission inputs"
 # Rule names of the online checks all start with this; none means they never ran.
@@ -184,6 +186,32 @@ class DocumentRun:
         return pdf
 
     async def run(self) -> VerifiedPackage | None:
+        """Run the document's stages, once the TeX installation has said which inputs it holds.
+
+        Returns:
+            The package when preparation verified one, otherwise ``None``.
+        """
+        with installed_inputs_known(await self._ask_installation()):
+            return await self._run_stages()
+
+    async def _ask_installation(self) -> InstalledInputs | None:
+        r"""Ask the TeX installation for the bare ``\input`` names that the project lacks.
+
+        Returns:
+            Its answer, or ``None`` when no name is missing or it cannot answer.
+        """
+        if self.main is None:
+            return None
+        names = await self.context.thread_operation(
+            "installation input names", installation_candidates, self.imported
+        )
+        if not names:
+            return None
+        self.context.emit(f"Looking up {len(names)} missing input file(s) in the TeX installation")
+        work = self.context.work / "installation-lookup"
+        return await ask_installation(names, work, self.context.runner)
+
+    async def _run_stages(self) -> VerifiedPackage | None:
         """Run the document's stages.
 
         Returns:

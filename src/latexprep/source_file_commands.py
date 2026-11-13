@@ -73,6 +73,9 @@ TOOLCHAIN_FILE_COMMANDS = frozenset(
         "LoadClassWithOptions",
     }
 )
+# Commands whose bare file name TeX may also find in its installation, as
+# ``\input{glyphtounicode}`` does; ``\include`` always reads a chapter of the project.
+INSTALLATION_INPUT_COMMANDS = frozenset({"input"})
 # Commands whose resolved target is read as TeX source in the current path context;
 # a subfile is traversed with its own directory as context instead.
 TRAVERSED_COMMANDS = frozenset(
