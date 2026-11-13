@@ -23,6 +23,7 @@ from .rules import MANDATORY_CODES
 ALWAYS = "always"
 DEFAULT = "default"
 OPT_IN = "opt-in"
+SUGGESTION = "suggestion"
 # Opt-in checks switched on outside the activation tables of the selection policy. The
 # catalogue generator, scripts/generate_check_docs.py, holds the same entry, and a test
 # checks that both classify every rule alike.
@@ -31,7 +32,8 @@ _ACTIVATED_ELSEWHERE: dict[str, tuple[str | None, tuple[str, ...]]] = {
 }
 _ACTIVATION_HELP = (
     "default: runs without settings; opt-in: runs once configured (fledge rule CODE says "
-    "how); always: a guard that ignoring its code does not switch off."
+    "how); suggestion: style advice, only when selected, never changing the outcome; "
+    "always: a guard that ignoring its code does not switch off."
 )
 
 
@@ -39,7 +41,7 @@ class RuleActivation(NamedTuple):
     """How a check is switched on.
 
     Attributes:
-        kind: ``ALWAYS``, ``DEFAULT`` or ``OPT_IN``.
+        kind: ``ALWAYS``, ``DEFAULT``, ``OPT_IN`` or ``SUGGESTION``.
         enabled_by: For an opt-in check, the settings that switch it on, written as a
             settings file spells them (``check_orcid in [manuscript_checks]``); otherwise
             empty.
@@ -60,7 +62,7 @@ def _activation_entries(code: str) -> list[tuple[str | None, tuple[str, ...]]]:
 
 
 def rule_activation(rule: Rule, defaults: Settings) -> RuleActivation:
-    """Classify a check as always enforced, on by default or opt-in under ``defaults``.
+    """Classify a check as always enforced, on by default, opt-in or a suggestion.
 
     Args:
         rule: The check.
@@ -71,6 +73,8 @@ def rule_activation(rule: Rule, defaults: Settings) -> RuleActivation:
     """
     if rule.code in MANDATORY_CODES:
         return RuleActivation(ALWAYS)
+    if rule.suggestion:
+        return RuleActivation(SUGGESTION, (f"--select {rule.code}",))
     entries = _activation_entries(rule.code)
     if not entries:
         return RuleActivation(DEFAULT)
@@ -128,6 +132,11 @@ def _activation_line(activation: RuleActivation) -> str:
         return "Runs: always, whenever its stage runs; ignoring its code does not switch it off."
     if activation.kind == DEFAULT:
         return "Runs: by default; [checks] ignore or --ignore turns it off."
+    if activation.kind == SUGGESTION:
+        return (
+            f"Runs: only when selected ({activation.enabled_by[0]}, its family, or [checks] "
+            "select); a suggestion never changes the outcome."
+        )
     return f"Runs: only once configured; set {' or '.join(activation.enabled_by)}."
 
 

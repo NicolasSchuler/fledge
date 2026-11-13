@@ -89,11 +89,15 @@ class DocumentationTests(unittest.TestCase):
         rows = re.findall(r"^\| `([A-Z]{3}\d{3})` \|", catalogue, flags=re.MULTILINE)
         self.assertCountEqual(rows, [rule.code for rule in RULES])
         kinds = {generator.classify(rule)[0] for rule in RULES}
-        self.assertEqual(kinds, {generator.ALWAYS, generator.DEFAULT, generator.OPT_IN})
+        self.assertEqual(
+            kinds,
+            {generator.ALWAYS, generator.DEFAULT, generator.OPT_IN, generator.SUGGESTION},
+        )
         for rule in RULES:
             kind, setting = generator.classify(rule)
             with self.subTest(code=rule.code):
-                self.assertEqual(kind == generator.OPT_IN, bool(setting))
+                # Opt-in checks and suggestions name what switches them on.
+                self.assertEqual(kind in {generator.OPT_IN, generator.SUGGESTION}, bool(setting))
 
     def test_agent_skill_uses_existing_commands_and_options(self) -> None:
         import re

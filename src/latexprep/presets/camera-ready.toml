@@ -61,8 +61,15 @@ report_unused_assets = true # PKG106: files outside the selected dependency grap
 # PKG105: compressed size of the final ZIP in bytes, if the publisher limits it.
 # max_archive_bytes = 0
 
+[bibliography_checks]
+doi_entry_types = ["article", "inproceedings"] # BIB104: DOIs where they exist (advisory).
+check_capitalization = true # BIB107: capitals in titles protected from the style (advisory).
+check_fuzzy_duplicates = true # BIB108: one work cited twice, such as preprint and article (advisory).
+
 [pdf_checks]
-# PDF206: PDF properties the publisher requires, typically set with hyperref.
+# PDF206: PDF properties the publisher requires, typically set with hyperref. The Title is
+# what viewers and screen readers show instead of the file name.
+required_metadata = ["Title"]
 # required_metadata = ["Title", "Author"]
 
 [build_checks]

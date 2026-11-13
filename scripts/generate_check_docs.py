@@ -10,7 +10,8 @@ default ``Settings``:
 
 - always enforced: rules marked ``mandatory``, which selection cannot remove;
 - on by default: checks that run without any configuration;
-- opt-in: checks whose activating setting is off or empty by default.
+- opt-in: checks whose activating setting is off or empty by default;
+- suggestions: style advice that runs only when selected.
 """
 
 from __future__ import annotations
@@ -37,6 +38,7 @@ _ACTIVATED_ELSEWHERE: dict[str, tuple[str | None, tuple[str, ...]]] = {
 ALWAYS = "always"
 DEFAULT = "default"
 OPT_IN = "opt-in"
+SUGGESTION = "suggestion"
 
 
 def _activation() -> dict[str, list[tuple[str | None, tuple[str, ...]]]]:
@@ -54,6 +56,8 @@ def classify(rule: Rule, defaults: Settings | None = None) -> tuple[str, str]:
     """Return the rule's kind and, for opt-in checks, the settings that enable it."""
     if rule.code in MANDATORY_CODES:
         return ALWAYS, ""
+    if rule.suggestion:
+        return SUGGESTION, f"`--select {rule.code}`"
     entries = _activation().get(rule.code)
     if not entries:
         return DEFAULT, ""
@@ -100,6 +104,14 @@ SECTIONS = (
         "network permission.",
     ),
     (
+        SUGGESTION,
+        "Suggestions",
+        "These {count} checks give style advice. They run only when selected, by code, by "
+        "family or with `[checks] select`, are reported in a section of their own and never "
+        "change the outcome or the exit code. A `% fledge: ignore CODE` comment silences one "
+        "occurrence.",
+    ),
+    (
         ALWAYS,
         "Always enforced",
         "These {count} guards protect reading, transforming, building and publishing the "
@@ -119,7 +131,7 @@ def generated() -> str:
     for kind, heading, intro in SECTIONS:
         rules = grouped[kind]
         parts.append(f"### {heading}\n\n{intro.format(count=len(rules))}\n\n")
-        parts.append(_table(rules, with_setting=kind == OPT_IN))
+        parts.append(_table(rules, with_setting=kind in {OPT_IN, SUGGESTION}))
         parts.append("\n")
     return "".join(parts).rstrip("\n") + "\n"
 

@@ -20,7 +20,7 @@ from latexprep.config import Settings
 from latexprep.core import run_job
 from latexprep.findings import Finding
 from latexprep.job_context import JobRequest
-from tests.support import AsyncProjectTestCase, ProjectTestCase
+from tests.support import AsyncProjectTestCase, ProjectTestCase, clean_case
 
 # Long enough that a backtracking pattern takes seconds; a linear scan needs milliseconds.
 _LONG_VALUE_CHARACTERS = 200_000
@@ -118,6 +118,7 @@ class PreprintSuggestionTests(SuggestionTestCase):
                 self.assertEqual((finding.line, finding.details["entry"]), (1, "key"))
                 self.assertIn("NET004", finding.next_step or "")
 
+    @clean_case("BIB111")
     def test_published_works_with_an_archived_copy_are_not_preprints(self) -> None:
         entries = {
             "published article with its arXiv copy": (
@@ -166,6 +167,7 @@ class UrlRepeatsDoiTests(SuggestionTestCase):
                 self.assertIn("repeats the DOI", finding.message)
                 self.assertEqual(finding.evidence_kind, "derived")
 
+    @clean_case("BIB112")
     def test_other_addresses_and_unreadable_fields_are_not_named(self) -> None:
         cases = {
             "publisher page": "doi={10.1234/x}, url={https://example.org/paper}",
@@ -221,6 +223,7 @@ class VenueVariantTests(SuggestionTestCase):
         self.assertEqual(cvpr.details["entry"], "e")
         self.assertIn("'Proc. of the IEEE Conf. on Computer Vision & Pattern", cvpr.message)
 
+    @clean_case("BIB113")
     def test_years_editions_and_distinct_venues_are_not_variants(self) -> None:
         bibliography = (
             "@inproceedings{a, booktitle={Proceedings of the 34th International Conference on "
