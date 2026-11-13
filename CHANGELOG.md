@@ -35,16 +35,22 @@ The version is defined once, as `__version__` in `src/latexprep/__init__.py`.
   PDF is shipped, because no engine can convert them inside the sandbox.
 - **Default runs scan the metadata of the document's figures** (`PRV104`, `PRV105`)
   and may end with advisories (exit code 1).
+- **Fledge needs Click 8.2.0 or newer, but not 8.2.2.** Click 8.1 mixes standard error
+  into the output that scripts read, and 8.2.2 lets a flag you did not give override
+  the settings file.
+- **`MAN002` reports more page-limit squeezing**: geometry margins, `fullpage` and
+  `savetrees`, shrunken caption skips and fonts, compact titles, zeroed display skips
+  and redefined float fractions, so runs with the `anonymous-review` and
+  `camera-ready` presets may end with advisories.
 
 ### Added
 
 - Python 3.14 and 3.15 are supported and tested.
 - Glossaries, acronym lists and nomenclatures are built, except glossaries written
   for xindy, which the isolated build does not offer (`TEX012` says so). `prepare`
-  ships the index,
-  glossary and nomenclature files its verified build generated, and proves them
-  sufficient by rebuilding the archive with makeindex (and, when a `.bbl` ships,
-  BibTeX and Biber) blocked. New settings describe the receiving service:
+  ships the index, glossary and nomenclature files its verified build generated, and
+  proves them sufficient by rebuilding the archive with makeindex (and, when a `.bbl`
+  ships, BibTeX and Biber) blocked. New settings describe the receiving service:
   `venue_runs_bibliography_tools`, `venue_runs_index_tools` and `venue_engines`.
 - `--force` replaces an output or preview folder, or a JSON or HTML report, that
   Fledge wrote earlier, once the new run has succeeded; an existing empty output
@@ -86,6 +92,24 @@ The version is defined once, as `__version__` in `src/latexprep/__init__.py`.
 - `source_transforms.suppress_included_pdf_information` (`TEX204`, enabled by the
   `anonymous-review` preset) adds one line to the prepared main file, so pdfLaTeX
   and LuaLaTeX omit the information and file names of included PDFs.
+- Style suggestions in a new `STY` family, selected by code or by group, for example
+  `--select ALL --select STY3`:
+  - `STY1`: obsolete packages, driver options and commands (`times`, `subfigure`,
+    `\bf`, `$$`, `eqnarray`), `[h]`-only floats and `center` inside floats.
+  - `STY2`: unused labels, `Figure~\cref` and `\ref` to an equation.
+  - `STY3`: missing ties before references, `et al.` spacing, hyphenated ranges,
+    straight quotes, `...`, a space before `\footnote` and `\cite\cite`.
+  - `STY4`: two spellings of a term, such as modelling and modeling.
+  - `STY5`: no `\DocumentMetadata` with the document language and tagging.
+- Bibliography suggestions: `BIB111` (a cited preprint), `BIB112` (a URL that repeats
+  the DOI) and `BIB113` (one venue spelled several ways). `% fledge: ignore CODE`
+  also works in `.bib` files.
+- An optional chktex lint, `CHK001`: with `--select ALL --select CHK001`, the
+  installed chktex runs in the sandbox on each TeX file the document uses, and its
+  warnings become suggestions. `% chktex` comments and a safe `.chktexrc` beside the
+  main file apply. See "Lint with chktex".
+- Opt-in warnings `MAN018` (output driver options and `psfig`, on in the `arxiv`
+  preset) and `MAN019` (`\DocumentMetadata` with language and tagging).
 
 ### Changed
 
@@ -112,6 +136,24 @@ The version is defined once, as `__version__` in `src/latexprep/__init__.py`.
   only. Ctrl-C prints one line, and the "Not checked" hint follows passing runs only.
 - PNG and JPEG files are stored uncompressed in the ZIP, and dependency evidence is
   classified faster.
+- PDF comparisons render several pages per `pdftoppm` process, each PDF is rendered
+  and measured once per job, and PDF tool versions are probed during the baseline
+  build: `prepare` on a 60-page paper takes about 10 seconds instead of 17. When
+  staging changes nothing, `prepare` reuses the baseline build, reports the
+  transformed stage as `skipped`, and leaves out that build's findings and the
+  comparison of the baseline PDF with itself; the archive rebuild always runs.
+- `BLD013`, `BLD014` and `BLD015` are suggestions and appear only when selected.
+  `fledge rules`, `fledge rule` and the check catalogue show suggestions as a kind
+  of their own.
+- `NET004` recognises preprints as Google Scholar, Semantic Scholar, DBLP, arXiv
+  and biblatex export them, searches arXiv DOIs and DOIs Crossref does not know by
+  title, and no longer treats a published article that records its arXiv copy as a
+  preprint. Each `.bib` file is parsed once per run.
+- `PRV003` reports self-citation phrasing only next to a citation; `MAN016` accepts
+  `alt=` and `artifact` on `\includegraphics`; `\crefrange`, `\labelcref`,
+  `\cpageref`, `\subref` and `\zcref` count as references.
+- The `camera-ready` preset switches on `BIB104` for articles and proceedings papers,
+  `BIB107` and `BIB108`, and requires a PDF Title (`PDF206`).
 
 ### Fixed
 
@@ -133,6 +175,8 @@ The version is defined once, as `__version__` in `src/latexprep/__init__.py`.
   longer reported after a TeX error stopped the build, and a log pattern that took
   quadratic time is gone.
 - Report counts no longer overlap.
+- The opt-in ORCID check (`MAN009`) no longer blocks a document that uses obsolete
+  font commands such as `\bf`.
 - Scan findings that reach the reporting limit show their count as "N+", and the
   message lists the same matches as `details.matches`.
 - An `@string` macro named `ids` no longer hides a missing `crossref` target
