@@ -9,6 +9,7 @@ invalid constraint values.
 from __future__ import annotations
 
 import json
+import math
 import tempfile
 import unittest
 from pathlib import Path
@@ -17,9 +18,16 @@ from unittest.mock import patch
 from latexprep.command_runner import RuntimeLimits
 from latexprep.errors import PreparationError
 from latexprep.pdf_comparison import ComparisonPolicy, PageDifference, compare_pdfs
-from latexprep.pdf_geometry import COMPARISON_DPI, require_comparison_raster_fit
+from latexprep.pdf_geometry import (
+    COMPARISON_DPI,
+    MIN_COMPARISON_DPI,
+    comparison_dpi,
+    measurement_raster_size,
+)
 from latexprep.pdf_inspection import PdfInspectionOptions, inspect_pdf
+from latexprep.pdf_job_sessions import PageDigests, PageRaster
 from latexprep.pdf_tool_output import is_type3, page_count, parse_page_sizes
+from latexprep.raster_pixels import MAX_RASTER_PIXELS
 from latexprep.report import Report
 from latexprep.resource_budget import ResourceBudget
 from latexprep.runtime import ToolRunner
@@ -99,6 +107,24 @@ class PdfTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rendered.details["dpi"], 96)
         self.assertIn("96 DPI", rendered.message)
         self.assertNotIn("144", rendered.message)
+
+    async def test_large_pages_are_compared_at_the_highest_resolution_that_fits(self) -> None:
+        # An A0 poster: too large for 144 DPI within the raster limits.
+        a0 = "Page 1 size: 2383.94 x 3370.39 pts\n"
+        runner = ConfigurablePdfRunner(outputs={"geometry": a0})
+        findings = await compare_pdfs(self.left, self.right, self.root / "compare", runner)
+        dpi = comparison_dpi(parse_page_sizes(a0, 1))
+        self.assertNotIn("compare.unavailable", {item.rule for item in findings})
+        rendered = next(item for item in findings if item.rule == "compare.rendering")
+        self.assertEqual((rendered.status, rendered.details["dpi"]), ("passed", dpi))
+        self.assertIn(f"{dpi} DPI", rendered.message)
+
+    def test_page_digests_are_kept_per_resolution(self) -> None:
+        digests = PageDigests()
+        raster = PageRaster(10, 10, b"digest")
+        digests.record(1, COMPARISON_DPI, raster, None)
+        self.assertEqual(digests.get(1, COMPARISON_DPI), raster)
+        self.assertIsNone(digests.get(1, MIN_COMPARISON_DPI))
 
     def test_policy_names_its_tolerances_and_a_difference_reports_only_measured_fields(
         self,
@@ -296,7 +322,7 @@ class PdfConstraintTests(unittest.IsolatedAsyncioTestCase):
     async def test_large_format_pages_are_inventoried_without_comparison_render_limits(
         self,
     ) -> None:
-        # About A1: valid geometry that the 144 DPI comparison renderer cannot raster.
+        # About A1: valid geometry that the comparison renders below its usual 144 DPI.
         a1 = "Page 1 size: 1684 x 2384 pts\n"
         findings = await self.inspect(
             PdfInspectionOptions(
@@ -310,9 +336,21 @@ class PdfConstraintTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(findings["pdf.page_geometry"].status, "passed")
         self.assertEqual(findings["pdf.page_dimensions"].status, "passed")
         self.assertEqual(findings["pdf.page_size_consistency"].status, "passed")
-        # The comparison path still refuses pages it cannot render, and says why.
-        with self.assertRaisesRegex(PreparationError, f"{COMPARISON_DPI} DPI"):
-            require_comparison_raster_fit(parse_page_sizes(a1, 1))
+        # The comparison renders large pages at the highest resolution that fits, and
+        # refuses only pages too large even for the lowest one, saying why.
+        a4 = parse_page_sizes("Page 1 size: 595.276 x 841.89 pts\n", 1)
+        self.assertEqual(comparison_dpi(a4), COMPARISON_DPI)
+        self.assertLess(comparison_dpi(parse_page_sizes(a1, 1)), COMPARISON_DPI)
+        a0 = parse_page_sizes("Page 1 size: 2383.94 x 3370.39 pts\n", 1)
+        dpi = comparison_dpi(a0)
+        self.assertLess(dpi, COMPARISON_DPI)
+        self.assertGreaterEqual(dpi, MIN_COMPARISON_DPI)
+        width, height = measurement_raster_size(a0[0], dpi)
+        self.assertLessEqual(width * height, MAX_RASTER_PIXELS)
+        self.assertGreater(math.prod(measurement_raster_size(a0[0], dpi + 1)), MAX_RASTER_PIXELS)
+        billboard = parse_page_sizes("Page 1 size: 14400 x 14400 pts\n", 1)
+        with self.assertRaisesRegex(PreparationError, f"even at {MIN_COMPARISON_DPI} DPI"):
+            comparison_dpi(billboard)
 
     async def test_page_limit_boundary_and_overflow(self) -> None:
         at_limit = await self.inspect(max_pages=2, runner=ConfigurablePdfRunner(pages=2))

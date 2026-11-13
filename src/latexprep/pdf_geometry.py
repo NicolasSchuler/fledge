@@ -21,8 +21,10 @@ from .raster_pixels import (
 )
 
 POINTS_PER_INCH = 72
-# Comparison and preview renders use this resolution; every page must fit it.
+# Comparison and preview renders use this resolution unless a page is too large for it.
 COMPARISON_DPI = 144
+# The lowest resolution a comparison falls back to for large pages, such as an A0 poster.
+MIN_COMPARISON_DPI = 36
 # Configured measurement renders use their own, lower resolution and limits.
 MAX_MEASUREMENT_PIXELS = 4_000_000
 MAX_MEASUREMENT_DIMENSION = 4000
@@ -104,23 +106,41 @@ def exceeds_measurement_raster(dimensions: tuple[int, int]) -> bool:
     )
 
 
-def require_comparison_raster_fit(sizes: Sequence[tuple[float, float]]) -> None:
-    """Reject pages that cannot be rendered at the comparison resolution within raster limits.
+def _fits_raster(size: tuple[float, float], dpi: int) -> bool:
+    """Return whether a page of ``size`` points rendered at ``dpi`` fits the raster limits."""
+    pixels = measurement_raster_size(size, dpi)
+    return max(pixels) <= MAX_RASTER_DIMENSION and math.prod(pixels) <= MAX_RASTER_PIXELS
+
+
+def comparison_dpi(sizes: Sequence[tuple[float, float]]) -> int:
+    """Return the resolution at which every page is compared: the highest one that fits.
+
+    Pages are rendered at ``COMPARISON_DPI`` when every page fits the raster limits there;
+    a document with larger pages, such as an A0 poster, is compared at the highest lower
+    resolution, down to ``MIN_COMPARISON_DPI``, at which all of them fit.
 
     Args:
         sizes: The width and height of every page, in points.
 
+    Returns:
+        The resolution in dots per inch.
+
     Raises:
-        PreparationError: A page is too large; the message names the first one.
+        PreparationError: A page is too large even at ``MIN_COMPARISON_DPI``; the message
+            names the first one.
     """
+    dpi = COMPARISON_DPI
     for page, size in enumerate(sizes, 1):
-        pixels = measurement_raster_size(size, COMPARISON_DPI)
-        if max(pixels) > MAX_RASTER_DIMENSION or math.prod(pixels) > MAX_RASTER_PIXELS:
+        while dpi >= MIN_COMPARISON_DPI and not _fits_raster(size, dpi):
+            dpi -= 1
+        if dpi < MIN_COMPARISON_DPI:
             raise PreparationError(
                 f"Page {page} ({size[0]:g} x {size[1]:g} points) is too large to compare as "
-                f"images at {COMPARISON_DPI} DPI (limits: {MAX_RASTER_PIXELS:,} pixels, "
-                f"{MAX_RASTER_DIMENSION:,} per side); compare a smaller export of the document"
+                f"images even at {MIN_COMPARISON_DPI} DPI (limits: {MAX_RASTER_PIXELS:,} "
+                f"pixels, {MAX_RASTER_DIMENSION:,} per side); compare a smaller export of the "
+                "document"
             )
+    return dpi
 
 
 def read_measurement_raster(

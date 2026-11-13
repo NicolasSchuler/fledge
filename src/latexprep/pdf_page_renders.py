@@ -1,13 +1,14 @@
 """Render and compare the pages of two PDFs: page ranges per process, remembered digests.
 
-A comparison renders every common page of both PDFs at ``COMPARISON_DPI`` and asks whether the
-rasters are identical, or, with explicit tolerances, how many pixels differ. Two things keep
-that cheap. Pages are rendered in ranges, several pages per ``pdftoppm`` process, because a
-process start costs about as much as rendering a text page; a range that fails is rendered
-again page by page, so a failure is still reported for the page that caused it. And a page
-whose raster was seen before is known by a digest (``PageDigests``) that lives as long as the
-job's PDF session, so the prepared PDF, which two comparisons of one preparation share, is
-rendered once, and equal digests prove equal rasters without reading a second raster.
+A comparison renders every common page of both PDFs at one resolution (``comparison_dpi``:
+``COMPARISON_DPI`` unless a page is too large for it) and asks whether the rasters are
+identical, or, with explicit tolerances, how many pixels differ. Two things keep that cheap.
+Pages are rendered in ranges, several pages per ``pdftoppm`` process, because a process start
+costs about as much as rendering a text page; a range that fails is rendered again page by
+page, so a failure is still reported for the page that caused it. And a page whose raster was
+seen before is known by a digest (``PageDigests``) that lives as long as the job's PDF session,
+so the prepared PDF, which two comparisons of one preparation share, is rendered once, and
+equal digests prove equal rasters without reading a second raster.
 
 A page that needs pixel counts (explicit tolerances and differing digests) is rendered once
 more when its raster was not kept. Peak memory stays at two rasters of a page pair for every
@@ -130,12 +131,14 @@ class RenderSide:
         session: The side's view of its PDF session, which runs the renders.
         dimensions: The size of every page in points.
         digests: The digests of the pages of this PDF rendered so far.
+        dpi: The resolution of the renders, the same for both sides (``comparison_dpi``).
     """
 
     name: str
     session: PdfToolSession
     dimensions: list[tuple[float, float]]
     digests: PageDigests
+    dpi: int = COMPARISON_DPI
 
 
 @dataclass(frozen=True, slots=True)
@@ -187,14 +190,16 @@ class RenderOutcome:
         return [item.page for item in self.differences if item.counts_as_changed]
 
 
-def raster_pixel_count(size: tuple[float, float]) -> int:
-    """Return the pixels of a page of ``size`` points rendered at the comparison resolution."""
-    return math.prod(measurement_raster_size(size, COMPARISON_DPI))
+def raster_pixel_count(size: tuple[float, float], dpi: int = COMPARISON_DPI) -> int:
+    """Return the pixels of a page of ``size`` points rendered at ``dpi``."""
+    return math.prod(measurement_raster_size(size, dpi))
 
 
-def pair_memory_mb(left: tuple[float, float], right: tuple[float, float]) -> int:
-    """Return the memory to reserve for holding both renders of a page pair, in MiB."""
-    pixels = raster_pixel_count(left) + raster_pixel_count(right)
+def pair_memory_mb(
+    left: tuple[float, float], right: tuple[float, float], dpi: int = COMPARISON_DPI
+) -> int:
+    """Return the memory to reserve for holding both renders of a page pair at ``dpi``, in MiB."""
+    pixels = raster_pixel_count(left, dpi) + raster_pixel_count(right, dpi)
     return math.ceil(_RGB_BYTES_PER_PIXEL * pixels / MIB) + RENDER_HEADROOM_MB
 
 
@@ -273,7 +278,7 @@ async def _render_page(side: RenderSide, name: str, page: int) -> Path | Prepara
     try:
         await side.session.run_without_lease(
             name,
-            render_page_argv(page, COMPARISON_DPI, "rgb"),
+            render_page_argv(page, side.dpi, "rgb"),
             memory_mb=RENDER_HEADROOM_MB,
         )
     except PreparationError as error:
@@ -304,7 +309,7 @@ async def _render_run(
     try:
         await side.session.run_without_lease(
             f"{name}/{side.name}",
-            render_pages_argv(first, last, COMPARISON_DPI, "rgb"),
+            render_pages_argv(first, last, side.dpi, "rgb"),
             memory_mb=RENDER_HEADROOM_MB,
         )
     except PreparationError as error:
@@ -339,7 +344,7 @@ async def _render_missing(
     Returns:
         The raster file of each page that was rendered, or the error that stopped it.
     """
-    missing = [page for page in range(first, last + 1) if side.digests.get(page) is None]
+    missing = [page for page in range(first, last + 1) if side.digests.get(page, side.dpi) is None]
     logger.debug(
         "PDF render %s pages %d-%d: %d to render, %d digests reused",
         side.name,
@@ -370,7 +375,7 @@ def _read_page(side: RenderSide, page: int, path: Path) -> RasterImage:
         PreparationError: The file is missing, unreadable, malformed or larger than the page.
     """
     image = read_pnm_raster(
-        path, channels=3, max_pixels=raster_pixel_count(side.dimensions[page - 1])
+        path, channels=3, max_pixels=raster_pixel_count(side.dimensions[page - 1], side.dpi)
     )
     path.unlink()
     return image
@@ -399,7 +404,7 @@ def _page_raster(
         PreparationError: The page could not be rendered or its raster read.
     """
     if rendered is None:
-        known = side.digests.get(page)
+        known = side.digests.get(page, side.dpi)
         if known is None:
             raise PreparationError("The page raster is unknown")
         if side.digests.renderer is not None:
@@ -410,7 +415,7 @@ def _page_raster(
         raise rendered
     image = _read_page(side, page, rendered)
     raster = PageRaster(image.width, image.height, hashlib.sha256(image.data).digest())
-    side.digests.record(page, raster, side.session.versions.get(_RENDERER))
+    side.digests.record(page, side.dpi, raster, side.session.versions.get(_RENDERER))
     return raster, image if keep_image else None
 
 
@@ -530,7 +535,9 @@ async def _compare_range(
     name = _directory_name(first, last)
     work = request.left.session.work
     memory_mb = max(
-        pair_memory_mb(request.left.dimensions[page - 1], request.right.dimensions[page - 1])
+        pair_memory_mb(
+            request.left.dimensions[page - 1], request.right.dimensions[page - 1], request.left.dpi
+        )
         for page in range(first, last + 1)
     )
     label = f"compare PDF page {first}" if first == last else f"compare PDF pages {first}-{last}"
@@ -567,8 +574,8 @@ async def render_page_pairs(request: RenderRequest, pages: int) -> RenderOutcome
         lambda page: (
             _RGB_BYTES_PER_PIXEL
             * max(
-                raster_pixel_count(request.left.dimensions[page - 1]),
-                raster_pixel_count(request.right.dimensions[page - 1]),
+                raster_pixel_count(request.left.dimensions[page - 1], request.left.dpi),
+                raster_pixel_count(request.right.dimensions[page - 1], request.right.dpi),
             )
         ),
         max_pages=limit,

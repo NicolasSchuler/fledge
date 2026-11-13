@@ -248,8 +248,8 @@ async def repeat_baselines(
             status="passed" if stable else "failed",
             details={
                 "requested_builds": settings.workflow.baseline_runs,
-                "comparison": "exact page count, normalized extracted text and "
-                f"{COMPARISON_DPI}-DPI pixels",
+                "comparison": "exact page count, normalized extracted text and pixels "
+                f"rendered at up to {COMPARISON_DPI} DPI",
             },
         )
     )

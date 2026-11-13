@@ -1,11 +1,11 @@
 """Bounded rendered and extracted-text comparison of two PDFs, with optional previews.
 
 A comparison reports the page counts, the extracted text per page (line ends and trailing
-blanks normalized) and the rendered pages at ``COMPARISON_DPI``, each side measured
-independently so one failure never hides the others. It proves neither semantic
-equivalence nor equality of metadata. With a preview collector, the pages whose text,
-rendering or size differ are also captured as PNG images, within the shared preview
-limits; preview failures never change the findings.
+blanks normalized) and the rendered pages at one resolution, ``COMPARISON_DPI`` unless a page
+is too large for it (``comparison_dpi``), each side measured independently so one failure never
+hides the others. It proves neither semantic equivalence nor equality of metadata. With a
+preview collector, the pages whose text, rendering or size differ are also captured as PNG
+images, within the shared preview limits; preview failures never change the findings.
 
 Each side is measured through the session of its PDF, which within a job is shared with every
 other look at the same PDF, and its pages are rendered and compared by ``pdf_page_renders``.
@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import shutil
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
 from typing import Final, NamedTuple, TypeVar
@@ -30,7 +30,7 @@ from .errors import PreparationError
 from .file_safety import FileTooLargeError, read_regular_file
 from .findings import Finding
 from .measurement_findings import TOOL_FAILURE_SUGGESTION, unavailable_finding
-from .pdf_geometry import COMPARISON_DPI, require_comparison_raster_fit
+from .pdf_geometry import COMPARISON_DPI, comparison_dpi
 from .pdf_job_sessions import JobPdf, PageDigests, job_pdf_sessions
 from .pdf_page_renders import (
     RENDER_HEADROOM_MB,
@@ -181,6 +181,11 @@ class _SidePair(NamedTuple):
         """Whether the page sizes of both sides are known."""
         return self.left.dimensions is not None and self.right.dimensions is not None
 
+    @property
+    def dpi(self) -> int:
+        """The resolution at which both sides are rendered: the highest one every page fits."""
+        return min(comparison_dpi(side.dimensions or []) for side in (self.left, self.right))
+
 
 def _side_evidence(
     outcome: CommandResult | PreparationError,
@@ -214,7 +219,7 @@ def _side_evidence(
 def _comparable_page_sizes(output: str, pages: int) -> list[tuple[float, float]]:
     """Parse the page sizes in points, refusing pages too large to compare.
 
-    A page must fit the raster limits when it is rendered at the comparison resolution.
+    A page must fit the raster limits at some comparison resolution (``comparison_dpi``).
 
     Args:
         output: The page box output of pdfinfo.
@@ -227,7 +232,7 @@ def _comparable_page_sizes(output: str, pages: int) -> list[tuple[float, float]]
         PreparationError: The sizes cannot be parsed, or a page is too large.
     """
     sizes = parse_page_sizes(output, pages)
-    require_comparison_raster_fit(sizes)
+    comparison_dpi(sizes)
     return sizes
 
 
@@ -444,8 +449,8 @@ async def _compare_prepared(
     if pair.left.dimensions is None or pair.right.dimensions is None:
         return comparison
     request = RenderRequest(
-        RenderSide("left", views.left, pair.left.dimensions, views.left_digests),
-        RenderSide("right", views.right, pair.right.dimensions, views.right_digests),
+        RenderSide("left", views.left, pair.left.dimensions, views.left_digests, policy.dpi),
+        RenderSide("right", views.right, pair.right.dimensions, views.right_digests, policy.dpi),
         PixelTolerance(policy.max_changed_pixel_ratio, policy.channel_tolerance)
         if count_changes
         else None,
@@ -578,6 +583,9 @@ async def _compare_open_pdfs(
         return [_unavailable("compare.unavailable", error)]
     pair, errors = await _prepare_sides(views)
     comparison = _Comparison([], errors)
+    if pair is not None and pair.dimensions_known:
+        # Large pages, such as an A0 poster, are compared at a lower resolution.
+        policy = replace(policy, dpi=min(policy.dpi, pair.dpi))
     if pair is not None:
         comparison = await _compare_prepared(
             views, pair, errors, policy, count_changes=options is not None
@@ -606,7 +614,7 @@ async def _compare_open_pdfs(
         evidence = (
             None if pair is None else _ChangeEvidence.of(pair, comparison, incomplete=bool(errors))
         )
-        await _capture_previews(views, pair, evidence, previews)
+        await _capture_previews(views, pair, evidence, previews, policy.dpi)
     return findings
 
 
@@ -625,7 +633,7 @@ class _PageSide(NamedTuple):
 
 
 async def _capture_png(
-    session: PdfToolSession, target: _PageSide, store: PdfPreviewStore, slot: int
+    session: PdfToolSession, target: _PageSide, store: PdfPreviewStore, slot: int, dpi: int
 ) -> tuple[str, tuple[int, int]]:
     """Render one optional image without retaining any scratch-file references.
 
@@ -634,6 +642,7 @@ async def _capture_png(
         target: The side of the page to render.
         store: The shared preview budget, which keeps the image.
         slot: The preview slot of the page pair.
+        dpi: The resolution of the comparison.
 
     Returns:
         The image id and the width and height of the image.
@@ -646,7 +655,7 @@ async def _capture_png(
     page, side, size = target
     name = f"preview-{page:04d}-{side}"
     async with session.lease(
-        f"preview PDF page {page} {side}", memory_mb=pair_memory_mb(size, size), kind="render"
+        f"preview PDF page {page} {side}", memory_mb=pair_memory_mb(size, size, dpi), kind="render"
     ):
         try:
             maximum = min(session.runner.limits.max_file_bytes, store.remaining_bytes)
@@ -654,7 +663,7 @@ async def _capture_png(
                 raise PreviewLimitError("Insufficient PNG preview or tool file byte allowance")
             await session.run_without_lease(
                 name,
-                render_page_argv(page, COMPARISON_DPI, "png"),
+                render_page_argv(page, dpi, "png"),
                 memory_mb=RENDER_HEADROOM_MB,
             )
             path = session.work / name / "command" / raster_filename("png")
@@ -669,7 +678,7 @@ async def _capture_png(
                     "Preview renderer did not produce a regular PNG image"
                 ) from None
             pixels = preview_dimensions(data)
-            if pixels[0] * pixels[1] > raster_pixel_count(size):
+            if pixels[0] * pixels[1] > raster_pixel_count(size, dpi):
                 raise PreparationError("Preview PNG dimensions exceed the geometry reservation")
             return store.add_image(slot, side, data), pixels
         finally:
@@ -793,6 +802,7 @@ async def _capture_page(
     preview: PreviewPage,
     store: PdfPreviewStore,
     slot: int,
+    dpi: int,
 ) -> None:
     """Capture the preview of each present side of a page, recording failures on it.
 
@@ -802,6 +812,7 @@ async def _capture_page(
         preview: The descriptor of the page, updated in place.
         store: The shared preview budget.
         slot: The preview slot of the page pair.
+        dpi: The resolution of the comparison.
     """
     for (name, descriptor), (_, side) in zip(preview.sides(), pair.named(), strict=True):
         if not descriptor.present:
@@ -812,7 +823,7 @@ async def _capture_page(
             continue
         try:
             target = _PageSide(preview.page, name, side.dimensions[preview.page - 1])
-            image_id, pixels = await _capture_png(views.session(name), target, store, slot)
+            image_id, pixels = await _capture_png(views.session(name), target, store, slot, dpi)
             descriptor.status, descriptor.image_id, descriptor.pixels = "captured", image_id, pixels
         except PreviewLimitError:
             descriptor.status = "omitted"
@@ -844,6 +855,7 @@ async def _capture_previews(
     pair: _SidePair | None,
     evidence: _ChangeEvidence | None,
     collector: PdfPreviewCollector,
+    dpi: int,
 ) -> None:
     """Capture only identified differences; preview failures never change findings.
 
@@ -852,6 +864,7 @@ async def _capture_previews(
         pair: The prepared sides, or ``None`` when the preflight failed.
         evidence: What the comparison established, or ``None`` when the preflight failed.
         collector: Collects the previews of this comparison.
+        dpi: The resolution of the comparison, at which the previews are rendered.
     """
     if pair is None or evidence is None:
         collector.unavailable(
@@ -868,7 +881,7 @@ async def _capture_previews(
             if slot is None:
                 _omit(preview)
                 continue
-            await _capture_page(views, pair, preview, store, slot)
+            await _capture_page(views, pair, preview, store, slot, dpi)
             preview.status = _combined_status(preview)
         collector.finished = True
         if not affected and evidence.incomplete:

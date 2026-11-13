@@ -59,14 +59,16 @@ class PageRaster:
 
 
 class PageDigests:
-    """The digests of the pages of one PDF that were rendered at the comparison resolution.
+    """The digests of the pages of one PDF, by page and the resolution they were rendered at.
 
-    The version of the renderer that produced them is kept too, because a comparison that
-    relies on a digest relied on that renderer and reports its version.
+    A PDF compared twice at different resolutions, such as a poster against a reference
+    with larger pages, keeps one digest per resolution. The version of the renderer that
+    produced them is kept too, because a comparison that relies on a digest relied on that
+    renderer and reports its version.
     """
 
     def __init__(self) -> None:
-        self._pages: dict[int, PageRaster] = {}
+        self._pages: dict[tuple[int, int], PageRaster] = {}
         self._renderer: ToolVersion | None = None
 
     @property
@@ -74,13 +76,13 @@ class PageDigests:
         """The version of the renderer that produced the digests, once there is one."""
         return self._renderer
 
-    def get(self, page: int) -> PageRaster | None:
-        """Return the digest of ``page``, or ``None`` when it was not rendered yet."""
-        return self._pages.get(page)
+    def get(self, page: int, dpi: int) -> PageRaster | None:
+        """Return the digest of ``page`` at ``dpi``, or ``None`` when it was not rendered yet."""
+        return self._pages.get((page, dpi))
 
-    def record(self, page: int, raster: PageRaster, renderer: ToolVersion | None) -> None:
-        """Remember the digest of ``page`` and the version of the renderer that made it."""
-        self._pages[page] = raster
+    def record(self, page: int, dpi: int, raster: PageRaster, renderer: ToolVersion | None) -> None:
+        """Remember the digest of ``page`` at ``dpi`` and the renderer that made it."""
+        self._pages[page, dpi] = raster
         if renderer is not None:
             self._renderer = renderer
 
