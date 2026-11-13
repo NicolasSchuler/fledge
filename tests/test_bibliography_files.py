@@ -1,17 +1,71 @@
-"""Finding and reading .bib files within budgets, with every failure typed."""
+"""Finding and reading .bib files within budgets, with every failure typed.
+
+The checks of one job that read the same project share each parse through the project's
+analysis (``AnalysedSource.bib_files``); the last classes show that every file is parsed
+once, that each read keeps its own budget, and that whole jobs parse once per tree.
+"""
 
 from __future__ import annotations
 
+import threading
+import time
 import unittest
+from collections import Counter
+from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
+from unittest.mock import patch
 
+import latexprep.bibtex_syntax as bibtex_syntax
+from latexprep.analysed_source import AnalysedSource
+from latexprep.bibliography_checks import check_bibliography_coverage_and_fields
 from latexprep.bibliography_files import (
     BibliographyBudget,
     ProblemKind,
     discover_bibliographies,
     read_declared_bibliographies,
 )
-from tests.support import ProjectTestCase
+from latexprep.bibliography_integrity import check_bibliography_integrity
+from latexprep.bibtex_syntax import ParsedBibFiles
+from latexprep.cancellation import AnalysisCancelled
+from latexprep.config import Settings
+from latexprep.core import run_job
+from latexprep.job_context import JobRequest
+from latexprep.online_inputs import collect_inputs
+from latexprep.online_options import OnlineOptions
+from tests.support import AsyncProjectTestCase, ProjectTestCase
+
+_PAPER = {
+    "main.tex": (
+        "\\documentclass{article}\n\\begin{document}\n\\cite{a}\\cite{missing}\n"
+        "\\bibliography{one,two}\n\\end{document}\n"
+    ),
+    "one.bib": (
+        "@article{a, title={A reference}, author={Smith, Ada}, year={2024}, doi={10.1234/a}}\n"
+        "@article{a, title={Repeated key}}\n"
+    ),
+    "two.bib": "@misc{b, title={Spare}, url={https://example.org/b}}\n",
+}
+
+
+@contextmanager
+def counted_parses() -> Iterator[Counter[str]]:
+    """Count the parses of each .bib file, by the name each is parsed under.
+
+    Yields:
+        The counter, which grows while the context is open.
+    """
+    parses: Counter[str] = Counter()
+    original = bibtex_syntax.parse_bibtex
+
+    def counting(name: str, text: str, *, bom: bool = False) -> bibtex_syntax.BibDocument:
+        """Count one parse of ``name`` and parse it as usual."""
+        parses[name] += 1
+        return original(name, text, bom=bom)
+
+    with patch.object(bibtex_syntax, "parse_bibtex", counting):
+        yield parses
 
 
 class BibliographyFilesTests(ProjectTestCase):
@@ -124,6 +178,129 @@ class BibliographyFilesTests(ProjectTestCase):
         (self.root / "folder.bib").mkdir()
         (self.root / "linked.bib").symlink_to(self.root / "a.bib")
         self.assertEqual(discover_bibliographies(self.root), ["a.bib", "linked.bib", "sub/b.BIB"])
+
+
+class SharedParseTests(ProjectTestCase):
+    """The checks that share a project's analysis parse each of its .bib files once."""
+
+    def checks(self, analysed: AnalysedSource | None):
+        """Run the integrity, coverage and online input checks of ``main.tex``.
+
+        Args:
+            analysed: The analysis they share, or ``None`` for each to read on its own.
+
+        Returns:
+            The findings of the two offline checks and the online inputs.
+        """
+        online = OnlineOptions(online=True, online_metadata=True)
+        return (
+            check_bibliography_integrity(self.root, "main.tex", analysed=analysed),
+            check_bibliography_coverage_and_fields(self.root, "main.tex", analysed=analysed),
+            collect_inputs(self.root, "main.tex", online, analysed=analysed),
+        )
+
+    def test_checks_sharing_an_analysis_parse_each_file_once(self) -> None:
+        for name, content in _PAPER.items():
+            self.write(name, content)
+        with counted_parses() as separate:
+            alone = self.checks(None)
+        with counted_parses() as shared:
+            together = self.checks(AnalysedSource(self.root, "main.tex"))
+        self.assertEqual(separate, {"one.bib": 3, "two.bib": 3})
+        self.assertEqual(shared, {"one.bib": 1, "two.bib": 1})
+        self.assertEqual(together, alone)
+        self.assertTrue(alone[0] and alone[1] and alone[2].references)
+
+    def test_each_read_keeps_its_own_budget_over_a_shared_parse(self) -> None:
+        self.write("a.bib", "@misc{a}\n" + "%" * 60)
+        self.write("b.bib", "@misc{b}\n" + "%" * 60)
+        shared = ParsedBibFiles()
+
+        def read(**budget: int | None):
+            """Read both files through ``shared`` within ``budget``."""
+            load = read_declared_bibliographies(
+                self.root, ["a.bib", "b.bib"], BibliographyBudget(**budget), shared=shared
+            )
+            return [document.path for document in load.documents], [
+                (problem.name, problem.kind) for problem in load.problems
+            ]
+
+        with counted_parses() as parses:
+            self.assertEqual(
+                read(max_file_bytes=32),
+                ([], [("a.bib", ProblemKind.TOO_LARGE), ("b.bib", ProblemKind.TOO_LARGE)]),
+            )
+            self.assertEqual(read(), (["a.bib", "b.bib"], []))
+            self.assertEqual(
+                read(max_file_bytes=32),
+                ([], [("a.bib", ProblemKind.TOO_LARGE), ("b.bib", ProblemKind.TOO_LARGE)]),
+            )
+            self.assertEqual(
+                read(max_total_bytes=100), (["a.bib"], [("b.bib", ProblemKind.TOO_LARGE)])
+            )
+        self.assertEqual(parses, {"a.bib": 1, "b.bib": 1})
+
+    def test_threads_that_read_one_file_at_once_wait_for_one_parse(self) -> None:
+        self.write("refs.bib")
+        shared = ParsedBibFiles()
+        original = bibtex_syntax.parse_bibtex
+        calls: list[str] = []
+        lock = threading.Lock()
+
+        def slow(name: str, text: str, *, bom: bool = False) -> bibtex_syntax.BibDocument:
+            """Parse ``name`` slowly, so that the other threads ask while it runs."""
+            with lock:
+                calls.append(name)
+            time.sleep(0.05)
+            return original(name, text, bom=bom)
+
+        def read(_: int):
+            """Read the file through ``shared`` and return the document."""
+            load = read_declared_bibliographies(
+                self.root, ["refs.bib"], BibliographyBudget(), shared=shared
+            )
+            return load.documents[0]
+
+        with patch.object(bibtex_syntax, "parse_bibtex", slow), ThreadPoolExecutor(8) as pool:
+            documents = list(pool.map(read, range(8)))
+        self.assertEqual(calls, ["refs.bib"])
+        self.assertTrue(all(document is documents[0] for document in documents))
+
+    def test_a_parse_that_was_cancelled_is_not_remembered(self) -> None:
+        self.write("refs.bib")
+        shared = ParsedBibFiles()
+        original = bibtex_syntax.parse_bibtex
+        outcomes = iter([AnalysisCancelled("stop"), None])
+
+        def cancelled_once(name: str, text: str, *, bom: bool = False):
+            """Raise the first time, as a cancelled job would, then parse."""
+            if (error := next(outcomes)) is not None:
+                raise error
+            return original(name, text, bom=bom)
+
+        with patch.object(bibtex_syntax, "parse_bibtex", cancelled_once):
+            with self.assertRaises(AnalysisCancelled):
+                read_declared_bibliographies(
+                    self.root, ["refs.bib"], BibliographyBudget(), shared=shared
+                )
+            load = read_declared_bibliographies(
+                self.root, ["refs.bib"], BibliographyBudget(), shared=shared
+            )
+        self.assertEqual([document.path for document in load.documents], ["refs.bib"])
+
+
+class JobParseTests(AsyncProjectTestCase):
+    """Whole jobs parse each .bib file once for every tree they check."""
+
+    async def test_the_bibliography_and_inspect_commands_parse_each_file_once(self) -> None:
+        project = self.write_project(_PAPER)
+        for command in ("bib", "inspect"):
+            with self.subTest(command=command), counted_parses() as parses:
+                report = await run_job(JobRequest(command, project, Settings(main="main.tex")))
+                self.assertEqual(parses, {"one.bib": 1, "two.bib": 1})
+                rules = {item.rule for item in report.findings}
+                self.assertIn("bibliography.duplicate_key", rules)
+                self.assertIn("bibliography.citation_coverage", rules)
 
 
 if __name__ == "__main__":

@@ -163,4 +163,71 @@ RULES = (
         ),
         reviewable=True,
     ),
+    Rule(
+        code="BIB111",
+        name="bibliography.preprint",
+        title="Cited preprint",
+        description=(
+            "Suggestion: name entries that cite a preprint, as Google Scholar, DBLP, Semantic "
+            "Scholar, arXiv and biblatex export them: an arXiv journal, CoRR with an abs/ "
+            "volume, an arXiv DOI, @unpublished or @preprint, or an arXiv archive prefix, "
+            "eprint type, URL or note when no journal or book title names a published venue. "
+            "The online published-version check (NET004) uses the same detection. Nothing is "
+            "looked up offline."
+        ),
+        tests=(
+            "tests.test_bibliography_suggestions.PreprintSuggestionTests.test_every_export_form_is_named_as_a_preprint",
+            "tests.test_bibliography_suggestions.PreprintSuggestionTests.test_published_works_with_an_archived_copy_are_not_preprints",
+        ),
+        fix=(
+            "Check whether the work has been published since and cite the published version "
+            "if so; online, NET004 looks for one."
+        ),
+        suggestion=True,
+        reference_url="https://info.arxiv.org/help/jref.html",
+    ),
+    Rule(
+        code="BIB112",
+        name="bibliography.url_repeats_doi",
+        title="URL that repeats the DOI",
+        description=(
+            "Suggestion: name entries whose url field is only their own DOI as a doi.org or "
+            "dx.doi.org address. A style that prints both fields shows the same link twice. "
+            "DOIs compare without regard to letter case."
+        ),
+        tests=(
+            "tests.test_bibliography_suggestions.UrlRepeatsDoiTests.test_a_doi_org_url_of_the_entrys_own_doi_is_named",
+            "tests.test_bibliography_suggestions.UrlRepeatsDoiTests.test_other_addresses_and_unreadable_fields_are_not_named",
+        ),
+        fix=(
+            "Remove the url field and keep the doi field, unless the bibliography style prints "
+            "URLs but not DOIs."
+        ),
+        suggestion=True,
+        reference_url="https://www.crossref.org/display-guidelines/",
+    ),
+    Rule(
+        code="BIB113",
+        name="bibliography.venue_variants",
+        title="Venue spelled several ways",
+        description=(
+            "Suggestion: group the literal journal and book titles of each .bib file by the "
+            "venue they name (case-folded, without punctuation, years and edition numbers, "
+            "with common abbreviations such as Proc. and Conf. written out and small function "
+            "words left out) and name each venue spelled in more than one way. Only equal "
+            "names group, never similar ones; names made only of words such as Proceedings "
+            "are not grouped, and a run reports a bounded number of venues."
+        ),
+        tests=(
+            "tests.test_bibliography_suggestions.VenueVariantTests.test_one_venue_spelled_several_ways_is_one_group",
+            "tests.test_bibliography_suggestions.VenueVariantTests.test_years_editions_and_distinct_venues_are_not_variants",
+            "tests.test_bibliography_suggestions.VenueVariantTests.test_the_number_of_reported_venues_is_capped",
+        ),
+        fix=(
+            "Choose one spelling for the venue and use it in every entry, or define it once "
+            "with @string and use the macro."
+        ),
+        suggestion=True,
+        reference_url="https://www.issn.org/services/online-services/access-to-the-ltwa/",
+    ),
 )

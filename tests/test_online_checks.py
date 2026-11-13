@@ -321,6 +321,73 @@ class OnlineCheckTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(finding.details["outcome"], "malformed")
 
+    async def test_published_version_is_sought_for_every_preprint_export_form(self):
+        forms = {
+            "Google Scholar": "@article{key, journal={arXiv preprint arXiv:2101.00001}",
+            "Semantic Scholar": "@article{key, journal={ArXiv}, volume={abs/2101.00001}",
+            "DBLP": (
+                "@article{key, journal={CoRR}, volume={abs/2101.00001}, eprinttype={arXiv}, "
+                "doi={10.48550/ARXIV.2101.00001}, url={https://doi.org/10.48550/arXiv.2101.00001}"
+            ),
+            "arXiv export": "@misc{key, eprint={2101.00001}, archivePrefix={arXiv}",
+            "biblatex": "@online{key, eprinttype={arxiv}, eprint={2101.00001}",
+            "arXiv DOI": "@misc{key, doi={10.48550/arXiv.2101.00001}",
+        }
+
+        def no_match(request):
+            return document({"items": []})
+
+        selected = options(online_published_versions=True)
+        for form, opening in forms.items():
+            with self.subTest(form=form):
+                self.bib.write_text(
+                    opening + ", title={A reference title}, author={Smith, Ada}, year={2021}}\n",
+                    encoding="utf-8",
+                )
+                finding, _, requests = await self.run_check(
+                    selected, no_match, "online.published_version", "NET004"
+                )
+                self.assertEqual(
+                    (finding.status, finding.details["outcome"]), ("passed", "no_match")
+                )
+                # Crossref holds no record of an arXiv DOI, so only the title search is made.
+                paths = [request.target.path.split("?")[0] for request in requests]
+                self.assertEqual(paths, ["/works"])
+
+    async def test_published_works_with_an_arxiv_copy_are_not_searched_for(self):
+        self.reference("doi={10.1234/example}, archiveprefix={arXiv}, eprint={2101.00001}")
+        transport = FakeTransport(AssertionError("no request"))
+        findings = await check_online_references(
+            self.root,
+            "main.tex",
+            options=options(online_published_versions=True),
+            resolver=public_resolver,
+            transport=transport,
+        )
+        (finding,) = [item for item in findings if item.rule == "online.published_version"]
+        self.assertEqual(
+            (finding.status, finding.details["outcome"]), ("skipped", "not_applicable")
+        )
+        self.assertEqual(transport.requests, [])
+
+    async def test_a_preprint_doi_that_crossref_does_not_hold_leads_to_the_title_search(self):
+        self.reference("doi={10.5281/zenodo.1234}", kind="unpublished")
+        candidate = metadata(DOI="10.1234/published", title=["A reference title"])
+
+        def answer(request):
+            if "?" in request.target.path:
+                return document({"items": [candidate]})
+            return Response(404)
+
+        finding, _, requests = await self.run_check(
+            options(online_published_versions=True), answer, "online.published_version", "NET004"
+        )
+        self.assertEqual(
+            (finding.status, finding.details["outcome"]), ("inconclusive", "candidate")
+        )
+        self.assertEqual(finding.details["candidates"][0]["doi"], "10.1234/published")
+        self.assertEqual(len(requests), 2)
+
     async def test_notices_valid_invalid_uncertain(self):
         self.reference()
         selected = options(online_notices=True)

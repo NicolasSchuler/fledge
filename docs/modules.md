@@ -120,6 +120,8 @@ a network connection, and each imports only other modules of this layer. (81 mod
 | `uncertainty_reasons` | Why a literal declaration may not take effect where it is written |
 | `workflow_options` | Options for packaging several documents and for comparing PDFs, independent of any publisher |
 | `workflow_rules` | Data-only catalogue for document packages and repeat builds |
+| `bibliography_preprints` | Whether a bibliography entry is a preprint, in the forms that common tools export |
+| `bibliography_venues` | Venue names of bibliography entries: how one is written, and the name it stands for |
 
 ## Infrastructure adapters
 
@@ -245,6 +247,8 @@ an output format. (61 modules)
 | `submission_readiness_checks` | Cheap, deterministic submission-readiness checks over the literal source graph |
 | `submission_scan_findings` | Findings for the matches of a submission scan, and the wording they share |
 | `submission_text` | Bounded, source-only submission fields; unresolved content remains visible |
+| `bibliography_suggestions` | Optional advice about the entries of the .bib files: preprints, repeated DOIs and venues |
+| `online_findings` | How the outcome of an online request reads in a report: findings, reasons and next steps |
 
 ## Orchestration
 

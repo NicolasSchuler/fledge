@@ -34,6 +34,7 @@ from .bibtex_syntax import (
     MAX_RESOURCE_FILES,
     MAX_RESOURCES_TOTAL_BYTES,
     BibDocument,
+    ParsedBibFiles,
 )
 from .cancellation import cancellation_point
 from .citation_graph import (
@@ -64,18 +65,21 @@ def _resource_budget() -> BibliographyBudget:
     )
 
 
-def _load_resources(root: Path, names: set[str]) -> tuple[list[BibDocument], list[Uncertainty]]:
+def _load_resources(
+    root: Path, names: set[str], shared: ParsedBibFiles
+) -> tuple[list[BibDocument], list[Uncertainty]]:
     """Parse the declared resources within the shared resource-set budget.
 
     Args:
         root: The project root.
         names: The declared resource paths, relative to ``root``.
+        shared: The files of ``root`` that other checks have parsed already.
 
     Returns:
         The parsed documents, and the gaps: each loading problem and each document whose
         syntax is incomplete.
     """
-    load = read_declared_bibliographies(root, names, _resource_budget())
+    load = read_declared_bibliographies(root, names, _resource_budget(), shared=shared)
     uncertainties = [Uncertainty(problem.message) for problem in load.problems]
     uncertainties.extend(
         Uncertainty(f"{document.path}: bibliography syntax is incomplete")
@@ -366,8 +370,9 @@ def check_bibliography_coverage_and_fields(
     if not options.any_enabled:
         return []
     require_directory(root, "Bibliography input")
-    scope = _select_scope(root, main, options, reuse_or_analyse(root, main, analysed).graph)
-    documents, input_gaps = _load_resources(root, scope.names)
+    analysis = reuse_or_analyse(root, main, analysed)
+    scope = _select_scope(root, main, options, analysis.graph)
+    documents, input_gaps = _load_resources(root, scope.names, analysis.bib_files)
     scope.add_input_gaps(input_gaps)
     references = located_entries(document for document in documents if document.valid)
     results = ResultCollector(

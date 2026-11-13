@@ -14,6 +14,7 @@ severities and suggestions is the callers' job; this module builds no findings.
 from __future__ import annotations
 
 import re
+import threading
 from bisect import bisect_right
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -538,11 +539,58 @@ def parse_bibtex(path: str, text: str, *, bom: bool = False) -> BibDocument:
     return document
 
 
+class _ParsedFile:
+    """One file's place in :class:`ParsedBibFiles`: its lock, and the parse once there is one.
+
+    Attributes:
+        lock: Held while the file is read and parsed, so that a second reader waits.
+        document: The parsed document, or ``None`` until a reader has parsed the file.
+        size: The bytes the file holds, once it has been parsed.
+    """
+
+    __slots__ = ("document", "lock", "size")
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.document: BibDocument | None = None
+        self.size = 0
+
+
+class ParsedBibFiles:
+    """The .bib files of one project parsed so far, so that each is parsed only once.
+
+    Readers that share it (``BibFileReader(shared=...)``) keep their own byte allowances: a
+    document parsed for one reader is handed to another only when the file fits that
+    reader's allowance, and its bytes count against that reader's total as if it had read
+    them. Only parsed documents are kept. A file that is too large, unreadable or not UTF-8
+    is tried again by the next reader, which costs a read but no parse. Threads that ask for
+    the same file at the same time wait for the one parse, and a parse that fails (a
+    cancelled job) is not remembered. Readers must not change the documents.
+
+    The files must not change while the record is in use; it belongs to the analysis of one
+    project root (``AnalysedSource.bib_files``), and transformations that edit a staged copy
+    do not use it.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._files: dict[tuple[Path, str], _ParsedFile] = {}
+
+    def _place(self, path: Path, name: str) -> _ParsedFile:
+        """Return the place of the file at ``path`` read as ``name``, creating it on first use."""
+        with self._lock:
+            return self._files.setdefault((path, name), _ParsedFile())
+
+
 class BibFileReader:
     """Reads .bib files within a per-file and an optional cumulative byte allowance.
 
     A leading UTF-8 byte-order mark is accepted and removed before parsing; the
     document records it so a rewrite can restore it byte for byte.
+
+    Args:
+        shared: The files parsed so far for other readers of the same project, which this
+            reader reuses and extends, or ``None`` to parse every file it reads.
 
     Attributes:
         max_file_bytes: The most bytes one file may hold.
@@ -552,11 +600,16 @@ class BibFileReader:
     """
 
     def __init__(
-        self, *, max_file_bytes: int = MAX_BIB_FILE_BYTES, max_total_bytes: int | None = None
+        self,
+        *,
+        max_file_bytes: int = MAX_BIB_FILE_BYTES,
+        max_total_bytes: int | None = None,
+        shared: ParsedBibFiles | None = None,
     ) -> None:
         self.max_file_bytes = max_file_bytes
         self.max_total_bytes = max_total_bytes
         self.total_bytes = 0
+        self._shared = shared
 
     @property
     def allowance(self) -> int:
@@ -566,7 +619,7 @@ class BibFileReader:
         return min(self.max_file_bytes, self.max_total_bytes - self.total_bytes)
 
     def read(self, path: Path, name: str) -> BibDocument | None:
-        """Read and parse ``path`` as ``name``.
+        """Read and parse ``path`` as ``name``, or reuse the parse that a sharing reader made.
 
         Bytes of a file that fails to decode still count as read.
 
@@ -581,6 +634,36 @@ class BibFileReader:
             OSError: The file is a link or special file or cannot be read.
             UnicodeError: The file is not UTF-8.
         """
+        if self._shared is None:
+            parsed = self._parse(path, name)
+            return None if parsed is None else parsed[0]
+        place = self._shared._place(path, name)
+        with place.lock:
+            if place.document is None:
+                parsed = self._parse(path, name)
+                if parsed is not None:
+                    place.document, place.size = parsed
+                return None if parsed is None else parsed[0]
+            if place.size > self.allowance:
+                return None
+            self.total_bytes += place.size
+            return place.document
+
+    def _parse(self, path: Path, name: str) -> tuple[BibDocument, int] | None:
+        """Read ``path`` within the allowance and parse it as ``name``.
+
+        Args:
+            path: The file to read.
+            name: The name to record as the document's ``path``.
+
+        Returns:
+            The parsed document and the bytes the file holds, or ``None`` when the file
+            exceeds the allowance.
+
+        Raises:
+            OSError: The file is a link or special file or cannot be read.
+            UnicodeError: The file is not UTF-8.
+        """
         try:
             raw = read_regular_file(path, self.allowance)
         except FileTooLargeError:
@@ -588,7 +671,7 @@ class BibFileReader:
         self.total_bytes += len(raw)
         text = raw.decode("utf-8")
         bom = text.startswith("﻿")
-        return parse_bibtex(name, text[1:] if bom else text, bom=bom)
+        return parse_bibtex(name, text[1:] if bom else text, bom=bom), len(raw)
 
 
 def mebibytes(count: int) -> str:

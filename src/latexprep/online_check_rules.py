@@ -58,11 +58,15 @@ RULES = (
         title="Published versions of preprints",
         description=(
             "Surface Crossref published-version relations or title-search candidates for "
-            "explicitly identified preprints; never infer that similar titles establish the "
-            "same work."
+            "explicitly identified preprints, recognised as the offline preprint suggestion "
+            "(BIB111) recognises them; never infer that similar titles establish the same work. "
+            "An arXiv DOI, which Crossref never holds, and a DOI that Crossref does not find "
+            "lead to the title search."
         ),
         tests=(
             "tests.test_online_checks.OnlineCheckTests.test_published_version_valid_invalid_uncertain",
+            "tests.test_online_checks.OnlineCheckTests.test_published_version_is_sought_for_every_preprint_export_form",
+            "tests.test_online_checks.OnlineCheckTests.test_a_preprint_doi_that_crossref_does_not_hold_leads_to_the_title_search",
         ),
         fix=(
             "Review the relation and cited version before changing the reference; retain the "

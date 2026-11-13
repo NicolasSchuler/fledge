@@ -107,6 +107,8 @@ MODULES_BY_LAYER: dict[str, tuple[str, ...]] = {
         "uncertainty_reasons",
         "workflow_options",
         "workflow_rules",
+        "bibliography_preprints",
+        "bibliography_venues",
     ),
     "adapters": (
         "biber_toolchain",
@@ -215,6 +217,8 @@ MODULES_BY_LAYER: dict[str, tuple[str, ...]] = {
         "submission_readiness_checks",
         "submission_scan_findings",
         "submission_text",
+        "bibliography_suggestions",
+        "online_findings",
     ),
     "orchestration": (
         "config",

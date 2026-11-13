@@ -3,8 +3,9 @@
 This module owns the checks that need no manuscript: syntax, duplicate keys and DOIs,
 repeated fields, undefined string macros, missing relationship targets and DOI syntax.
 It decides which files are read (the selected document's declared resources, or every
-.bib file below the root) and reports a file it cannot read as a finding. It does not
-relate citations to entries (``bibliography_checks``), contact URLs or propose edits.
+.bib file below the root) and reports a file it cannot read as a finding. The same files
+receive the bibliography suggestions (``bibliography_suggestions``). It does not relate
+citations to entries (``bibliography_checks``), contact URLs or propose edits.
 """
 
 from __future__ import annotations
@@ -12,7 +13,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from pathlib import Path
 
-from .analysed_source import AnalysedSource
+from .analysed_source import AnalysedSource, reuse_or_analyse
 from .bibliography_files import (
     BibliographyBudget,
     BibliographyProblem,
@@ -22,12 +23,14 @@ from .bibliography_files import (
 )
 from .bibliography_results import located_finding, syntax_finding
 from .bibliography_styles import MONTH_MACROS, StyleMacros, style_macros
+from .bibliography_suggestions import bibliography_suggestions
 from .bibtex_syntax import (
     MAX_BIB_FILE_BYTES,
     BibDocument,
     Declaration,
     Entry,
     Field,
+    ParsedBibFiles,
     mebibytes,
     plain_literal,
     read_doi,
@@ -61,7 +64,7 @@ def _input_finding(problem: BibliographyProblem) -> Finding:
 
 
 def _load_bibliographies(
-    root: Path, only: set[str] | None
+    root: Path, only: set[str] | None, shared: ParsedBibFiles
 ) -> tuple[list[BibDocument], list[Finding]]:
     """Parse every .bib file below ``root``, or only the named ones.
 
@@ -69,17 +72,14 @@ def _load_bibliographies(
         root: The project directory.
         only: The project-relative names of the files to read, or ``None`` to read every
             .bib file below ``root``.
+        shared: The files of ``root`` that other checks have parsed already.
 
     Returns:
         The documents that were read, valid or not, and a finding for each file that
         was not.
-
-    Raises:
-        PreparationError: ``root`` is not a directory.
     """
-    require_directory(root, "Bibliography input")
     names = discover_bibliographies(root) if only is None else only
-    load = read_declared_bibliographies(root, names, BibliographyBudget())
+    load = read_declared_bibliographies(root, names, BibliographyBudget(), shared=shared)
     return load.documents, [_input_finding(problem) for problem in load.problems]
 
 
@@ -409,8 +409,10 @@ def inspect_bibliography_integrity(
     Raises:
         PreparationError: ``root`` is not a directory.
     """
-    selection = selected_bibliography(root, main, analysed=analysed)
-    documents, findings = _load_bibliographies(root, selection.resources)
+    require_directory(root, "Bibliography input")
+    analysis = reuse_or_analyse(root, main, analysed)
+    selection = selected_bibliography(root, main, analysed=analysis)
+    documents, findings = _load_bibliographies(root, selection.resources, analysis.bib_files)
     style = style_macros(root, selection.styles)
     return documents, _integrity_findings(documents, findings, style)
 
@@ -433,6 +435,10 @@ def check_bibliography_integrity(
     No findings means no problem was found by these checks, not that metadata,
     macro expansion order, style requirements, or rendered citations are valid.
 
+    The bibliography suggestions about the same files (preprints, URLs that repeat the
+    DOI, venues spelled several ways) follow the findings; check selection drops them
+    unless a selector other than ``ALL`` selects them.
+
     Args:
         root: The project directory.
         main: The main source whose declared resources select the files, or ``None`` to
@@ -446,4 +452,5 @@ def check_bibliography_integrity(
     Raises:
         PreparationError: ``root`` is not a directory.
     """
-    return inspect_bibliography_integrity(root, main, analysed=analysed)[1]
+    documents, findings = inspect_bibliography_integrity(root, main, analysed=analysed)
+    return [*findings, *bibliography_suggestions(documents)]

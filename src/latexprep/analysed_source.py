@@ -5,16 +5,19 @@ root and main file, and many also need the graph spliced into one document
 (``ExpandedDocument``). Each built them on its own, so every check re-read and re-lexed
 the same files. ``AnalysedSource`` names that pair for one root and main file and computes
 each part on first use; ``AnalysedSourceCache`` hands the same value to every check of a
-job that asks for the same root and main file.
+job that asks for the same root and main file. The bibliography checks and the online
+lookups read the same .bib files, so the analysis also keeps each .bib file once it is
+parsed (``ParsedBibFiles``).
 
-Both parts are read-only once built: a check must not change the graph or the document.
-Sharing is safe because neither depends on settings, only on the files under the root, so
-a root whose files change (a staging copy that is edited between steps) needs a fresh
-``AnalysedSource``; the transformations that plan each edit on such a copy build their own
-graph. The graph is always the whole-project one (``GraphScope`` "project"): the
-selected-scope graph that preparation uses to choose inputs reads fewer files and is
-built separately. Checks are written to work stand-alone: they accept an optional
-``AnalysedSource`` and build their own when none is passed (:func:`reuse_or_analyse`).
+Every part is read-only once built: a check must not change the graph, the document or a
+parsed bibliography. Sharing is safe because none depends on settings, only on the files
+under the root, so a root whose files change (a staging copy that is edited between
+steps) needs a fresh ``AnalysedSource``; the transformations that plan each edit on such a
+copy build their own graph and read their own .bib files. The graph is always the
+whole-project one (``GraphScope`` "project"): the selected-scope graph that preparation
+uses to choose inputs reads fewer files and is built separately. Checks are written to
+work stand-alone: they accept an optional ``AnalysedSource`` and build their own when
+none is passed (:func:`reuse_or_analyse`).
 """
 
 from __future__ import annotations
@@ -24,6 +27,7 @@ import threading
 import time
 from pathlib import Path
 
+from .bibtex_syntax import ParsedBibFiles
 from .expanded_document import ExpandedDocument, expand_document
 from .source_graph import SourceGraph
 
@@ -42,13 +46,24 @@ class AnalysedSource:
         root: The project root whose files the analysis reads.
         main: The main file as the caller named it; ``None`` selects the project's single
             document root.
+        bib_files: The .bib files under ``root`` that a check has parsed, each parsed once
+            for every check that reads it.
     """
 
-    __slots__ = ("_expanded", "_expansion_lock", "_graph", "_graph_lock", "main", "root")
+    __slots__ = (
+        "_expanded",
+        "_expansion_lock",
+        "_graph",
+        "_graph_lock",
+        "bib_files",
+        "main",
+        "root",
+    )
 
     def __init__(self, root: Path, main: str | None) -> None:
         self.root = root
         self.main = main
+        self.bib_files = ParsedBibFiles()
         self._graph: SourceGraph | None = None
         self._expanded: ExpandedDocument | None = None
         self._graph_lock = threading.Lock()

@@ -594,9 +594,8 @@ the inspected content and phase explicit.
 The architecture document includes target design: per-task timeout/artifact
 descriptors and a structured progress-event schema are not implemented as
 described there. Current execution uses progress strings and a shared whole-job
-deadline alongside per-tool limits. Bibliography files and PDF measurements are
-still parsed by each check that reads them. Checkers that read TeX source share two
-public modules:
+deadline alongside per-tool limits. PDF measurements are still parsed by each check
+that reads them. Checkers that read TeX source share two public modules:
 {download}`tex_lexer.py <../src/latexprep/tex_lexer.py>` provides the bounded
 lexical subset (commands and their argument groups, comment and verbatim
 masking, conditional spans), and
@@ -651,18 +650,23 @@ transformations and online lookups share the bounded BibTeX reader in
 {download}`bibtex_syntax.py <../src/latexprep/bibtex_syntax.py>`, the one loader
 of declared .bib files (`read_declared_bibliographies`, with typed problems and
 byte budgets) in
-{download}`bibliography_files.py <../src/latexprep/bibliography_files.py>`, the
+{download}`bibliography_files.py <../src/latexprep/bibliography_files.py>`, which
+reuses the parses kept by a shared analysis (`AnalysedSource.bib_files`), so that each
+file is parsed once for every check of a job that reads the same tree, the
 index of entries and their reach in
 {download}`bibliography_index.py <../src/latexprep/bibliography_index.py>` and the
 literal citation graph of the selected main file in
 {download}`citation_graph.py <../src/latexprep/citation_graph.py>`
-(`build_citation_graph`). The online checks are layered, each module importing
-only those before it: `online_options` (settings and outcomes), `public_url`
+(`build_citation_graph`). The offline preprint suggestion and the online
+published-version check ask the same preprint detector, in
+{download}`bibliography_preprints.py <../src/latexprep/bibliography_preprints.py>`.
+The online checks are layered, each module importing only those before it: `online_options` (settings and outcomes), `public_url`
 (which addresses may be requested), `pinned_dns` (resolution in a disposable
 child), `online_http_wire` (the HTTP/1.1 bytes, testable on a `StreamReader`),
 `online_http_session` (the client, with `resolver` and `transport` seams that
-tests replace), `crossref` (typed replies), `online_inputs` and `online_checks`
-(the findings). No test needs a network.
+tests replace), `crossref` (typed replies), `online_inputs`, `online_findings` (the
+wording of findings and next steps) and `online_checks` (the checks). No test needs a
+network.
 PDF checkers share a few modules. {download}`pdf_tools.py <../src/latexprep/pdf_tools.py>`
 holds the tool session that freezes the inputs and runs each Poppler, qpdf or MuPDF
 command in its own directory, the one argument builder for each tool command, the

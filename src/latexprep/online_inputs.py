@@ -22,7 +22,14 @@ from .bibliography_files import (
     discover_bibliographies,
     read_declared_bibliographies,
 )
-from .bibtex_syntax import DOI_PATTERN, BibDocument, Entry, field_literal, read_doi
+from .bibtex_syntax import (
+    DOI_PATTERN,
+    BibDocument,
+    Entry,
+    ParsedBibFiles,
+    field_literal,
+    read_doi,
+)
 from .cancellation import cancellation_point
 from .citation_graph import require_directory, resource_declarations
 from .expanded_document import reachable_sources
@@ -158,7 +165,9 @@ def entry_reference(document: BibDocument, entry: Entry) -> Reference:
     )
 
 
-def _bibliography_references(root: Path, names: list[str], gaps: list[str]) -> list[Reference]:
+def _bibliography_references(
+    root: Path, names: list[str], gaps: list[str], shared: ParsedBibFiles
+) -> list[Reference]:
     """Read the entries of the named bibliography files, up to ``MAX_REFERENCES``.
 
     Args:
@@ -166,12 +175,13 @@ def _bibliography_references(root: Path, names: list[str], gaps: list[str]) -> l
         names: The bibliography files to read.
         gaps: Receives the read problems, files with incomplete syntax and an exceeded
             entry bound.
+        shared: The files of ``root`` that other checks have parsed already.
 
     Returns:
         The entries of the valid files, in file and source order.
     """
     budget = BibliographyBudget(max_file_bytes=MAX_BIB_BYTES, max_total_bytes=MAX_INPUT_BYTES)
-    load = read_declared_bibliographies(root, names, budget)
+    load = read_declared_bibliographies(root, names, budget, shared=shared)
     gaps.extend(problem.message for problem in load.problems)
     references: list[Reference] = []
     for document in load.documents:
@@ -269,9 +279,12 @@ def collect_inputs(
     require_directory(root, "Online reference input")
     gaps: list[str] = []
     # Both bibliography entries and source links are scoped by the selected graph.
-    inspection = reuse_or_analyse(root, main, analysed).graph
+    analysis = reuse_or_analyse(root, main, analysed)
+    inspection = analysis.graph
     references = (
-        _bibliography_references(root, _bibliography_names(root, inspection, gaps), gaps)
+        _bibliography_references(
+            root, _bibliography_names(root, inspection, gaps), gaps, analysis.bib_files
+        )
         if options.reads_bibliography
         else []
     )

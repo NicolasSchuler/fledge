@@ -20,6 +20,7 @@ from .bibtex_syntax import (
     MAX_BIB_FILE_BYTES,
     BibDocument,
     BibFileReader,
+    ParsedBibFiles,
     describe_read_failure,
     mebibytes,
 )
@@ -121,7 +122,11 @@ def discover_bibliographies(root: Path) -> list[str]:
 
 
 def read_declared_bibliographies(
-    root: Path, names: Iterable[str], budget: BibliographyBudget
+    root: Path,
+    names: Iterable[str],
+    budget: BibliographyBudget,
+    *,
+    shared: ParsedBibFiles | None = None,
 ) -> BibliographyLoad:
     """Read the named files under ``root`` in name order until a budget runs out.
 
@@ -131,16 +136,24 @@ def read_declared_bibliographies(
     with a syntax error is returned, because only the caller knows whether that
     makes it unusable.
 
+    Checks that read the same unchanged project pass the files its analysis has parsed
+    (``AnalysedSource.bib_files``), so that each file is parsed once however many checks
+    read it; the budget still applies to each read as if the files were read anew.
+
     Args:
         root: The project directory the names are relative to.
         names: The project-relative names of the declared files.
         budget: The byte, file and record limits of this read.
+        shared: The files of ``root`` already parsed for other checks, which this read
+            reuses and extends, or ``None`` to parse every file read.
 
     Returns:
         The documents that were read and the problems that stopped the others.
     """
     reader = BibFileReader(
-        max_file_bytes=budget.max_file_bytes, max_total_bytes=budget.max_total_bytes
+        max_file_bytes=budget.max_file_bytes,
+        max_total_bytes=budget.max_total_bytes,
+        shared=shared,
     )
     documents: list[BibDocument] = []
     problems: list[BibliographyProblem] = []
