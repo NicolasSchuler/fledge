@@ -26,6 +26,9 @@ from tests.fakes import FakeBuildRunner
 _LONG_LINE_CHARACTERS = 160_000
 # Each rule must decide a long line well within this; linear rules need milliseconds.
 _MAX_SECONDS_PER_LINE = 0.5
+# The whole reader takes about 0.15 s on the long log here, and coverage tracing in CI
+# makes it about ten times slower; quadratic reading of that log would take minutes.
+_MAX_SECONDS_FOR_WHOLE_LOG = 10.0
 # Fragments that make backtracking patterns slow when they repeat without a match: the
 # prefixes of every former regular expression and the separators of located errors.
 _ADVERSARIAL_FRAGMENTS = (
@@ -73,7 +76,7 @@ class LogRuleComplexityTests(unittest.TestCase):
         log = "Citation " * 20_000 + "\n" + " continuation\n" * 20_000
         started = time.perf_counter()
         log_findings(log, "main.tex")
-        self.assertLess(time.perf_counter() - started, 5 * _MAX_SECONDS_PER_LINE)
+        self.assertLess(time.perf_counter() - started, _MAX_SECONDS_FOR_WHOLE_LOG)
 
 
 class LogMessageTests(unittest.TestCase):

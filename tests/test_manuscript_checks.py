@@ -15,14 +15,17 @@ from latexprep.manuscript_checks import check_manuscript_policies
 from latexprep.manuscript_metadata_checks import read_literal_metadata
 from tests.support import ProjectTestCase
 
-# A growth test compares the processor time of a count and of twice that count: a linear
-# scan takes about twice as long, one that copies the rest of the text per command about
-# four times as long.
-LAYOUT_GROWTH_COMMANDS = 5_000
-LAYOUT_TAIL_WORDS_PER_COMMAND = 100
-MAX_GROWTH_FACTOR = 3.0
+# A growth test compares the processor time of a count and of four times that count: a
+# linear scan takes about four times as long, one that copies the rest of the text per
+# command about sixteen times as long. The limit between them leaves room for the noise
+# of short measurements, which coverage tracing in CI makes worse.
+# Four times the count, with its tail, stays below the 8 MiB limit on one source file.
+LAYOUT_GROWTH_COMMANDS = 4_000
+LAYOUT_TAIL_WORDS_PER_COMMAND = 80
+GROWTH_INPUT_FACTOR = 4
+MAX_GROWTH_FACTOR = 8.0
 # Measurements below this are clock noise, so a fast scan is not judged on them.
-MIN_MEASURED_SECONDS = 0.05
+MIN_MEASURED_SECONDS = 0.15
 
 
 class ManuscriptDetailTests(ProjectTestCase):
@@ -221,7 +224,7 @@ class ManuscriptDetailTests(ProjectTestCase):
 
     def test_layout_values_are_read_in_linear_time_before_a_long_document(self) -> None:
         small = self.layout_seconds(LAYOUT_GROWTH_COMMANDS)
-        large = self.layout_seconds(2 * LAYOUT_GROWTH_COMMANDS)
+        large = self.layout_seconds(GROWTH_INPUT_FACTOR * LAYOUT_GROWTH_COMMANDS)
         self.assertLess(large, MAX_GROWTH_FACTOR * max(small, MIN_MEASURED_SECONDS))
 
     def test_layout_values_are_read_in_linear_time(self) -> None:

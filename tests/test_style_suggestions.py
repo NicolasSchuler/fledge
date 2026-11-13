@@ -30,10 +30,13 @@ HOSTILE_CHARACTERS = 200_000
 # A linear scan takes about 0.3 s here, and coverage tracing in CI makes it about ten
 # times slower; the budget leaves room for that and still catches quadratic backtracking.
 LINEAR_TIME_LIMIT_SECONDS = 10.0
-# A growth test compares the processor time of a count and of twice that count: a linear
-# scan takes about twice as long, one that compares every pair about four times as long.
+# A growth test compares the processor time of a count and of four times that count: a
+# linear scan takes about four times as long, one that compares every pair about sixteen
+# times as long. The limit between them leaves room for the noise of short measurements,
+# which coverage tracing in CI makes worse.
 GROWTH_SMALL_COUNT = 10_000
-MAX_GROWTH_FACTOR = 3.0
+GROWTH_INPUT_FACTOR = 4
+MAX_GROWTH_FACTOR = 8.0
 # Measurements below this are clock noise, so a fast scan is not judged on them.
 MIN_MEASURED_SECONDS = 0.05
 DOCUMENT_START = "\\documentclass{article}\n\\begin{document}\n"
@@ -296,7 +299,7 @@ class ReferenceTests(StyleTestCase):
 
     def test_unused_labels_grow_linearly_with_dynamic_reference_prefixes(self) -> None:
         small = self.unused_label_seconds(GROWTH_SMALL_COUNT)
-        large = self.unused_label_seconds(2 * GROWTH_SMALL_COUNT)
+        large = self.unused_label_seconds(GROWTH_INPUT_FACTOR * GROWTH_SMALL_COUNT)
         self.assertLess(large, MAX_GROWTH_FACTOR * max(small, MIN_MEASURED_SECONDS))
 
     def test_doubled_reference_names(self) -> None:
