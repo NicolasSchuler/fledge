@@ -76,10 +76,18 @@ class Verdict(NamedTuple):
     tokens: tuple[str, ...] = ()
 
 
+def _descending(first: str, last: str) -> bool:
+    """Return whether the page number ``first`` is greater than ``last``, both digit strings."""
+    first, last = first.lstrip("0"), last.lstrip("0")
+    return (len(first), first) > (len(last), last)
+
+
 def page_verdict(value: str) -> Verdict:
     """Judge a literal ``pages`` value: ranges must ascend and use one notation.
 
-    Single pages and comma-separated ranges with matching letter prefixes are supported.
+    Single pages and comma-separated ranges with matching letter prefixes are supported,
+    and so is the article-number notation of ACM and other journals: ``263:1--263:52``
+    is pages 1 to 52 of article 263. A range across two article numbers is unsupported.
 
     Args:
         value: The literal field value.
@@ -96,17 +104,14 @@ def page_verdict(value: str) -> Verdict:
     unknown = False
     for part in value.split(","):
         part = part.strip()
-        if re.fullmatch(r"[A-Za-z]*\d+", part):
+        if re.fullmatch(r"[A-Za-z]*\d+|\d+:\d+", part):
             continue
-        match = re.fullmatch(r"([A-Za-z]*)(\d+)\s*(?:--?|[–—])\s*([A-Za-z]*)(\d+)", part)
+        match = re.fullmatch(r"([A-Za-z]*|\d+:)(\d+)\s*(?:--?|[–—])\s*([A-Za-z]*|\d+:)(\d+)", part)
         if match:
             first_prefix, first, last_prefix, last = match.groups()
             if first_prefix != last_prefix:
                 unknown = True
-            elif (len(first.lstrip("0")), first.lstrip("0")) > (
-                len(last.lstrip("0")),
-                last.lstrip("0"),
-            ):
+            elif _descending(first, last):
                 return Verdict("failed", "descending page endpoints")
         elif not part or re.fullmatch(r"[\d\s–—-]+", part):
             return Verdict("failed", "malformed numeric page range")

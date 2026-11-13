@@ -30,6 +30,9 @@ The version is defined once, as `__version__` in `src/latexprep/__init__.py`.
 - **Older DOIs with angle brackets are valid (`BIB006`).** SICI-style DOIs such as
   `10.1175/1520-0469(1963)020<0130:DNF>2.0.CO;2` were reported as malformed. Online
   lookups percent-encode the brackets.
+- **Article-number page ranges are supported (`BIB105`).** ACM-style values such as
+  `263:1--263:52` were inconclusive as an unsupported notation; they are now checked
+  like other ranges. A range across two article numbers stays inconclusive.
 
 ## [0.4.0] - 2026-11-13
 

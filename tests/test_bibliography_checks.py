@@ -414,6 +414,21 @@ class BibliographyCheckTests(ProjectTestCase):
         self.assertEqual({row.code for row in rows}, {"BIB105"})
         self.assertTrue(all(row.status == "failed" for row in rows))
 
+    def test_article_number_pages_are_checked_like_page_ranges(self) -> None:
+        self.manuscript()
+        self.write(
+            "references.bib",
+            "@article{acm,pages={263:1--263:52}}\n@article{one,pages={51:1}}\n"
+            "@article{dash,pages={32:699–32:721}}",
+        )
+        self.assertEqual([row.status for row in self.rows("page_ranges")], ["passed"])
+        self.write(
+            "references.bib",
+            "@article{reversed,pages={263:52--263:1}}\n@article{across,pages={6:1--7:3}}",
+        )
+        rows = {row.details["entry"]: row.status for row in self.rows("page_ranges")}
+        self.assertEqual(rows, {"reversed": "failed", "across": "inconclusive"})
+
     def test_page_range_unknown_notation_and_macros_are_inconclusive(self) -> None:
         self.manuscript()
         self.write(
