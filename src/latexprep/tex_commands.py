@@ -112,6 +112,34 @@ NAMED_OPERAND_COUNTS: dict[str, int] = {
     "futurelet": 1,
     **dict.fromkeys(COMMAND_DEFINITION_COMMANDS, 1),
 }
+# xparse definitions, whose second group is an argument specification, not the body.
+ARGUMENT_SPECIFICATION_DEFINITIONS = frozenset(
+    {
+        "NewDocumentCommand",
+        "RenewDocumentCommand",
+        "ProvideDocumentCommand",
+        "DeclareDocumentCommand",
+    }
+)
+# Commands that define an environment from their first argument, with its begin and end
+# code or, for tcolorbox, its options in the arguments after it.
+ENVIRONMENT_DEFINITION_COMMANDS = frozenset(
+    {
+        "newenvironment",
+        "renewenvironment",
+        "NewDocumentEnvironment",
+        "RenewDocumentEnvironment",
+        "newtcolorbox",
+        "renewtcolorbox",
+        "NewTColorBox",
+        "DeclareTColorBox",
+    }
+)
+# Commands that allocate a length or box register, or set a macro to a computed number or
+# length (pgfmath), named by their first braced argument: using it prints a value.
+REGISTER_DEFINITIONS = frozenset(
+    {"newlength", "newsavebox", "pgfmathsetlengthmacro", "pgfmathsetmacro", "pgfmathtruncatemacro"}
+)
 # TeX primitives that read a parameter text and then a braced body for the name they define.
 PRIMITIVE_BODY_DEFINITIONS = frozenset({"def", "gdef", "edef", "xdef"})
 # Commands that turn the next control sequence into characters or a diagnostic, as in

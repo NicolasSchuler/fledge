@@ -224,8 +224,9 @@ RULES = (
         name="manuscript.float_label_order",
         title="Figure and table label placement",
         description=(
-            "Check that literal float labels follow a caption in source order; custom counter "
-            "changes and subfloat semantics are inconclusive."
+            "Check that literal float labels follow a caption in source order. Subfigure "
+            "captions and labels belong to their subfigure and equation labels to their "
+            "equation; custom counter changes are inconclusive."
         ),
         tests=("tests.test_manuscript_checks.ManuscriptDetailTests.test_float_label_order",),
         fix=(

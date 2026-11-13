@@ -11,15 +11,20 @@ from __future__ import annotations
 
 import bisect
 from collections.abc import Iterable, Sequence
+from typing import NamedTuple
 
 from .tex_commands import (
+    ARGUMENT_SPECIFICATION_DEFINITIONS,
     COMMAND_DEFINITION_COMMANDS,
     DEFINITION_COMMANDS,
+    ENVIRONMENT_DEFINITION_COMMANDS,
     MACRO_DEFINITION_COMMANDS,
     NAMED_OPERAND_COUNTS,
+    PRIMITIVE_BODY_DEFINITIONS,
+    REGISTER_DEFINITIONS,
     TYPESET_ARGUMENT_COMMANDS,
 )
-from .tex_lexer import CONTROL_SEQUENCE, Command, end_of_line, read_group
+from .tex_lexer import CONTROL_SEQUENCE, Argument, Command, end_of_line, read_group
 
 # Package conditionals that take braced branches instead of ending with \fi.
 _ARGUMENT_CONDITIONALS = frozenset(
@@ -46,6 +51,12 @@ _ARGUMENT_CONDITIONALS = frozenset(
     }
 )
 
+# The longest replacement text read for one definition; a longer one is not read, so the
+# name stays unexpanded and the reading stays bounded however definitions nest.
+_MAX_MACRO_BODY = 4096
+# The longest parameter text read between a defined name and its body, as in
+# \def\x#1#2{…}; a longer one is not read, so the name stays unexpanded.
+_MAX_PARAMETER_TEXT = 256
 # Commands nested deeper than this many brace groups are not placed: no real manuscript
 # nests so deeply, and the walk over the groups stays bounded.
 MAX_PLACED_DEPTH = 64
@@ -144,6 +155,144 @@ def definition_spans(text: str, commands: Sequence[Command]) -> list[tuple[int, 
             end = max([end, *(item.end + 1 for item in (*following.options, *body))])
         spans.append((command.start, end))
     return merge_spans(spans)
+
+
+class MacroDefinition(NamedTuple):
+    r"""One definition of a command or environment, and where its replacement text lies.
+
+    Attributes:
+        name: The defined command without its backslash (``capslot``), or the environment
+            as ``begin{name}``, the owner of its groups (see ``tex_lexer.Group``).
+        start: The offset where the replacement text, or the aliased token, begins.
+        end: The offset just after it.
+        parameters: How many braced arguments a use reads: ``\newcommand{\x}[2]`` reads
+            two, and one with an optional first argument (``[2][default]``) one.
+    """
+
+    name: str
+    start: int
+    end: int
+    parameters: int = 0
+
+
+def macro_definitions(text: str, commands: Sequence[Command]) -> list[MacroDefinition]:
+    r"""Return the commands and environments that the definitions in ``commands`` define.
+
+    ``\newcommand{\x}[1]{body}``, ``\renewcommand\x{body}`` and ``\def\x#1{body}``
+    define ``x`` with that body, which for ``\def`` is the first brace group after the
+    parameter text, as TeX reads it; ``\let\x\y`` defines ``x`` as the token ``\y``.
+    ``\newenvironment{e}{begin}{end}`` and tcolorbox's ``\newtcolorbox{e}{options}``
+    define ``begin{e}`` with their remaining arguments, and ``\newlength{\x}`` and
+    ``\newsavebox{\x}`` define the register ``x`` with no replacement text. A definition
+    whose name or body
+    the lexer cannot delimit is left out, so the name stays unexpanded.
+
+    Args:
+        text: The text the commands were scanned from.
+        commands: The commands of ``text``, in order.
+
+    Returns:
+        The definitions, in source order.
+    """
+    return [
+        definition
+        for index in range(len(commands))
+        if (definition := _definition_at(text, commands, index)) is not None
+    ]
+
+
+def _definition_at(text: str, commands: Sequence[Command], index: int) -> MacroDefinition | None:
+    r"""Return what ``commands[index]`` defines, or ``None`` when it defines nothing readable.
+
+    xparse definitions (``\NewDocumentCommand{\x}{m}{body}``), whose second group is an
+    argument specification, and ``\def`` with delimited parameters are not read.
+
+    Args:
+        text: The text the commands were scanned from.
+        commands: The commands of ``text``, in order.
+        index: The index of the command that may define something.
+
+    Returns:
+        The definition, as :func:`macro_definitions` describes it.
+    """
+    command = commands[index]
+    following = commands[index + 1] if index + 1 < len(commands) else None
+    named = following if following is not None and following.named_by == command.name else None
+    arguments = command.arguments
+    if command.name in ENVIRONMENT_DEFINITION_COMMANDS and len(arguments) > 1:
+        name = f"begin{{{arguments[0].value.strip()}}}"
+        return MacroDefinition(
+            name, arguments[1].start, arguments[-1].end, _parameter_count(command.options)
+        )
+    if command.name in REGISTER_DEFINITIONS and arguments:
+        # \newlength{\x} makes \x a register; using it prints nothing itself.
+        token = CONTROL_SEQUENCE.fullmatch(arguments[0].value.strip())
+        return MacroDefinition(token.group(1), command.start, command.start) if token else None
+    if named is None or command.name in ARGUMENT_SPECIFICATION_DEFINITIONS:
+        return None
+    if command.name in COMMAND_DEFINITION_COMMANDS:
+        return _command_definition(command, named)
+    if command.name == "let":
+        alias = commands[index + 2] if index + 2 < len(commands) else None
+        # \global\let\x\x, which TikZ code uses to export a value, changes nothing.
+        if alias is not None and alias.named_by == "let" and alias.name != named.name:
+            return MacroDefinition(named.name, alias.start, alias.name_end)
+        return None
+    if command.name in PRIMITIVE_BODY_DEFINITIONS:
+        return _primitive_definition(text, named)
+    return None
+
+
+def _command_definition(command: Command, named: Command) -> MacroDefinition | None:
+    r"""Read ``\newcommand{\x}[n]{body}`` or ``\renewcommand\x[n]{body}``.
+
+    Args:
+        command: The definition command.
+        named: The defined name.
+
+    Returns:
+        The definition, or ``None`` without a body.
+    """
+    if named.arguments:
+        # Unbraced, \renewcommand\x[1]{body}: the lexer gives \x the groups.
+        body, options = named.arguments[0], named.options
+    elif len(command.arguments) > 1:
+        body, options = command.arguments[1], command.options
+    else:
+        return None
+    return MacroDefinition(named.name, body.start, body.end, _parameter_count(options))
+
+
+def _primitive_definition(text: str, named: Command) -> MacroDefinition | None:
+    r"""Read ``\def\x#1#2{body}``, whose body is the first brace group after the name.
+
+    Args:
+        text: The scanned text.
+        named: The defined name.
+
+    Returns:
+        The definition, or ``None`` when its parameters are delimited or its body is not
+        found within the bounds.
+    """
+    opening = text.find("{", named.name_end, named.name_end + _MAX_PARAMETER_TEXT)
+    if opening < 0:
+        return None
+    parameters = text[named.name_end : opening]
+    # Only undelimited parameters, #1#2: a delimited one may read any text up to its end.
+    if parameters.replace(" ", "").replace("#", "").strip("123456789"):
+        return None
+    body = read_group(text, opening, limit=_MAX_MACRO_BODY)
+    if body is None:
+        return None
+    return MacroDefinition(named.name, body.start, body.end, parameters.count("#"))
+
+
+def _parameter_count(options: Sequence[Argument]) -> int:
+    """Return how many braced arguments a use of a ``[n][default]`` definition reads."""
+    if not options or not options[0].value.strip().isdigit():
+        return 0
+    count = int(options[0].value.strip())
+    return max(0, count - 1) if len(options) > 1 else count
 
 
 def conditional_spans(commands: list[Command]) -> list[tuple[int, int]]:

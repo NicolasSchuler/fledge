@@ -10,12 +10,14 @@ to the whole document. This module owns no policy itself.
 
 from __future__ import annotations
 
+from bisect import bisect_left
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import NamedTuple
 
 from .cancellation import cancellation_point
 from .expanded_document import (
+    UNCLOSED_ENVIRONMENT,
     EnvironmentRegion,
     ExpandedDocument,
     environment_regions,
@@ -23,8 +25,24 @@ from .expanded_document import (
 from .finding_text import check_status, list_locations, more_suffix
 from .finding_weight import POLICY, Weight
 from .findings import Finding
-from .manuscript_vocabulary import COUNTER_CHANGES, INTERPRETED_COMMANDS, INTERPRETED_ENVIRONMENTS
-from .tex_spans import definition_spans, in_conditional, in_half_open_span
+from .manuscript_vocabulary import (
+    COUNTER_CHANGES,
+    DRAWING_ENVIRONMENTS,
+    INTERPRETED_COMMANDS,
+    INTERPRETED_ENVIRONMENTS,
+    LAYOUT_ONLY_COMMANDS,
+    NEUTRAL_COMMANDS,
+    NEUTRAL_ENVIRONMENTS,
+)
+from .tex_lexer import Command
+from .tex_spans import (
+    defined_names,
+    definition_spans,
+    in_conditional,
+    in_half_open_span,
+    macro_definitions,
+    merge_spans,
+)
 from .uncertainty_reasons import CONDITIONAL_FLOW
 
 # Offending names spelled out in a message; the details list every one.
@@ -109,23 +127,37 @@ class Reading:
         document: The expanded document that was read.
         unknown: Offset and label of each unexpanded body construct, in source order.
         uncertainty: Everything a document-wide scan cannot interpret.
+        layout_only: The offsets in ``unknown`` of project macros and environments built
+            only from neutral and layout commands: they may change the layout, but print
+            no caption, label, reference or heading.
+        definitions: The merged definition spans of the document, inside which nothing
+            runs where it stands.
     """
 
     document: ExpandedDocument
     unknown: list[tuple[int, str]]
     uncertainty: list[str]
+    layout_only: frozenset[int] = frozenset()
+    definitions: tuple[tuple[int, int], ...] = ()
 
-    def unknown_reasons(self, start: int, end: int) -> list[str]:
+    def unknown_reasons(self, start: int, end: int, *, layout_matters: bool = True) -> list[str]:
         """Describe the unexpanded constructs between two offsets as one reason or none.
 
         Args:
             start: The first offset of the range.
             end: The offset just past the range.
+            layout_matters: Whether a policy reads layout, so that layout-only macros are
+                gaps for it; the float policies do not.
 
         Returns:
             One reason naming the constructs in the range, or an empty list.
         """
-        return _unknown_reasons(self.unknown, start, end)
+        unknown = (
+            self.unknown
+            if layout_matters
+            else [item for item in self.unknown if item[0] not in self.layout_only]
+        )
+        return _unknown_reasons(unknown, start, end)
 
     def scope(self, region: EnvironmentRegion) -> None:
         """Attach only the interpretation gaps that fall inside this region.
@@ -140,11 +172,14 @@ class Reading:
             region.uncertainty.append(CONDITIONAL_FLOW)
         region.uncertainty.extend(self.unknown_reasons(region.start, region.end))
 
-    def scoped_regions(self, kinds: Iterable[str]) -> tuple[list[EnvironmentRegion], list[str]]:
+    def scoped_regions(
+        self, kinds: Iterable[str], *, layout_matters: bool = True
+    ) -> tuple[list[EnvironmentRegion], list[str]]:
         """Find environment regions with the unexpanded constructs inside each one.
 
         Args:
             kinds: The environment names to collect.
+            layout_matters: As for :meth:`unknown_reasons`.
 
         Returns:
             The regions in source order, each with its unexpanded constructs added to its
@@ -152,7 +187,9 @@ class Reading:
         """
         regions, reasons = environment_regions(self.document, frozenset(kinds))
         for region in regions:
-            region.uncertainty.extend(self.unknown_reasons(region.start, region.end))
+            region.uncertainty.extend(
+                self.unknown_reasons(region.start, region.end, layout_matters=layout_matters)
+            )
         return regions, reasons
 
 
@@ -160,34 +197,188 @@ def interpret(document: ExpandedDocument) -> Reading:
     """Find body constructs outside the interpreted inventory.
 
     Preamble declarations configure the toolchain; they are not manuscript content,
-    and a macro definition only names a replacement body.
+    and a macro definition only names a replacement body. A macro or environment the
+    project defines from neutral commands alone (:class:`_NeutralDefinitions`) is
+    interpreted where its arguments follow it, and so is a command that is not the
+    project's inside a closed drawing or algorithm environment, which draws or typesets
+    a step.
 
     Args:
         document: The expanded document to read.
 
     Returns:
         The reading, whose document-wide uncertainty adds the document's presence
-        uncertainty to the unexpanded constructs.
+        uncertainty and unclosed drawings to the unexpanded constructs.
     """
     definitions = definition_spans(document.text, document.commands)
+    neutral = _NeutralDefinitions.of(document)
+    project = defined_names(document.commands)
+    drawings, drawing_reasons = environment_regions(document, DRAWING_ENVIRONMENTS)
+    drawing_spans = merge_spans(
+        (region.command.start, region.end)
+        for region in drawings
+        if UNCLOSED_ENVIRONMENT not in region.uncertainty
+    )
     unknown: list[tuple[int, str]] = []
+    layout_only: set[int] = set()
     for command in document.commands:
         cancellation_point()
         if command.start < document.body_start or in_half_open_span(definitions, command.start):
             continue
-        if command.name not in INTERPRETED_COMMANDS:
-            unknown.append((command.start, "\\" + command.name))
-        if command.name in {"begin", "end"} and command.arguments:
-            environment = command.arguments[0].value.strip()
-            if environment not in INTERPRETED_ENVIRONMENTS:
-                unknown.append((command.start, "environment " + environment))
         if command.name in COUNTER_CHANGES:
             unknown.append((command.start, "explicit counter modification"))
+        if neutral.covers(command) or (
+            command.name not in project and in_half_open_span(drawing_spans, command.start)
+        ):
+            continue
+        label = _unknown_label(command)
+        if label is not None:
+            unknown.append((command.start, label))
+            if neutral.covers(command, layout=True):
+                layout_only.add(command.start)
     uncertainty = [
         *document.presence_uncertainty,
+        *drawing_reasons,
         *_unknown_reasons(unknown, 0, len(document.text)),
     ]
-    return Reading(document, unknown, uncertainty)
+    return Reading(document, unknown, uncertainty, frozenset(layout_only), tuple(definitions))
+
+
+def _unknown_label(command: Command) -> str | None:
+    """Return how an uninterpreted command or environment is named in reasons, if it is one."""
+    if command.name in {"begin", "end"} and command.arguments:
+        environment = command.arguments[0].value.strip()
+        return None if environment in INTERPRETED_ENVIRONMENTS else "environment " + environment
+    return None if command.name in INTERPRETED_COMMANDS else "\\" + command.name
+
+
+@dataclass(frozen=True, slots=True)
+class _NeutralDefinitions:
+    r"""The project's macros and environments whose every definition is neutral.
+
+    A definition is neutral when its replacement text uses only ``NEUTRAL_COMMANDS``,
+    ``NEUTRAL_ENVIRONMENTS`` and other neutral definitions, as
+    ``\newcommand{\capslot}{$\langle$capability$\rangle$}`` does; it prints text and
+    nothing a policy reads. One that also uses ``LAYOUT_ONLY_COMMANDS`` may change the
+    layout but hides no caption, label or reference. A definition that uses an unknown
+    command, a caption, label, reference, heading or TeX machinery is neither; nor is an
+    environment whose options mention a label or caption, nor anything when the project
+    builds definition names with ``\csname``. Definitions that use each other are
+    resolved in dependency order; a cycle stays unexpanded.
+
+    Attributes:
+        neutral: The braced arguments a use of each neutral name reads, by name; an
+            environment is named ``begin{name}``.
+        layout: The same for names that are neutral only with layout commands.
+    """
+
+    neutral: dict[str, int]
+    layout: dict[str, int]
+
+    @classmethod
+    def of(cls, document: ExpandedDocument) -> _NeutralDefinitions:
+        """Read the neutral definitions of a document's selected sources."""
+        commands = document.commands
+        if any(
+            (command.name == "csname" and command.named_by) or command.name == "@namedef"
+            for command in commands
+        ):
+            return cls({}, {})
+        starts = [command.start for command in commands]
+        strict: dict[str, set[str]] = {}
+        loose: dict[str, set[str]] = {}
+        parameters: dict[str, int] = {}
+        refused: set[str] = set()
+        for definition in macro_definitions(document.text, commands):
+            cancellation_point()
+            body = commands[
+                bisect_left(starts, definition.start) : bisect_left(starts, definition.end)
+            ]
+            uses = _uses(body)
+            strict.setdefault(definition.name, set()).update(uses)
+            loose.setdefault(definition.name, set()).update(uses - LAYOUT_ONLY_COMMANDS)
+            parameters[definition.name] = max(
+                parameters.get(definition.name, 0), definition.parameters
+            )
+            if definition.name.startswith("begin{"):
+                text = document.text[definition.start : definition.end]
+                if "label" in text or "caption" in text:
+                    refused.add(definition.name)
+        neutral = _resolved(
+            strict, refused | {name for name, uses in strict.items() if uses - strict.keys()}
+        )
+        layout = _resolved(
+            loose, refused | {name for name, uses in loose.items() if uses - loose.keys()}
+        )
+        return cls(
+            {name: parameters[name] for name in neutral},
+            {name: parameters[name] for name in layout - neutral},
+        )
+
+    def covers(self, command: Command, *, layout: bool = False) -> bool:
+        r"""Return whether a use of a command or environment is neutral, its arguments present.
+
+        Args:
+            command: The use: a command, or the ``\begin`` of an environment.
+            layout: Whether to ask about definitions that are neutral only with layout
+                commands instead.
+
+        Returns:
+            Whether the definition is neutral and the use has the braced arguments it reads,
+            so that it swallows no following token.
+        """
+        names = self.layout if layout else self.neutral
+        if command.name in {"begin", "end"} and command.arguments:
+            needed = names.get(f"begin{{{command.arguments[0].value.strip()}}}")
+            # \end reads no argument; \begin reads the environment's after its name.
+            arguments = len(command.arguments) - 1 if command.name == "begin" else needed
+            return needed is not None and arguments is not None and arguments >= needed
+        needed = names.get(command.name)
+        return needed is not None and len(command.arguments) >= needed
+
+
+def _uses(body: Sequence[Command]) -> set[str]:
+    """Return what a replacement text uses beyond ``NEUTRAL_COMMANDS`` and its environments."""
+    uses = set()
+    for command in body:
+        if command.name in {"begin", "end"} and command.arguments:
+            environment = command.arguments[0].value.strip()
+            if environment not in NEUTRAL_ENVIRONMENTS:
+                uses.add(f"begin{{{environment}}}")
+        elif command.name not in NEUTRAL_COMMANDS:
+            uses.add(command.name)
+    return uses
+
+
+def _resolved(needs: dict[str, set[str]], refused: set[str]) -> set[str]:
+    """Return the names whose uses all resolve to other resolved names, in dependency order.
+
+    Args:
+        needs: The defined names each definition uses, by defined name.
+        refused: The names that can never be resolved.
+
+    Returns:
+        The resolved names; a name in a cycle or depending on a refused one is not.
+    """
+    waiting = {name: set(uses) for name, uses in needs.items() if name not in refused}
+    users: dict[str, list[str]] = {}
+    for name, uses in waiting.items():
+        for used in uses:
+            users.setdefault(used, []).append(name)
+    ready = [name for name, uses in waiting.items() if not uses]
+    resolved: set[str] = set()
+    while ready:
+        name = ready.pop()
+        if name in resolved:
+            continue
+        resolved.add(name)
+        for user in users.get(name, ()):
+            remaining = waiting.get(user)
+            if remaining is not None:
+                remaining.discard(name)
+                if not remaining:
+                    ready.append(user)
+    return resolved
 
 
 def policy_finding(

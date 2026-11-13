@@ -481,6 +481,10 @@ def expand_document(
     )
 
 
+# The uncertainty of an environment region that runs to the end of the document.
+UNCLOSED_ENVIRONMENT = "environment has no closing delimiter"
+
+
 @dataclass
 class EnvironmentRegion:
     """The body of one literal environment, the commands in it, and why it may be unclear.
@@ -562,7 +566,7 @@ def environment_regions(
         elif stack:
             stack[-1].commands.append(command)
     for region in stack:
-        region.uncertainty.append("environment has no closing delimiter")
+        region.uncertainty.append(UNCLOSED_ENVIRONMENT)
         result.append(region)
     for region in result:
         if in_conditional(document.conditionals, region.command.start):

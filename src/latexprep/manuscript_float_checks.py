@@ -17,7 +17,12 @@ from dataclasses import dataclass, field
 from typing import NamedTuple
 
 from .cancellation import cancellation_point
-from .expanded_document import EnvironmentRegion, ExpandedDocument, Location
+from .expanded_document import (
+    EnvironmentRegion,
+    ExpandedDocument,
+    Location,
+    environment_regions,
+)
 from .finding_text import plural
 from .findings import Finding
 from .literal_text import (
@@ -32,9 +37,21 @@ from .literal_text import (
 )
 from .manuscript_check_options import ManuscriptCheckOptions
 from .manuscript_policy_kernel import CheckOutcome, Policy, Reading, policy_finding
-from .manuscript_vocabulary import FLOAT_ENVIRONMENTS
+from .manuscript_vocabulary import (
+    FLOAT_ENVIRONMENTS,
+    LIST_ENVIRONMENTS,
+    SUBFIGURE_COMMANDS,
+    SUBFIGURE_ENVIRONMENTS,
+)
+from .tex_commands import ALL_MATH_ENVIRONMENTS
 from .tex_lexer import Command
-from .tex_spans import command_end, in_closed_span, merge_spans
+from .tex_spans import (
+    command_end,
+    defined_names,
+    in_closed_span,
+    merge_spans,
+    runs_in_place,
+)
 from .uncertainty_reasons import grouped_reason
 
 
@@ -142,6 +159,12 @@ class _FloatScan:
         label_counts: How often each literal label occurs in the whole document.
         labels_seen: The float labels read so far.
         records: One record per float read, in order.
+        definitions: The definition spans of the document, inside which nothing runs.
+        defined: The commands and environments the document defines.
+        parts: The spans of every subfigure, whose captions and labels are the part's,
+            not the float's.
+        foreign: The spans of equations and lists, whose labels name an equation or an
+            item, never the float around them.
     """
 
     document: ExpandedDocument
@@ -153,6 +176,12 @@ class _FloatScan:
     label_counts: Counter[str] = field(default_factory=Counter)
     labels_seen: set[str] = field(default_factory=set)
     records: list[_FloatRecord] = field(default_factory=list)
+    definitions: list[tuple[int, int]] = field(default_factory=list)
+    defined: frozenset[str] = frozenset()
+    parts: list[tuple[int, int]] = field(default_factory=list)
+    foreign: list[tuple[int, int]] = field(default_factory=list)
+    _region_parts: list[tuple[int, int]] = field(default_factory=list)
+    _region_foreign: list[tuple[int, int]] = field(default_factory=list)
 
     def note(self, reasons: Iterable[str], *rules: _FloatRule) -> None:
         """Record interpretation gaps against each of the given rules.
@@ -166,6 +195,21 @@ class _FloatScan:
 
     def run(self) -> None:
         """Count the labels and first references, then read every float into a record."""
+        commands = self.document.commands
+        self.defined = frozenset(defined_names(commands))
+        subfigures, _ = environment_regions(self.document, SUBFIGURE_ENVIRONMENTS)
+        minipages, _ = environment_regions(self.document, {"minipage"})
+        equations, _ = environment_regions(self.document, ALL_MATH_ENVIRONMENTS | LIST_ENVIRONMENTS)
+        self.foreign = [(region.command.start, region.end) for region in equations]
+        self.parts = [
+            *((region.command.start, region.end) for region in subfigures),
+            *(
+                _subfigure_span(command)
+                for command in commands
+                if command.name in SUBFIGURE_COMMANDS
+            ),
+            *_subcaption_minipages(commands, minipages),
+        ]
         self.label_counts.update(
             command.arguments[0].value.strip()
             for command in self.document.commands
@@ -190,7 +234,7 @@ class _FloatScan:
             labels = reference_labels(command)
             if (
                 not labels
-                or command.depth
+                or not self._in_place(command)
                 or any(literal_list(item.value) is None for item in labels)
             ):
                 self.note(["grouped or nonliteral reference"], _REFERENCES, _REFERENCE_ORDER)
@@ -212,12 +256,31 @@ class _FloatScan:
         # label or description that appears to be missing.
         confirmed = not region.uncertainty
         kind = region.kind.rstrip("*")
-        captions = [command for command in region.commands if command.name == "caption"]
+        # A subfigure's caption and label are its own; a reference to it refers to the float.
+        # Only equations, lists and subfigures inside the float set their labels apart: a
+        # float inside a list is still the float.
+        self._region_parts = _within(self.parts, region)
+        self._region_foreign = _within(self.foreign, region)
+        own = [
+            command
+            for command in region.commands
+            if not _inside(self._region_parts, command.start)
+            and not _inside(self._region_foreign, command.start)
+        ]
+        if any(command.name == "subcaption" for command in own):
+            # A \subcaption outside a subfigure or minipage has no part to label.
+            self.note(["subcaption outside a subfigure"], _LABELS, _LABEL_ORDER, _REFERENCES)
+        captions = [command for command in own if command.name == "caption"]
         caption_data = self._read_captions(captions)
         first_caption_end = min((command_end(command) for command in captions), default=None)
-        labels, misplaced = self._read_labels(region, first_caption_end, confirmed=confirmed)
+        labels, misplaced = self._read_labels(region, own, first_caption_end, confirmed=confirmed)
+        referenced = [*labels, *self._part_labels(region)]
         first = min(
-            (self.first_references[label] for label in labels if label in self.first_references),
+            (
+                self.first_references[label]
+                for label in referenced
+                if label in self.first_references
+            ),
             default=None,
         )
         if first is None:
@@ -246,21 +309,31 @@ class _FloatScan:
         data = []
         for command in captions:
             value, unknown = plain_argument_text(command)
-            self.note(unknown, _CAPTIONS)
-            if command.depth:
+            # A caption with literal text is not empty, whatever its macros expand to.
+            if not value:
+                self.note(unknown, _CAPTIONS)
+            if not self._in_place(command):
                 self.note([grouped_reason("caption")], _CAPTIONS)
-            data.append(self.document.located(command.start, value=value))
+            # A caption whose text is only macros is unknown, not empty.
+            located = self.document.located(command.start, value=value)
+            data.append({**located, "unresolved": True} if unknown and not value else located)
         if len(captions) > 1:
             self.note(["multiple captions within one float"], _LABEL_ORDER)
         return data
 
     def _read_labels(
-        self, region: EnvironmentRegion, first_caption_end: int | None, *, confirmed: bool
+        self,
+        region: EnvironmentRegion,
+        own: list[Command],
+        first_caption_end: int | None,
+        *,
+        confirmed: bool,
     ) -> tuple[list[str], list[dict[str, object]]]:
         """Read the float's literal labels, and those placed before its first caption.
 
         Args:
             region: The float region.
+            own: The float's commands outside its subfigures.
             first_caption_end: The offset just past the first caption, or ``None`` when
                 the float has none.
             confirmed: Whether the region could be interpreted; only then are misplaced
@@ -273,13 +346,13 @@ class _FloatScan:
         kind = region.kind.rstrip("*")
         labels: list[str] = []
         misplaced: list[dict[str, object]] = []
-        for command in region.commands:
+        for command in own:
             if command.name != "label":
                 continue
             names = first_argument_names(command)
             if command.arguments and not command.arguments[0].value.strip():
                 continue
-            if names is None or len(names) != 1 or command.depth:
+            if names is None or len(names) != 1 or not self._in_place(command):
                 self.note(
                     ["grouped, empty or nonliteral float label"],
                     _LABELS,
@@ -300,6 +373,28 @@ class _FloatScan:
             if confirmed and (first_caption_end is None or first_caption_end > command.start):
                 misplaced.append(self.document.located(command.start, label=label, kind=kind))
         return labels, misplaced
+
+    def _in_place(self, command: Command) -> bool:
+        """Return whether a caption, label or reference runs where it stands."""
+        return runs_in_place(command, self.definitions, self.defined)
+
+    def _in_part(self, command: Command) -> bool:
+        """Return whether a command lies inside a subfigure of the float being read."""
+        return _inside(self._region_parts, command.start)
+
+    def _part_labels(self, region: EnvironmentRegion) -> list[str]:
+        """Return the literal labels of the float's subfigures, which refer to the float."""
+        labels = []
+        for command in region.commands:
+            if (
+                command.name == "label"
+                and self._in_part(command)
+                and not _inside(self._region_foreign, command.start)
+            ):
+                names = first_argument_names(command)
+                if names is not None and len(names) == 1:
+                    labels.append(names[0])
+        return labels
 
     def _described(self, region: EnvironmentRegion) -> bool:
         """Return whether a figure has a usable Description, or alt text for all its graphics."""
@@ -352,6 +447,52 @@ class _FloatScan:
         return bool(graphics)
 
 
+def _subfigure_span(command: Command) -> tuple[int, int]:
+    r"""Return the span of ``\subfloat[caption]{body}`` or ``\subcaptionbox{caption}{body}``.
+
+    It ends after the command's own arguments: a later brace group is text of the float.
+    """
+    count = 2 if command.name == "subcaptionbox" else 1
+    groups = [*command.options, *command.arguments[:count]]
+    return command.start, max((group.end + 1 for group in groups), default=command.name_end)
+
+
+def _subcaption_minipages(
+    commands: list[Command], minipages: list[EnvironmentRegion]
+) -> list[tuple[int, int]]:
+    r"""Return the minipages that hold a ``\subcaption``, the subfigures subcaption documents.
+
+    Args:
+        commands: The commands of the document.
+        minipages: The minipage regions of the document.
+
+    Returns:
+        The span of the innermost minipage around each ``\subcaption``.
+    """
+    spans = []
+    for command in commands:
+        if command.name != "subcaption":
+            continue
+        around = [
+            (region.command.start, region.end)
+            for region in minipages
+            if region.command.start < command.start < region.end
+        ]
+        if around:
+            spans.append(max(around))
+    return spans
+
+
+def _within(spans: list[tuple[int, int]], region: EnvironmentRegion) -> list[tuple[int, int]]:
+    """Return the spans that begin inside the float ``region``."""
+    return [span for span in spans if region.command.start < span[0] < region.end]
+
+
+def _inside(spans: list[tuple[int, int]], offset: int) -> bool:
+    """Return whether ``offset`` lies in one of a float's few ``spans``."""
+    return any(start <= offset < end for start, end in spans)
+
+
 def _float_violations(records: list[_FloatRecord]) -> dict[_FloatRule, list[dict[str, object]]]:
     """Collect the violations of every float rule from the records.
 
@@ -379,7 +520,7 @@ def _float_violations(records: list[_FloatRecord]) -> dict[_FloatRule, list[dict
         _CAPTIONS: [
             record.details()
             for record in confirmed
-            if not any(caption["value"] for caption in record.captions)
+            if not any(caption["value"] or caption.get("unresolved") for caption in record.captions)
         ],
         _LABELS: [record.details() for record in confirmed if not record.labels],
         _LABEL_ORDER: [label for record in records for label in record.misplaced_labels],
@@ -427,12 +568,13 @@ def float_checks(reading: Reading, options: ManuscriptCheckOptions) -> list[Find
     enabled = _enabled_rules(options)
     if not enabled:
         return []
-    floats, structure_reasons = reading.scoped_regions(FLOAT_ENVIRONMENTS)
+    # A layout-only macro cannot hide a caption, label or reference.
+    floats, structure_reasons = reading.scoped_regions(FLOAT_ENVIRONMENTS, layout_matters=False)
     # Unexpanded constructs outside every float cannot caption, label or hide one.
     reasons = [*reading.document.graph_uncertainty, *structure_reasons]
     for region in floats:
         reasons.extend(region.uncertainty)
-    scan = _FloatScan(reading.document, floats)
+    scan = _FloatScan(reading.document, floats, definitions=list(reading.definitions))
     scan.run()
     violations = _float_violations(scan.records)
     details = {

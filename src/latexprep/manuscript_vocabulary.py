@@ -213,6 +213,139 @@ _MATH_COMMANDS = {
     "[",
     "]",
 }
+# More mathematics: letters, relations, operators, arrows, delimiters, symbols, fonts,
+# named functions and layout inside formulas. None prints a caption, label or heading.
+_MORE_MATH_COMMANDS = set(
+    """
+    varepsilon zeta eta vartheta iota kappa nu xi varpi varrho varsigma upsilon varphi
+    chi psi Gamma Delta Theta Lambda Xi Pi Sigma Upsilon Phi Psi Omega
+    le ne neq ll gg approx sim simeq cong equiv propto prec succ preceq succeq subset
+    supset subseteq supseteq sqsubseteq ni notin mid parallel perp models vdash dashv
+    triangleq coloneqq eqqcolon doteq asymp
+    pm mp div ast star circ bullet cap cup wedge vee setminus oplus otimes odot bigcup
+    bigcap bigoplus bigotimes bigwedge bigvee coprod oint partial nabla
+    leftarrow rightarrow Leftarrow Rightarrow leftrightarrow Leftrightarrow
+    longleftarrow longrightarrow Longleftarrow Longrightarrow longleftrightarrow
+    Longleftrightarrow mapsto longmapsto uparrow downarrow Uparrow Downarrow updownarrow
+    hookrightarrow hookleftarrow leadsto implies impliedby iff gets nearrow searrow
+    langle rangle lceil rceil lfloor rfloor lvert rvert lVert rVert vert Vert big Big
+    bigg Bigg bigl bigr Bigl Bigr biggl biggr Biggl Biggr middle
+    infty emptyset varnothing forall exists nexists neg lnot top bot ell hbar Re Im
+    aleph prime dagger ddagger angle triangle square Box Diamond surd flat sharp natural
+    cdots vdots ddots dots colon
+    mathbb mathbf mathrm mathtt mathfrak mathscr mathnormal boldsymbol bm operatorname
+    max min sup inf lim liminf limsup log ln exp sin cos tan arg det dim ker Pr gcd deg
+    bmod pmod
+    binom tfrac dfrac cfrac nicefrac sfrac overset underset stackrel substack limits
+    nolimits textstyle scriptstyle mathop mathrel mathbin mathord underbrace overbrace
+    widehat widetilde tilde vec dot ddot acute grave breve check overrightarrow
+    """.split()
+)
+# Table formatting: booktabs, colortbl, array, makecell, multirow and siunitx. They
+# draw rules, colour cells and format numbers.
+_TABLE_FORMATTING_COMMANDS = set(
+    """
+    toprule midrule bottomrule cmidrule addlinespace specialrule morecmidrules
+    aboverulesep belowrulesep heavyrulewidth lightrulewidth cmidrulewidth rowcolor
+    cellcolor columncolor arrayrulecolor hline cline arraybackslash tabularnewline
+    extracolsep tabcolsep arraystretch extrarowheight makecell thead makegapedcells
+    shortstack RaggedRight RaggedLeft Centering
+    num SI si qty unit ang numrange SIrange qtyrange tablenum
+    """.split()
+)
+# Text from common packages: acronyms and glossary entries, quotations, symbols, line
+# breaking, colour definitions and counter values.
+_PACKAGE_TEXT_COMMANDS = set(
+    """
+    ac acs acl acf acp acsp aclp acfp acsu aclu Ac Acp Acl Acf Acs
+    gls Gls glspl Glspl GLS acrshort acrlong acrfull acrshortpl acrlongpl
+    enquote textquote checkmark textdagger textdaggerdbl textbullet textdegree
+    textregistered texttrademark textcopyright textsection textparagraph textellipsis
+    textendash textemdash textasciitilde textasciicircum textbackslash textbar textless
+    textgreater textunderscore S P dag ddag euro xspace texorpdfstring
+    nobreak allowbreak hyphenpenalty exhyphenpenalty scshape mdseries em
+    definecolor colorlet providecolor colorbox fcolorbox
+    arabic roman Roman alph Alph fnsymbol
+    """.split()
+)
+# Font switches that change no size, and characters and spaces.
+_PLAIN_TEXT_COMMANDS = {
+    "bfseries",
+    "itshape",
+    "ttfamily",
+    "sffamily",
+    "rmfamily",
+    "upshape",
+    "normalfont",
+    "relax",
+    "protect",
+    "ignorespaces",
+    "strut",
+    "ensuremath",
+    "centering",
+    "raggedright",
+    "raggedleft",
+    "noindent",
+    "hfill",
+    "newline",
+    "linebreak",
+    "%",
+    "&",
+    "#",
+    "_",
+    "{",
+    "}",
+    "\\",
+    ",",
+    ";",
+    "!",
+    " ",
+    ":",
+}
+# Commands that print text, mathematics or table formatting and nothing a policy reads:
+# no caption, label, reference, heading, citation, metadata, input or layout change. A
+# macro the project defines from these alone is interpreted too (``interpret``).
+NEUTRAL_COMMANDS = frozenset(
+    TEXT_WRAPPERS
+    | _MATH_COMMANDS
+    | _MORE_MATH_COMMANDS
+    | _TABLE_COMMANDS
+    | _TABLE_FORMATTING_COMMANDS
+    | _PACKAGE_TEXT_COMMANDS
+    | _PLAIN_TEXT_COMMANDS
+    | _COLOR_COMMANDS
+    | _RELATIVE_WIDTHS
+)
+# Lists, whose labels name an item, and threeparttable's table notes.
+LIST_ENVIRONMENTS = frozenset(
+    {"itemize", "enumerate", "description", "itemize*", "enumerate*", "description*", "tablenotes"}
+)
+# Subfigures (subfig's \subfloat, subcaption's \subcaptionbox and \subcaption): their
+# captions and labels belong to a part of the float (``manuscript_float_checks``).
+SUBFIGURE_COMMANDS = frozenset({"subfloat", "subcaptionbox"})
+SUBFIGURE_ENVIRONMENTS = frozenset({"subfigure", "subtable"})
+# Environments whose body is drawing or pseudo-code commands: TikZ, pgfplots, picture
+# and algorithms. Their commands draw or typeset steps; a caption, label or reference
+# inside is still read.
+DRAWING_ENVIRONMENTS = frozenset(
+    {
+        "tikzpicture",
+        "pgfpicture",
+        "scope",
+        "axis",
+        "semilogxaxis",
+        "semilogyaxis",
+        "loglogaxis",
+        "polaraxis",
+        "groupplot",
+        "picture",
+        "forest",
+        "circuitikz",
+        "algorithm",
+        "algorithm*",
+        "algorithmic",
+    }
+)
 # Every command these policies interpret; anything else in the document body is
 # an unexpanded construct that may hide or generate what a policy looks for.
 INTERPRETED_COMMANDS = (
@@ -235,8 +368,9 @@ INTERPRETED_COMMANDS = (
     | _TABLE_COMMANDS
     | _COLOR_COMMANDS
     | _RELATIVE_WIDTHS
-    | _MATH_COMMANDS
-    | {"captionsetup"}
+    | NEUTRAL_COMMANDS
+    | SUBFIGURE_COMMANDS
+    | {"captionsetup", "subcaption"}
 )
 # Every environment these policies interpret; any other environment in the body is an
 # unexpanded construct.
@@ -282,8 +416,72 @@ INTERPRETED_ENVIRONMENTS = {
     "Verbatim",
     "lstlisting",
     "minted",
+    "enumerate*",
+    "itemize*",
+    "description*",
+    "threeparttable",
+    "tablenotes",
+    *SUBFIGURE_ENVIRONMENTS,
+    *DRAWING_ENVIRONMENTS,
     # eqnarray is obsolete, but it only sets mathematics.
     *OBSOLETE_ENVIRONMENTS,
 }
+# Commands that change spacing, type size or page layout and print nothing a policy
+# other than the layout one reads; with ``NEUTRAL_COMMANDS``, the commands a macro may
+# use and still never hide a caption, label, reference or heading.
+LAYOUT_ONLY_COMMANDS = frozenset(
+    LAYOUT_COMMANDS
+    | LENGTH_COMMANDS
+    | DISPLAY_SKIP_LENGTHS
+    | FLOAT_FRACTIONS
+    | {
+        "fontsize",
+        "selectfont",
+        "setlength",
+        "addtolength",
+        "vspace",
+        "hspace",
+        "vskip",
+        "hskip",
+        "smallskip",
+        "medskip",
+        "bigskip",
+        "normalsize",
+        "large",
+        "Large",
+        "LARGE",
+        "huge",
+        "Huge",
+        "rule",
+    }
+)
+# Environments that lay out text, lists, tables and mathematics and nothing a policy
+# reads; a project environment or macro built from them alone is interpreted.
+NEUTRAL_ENVIRONMENTS = frozenset(
+    {
+        "center",
+        "flushleft",
+        "flushright",
+        "minipage",
+        "tabular",
+        "tabular*",
+        "tabularx",
+        "array",
+        "itemize",
+        "enumerate",
+        "description",
+        "itemize*",
+        "enumerate*",
+        "description*",
+        "quote",
+        "quotation",
+        "matrix",
+        "pmatrix",
+        "bmatrix",
+        "cases",
+        "aligned",
+        "split",
+    }
+)
 # Explicit counter modifications, which can renumber floats and sections.
 COUNTER_CHANGES = {"setcounter", "addtocounter", "refstepcounter", "stepcounter"}

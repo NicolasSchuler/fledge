@@ -84,10 +84,22 @@ The version is defined once, as `__version__` in `src/latexprep/__init__.py`.
 - **`fledge submission-text` gives ready fields for papers on venue classes.** A
   shipped `llncs.cls` or `IEEEtran.cls` made the abstract and keywords "locally
   defined", `\thanks{…}` stayed in the title (with the funding text), and any
-  conditional anywhere made every field unresolved. Class and package definitions no
-  longer count, `\thanks` and the LNCS `\keywords` inside an abstract are left out, a
+  conditional anywhere made every field unresolved. The document class's definitions no
+  longer count (an author's own `.sty` still does), `\thanks` and the LNCS `\keywords` inside an abstract are left out, a
   conditional whose branches give the same text is resolved, and `$20.5\%$` reads as
   20.5%. The command also accepts `-q`.
+- **The float checks read what real papers put inside floats (`MAN011`–`MAN015`).**
+  Mathematics (`\Delta`, `\langle`), table formatting (booktabs, colortbl, makecell,
+  siunitx), acronyms (`\ac`), TikZ and algorithm environments made every float
+  inconclusive, so `--preset anonymous-review` blocked six of eight trial papers. These
+  are now read as what they are. A macro or environment the project defines from such
+  commands alone, such as `\newcommand{\capslot}{$\langle$capability$\rangle$}`, is
+  read too; one that may hide a caption, label or reference still makes its float
+  inconclusive, and one that only changes layout stays visible to `MAN002`. Subfigures
+  (`\subfloat`, `\subcaptionbox`, the `subfigure` and `subtable` environments) have
+  their own captions and labels, and a reference to one counts as a reference to its
+  figure. A label inside an equation or a list is not the float's label, and a
+  reference inside `\textbf{…}` or a caption counts.
 
 ### Changed
 
