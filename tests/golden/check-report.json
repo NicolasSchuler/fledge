@@ -341,7 +341,9 @@
    "check_float_reference_order": false,
    "require_figure_descriptions": false,
    "require_line_numbers": false,
-   "forbid_line_numbers": false
+   "forbid_line_numbers": false,
+   "forbid_output_drivers": false,
+   "require_document_metadata": false
   },
   "online_checks": {
    "online": false,
@@ -722,6 +724,8 @@
      "MAN015",
      "MAN016",
      "MAN017",
+     "MAN018",
+     "MAN019",
      "MAN201",
      "NET001",
      "NET002",
@@ -819,6 +823,8 @@
      "manuscript_checks.require_figure_descriptions",
      "manuscript_checks.require_line_numbers",
      "manuscript_checks.forbid_line_numbers",
+     "manuscript_checks.forbid_output_drivers",
+     "manuscript_checks.require_document_metadata",
      "structure_checks.required_author_fields",
      "online_checks.online_doi_resolution",
      "online_checks.online_metadata",

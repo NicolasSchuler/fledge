@@ -21,6 +21,7 @@ from .literal_text import (
 )
 from .tex_commands import (
     MULTICITE_COMMANDS,
+    OBSOLETE_ENVIRONMENTS,
     PRINTED_CITATION_COMMANDS,
     with_capitalized_forms,
 )
@@ -57,7 +58,62 @@ LAYOUT_COMMANDS = {
     "restoregeometry",
     "fontsize",
     "baselinestretch",
+    # titlesec's heading spacing, which squeezes the space around headings.
+    "titlespacing",
 }
+# Packages whose only purpose is a smaller margin or tighter spacing; loading one is a
+# layout override candidate.
+LAYOUT_PACKAGES = frozenset({"fullpage", "savetrees"})
+# geometry keys that set the text area or the margins, rather than the paper alone.
+GEOMETRY_AREA_KEYS = frozenset(
+    {
+        "margin",
+        "hmargin",
+        "vmargin",
+        "left",
+        "right",
+        "top",
+        "bottom",
+        "inner",
+        "outer",
+        "lmargin",
+        "rmargin",
+        "tmargin",
+        "bmargin",
+        "textwidth",
+        "textheight",
+        "width",
+        "height",
+        "total",
+        "body",
+        "text",
+        "scale",
+        "hscale",
+        "vscale",
+    }
+)
+# caption keys whose small values squeeze captions: the space around them and their size.
+CAPTION_SKIP_KEYS = frozenset({"skip", "aboveskip", "belowskip"})
+CAPTION_FONT_KEYS = frozenset({"font", "labelfont", "textfont", "font+"})
+# Type sizes below the footnote size of the caption text are squeezing candidates.
+SMALL_TYPE_SIZES = frozenset({"tiny", "scriptsize", "footnotesize"})
+# titlesec package options that tighten the space around headings.
+COMPACT_HEADING_OPTIONS = frozenset({"compact"})
+# Display-math spacing; a zero or negative value squeezes the lines around equations.
+DISPLAY_SKIP_LENGTHS = frozenset(
+    {"abovedisplayskip", "belowdisplayskip", "abovedisplayshortskip", "belowdisplayshortskip"}
+)
+# Float placement parameters; redefining one lets floats fill more of a page.
+FLOAT_FRACTIONS = frozenset(
+    {
+        "topfraction",
+        "bottomfraction",
+        "textfraction",
+        "floatpagefraction",
+        "dbltopfraction",
+        "dblfloatpagefraction",
+    }
+)
 # Page-geometry lengths; setting one to a literal value is a layout override candidate.
 LENGTH_COMMANDS = {
     "textwidth",
@@ -150,6 +206,8 @@ _MATH_COMMANDS = {
     "overline",
     "hat",
     "bar",
+    # Plain TeX's fraction, obsolete in LaTeX but harmless to these policies.
+    "over",
     "(",
     ")",
     "[",
@@ -164,6 +222,8 @@ INTERPRETED_COMMANDS = (
     | ORCID_COMMANDS
     | LAYOUT_COMMANDS
     | LENGTH_COMMANDS
+    | DISPLAY_SKIP_LENGTHS
+    | FLOAT_FRACTIONS
     | PACKAGE_COMMANDS
     | TEXT_WRAPPERS
     # One canonical non-content inventory is shared with the literal text scan so
@@ -176,6 +236,7 @@ INTERPRETED_COMMANDS = (
     | _COLOR_COMMANDS
     | _RELATIVE_WIDTHS
     | _MATH_COMMANDS
+    | {"captionsetup"}
 )
 # Every environment these policies interpret; any other environment in the body is an
 # unexpanded construct.
@@ -221,6 +282,8 @@ INTERPRETED_ENVIRONMENTS = {
     "Verbatim",
     "lstlisting",
     "minted",
+    # eqnarray is obsolete, but it only sets mathematics.
+    *OBSOLETE_ENVIRONMENTS,
 }
 # Explicit counter modifications, which can renumber floats and sections.
 COUNTER_CHANGES = {"setcounter", "addtocounter", "refstepcounter", "stepcounter"}

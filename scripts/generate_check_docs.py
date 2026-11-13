@@ -4,9 +4,9 @@
 Run ``python scripts/generate_check_docs.py`` after changing a rule; use
 ``--check`` to fail when the documentation is out of date (used by the tests).
 
-Each code is placed in one of three tables, derived from the rules marked ``mandatory``
-(``latexprep.rules.MANDATORY_CODES``), ``check_policy.opt_in_activation()`` and the
-default ``Settings``:
+Each code is placed in one of four tables, derived from the rules marked ``mandatory``
+(``latexprep.rules.MANDATORY_CODES``) or ``suggestion``, ``check_policy.opt_in_activation()``
+and the default ``Settings``:
 
 - always enforced: rules marked ``mandatory``, which selection cannot remove;
 - on by default: checks that run without any configuration;
@@ -57,7 +57,7 @@ def classify(rule: Rule, defaults: Settings | None = None) -> tuple[str, str]:
     if rule.code in MANDATORY_CODES:
         return ALWAYS, ""
     if rule.suggestion:
-        return SUGGESTION, f"`--select {rule.code}`"
+        return SUGGESTION, f"`--select ALL --select {rule.code}`"
     entries = _activation().get(rule.code)
     if not entries:
         return DEFAULT, ""
@@ -106,10 +106,11 @@ SECTIONS = (
     (
         SUGGESTION,
         "Suggestions",
-        "These {count} checks give style advice. They run only when selected, by code, by "
-        "family or with `[checks] select`, are reported in a section of their own and never "
-        "change the outcome or the exit code. A `% fledge: ignore CODE` comment silences one "
-        "occurrence.",
+        "These {count} checks give style advice. They run only when selected beside `ALL`, by "
+        "code, family or prefix (for example `--select ALL --select STY`, or "
+        '`select = ["ALL", "STY"]` in `[checks]`), are reported in a section of their own and '
+        "never change the outcome or the exit code; a `% fledge: ignore CODE` comment silences "
+        "one occurrence.",
     ),
     (
         ALWAYS,

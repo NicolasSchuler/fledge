@@ -32,7 +32,12 @@ from .findings import Finding
 from .redaction import SECRET_PATTERNS, redact_secrets
 from .submission_options import SubmissionOptions
 from .submission_scan_findings import ScanLimits, ScanRule, scan_finding
-from .tex_commands import TEX_SOURCE_SUFFIXES
+from .tex_commands import (
+    MULTICITE_COMMANDS,
+    PRINTED_CITATION_COMMANDS,
+    TEX_SOURCE_SUFFIXES,
+    with_capitalized_forms,
+)
 from .tex_comments import tex_comments
 from .tex_lexer import blank_regions, source_regions
 
@@ -75,11 +80,27 @@ _TEXT_EXTENSIONS = {
 _TEX_EXTENSIONS = TEX_SOURCE_SUFFIXES | {".dtx"}
 # Example credentials shipped in templates and documentation; they are not secrets.
 _PLACEHOLDERS = {"your_api_key_here", "your_password_here", "example_password", "changemechangeme"}
+# Self-citation phrasing names the authors only beside a citation, so these phrases count
+# when a citation command follows or precedes them within one sentence of at most
+# ``_CITATION_WINDOW`` characters; on their own they are ordinary prose.
+_CITATION_WINDOW = 80
+_CITATION = (
+    r"\\(?:"
+    + "|".join(sorted(with_capitalized_forms(PRINTED_CITATION_COMMANDS | MULTICITE_COMMANDS)))
+    + r")(?![A-Za-z@])"
+)
+_SELF_CITATION = (
+    r"\bin our (?:earlier|previous|prior) (?:work|works|paper|papers|study|studies|article)\b"
+    r"|\bwe (?:previously|earlier) (?:showed|proposed|introduced|presented|demonstrated)\b"
+    r"|\bour prior work\b"
+)
 _HINT = re.compile(
     r"(?i)\\(?:acknowledg(?:e)?ments?|thanks)\b|"
     r"\\(?:section\*?|begin)\s*\{acknowledg(?:e)?ments?\}|"
     r"\b(?:at our (?:university|institution|laboratory)|in our previous work|"
-    r"our (?:institution|laboratory|university)|the authors are (?:at|from))\b"
+    r"our (?:institution|laboratory|university)|the authors are (?:at|from))\b|"
+    rf"(?:{_SELF_CITATION})[^.]{{0,{_CITATION_WINDOW}}}?{_CITATION}|"
+    rf"{_CITATION}[^.]{{0,{_CITATION_WINDOW}}}?(?:{_SELF_CITATION})"
 )
 # Unfinished-work markers and private-note or distribution-restriction phrases; review
 # correspondence is left to the default private-note advisory.

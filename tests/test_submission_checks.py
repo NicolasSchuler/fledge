@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import tempfile
+import time
 import unittest
 from dataclasses import asdict, fields
 from pathlib import Path
@@ -355,6 +356,47 @@ class SubmissionTests(ProjectTestCase):
         self.assertEqual(result.evidence_kind, "heuristic")
         self.assertEqual(result.severity, "warning")
         self.assertEqual(self.incomplete(rule, options).status, "inconclusive")
+
+    def test_self_citation_phrasing_counts_only_beside_a_citation(self) -> None:
+        rule = "submission.identity_hints"
+        options = SubmissionOptions(scan_identity_hints=True)
+        flagged = (
+            r"In our earlier paper \cite{key} we proved the bound.",
+            "As we previously showed in this setting\n\\citep{key}, it holds.",
+            r"Following \citet{key}, we earlier proposed a variant.",
+            r"Our prior work \parencite{key} is related.",
+        )
+        for text in flagged:
+            with self.subTest(text=text):
+                self.write("main.tex", text)
+                result = self.result(rule, options)
+                self.assertEqual((result.code, result.status), ("PRV003", "failed"))
+                self.assertEqual(result.details["matches"][0]["line"], 1)
+        ordinary = (
+            # The phrases without a citation in the sentence, and a citation far away.
+            r"We previously showed nothing. In our earlier work we used Python.",
+            "Our prior work hours were long. " + "x" * 120 + r" \cite{key}.",
+            r"The authors of \cite{key} previously showed a bound.",
+            r"% In our earlier paper \cite{key}",
+        )
+        for text in ordinary:
+            with self.subTest(text=text):
+                self.write("main.tex", text)
+                self.assertEqual(self.result(rule, options).status, "passed")
+
+    def test_self_citation_patterns_scan_hostile_text_in_linear_time(self) -> None:
+        options = SubmissionOptions(scan_identity_hints=True)
+        size = 200_000
+        for text in (
+            "in our earlier work " * (size // 20),
+            r"\cite{a} " * (size // 9),
+            "we previously showed " + "x" * size,
+        ):
+            with self.subTest(text=text[:20]):
+                self.write("main.tex", text)
+                started = time.perf_counter()
+                self.result("submission.identity_hints", options)
+                self.assertLess(time.perf_counter() - started, 2.0)
 
     def test_secrets_are_redacted(self) -> None:
         options = SubmissionOptions(scan_secrets=True, filename_max_length=8)

@@ -122,6 +122,7 @@ a network connection, and each imports only other modules of this layer. (81 mod
 | `workflow_rules` | Data-only catalogue for document packages and repeat builds |
 | `bibliography_preprints` | Whether a bibliography entry is a preprint, in the forms that common tools export |
 | `bibliography_venues` | Venue names of bibliography entries: how one is written, and the name it stands for |
+| `style_rules` | Data-only catalogue for the style suggestions of the `STY` family |
 
 ## Infrastructure adapters
 
@@ -249,6 +250,11 @@ an output format. (61 modules)
 | `submission_text` | Bounded, source-only submission fields; unresolved content remains visible |
 | `bibliography_suggestions` | Optional advice about the entries of the .bib files: preprints, repeated DOIs and venues |
 | `online_findings` | How the outcome of an online request reads in a report: findings, reasons and next steps |
+| `style_support` | The prose view of a document and the finding per occurrence that style suggestions share |
+| `style_obsolete` | Obsolete packages, output driver options, commands and environments (`STY101`, `STY102`) |
+| `style_references` | Unused labels, reference names printed twice and `\ref` to equations (`STY2xx`) |
+| `style_typography` | Typography suggestions over the prose of the document body (`STY301` to `STY307`) |
+| `style_suggestions` | Run the selected style suggestions; float placement, spelling variants, accessibility metadata |
 
 ## Orchestration
 

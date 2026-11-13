@@ -183,6 +183,8 @@ class CheckSelectionNoteTests(InputTestCase):
             (("inspect", str(self.project), "--select", "PDF001"), "fledge check"),
             (("inspect", str(self.project), "--select", "bld"), "fledge check"),
             (("bib", "check", str(self.project), "--select", "MAN"), "fledge inspect"),
+            (("bib", "check", str(self.project), "--select", "STY"), "fledge inspect"),
+            (("pdf", "check", str(self.project), "--select", "STY3"), "fledge inspect"),
         ):
             with self.subTest(words=words):
                 request, result = self.run_job_of(*words)
@@ -204,6 +206,7 @@ class CheckSelectionNoteTests(InputTestCase):
             (JobCommand.INSPECT, ("PDF313",)),
             (JobCommand.INSPECT, ("ALL",)),
             (JobCommand.INSPECT, ("TEX", "BIB1")),
+            (JobCommand.INSPECT, ("ALL", "STY")),
             (JobCommand.CHECK, ("PDF001",)),
             (JobCommand.PREPARE, ("FMT",)),
             (JobCommand.BIBLIOGRAPHY, ("BIB", "NET")),

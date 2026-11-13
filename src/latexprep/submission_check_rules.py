@@ -71,9 +71,15 @@ RULES = (
         title="Possible identifying language",
         description=(
             "Optionally flag acknowledgement declarations and literal "
-            "self-identifying phrases in active source as advisory hints."
+            "self-identifying phrases in active source as advisory hints. Self-citation "
+            "phrasing ('in our earlier work', 'we previously showed', 'our prior work') "
+            "counts only next to a citation command in the same sentence."
         ),
-        tests=("tests.test_submission_checks.SubmissionTests.test_identity_hints",),
+        tests=(
+            "tests.test_submission_checks.SubmissionTests.test_identity_hints",
+            "tests.test_submission_checks.SubmissionTests"
+            ".test_self_citation_phrasing_counts_only_beside_a_citation",
+        ),
         fix="Review these heuristic hints in context; do not rewrite self-citations blindly.",
         reviewable=True,
     ),

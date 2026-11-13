@@ -1,8 +1,9 @@
 """Terminal views of the check catalogue: the list of checks and the explanation of one.
 
 Shows what a researcher needs to choose or understand a check, including whether it runs
-by default, only once configured, or always. The tests that demonstrate a check are
-developer documentation and appear only in the JSON form.
+by default, only once configured, always, or only when selected as a suggestion. The
+tests that demonstrate a check are developer documentation and appear only in the JSON
+form.
 """
 
 from __future__ import annotations
@@ -32,8 +33,8 @@ _ACTIVATED_ELSEWHERE: dict[str, tuple[str | None, tuple[str, ...]]] = {
 }
 _ACTIVATION_HELP = (
     "default: runs without settings; opt-in: runs once configured (fledge rule CODE says "
-    "how); suggestion: style advice, only when selected, never changing the outcome; "
-    "always: a guard that ignoring its code does not switch off."
+    "how); suggestion: style advice that runs only when selected and never changes the "
+    "outcome; always: a guard that ignoring its code does not switch off."
 )
 
 
@@ -74,7 +75,7 @@ def rule_activation(rule: Rule, defaults: Settings) -> RuleActivation:
     if rule.code in MANDATORY_CODES:
         return RuleActivation(ALWAYS)
     if rule.suggestion:
-        return RuleActivation(SUGGESTION, (f"--select {rule.code}",))
+        return RuleActivation(SUGGESTION, (f"--select ALL --select {rule.code}",))
     entries = _activation_entries(rule.code)
     if not entries:
         return RuleActivation(DEFAULT)
@@ -134,8 +135,8 @@ def _activation_line(activation: RuleActivation) -> str:
         return "Runs: by default; [checks] ignore or --ignore turns it off."
     if activation.kind == SUGGESTION:
         return (
-            f"Runs: only when selected ({activation.enabled_by[0]}, its family, or [checks] "
-            "select); a suggestion never changes the outcome."
+            "Runs: only when selected by its code, family or prefix; to add it to the other "
+            f"checks, use {activation.enabled_by[0]}. A suggestion never changes the outcome."
         )
     return f"Runs: only once configured; set {' or '.join(activation.enabled_by)}."
 

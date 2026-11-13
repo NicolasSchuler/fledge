@@ -20,7 +20,7 @@ from .analysed_source import AnalysedSource, reuse_or_analyse
 from .comment_markers import MarkerCategory, marker_pattern
 from .file_safety import read_regular_file
 from .findings import EvidenceKind, Finding
-from .literal_text import REFERENCE_COMMANDS
+from .literal_text import REFERENCE_COMMANDS, reference_labels
 from .project_files import project_files
 from .source_file_commands import is_literal_text
 from .source_graph import SourceGraph
@@ -30,7 +30,6 @@ from .tex_lexer import (
     MAX_SOURCE_BYTES,
     ParseLimitExceeded,
     scan_source_commands,
-    split_argument_items,
 )
 
 # Active manuscript text is matched case-sensitively: lowercase "todo" or "xxx" can be
@@ -158,15 +157,16 @@ def _defined_labels(source: ParsedSource) -> list[tuple[str, int]]:
 
 
 def _referenced_labels(source: ParsedSource) -> list[tuple[str, int]]:
-    """List the literal labels a source refers to, with their lines."""
+    r"""List the literal labels a source refers to, with their lines.
+
+    cleveref and zref-clever lists name each label, and ``\crefrange`` its two ends.
+    """
     references = []
     for command in source.commands:
-        if command.name in REFERENCE_COMMANDS and command.arguments:
+        if command.name in REFERENCE_COMMANDS:
             references.extend(
                 (argument.value, command.line)
-                for argument in split_argument_items(
-                    command.arguments[0], comma_separated=command.name in {"cref", "Cref"}
-                )
+                for argument in reference_labels(command)
                 if is_literal_text(argument.value)
             )
     return references

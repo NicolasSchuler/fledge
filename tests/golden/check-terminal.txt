@@ -17,7 +17,7 @@ BLD105  Local TeX distribution release  [INFO / inconclusive]
   Next: Resolve the missing or ambiguous evidence described above, then repeat this check.
 
 Not checked (needs your settings): anonymity, page limit, ZIP size limit, forbidden packages, strict
-font embedding, image resolution, 93 other opt-in checks. Set them in fledge.toml (start with fledge
+font embedding, image resolution, 95 other opt-in checks. Set them in fledge.toml (start with fledge
 init --preset anonymous-review|arxiv|camera-ready); see
 https://nicolasschuler.github.io/fledge/configuration.html
 

@@ -36,6 +36,7 @@ from .runtime_rules import RULES as RUNTIME_RULES
 from .source_graph_rules import RULES as SOURCE_GRAPH_RULES
 from .source_transform_rules import RULES as SOURCE_TRANSFORM_RULES
 from .structure_rules import RULES as STRUCTURE_RULES
+from .style_rules import RULES as STYLE_RULES
 from .submission_check_rules import RULES as SUBMISSION_RULES
 from .submission_readiness_rules import RULES as SUBMISSION_READINESS_RULES
 from .workflow_rules import RULES as WORKFLOW_RULES
@@ -83,6 +84,7 @@ RULES = _catalogue(
     SOURCE_TRANSFORM_RULES,
     BIBLIOGRAPHY_TRANSFORM_RULES,
     PDF_ARTWORK_RULES,
+    STYLE_RULES,
 )
 BY_CODE = MappingProxyType({rule.code: rule for rule in RULES})
 BY_NAME = MappingProxyType({name: rule for rule in RULES for name in (rule.name, *rule.aliases)})

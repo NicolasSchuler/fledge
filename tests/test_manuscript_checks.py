@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 import unittest
 from dataclasses import FrozenInstanceError, replace
 from unittest.mock import patch
@@ -131,6 +132,58 @@ class ManuscriptDetailTests(ProjectTestCase):
         )
         self.assertEqual(forced.status, "failed")
 
+    def test_page_limit_squeezing_is_a_layout_override(self) -> None:
+        options = ManuscriptCheckOptions(check_layout_manipulation=True)
+        squeezes = (
+            r"\usepackage[margin=1.5cm]{geometry}",
+            r"\usepackage[a4paper, left=2cm]{geometry}",
+            r"\usepackage{fullpage}",
+            r"\usepackage[subtle]{savetrees}",
+            r"\usepackage[font=scriptsize]{caption}",
+            r"\usepackage[skip=0pt]{caption}",
+            r"\usepackage[compact]{titlesec}",
+            r"\captionsetup[figure]{belowskip=-4pt}",
+            r"\captionsetup{font={footnotesize,it}}",
+            r"\titlespacing*{\section}{0pt}{2pt}{1pt}",
+            r"\setlength{\abovedisplayskip}{0pt}",
+            r"\setlength\belowdisplayskip{-2pt plus 1pt}",
+            r"\addtolength{\abovedisplayshortskip}{-3pt}",
+            r"\belowdisplayskip=0pt",
+            r"\abovedisplayskip\z@",
+            r"\renewcommand{\topfraction}{0.99}",
+            r"\renewcommand\textfraction{0.01}",
+            r"\def\floatpagefraction{.95}",
+        )
+        for source in squeezes:
+            with self.subTest(source=source):
+                result = self.result(source + "\nText.", options, "layout_manipulation")
+                self.assertEqual(result.status, "failed", result.details)
+                self.assertEqual(result.line, 2)
+                self.assertEqual(result.severity, "warning")
+        ordinary = (
+            r"\usepackage[a4paper]{geometry}\usepackage[font=small,skip=10pt]{caption}"
+            r"\usepackage[explicit]{titlesec}\captionsetup{skip=6pt}"
+            r"\setlength{\abovedisplayskip}{6pt}\abovedisplayskip=3pt"
+            r"\renewcommand{\figurename}{Fig.}\newcommand{\topfractionnote}{x}"
+            "\n% \\usepackage{fullpage}\nText."
+        )
+        clean = self.result(ordinary, options, "layout_manipulation")
+        self.assertEqual(clean.status, "passed", clean.details)
+
+    def test_layout_values_are_read_in_linear_time(self) -> None:
+        options = ManuscriptCheckOptions(check_layout_manipulation=True)
+        size = 60_000
+        for source in (
+            "\\captionsetup{skip=" + " " * size + "-}",
+            "\\captionsetup{font={" + "small," * (size // 6) + "}}",
+            "\\setlength{\\abovedisplayskip}{" + "1" * size + "}",
+            "\\usepackage[" + "a," * (size // 2) + "]{geometry}",
+        ):
+            with self.subTest(source=source[:24]):
+                started = time.perf_counter()
+                self.result(source, options, "layout_manipulation")
+                self.assertLess(time.perf_counter() - started, 2.0)
+
     def test_abstract_citations(self) -> None:
         self.policy(
             "abstract_citations",
@@ -245,6 +298,24 @@ class ManuscriptDetailTests(ProjectTestCase):
         dynamic = self.result(r"\orcid{\id}", ManuscriptCheckOptions(check_orcid=True), "orcid")
         self.assertEqual(dynamic.status, "inconclusive")
 
+    def test_obsolete_constructs_leave_the_orcid_check_decided(self) -> None:
+        # The obsolete commands were unknown constructs, which made the ORCID check of a
+        # document without any ORCID a blocking "could not decide".
+        body = (
+            "\\begin{document}\n{\\bf Bold} {\\it it} {\\rm rm} {\\sf sf} {\\tt tt} {\\sc sc} "
+            "{\\sl sl}\n$$ E = mc^2 $$\n\\begin{eqnarray}a &=& {b \\over c}\\end{eqnarray}\n"
+            "\\centerline{Centred}\n\\end{document}"
+        )
+        result = self.result(body, ManuscriptCheckOptions(check_orcid=True), "orcid")
+        self.assertEqual((result.status, result.severity), ("passed", "info"), result.details)
+        self.assertEqual(result.details["uncertainty"], [])
+        unknown = self.result(
+            "\\begin{document}\\customorcidmacro\\end{document}",
+            ManuscriptCheckOptions(check_orcid=True),
+            "orcid",
+        )
+        self.assertEqual(unknown.status, "inconclusive")
+
     def test_required_declarations(self) -> None:
         options = ManuscriptCheckOptions(required_declarations=("Data Availability", "Funding"))
         self.policy(
@@ -329,6 +400,79 @@ class ManuscriptDetailTests(ProjectTestCase):
         )
         self.assertEqual(missing.status, "failed")
         self.assertIn("human review", str(missing.details["description_quality"]))
+
+    def test_figure_alt_text_and_artifacts_count_as_descriptions(self) -> None:
+        options = ManuscriptCheckOptions(require_figure_descriptions=True)
+        described = (
+            r"\begin{figure}\includegraphics[width=\linewidth,alt={A rising line, in blue}]{a}"
+            r"\includegraphics[artifact]{rule}\end{figure}"
+        )
+        result = self.result(described, options, "figure_descriptions")
+        self.assertEqual(result.status, "passed", result.details)
+        for figure in (
+            r"\begin{figure}\includegraphics[alt=A plot]{a}\includegraphics{b}\end{figure}",
+            r"\begin{figure}\includegraphics[alt={TODO}]{a}\end{figure}",
+            r"\begin{figure}\includegraphics[alt={}]{a}\end{figure}",
+        ):
+            with self.subTest(figure=figure):
+                missing = self.result(figure, options, "figure_descriptions")
+                self.assertEqual(missing.status, "failed", missing.details)
+
+    def test_output_drivers(self) -> None:
+        options = ManuscriptCheckOptions(forbid_output_drivers=True)
+        good = self.result(
+            r"\usepackage{graphicx}\usepackage[colorlinks]{hyperref}\usepackage[pdftex]{other}",
+            options,
+            "output_drivers",
+        )
+        self.assertEqual((good.status, good.severity), ("passed", "info"), good.details)
+        bad = self.result(
+            "\\usepackage[pdftex]{graphicx}\n\\usepackage{psfig}\n", options, "output_drivers"
+        )
+        self.assertEqual((bad.code, bad.status, bad.severity), ("MAN018", "failed", "warning"))
+        self.assertEqual(bad.evidence_kind, "derived")
+        self.assertEqual(
+            [match["fixed"] for match in bad.details["matches"]],
+            [["option pdftex"], ["package psfig"]],
+        )
+        self.write("main.tex", "\\documentclass[dvips,a4paper]{article}\nText.")
+        classes = check_manuscript_policies(self.root, "main.tex", options)
+        self.assertEqual(classes[0].details["matches"][0]["fixed"], ["class option dvips"])
+        unclear = self.result(
+            "\\iftrue\n\\usepackage[pdftex]{graphicx}\n\\fi", options, "output_drivers"
+        )
+        self.assertEqual((unclear.status, unclear.severity), ("inconclusive", "info"))
+
+    def test_document_metadata(self) -> None:
+        options = ManuscriptCheckOptions(require_document_metadata=True)
+        cases = (
+            ("\\DocumentMetadata{lang=en, pdfstandard=ua-2, tagging=on}\n", "passed", []),
+            ("\\DocumentMetadata{lang=en,\n  pdfstandard={UA-2}}\n", "passed", []),
+            ("", "failed", ["\\DocumentMetadata declaration"]),
+            ("\\DocumentMetadata{tagging=on}\n", "failed", ["lang key"]),
+            (
+                "\\DocumentMetadata{lang=en, pdfstandard=a-4f}\n",
+                "failed",
+                ["tagging=on or a PDF/UA pdfstandard"],
+            ),
+            ("\\DocumentMetadata{lang=\\mylang, tagging=on}\n", "inconclusive", []),
+            ("\\iftrue\\fi\n", "inconclusive", []),
+        )
+        for preamble, status, missing in cases:
+            with self.subTest(preamble=preamble):
+                self.write("main.tex", preamble + "\\documentclass{article}\nText.")
+                [result] = check_manuscript_policies(self.root, "main.tex", options)
+                self.assertEqual(result.rule, "manuscript.document_metadata")
+                self.assertEqual(result.status, status, result.details)
+                self.assertEqual(
+                    result.severity, {"passed": "info", "failed": "warning"}.get(status, "info")
+                )
+                if missing:
+                    self.assertEqual(result.details["matches"][0]["missing"], missing)
+        # A declaration after the class is too late for LaTeX.
+        self.write("main.tex", "\\documentclass{article}\n\\DocumentMetadata{lang=en,tagging=on}")
+        [late] = check_manuscript_policies(self.root, "main.tex", options)
+        self.assertEqual(late.status, "failed")
 
     def test_float_spanning_literal_include_boundaries(self) -> None:
         self.write("start.tex", "\\begin{figure}\n\\caption{Results}\n")

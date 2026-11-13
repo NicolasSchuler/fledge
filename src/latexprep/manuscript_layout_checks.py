@@ -2,25 +2,50 @@
 
 Both policies read how the document sets up its page: spacing, page breaks, type size
 and geometry overrides that a venue may forbid, and the ``lineno`` activation that
-review copies need and final versions must not have. Layout candidates are advisory
-and never infer intent; line numbering recognizes only literal ``lineno`` activation,
-not class-specific review modes.
+review copies need and final versions must not have. Layout candidates include the
+usual ways of squeezing a paper under a page limit: smaller margins through geometry
+options or the fullpage and savetrees packages, small caption skips and fonts, compact
+headings, zero display skips and float fractions that let floats fill a page. They are
+advisory and never infer intent; line numbering recognizes only literal ``lineno``
+activation, not class-specific review modes.
 """
 
 from __future__ import annotations
 
 import re
+from collections.abc import Callable, Iterable
 
 from .cancellation import cancellation_point
 from .expanded_document import ExpandedDocument
 from .finding_text import list_locations, plural
 from .finding_weight import ADVISORY
 from .findings import Finding
-from .literal_text import PACKAGE_COMMANDS, first_argument_names, literal_list
+from .literal_text import PACKAGE_COMMANDS, first_argument_names, key_value_items, literal_list
 from .manuscript_check_options import ManuscriptCheckOptions
 from .manuscript_policy_kernel import CheckOutcome, Policy, Reading, policy_finding
-from .manuscript_vocabulary import FLOAT_ENVIRONMENTS, LAYOUT_COMMANDS, LENGTH_COMMANDS
-from .tex_lexer import Command, command_end, definition_spans, in_conditional, in_half_open_span
+from .manuscript_vocabulary import (
+    CAPTION_FONT_KEYS,
+    CAPTION_SKIP_KEYS,
+    COMPACT_HEADING_OPTIONS,
+    DISPLAY_SKIP_LENGTHS,
+    FLOAT_ENVIRONMENTS,
+    FLOAT_FRACTIONS,
+    GEOMETRY_AREA_KEYS,
+    LAYOUT_COMMANDS,
+    LAYOUT_PACKAGES,
+    LENGTH_COMMANDS,
+    SMALL_TYPE_SIZES,
+)
+from .tex_commands import PRIMITIVE_DEFINITION_COMMANDS
+from .tex_lexer import (
+    CONTROL_SEQUENCE,
+    Command,
+    command_end,
+    definition_spans,
+    in_conditional,
+    in_half_open_span,
+    skip_space,
+)
 
 _LAYOUT = Policy("manuscript.layout_manipulation", "Checked layout override candidates.", ADVISORY)
 _LINE_NUMBER_RULE = "manuscript.line_numbers"
@@ -30,13 +55,245 @@ _LINE_NUMBER_OPTIONS = {"lineno", "linenumbers"}
 _VALUE_LOOKAHEAD_CHARS = 80
 # Source characters of a layout command quoted in the details.
 _SNIPPET_CHARS = 160
+# A caption skip below this many points squeezes the caption against its float; the
+# caption package's default is 10pt.
+_SMALL_SKIP_POINTS = 3.0
+# TeX units in points; em and ex assume a 10pt font, the size of ordinary body text.
+_POINTS_PER_UNIT = {
+    "pt": 1.0,
+    "bp": 72.27 / 72,
+    "mm": 72.27 / 25.4,
+    "cm": 72.27 / 2.54,
+    "in": 72.27,
+    "pc": 12.0,
+    "dd": 1238 / 1157,
+    "cc": 12 * 1238 / 1157,
+    "sp": 1 / 65536,
+    "em": 10.0,
+    "ex": 4.3,
+}
+# A signed decimal number at the start of a TeX length, with its unit when there is one.
+_LEADING_LENGTH = re.compile(r"\s*([-+]?)\s*(\d+(?:\.\d*)?|\.\d+)?\s*([a-z]{2})?")
+# TeX's internal names for a zero length, at the start of a value.
+_ZERO_LENGTH = re.compile(r"\s*\\z@(?:skip)?(?![A-Za-z@])")
+# The optional equals sign of a direct length assignment such as ``\textwidth=5in``.
+_ASSIGNMENT = re.compile(r"\s*(?:=\s*)?")
+# Commands that redefine a macro, whose name follows them braced or bare.
+_REDEFINITIONS = frozenset({"renewcommand", *PRIMITIVE_DEFINITION_COMMANDS})
+
+
+def _leading_points(value: str) -> tuple[bool, float | None]:
+    r"""Read the sign and size of the length a TeX value starts with.
+
+    Args:
+        value: The value as written, such as ``-2pt``, ``0pt plus 1pt`` or ``\z@``.
+
+    Returns:
+        Whether the value is negative, and its natural size in points: zero for TeX's zero
+        lengths, ``None`` when it starts with no number or with an unknown unit.
+    """
+    if _ZERO_LENGTH.match(value):
+        return False, 0.0
+    match = _LEADING_LENGTH.match(value)
+    negative = bool(match and match.group(1) == "-")
+    if match is None or match.group(2) is None:
+        return negative, None
+    number = float(match.group(2))
+    if number == 0:
+        return negative, 0.0
+    unit = _POINTS_PER_UNIT.get(match.group(3) or "")
+    return negative, number * unit if unit is not None else None
+
+
+def _zero_or_negative(value: str) -> bool:
+    """Return whether a TeX length value is zero or negative."""
+    negative, points = _leading_points(value)
+    return negative or points == 0
+
+
+def _small_length(value: str) -> bool:
+    """Return whether a TeX length value is negative or below ``_SMALL_SKIP_POINTS``."""
+    negative, points = _leading_points(value)
+    return negative or (points is not None and points < _SMALL_SKIP_POINTS)
+
+
+def _small_type_size(value: str) -> bool:
+    """Return whether a caption font value names the footnote size or a smaller one."""
+    return any(word in SMALL_TYPE_SIZES for word in re.split(r"[\s,{}]+", value))
+
+
+def _squeezes_captions(items: Iterable[tuple[str, str | None]]) -> bool:
+    r"""Return whether caption keys set a small skip or a small font.
+
+    Args:
+        items: The ``key=value`` items of a caption package option list or of
+            ``\captionsetup``.
+
+    Returns:
+        ``True`` for a skip key with a small value or a font key with a small type size.
+    """
+    return any(
+        value is not None
+        and (
+            (key in CAPTION_SKIP_KEYS and _small_length(value))
+            or (key in CAPTION_FONT_KEYS and _small_type_size(value))
+        )
+        for key, value in items
+    )
+
+
+def _negative_spacing(document: ExpandedDocument, command: Command) -> bool:
+    """Return whether a spacing command moves backwards; an unbraced value is read too.
+
+    Args:
+        document: The expanded document, read after the command for an unbraced value.
+        command: The spacing command.
+
+    Returns:
+        ``True`` when its value starts with a minus sign.
+    """
+    value = (
+        command.arguments[0].value
+        if command.arguments
+        else document.text[command.name_end :][:_VALUE_LOOKAHEAD_CHARS]
+    )
+    return bool(re.match(r"\s*-", value))
+
+
+def _sets_layout_length(name: str, value: str, *, added: bool = False) -> bool:
+    """Return whether giving the length ``name`` the value ``value`` overrides the layout.
+
+    Args:
+        name: The length, without its backslash.
+        value: The value, or the amount added to the length.
+        added: Whether ``value`` is added to the length instead of replacing it.
+
+    Returns:
+        ``True`` for any value of a page-geometry length, and for a display skip set to
+        zero or less, or reduced.
+    """
+    if name in LENGTH_COMMANDS:
+        return True
+    if name not in DISPLAY_SKIP_LENGTHS:
+        return False
+    return _leading_points(value)[0] if added else _zero_or_negative(value)
+
+
+def _length_setting(_document: ExpandedDocument, command: Command) -> bool:
+    r"""Return whether ``\setlength`` or ``\addtolength`` with a braced length overrides the layout.
+
+    Args:
+        _document: The expanded document, unused.
+        command: The ``\setlength`` or ``\addtolength`` command.
+
+    Returns:
+        ``True`` as :func:`_sets_layout_length` decides it.
+    """
+    if not command.arguments:
+        return False
+    target = command.arguments[0].value.strip().lstrip("\\")
+    value = command.arguments[1].value if len(command.arguments) > 1 else ""
+    return _sets_layout_length(target, value, added=command.name == "addtolength")
+
+
+def _length_assignment(document: ExpandedDocument, command: Command) -> bool:
+    r"""Return whether a length command is given a value: ``\textwidth=5in``.
+
+    A braced group right after the length is its value, as in ``\setlength\textwidth{5in}``;
+    otherwise the source after the command is read. A page-geometry length counts with a
+    numeric value, a display skip only with zero or less.
+
+    Args:
+        document: The expanded document, read after the command for an unbraced value.
+        command: A page-geometry length or a display skip.
+
+    Returns:
+        ``True`` for a layout length override.
+    """
+    if command.arguments:
+        return _sets_layout_length(command.name, command.arguments[0].value)
+    following = document.text[command_end(command) :][:_VALUE_LOOKAHEAD_CHARS]
+    assignment = _ASSIGNMENT.match(following)
+    value = following[assignment.end() :] if assignment else following
+    if command.name in LENGTH_COMMANDS:
+        return bool(re.match(r"[-+]?\d", value))
+    return _zero_or_negative(value)
+
+
+def _forced_float(_document: ExpandedDocument, command: Command) -> bool:
+    r"""Return whether ``\begin`` opens a float placed with ``H`` or ``!``."""
+    return bool(command.arguments) and (
+        command.arguments[0].value in FLOAT_ENVIRONMENTS
+        and any("H" in argument.value or "!" in argument.value for argument in command.options)
+    )
+
+
+def _squeezing_package(_document: ExpandedDocument, command: Command) -> bool:
+    """Return whether a package declaration shrinks margins, captions or heading space.
+
+    Args:
+        _document: The expanded document, unused.
+        command: A package declaration.
+
+    Returns:
+        ``True`` for fullpage or savetrees, geometry with margin or text-area options,
+        caption with a small skip or font, and titlesec with ``compact``.
+    """
+    names = set(first_argument_names(command) or ())
+    items = [item for option in command.options for item in key_value_items(option.value)]
+    keys = {key for key, _ in items}
+    return bool(
+        names & LAYOUT_PACKAGES
+        or ("geometry" in names and keys & GEOMETRY_AREA_KEYS)
+        or ("caption" in names and _squeezes_captions(items))
+        or ("titlesec" in names and keys & COMPACT_HEADING_OPTIONS)
+    )
+
+
+def _squeezing_caption_setup(_document: ExpandedDocument, command: Command) -> bool:
+    r"""Return whether ``\captionsetup`` sets a small caption skip or font."""
+    return bool(command.arguments) and _squeezes_captions(
+        key_value_items(command.arguments[0].value)
+    )
+
+
+def _float_fraction_definition(document: ExpandedDocument, command: Command) -> bool:
+    r"""Return whether a redefinition changes a float placement parameter such as ``\topfraction``.
+
+    Args:
+        document: The expanded document, read after the command for a bare macro name.
+        command: A redefinition command.
+
+    Returns:
+        ``True`` when the redefined macro, braced or bare, is in ``FLOAT_FRACTIONS``.
+    """
+    if command.arguments:
+        defined = command.arguments[0].value.strip().lstrip("\\")
+    else:
+        token = CONTROL_SEQUENCE.match(document.text, skip_space(document.text, command.name_end))
+        defined = token.group(1) if token else ""
+    return defined in FLOAT_FRACTIONS
+
+
+# How each command that may be a candidate is judged; any other command is one when it is
+# a length given a value or a command in ``LAYOUT_COMMANDS``.
+_OVERRIDE_TESTS: dict[str, Callable[[ExpandedDocument, Command], bool]] = {
+    **dict.fromkeys(("hspace", "vspace", "hskip", "vskip", "kern"), _negative_spacing),
+    **dict.fromkeys(("setlength", "addtolength"), _length_setting),
+    **dict.fromkeys(PACKAGE_COMMANDS, _squeezing_package),
+    **dict.fromkeys(_REDEFINITIONS, _float_fraction_definition),
+    "begin": _forced_float,
+    "captionsetup": _squeezing_caption_setup,
+}
 
 
 def _is_layout_override(document: ExpandedDocument, command: Command) -> bool:
     """Return whether a command is a layout override candidate.
 
-    Candidates are negative spacing, a change or assignment of a layout length, a float
-    placed with ``H`` or ``!``, and every command in ``LAYOUT_COMMANDS``.
+    Candidates are negative spacing, a change or assignment of a layout length, a zero
+    or negative display skip, a float placed with ``H`` or ``!``, a package or caption
+    setting that squeezes margins, captions or headings, a redefined float fraction, and
+    every command in ``LAYOUT_COMMANDS``.
 
     Args:
         document: The expanded document, read after the command for an unbraced value.
@@ -45,25 +302,12 @@ def _is_layout_override(document: ExpandedDocument, command: Command) -> bool:
     Returns:
         ``True`` when the command overrides spacing, page breaks, type size or geometry.
     """
-    match command.name:
-        case "hspace" | "vspace" | "hskip" | "vskip" | "kern":
-            value = (
-                command.arguments[0].value
-                if command.arguments
-                else document.text[command.name_end :][:_VALUE_LOOKAHEAD_CHARS]
-            )
-            return bool(re.match(r"\s*-", value))
-        case "setlength" | "addtolength" if command.arguments:
-            return command.arguments[0].value.strip().lstrip("\\") in LENGTH_COMMANDS
-        case name if name in LENGTH_COMMANDS:
-            following = document.text[command_end(command) :][:_VALUE_LOOKAHEAD_CHARS]
-            return bool(re.match(r"\s*(?:=\s*)?[-+]?\d", following))
-        case "begin" if command.arguments:
-            return command.arguments[0].value in FLOAT_ENVIRONMENTS and any(
-                "H" in argument.value or "!" in argument.value for argument in command.options
-            )
-        case name:
-            return name in LAYOUT_COMMANDS
+    test = _OVERRIDE_TESTS.get(command.name)
+    if test is not None:
+        return test(document, command)
+    if command.name in LENGTH_COMMANDS or command.name in DISPLAY_SKIP_LENGTHS:
+        return _length_assignment(document, command)
+    return command.name in LAYOUT_COMMANDS
 
 
 def _layout_overrides(document: ExpandedDocument) -> list[dict[str, object]]:

@@ -13,7 +13,7 @@ from click.testing import CliRunner
 from latexprep.cli import USAGE_EXIT_CODE, cli
 from latexprep.cli_completion import complete_check_codes, complete_check_selectors
 from latexprep.config import Settings
-from latexprep.rule_catalogue_view import ALWAYS, DEFAULT, OPT_IN, rule_activation
+from latexprep.rule_catalogue_view import ALWAYS, DEFAULT, OPT_IN, SUGGESTION, rule_activation
 from latexprep.rules import RULES, get_rule
 from tests import SOURCE_ROOT
 
@@ -97,6 +97,22 @@ class RuleExplanationTests(unittest.TestCase):
                 self.assertIn(expected, result.stdout)
         payload = json.loads(CliRunner().invoke(cli, ["rule", "PDF001", "--json"]).stdout)
         self.assertEqual(payload["activation"], OPT_IN)
+
+    def test_suggestions_are_marked_and_say_how_to_select_them(self) -> None:
+        listed = {
+            rule["code"]: rule
+            for rule in json.loads(CliRunner().invoke(cli, ["rules", "--json"]).stdout)["rules"]
+        }
+        for code in ("STY101", "STY301", "BLD013"):
+            with self.subTest(code=code):
+                self.assertEqual(listed[code]["activation"], SUGGESTION)
+                self.assertTrue(listed[code]["suggestion"])
+                self.assertEqual(listed[code]["enabled_by"], [f"--select ALL --select {code}"])
+        result = CliRunner().invoke(cli, ["rule", "STY301"], terminal_width=200)
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Runs: only when selected", result.stdout)
+        self.assertIn("--select ALL --select STY301", result.stdout)
+        self.assertIn("Reference: https://ctan.org/pkg/lshort-english", result.stdout)
 
     def test_a_mistyped_code_suggests_the_closest_codes(self) -> None:
         result = CliRunner().invoke(cli, ["rule", "TEX01"])

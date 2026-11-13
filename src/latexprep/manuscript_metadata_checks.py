@@ -1,11 +1,13 @@
-"""Required literal metadata and ORCID identifiers (``MAN008``, ``MAN009``), and the reader.
+r"""Metadata, ORCID identifiers and accessibility metadata (``MAN008``, ``MAN009``, ``MAN019``).
 
 Title, author, affiliation, email and corresponding-author declarations are read from
 the expanded document. ``read_literal_metadata`` is also the source of the values the
 PDF metadata check compares with: it returns only declarations that are unique, literal
 and not placeholders, with the reasons the rest stay unresolved. The policies claim
 presence only, never per-author completeness or identity; an ORCID checksum shows that
-an identifier is well formed, not that it belongs to the author.
+an identifier is well formed, not that it belongs to the author. ``accessibility_metadata``
+reads the ``\DocumentMetadata`` declaration that asks LaTeX for a tagged PDF with a
+document language; it is not a test of the PDF's accessibility.
 """
 
 from __future__ import annotations
@@ -17,8 +19,9 @@ from pathlib import Path
 from .analysed_source import AnalysedSource, reuse_or_analyse
 from .expanded_document import ExpandedDocument
 from .finding_text import plural
-from .findings import Finding
-from .literal_text import is_placeholder_text, plain_argument_text
+from .finding_weight import Weight
+from .findings import EvidenceKind, Finding
+from .literal_text import is_placeholder_text, key_value_items, plain_argument_text
 from .manuscript_check_options import ManuscriptCheckOptions
 from .manuscript_policy_kernel import CheckOutcome, Policy, Reading, listing, policy_finding
 from .manuscript_vocabulary import METADATA_COMMANDS, ORCID_COMMANDS
@@ -29,6 +32,16 @@ _REQUIRED_METADATA = Policy(
     "manuscript.required_metadata", "Checked configured literal metadata presence."
 )
 _ORCID = Policy("manuscript.orcid", "Checked literal ORCID syntax and checksums.")
+# Missing accessibility metadata warns; a declaration that could not be read only informs.
+_DOCUMENT_METADATA = Policy(
+    "manuscript.document_metadata",
+    "The document asks for a tagged PDF with a document language.",
+    Weight("warning", "info", EvidenceKind.DERIVED),
+)
+# What a \DocumentMetadata declaration needs for an accessible PDF, as reported.
+DOCUMENT_METADATA_COMMAND = "\\DocumentMetadata declaration"
+LANGUAGE_KEY = "lang key"
+TAGGING_KEY = "tagging=on or a PDF/UA pdfstandard"
 _ORCID_IDENTIFIER = re.compile(r"\d{4}-\d{4}-\d{4}-\d{3}[\dX]", re.ASCII)
 _ORCID_URL_PREFIX = re.compile(r"^https://orcid\.org/")
 # An ORCID has 15 digits followed by one check character (ISO 7064 MOD 11-2).
@@ -266,3 +279,118 @@ def metadata_checks(reading: Reading, options: ManuscriptCheckOptions) -> list[F
     if options.check_orcid:
         results.append(_orcid_finding(reading))
     return results
+
+
+@dataclass(frozen=True, slots=True)
+class AccessibilityMetadata:
+    r"""What the ``\DocumentMetadata`` declaration says about a tagged, language-tagged PDF.
+
+    Attributes:
+        location: The path and line of the declaration, or of the main file without a line
+            when there is none.
+        missing: What is missing, in the order ``DOCUMENT_METADATA_COMMAND``,
+            ``LANGUAGE_KEY``, ``TAGGING_KEY``; empty when nothing is.
+        uncertainty: Why the declaration could not be read; when there is any, ``missing``
+            is empty.
+        offset: Where the declaration is in the expanded text, or else the class
+            declaration before which it belongs; ``None`` without either.
+    """
+
+    location: dict[str, object]
+    missing: list[str]
+    uncertainty: list[str]
+    offset: int | None = None
+
+
+def _asks_for_tagging(items: list[tuple[str, str | None]]) -> bool:
+    """Return whether ``key=value`` items switch tagging on or name a PDF/UA standard."""
+    for key, value in items:
+        words = (value or "").casefold().replace(" ", "")
+        if key == "tagging" and words == "on":
+            return True
+        if key == "pdfstandard" and any(item.startswith("ua") for item in words.split(",")):
+            return True
+    return False
+
+
+def accessibility_metadata(document: ExpandedDocument) -> AccessibilityMetadata:
+    r"""Read the ``\DocumentMetadata`` declaration before ``\documentclass``.
+
+    LaTeX reads the declaration only before the class. It asks for a tagged PDF with
+    ``tagging=on`` or a PDF/UA ``pdfstandard``, and ``lang`` names the document language.
+    A declaration inside a group or conditional, one with a nonliteral argument, a
+    conditional before the class, and a document without a literal class declaration
+    leave the result unclear.
+
+    Args:
+        document: The expanded document.
+
+    Returns:
+        What the declaration lacks, or why it could not be read.
+    """
+    main = {"path": document.graph.main, "line": None}
+    class_offset = next(
+        (command.start for command in document.commands if command.name == "documentclass"),
+        None,
+    )
+    if class_offset is None:
+        # Without the class declaration the preamble cannot be told from the body.
+        return AccessibilityMetadata(
+            main, [], document.graph_uncertainty or ["no literal \\documentclass declaration"]
+        )
+    declaration = next(
+        (
+            command
+            for command in document.commands
+            if command.name == "DocumentMetadata" and command.start < class_offset
+        ),
+        None,
+    )
+    reasons: list[str] = []
+    if declaration is None:
+        if any(start < class_offset for start, _ in document.conditionals):
+            reasons.append(f"{CONDITIONAL_FLOW} before \\documentclass")
+        missing = [] if reasons else [DOCUMENT_METADATA_COMMAND]
+        return AccessibilityMetadata(main, missing, reasons, class_offset)
+    location = document.located(declaration.start)
+    reasons.extend(context_reasons(declaration, document.conditionals, "DocumentMetadata"))
+    value = declaration.arguments[0].value if declaration.arguments else ""
+    if "\\" in value or not declaration.arguments:
+        reasons.append("DocumentMetadata is not a literal argument")
+    if reasons:
+        return AccessibilityMetadata(location, [], reasons, declaration.start)
+    items = key_value_items(value)
+    missing = [
+        *([] if any(key == "lang" and item for key, item in items) else [LANGUAGE_KEY]),
+        *([] if _asks_for_tagging(items) else [TAGGING_KEY]),
+    ]
+    return AccessibilityMetadata(location, missing, [], declaration.start)
+
+
+def document_metadata_checks(reading: Reading, options: ManuscriptCheckOptions) -> list[Finding]:
+    r"""Require a ``\DocumentMetadata`` declaration for a tagged PDF with a language.
+
+    Args:
+        reading: The expanded document.
+        options: ``require_document_metadata`` switches the policy on.
+
+    Returns:
+        One ``manuscript.document_metadata`` finding, or an empty list when the policy is
+        off.
+    """
+    if not options.require_document_metadata:
+        return []
+    metadata = accessibility_metadata(reading.document)
+    violations = [{**metadata.location, "missing": metadata.missing}] if metadata.missing else []
+    return [
+        policy_finding(
+            _DOCUMENT_METADATA,
+            CheckOutcome(violations, metadata.uncertainty),
+            failure="The document does not ask for a tagged PDF with a language",
+            named=listing("Missing", metadata.missing),
+            details={
+                "scope": "The literal \\DocumentMetadata declaration before \\documentclass; "
+                "the PDF's tagging and accessibility are not established.",
+            },
+        )
+    ]

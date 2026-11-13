@@ -1,9 +1,12 @@
-"""The direct package inventory and the allowlist policy (``MAN001``).
+"""The direct package inventory, the allowlist (``MAN001``) and fixed output drivers (``MAN018``).
 
 Package declarations are read from every selected local source, class and style file,
 not only the main file. The inventory is inconclusive when a construct could build,
 rename or conditionally execute a declaration; a conditional declaration is never
-reported as a violation. Packages that system classes load are out of scope.
+reported as a violation. Packages that system classes load are out of scope. The output
+driver policy reports driver options such as ``pdftex`` on packages that detect their
+driver themselves, and packages such as psfig that work with one driver only: both break
+the build on a service that chooses the engine itself.
 """
 
 from __future__ import annotations
@@ -13,12 +16,18 @@ from .expanded_document import (
     commands_before_end,
 )
 from .finding_text import plural
+from .finding_weight import Weight
 from .findings import EvidenceKind, Finding
-from .literal_text import PACKAGE_COMMANDS, Declaration, first_argument_names
+from .literal_text import PACKAGE_COMMANDS, Declaration, first_argument_names, key_value_items
 from .manuscript_check_options import ManuscriptCheckOptions
 from .manuscript_policy_kernel import CheckOutcome, Policy, Reading, listing, policy_finding
 from .manuscript_vocabulary import INTERPRETED_COMMANDS
-from .tex_commands import MACRO_DEFINITION_COMMANDS
+from .tex_commands import (
+    DRIVER_BOUND_PACKAGES,
+    DRIVER_OPTION_PACKAGES,
+    MACRO_DEFINITION_COMMANDS,
+    OUTPUT_DRIVER_OPTIONS,
+)
 from .tex_lexer import (
     command_end,
     conditional_spans,
@@ -26,10 +35,18 @@ from .tex_lexer import (
     in_conditional,
     in_half_open_span,
 )
+from .uncertainty_reasons import context_reasons
 
 _INVENTORY_RULE = "manuscript.package_inventory"
 _ALLOWLIST = Policy(
     "manuscript.package_allowlist", "Checked the configured direct-package allowlist."
+)
+# A fixed driver warns; a declaration that could not be read only informs, because local
+# classes and styles commonly hold constructs (\ProcessOptions) that could generate one.
+_OUTPUT_DRIVERS = Policy(
+    "manuscript.output_drivers",
+    "No output driver is fixed in the sources.",
+    Weight("warning", "info", EvidenceKind.DERIVED),
 )
 _SCOPE = (
     "Direct literal package declarations in selected local sources, classes and styles; "
@@ -186,3 +203,88 @@ def package_checks(reading: Reading, options: ManuscriptCheckOptions) -> list[Fi
             )
         )
     return findings
+
+
+def fixed_output_drivers(names: list[str], options: list[str]) -> list[str]:
+    """Name what ties one declaration to a single output driver.
+
+    Args:
+        names: The declared package names.
+        options: The option groups of the declaration, as written.
+
+    Returns:
+        Each driver option given to a package that detects its driver itself, and each
+        package that works with one driver only, as ``option pdftex`` or ``package psfig``.
+    """
+    keys = {key for value in options for key, _ in key_value_items(value)}
+    drivers = sorted(keys & OUTPUT_DRIVER_OPTIONS) if set(names) & DRIVER_OPTION_PACKAGES else []
+    return [
+        *(f"option {driver}" for driver in drivers),
+        *(f"package {name}" for name in sorted(set(names) & DRIVER_BOUND_PACKAGES)),
+    ]
+
+
+def _class_driver_options(
+    document: ExpandedDocument,
+) -> tuple[list[dict[str, object]], list[str], list[str]]:
+    r"""Find driver options among the class options, which LaTeX passes on to every package.
+
+    Args:
+        document: The expanded document.
+
+    Returns:
+        The located ``\documentclass`` declarations with driver options, what each of
+        them fixes (``class option dvips``), and the reasons a class declaration could not
+        be read.
+    """
+    matches: list[dict[str, object]] = []
+    fixed: list[str] = []
+    reasons: list[str] = []
+    for command in document.commands:
+        if command.name != "documentclass":
+            continue
+        unclear = context_reasons(command, document.conditionals, "class declaration")
+        if unclear:
+            reasons.extend(unclear)
+            continue
+        keys = {key for option in command.options for key, _ in key_value_items(option.value)}
+        if drivers := [f"class option {name}" for name in sorted(keys & OUTPUT_DRIVER_OPTIONS)]:
+            matches.append(document.located(command.start, fixed=drivers))
+            fixed.extend(drivers)
+    return matches, fixed, reasons
+
+
+def output_driver_checks(reading: Reading, options: ManuscriptCheckOptions) -> list[Finding]:
+    """Find output drivers fixed in the sources when ``forbid_output_drivers`` is set.
+
+    A declaration with its own interpretation gaps is never reported as a violation.
+
+    Args:
+        reading: The expanded document.
+        options: ``forbid_output_drivers`` switches the policy on.
+
+    Returns:
+        One ``manuscript.output_drivers`` finding, or an empty list when the policy is off.
+    """
+    if not options.forbid_output_drivers:
+        return []
+    declarations, reasons = _package_declarations(reading.document)
+    matches, fixed_names, class_reasons = _class_driver_options(reading.document)
+    for declaration in declarations:
+        names = declaration["names"]
+        if names is None or declaration["uncertainty"]:
+            continue
+        if fixed := fixed_output_drivers(names, declaration["options"] or []):
+            matches.append(
+                {"path": declaration["path"], "line": declaration["line"], "fixed": fixed}
+            )
+            fixed_names.extend(fixed)
+    return [
+        policy_finding(
+            _OUTPUT_DRIVERS,
+            CheckOutcome(matches, [*reasons, *class_reasons]),
+            failure=f"Output drivers fixed at {plural(len(matches), 'declaration')}",
+            named=listing("Fixed", fixed_names),
+            details={"scope": _SCOPE},
+        )
+    ]

@@ -106,7 +106,8 @@ _MACRO_NAME_COMMANDS = frozenset({"@ifundefined", "@namedef", "@nameuse"})
 _PATH_LIKE = re.compile(
     r"""
     (?: ^ | [\s,=] )      # the value's start or a list/key separator
-    [^\s{}]+              # a name without spaces or groups
+    [^\s{},=]+            # a name without spaces, groups or separators, so each
+                          # separator starts one scan that ends at the next: linear
     \. (?: tex | ltx | bib | bst | sty | cls | pdf | png | jpe?g | eps | svg
          | csv | tsv | dat | txt | json | xml | ttf | otf )
     (?: $ | [\s,] )       # the value's end or a list separator

@@ -300,7 +300,7 @@ _SOURCE_CHECKS = (
     SourceCheck(
         TaskName.MANUSCRIPT_DETAILS,
         lambda root, main, settings, analysed: check_manuscript_policies(
-            root, main, settings.manuscript_checks, analysed=analysed
+            root, main, settings.manuscript_checks, analysed=analysed, selection=settings.checks
         ),
     ),
     SourceCheck(

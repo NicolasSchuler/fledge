@@ -108,6 +108,8 @@ GROUP_CHECKS: dict[str, dict[str, dict[str, object]]] = {
         "MAN015": {"check_float_reference_order": False},
         "MAN016": {"require_figure_descriptions": False},
         "MAN017": {"require_line_numbers": False, "forbid_line_numbers": False},
+        "MAN018": {"forbid_output_drivers": False},
+        "MAN019": {"require_document_metadata": False},
     },
     "metadata_privacy": {"PRV103": {"image_identity_terms": ()}},
     "online_checks": {

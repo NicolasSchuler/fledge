@@ -183,7 +183,8 @@ RULES = (
         title="Removed tokens in PDF strings",
         description=(
             "Note hyperref's warning that a command or math in a heading or title cannot "
-            "appear in a PDF string, such as a bookmark, and was removed there."
+            "appear in a PDF string, such as a bookmark, and was removed there. A suggestion, "
+            "off unless selected explicitly."
         ),
         tests=(
             "tests.test_build_log.NewLogRuleTests.test_each_rule_reports_its_message",
@@ -194,6 +195,8 @@ RULES = (
             "version}, or ignore the note when the bookmark reads well."
         ),
         reviewable=True,
+        suggestion=True,
+        reference_url="https://ctan.org/pkg/hyperref",
     ),
     Rule(
         code="BLD014",
@@ -201,7 +204,9 @@ RULES = (
         title="Obsolete or deprecated packages and commands",
         description=(
             "Note class and package warnings that call a package, option or command obsolete "
-            "or deprecated, such as fixltx2e or the LaTeX 2.09 font commands."
+            "or deprecated, such as fixltx2e or the LaTeX 2.09 font commands. A suggestion, "
+            "off unless selected explicitly; STY101 and STY102 find such constructs in the "
+            "sources without a build."
         ),
         tests=(
             "tests.test_build_log.NewLogRuleTests.test_each_rule_reports_its_message",
@@ -212,6 +217,8 @@ RULES = (
             "the PDF for changes afterwards."
         ),
         reviewable=True,
+        suggestion=True,
+        reference_url="https://mirrors.ctan.org/info/l2tabu/english/l2tabuen.pdf",
     ),
     Rule(
         code="BLD015",
@@ -219,8 +226,8 @@ RULES = (
         title="Bibliography tool warnings",
         description=(
             "Note the warnings BibTeX or Biber wrote to their log (.blg), such as an empty "
-            "required field or a duplicate entry, as information: one finding per distinct "
-            "warning, which never changes the outcome."
+            "required field or a duplicate entry: one suggestion per distinct warning, off "
+            "unless selected explicitly, which never changes the outcome."
         ),
         tests=(
             "tests.test_build_log.BibliographyLogTests.test_bibtex_and_biber_warnings",
@@ -231,5 +238,7 @@ RULES = (
             "the reference in the PDF."
         ),
         reviewable=True,
+        suggestion=True,
+        reference_url="https://ctan.org/pkg/bibtex",
     ),
 )

@@ -19,13 +19,22 @@ from .tex_commands import (
     MATH_DELIMITER,
     MATH_ENVIRONMENT_PATTERN,
     MATH_MARKER,
+    OBSOLETE_FONT_SWITCHES,
     PRINTED_CITATION_COMMANDS,
     with_capitalized_forms,
 )
-from .tex_lexer import Command, ParseLimitExceeded, mask_literals, scan_commands
+from .tex_lexer import (
+    Argument,
+    Command,
+    ParseLimitExceeded,
+    mask_literals,
+    scan_commands,
+    split_argument_items,
+)
 from .text_edits import TextEdit, apply_text_edits
 
-# Formatting wrappers whose argument is retained as ordinary text.
+# Formatting wrappers whose argument is retained as ordinary text. \centerline is the
+# plain TeX form of a centred line, kept here so that it is read, not left unresolved.
 TEXT_WRAPPERS = frozenset(
     {
         "emph",
@@ -43,11 +52,26 @@ TEXT_WRAPPERS = frozenset(
         "underline",
         "mathrm",
         "mathbf",
+        "centerline",
     }
 )
-# Cross-references: their argument is a label key.
+# cleveref and zref-clever references that take a comma-separated list of labels.
+LIST_REFERENCE_COMMANDS = frozenset({"cref", "Cref", "labelcref", "cpageref", "Cpageref", "zcref"})
+# cleveref references to a range, whose first two arguments are labels.
+RANGE_REFERENCE_COMMANDS = frozenset({"crefrange", "Crefrange"})
+# Cross-references: their arguments are label keys.
 REFERENCE_COMMANDS = frozenset(
-    {"ref", "pageref", "eqref", "autoref", "cref", "Cref", "nameref", "vref"}
+    {
+        "ref",
+        "pageref",
+        "eqref",
+        "autoref",
+        "nameref",
+        "vref",
+        "subref",
+        *LIST_REFERENCE_COMMANDS,
+        *RANGE_REFERENCE_COMMANDS,
+    }
 )
 # Label, citation and reference commands: their arguments are keys, never prose.
 # \nameref and \vref print text taken from their target, so the literal scan leaves
@@ -117,6 +141,8 @@ _NONCONTENT_COMMANDS = frozenset(
         "ttfamily",
         "upshape",
         "vfill",
+        # The obsolete two-letter font switches change the font, not the text.
+        *OBSOLETE_FONT_SWITCHES,
     }
 )
 # Non-content commands whose leading arguments hold a filename, length, counter
@@ -180,7 +206,8 @@ _INTERPRETATIONS: dict[str, _Interpretation] = {
     **{name: _Interpretation(" ") for name in _SPACE_COMMANDS | _NONCONTENT_COMMANDS},
     **{name: _Interpretation(name) for name in ("TeX", "LaTeX")},
     **{name: _Interpretation("") for name in TEXT_WRAPPERS},
-    **{name: _Interpretation(" ", 1) for name in KEY_ARGUMENT_COMMANDS},
+    **{name: _Interpretation(" ", 1) for name in KEY_ARGUMENT_COMMANDS - RANGE_REFERENCE_COMMANDS},
+    **{name: _Interpretation(" ", 2) for name in RANGE_REFERENCE_COMMANDS},
     **{name: _Interpretation(" ", count) for name, count in _NONCONTENT_ARGUMENTS.items()},
 }
 # Every command the literal text scan interprets without an interpretation gap.
@@ -396,3 +423,62 @@ def first_argument_names(command: Command) -> list[str] | None:
         list.
     """
     return literal_list(command.arguments[0].value) if command.arguments else None
+
+
+def reference_labels(command: Command) -> list[Argument]:
+    r"""Return the label arguments of a reference command, each stripped.
+
+    A cleveref or zref-clever list reference (``\cref{a,b}``) names each item of its first
+    argument, a range reference (``\crefrange{a}{b}``) its first two arguments, and every
+    other reference command its whole first argument, commas included.
+
+    Args:
+        command: A command in ``REFERENCE_COMMANDS``.
+
+    Returns:
+        The label arguments, with offsets into the scanned text; none when the command
+        has no argument.
+    """
+    if not command.arguments:
+        return []
+    if command.name in RANGE_REFERENCE_COMMANDS:
+        return [argument.stripped() for argument in command.arguments[:2]]
+    return split_argument_items(
+        command.arguments[0], comma_separated=command.name in LIST_REFERENCE_COMMANDS
+    )
+
+
+def key_value_items(value: str) -> list[tuple[str, str | None]]:
+    r"""Split a ``key=value`` list at the commas outside braces, as option lists are written.
+
+    Keys are stripped and folded to lower case; a value keeps its inner text, without the
+    braces around a whole braced value. Empty items are dropped. The scan is one pass over
+    ``value``.
+
+    Args:
+        value: The list as written, such as ``width=\linewidth, alt={A plot, in blue}``.
+
+    Returns:
+        Each key with its value, or ``None`` for an item without ``=``.
+    """
+    items: list[str] = []
+    depth = start = 0
+    for index, char in enumerate(value):
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth = max(0, depth - 1)
+        elif char == "," and depth == 0:
+            items.append(value[start:index])
+            start = index + 1
+    items.append(value[start:])
+    pairs: list[tuple[str, str | None]] = []
+    for item in items:
+        key, separator, rest = item.partition("=")
+        if not key.strip():
+            continue
+        text = rest.strip()
+        if text.startswith("{") and text.endswith("}"):
+            text = text[1:-1].strip()
+        pairs.append((key.strip().lower(), text if separator else None))
+    return pairs

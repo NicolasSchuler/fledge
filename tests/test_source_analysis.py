@@ -172,6 +172,25 @@ class SourceAnalysisTests(ProjectTestCase):
                     {"source.edit_marker", "source.unresolved_reference"},
                 )
 
+    def test_every_reference_command_resolves_its_labels(self) -> None:
+        # cleveref ranges and lists, cpageref, subcaption and zref-clever refer to labels too.
+        references = (
+            r"\crefrange{a}{b}\Crefrange{a}{b}\labelcref{a,b}\cpageref{a,b}\Cpageref{b}"
+            r"\subref{a}\zcref[S]{a,b}\ref{a}"
+        )
+        self.write(
+            "main.tex", "\\documentclass{article}\n\\label{a}\\label{b}\n" + references + "\n"
+        )
+        self.assertEqual(analyze_sources(self.root, "main.tex").findings, [])
+        self.write("main.tex", "\\documentclass{article}\n\\label{a}\n" + references + "\n")
+        missing = [
+            item.line
+            for item in analyze_sources(self.root, "main.tex").findings
+            if item.rule == "source.unresolved_reference"
+        ]
+        # b is missing from \crefrange, \Crefrange, \labelcref, \cpageref, \Cpageref, \zcref.
+        self.assertEqual(missing, [3] * 6)
+
     def test_all_literals_keep_offsets_and_escaped_percent_is_text(self) -> None:
         source = (
             "% TODO \\input{bad}\n"

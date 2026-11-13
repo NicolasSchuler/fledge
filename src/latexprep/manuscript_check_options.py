@@ -1,9 +1,10 @@
 """The ``[manuscript_checks]`` settings: which opt-in manuscript policies run.
 
-Each option switches on one literal-source policy (package allowlist, abstract
-rules, heading structure, metadata, floats, line numbers) or supplies the value a
-policy compares against. This module owns only the options and their validation; the
-policies themselves are in the ``manuscript_*_checks`` modules.
+Each option switches on one literal-source policy (package allowlist, output drivers,
+abstract rules, heading structure, metadata, accessibility metadata, floats, line
+numbers) or supplies the value a policy compares against. This module owns only the
+options and their validation; the policies themselves are in the
+``manuscript_*_checks`` modules.
 """
 
 from __future__ import annotations
@@ -55,6 +56,10 @@ class ManuscriptCheckOptions:
         require_figure_descriptions: Whether every figure needs a usable ``Description``.
         require_line_numbers: Whether literal line-number activation is required.
         forbid_line_numbers: Whether literal line-number activation is forbidden.
+        forbid_output_drivers: Whether driver options such as ``pdftex`` on graphicx or
+            hyperref, and packages that work with one driver only, are reported.
+        require_document_metadata: Whether a ``\DocumentMetadata`` declaration with a
+            language and tagging is required.
     """
 
     # Heading depths run from part (-1) to subparagraph (5).
@@ -82,6 +87,8 @@ class ManuscriptCheckOptions:
     require_figure_descriptions: bool = False
     require_line_numbers: bool = False
     forbid_line_numbers: bool = False
+    forbid_output_drivers: bool = False
+    require_document_metadata: bool = False
 
     def __post_init__(self) -> None:
         validate_scalars(self)

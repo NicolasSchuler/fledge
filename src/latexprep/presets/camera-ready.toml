@@ -52,6 +52,9 @@ check_float_reference_order = true # MAN015: floats first referenced in source o
 # required_declarations = ["Data Availability", "Competing Interests"]
 # MAN017: reject line numbers left over from the review version.
 # forbid_line_numbers = true
+# MAN019: \DocumentMetadata with the document language and tagging, for publishers that
+# require an accessible (tagged) PDF.
+# require_document_metadata = true
 
 [submission_checks]
 scan_private_comments = true # PRV005: TODO and private notes inside TeX comments.

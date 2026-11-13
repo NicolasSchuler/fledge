@@ -552,11 +552,10 @@ class CheckPolicyTests(ProjectTestCase):
         self.assertNotIn(BY_CODE["PDF311"].name, [finding.rule for finding in retained])
         self.assertIs(retained[-2], diagnostic)
         self.assertIs(retained[-1], inventory)
-        # ALL keeps every finding but the suggestions, which need a selector of their own.
-        suggestions = {rule.name for rule in RULES if rule.suggestion}
+        # ALL keeps every finding except the suggestions, which only explicit selectors keep.
         self.assertEqual(
             selected_findings(findings, CheckSelection()),
-            [finding for finding in findings if finding.rule not in suggestions],
+            [item for item in findings if item.code is None or not BY_CODE[item.code].suggestion],
         )
 
     def test_future_registered_code_is_selected_without_policy_allowlist(self) -> None:
@@ -619,12 +618,11 @@ class CheckPolicyTests(ProjectTestCase):
             "PRV104",
             "PRV105",
         }
-        # Suggestions run with the checks that produce them and are reported only when a
-        # selector other than ALL selects them (``Rule.suggestion``).
-        suggestions = {rule.code for rule in RULES if rule.suggestion}
+        # Suggestions run only when a selector other than ALL selects them.
+        suggestions = {code for code, rule in BY_CODE.items() if rule.suggestion}
         self.assertFalse(gated & MANDATORY_CODES)
         self.assertFalse(default_advisories & (gated | MANDATORY_CODES))
-        self.assertFalse(suggestions & (gated | MANDATORY_CODES))
+        self.assertFalse(suggestions & (gated | MANDATORY_CODES | default_advisories))
         self.assertEqual(
             set(BY_CODE),
             gated

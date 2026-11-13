@@ -2,7 +2,8 @@
 
 Six opt-in policies read each ``figure`` and ``table`` environment of the expanded
 document: a nonempty caption, a label, a label that follows the caption, an external
-reference, first references in source order, and a usable figure ``Description``. Order
+reference, first references in source order, and a usable figure description (a
+``Description``, or alt text or an artifact mark on every included graphic). Order
 means source order only; rendered float placement is not measured. A float whose own
 region cannot be interpreted yields reasons instead of violations, because an unexpanded
 construct inside it may be the caption, label or description that appears to be missing.
@@ -23,12 +24,16 @@ from .literal_text import (
     REFERENCE_COMMANDS,
     first_argument_names,
     is_placeholder_text,
+    key_value_items,
+    literal_list,
     plain_argument_text,
+    plain_text,
+    reference_labels,
 )
 from .manuscript_check_options import ManuscriptCheckOptions
 from .manuscript_policy_kernel import CheckOutcome, Policy, Reading, policy_finding
 from .manuscript_vocabulary import FLOAT_ENVIRONMENTS
-from .tex_lexer import Command, command_end, in_closed_span, merge_spans, split_argument_items
+from .tex_lexer import Command, command_end, in_closed_span, merge_spans
 from .uncertainty_reasons import grouped_reason
 
 
@@ -178,11 +183,15 @@ class _FloatScan:
                 continue
             if in_closed_span(float_spans, command.start):
                 continue
-            names = first_argument_names(command)
-            if names is None or command.depth:
+            labels = reference_labels(command)
+            if (
+                not labels
+                or command.depth
+                or any(literal_list(item.value) is None for item in labels)
+            ):
                 self.note(["grouped or nonliteral reference"], _REFERENCES, _REFERENCE_ORDER)
                 continue
-            for argument in split_argument_items(command.arguments[0]):
+            for argument in labels:
                 self.first_references.setdefault(argument.value, argument.start)
 
     def _record(self, region: EnvironmentRegion) -> _FloatRecord:
@@ -289,7 +298,7 @@ class _FloatScan:
         return labels, misplaced
 
     def _described(self, region: EnvironmentRegion) -> bool:
-        """Return whether a figure has a nonempty, non-placeholder Description."""
+        """Return whether a figure has a usable Description, or alt text for all its graphics."""
         descriptions = [command for command in region.commands if command.name == "Description"]
         if len(descriptions) > 1:
             self.note(["multiple descriptions within one figure"], _DESCRIPTIONS)
@@ -300,7 +309,35 @@ class _FloatScan:
             if command.depth:
                 self.note([grouped_reason("description")], _DESCRIPTIONS)
             usable = usable or (bool(value) and not is_placeholder_text(value))
-        return usable
+        return usable or self._graphics_described(region)
+
+    def _graphics_described(self, region: EnvironmentRegion) -> bool:
+        r"""Return whether every ``\includegraphics`` of a figure has alt text or is decorative.
+
+        LaTeX's tagging support reads ``alt=...`` as the alternative text of a graphic and
+        ``artifact`` as a mark that the graphic is decorative. A figure without
+        ``\includegraphics`` is not described this way.
+
+        Args:
+            region: The figure region.
+
+        Returns:
+            Whether the figure has graphics and each has nonempty, non-placeholder alt text
+            or the ``artifact`` key.
+        """
+        graphics = [command for command in region.commands if command.name == "includegraphics"]
+        for command in graphics:
+            items = [item for option in command.options for item in key_value_items(option.value)]
+            if any(key == "artifact" for key, _ in items):
+                continue
+            alt = next((value for key, value in items if key == "alt" and value), None)
+            if alt is None:
+                return False
+            text, unknown = plain_text(alt)
+            self.note(unknown, _DESCRIPTIONS)
+            if not text.strip() or is_placeholder_text(text):
+                return False
+        return bool(graphics)
 
 
 def _float_violations(records: list[_FloatRecord]) -> dict[_FloatRule, list[dict[str, object]]]:

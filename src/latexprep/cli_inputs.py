@@ -24,8 +24,8 @@ from .text_safety import escape_single_line_text
 # ``pdf check`` reads nothing but the PDF.
 _FAMILIES_NOT_RUN: dict[JobCommand, frozenset[str]] = {
     JobCommand.INSPECT: frozenset({"BLD", "CMP", "FMT", "PDF"}),
-    JobCommand.BIBLIOGRAPHY: frozenset({"BLD", "CMP", "FMT", "MAN", "PDF"}),
-    JobCommand.PDF: frozenset({"BIB", "BLD", "FMT", "MAN", "NET", "PKG", "TEX"}),
+    JobCommand.BIBLIOGRAPHY: frozenset({"BLD", "CMP", "FMT", "MAN", "PDF", "STY"}),
+    JobCommand.PDF: frozenset({"BIB", "BLD", "FMT", "MAN", "NET", "PKG", "STY", "TEX"}),
 }
 # Checks of such a family that the command runs all the same: inspect checks the colour
 # space of the figures in the sources (PDF313) as part of its readiness checks.

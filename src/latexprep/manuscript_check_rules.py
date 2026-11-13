@@ -26,9 +26,18 @@ RULES = (
         title="Layout override candidates",
         description=(
             "Advisory scan for literal negative spacing, page breaks, shrinking, forced "
-            "placement and layout length overrides; intent is not inferred."
+            "placement and layout length overrides, and for the usual ways of squeezing a "
+            "paper under a page limit: geometry margin or text-area options, the fullpage "
+            "and savetrees packages, caption skips below 3pt or caption fonts at footnote "
+            "size or smaller (caption options or \\captionsetup), titlesec's compact "
+            "option, \\titlespacing, zero or negative display skips and redefined float "
+            "fractions such as \\topfraction; intent is not inferred."
         ),
-        tests=("tests.test_manuscript_checks.ManuscriptDetailTests.test_layout_manipulation",),
+        tests=(
+            "tests.test_manuscript_checks.ManuscriptDetailTests.test_layout_manipulation",
+            "tests.test_manuscript_checks.ManuscriptDetailTests"
+            ".test_page_limit_squeezing_is_a_layout_override",
+        ),
         fix=(
             "Review the reported layout override in the compiled document and retain it only "
             "when intended and permitted by your requirements."
@@ -146,7 +155,11 @@ RULES = (
             "Validate literal identifiers in orcid, ORCID and orcidlink commands with the ISO "
             "7064 MOD 11-2 checksum; validity does not establish ownership."
         ),
-        tests=("tests.test_manuscript_checks.ManuscriptDetailTests.test_orcid",),
+        tests=(
+            "tests.test_manuscript_checks.ManuscriptDetailTests.test_orcid",
+            "tests.test_manuscript_checks.ManuscriptDetailTests"
+            ".test_obsolete_constructs_leave_the_orcid_check_decided",
+        ),
         fix=(
             "Correct the reported ORCID from the author's verified identifier; a valid "
             "checksum alone does not establish identity or ownership."
@@ -256,11 +269,16 @@ RULES = (
         name="manuscript.figure_descriptions",
         title="Required figure descriptions",
         description=(
-            "Require nonempty literal Description commands for figures and flag obvious "
-            "placeholder text; presence does not establish description quality or PDF "
-            "accessibility."
+            "Require a description of each figure: a nonempty literal Description command, "
+            "or alt text on every \\includegraphics (alt=...) or graphics marked as "
+            "decorative (artifact); obvious placeholder text is flagged. Presence does not "
+            "establish description quality or PDF accessibility."
         ),
-        tests=("tests.test_manuscript_checks.ManuscriptDetailTests.test_figure_descriptions",),
+        tests=(
+            "tests.test_manuscript_checks.ManuscriptDetailTests.test_figure_descriptions",
+            "tests.test_manuscript_checks.ManuscriptDetailTests"
+            ".test_figure_alt_text_and_artifacts_count_as_descriptions",
+        ),
         fix=(
             "Add a useful nonempty Description for the figure and manually assess whether it "
             "conveys the information needed by readers."
@@ -287,5 +305,45 @@ RULES = (
             "venue documents); for final versions, remove the activation. If the class numbers "
             "lines through another option, confirm it in the PDF and suppress this finding."
         ),
+    ),
+    Rule(
+        code="MAN018",
+        name="manuscript.output_drivers",
+        title="Output drivers fixed in the sources",
+        description=(
+            "Opt-in (forbid_output_drivers): report output driver options such as pdftex or "
+            "dvips on graphics, graphicx, color, xcolor and hyperref, or among the class "
+            "options, and packages such as psfig that work with one driver only. These "
+            "packages detect the driver themselves, so a fixed one breaks the build on a "
+            "service that chooses the engine, as arXiv does. A declaration that could not be "
+            "read leaves an informational inconclusive result."
+        ),
+        tests=("tests.test_manuscript_checks.ManuscriptDetailTests.test_output_drivers",),
+        fix=(
+            "Remove the driver option and let the package detect the driver; replace psfig "
+            "by graphicx and \\includegraphics."
+        ),
+        reviewable=True,
+        reference_url="https://ctan.org/pkg/graphicx",
+    ),
+    Rule(
+        code="MAN019",
+        name="manuscript.document_metadata",
+        title="Tagged PDF with a document language",
+        description=(
+            "Opt-in (require_document_metadata): require a literal \\DocumentMetadata "
+            "declaration before \\documentclass with a lang key and tagging=on or a PDF/UA "
+            "pdfstandard, which ask a current LaTeX release for a tagged PDF with a document "
+            "language. A declaration that could not be read leaves an informational "
+            "inconclusive result. The declaration does not establish that the PDF is "
+            "accessible; the PDF checks PDF208 and PDF209 measure the result."
+        ),
+        tests=("tests.test_manuscript_checks.ManuscriptDetailTests.test_document_metadata",),
+        fix=(
+            "Write \\DocumentMetadata{lang=en, pdfstandard=ua-2, tagging=on} before "
+            "\\documentclass, with the document's language, and check the tagged PDF."
+        ),
+        reviewable=True,
+        reference_url="https://latex3.github.io/tagging-project/documentation/usage-instructions",
     ),
 )

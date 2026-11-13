@@ -6,7 +6,13 @@ import time
 import unittest
 from unittest.mock import patch
 
-from latexprep.literal_text import is_placeholder_text, plain_argument_text, scan_literal_text
+from latexprep.literal_text import (
+    is_placeholder_text,
+    key_value_items,
+    plain_argument_text,
+    reference_labels,
+    scan_literal_text,
+)
 from latexprep.tex_lexer import scan_commands
 
 # A backtracking pattern after a stray dollar sign doubles its work for each escape pair, so
@@ -45,6 +51,45 @@ class LiteralTextTests(unittest.TestCase):
         result = scan_literal_text(stray_dollar_value(LARGE_REPEATS))
         self.assertIn("unbalanced math delimiters", result.unresolved)
         self.assertIn("text", result.text)
+
+    def test_reference_labels_follow_each_command_signature(self) -> None:
+        source = r"\cref{a, b}\crefrange{c}{d}\ref{e,f}\zcref[S]{g,h}\subref{i}\eqref{}"
+        labels = {
+            command.name: [item.value for item in reference_labels(command)]
+            for command in scan_commands(source)
+        }
+        self.assertEqual(
+            labels,
+            {
+                "cref": ["a", "b"],
+                "crefrange": ["c", "d"],
+                "ref": ["e,f"],
+                "zcref": ["g", "h"],
+                "subref": ["i"],
+                "eqref": [""],
+            },
+        )
+        self.assertEqual(reference_labels(scan_commands(r"\ref")[0]), [])
+
+    def test_range_references_drop_both_labels_from_the_literal_text(self) -> None:
+        result = scan_literal_text(r"See \crefrange{eq:a}{eq:b} and \labelcref{c,d} here.")
+        self.assertEqual(result.text.split(), ["See", "and", "here."])
+        self.assertEqual(result.unresolved, [])
+        old_fonts = scan_literal_text(r"{\bf Bold} and \centerline{centred} text")
+        self.assertEqual(old_fonts.text.split(), ["Bold", "and", "centred", "text"])
+        self.assertEqual(old_fonts.unresolved, [])
+
+    def test_key_value_items_split_at_top_level_commas(self) -> None:
+        self.assertEqual(
+            key_value_items(r" width=\linewidth, Alt={A plot, in blue} ,artifact,, =x"),
+            [("width", r"\linewidth"), ("alt", "A plot, in blue"), ("artifact", None)],
+        )
+        self.assertEqual(key_value_items(""), [])
+        # 100,000 unclosed braces take milliseconds when the split is linear; a quadratic
+        # scan would take minutes. Processor time is not inflated by a loaded machine.
+        started = time.process_time()
+        self.assertEqual(len(key_value_items("{" * 100_000 + "a=b,c")), 1)
+        self.assertLess(time.process_time() - started, 2.0)
 
     def test_inline_math_is_dropped_including_escaped_dollars_and_backslashes(self) -> None:
         for source, expected in (

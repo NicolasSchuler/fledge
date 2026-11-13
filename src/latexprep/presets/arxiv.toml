@@ -58,6 +58,11 @@ venue_engines = ["pdflatex", "xelatex"]
 # line of a .bbl built with that release; TeX Live 2026 writes "3.3").
 # biblatex_bbl_format_version = ""
 
+[manuscript_checks]
+# MAN018: driver options such as [pdftex] or [dvips] and the psfig package, which break
+# when arXiv picks the TeX processor itself.
+forbid_output_drivers = true
+
 [source_transforms]
 # prepare only: remove TeX comments that contain TODO, FIXME, XXX, "private",
 # "internal", "confidential" or "note to self" from the separate copy. Licence
