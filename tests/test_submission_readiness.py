@@ -655,6 +655,46 @@ class VenueEngineTests(ReadinessCase):
                 self.assertEqual([(item.severity, item.status) for item in findings], [expected])
 
 
+class EnginePackageTests(ReadinessCase):
+    """Packages that the engine the document builds with cannot run (TEX014)."""
+
+    def test_a_package_the_engine_cannot_run_warns_with_its_line(self) -> None:
+        self.document("\\usepackage{graphicx}\n\\usepackage{fontspec}\n")
+        warning = self.one("source.engine_packages", engine="pdflatex")
+        self.assertEqual(
+            (warning.code, warning.severity, warning.status), ("TEX014", "warning", "failed")
+        )
+        self.assertEqual((warning.path, warning.line), ("main.tex", 3))
+        self.assertIn("fontspec needs XeLaTeX or LuaLaTeX", warning.message)
+        self.assertIn("% !TEX program = xelatex", warning.suggestion or "")
+        # Without a known engine, or without such a package, nothing is reported.
+        self.assertEqual(self.findings("source.engine_packages"), [])
+        self.document("\\usepackage{graphicx}\n")
+        self.assertEqual(self.findings("source.engine_packages", engine="pdflatex"), [])
+
+    def test_a_chosen_engine_that_runs_the_packages_passes(self) -> None:
+        self.document("\\usepackage{fontspec}\n\\usepackage{luacode}\n")
+        passed = self.one("source.engine_packages", engine="lualatex")
+        self.assertEqual((passed.severity, passed.status), ("info", "passed"))
+        warning = self.one("source.engine_packages", engine="xelatex")
+        self.assertEqual(warning.details["package"], "luacode")
+        self.assertIn("--engine lualatex", warning.suggestion or "")
+        # A conditional declaration is not interpreted.
+        self.document("\\ifdefined\\directlua\\usepackage{fontspec}\\fi\n")
+        self.assertEqual(self.findings("source.engine_packages", engine="pdflatex"), [])
+
+    def test_packages_that_need_different_engines_say_so(self) -> None:
+        self.document("\\usepackage{xeCJK}\n\\usepackage{luatexja}\n")
+        findings = self.findings("source.engine_packages", engine="pdflatex")
+        self.assertEqual([item.details["package"] for item in findings], ["luatexja", "xeCJK"])
+        self.assertTrue(
+            all(
+                "No engine runs all of luatexja, xeCJK" in (item.suggestion or "")
+                for item in findings
+            )
+        )
+
+
 class PrivateMarkerTests(ReadinessCase):
     """The advisory about private markers in comments, such as notes and author initials."""
 

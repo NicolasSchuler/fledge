@@ -172,6 +172,31 @@ RULES = (
         ),
     ),
     Rule(
+        code="TEX014",
+        name="source.engine_packages",
+        title="Packages the build engine cannot run",
+        description=(
+            "Default check: the expanded literal preamble loads a package that stops with an "
+            "error under the engine the document builds with (the engine setting, else the "
+            "main file's % !TEX program comment, else pdfLaTeX). fontspec, unicode-math, "
+            "polyglossia, fontsetup and xltxtra need XeLaTeX or LuaLaTeX; xeCJK and mathspec "
+            "need XeLaTeX; luacode, luatexja and luaotfload need LuaLaTeX. Found without "
+            "running TeX, so inspect reports it too. Conditional, grouped and "
+            "macro-generated declarations and packages loaded inside local style files are "
+            "not interpreted."
+        ),
+        tests=(
+            "tests.test_submission_readiness.EnginePackageTests.test_a_package_the_engine_cannot_run_warns_with_its_line",
+            "tests.test_submission_readiness.EnginePackageTests.test_a_chosen_engine_that_runs_the_packages_passes",
+            "tests.test_submission_readiness.EnginePackageTests.test_packages_that_need_different_engines_say_so",
+        ),
+        fix=(
+            "Choose an engine that runs the package: add % !TEX program = xelatex (or "
+            "lualatex) as the first line of the main file, pass --engine, or set engine in "
+            "fledge.toml."
+        ),
+    ),
+    Rule(
         code="PRV007",
         name="submission.private_comment_markers",
         title="Comments carrying private-note markers",

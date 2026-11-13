@@ -67,6 +67,23 @@ _AFTER_HYPERREF = {
     "glossaries-extra": "creates hyperlinks only when hyperref is already loaded",
 }
 
+# Packages that stop with an error under every engine but the ones listed, as their
+# documentation states and as TeX Live 2026 shows. Keep this list to packages that refuse
+# an engine outright; a package that only behaves differently does not belong here.
+_ENGINE_PACKAGES: dict[str, tuple[Engine, ...]] = {
+    "fontspec": ("xelatex", "lualatex"),
+    "unicode-math": ("xelatex", "lualatex"),
+    "polyglossia": ("xelatex", "lualatex"),
+    "fontsetup": ("xelatex", "lualatex"),
+    "xltxtra": ("xelatex", "lualatex"),
+    "xeCJK": ("xelatex",),
+    "mathspec": ("xelatex",),
+    "luacode": ("lualatex",),
+    "luatexja": ("lualatex",),
+    "luaotfload": ("lualatex",),
+}
+_ENGINE_PACKAGE_WEIGHT = Weight("warning", "warning", EvidenceKind.DERIVED)
+
 # Narrow, explicit private-note markers. Only the category and location are
 # reported; comment text is never copied into the report.
 _PRIVATE_MARKER_CATEGORIES = (
@@ -455,6 +472,84 @@ def _venue_engine(engine: Engine | None, offered: tuple[Engine, ...], main: str)
     ]
 
 
+def _engine_packages(document: ExpandedDocument, engine: Engine | None, main: str) -> list[Finding]:
+    """Report packages the document loads that the engine it builds with cannot run.
+
+    Args:
+        document: The expanded document whose preamble is scanned.
+        engine: The engine the document builds with, or ``None`` when not known.
+        main: The main file, which the passed finding names.
+
+    Returns:
+        One warning per package the engine cannot run, a pass when it runs all of them, or
+        nothing when the engine is not known or no such package is declared.
+    """
+    if engine is None:
+        return []
+    positions = _package_positions(document)
+    declared = sorted(name for name in positions if name in _ENGINE_PACKAGES)
+    if not declared:
+        return []
+    scope = (
+        "First unconditional literal declarations in the expanded preamble; packages "
+        "loaded inside local style files are not inspected."
+    )
+    refused = [name for name in declared if engine not in _ENGINE_PACKAGES[name]]
+    if not refused:
+        return [
+            Finding(
+                "source.engine_packages",
+                f"{', '.join(declared)} run with {_ENGINE_NAMES[engine]}, the engine the "
+                "document builds with.",
+                severity=_ENGINE_PACKAGE_WEIGHT.severity("passed"),
+                status="passed",
+                path=main,
+                details={"engine": engine, "packages": declared, "scope": scope},
+            )
+        ]
+    # The engines that run every declared package, in the order of _ENGINE_NAMES.
+    common = [
+        item for item in _ENGINE_NAMES if all(item in _ENGINE_PACKAGES[name] for name in declared)
+    ]
+    if common:
+        choices = " or ".join(_ENGINE_NAMES[item] for item in common)
+        program = common[0]
+        suggestion = (
+            f"Build with {choices}: add `% !TEX program = {program}` as the first line of "
+            f"{main}, which Fledge and most editors follow, pass --engine {program}, or set "
+            f'engine = "{program}" in fledge.toml.'
+        )
+    else:
+        suggestion = (
+            "No engine runs all of " + ", ".join(declared) + "; replace the packages that "
+            "need another engine, then choose the engine the rest need."
+        )
+    findings = []
+    for name in refused:
+        location = positions[name][1]
+        needs = " or ".join(_ENGINE_NAMES[item] for item in _ENGINE_PACKAGES[name])
+        findings.append(
+            Finding(
+                "source.engine_packages",
+                f"{name} needs {needs}, but the document builds with "
+                f"{_ENGINE_NAMES[engine]}; the build will stop with an error.",
+                severity=_ENGINE_PACKAGE_WEIGHT.severity("failed"),
+                status="failed",
+                path=location.path,
+                line=location.line,
+                evidence_kind=EvidenceKind.DERIVED,
+                suggestion=suggestion,
+                details={
+                    "package": name,
+                    "engine": engine,
+                    "engines": list(_ENGINE_PACKAGES[name]),
+                    "scope": scope,
+                },
+            )
+        )
+    return findings
+
+
 def check_submission_readiness(
     root: Path,
     main: str | None,
@@ -506,6 +601,7 @@ def check_submission_readiness(
     findings.extend(_hyperref_order(document))
     figures = _figures(graph, selected)
     findings.extend(_eps_finding(figures, set(graph.files), graph.main))
+    findings.extend(_engine_packages(document, engine, graph.main))
     findings.extend(_venue_engine(engine, bbl_options.venue_engines, graph.main))
     if required_color_space is not None:
         findings.append(color_space_finding(root, graph, figures, required_color_space, graph.main))

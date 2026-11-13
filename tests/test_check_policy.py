@@ -614,6 +614,7 @@ class CheckPolicyTests(ProjectTestCase):
             "TEX011",
             "TEX012",
             "TEX013",
+            "TEX014",
             "PRV007",
             "PRV104",
             "PRV105",

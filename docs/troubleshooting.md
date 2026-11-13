@@ -160,8 +160,9 @@ the archive rebuilds on your computer but not on one without that font.
 `The fontspec package requires either XeTeX or LuaTeX` means pdfLaTeX built a document
 written for XeLaTeX or LuaLaTeX. Fledge follows a `% !TEX program = xelatex` comment in the
 first lines of the main file, as most editors do, or `--engine` and the
-[engine setting](configuration.md#choose-the-tex-engine). `BLD106` records which engine
-built the document and why. A project `latexmkrc` is never executed; `BLD107` says what it
+[engine setting](configuration.md#choose-the-tex-engine). `TEX014` reports a package the
+chosen engine cannot run, such as fontspec under pdfLaTeX, before any build, so
+`fledge inspect` finds it too. `BLD106` records which engine built the document and why. A project `latexmkrc` is never executed; `BLD107` says what it
 would have changed.
 
 ### Shell escape, SVG and EPS figures

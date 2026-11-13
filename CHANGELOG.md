@@ -9,6 +9,15 @@ The version is defined once, as `__version__` in `src/latexprep/__init__.py`.
 
 ## [Unreleased]
 
+### Added
+
+- **`TEX014` reports a package the build engine cannot run, before any build.** A
+  document that loads fontspec, unicode-math, polyglossia, fontsetup or xltxtra needs
+  XeLaTeX or LuaLaTeX, xeCJK and mathspec need XeLaTeX, and luacode, luatexja and
+  luaotfload need LuaLaTeX. Until now only the build failed, so `fledge inspect` passed
+  a document that could not build with the engine Fledge would choose. The warning names
+  the declaration and how to choose an engine that runs it.
+
 ### Fixed
 
 - **A venue class or style file shipped in the project no longer makes the manuscript
