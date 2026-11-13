@@ -101,15 +101,22 @@ The version is defined once, as `__version__` in `src/latexprep/__init__.py`.
     straight quotes, `...`, a space before `\footnote` and `\cite\cite`.
   - `STY4`: two spellings of a term, such as modelling and modeling.
   - `STY5`: no `\DocumentMetadata` with the document language and tagging.
+
+  When the manuscript's commands cannot be read, for example past a parsing limit,
+  each selected style suggestion is reported as not checked.
 - Bibliography suggestions: `BIB111` (a cited preprint), `BIB112` (a URL that repeats
-  the DOI) and `BIB113` (one venue spelled several ways). `% fledge: ignore CODE`
-  also works in `.bib` files.
+  the DOI) and `BIB113` (one venue spelled several ways). They are computed only when
+  selected, and `BIB111` and `BIB112` list at most 50 entries each and count the rest.
+  `% fledge: ignore CODE` also works in `.bib` files.
 - An optional chktex lint, `CHK001`: with `--select ALL --select CHK001`, the
   installed chktex runs in the sandbox on each TeX file the document uses, and its
   warnings become suggestions. `% chktex` comments and a safe `.chktexrc` beside the
   main file apply. See "Lint with chktex".
 - Opt-in warnings `MAN018` (output driver options and `psfig`, on in the `arxiv`
   preset) and `MAN019` (`\DocumentMetadata` with language and tagging).
+- Documentation: guides for an arXiv upload, a double-blind submission and the
+  camera-ready version, built on the presets; an FAQ; the changelog and the version on
+  the documentation site.
 
 ### Changed
 
@@ -149,11 +156,16 @@ The version is defined once, as `__version__` in `src/latexprep/__init__.py`.
   and biblatex export them, searches arXiv DOIs and DOIs Crossref does not know by
   title, and no longer treats a published article that records its arXiv copy as a
   preprint. Each `.bib` file is parsed once per run.
-- `PRV003` reports self-citation phrasing only next to a citation; `MAN016` accepts
-  `alt=` and `artifact` on `\includegraphics`; `\crefrange`, `\labelcref`,
+- `PRV003` reports self-citation phrasing, including "in our previous work", only next
+  to a citation; `MAN016` accepts `alt=` and `artifact` or `artifact=true` on
+  `\includegraphics`, spelled exactly; `\crefrange`, `\labelcref`,
   `\cpageref`, `\subref` and `\zcref` count as references.
 - The `camera-ready` preset switches on `BIB104` for articles and proceedings papers,
   `BIB107` and `BIB108`, and requires a PDF Title (`PDF206`).
+- The documentation installs a release tag from GitHub with pipx or uv until Fledge is
+  on PyPI. The quick start begins with `inspect` and covers Linux, and the pages
+  describe the exit codes, the engine choice, generated files, the receiving-service
+  settings, suggestions, empty output folders and `--force`.
 
 ### Fixed
 
