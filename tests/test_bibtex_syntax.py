@@ -14,6 +14,7 @@ from latexprep.bibtex_syntax import (
     plain_literal,
     read_doi,
 )
+from latexprep.crossref import doi_url
 
 
 def parse(text: str):
@@ -125,17 +126,30 @@ class DoiTests(unittest.TestCase):
     """Tests of ``DOI_PATTERN`` and ``read_doi``."""
 
     def test_the_shared_pattern_accepts_registrant_and_suffix_only(self):
-        for good in ("10.1234/abc", "10.12345678/a.b-c_d", "10.1002/(SICI)1097:x"):
+        for good in (
+            "10.1234/abc",
+            "10.12345678/a.b-c_d",
+            "10.1002/(SICI)1097:x",
+            "10.1175/1520-0469(1963)020<0130:DNF>2.0.CO;2",
+        ):
             self.assertIsNotNone(DOI_PATTERN.fullmatch(good), good)
         for bad in (
             "10.12/abc",
             "11.1234/abc",
             "10.1234/",
             "10.1234/a b",
-            "10.1234/<x>",
+            '10.1234/a"b',
             "10.1234/a{b}",
+            "10.1234/a\\b",
         ):
             self.assertIsNone(DOI_PATTERN.fullmatch(bad), bad)
+
+    def test_read_doi_accepts_a_sici_doi_and_lookups_encode_its_angle_brackets(self):
+        doi = "10.1175/1520-0469(1963)020<0130:DNF>2.0.CO;2"
+        self.assertEqual(read_doi(only_field(f"doi = {{{doi}}}")).identifier, doi)
+        self.assertEqual(
+            doi_url(doi), "https://doi.org/10.1175/1520-0469%281963%29020%3C0130%3ADNF%3E2.0.CO%3B2"
+        )
 
     def test_read_doi_strips_a_supported_prefix_and_reports_its_span(self):
         text = "doi = {https://doi.org/10.1234/Abc}"

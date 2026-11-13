@@ -385,6 +385,7 @@ RULES = (
         tests=(
             "tests.test_bibliography.BibliographyTests.test_invalid_plain_dois_and_ambiguous_markup_are_distinct",
             "tests.test_bibliography.BibliographyTests.test_macro_and_concatenated_dois_remain_unchanged",
+            "tests.test_bibtex_syntax.DoiTests.test_read_doi_accepts_a_sici_doi_and_lookups_encode_its_angle_brackets",
         ),
         fix="Check the DOI against the publication and correct its literal bibliography value.",
         reviewable=True,

@@ -42,8 +42,10 @@ ENTRY_TYPE = re.compile(r"[A-Za-z][A-Za-z0-9_-]*")
 LOWERCASE_NAME = re.compile(r"[a-z][a-z0-9_-]*")
 _DOI_PREFIX = re.compile(r"(?:https?://(?:dx\.)?doi\.org/|doi:\s*)", re.IGNORECASE)
 # The one DOI shape every module recognises: a registrant prefix and a suffix of
-# printable characters without white space, angle brackets, quotes, braces or backslash.
-DOI_PATTERN = re.compile(r"10\.\d{4,9}/[^\s<>\"{}\\]{1,2048}", re.IGNORECASE)
+# printable characters without white space, quotes, braces or backslash. Angle brackets
+# are allowed: older SICI-style DOIs such as 10.1175/1520-0469(1963)020<0130:DNF>2.0.CO;2
+# contain them, and every address built from a DOI percent-encodes them.
+DOI_PATTERN = re.compile(r"10\.\d{4,9}/[^\s\"{}\\]{1,2048}", re.IGNORECASE)
 
 AtomKind = Literal["literal", "number", "macro"]
 DeclarationKind = Literal["string", "preamble"]

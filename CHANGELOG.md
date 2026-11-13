@@ -27,6 +27,9 @@ The version is defined once, as `__version__` in `src/latexprep/__init__.py`.
   `IEEEtran.cls` defines `\thanks`, which matched as an acknowledgement hint eight times.
   `.cls`, `.sty`, `.def`, `.cfg` and `.bst` files are no longer searched for identity
   hints; the identity terms you list (`PRV001`) are still searched there.
+- **Older DOIs with angle brackets are valid (`BIB006`).** SICI-style DOIs such as
+  `10.1175/1520-0469(1963)020<0130:DNF>2.0.CO;2` were reported as malformed. Online
+  lookups percent-encode the brackets.
 
 ## [0.4.0] - 2026-11-13
 
