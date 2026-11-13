@@ -412,9 +412,11 @@ def _class_options_finding(evidence: _Evidence, options: ManuscriptOptions) -> F
 
 
 def _forbidden_packages_finding(evidence: _Evidence, forbidden: tuple[str, ...]) -> Finding:
-    """Find direct declarations of forbidden packages.
+    r"""Find direct declarations of forbidden packages.
 
-    An unclear declaration is never a violation, but leaves the result incomplete.
+    An unclear declaration is never a violation. It leaves the result incomplete only when
+    it could declare a forbidden package: its names are not literal or include one. An
+    unclear ``\RequirePackage{newtxmath}`` inside a class macro cannot load ``showframe``.
 
     Args:
         evidence: The collected evidence.
@@ -431,7 +433,13 @@ def _forbidden_packages_finding(evidence: _Evidence, forbidden: tuple[str, ...])
         and set(item["names"]) & set(forbidden)
         and not item["uncertainty"]
     ]
-    uncertain = bool(evidence.graph_reasons or any(item["uncertainty"] for item in packages))
+    unclear = [
+        item
+        for item in packages
+        if item["uncertainty"]
+        and (not isinstance(item["names"], list) or set(item["names"]) & set(forbidden))
+    ]
+    uncertain = bool(evidence.graph_reasons or unclear)
     found = [name for item in matches for name in item["names"] or [] if name in forbidden]
     return evidence.finding(
         "manuscript.forbidden_packages",
@@ -448,7 +456,7 @@ def _forbidden_packages_finding(evidence: _Evidence, forbidden: tuple[str, ...])
                 "scope": "Does not establish the transitive packages loaded by TeX.",
             },
         ),
-        evidence.gaps(_uncertainty(packages)),
+        evidence.gaps(_uncertainty(unclear)),
         _where(matches),
     )
 

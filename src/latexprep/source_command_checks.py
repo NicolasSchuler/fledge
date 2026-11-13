@@ -13,6 +13,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import PurePosixPath
 
 from .literal_text import HEADING_DEPTHS, KEY_ARGUMENT_COMMANDS, REFERENCE_COMMANDS, TEXT_WRAPPERS
 from .source_file_commands import (
@@ -115,6 +116,10 @@ _PATH_LIKE = re.compile(
     re.IGNORECASE | re.VERBOSE,
 )
 _DECLARED_IDENTITY_COMMANDS = frozenset({"ProvidesPackage", "ProvidesClass", "ProvidesFile"})
+# Class and package files, whose run-time commands are reported once per file.
+_PACKAGE_SUFFIXES = frozenset({".cls", ".sty"})
+# How many lines of those commands a per-file finding lists.
+_MAX_LISTED_LINES = 10
 
 
 @dataclass(frozen=True, slots=True)
@@ -327,20 +332,28 @@ def _check_option_paths(checks: SourceChecks, command: Command) -> None:
 def _check_nested(checks: SourceChecks, command: Command) -> None:
     """Report a file command inside a group or macro argument, whose execution context is unknown.
 
+    Toolchain classes and packages that cannot name a project file are left out, as in
+    ``_check_conditional_dependencies``: a class file that loads ``newtxmath`` inside a
+    macro does not hide a project file.
+
     Args:
         checks: The source being checked.
         command: The command to check.
     """
-    if _is_file_command(command) and command.depth and command.name != "graphicspath":
-        checks.findings.uncertain(
-            "source.nested_file_command",
-            f"\\{command.name} occurs inside a group or macro argument; "
-            "its execution context is not established.",
-            checks.path,
-            command.line,
-            "Use a direct literal reference outside groups and macro arguments. "
-            + NEEDED_FOR_RESTRUCTURING,
-        )
+    if not _is_file_command(command) or not command.depth or command.name == "graphicspath":
+        return
+    # Toolchain classes and packages are covered by recorded build inputs.
+    if command.name in TOOLCHAIN_FILE_COMMANDS and not checks.names_project_file(command):
+        return
+    checks.findings.uncertain(
+        "source.nested_file_command",
+        f"\\{command.name} occurs inside a group or macro argument; "
+        "its execution context is not established.",
+        checks.path,
+        command.line,
+        "Use a direct literal reference outside groups and macro arguments. "
+        + NEEDED_FOR_RESTRUCTURING,
+    )
 
 
 def _check_filename_argument(checks: SourceChecks, command: Command) -> None:
@@ -383,12 +396,56 @@ _COMMAND_CHECKS: tuple[Callable[[SourceChecks, Command], None], ...] = (
     _check_nested,
     _check_filename_argument,
 )
+# The checks for a run-time command of a class or package file, reported per file instead.
+_COMMAND_CHECKS_AFTER_PATHS = tuple(
+    check for check in _COMMAND_CHECKS if check is not _check_unsupported_or_custom_path
+)
+
+
+def _report_package_runtime_commands(checks: SourceChecks, commands: list[Command]) -> None:
+    r"""Report the run-time commands of one class or package file as a single uncertainty.
+
+    Class and package files are macro code, so ``\csname`` and ``\catcode`` are routine
+    there; one finding per file says what flat layout cannot follow without listing each.
+
+    Args:
+        checks: The class or package file being checked.
+        commands: Its commands from ``_UNSUPPORTED_COMMANDS``, in source order.
+    """
+    names = sorted({command.name for command in commands})
+    listed = ", ".join(f"\\{name}" for name in names)
+    checks.findings.uncertain(
+        "source.unsupported_command",
+        f"{len(commands)} commands in this class or package file may depend on paths or "
+        f"runtime lookup outside the supported literal subset: {listed}.",
+        checks.path,
+        commands[0].line,
+        "Only flat layout and source transformations need these followed: "
+        + NEEDED_FOR_RESTRUCTURING,
+        {
+            "commands": names,
+            "occurrences": len(commands),
+            "lines": [command.line for command in commands[:_MAX_LISTED_LINES]],
+        },
+    )
 
 
 def check_source(checks: SourceChecks) -> None:
-    """Run every check over a freshly parsed source: conditionals, literals, then commands."""
+    """Run every check over a freshly parsed source: conditionals, literals, then commands.
+
+    In a class or package file, the run-time commands are collected into one finding.
+    """
     _check_conditional_dependencies(checks)
     _check_unclosed_literals(checks)
+    package_file = PurePosixPath(checks.path).suffix.lower() in _PACKAGE_SUFFIXES
+    runtime_commands: list[Command] = []
     for command in checks.source.commands:
-        for check in _COMMAND_CHECKS:
+        if package_file and command.name in _UNSUPPORTED_COMMANDS:
+            runtime_commands.append(command)
+            checks_to_run = _COMMAND_CHECKS_AFTER_PATHS
+        else:
+            checks_to_run = _COMMAND_CHECKS
+        for check in checks_to_run:
             check(checks, command)
+    if runtime_commands:
+        _report_package_runtime_commands(checks, runtime_commands)

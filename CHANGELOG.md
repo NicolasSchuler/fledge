@@ -7,6 +7,23 @@ breaking changes are listed under their own heading.
 
 The version is defined once, as `__version__` in `src/latexprep/__init__.py`.
 
+## [Unreleased]
+
+### Fixed
+
+- **A venue class or style file shipped in the project no longer makes the manuscript
+  checks inconclusive.** Its macro code (`\catcode`, `\csname`, packages loaded inside
+  macros) was counted as a gap in the manuscript text, so a project with its own
+  `IEEEtran.cls` got inconclusive citation coverage (`BIB101`, `BIB102`), float checks
+  (`MAN011`–`MAN015`), class options and forbidden packages (`TEX102`, `TEX103`), and
+  the `anonymous-review` preset blocked on them. Such files are now package code: what
+  the scan cannot follow in them still keeps flat layout and source transformations
+  from using the file, but not the checks of text, citations and declarations. Their
+  run-time commands are one `TEX312` finding per file instead of one per command,
+  toolchain packages loaded inside their macros no longer raise `TEX309`, and a final
+  `\endinput` followed only by comments no longer counts as unresolved. An unclear
+  declaration leaves `TEX103` incomplete only when it could name a forbidden package.
+
 ## [0.4.0] - 2026-11-13
 
 ### Breaking changes

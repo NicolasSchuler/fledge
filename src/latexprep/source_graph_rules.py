@@ -137,10 +137,13 @@ RULES = (
         title="File commands inside groups or macro arguments",
         description=(
             "Report a file command inside a group or macro argument. Its execution context "
-            "is not established, so the scan does not follow the reference."
+            "is not established, so the scan does not follow the reference. Toolchain "
+            "classes and packages that the recorded build covers are not reported."
         ),
         tests=(
             "tests.test_source_graph_findings.SourceGraphFindingTests.test_a_file_command_inside_a_group_or_macro_is_reported",
+            "tests.test_package_code_scope.PackageCodeScopeTests.test_toolchain_packages_loaded_inside_class_macros_are_not_nested_findings",
+            "tests.test_package_code_scope.PackageCodeScopeTests.test_a_nested_load_of_a_project_package_is_still_reported",
         ),
         fix="Use a direct literal reference outside groups and macro arguments.",
         mandatory=True,
@@ -184,10 +187,14 @@ RULES = (
         description=(
             "Report commands such as \\IfFileExists or \\directlua, and font commands without "
             "an explicit local font file, whose paths or lookups fall outside the supported "
-            "literal subset."
+            "literal subset. In a project .cls or .sty file they are reported once per file; "
+            "they keep flat layout and source transformations from following the file but "
+            "do not make the manuscript checks inconclusive."
         ),
         tests=(
             "tests.test_source_analysis.SourceAnalysisTests.test_selected_analysis_reports_unsupported_or_unresolved_dependencies_as_incomplete",
+            "tests.test_package_code_scope.PackageCodeScopeTests.test_run_time_commands_of_a_class_file_are_one_finding",
+            "tests.test_package_code_scope.PackageCodeScopeTests.test_the_spliced_manuscript_has_no_gaps",
         ),
         fix="Replace the command with a literal file reference the scan can follow.",
         mandatory=True,

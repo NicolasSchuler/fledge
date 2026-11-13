@@ -20,13 +20,14 @@ from typing import NamedTuple
 from .analysed_source import AnalysedSource, reuse_or_analyse
 from .cancellation import cancellation_point
 from .errors import PreparationError
-from .expanded_document import commands_before_end, reachable_sources
+from .expanded_document import CONTENT_INPUT_COMMANDS, commands_before_end, reachable_sources
 from .findings import Finding
 from .source_file_commands import IMPORT_COMMANDS, TRAVERSED_COMMANDS
 from .source_graph import (
     INCOMPLETE_GRAPH_RULES,
     ROOT_AMBIGUOUS_RULE,
     ROOT_MISSING_RULE,
+    UNPARSED_SOURCE_RULES,
     ArgumentLocation,
     SourceGraph,
 )
@@ -325,9 +326,12 @@ def graph_failures(inspection: SourceGraph, selected: set[str]) -> list[Finding]
 
     Returns:
         The findings about the selected sources or the main file whose rules mark an
-        incomplete graph, that did not pass and that can hide citations.
+        incomplete graph, that did not pass and that can hide citations. Inside a class
+        or package file of the project, which runs as preamble code, only a file the scan
+        could not read and a bibliography resource it cannot follow count.
     """
     scope = selected | {inspection.main}
+    package_code = package_code_sources(inspection, selected)
     # A resolved lookup-order or conditional dependency is evidence, not a gap.
     return [
         item
@@ -336,7 +340,30 @@ def graph_failures(inspection: SourceGraph, selected: set[str]) -> list[Finding]
         and item.rule in INCOMPLETE_GRAPH_RULES
         and item.status != "passed"
         and _can_hide_citations(item)
+        and (
+            item.path not in package_code
+            or item.rule in UNPARSED_SOURCE_RULES
+            or item.details.get("command") in _RESOURCE_COMMANDS
+        )
     ]
+
+
+def package_code_sources(inspection: SourceGraph, selected: set[str]) -> set[str]:
+    r"""Return the selected class and package files whose text is not manuscript content.
+
+    Content follows ``\input``, ``\include`` and ``\import`` from the main file; a project
+    ``.cls`` or ``.sty`` reached only through ``\documentclass``, ``\usepackage`` and their
+    relatives is package code.
+
+    Args:
+        inspection: The source graph of the manuscript.
+        selected: The selected sources, by relative path.
+
+    Returns:
+        The selected sources outside the content sources, the main file never among them.
+    """
+    content = reachable_sources(inspection, CONTENT_INPUT_COMMANDS)
+    return selected - content - {inspection.main}
 
 
 def citation_source_errors(inspection: SourceGraph) -> list[Finding]:
@@ -515,12 +542,17 @@ def build_citation_graph(inspection: SourceGraph) -> CitationGraph:
     graph.resources.update(resources)
     uncertainties.extend(map(Uncertainty, resource_reasons))
     unused: list[Uncertainty] = []
+    package_code = package_code_sources(inspection, selected)
     for name in sorted(selected):
         cancellation_point()
         source = inspection.sources[name]
         spans = conditional_spans(source.commands)
         for command in commands_before_end(source):
             gaps = [*_execution_gaps(command, spans), *_read_citation(graph, name, source, command)]
+            # Package code contributes its literal keys; its macro machinery is not a
+            # gap in the manuscript's citations.
+            if name in package_code:
+                continue
             uncertainties.extend(Uncertainty(f"{name}:{command.line}: {gap}") for gap in gaps)
             if command.name == "printbibliography" and command.options:
                 unused.append(

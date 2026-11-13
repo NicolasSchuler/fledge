@@ -388,20 +388,25 @@ def unresolved_non_content_file(finding: Finding) -> bool:
     )
 
 
-def _graph_gaps(graph: SourceGraph, selected: set[str]) -> list[str]:
+def _graph_gaps(graph: SourceGraph, selected: set[str], content: set[str]) -> list[str]:
     """List the gaps in the spliced text: every unresolved ``source.*`` finding in scope.
 
     That is a superset of ``INCOMPLETE_GRAPH_RULES``, which names only the findings that make
     the dependency graph incomplete; other unresolved findings, such as an unsupported
     search-path form, are gaps here as well. A main source outside ``selected`` and subfile
     targets are gaps too, and missing figure or bibliography files are not.
+
+    The scope is the content sources, the ones the splice copies. A class or package file
+    in the project runs as preamble code and its text is never spliced, so what the scan
+    cannot follow inside it says nothing about the manuscript text; it still makes the
+    dependency graph incomplete for flat layout and source transformations.
     """
     gaps = []
     if graph.main not in selected:
         gaps.append("no inspectable selected main source")
     if graph.subfile_targets:
         gaps.append("subfile body/preamble content interpretation is not supported by this check")
-    scope = selected | {graph.main}
+    scope = content | {graph.main}
     gaps.extend(
         f"{finding.path}: {finding.message}"
         for finding in graph.findings
@@ -429,7 +434,8 @@ def expand_document(
     """
     graph = graph or SourceGraph.build(root, main)
     selected = reachable_sources(graph)
-    splice = _Splice(graph, _graph_gaps(graph, selected))
+    content = reachable_sources(graph, CONTENT_INPUT_COMMANDS)
+    splice = _Splice(graph, _graph_gaps(graph, selected, content))
     parse_limit_exceeded = False
     try:
         if graph.main in selected:

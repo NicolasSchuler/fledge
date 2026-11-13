@@ -32,7 +32,7 @@ from .literal_text import (
     plain_text,
     scan_literal_text,
 )
-from .source_graph import INCOMPLETE_GRAPH_RULES, SourceGraph
+from .source_graph import INCOMPLETE_GRAPH_RULES, UNPARSED_SOURCE_RULES, SourceGraph
 from .source_loading import ParsedSource
 from .tex_commands import MATH_MARKER
 from .tex_lexer import CONTROL_SEQUENCE, Command, conditional_spans, in_conditional
@@ -290,7 +290,10 @@ def graph_reasons(graph: SourceGraph, selected: set[str], content: set[str]) -> 
 
     Returns:
         The reasons: an uninspected main source, subfiles, repeated inclusions, and
-        incomplete-graph findings within the scope of the selection.
+        incomplete-graph findings within the scope of the selection. Inside a class or
+        package file that is not content, only a file the scan could not read at all
+        counts: what it cannot follow in readable package code is a gap of the dependency
+        graph, not of the literal declarations and content these checks read.
     """
     reasons: list[str] = []
     if graph.main not in selected:
@@ -312,10 +315,12 @@ def graph_reasons(graph: SourceGraph, selected: set[str], content: set[str]) -> 
         | {graph.main}
         | {target for (name, _, _), (target, _) in graph.references.items() if name in selected}
     )
+    package_code = scope - content - {graph.main}
     reasons.extend(
         f"{item.path}: {item.message}"
         for item in graph.findings
         if item.path in scope
+        and (item.path not in package_code or item.rule in UNPARSED_SOURCE_RULES)
         and item.rule in INCOMPLETE_GRAPH_RULES
         and item.status != "passed"
         and not unresolved_non_content_file(item)
@@ -378,13 +383,17 @@ class ManuscriptScan:
             command: The ``\endinput`` command.
             conditional: Whether the command lies inside a conditional.
         """
+        rest = source.masked[command.start + len("\\endinput") :]
+        # Nothing but white space and comments follows: whether it runs changes nothing.
+        if not rest.strip():
+            return
         if command.depth or conditional:
             self.graph_reasons.append(
                 f"{name}:{command.line}: grouped, macro-defined, or conditional "
                 "\\endinput has an unresolved execution context"
             )
             return
-        suffix = source.masked[command.start + len("\\endinput") :].split("\n", 1)[0]
+        suffix = rest.split("\n", 1)[0]
         if suffix.strip():
             self.graph_reasons.append(
                 f"{name}:{command.line}: tokens after \\endinput on the same "
