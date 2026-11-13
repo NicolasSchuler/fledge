@@ -722,7 +722,8 @@ class SharedPdfSession:
         """Return a session over the shared frozen ``pdf`` that writes below the new ``work``.
 
         Args:
-            pdf: The PDF the caller expects; it must be the shared one.
+            pdf: The PDF the caller expects; it must be the shared one, under any spelling
+                that resolves to the same path, as the job's registry of sessions keys it.
             work: The new working directory of the view.
 
         Returns:
@@ -735,7 +736,7 @@ class SharedPdfSession:
             ValueError: ``pdf`` is not the shared PDF.
             RuntimeError: The session was released.
         """
-        if pdf != self.pdf:
+        if pdf.resolve() != self.pdf.resolve():
             raise ValueError("The shared PDF session belongs to a different PDF")
         return (await self._open()).view(work)
 

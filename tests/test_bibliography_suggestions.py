@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import time
 import unittest
+from contextlib import ExitStack
 from dataclasses import replace
+from unittest.mock import patch
 
 from latexprep.bibliography_integrity import check_bibliography_integrity
 from latexprep.bibliography_suggestions import MAX_VENUE_GROUPS
@@ -20,6 +22,7 @@ from latexprep.config import Settings
 from latexprep.core import run_job
 from latexprep.findings import Finding
 from latexprep.job_context import JobRequest
+from latexprep.style_support import MAX_FINDINGS_PER_RULE
 from tests.support import AsyncProjectTestCase, ProjectTestCase, clean_case
 
 # Long enough that a backtracking pattern takes seconds; a linear scan needs milliseconds.
@@ -53,7 +56,7 @@ class SuggestionTestCase(ProjectTestCase):
         self.write("references.bib", bibliography)
         findings = [
             item
-            for item in check_bibliography_integrity(self.root, "main.tex")
+            for item in check_bibliography_integrity(self.root, "main.tex", selection=_SUGGESTIONS)
             if item.rule == f"bibliography.{rule}"
         ]
         for finding in findings:
@@ -187,6 +190,29 @@ class UrlRepeatsDoiTests(SuggestionTestCase):
             with self.subTest(case=case):
                 entry = f"@string{{link={{x}}}}\n@article{{key, title={{T}}, {fields}}}\n"
                 self.assertEqual(self.suggestions(entry, "url_repeats_doi"), [])
+
+
+class SuggestionBoundTests(SuggestionTestCase):
+    """The per-entry suggestions list a bounded number of entries per rule, as ``STY`` does."""
+
+    def test_each_entry_rule_lists_at_most_the_bound_and_counts_the_rest(self) -> None:
+        hidden = 7
+        bibliography = "".join(
+            f"@misc{{key{index}, title={{T}}, howpublished={{arXiv:2101.{index:05d}}}, "
+            f"doi={{10.1234/{index}}}, url={{https://doi.org/10.1234/{index}}}}}\n"
+            for index in range(MAX_FINDINGS_PER_RULE + hidden)
+        )
+        for rule in ("preprint", "url_repeats_doi"):
+            with self.subTest(rule=rule):
+                findings = self.suggestions(bibliography, rule)
+                *listed, counted = findings
+                self.assertEqual(len(listed), MAX_FINDINGS_PER_RULE)
+                self.assertEqual(listed[-1].details["entry"], f"key{MAX_FINDINGS_PER_RULE - 1}")
+                self.assertEqual(counted.details, {"not_listed": hidden})
+                self.assertEqual(
+                    counted.message, f"{hidden} more occurrences of this suggestion are not listed."
+                )
+                self.assertIsNone(counted.line)
 
 
 class VenueVariantTests(SuggestionTestCase):
@@ -349,6 +375,45 @@ class SuggestionReportingTests(AsyncProjectTestCase):
         self.assertEqual(sorted(self.codes(family)), ["BIB111", "BIB112", "BIB113"])
         ignored = await self.run_bib(checks=replace(_SUGGESTIONS, ignore=("BIB112",)))
         self.assertEqual(sorted(self.codes(ignored)), ["BIB111", "BIB113"])
+
+    async def run_with_defects(self, command: str, helpers: tuple[str, ...], **settings: object):
+        """Run ``command`` while the named helpers of the suggestions raise a defect.
+
+        Args:
+            command: The job command, ``bib`` or ``inspect``.
+            helpers: Names in ``latexprep.bibliography_suggestions`` that raise when called.
+            **settings: Fields of the ``Settings`` beyond the main file.
+
+        Returns:
+            The report of the job.
+        """
+        defect = RuntimeError("suggestion defect")
+        with ExitStack() as stack:
+            for helper in helpers:
+                stack.enter_context(
+                    patch(f"latexprep.bibliography_suggestions.{helper}", side_effect=defect)
+                )
+            return await self.run_bib(command, **settings)
+
+    async def test_a_defect_in_a_suggestion_that_is_not_selected_cannot_change_the_outcome(
+        self,
+    ) -> None:
+        entry_helpers = ("entry_preprint_evidence", "read_doi")
+        for command in ("bib", "inspect"):
+            with self.subTest(command=command):
+                healthy = await self.run_bib(command)
+                default = await self.run_with_defects(command, (*entry_helpers, "venue_spelling"))
+                self.assertEqual(default.outcome, healthy.outcome)
+                self.assertEqual(
+                    [(item.rule, item.status) for item in default.findings],
+                    [(item.rule, item.status) for item in healthy.findings],
+                )
+                # Selecting one suggestion computes that one alone.
+                venues_only = await self.run_with_defects(
+                    command, entry_helpers, checks=CheckSelection(select=("ALL", "BIB113"))
+                )
+                self.assertEqual(venues_only.outcome, healthy.outcome)
+                self.assertEqual(self.codes(venues_only), ["BIB113"])
 
     async def test_a_comment_before_the_entry_silences_its_suggestion(self) -> None:
         bibliography = self.project / "references.bib"

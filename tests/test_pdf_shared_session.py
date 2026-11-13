@@ -420,6 +420,16 @@ class SharedSessionTests(SharedSessionCase):
             with self.assertRaisesRegex(ValueError, "different PDF"):
                 await shared.view(self.root / "other.pdf", self.work())
 
+    async def test_a_view_accepts_another_spelling_of_the_same_pdf(self) -> None:
+        alias = self.root / "alias"
+        alias.symlink_to(self.root, target_is_directory=True)
+        runner = SharedRunner()
+        with self.shared(runner) as shared:
+            first = await shared.view(self.pdf, self.work())
+            second = await shared.view(alias / "document.pdf", self.work())
+            self.assertEqual(await self.properties(first), await self.properties(second))
+        self.assertEqual(runner.freezes, 1)
+
     async def test_the_open_failure_is_remembered_and_raised_to_every_group(self) -> None:
         self.pdf.write_bytes(b"not a pdf")
         runner = SharedRunner()

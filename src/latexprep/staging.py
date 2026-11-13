@@ -365,11 +365,14 @@ def _tree_entries(root: Path) -> tuple[set[str], set[str]] | None:
 
     Returns:
         The relative folders and the relative files, or ``None`` when the tree holds a link
-        or any other special entry.
+        or any other special entry, or a folder could not be listed.
     """
     folders: set[str] = set()
     files: set[str] = set()
-    for folder, names, filenames in os.walk(root, followlinks=False):
+    # os.walk skips a folder it cannot list unless told otherwise; a folder that was not
+    # listed makes the listing incomplete, so two trees could otherwise look equal.
+    unlisted: list[OSError] = []
+    for folder, names, filenames in os.walk(root, onerror=unlisted.append, followlinks=False):
         cancellation_point()
         relative = Path(folder).relative_to(root)
         for name in names:
@@ -381,7 +384,7 @@ def _tree_entries(root: Path) -> tuple[set[str], set[str]] | None:
             if path.is_symlink() or not path.is_file():
                 return None
             files.add((relative / name).as_posix())
-    return folders, files
+    return None if unlisted else (folders, files)
 
 
 def trees_identical(first: Path, second: Path) -> bool:
@@ -389,8 +392,8 @@ def trees_identical(first: Path, second: Path) -> bool:
 
     A link or any other special entry in either tree makes the answer ``False``: the trees
     are only called identical when nothing about them needs interpreting. Both trees are read
-    in full, so the answer is exact; it is meant for a staging copy and the tree it was
-    copied from.
+    in full, so the answer is exact; a folder or file that cannot be read also makes it
+    ``False``. It is meant for a staging copy and the tree it was copied from.
 
     Args:
         first: One tree.
@@ -404,7 +407,11 @@ def trees_identical(first: Path, second: Path) -> bool:
         return False
     for name in sorted(entries[0][1]):
         cancellation_point()
-        if not filecmp.cmp(first / name, second / name, shallow=False):
+        try:
+            same = filecmp.cmp(first / name, second / name, shallow=False)
+        except OSError:
+            return False
+        if not same:
             return False
     return True
 

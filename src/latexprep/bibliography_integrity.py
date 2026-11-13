@@ -23,7 +23,7 @@ from .bibliography_files import (
 )
 from .bibliography_results import located_finding, syntax_finding
 from .bibliography_styles import MONTH_MACROS, StyleMacros, style_macros
-from .bibliography_suggestions import bibliography_suggestions
+from .bibliography_suggestions import BIBLIOGRAPHY_SUGGESTION_CODES, bibliography_suggestions
 from .bibtex_syntax import (
     MAX_BIB_FILE_BYTES,
     BibDocument,
@@ -36,6 +36,8 @@ from .bibtex_syntax import (
     read_doi,
 )
 from .cancellation import cancellation_point
+from .check_policy import suggestion_selected
+from .check_selection import CheckSelection
 from .citation_graph import RELATIONSHIP_FIELDS, require_directory, selected_bibliography
 from .findings import Finding, Severity, Status
 
@@ -418,7 +420,11 @@ def inspect_bibliography_integrity(
 
 
 def check_bibliography_integrity(
-    root: Path, main: str | None = None, *, analysed: AnalysedSource | None = None
+    root: Path,
+    main: str | None = None,
+    *,
+    analysed: AnalysedSource | None = None,
+    selection: CheckSelection | None = None,
 ) -> list[Finding]:
     """Inspect UTF-8 .bib files without changing them or accessing the network.
 
@@ -436,8 +442,9 @@ def check_bibliography_integrity(
     macro expansion order, style requirements, or rendered citations are valid.
 
     The bibliography suggestions about the same files (preprints, URLs that repeat the
-    DOI, venues spelled several ways) follow the findings; check selection drops them
-    unless a selector other than ``ALL`` selects them.
+    DOI, venues spelled several ways) follow the findings. Only those that a selector other
+    than ``ALL`` selects are computed, so a run that does not ask for them cannot be
+    affected by them.
 
     Args:
         root: The project directory.
@@ -445,12 +452,23 @@ def check_bibliography_integrity(
             inspect every .bib file below ``root``.
         analysed: The source analysis of the same root and main file, shared with other
             checks; without one the checks build their own.
+        selection: The check selection, whose explicit selectors choose the suggestions
+            to run; ``None`` runs none.
 
     Returns:
-        The findings.
+        The findings, then the selected suggestions.
 
     Raises:
         PreparationError: ``root`` is not a directory.
     """
     documents, findings = inspect_bibliography_integrity(root, main, analysed=analysed)
-    return [*findings, *bibliography_suggestions(documents)]
+    selected = (
+        frozenset()
+        if selection is None
+        else frozenset(
+            code for code in BIBLIOGRAPHY_SUGGESTION_CODES if suggestion_selected(selection, code)
+        )
+    )
+    if selected:
+        findings.extend(bibliography_suggestions(documents, selected))
+    return findings

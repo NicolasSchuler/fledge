@@ -11,14 +11,16 @@ reported only when a selector other than ``ALL`` selects them:
 - ``bibliography.venue_variants``: one venue whose name is spelled in several ways in one
   .bib file (:mod:`~latexprep.bibliography_venues`).
 
-Only complete, parsed files are read, and nothing is changed. Every finding has the
-``suggestion`` severity, so a ``% fledge: ignore CODE`` comment on the line before the
-entry silences it.
+Only the selected suggestions run, only complete, parsed files are read, and nothing is
+changed. Every finding has the ``suggestion`` severity, so a ``% fledge: ignore CODE``
+comment on the line before the entry silences it. The preprint and repeated-DOI
+suggestions list at most ``MAX_FINDINGS_PER_RULE`` entries each, as the style suggestions
+do, and count the rest in one more finding; the venue groups have a bound of their own.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Collection, Iterator
 from dataclasses import dataclass, field
 from urllib.parse import unquote, urlsplit
 
@@ -28,6 +30,7 @@ from .bibtex_syntax import BibDocument, Entry, read_doi
 from .cancellation import cancellation_point
 from .finding_text import more_suffix
 from .findings import EvidenceKind, Finding
+from .style_support import MAX_FINDINGS_PER_RULE
 
 # Fields that hold the name of the venue a work appeared in (biblatex: journaltitle).
 _VENUE_FIELDS = ("journal", "journaltitle", "booktitle")
@@ -275,32 +278,97 @@ def _venue_finding(document: BibDocument, variants: list[_Variant], omitted: int
     )
 
 
-def bibliography_suggestions(documents: list[BibDocument]) -> list[Finding]:
-    """Offer the bibliography suggestions for the entries of the complete documents.
+EntrySuggestion = Callable[[BibDocument, Entry], Finding | None]
+# The suggestions about one entry, by code, in reporting order.
+_ENTRY_SUGGESTIONS: dict[str, EntrySuggestion] = {
+    "BIB111": _preprint,
+    "BIB112": _url_repeats_doi,
+}
+_VENUE_VARIANTS = "BIB113"
+# Every bibliography suggestion, in reporting order.
+BIBLIOGRAPHY_SUGGESTION_CODES = (*_ENTRY_SUGGESTIONS, _VENUE_VARIANTS)
 
-    A document with a syntax error is skipped. At most ``MAX_VENUE_GROUPS`` venue groups
-    are reported; the last one says how many more there are.
+
+def _not_listed_finding(first: Finding, hidden: int) -> Finding:
+    """Count the suggestions of one rule that the per-rule bound left out.
+
+    Args:
+        first: The first suggestion of the rule that is not listed, which gives the rule,
+            the file and the kind of evidence.
+        hidden: How many suggestions of the rule are not listed.
+
+    Returns:
+        One more suggestion of the rule, located at the file of ``first`` without a line.
+    """
+    return Finding(
+        first.rule,
+        f"{hidden} more {'occurrence' if hidden == 1 else 'occurrences'} of this "
+        f"suggestion {'is' if hidden == 1 else 'are'} not listed.",
+        severity="suggestion",
+        status="failed",
+        path=first.path,
+        evidence_kind=first.evidence_kind,
+        details={"not_listed": hidden},
+    )
+
+
+def _entry_suggestions(documents: list[BibDocument], codes: list[str]) -> list[Finding]:
+    """Offer the selected per-entry suggestions, at most ``MAX_FINDINGS_PER_RULE`` per rule.
+
+    Args:
+        documents: The complete parsed .bib files, in the order they were read.
+        codes: The codes of the per-entry suggestions to run, in reporting order.
+
+    Returns:
+        The listed suggestions of each entry, in file and entry order, then for each rule
+        that had more, one finding that counts those not listed.
+    """
+    findings: list[Finding] = []
+    listed = dict.fromkeys(codes, 0)
+    unlisted: dict[str, tuple[Finding, int]] = {}
+    for document in documents:
+        for entry in document.entries:
+            cancellation_point()
+            for code in codes:
+                finding = _ENTRY_SUGGESTIONS[code](document, entry)
+                if finding is None:
+                    continue
+                if listed[code] < MAX_FINDINGS_PER_RULE:
+                    listed[code] += 1
+                    findings.append(finding)
+                else:
+                    first, count = unlisted.get(code, (finding, 0))
+                    unlisted[code] = (first, count + 1)
+    findings.extend(_not_listed_finding(*unlisted[code]) for code in codes if code in unlisted)
+    return findings
+
+
+def bibliography_suggestions(
+    documents: list[BibDocument], selected: Collection[str]
+) -> list[Finding]:
+    """Offer the selected bibliography suggestions for the entries of the complete documents.
+
+    A suggestion that is not selected is not computed, so a defect in one cannot affect a
+    run that does not ask for it. A document with a syntax error is skipped. Each per-entry
+    rule lists at most ``MAX_FINDINGS_PER_RULE`` suggestions and counts the rest in one
+    more finding. At most ``MAX_VENUE_GROUPS`` venue groups are reported; the last one
+    says how many more there are.
 
     Args:
         documents: The parsed .bib files, in the order they were read.
+        selected: The codes of the suggestions to run; other codes are ignored.
 
     Returns:
         The preprint and repeated-DOI suggestions of each entry, then the venue groups of
         each file, in file order.
     """
-    findings: list[Finding] = []
-    groups: list[tuple[BibDocument, list[_Variant]]] = []
-    for document in documents:
-        if not document.valid:
-            continue
-        for entry in document.entries:
-            cancellation_point()
-            findings.extend(
-                item
-                for item in (_preprint(document, entry), _url_repeats_doi(document, entry))
-                if item is not None
-            )
-        groups.extend((document, variants) for variants in _venue_groups(document))
+    complete = [document for document in documents if document.valid]
+    findings = _entry_suggestions(
+        complete, [code for code in _ENTRY_SUGGESTIONS if code in selected]
+    )
+    if _VENUE_VARIANTS not in selected:
+        return findings
+    groups = [(document, variants) for document in complete for variants in _venue_groups(document)]
     reported = groups[:MAX_VENUE_GROUPS]
     for index, (document, variants) in enumerate(reported):
         omitted = len(groups) - len(reported) if index == len(reported) - 1 else 0

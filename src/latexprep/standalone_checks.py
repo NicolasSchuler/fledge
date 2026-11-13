@@ -69,7 +69,12 @@ async def check_bibliography(context: JobContext, report: Report) -> None:
     # The three checks read the same sources, so they share one source analysis.
     analysed = context.sources.get(snapshot, main)
     integrity = await context.thread_operation(
-        "bibliography checks", check_bibliography_integrity, snapshot, main, analysed=analysed
+        "bibliography checks",
+        check_bibliography_integrity,
+        snapshot,
+        main,
+        analysed=analysed,
+        selection=settings.checks,
     )
     report.findings.extend(_unsilenced(report, integrity, snapshot))
     report.findings.extend(

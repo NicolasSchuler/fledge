@@ -9,6 +9,7 @@ rebuild always runs and always has to match.
 
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 import zipfile
@@ -71,6 +72,29 @@ class TreeIdentityTests(unittest.TestCase):
 
     def test_files_of_equal_size_are_compared_by_content(self) -> None:
         (self.second / "main.tex").write_text("mine\n")
+        self.assertFalse(trees_identical(self.first, self.second))
+
+    def deny_access(self, path: Path) -> None:
+        """Make ``path`` unreadable until the test ends; skip the test when that cannot work.
+
+        Args:
+            path: The file or folder.
+        """
+        if os.geteuid() == 0:
+            self.skipTest("the superuser can read every file")
+        mode = path.stat().st_mode
+        path.chmod(0)
+        self.addCleanup(path.chmod, mode)
+
+    def test_an_unreadable_folder_is_never_identical(self) -> None:
+        (self.second / "sections/one.tex").write_text("One\n")
+        for root in (self.first, self.second):
+            self.deny_access(root / "sections")
+        self.assertFalse(trees_identical(self.first, self.second))
+
+    def test_an_unreadable_file_is_never_identical(self) -> None:
+        for root in (self.first, self.second):
+            self.deny_access(root / "main.tex")
         self.assertFalse(trees_identical(self.first, self.second))
 
 

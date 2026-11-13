@@ -294,7 +294,9 @@ class SourceCheck:
 _SOURCE_CHECKS = (
     SourceCheck(
         TaskName.BIBLIOGRAPHY_CHECKS,
-        lambda root, main, _, analysed: check_bibliography_integrity(root, main, analysed=analysed),
+        lambda root, main, settings, analysed: check_bibliography_integrity(
+            root, main, analysed=analysed, selection=settings.checks
+        ),
     ),
     SourceCheck(
         TaskName.BIBLIOGRAPHY_COVERAGE,

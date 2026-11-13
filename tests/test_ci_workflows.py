@@ -111,7 +111,19 @@ class WorkflowSafeguardTests(unittest.TestCase):
         self.assertIn("sha512sum --check --strict", install)
         self.assertIn("gpg --batch --status-fd 1", install)
         self.assertRegex(install, r"TEXLIVE_SIGNING_KEY: [0-9A-F]{40}\n")
-        self.assertLess(install.index("VALIDSIG"), install.index("install-tl --no-interaction"))
+        self.assertIn("set -euo pipefail", install)
+        # The signature is checked with a key from tug.org, not one from the unverified
+        # installer; then the hash; and only then is the installer unpacked and run.
+        self.assertIn("gpg --batch --quiet --import texlive.asc", install)
+        self.assertNotIn("unpacked/tlpkg", install)
+        order = (
+            "VALIDSIG",
+            "sha512sum --check",
+            "tar -xzf install-tl-unx.tar.gz",
+            "install-tl --no-interaction",
+        )
+        positions = [install.index(step) for step in order]
+        self.assertEqual(positions, sorted(positions))
         self.assertIn("tlmgr --repository", install)
         for package in ("latexmk", "biber", "cm-super", "tex-gyre", "collection-luatex", "bbm"):
             self.assertIn(package, install)

@@ -350,20 +350,30 @@ jobs:
       # installs slowly on a hosted runner. Documentation and source files are left out. The release is whichever one
       # tug.org serves now, which is the point of this leg; it installs under
       # /usr/local/texlive/<year>.
-      # The installer is checked before it runs: its SHA-512 from the same mirror, and the
-      # signature of that hash file by the TeX Live signing key. TEXLIVE_SIGNING_KEY pins
-      # the fingerprint of the primary key; tug.org renews the signing subkey every year, so
-      # the subkey is not pinned. The fingerprint was taken from the keyring and from
-      # tlpkg/gpg/tl-key-extension.txt of the installer on 2026-11-13, so the pin guards
-      # against a later substitution of the installer or its key, not against a bad first
-      # observation; compare it with the key that tug.org publishes if it ever has to change.
+      # Nothing from the installer is unpacked or run before it is verified, in this order:
+      #   1. The TeX Live public key is fetched from tug.org itself, not from the mirror and
+      #      not from the unverified installer, into an empty keyring of this step.
+      #   2. The signature of the hash file (install-tl-unx.tar.gz.sha512.asc) must verify
+      #      with that keyring, and gpg's VALIDSIG line must name TEXLIVE_SIGNING_KEY as the
+      #      primary key. The pin is what authenticates the hash: a key from a substituted
+      #      texlive.asc cannot produce such a signature without the TeX Live private key.
+      #   3. The installer must match the signed SHA-512; only then is it unpacked and run.
+      # TEXLIVE_SIGNING_KEY pins the fingerprint of the primary key; tug.org renews the
+      # signing subkey every year, so the subkey is not pinned. The fingerprint was taken
+      # from the keyring and from tlpkg/gpg/tl-key-extension.txt of the installer on
+      # 2026-11-13, so the pin guards against a later substitution of the installer or its
+      # key, not against a bad first observation; compare it with the key that tug.org
+      # publishes if it ever has to change. Nothing guards against an older, validly signed
+      # installer being served.
       # The step has its own timeout, so a slow mirror fails here and not at the job's limit.
       - name: Install the current TeX Live from tug.org
         if: ${{ matrix.texlive == 'current-from-tug' }}
         timeout-minutes: 25
         env:
           TEXLIVE_SIGNING_KEY: C78B82D8C79512F79CC0D7C80D5E5D9106BAB6BC
+          TEXLIVE_PUBLIC_KEY_URL: https://tug.org/texlive/files/texlive.asc
         run: |
+          set -euo pipefail
           installer="$(mktemp -d)"
           mirror="$(curl --fail --silent --show-error --location --output /dev/null \
             --write-out '%{url_effective}' https://mirror.ctan.org/systems/texlive/tlnet/)"
@@ -373,19 +383,22 @@ jobs:
             curl --fail --silent --show-error --location --retry 3 \
               --output "$installer/$name" "${mirror}${name}"
           done
+          curl --fail --silent --show-error --location --retry 3 \
+            --proto '=https' --proto-redir '=https' \
+            --output "$installer/texlive.asc" "$TEXLIVE_PUBLIC_KEY_URL"
           cd "$installer"
-          sha512sum --check --strict install-tl-unx.tar.gz.sha512
-          mkdir unpacked
-          tar -xzf install-tl-unx.tar.gz -C unpacked --strip-components=1
           export GNUPGHOME="$installer/gnupg"
           mkdir -m 700 "$GNUPGHOME"
-          gpg --batch --quiet --import unpacked/tlpkg/gpg/pubring.gpg
-          status="$(gpg --batch --status-fd 1 \
-            --verify install-tl-unx.tar.gz.sha512.asc install-tl-unx.tar.gz.sha512 2>/dev/null)"
-          if ! grep -Eq "^\[GNUPG:\] VALIDSIG .* ${TEXLIVE_SIGNING_KEY}\$" <<< "$status"; then
+          gpg --batch --quiet --import texlive.asc
+          if ! status="$(gpg --batch --status-fd 1 \
+            --verify install-tl-unx.tar.gz.sha512.asc install-tl-unx.tar.gz.sha512 2>/dev/null)" \
+            || ! grep -Eq "^\[GNUPG:\] VALIDSIG .* ${TEXLIVE_SIGNING_KEY}\$" <<< "$status"; then
             echo "::error::The hash of the TeX Live installer is not signed by the TeX Live signing key."
             exit 1
           fi
+          sha512sum --check --strict install-tl-unx.tar.gz.sha512
+          mkdir unpacked
+          tar -xzf install-tl-unx.tar.gz -C unpacked --strip-components=1
           cat > texlive.profile <<'PROFILE'
           selected_scheme scheme-small
           instopt_adjustpath 0
