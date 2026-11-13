@@ -54,14 +54,17 @@ class WorkflowReviewTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(saved["outcome"], "accepted_exceptions")
 
     async def test_baseline_difference_is_accepted_at_the_stage_the_workflow_records(self):
+        # The flat layout rebuilds the prepared sources; with unchanged sources and the
+        # preserved layout the baseline PDF stands in and is not compared with itself.
         settings = Settings(
+            layout="flat",
             reporting=ReportingOptions(
                 accepted_exceptions=(
                     ReviewRule(
                         "CMP003", "Intended new appearance", stage=BASELINE_VERSUS_PREPARED_STAGE
                     ),
                 )
-            )
+            ),
         )
         changed = Finding("compare.rendering", "Pixels differ", severity="error")
 

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 import shutil
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
@@ -63,6 +64,9 @@ _RASTER_FORMATS: dict[str, tuple[tuple[str, ...], str]] = {
     "png": (("-png",), "page.png"),
 }
 _DOCUMENT_NAME = "document"
+# Directory entries read when looking for the pages a multi-page render wrote: a range holds
+# a handful of pages, so far more entries than that are not a render's output.
+_RENDERED_ENTRY_LIMIT = 256
 
 
 def pdf_tool_version_argv(tool: str) -> list[str]:
@@ -172,6 +176,79 @@ def render_page_argv(
 def raster_filename(raster: Literal["gray", "rgb", "png"]) -> str:
     """Return the file name ``render_page_argv`` writes in a command's working directory."""
     return _RASTER_FORMATS[raster][1]
+
+
+def render_pages_argv(
+    first: int,
+    last: int,
+    dpi: int,
+    raster: Literal["gray", "rgb", "png"],
+    document: str = DOCUMENT,
+) -> list[str]:
+    """Build the ``pdftoppm`` command that renders pages ``first`` to ``last`` in one process.
+
+    Each page becomes its own file in the working directory, named ``page-`` and the page
+    number with as many digits as the document's page count has (``page-07.ppm``);
+    :func:`rendered_page_files` finds them. Every page is rendered exactly as
+    :func:`render_page_argv` renders it alone, so the pages of a range need one process
+    start instead of one each.
+
+    Args:
+        first: The first page to render, from 1.
+        last: The last page to render, at least ``first``.
+        dpi: The resolution in dots per inch.
+        raster: The raster format.
+        document: The input argument.
+
+    Returns:
+        The command.
+    """
+    options, _ = _RASTER_FORMATS[raster]
+    return [
+        "pdftoppm",
+        "-f",
+        str(first),
+        "-l",
+        str(last),
+        *options,
+        "-r",
+        str(dpi),
+        document,
+        "page",
+    ]
+
+
+def rendered_page_files(
+    directory: Path, raster: Literal["gray", "rgb", "png"], *, first: int, last: int
+) -> dict[int, Path]:
+    """Return the page files that a ``render_pages_argv`` command wrote, by page number.
+
+    Only names of the form ``page-<number><suffix of the raster format>`` for a page from
+    ``first`` to ``last`` count, and only the first few entries of the directory are read,
+    so unexpected output neither adds pages nor slows the lookup. A page that was not
+    written is absent from the result.
+
+    Args:
+        directory: The command's working directory.
+        raster: The raster format that was requested.
+        first: The first requested page.
+        last: The last requested page.
+
+    Returns:
+        The path of each page file found; empty when the directory cannot be read.
+    """
+    suffix = Path(_RASTER_FORMATS[raster][1]).suffix
+    pattern = re.compile(rf"page-(\d{{1,9}}){re.escape(suffix)}")
+    found: dict[int, Path] = {}
+    try:
+        with os.scandir(directory) as entries:
+            for _, entry in zip(range(_RENDERED_ENTRY_LIMIT), entries, strict=False):
+                match = pattern.fullmatch(entry.name)
+                if match is not None and first <= int(match[1]) <= last:
+                    found[int(match[1])] = Path(entry.path)
+    except OSError:
+        return {}
+    return found
 
 
 def qpdf_objects_argv() -> list[str]:

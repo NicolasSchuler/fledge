@@ -16,6 +16,7 @@ reads inside them do.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Sequence
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
@@ -33,6 +34,7 @@ from .pdf_check_options import MAX_FIGURE_INPUTS, PdfCheckOptions, figure_font_c
 from .pdf_checks import extract_pdf_evidence, inspect_included_pdf_figures, inspect_pdf_details
 from .pdf_comparison import compare_pdfs
 from .pdf_inspection import PdfInspectionOptions, inspect_pdf
+from .pdf_job_sessions import job_pdf_sessions
 from .pdf_previews import PdfPreviewCollector
 from .pdf_rule_names import PdfRule
 from .pdf_structure_checks import StructureOptions, inspect_pdf_structure
@@ -85,6 +87,8 @@ class _PdfCheckContext:
         settings: The options of every check group.
         budget: The shared resource budget.
         session: The frozen copy and remembered measurements that the groups share.
+        job_owned: Whether ``session`` belongs to the job, which releases it when the job
+            ends, rather than to this run.
     """
 
     pdf: Path
@@ -93,6 +97,7 @@ class _PdfCheckContext:
     settings: PdfCheckSettings
     budget: ResourceBudget
     session: SharedPdfSession
+    job_owned: bool = False
 
     @classmethod
     def of(
@@ -105,6 +110,9 @@ class _PdfCheckContext:
     ) -> _PdfCheckContext:
         """Return the context of ``pdf``, whose shared session freezes it below ``work``.
 
+        Within a job the session is the job's, shared with every other look at the same PDF;
+        otherwise it is this run's own.
+
         Args:
             pdf: The checked PDF.
             work: The private workspace.
@@ -115,8 +123,15 @@ class _PdfCheckContext:
         Returns:
             The context.
         """
+        registry = job_pdf_sessions(runner, budget)
+        if registry is not None:
+            return cls(pdf, work, runner, settings, budget, registry.pdf(pdf).session, True)
         session = SharedPdfSession(pdf, work / _SHARED_DOCUMENT, runner, budget)
         return cls(pdf, work, runner, settings, budget, session)
+
+    def run_scope(self) -> AbstractContextManager[object]:
+        """Return the scope of one pipeline run, which releases a session it owns when it ends."""
+        return nullcontext() if self.job_owned else self.session
 
 
 _T = TypeVar("_T")
@@ -550,7 +565,7 @@ async def inspect_configured_pdf_checks(
     """
     context = _PdfCheckContext.of(pdf, work, runner, settings, budget)
     source = reuse_or_analyse(root, main, analysed)
-    with context.session:
+    with context.run_scope():
         return await _run_groups(
             [
                 partial(_inspect_pdf_details_with_source_metadata, context, source, main),
@@ -612,7 +627,7 @@ async def inspect_standalone_pdf(
         source project.
     """
     context = _PdfCheckContext.of(pdf, work, runner, settings, budget)
-    with context.session:
+    with context.run_scope():
         findings = await _run_groups(
             [
                 partial(_inspect_pdf_basics, context),

@@ -37,6 +37,7 @@ POPPLER_TOOLS = ("pdfinfo", "pdftotext", "pdftoppm")
 # Stage names as reports show them. Review rules in settings files name stages literally
 # (stage = "baseline versus prepared"), so these are not imported: a rename must fail here.
 BASELINE_VERSUS_PREPARED_STAGE = "baseline versus prepared"
+PREPARED_VERSUS_ARCHIVE_STAGE = "prepared versus archive rebuild"
 FINAL_SOURCE_CHECKS_STAGE = "final source checks"
 # The builds of a prepare job with the preserved layout: the unchanged sources, the
 # transformed copy, and the rebuild of the extracted archive.
@@ -374,7 +375,10 @@ class LiveBibliographyPreparationTests(AsyncLiveProjectTestCase):
         self.assertIn("\\bibitem{first}", shipped["main.bbl"])
         self.assertNotIn("Stale entry", shipped["main.bbl"])
         self.assert_passed(report, ("TEX009",), FINAL_SOURCE_CHECKS_STAGE)
-        self.assert_passed(report, ("CMP002", "CMP003"), BASELINE_VERSUS_PREPARED_STAGE)
+        # Staging changed nothing, so the baseline PDF stands in for the prepared one and is
+        # not compared with itself; the archive rebuild, which reads the shipped main.bbl, is.
+        self.assertEqual(finding_statuses(report, "CMP003", BASELINE_VERSUS_PREPARED_STAGE), [])
+        self.assert_passed(report, ("CMP002", "CMP003"), PREPARED_VERSUS_ARCHIVE_STAGE)
         archive = next(item for item in report.stages if item["name"] == ARCHIVE_STAGE)
         self.assertIn("$bibtex_use=0", " ".join(archive["command"]))
         self.assertEqual(directory_contents(source), originals)

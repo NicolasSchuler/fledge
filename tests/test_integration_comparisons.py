@@ -14,6 +14,7 @@ import re
 import tempfile
 import unittest
 import zipfile
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -22,19 +23,32 @@ from click.testing import CliRunner
 from latexprep.cli import cli
 from latexprep.config import Settings
 from latexprep.job_context import JobRequest
+from latexprep.job_execution import JobExecution
 from latexprep.pdf_artwork_options import PdfArtworkOptions
+from latexprep.pdf_comparison import compare_pdfs
+from latexprep.pdf_geometry import COMPARISON_DPI
+from latexprep.pdf_tools import (
+    DOCUMENT,
+    PdfToolSession,
+    raster_filename,
+    render_page_argv,
+    render_pages_argv,
+    rendered_page_files,
+)
 from latexprep.png_support import iter_png_chunks, read_png_header
 from latexprep.report import Outcome, Report
 from latexprep.workflow_options import WorkflowOptions
 from tests.live_support import (
     LIVE_BUILD_EPOCH,
     LIVE_JOB_TIMEOUT_SECONDS,
+    AsyncLiveProjectTestCase,
     LiveProjectTestCase,
     blocking_summary,
     finding_statuses,
     live_settings,
     run_job_sync,
 )
+from tests.page_render_fakes import multi_page_pdf
 from tests.support import live_test, write_file, write_project
 
 # The stages that comparison findings record, as reports and review decisions name them.
@@ -476,6 +490,105 @@ class LiveComparisonTests(LiveProjectTestCase):
         report = self.prepare_published(stable, "stable-output", settings)
         self.assertEqual(finding_statuses(report, "CMP101"), ["passed"], blocking_summary(report))
         self.assertEqual(_comparison_results(report, FIRST_BASELINE_REPEAT), ALL_MATCH)
+
+
+PAGE_RANGE_PAGES = 12
+
+
+@live_test("Opt-in live Poppler rendering (FLEDGE_RUN_INTEGRATION=1)")
+class LivePageRangeTests(AsyncLiveProjectTestCase):
+    """Real renders of a twelve-page PDF, in ranges, page by page and from remembered digests.
+
+    A range of pages renders byte for byte like the same pages one process each, a comparison
+    that renders in ranges reports what a page-by-page comparison reports, and a job that
+    compares a PDF again reuses the digests of its earlier renders without changing a finding.
+    """
+
+    async def asyncSetUp(self) -> None:
+        """Write ``first``, a copy of it and ``other``, which differs from it on every page."""
+        self.require_tools("pdfinfo", "pdftotext", "pdftoppm")
+        self.first = self.base / "first.pdf"
+        self.same = self.base / "same.pdf"
+        self.other = self.base / "other.pdf"
+        self.first.write_bytes(multi_page_pdf(PAGE_RANGE_PAGES))
+        self.same.write_bytes(multi_page_pdf(PAGE_RANGE_PAGES))
+        self.other.write_bytes(multi_page_pdf(PAGE_RANGE_PAGES, variant=1))
+
+    async def test_a_range_renders_byte_for_byte_like_single_pages(self) -> None:
+        execution = JobExecution(live_settings())
+        with execution.workspace("fledge-range-bytes-") as work:
+            async with execution.bounded(work):
+                session = await PdfToolSession.open(
+                    work / "render", {"document": self.first}, execution.runner, execution.budget
+                )
+                ranged = await session.run_without_lease(
+                    "range", render_pages_argv(1, PAGE_RANGE_PAGES, COMPARISON_DPI, "rgb", DOCUMENT)
+                )
+                self.assertEqual(ranged.stderr.strip(), "")
+                files = rendered_page_files(
+                    session.work / "range/command", "rgb", first=1, last=PAGE_RANGE_PAGES
+                )
+                self.assertEqual(sorted(files), list(range(1, PAGE_RANGE_PAGES + 1)))
+                for page in range(1, PAGE_RANGE_PAGES + 1):
+                    await session.run_without_lease(
+                        f"single-{page}", render_page_argv(page, COMPARISON_DPI, "rgb", DOCUMENT)
+                    )
+                    single = session.work / f"single-{page}/command" / raster_filename("rgb")
+                    with self.subTest(page=page):
+                        self.assertEqual(files[page].read_bytes(), single.read_bytes())
+
+    async def compare(
+        self, settings_options: dict[str, int], left: Path, right: Path, *, again: bool = False
+    ) -> list[list[dict[str, object]]]:
+        """Compare ``left`` with ``right`` in one job, and with ``right`` first when ``again``.
+
+        Returns:
+            The findings of each comparison, as plain data.
+        """
+        execution = JobExecution(live_settings(**settings_options))
+        results = []
+        with execution.workspace("fledge-range-compare-") as work:
+            async with execution.bounded(work):
+                pairs = [(left, right), *([(right, left)] if again else [])]
+                for index, (one, two) in enumerate(pairs):
+                    findings = await compare_pdfs(
+                        one,
+                        two,
+                        work / f"compare-{index}",
+                        execution.runner,
+                        budget=execution.budget,
+                    )
+                    results.append([asdict(finding) for finding in findings])
+        return results
+
+    async def test_ranges_and_single_pages_give_the_same_findings(self) -> None:
+        # One renderer cuts the twelve pages into ranges; eight renderers take a page each.
+        ranged = await self.compare({"jobs": 1, "render_jobs": 1}, self.first, self.other)
+        paged = await self.compare({"jobs": 8, "render_jobs": 8}, self.first, self.other)
+        self.assertEqual(ranged, paged)
+        rendering = next(item for item in ranged[0] if item["rule"] == "compare.rendering")
+        self.assertEqual(rendering["status"], "failed")
+        self.assertEqual(
+            rendering["details"]["changed_pages"], list(range(1, PAGE_RANGE_PAGES + 1))
+        )
+
+    async def test_identical_pdfs_pass_with_ranges(self) -> None:
+        (findings,) = await self.compare({"jobs": 2, "render_jobs": 2}, self.first, self.same)
+        statuses = {item["rule"]: item["status"] for item in findings}
+        self.assertEqual(statuses["compare.rendering"], "passed")
+        self.assertEqual(statuses["compare.text"], "passed")
+        self.assertEqual(statuses["compare.page_count"], "passed")
+
+    async def test_a_second_comparison_that_reuses_digests_reports_the_same_findings(self) -> None:
+        options = {"jobs": 4, "render_jobs": 2}
+        together = await self.compare(options, self.first, self.other, again=True)
+        (fresh,) = await self.compare(options, self.other, self.first)
+        # The second comparison needed no render at all, and still says what a fresh job says.
+        self.assertEqual(together[1], fresh)
+        rendering = next(item for item in fresh if item["rule"] == "compare.rendering")
+        self.assertEqual(
+            rendering["details"]["changed_pages"], list(range(1, PAGE_RANGE_PAGES + 1))
+        )
 
 
 if __name__ == "__main__":

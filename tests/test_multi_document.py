@@ -79,7 +79,9 @@ class MultiDocumentTests(unittest.IsolatedAsyncioTestCase):
             JobRequest("prepare", self.source, self.settings, self.base / "out"), backends=backends
         )
         self.assertEqual(report.outcome, "passed", report.to_dict())
-        self.assertEqual(len(visits), 6)
+        # Each document builds its baseline and its archive; staging changed nothing, so the
+        # transformed rebuild is skipped.
+        self.assertEqual(len(visits), 4)
         for name, main in (("paper", "main.tex"), ("supplement", "extra.tex")):
             with zipfile.ZipFile(self.base / "out" / name / "submission.zip") as archive:
                 self.assertEqual(archive.namelist(), [main])
@@ -269,8 +271,11 @@ class BaselineStabilityTests(unittest.IsolatedAsyncioTestCase):
         self.base = Path(self.temporary.name)
         self.source = self.base / "input"
         minimal_project(self.source)
+        # The flat layout rebuilds the prepared sources, so the tolerant comparison with the
+        # baseline runs; with unchanged sources and the preserved layout it would be skipped.
         self.settings = Settings(
-            workflow=WorkflowOptions(baseline_runs=2, comparison=ComparisonOptions(1, 0.01))
+            layout="flat",
+            workflow=WorkflowOptions(baseline_runs=2, comparison=ComparisonOptions(1, 0.01)),
         )
 
     async def test_repeat_build_difference_blocks_publication(self):

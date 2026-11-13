@@ -16,6 +16,7 @@ from pathlib import Path
 
 from .command_runner import RuntimeLimits
 from .config import COORDINATOR_MEMORY_MB, Settings
+from .pdf_job_sessions import pdf_job_scope
 from .resource_budget import ResourceBudget
 from .runtime import ToolRunner
 
@@ -77,6 +78,9 @@ class JobExecution:
     async def bounded(self, work: Path) -> AsyncGenerator[None]:
         """Account tool processes and temporary bytes to ``work`` within the job deadline.
 
+        The block also shares one frozen copy, measurements and page digests per PDF between
+        the stages that look at the same PDF (``pdf_job_scope``); they are released with it.
+
         Args:
             work: The directory whose temporary bytes count against the job's limit.
 
@@ -87,7 +91,10 @@ class JobExecution:
             JobDeadlineExceeded: The whole-job deadline passed inside the block. Any other
                 ``TimeoutError`` propagates unchanged.
         """
-        async with self.runner.job_scope(work, max_temp_bytes=self.settings.max_temporary_bytes):
+        async with (
+            self.runner.job_scope(work, max_temp_bytes=self.settings.max_temporary_bytes),
+            pdf_job_scope(work, self.runner, self.budget),
+        ):
             try:
                 async with asyncio.timeout(self.settings.job_timeout_seconds) as deadline:
                     yield

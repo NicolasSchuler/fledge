@@ -174,14 +174,14 @@ class DependencyPackagingTests(unittest.IsolatedAsyncioTestCase):
         self.write("main.tex", "\\documentclass{article}\n\\begin{document}Body.\\end{document}\n")
         output = (self.base / "raced-output").resolve()
         original = directory_contents(self.source)
-        build = RecordedBuild({"main.tex": ({"main.tex"},) * 3})
+        build = RecordedBuild({"main.tex": ({"main.tex"},) * 2})
         report = Report("prepare")
         mkdir = Path.mkdir
         raced_contents: dict[str, bytes] = {}
 
         def race_mkdir(path: Path, *args, **kwargs) -> None:
             if path == output and not raced_contents:
-                self.assertEqual(build.counts["main.tex"], 3)
+                self.assertEqual(build.counts["main.tex"], 2)
                 mkdir(path, *args, **kwargs)
                 with zipfile.ZipFile(path / "submission.zip", "w") as archive:
                     archive.writestr("previous.tex", "Another job's completed archive.\n")
@@ -202,7 +202,7 @@ class DependencyPackagingTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(raced_contents)
         self.assertEqual(directory_contents(output), raced_contents)
         self.assertEqual(directory_contents(self.source), original)
-        self.assertEqual(build.counts["main.tex"], 3)
+        self.assertEqual(build.counts["main.tex"], 2)
         self.assertEqual(report.artifacts, {})
 
     async def test_unused_files_do_not_ship_or_block_selected_transforms_without_cleanup(self):
@@ -337,13 +337,13 @@ class DependencyPackagingTests(unittest.IsolatedAsyncioTestCase):
         self.write("other/data.csv", "unused\n")
         # Bibliography backend resources supplement the TeX recorder's inputs.
         observed = set(files) - {"bib/references.bib", "styles/custom.bst"}
-        build = RecordedBuild({"main.tex": (observed, observed, observed)})
+        build = RecordedBuild({"main.tex": (observed, observed)})
         report, output = await self.prepare(Settings(main="main.tex", engine="xelatex"), build)
         self.assert_released(report)
         archived = self.archive_contents(output)
         self.assertEqual(set(archived), set(files))
         self.assertEqual(archived, {path: value.encode() for path, value in files.items()})
-        self.assertEqual(build.counts["main.tex"], 3)
+        self.assertEqual(build.counts["main.tex"], 2)
         self.assertEqual(build.visits[-1][2], archived)
 
     async def test_missing_or_incomplete_build_evidence_cannot_be_ignored(self):
@@ -400,7 +400,7 @@ class DependencyPackagingTests(unittest.IsolatedAsyncioTestCase):
         ):
             with self.subTest(source=name):
                 self.write("main.tex", "\\documentclass{article}\n" + command)
-                build = RecordedBuild({"main.tex": (selected,) * 3})
+                build = RecordedBuild({"main.tex": (selected,) * 2})
                 report, output = await self.prepare(
                     Settings(main="main.tex", checks=CheckSelection(ignore=("ALL",))), build, name
                 )
@@ -413,7 +413,7 @@ class DependencyPackagingTests(unittest.IsolatedAsyncioTestCase):
                 ]
                 self.assertTrue(advisory, report.findings)
                 self.assertTrue(all(item.severity == "warning" for item in advisory))
-                self.assertEqual(build.counts["main.tex"], 3)
+                self.assertEqual(build.counts["main.tex"], 2)
                 self.assertEqual(build.visits[-1][2], self.archive_contents(output))
 
     async def test_unsupported_selected_dependencies_block_without_complete_trace(self):
@@ -473,7 +473,7 @@ class DependencyPackagingTests(unittest.IsolatedAsyncioTestCase):
         self.write("template/custom.sty", template)
         trusted = self.base / "trusted-custom.sty"
         trusted.write_bytes(template)
-        build = RecordedBuild({"main.tex": ({"main.tex"},) * 4})
+        build = RecordedBuild({"main.tex": ({"main.tex"},) * 3})
         report, output = await self.prepare(
             Settings(
                 main="main.tex",
@@ -494,7 +494,9 @@ class DependencyPackagingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(archived["cover.pdf"], b"%PDF-explicit cover\n")
         self.assertEqual(archived["summary.txt"], b"Explicit text deliverable.\n")
         self.assertEqual(archived["custom.sty"], template)
-        self.assertEqual(build.counts["main.tex"], 4)
+        # Baseline, prepared (flat) and archive: staging changed nothing, so there is no
+        # transformed rebuild.
+        self.assertEqual(build.counts["main.tex"], 3)
         self.assertEqual(build.visits[-1][2], archived)
         self.assertTrue(
             any(
@@ -533,13 +535,13 @@ class DependencyPackagingTests(unittest.IsolatedAsyncioTestCase):
         for failed_main in (None, "other.tex"):
             with self.subTest(failed_archive=failed_main):
                 build = RecordedBuild(
-                    {"main.tex": (first,) * 3, "other.tex": (second,) * 3},
+                    {"main.tex": (first,) * 2, "other.tex": (second,) * 2},
                     fail_archive_main=failed_main,
                 )
                 report, output = await self.prepare(
                     settings, build, "released" if failed_main is None else "blocked"
                 )
-                self.assertEqual(build.counts, {"main.tex": 3, "other.tex": 3})
+                self.assertEqual(build.counts, {"main.tex": 2, "other.tex": 2})
                 for main, selected in (("main.tex", first), ("other.tex", second)):
                     visits = [visit for visit in build.visits if visit[0] == main]
                     self.assertIn("unused.csv", visits[0][2])

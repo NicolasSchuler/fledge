@@ -614,9 +614,10 @@ class LiveEngineSelectionTests(AsyncLiveProjectTestCase):
     async def test_lualatex_builds_share_the_sealed_font_cache(self) -> None:
         """Check that a job's LuaLaTeX builds read one sealed font cache, and show the timing.
 
-        The first build warms the luaotfload font database once; the transformed and archive
-        builds then skip the font scan. The stage times are printed, not asserted, because
-        a shared host makes timings unreliable.
+        The first build warms the luaotfload font database once; the prepared and archive
+        builds then skip the font scan; the transformed rebuild is skipped because staging changed
+        nothing. The stage times are printed, not asserted, because a shared host makes timings
+        unreliable.
         """
         self.require_tools("latexmk", "lualatex", *POPPLER_TOOLS)
         self.installed_tex_file("fontspec.sty", "tlmgr install fontspec")
@@ -630,9 +631,7 @@ class LiveEngineSelectionTests(AsyncLiveProjectTestCase):
         times = {stage["name"]: stage["elapsed_seconds"] for stage in report.stages}
         print(  # noqa: T201 - the timing is the point of this live test's output
             "LuaLaTeX build seconds with the sealed font cache: "
-            + ", ".join(
-                f"{name} {times[name]:.1f}" for name in ("baseline", "transformed", "archive")
-            )
+            + ", ".join(f"{name} {times[name]:.1f}" for name in ("baseline", "prepared", "archive"))
         )
 
 

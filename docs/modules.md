@@ -148,6 +148,7 @@ other, never a check, the job workflow or an output format. (35 modules)
 | `loaded_options` | Bounded post-document LaTeX kernel option evidence from disposable builds |
 | `online_http_session` | Bounded requests to public hosts: connection, pacing, budget, redirects and caching |
 | `online_http_wire` | The HTTP/1.1 bytes of one request and its bounded response |
+| `pdf_job_sessions` | The frozen PDFs, remembered measurements and page-render digests that the stages of one job share |
 | `pdf_qpdf_graph` | Read access to a PDF's objects through qpdf's JSON version 2 output |
 | `pdf_tools` | Running PDF tools: argument builders, frozen inputs, sessions and measurements |
 | `pinned_dns` | Resolving a host name to public addresses without letting a slow resolver stall a job |
@@ -227,6 +228,7 @@ an output format. (61 modules)
 | `pdf_comparison` | Bounded rendered and extracted-text comparison of two PDFs, with optional previews |
 | `pdf_inspection` | Bounded single-PDF inspection and explicitly configured acceptance policies |
 | `pdf_object_checks` | Catalog-language, annotation and action policies read from qpdf's object data |
+| `pdf_page_renders` | Page-range renders of two PDFs and their comparison, with remembered raster digests |
 | `pdf_paint_checks` | Stroke-width, color-space, text-contrast and grayscale-separation measurements |
 | `pdf_printer_marks` | Printer-mark candidates: short crop and registration strokes outside a trim region |
 | `pdf_sparse_page_checks` | Sparse-page measurement: how much of each rendered page carries ink |

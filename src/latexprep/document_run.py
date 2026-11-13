@@ -23,7 +23,7 @@ from .document_tasks import (
 )
 from .findings import Finding, has_blockers
 from .formatting import format_project
-from .job_context import JobCommand, JobContext, import_input
+from .job_context import DocumentBackends, JobCommand, JobContext, import_input
 from .job_report import is_blocked, job_outcome, record_findings
 from .main_selection import select_main
 from .package_inputs import (
@@ -33,6 +33,9 @@ from .package_inputs import (
     shipped_generated_suffixes,
 )
 from .package_verification import PackageVerification, ShippedSources
+from .pdf_comparison import COMPARISON_TOOLS
+from .pdf_inspection import required_inspection_tools
+from .pdf_job_sessions import job_pdf_sessions
 from .publication import VerifiedPackage
 from .report import Outcome, Report
 from .review_policy import BASELINE_VERSUS_PREPARED_STAGE
@@ -42,6 +45,7 @@ from .staging import (
     flatten_sources,
     inline_bibliography_files,
     transform_sources,
+    trees_identical,
 )
 from .task_reporting import InputSelection, PackageLayout, TaskReporter
 
@@ -186,6 +190,7 @@ class DocumentRun:
             The package when preparation verified one, otherwise ``None``.
         """
         report, settings = self.report, self.settings
+        self._warm_pdf_tool_probes()
         await self.scheduler.execute(self._analysis_tasks())
         # Later stages read other trees; free the graphs the analysis tasks shared.
         self.context.sources.clear()
@@ -207,6 +212,28 @@ class DocumentRun:
             self._note_online_checks_not_reached()
             return None
         return await self._prepare(baseline.value, self.main)
+
+    def _warm_pdf_tool_probes(self) -> None:
+        """Start probing the PDF tools' versions now, while the baseline builds.
+
+        The probes need no PDF, so they overlap the build instead of delaying the first
+        measurement of each tool. Nothing is probed for ``inspect``, without a main file or
+        when the job's builds and PDF checks are replaced by controlled ones, which never
+        start a tool.
+        """
+        if (
+            self.command is JobCommand.INSPECT
+            or self.main is None
+            or self.context.backends != DocumentBackends()
+        ):
+            return
+        sessions = job_pdf_sessions(self.context.runner, self.context.budget)
+        if sessions is None:
+            return
+        tools = required_inspection_tools()
+        if self.command is JobCommand.PREPARE and not self.context.request.dry_run:
+            tools |= COMPARISON_TOOLS
+        sessions.warm_tool_probes(tools)
 
     def _stop(self) -> None:
         """End the run without a package: blocked, with a note on online checks never reached."""
@@ -373,6 +400,73 @@ class DocumentRun:
                 )
         return None if is_blocked(report, settings) else prepared
 
+    async def _transformed_build(self, prepared: Path, main: str) -> BuildResult | None:
+        """Rebuild the staged sources, unless staging changed nothing and the baseline stands in.
+
+        When the staged copy is byte for byte the tree it was copied from, the transformed
+        build would repeat the baseline build on the same sources, so its result is the
+        baseline's: the evidence, the PDF and the generated files carry over, and the stage
+        is recorded as skipped. The archive rebuild still runs and still has to match, which
+        is what proves that the shipped files suffice. Any change, or a baseline without
+        complete dependency evidence, builds as usual.
+
+        Args:
+            prepared: The staging copy.
+            main: The main file.
+
+        Returns:
+            The build result, or ``None`` when the build failed or produced no PDF.
+        """
+        context = self.context
+        baseline = self._baseline_build()
+        if (
+            baseline.success
+            and baseline.pdf is not None
+            and baseline.submission_inputs is not None
+            and await context.thread_operation(
+                "compare staged sources",
+                trees_identical,
+                self._analysis_snapshot(),
+                prepared,
+            )
+        ):
+            context.emit("Staging changed nothing: the baseline build is reused")
+            self.report.stages.append(
+                {
+                    "name": TRANSFORMED.label,
+                    "status": "skipped",
+                    "elapsed_seconds": 0.0,
+                    "queue_seconds": 0.0,
+                }
+            )
+            return baseline
+        staged = await build_stage(context, self.reporter, prepared, main, TRANSFORMED)
+        return staged if staged.success and staged.pdf is not None else None
+
+    async def _compare_with_baseline(self, pdf: Path) -> None:
+        """Compare the prepared document's PDF with the baseline PDF and record the findings.
+
+        A prepared PDF that is the baseline PDF itself (the transformed rebuild was skipped
+        and the layout is preserved) is not compared with itself.
+
+        Args:
+            pdf: The PDF of the build that matches the shipped sources.
+        """
+        if pdf == self._baseline_pdf():
+            return
+        record_findings(
+            self.report,
+            await compare_documents(
+                self.context,
+                self._baseline_pdf(),
+                pdf,
+                "compare-prepared",
+                BASELINE_VERSUS_PREPARED_STAGE,
+                options=self.settings.workflow.comparison,
+            ),
+            BASELINE_VERSUS_PREPARED_STAGE,
+        )
+
     async def _ship(self, prepared: Path, main: str) -> ShippedSources | None:
         """Rebuild staging, select the shipped inputs, flatten and compare with the baseline.
 
@@ -387,8 +481,8 @@ class DocumentRun:
             The shipped sources, or ``None`` when a build failed or the report is blocked.
         """
         context, settings, report = self.context, self.settings, self.report
-        staged = await build_stage(context, self.reporter, prepared, main, TRANSFORMED)
-        if not staged.success or staged.pdf is None:
+        staged = await self._transformed_build(prepared, main)
+        if staged is None:
             return None
         context.emit("Selecting the transformed document's inputs for submission")
         shipment = context.work / "shipment"
@@ -427,18 +521,7 @@ class DocumentRun:
         pdf = build.pdf
         if not build.success or pdf is None:
             return None
-        record_findings(
-            report,
-            await compare_documents(
-                context,
-                self._baseline_pdf(),
-                pdf,
-                "compare-prepared",
-                BASELINE_VERSUS_PREPARED_STAGE,
-                options=settings.workflow.comparison,
-            ),
-            BASELINE_VERSUS_PREPARED_STAGE,
-        )
+        await self._compare_with_baseline(pdf)
         if is_blocked(report, settings):
             return None
         return ShippedSources(

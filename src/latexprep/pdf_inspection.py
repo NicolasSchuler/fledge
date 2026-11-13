@@ -21,6 +21,7 @@ from .errors import PreparationError, SettingsError
 from .findings import EvidenceKind, Finding
 from .measurement_findings import TOOL_FAILURE_SUGGESTION, unavailable_finding
 from .option_config import NONNEGATIVE_NUMBER, POSITIVE_NUMBER, Bounds, validate_scalars
+from .pdf_job_sessions import job_pdf_sessions
 from .pdf_rule_names import PdfRule
 from .pdf_tool_output import (
     PdfFont,
@@ -875,13 +876,15 @@ async def inspect_pdf(
         budget: The resource budget, or ``None``.
         session: A shared session for ``pdf``, which supplies the frozen PDF and remembered
             measurements; the ``pdf.tools`` finding still lists exactly the tools this
-            inspection relied on.
+            inspection relied on. Within a job it defaults to the job's session for ``pdf``.
 
     Returns:
         The findings, in report order.
     """
     options = options or PdfInspectionOptions()
     configured = configured_policy_rules(options, max_pages)
+    if session is None and (registry := job_pdf_sessions(runner, budget)) is not None:
+        session = registry.pdf(pdf).session
     # The inspection runs under exactly the supplied budget; its failures name the tool step.
     preflight = await preflight_pdf(
         pdf,

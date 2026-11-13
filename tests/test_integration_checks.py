@@ -131,8 +131,10 @@ The complete fixture is included in this source package.
                 )
                 self.assertTrue(all(item.status == "passed" for item in findings), findings)
 
+            # Staging changed nothing, so the baseline build stands in for the transformed one
+            # and only the baseline, the flattened (prepared) and the archive builds report.
             for code in ("BLD101", "BLD102", "BLD103"):
-                assert_code_stages(code, {"baseline", "transformed", "prepared", "archive"})
+                assert_code_stages(code, {"baseline", "prepared", "archive"})
             for code in ("MAN008", "MAN010", "MAN011", "MAN012", "MAN013", "MAN014"):
                 assert_code_stages(code, {"manuscript details", "final source checks"})
             for code in ("PDF201", "PDF202", "PDF206", "PDF207", "PRV002"):
@@ -158,10 +160,15 @@ The complete fixture is included in this source package.
                     self.assertEqual(finding.details["compared_fields"], ["Title"])
                 if finding.code == "PDF201":
                     self.assertEqual(finding.details["observed_total_pages"], 1)
-            for stage in ("baseline", "transformed", "prepared", "archive"):
+            for stage, status in (
+                ("baseline", "succeeded"),
+                ("transformed", "skipped"),
+                ("prepared", "succeeded"),
+                ("archive", "succeeded"),
+            ):
                 builds = [item for item in report.stages if item["name"] == stage]
                 self.assertEqual(len(builds), 1)
-                self.assertEqual(builds[0]["status"], "succeeded")
+                self.assertEqual(builds[0]["status"], status)
             comparisons = [item for item in report.findings if item.rule == "compare.rendering"]
             self.assertEqual(len(comparisons), 2)
             self.assertTrue(all(item.status == "passed" for item in comparisons))

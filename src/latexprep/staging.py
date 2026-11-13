@@ -10,7 +10,9 @@ validated completely before the first file changes.
 
 from __future__ import annotations
 
+import filecmp
 import fnmatch
+import os
 import shutil
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
@@ -353,6 +355,58 @@ def transform_sources(
             if not (change.kind == "exclude" and change.path in retained)
         ]
     return TransformOutcome(prepared, changes, findings)
+
+
+def _tree_entries(root: Path) -> tuple[set[str], set[str]] | None:
+    """List the folders and regular files below ``root``, as paths relative to it.
+
+    Args:
+        root: The tree.
+
+    Returns:
+        The relative folders and the relative files, or ``None`` when the tree holds a link
+        or any other special entry.
+    """
+    folders: set[str] = set()
+    files: set[str] = set()
+    for folder, names, filenames in os.walk(root, followlinks=False):
+        cancellation_point()
+        relative = Path(folder).relative_to(root)
+        for name in names:
+            if (Path(folder) / name).is_symlink():
+                return None
+            folders.add((relative / name).as_posix())
+        for name in filenames:
+            path = Path(folder) / name
+            if path.is_symlink() or not path.is_file():
+                return None
+            files.add((relative / name).as_posix())
+    return folders, files
+
+
+def trees_identical(first: Path, second: Path) -> bool:
+    """Return whether two trees hold the same folders and regular files with the same bytes.
+
+    A link or any other special entry in either tree makes the answer ``False``: the trees
+    are only called identical when nothing about them needs interpreting. Both trees are read
+    in full, so the answer is exact; it is meant for a staging copy and the tree it was
+    copied from.
+
+    Args:
+        first: One tree.
+        second: The other tree.
+
+    Returns:
+        Whether the trees are identical.
+    """
+    entries = _tree_entries(first), _tree_entries(second)
+    if entries[0] is None or entries[0] != entries[1]:
+        return False
+    for name in sorted(entries[0][1]):
+        cancellation_point()
+        if not filecmp.cmp(first / name, second / name, shallow=False):
+            return False
+    return True
 
 
 @dataclass(frozen=True, slots=True)

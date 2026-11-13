@@ -82,7 +82,9 @@ class CheckSelectionWorkflowTests(AsyncProjectTestCase):
 
     async def test_ignore_all_cannot_release_changed_archive(self):
         failure = Finding("compare.rendering", "Rendered pixels changed", severity="error")
-        comparison = AsyncMock(side_effect=[[], [failure]])
+        # Staging changes nothing and the layout is preserved, so the baseline PDF stands in for
+        # the prepared one and only the archive comparison runs.
+        comparison = AsyncMock(side_effect=[[failure]])
         backends = controlled_backends(compare_pdfs=comparison)
         report = await run_job(
             JobRequest(
@@ -94,7 +96,7 @@ class CheckSelectionWorkflowTests(AsyncProjectTestCase):
             backends=backends,
         )
         self.assertEqual(report.outcome, "blocked")
-        self.assertEqual(comparison.await_count, 2)
+        self.assertEqual(comparison.await_count, 1)
         self.assertTrue(any(item.code == "CMP003" for item in report.findings))
         self.assertFalse((self.root / "output").exists())
 
