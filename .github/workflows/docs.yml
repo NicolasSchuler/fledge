@@ -12,6 +12,7 @@ on:
       - "scripts/**"
       - "skills/**"
       - "README.md"
+      - "CHANGELOG.md"
       - "architecture.md"
       - "requirements.md"
       - "pyproject.toml"

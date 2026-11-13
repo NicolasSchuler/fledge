@@ -7,7 +7,7 @@
 # their values, and delete anything you do not want.
 #
 # `fledge init --preset camera-ready` copies this file to fledge.toml for
-# editing. `--preset camera-ready` on inspect, check and prepare applies it as
+# editing. `--preset camera-ready` on any command that accepts it applies it as
 # the lowest layer: your settings file overrides it and command-line options
 # override both. Codes such as PDF104 are explained by `fledge rule PDF104`.
 

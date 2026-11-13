@@ -8,7 +8,7 @@
 # not want.
 #
 # `fledge init --preset anonymous-review` copies this file to fledge.toml for
-# editing. `--preset anonymous-review` on inspect, check and prepare applies it
+# editing. `--preset anonymous-review` on any command that accepts it applies it
 # as the lowest layer: your settings file overrides it and command-line options
 # override both. Codes such as PRV003 are explained by `fledge rule PRV003`.
 
