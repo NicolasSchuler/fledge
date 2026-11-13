@@ -23,7 +23,8 @@ from .expanded_document import ExpandedDocument
 from .findings import EvidenceKind, Finding
 from .literal_text import HEADING_DEPTHS, TEXT_WRAPPERS
 from .tex_commands import ALL_MATH_ENVIRONMENTS
-from .tex_lexer import Command, Region, blank_regions, command_end, merge_spans
+from .tex_lexer import Command, Region, blank_regions
+from .tex_spans import command_end, merge_spans
 
 # Suggestions listed per rule; the rest are counted in one further finding.
 MAX_FINDINGS_PER_RULE = 50

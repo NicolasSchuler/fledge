@@ -36,12 +36,12 @@ from .tex_lexer import (
     MAX_TOTAL_SOURCE_BYTES,
     Command,
     ParseLimitExceeded,
-    in_half_open_span,
     mask_literals,
     scan_source_commands,
     source_regions,
 )
 from .tex_protected_regions import protected_spans
+from .tex_spans import in_half_open_span
 from .text_edits import TextEdit, apply_text_edits, unified_diff_text
 
 _PRIVATE = marker_pattern(MarkerCategory.EDIT_MARKER, MarkerCategory.PRIVACY_KEYWORD)

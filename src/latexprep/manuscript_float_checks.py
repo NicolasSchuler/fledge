@@ -33,7 +33,8 @@ from .literal_text import (
 from .manuscript_check_options import ManuscriptCheckOptions
 from .manuscript_policy_kernel import CheckOutcome, Policy, Reading, policy_finding
 from .manuscript_vocabulary import FLOAT_ENVIRONMENTS
-from .tex_lexer import Command, command_end, in_closed_span, merge_spans
+from .tex_lexer import Command
+from .tex_spans import command_end, in_closed_span, merge_spans
 from .uncertainty_reasons import grouped_reason
 
 

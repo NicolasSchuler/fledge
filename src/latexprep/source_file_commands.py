@@ -94,3 +94,36 @@ SUPPORTED_FONT_COMMANDS = frozenset({"setmainfont", "setsansfont", "setmonofont"
 def is_literal_text(value: str) -> bool:
     """Return whether ``value`` is nonempty and free of TeX syntax that could change its meaning."""
     return bool(value) and not any(char in value for char in "\\{}#$^~&%\n\r\x00")
+
+
+# Commands that declare a bibliography resource: a problem with one can hide bibliography
+# entries, but not manuscript text.
+BIBLIOGRAPHY_RESOURCE_COMMANDS = frozenset({"bibliography", "addbibresource"})
+# Commands whose file holds nothing that TeX runs as manuscript source: figures and PDF
+# pages, plot coordinates, plain verbatim listings, fonts, bibliography styles and the
+# graphics rules. What the scan cannot establish about one of them, such as a figure in
+# a macro argument, cannot hide manuscript text, a label or a citation. Files whose
+# content can run TeX are left out: listings and minted with escapeinside, fancyvrb with
+# commandchars, CSV and table cells that are typeset, an SVG's generated .pdf_tex, and
+# another document's labels (\externaldocument).
+OPAQUE_FILE_COMMANDS = frozenset(
+    {
+        "includegraphics",
+        "includepdf",
+        "includepdfmerge",
+        "DeclareGraphicsExtensions",
+        "DeclareGraphicsRule",
+        "graphicspath",
+        "pgfplotstableread",
+        "addplot",
+        "addplot3",
+        "verbatiminput",
+        "setmainfont",
+        "setsansfont",
+        "setmonofont",
+        "fontspec",
+        "newfontfamily",
+        "newfontface",
+        "bibliographystyle",
+    }
+)

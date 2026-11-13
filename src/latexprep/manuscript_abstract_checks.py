@@ -22,7 +22,7 @@ from .literal_text import plain_text
 from .manuscript_check_options import ManuscriptCheckOptions
 from .manuscript_policy_kernel import CheckOutcome, Policy, Reading, listing, policy_finding
 from .manuscript_vocabulary import CITATION_COMMANDS
-from .tex_lexer import command_end
+from .tex_spans import command_end
 
 _CITATIONS = Policy("manuscript.abstract_citations", "Checked the abstract citation policy.")
 _ABBREVIATIONS = Policy(

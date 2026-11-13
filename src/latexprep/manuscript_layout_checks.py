@@ -37,15 +37,8 @@ from .manuscript_vocabulary import (
     SMALL_TYPE_SIZES,
 )
 from .tex_commands import PRIMITIVE_DEFINITION_COMMANDS
-from .tex_lexer import (
-    CONTROL_SEQUENCE,
-    Command,
-    command_end,
-    definition_spans,
-    in_conditional,
-    in_half_open_span,
-    skip_space,
-)
+from .tex_lexer import CONTROL_SEQUENCE, Command, skip_space
+from .tex_spans import command_end, definition_spans, in_conditional, in_half_open_span
 
 _LAYOUT = Policy("manuscript.layout_manipulation", "Checked layout override candidates.", ADVISORY)
 _LINE_NUMBER_RULE = "manuscript.line_numbers"

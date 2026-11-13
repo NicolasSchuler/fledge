@@ -13,7 +13,8 @@ from __future__ import annotations
 import re
 from typing import NamedTuple
 
-from .tex_lexer import RegionScan, merge_spans, source_regions
+from .tex_lexer import RegionScan, source_regions
+from .tex_spans import merge_spans
 
 # Comments read by tools rather than people, which comment removal must keep.
 _DIRECTIVE = re.compile(

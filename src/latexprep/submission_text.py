@@ -16,16 +16,8 @@ from .expanded_document import (
 )
 from .literal_text import KEYWORD_ENVIRONMENTS, TEXT_WRAPPERS
 from .tex_commands import MACRO_DEFINITION_COMMANDS, PRIMITIVE_DEFINITION_COMMANDS
-from .tex_lexer import (
-    MAX_ARGUMENT_CHARS,
-    Argument,
-    definition_spans,
-    in_conditional,
-    in_half_open_span,
-    merge_spans,
-    read_group,
-    skip_space,
-)
+from .tex_lexer import MAX_ARGUMENT_CHARS, Argument, read_group, skip_space
+from .tex_spans import definition_spans, in_conditional, in_half_open_span, merge_spans
 from .text_safety import escape_single_line_text, is_unsafe_character
 
 FieldName = Literal["title", "abstract", "keywords"]

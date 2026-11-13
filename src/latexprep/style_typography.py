@@ -16,7 +16,7 @@ from itertools import pairwise
 from .cancellation import cancellation_point
 from .style_support import Occurrence, StyleContext
 from .tex_commands import PRINTED_CITATION_COMMANDS, with_capitalized_forms
-from .tex_lexer import command_end
+from .tex_spans import command_end
 
 # White space within one paragraph: spaces and tabs, with at most one line break.
 _SPACE = r"(?:[ \t]+(?:\r?\n[ \t]*)?|\r?\n[ \t]*)"

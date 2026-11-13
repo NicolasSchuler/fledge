@@ -27,7 +27,7 @@ from .literal_text import (
 from .manuscript_check_options import ManuscriptCheckOptions
 from .manuscript_policy_kernel import CheckOutcome, Policy, Reading, listing, policy_finding
 from .tex_commands import MATH_MARKER
-from .tex_lexer import command_end
+from .tex_spans import command_end
 from .uncertainty_reasons import context_reasons
 
 _DEPTH = Policy("manuscript.heading_depth", "Checked the configured literal heading depth.")

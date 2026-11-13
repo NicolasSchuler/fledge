@@ -41,7 +41,7 @@ from .setting_choices import Engine
 from .source_graph import SourceGraph
 from .tex_commands import ROOT_SUFFIXES
 from .tex_comments import marked_comments, tex_comments
-from .tex_lexer import definition_spans, in_conditional, in_half_open_span
+from .tex_spans import definition_spans, in_conditional, in_half_open_span
 
 # Matches and figures named in a message; the details list every one.
 _MAX_LISTED = 3

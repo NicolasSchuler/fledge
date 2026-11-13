@@ -13,7 +13,8 @@ from latexprep.source_transform import (
     SourceTransformOptions,
     plan_source_transforms,
 )
-from latexprep.tex_lexer import ParseLimitExceeded, conditional_spans, scan_source_commands
+from latexprep.tex_lexer import ParseLimitExceeded, scan_source_commands
+from latexprep.tex_spans import conditional_spans
 from tests.support import ProjectTestCase
 
 

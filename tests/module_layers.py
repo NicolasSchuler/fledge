@@ -102,6 +102,7 @@ MODULES_BY_LAYER: dict[str, tuple[str, ...]] = {
         "tex_comments",
         "tex_lexer",
         "tex_protected_regions",
+        "tex_spans",
         "text_edits",
         "text_safety",
         "uncertainty_reasons",

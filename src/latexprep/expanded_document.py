@@ -16,13 +16,13 @@ from pathlib import Path
 from typing import NamedTuple
 
 from .cancellation import cancellation_point
-from .findings import Finding
 from .source_file_commands import (
     COMMA_LIST_FILE_COMMANDS,
     FILE_COMMANDS,
     IMPORT_COMMANDS,
     file_argument_index,
 )
+from .source_findings import can_hide_manuscript_text
 from .source_graph import MAX_INPUT_DEPTH, ArgumentLocation, SourceGraph
 from .source_loading import ParsedSource
 from .tex_lexer import (
@@ -30,12 +30,10 @@ from .tex_lexer import (
     MAX_TOTAL_SOURCE_BYTES,
     Command,
     ParseLimitExceeded,
-    command_end,
-    conditional_spans,
-    in_conditional,
     scan_commands,
     split_argument_items,
 )
+from .tex_spans import command_end, conditional_spans, in_conditional
 
 # Commands that splice another manuscript source into the document. Class and
 # style files are package evidence, not manuscript content.
@@ -395,27 +393,14 @@ def _document_end(source: ParsedSource) -> Command | None:
 # A file that cannot be resolved only leaves the manuscript undecidable when it could
 # supply source text. A missing figure or bibliography cannot hold a title, abstract,
 # keywords, heading or declaration, so it never hides what a constraint looks for.
-_UNRESOLVED_FILE_RULES = frozenset({"source.missing_dependency", "source.case_mismatch"})
-_NON_CONTENT_FILE_COMMANDS = frozenset(
-    {"includegraphics", "includepdf", "bibliography", "addbibresource", "bibliographystyle"}
-)
-
-
-def unresolved_non_content_file(finding: Finding) -> bool:
-    """Return whether ``finding`` reports a figure or bibliography file that cannot be found."""
-    return (
-        finding.rule in _UNRESOLVED_FILE_RULES
-        and finding.details.get("command") in _NON_CONTENT_FILE_COMMANDS
-    )
-
-
 def _graph_gaps(graph: SourceGraph, selected: set[str]) -> list[str]:
     """List the gaps in the spliced text: every unresolved ``source.*`` finding in scope.
 
     That is a superset of ``INCOMPLETE_GRAPH_RULES``, which names only the findings that make
     the dependency graph incomplete; other unresolved findings, such as an unsupported
     search-path form, are gaps here as well. A main source outside ``selected`` and subfile
-    targets are gaps too, and missing figure or bibliography files are not.
+    targets are gaps too; what cannot hide manuscript text (``can_hide_manuscript_text``),
+    such as a figure or a bibliography file, is not.
 
     Package code (``package_code_sources``) is left out: its text is never spliced, so
     what the scan cannot follow inside it says nothing about the manuscript text; it still
@@ -433,7 +418,7 @@ def _graph_gaps(graph: SourceGraph, selected: set[str]) -> list[str]:
         if finding.rule.startswith("source.")
         and (finding.path in scope or finding.path is None)
         and finding.status in {"failed", "inconclusive"}
-        and not unresolved_non_content_file(finding)
+        and can_hide_manuscript_text(finding)
     )
     return gaps
 

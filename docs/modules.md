@@ -32,7 +32,7 @@ The vocabulary and the pure logic everything else shares: findings, the report, 
 catalogue of check codes and its data-only `*_rules.py` modules, settings choices and option
 schemas, the bounded TeX and BibTeX readers, the literal source graph, text, path and file
 helpers, and the cancellation and resource-budget primitives. None starts a process or opens
-a network connection, and each imports only other modules of this layer. (90 modules)
+a network connection, and each imports only other modules of this layer. (91 modules)
 
 | Module | Responsibility |
 | --- | --- |
@@ -115,6 +115,7 @@ a network connection, and each imports only other modules of this layer. (90 mod
 | `tex_comments` | Comments of a TeX source with their line numbers, and the private notes among them |
 | `tex_lexer` | Bounded lexical subset of LaTeX shared by source inspection, checks and transformations |
 | `tex_protected_regions` | Regions of TeX source that a tool must leave exactly as written |
+| `tex_spans` | Offset spans of the lexical subset: definitions, conditionals and where commands run |
 | `text_edits` | Offset-based text edits, byte-order-mark restoration and unified diffs of proposals |
 | `text_safety` | Making untrusted text harmless for one output channel |
 | `uncertainty_reasons` | Why a literal declaration may not take effect where it is written |

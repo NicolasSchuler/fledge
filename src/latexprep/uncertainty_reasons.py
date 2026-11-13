@@ -10,7 +10,8 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from .tex_lexer import Command, in_conditional
+from .tex_lexer import Command
+from .tex_spans import in_conditional
 
 CONDITIONAL_FLOW = "conditional source control flow"
 

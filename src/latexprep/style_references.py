@@ -18,15 +18,8 @@ from collections.abc import Iterator
 from .cancellation import cancellation_point
 from .literal_text import REFERENCE_COMMANDS
 from .style_support import Occurrence, StyleContext, math_environment_spans
-from .tex_lexer import (
-    Command,
-    command_end,
-    definition_spans,
-    in_conditional,
-    in_half_open_span,
-    merge_spans,
-    split_argument_items,
-)
+from .tex_lexer import Command, split_argument_items
+from .tex_spans import command_end, definition_spans, in_conditional, in_half_open_span, merge_spans
 
 # Reference commands whose argument may be built from a macro parameter: the shared table,
 # hyperref's \hyperref[label]{text} and the capitalised and varioref forms.

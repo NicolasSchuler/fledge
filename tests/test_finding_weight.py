@@ -6,7 +6,8 @@ import unittest
 
 from latexprep.finding_weight import ADVISORY, DIRECT_POLICY, NOTE, POLICY, Weight
 from latexprep.findings import EvidenceKind
-from latexprep.tex_lexer import conditional_spans, scan_commands
+from latexprep.tex_lexer import scan_commands
+from latexprep.tex_spans import conditional_spans
 from latexprep.uncertainty_reasons import CONDITIONAL_FLOW, context_reasons, grouped_reason
 
 

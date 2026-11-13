@@ -22,7 +22,10 @@ from .cancellation import cancellation_point
 from .errors import PreparationError
 from .expanded_document import commands_before_end, package_code_sources, reachable_sources
 from .findings import Finding
-from .source_file_commands import IMPORT_COMMANDS, TRAVERSED_COMMANDS
+from .source_file_commands import (
+    BIBLIOGRAPHY_RESOURCE_COMMANDS,
+)
+from .source_findings import can_hide_citations
 from .source_graph import (
     INCOMPLETE_GRAPH_RULES,
     ROOT_AMBIGUOUS_RULE,
@@ -33,21 +36,22 @@ from .source_graph import (
 from .source_loading import ParsedSource
 from .tex_commands import (
     CITATION_COMMANDS,
+    CITATION_STYLE_COMMANDS,
     COMMAND_DEFINITION_COMMANDS,
     MULTICITE_COMMANDS,
     PRIMITIVE_DEFINITION_COMMANDS,
 )
-from .tex_lexer import (
-    Argument,
-    Command,
+from .tex_lexer import Argument, Command, split_argument_items
+from .tex_spans import (
     conditional_spans,
+    defined_names,
     definition_spans,
     in_conditional,
     in_half_open_span,
-    split_argument_items,
+    runs_in_place,
 )
 
-_RESOURCE_COMMANDS = frozenset({"bibliography", "addbibresource"})
+_RESOURCE_COMMANDS = BIBLIOGRAPHY_RESOURCE_COMMANDS
 # The gaps that macro and category-code machinery leaves. In package code they are routine
 # and say nothing about the manuscript's citations, so only there they are dropped.
 _DEFINITION_GAP = "a macro definition of citation markup is not expanded"
@@ -97,10 +101,6 @@ _FILTERS = frozenset(
 _ROOT_FAILURES = frozenset({ROOT_AMBIGUOUS_RULE, ROOT_MISSING_RULE, "source.main_invalid"})
 # The uncertainty of a graph without a selected main source; reports name its cause by it.
 NO_MAIN_SOURCE = "A unique readable main source could not be selected"
-# The file commands whose file can hold citations or bibliography declarations: what TeX
-# reads as source, and the bibliography resources. A dependency problem of any other file
-# command, such as a missing figure or data file, leaves the citation evidence complete.
-_CITATION_READING_COMMANDS = TRAVERSED_COMMANDS | IMPORT_COMMANDS | {"subfile"} | _RESOURCE_COMMANDS
 
 
 @dataclass(frozen=True, slots=True)
@@ -357,7 +357,7 @@ def graph_failures(inspection: SourceGraph, selected: set[str]) -> list[Finding]
         if item.path in scope
         and item.rule in INCOMPLETE_GRAPH_RULES
         and item.status != "passed"
-        and _can_hide_citations(item)
+        and can_hide_citations(item)
         and (item.path not in package_code or item.details.get("command") in _RESOURCE_COMMANDS)
     ]
 
@@ -382,17 +382,6 @@ def citation_source_errors(inspection: SourceGraph) -> list[Finding]:
     return [item for item in graph_failures(inspection, selected) if item.is_blocking]
 
 
-def _can_hide_citations(finding: Finding) -> bool:
-    """Return whether a source-graph problem can hide citations or bibliography declarations.
-
-    A finding that names the file command it concerns can hide them only when that
-    command reads TeX source or declares a bibliography resource; a finding without a
-    command is assumed to.
-    """
-    command = finding.details.get("command")
-    return not isinstance(command, str) or command in _CITATION_READING_COMMANDS
-
-
 def citation_keys(value: str) -> list[str] | None:
     """Split a literal comma-separated key list; return ``None`` if any key is not literal."""
     keys = [part.strip() for part in value.split(",")]
@@ -401,6 +390,14 @@ def citation_keys(value: str) -> list[str] | None:
     ):
         return None
     return keys
+
+
+def _cites_by_name(name: str) -> bool:
+    r"""Return whether a command's name says it may add citations or bibliography entries.
+
+    A style switch such as ``\citestyle`` or ``\setcitestyle`` does not.
+    """
+    return name not in CITATION_STYLE_COMMANDS and _citation_marked(name)
 
 
 def _citation_marked(text: str) -> bool:
@@ -419,9 +416,16 @@ def _execution_gaps(command: Command, spans: list[tuple[int, int]]) -> Iterator[
     Yields:
         A description of each construct that is not followed.
     """
+    if command.named:
+        # A name that a conditional test only compares, as in llncs.cls's
+        # \ifx\citeauthoryear\undefined, runs nothing; a definition of one changes
+        # what later citations do, as \def\cite does.
+        if command.named_by in _DEFINITIONS and _cites_by_name(command.name):
+            yield _DEFINITION_GAP
+        return
     if command.name == "subfile":
         yield "subfile bibliography content context is unsupported"
-    if _citation_marked(command.name) and in_conditional(spans, command.start):
+    if _cites_by_name(command.name) and in_conditional(spans, command.start):
         yield "conditional citation or bibliography execution is not expanded"
     if command.name in _DEFINITIONS and _citation_marked(
         " ".join(item.value for item in (*command.arguments, *command.options))
@@ -442,7 +446,7 @@ def _execution_gaps(command: Command, spans: list[tuple[int, int]]) -> Iterator[
 
 
 def _citation_shape_gaps(
-    command: Command, arguments: Sequence[Argument], *, multicite: bool
+    command: Command, arguments: Sequence[Argument], *, multicite: bool, in_place: bool
 ) -> Iterator[str]:
     """Describe what is unverified about the arguments and placement of a citation command.
 
@@ -450,20 +454,26 @@ def _citation_shape_gaps(
         command: The citation command.
         arguments: The arguments that hold its keys.
         multicite: Whether the command is a multicite command.
+        in_place: Whether the citation runs where it stands (``runs_in_place``).
 
     Yields:
         A description of each unverified aspect.
     """
     if not arguments:
         yield "citation has no supported key argument"
-    if command.depth:
+    if not in_place:
         yield "grouped citation execution is unverified"
     if multicite and len(command.arguments) + len(command.options) >= _MULTICITE_LEXICAL_LIMIT:
         yield "multicite exceeds lexical argument coverage"
 
 
 def _read_citation(
-    graph: CitationGraph, name: str, source: ParsedSource, command: Command
+    graph: CitationGraph,
+    name: str,
+    source: ParsedSource,
+    command: Command,
+    *,
+    in_place: bool,
 ) -> Iterator[str]:
     r"""Record the literal keys of a citation or \bibitem; yield what stays unverified.
 
@@ -476,6 +486,7 @@ def _read_citation(
         name: The source that holds the command, by relative path.
         source: The parsed source.
         command: The command to read.
+        in_place: Whether the command runs where it stands (``runs_in_place``).
 
     Yields:
         A description of each unverified aspect of the command.
@@ -484,11 +495,15 @@ def _read_citation(
     multicite = lowered in MULTICITE_COMMANDS
     inline = command.name == "bibitem"
     if not inline and lowered not in CITATION_COMMANDS and not multicite:
-        if "cite" in lowered and command.name not in _DYNAMIC:
+        if (
+            "cite" in lowered
+            and command.name not in _DYNAMIC
+            and command.name not in CITATION_STYLE_COMMANDS
+        ):
             yield f"unsupported citation-like command \\{command.name}"
         return
     arguments = command.arguments if multicite else command.arguments[:1]
-    yield from _citation_shape_gaps(command, arguments, multicite=multicite)
+    yield from _citation_shape_gaps(command, arguments, multicite=multicite, in_place=in_place)
     for argument in arguments:
         keys = citation_keys(argument.value)
         if keys is None or source.text[argument.start : argument.end] != argument.value:
@@ -539,19 +554,39 @@ def build_citation_graph(inspection: SourceGraph) -> CitationGraph:
     uncertainties.extend(map(Uncertainty, resource_reasons))
     unused: list[Uncertainty] = []
     package_code = package_code_sources(inspection, selected)
+    # What the project defines may drop its arguments; a venue class's own commands do not.
+    defined = frozenset(
+        defined_names(
+            command
+            for name in selected
+            if not name.endswith(".cls")
+            for command in inspection.sources[name].commands
+        )
+    )
     for name in sorted(selected):
         cancellation_point()
         source = inspection.sources[name]
         spans = conditional_spans(source.commands)
-        definitions = (
-            definition_spans(source.masked, source.commands) if name in package_code else []
-        )
+        definitions = definition_spans(source.masked, source.commands)
         for command in commands_before_end(source):
             if name in package_code and in_half_open_span(definitions, command.start):
                 # A definition body in package code runs only where the macro is used, and
                 # a use of a citation-like macro in the document text is a gap there.
                 continue
-            gaps = [*_execution_gaps(command, spans), *_read_citation(graph, name, source, command)]
+            gaps = [
+                *_execution_gaps(command, spans),
+                *(
+                    ()
+                    if command.named
+                    else _read_citation(
+                        graph,
+                        name,
+                        source,
+                        command,
+                        in_place=runs_in_place(command, definitions, defined),
+                    )
+                ),
+            ]
             if name in package_code:
                 # Package code keeps its citation and resource gaps, but its macro and
                 # category-code machinery is not a gap in the manuscript's citations.

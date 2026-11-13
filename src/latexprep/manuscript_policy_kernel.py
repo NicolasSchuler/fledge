@@ -24,7 +24,7 @@ from .finding_text import check_status, list_locations, more_suffix
 from .finding_weight import POLICY, Weight
 from .findings import Finding
 from .manuscript_vocabulary import COUNTER_CHANGES, INTERPRETED_COMMANDS, INTERPRETED_ENVIRONMENTS
-from .tex_lexer import definition_spans, in_conditional, in_half_open_span
+from .tex_spans import definition_spans, in_conditional, in_half_open_span
 from .uncertainty_reasons import CONDITIONAL_FLOW
 
 # Offending names spelled out in a message; the details list every one.

@@ -119,6 +119,15 @@ INCOMPLETE_GRAPH_RULES = UNPARSED_SOURCE_RULES | {
 }
 
 
+# Class and package files: macro code, whose findings are merged per rule.
+_PACKAGE_SUFFIXES = frozenset({".cls", ".sty"})
+
+
+def _is_package_file(path: str) -> bool:
+    """Return whether a project file is a class or package file, whose findings are merged."""
+    return PurePosixPath(path).suffix.lower() in _PACKAGE_SUFFIXES
+
+
 class ArgumentLocation(NamedTuple):
     """Where an argument's text sits in one project file.
 
@@ -275,6 +284,7 @@ class SourceGraph:
             graph._visit(_Frame(graph.main, ()), ())
         if scope == "selected":
             graph.roots = graph._document_roots()
+        graph._reporter.merge_per_rule(_is_package_file)
         return graph
 
     @property

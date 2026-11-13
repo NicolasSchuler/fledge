@@ -20,7 +20,6 @@ from .expanded_document import (
     CONTENT_INPUT_COMMANDS,
     commands_before_end,
     package_code_sources,
-    unresolved_non_content_file,
 )
 from .literal_text import (
     HEADING_DEPTHS,
@@ -33,10 +32,12 @@ from .literal_text import (
     plain_text,
     scan_literal_text,
 )
+from .source_findings import can_hide_manuscript_text
 from .source_graph import INCOMPLETE_GRAPH_RULES, SourceGraph
 from .source_loading import ParsedSource
 from .tex_commands import MATH_MARKER
-from .tex_lexer import CONTROL_SEQUENCE, Command, conditional_spans, in_conditional
+from .tex_lexer import CONTROL_SEQUENCE, Command
+from .tex_spans import conditional_spans, in_conditional
 from .uncertainty_reasons import context_reasons
 
 COUNT_METHOD = (
@@ -325,7 +326,7 @@ def graph_reasons(graph: SourceGraph, selected: set[str], content: set[str]) -> 
         and item.path not in package_code
         and item.rule in INCOMPLETE_GRAPH_RULES
         and item.status != "passed"
-        and not unresolved_non_content_file(item)
+        and can_hide_manuscript_text(item)
     )
     return reasons
 

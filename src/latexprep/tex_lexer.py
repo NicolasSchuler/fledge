@@ -11,12 +11,17 @@ from __future__ import annotations
 import bisect
 import re
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal, NamedTuple
 
 from .cancellation import cancellation_point
 from .limits import CANCELLATION_STRIDE_CHARS, KIB, MIB
-from .tex_commands import DEFINITION_COMMANDS, MACRO_DEFINITION_COMMANDS
+from .tex_commands import (
+    COMMAND_DEFINITION_COMMANDS,
+    NAMED_OPERAND_COUNTS,
+    PRIMITIVE_BODY_DEFINITIONS,
+    STRINGIFYING_COMMANDS,
+)
 
 # Bounds shared by every reader of the lexical subset.
 MAX_SOURCE_BYTES = 8 * MIB
@@ -28,6 +33,9 @@ _MAX_GROUPS_PER_COMMAND = 6
 # Arguments may together span this many times the scanned text, because commands nest.
 _ARGUMENT_BUDGET_FACTOR = 4
 
+# The owner of a brace group after ``<…>`` or ``(…)``: an argument of a command with
+# delimited arguments, such as beamer's ``\only<2>{…}``, never a bare group.
+DELIMITED_OWNER = "<delimited>"
 # A control word, with ``@`` as a letter as in package code, or a control symbol
 # on the same line.
 CONTROL_SEQUENCE = re.compile(r"\\([A-Za-z@]+|[^\r\n])")
@@ -56,30 +64,6 @@ _VERBATIM_COMMANDS = frozenset({"verb", "lstinline", "mintinline", "url", "nolin
 # The url package's \path takes a braced or ``|``-delimited argument. TikZ shares the name
 # for \path[options] (a) -- (b), whose arguments are ordinary markup, not literal text.
 _URL_PATH_OPENERS = "{|"
-# Package conditionals that take braced branches instead of ending with \fi.
-_ARGUMENT_CONDITIONALS = frozenset(
-    {
-        "ifthenelse",
-        "iftoggle",
-        "ifbool",
-        "ifboolexpr",
-        "ifdef",
-        "ifundef",
-        "ifdefempty",
-        "ifdefvoid",
-        "ifdefstring",
-        "ifcsdef",
-        "ifcsundef",
-        "ifcsvoid",
-        "ifstrequal",
-        "ifstrempty",
-        "ifblank",
-        "ifnumcomp",
-        "ifdimcomp",
-        "ifpackageloaded",
-        "ifclassloaded",
-    }
-)
 
 
 ParseLimit = Literal[
@@ -143,8 +127,29 @@ class Argument:
 
 
 @dataclass(frozen=True, slots=True)
+class Group:
+    r"""One open brace group and the group around it, shared by the commands inside.
+
+    The owner is the command whose argument the group is: ``textbf`` for
+    ``\textbf{…}``, ``begin{figure}`` for a group after ``\begin{figure}``, the
+    definition (``def``, ``renewcommand``) for the parameters and body of a defined name,
+    and ``None`` for a bare group. ``DELIMITED_OWNER`` marks a group after ``<…>`` or
+    ``(…)``, which a command with such delimited arguments takes.
+
+    Attributes:
+        owner: The command that takes the group, or ``None``.
+        parent: The group around this one, or ``None`` at the top level.
+        depth: How many groups are open inside and including this one.
+    """
+
+    owner: str | None
+    parent: Group | None
+    depth: int
+
+
+@dataclass(frozen=True, slots=True)
 class Command:
-    """A control sequence with the groups that directly follow it.
+    r"""A control sequence with the groups that directly follow it.
 
     The lexer cannot know a command's signature, so every following brace group
     is recorded as a possible argument and every bracket group as a possible option.
@@ -156,6 +161,11 @@ class Command:
         depth: The number of brace groups open at the command, never below zero.
         arguments: The brace groups that follow the command, in order.
         options: The bracket groups that follow the command, in order.
+        group: The innermost open brace group, linked to the groups around it, or
+            ``None`` at the top level; :attr:`groups` lists their owners.
+        named_by: The definition or conditional test that names this control sequence
+            instead of running it, as ``def`` in ``\def\x`` or ``ifx`` in ``\ifx\x\y``;
+            ``None`` for a command that runs.
     """
 
     name: str
@@ -164,6 +174,23 @@ class Command:
     depth: int
     arguments: tuple[Argument, ...]
     options: tuple[Argument, ...]
+    group: Group | None = None
+    named_by: str | None = None
+
+    @property
+    def groups(self) -> tuple[str | None, ...]:
+        """The owner of each open brace group, outermost first (see :class:`Group`)."""
+        owners = []
+        group = self.group
+        while group is not None:
+            owners.append(group.owner)
+            group = group.parent
+        return tuple(reversed(owners))
+
+    @property
+    def named(self) -> bool:
+        """Whether a definition or conditional test names this token instead of running it."""
+        return self.named_by is not None
 
     @property
     def name_end(self) -> int:
@@ -442,7 +469,7 @@ def _verbatim_command(text: str, name: str, pos: int) -> _LiteralEnd | None:
     if text[cursor] == "{" and name != "verb":
         argument = read_group(text, cursor)
         return _LiteralEnd(argument.end + 1, True) if argument else _LiteralEnd(len(text), False)
-    line_end = _line_end(text, cursor)
+    line_end = end_of_line(text, cursor)
     close = text.find(text[cursor], cursor + 1, line_end)
     return _LiteralEnd(close + 1, True) if close >= 0 else _LiteralEnd(line_end, False)
 
@@ -466,7 +493,7 @@ def _literal_after(text: str, name: str, pos: int) -> _LiteralEnd | None:
     return None
 
 
-def _line_end(text: str, pos: int) -> int:
+def end_of_line(text: str, pos: int) -> int:
     """Return the offset of the line break that ends the line holding ``pos``, or the text's end.
 
     Args:
@@ -490,7 +517,7 @@ def source_regions(text: str) -> RegionScan:
         if pos % CANCELLATION_STRIDE_CHARS == 0:
             cancellation_point()
         if text[pos] == "%":
-            end = _line_end(text, pos)
+            end = end_of_line(text, pos)
             regions.append(Region(pos, end - (text[end - 1 : end] == "\r"), "comment"))
             pos = end
             continue
@@ -667,7 +694,8 @@ def scan_commands(masked: str, comments: Sequence[int] = ()) -> list[Command]:
             ``MAX_COMMANDS`` commands.
     """
     result: list[Command] = []
-    depth = pos = 0
+    state = _ScanState(masked, comments)
+    pos = 0
     line = 1
     argument_chars = 0
     argument_budget = min(MAX_SOURCE_BYTES, len(masked) * _ARGUMENT_BUDGET_FACTOR)
@@ -678,29 +706,181 @@ def scan_commands(masked: str, comments: Sequence[int] = ()) -> list[Command]:
         if char == "\n":
             line += 1
         elif char == "{":
-            depth += 1
+            state.open_group(pos)
         elif char == "}":
-            depth = max(0, depth - 1)
+            state.close_group(pos)
         elif char == "\\" and (token := CONTROL_SEQUENCE.match(masked, pos)):
-            name, name_end = token.group(1), token.end()
-            groups = _read_following_groups(
-                masked, name_end + masked.startswith("*", name_end), comments
-            )
+            name_end = token.end()
+            command = _read_command(masked, token.group(1), pos, line, comments, state)
             argument_chars += sum(
-                len(group.value) for group in (*groups.arguments, *groups.options)
+                len(group.value) for group in (*command.arguments, *command.options)
             )
             if argument_chars > argument_budget:
                 raise ParseLimitExceeded("argument_budget", pos)
-            arguments = groups.arguments
-            if not arguments and name == "input":
-                arguments.extend(_bare_input_name(masked, name_end))
-            result.append(Command(name, pos, line, depth, tuple(arguments), tuple(groups.options)))
+            command = state.command(command, name_end + masked.startswith("*", name_end))
+            if command is not None:
+                result.append(command)
             if len(result) > MAX_COMMANDS:
                 raise ParseLimitExceeded("command_count", pos)
             pos = name_end
             continue
         pos += 1
     return result
+
+
+def _read_command(
+    masked: str, name: str, pos: int, line: int, comments: Sequence[int], state: _ScanState
+) -> Command:
+    """Read the command named ``name`` at ``pos`` with its following groups.
+
+    Args:
+        masked: The literal-masked text.
+        name: The control-sequence name.
+        pos: The offset of the backslash.
+        line: The 1-based line of the backslash.
+        comments: The sorted offsets of the comments blanked to produce ``masked``.
+        state: The scan state, whose open groups give the command's depth.
+
+    Returns:
+        The command with its arguments and options, before naming and groups are added.
+    """
+    name_end = pos + len(name) + 1
+    groups = _read_following_groups(masked, name_end + masked.startswith("*", name_end), comments)
+    arguments = groups.arguments
+    if not arguments and name == "input":
+        arguments.extend(_bare_input_name(masked, name_end))
+    return Command(name, pos, line, state.depth, tuple(arguments), tuple(groups.options))
+
+
+class _ScanState:
+    r"""What :func:`scan_commands` tracks between commands: open groups and named tokens.
+
+    Every open brace group is recorded with the command whose argument it is, so that a
+    reader can tell ``\textbf{\cite{x}}`` from the argument of an unknown macro. Groups
+    are linked to their parent, so each costs constant memory however deep it is. A
+    token that a definition or conditional test names is marked, the groups that follow
+    a defined name belong to its definition, and a token that ``STRINGIFYING_COMMANDS``
+    turn into characters is dropped.
+
+    Args:
+        masked: The literal-masked text being scanned.
+        comments: The sorted offsets of the comments blanked to produce ``masked``.
+
+    Attributes:
+        group: The innermost open brace group, or ``None`` at the top level.
+    """
+
+    def __init__(self, masked: str, comments: Sequence[int]) -> None:
+        self._masked = masked
+        self._comments = comments
+        self.group: Group | None = None
+        # The offset of the opening brace of each argument not yet entered, by owner.
+        self._argument_braces: dict[int, str] = {}
+        # Where the next named token must start, how many remain, and what names them.
+        self._operand_at = -1
+        self._operands_left = 0
+        self._naming = ""
+        self._stringified_at = -1
+        # The definition whose body the next brace group opens: TeX reads the parameter
+        # text of \def\x#1 up to the first brace, across line breaks.
+        self._body_of = ""
+
+    @property
+    def depth(self) -> int:
+        """How many brace groups are open."""
+        return self.group.depth if self.group else 0
+
+    def open_group(self, pos: int) -> None:
+        """Enter the brace group that opens at ``pos``."""
+        owner = self._argument_braces.pop(pos, None)
+        if self._body_of:
+            owner, self._body_of = self._body_of, ""
+        elif owner is None and self._after_delimited_argument(pos):
+            owner = DELIMITED_OWNER
+        self.group = Group(owner, self.group, self.depth + 1)
+
+    def close_group(self, pos: int) -> None:
+        """Leave the group that the brace at ``pos`` closes; a stray brace changes nothing.
+
+        A brace group right after an argument, beyond those the lexer records for its
+        command, is another argument of the same command.
+        """
+        if self.group is None:
+            return
+        owner, self.group = self.group.owner, self.group.parent
+        following = skip_space(self._masked, pos + 1)
+        if (
+            owner is not None
+            and self._masked.startswith("{", following)
+            and following not in self._argument_braces
+            and not _has_blank_line(self._masked, pos + 1, following, self._comments)
+        ):
+            self._argument_braces[following] = owner
+
+    def _after_delimited_argument(self, pos: int) -> bool:
+        r"""Return whether the group at ``pos`` follows ``<…>`` or ``(…)``, as ``\only<2>{…}``."""
+        before = pos - 1
+        while before >= 0 and self._masked[before] in " \t":
+            before -= 1
+        return before >= 0 and self._masked[before] in ">)"
+
+    def command(self, command: Command, token_end: int) -> Command | None:
+        """Complete one scanned command, or return ``None`` for a stringified token.
+
+        Args:
+            command: The command as read, without its groups or naming.
+            token_end: The offset just after its name and star.
+
+        Returns:
+            The command with its enclosing group and what names it, if anything.
+        """
+        if command.start == self._stringified_at:
+            self._stringified_at = -1
+            return None
+        named = command.start == self._operand_at and self._operands_left > 0
+        named_by = self._naming if named else None
+        self._operands_left = self._operands_left - 1 if named else 0
+        self._operand_at = self._after_operand(token_end) if self._operands_left else -1
+        if not named:
+            self._expect_operands(command, token_end)
+        owner = command.name
+        if named_by is not None:
+            # The parameters and body of a defined name belong to its definition.
+            owner = named_by
+            if named_by in PRIMITIVE_BODY_DEFINITIONS:
+                self._body_of = named_by
+        elif command.name == "begin" and command.arguments:
+            owner = f"begin{{{command.arguments[0].value.strip()}}}"
+        for argument in command.arguments:
+            self._argument_braces[argument.start - 1] = owner
+        return replace(command, group=self.group, named_by=named_by)
+
+    def _expect_operands(self, command: Command, token_end: int) -> None:
+        """Note the tokens that ``command`` names or stringifies, if it is such a command."""
+        following = skip_space(self._masked, token_end)
+        if command.name in STRINGIFYING_COMMANDS:
+            # Before a blank line, \string turns the paragraph break into characters.
+            if not _has_blank_line(self._masked, token_end, following, self._comments):
+                self._stringified_at = following
+            return
+        count = NAMED_OPERAND_COUNTS.get(command.name, 0)
+        if not count:
+            return
+        self._operands_left = count
+        self._naming = command.name
+        if command.name in COMMAND_DEFINITION_COMMANDS and command.arguments:
+            # \newcommand{\x}: the defined name is alone in the first brace group.
+            self._operands_left = 1
+            self._operand_at = command.arguments[0].stripped().start
+        else:
+            self._operand_at = following
+
+    def _after_operand(self, token_end: int) -> int:
+        r"""Return where the next named token may start; ``\let\a=\b`` allows an ``=``."""
+        pos = skip_space(self._masked, token_end)
+        if self._masked.startswith("=", pos):
+            pos = skip_space(self._masked, pos + 1)
+        return pos
 
 
 def scan_source_commands(text: str) -> list[Command]:
@@ -738,183 +918,3 @@ def split_argument_items(argument: Argument, *, comma_separated: bool = True) ->
         items.append(Argument(cursor, cursor + len(value), value).stripped())
         cursor += len(value) + 1
     return items
-
-
-def merge_spans(spans: Iterable[tuple[int, int]]) -> list[tuple[int, int]]:
-    """Sort ``(start, end)`` spans and join those that overlap or touch."""
-    merged: list[tuple[int, int]] = []
-    for start, end in sorted(spans):
-        if merged and start <= merged[-1][1]:
-            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
-        else:
-            merged.append((start, end))
-    return merged
-
-
-def command_end(command: Command) -> int:
-    """Return the offset just after a command's last recorded argument or option.
-
-    A command without arguments or options ends at the end of its name.
-    """
-    return max(
-        (argument.end + 1 for argument in (*command.arguments, *command.options)),
-        default=command.name_end,
-    )
-
-
-def _definition_end(text: str, command: Command) -> int:
-    r"""Return the offset after a definition's name, parameters and replacement body.
-
-    A command outside ``DEFINITION_COMMANDS`` ends at :func:`command_end`. For the
-    primitive-style definitions in it, the defined name (two names for ``\let`` and
-    ``\futurelet``) and a braced body that opens on the same line are included.
-
-    Args:
-        text: The text the command was scanned from.
-        command: The definition command.
-
-    Returns:
-        The offset just after the braced body when one opens on the same line and closes,
-        otherwise just after the last defined name read, or :func:`command_end` for a
-        command outside ``DEFINITION_COMMANDS``.
-    """
-    stop = command_end(command)
-    if command.name not in DEFINITION_COMMANDS:
-        return stop
-    # Definitions written with TeX primitives take their name and replacement text
-    # without braces around the name, so the lexer records no arguments for them.
-    line_end = _line_end(text, stop)
-    cursor = stop
-    # \let\a\b and \def\x#1{…} place the defined name outside any group.
-    for _ in range(2 if command.name in {"let", "futurelet"} else 1):
-        token = CONTROL_SEQUENCE.match(text, cursor)
-        if token is None:
-            break
-        cursor = stop = token.end()
-    opening = text.find("{", cursor, line_end)
-    if opening >= 0:
-        body = read_group(text, opening)
-        if body is not None:
-            return body.end + 1
-    return stop
-
-
-def definition_spans(text: str, commands: Sequence[Command]) -> list[tuple[int, int]]:
-    """Return merged offset ranges covering definition commands and their bodies.
-
-    Args:
-        text: The text the commands were scanned from.
-        commands: The commands of ``text``; those in ``MACRO_DEFINITION_COMMANDS`` count.
-
-    Returns:
-        The merged ``(start, end)`` ranges, from each definition command to the end of its
-        body.
-    """
-    return merge_spans(
-        (command.start, _definition_end(text, command))
-        for command in commands
-        if command.name in MACRO_DEFINITION_COMMANDS
-    )
-
-
-def conditional_spans(commands: list[Command]) -> list[tuple[int, int]]:
-    r"""Return offset ranges enclosed by primitive-style ``\if…`` … ``\fi`` conditionals.
-
-    A conditional name defined by ``\newif`` or ``\def`` is not itself executed,
-    and an opener without a matching ``\fi`` (such as a branch-taking package
-    conditional) is ignored rather than extended to the end of the file.
-
-    Args:
-        commands: The commands of a text, in order.
-
-    Returns:
-        The merged ``(start, end)`` ranges, from the offset of an ``\if…`` to the offset of
-        its ``\fi``.
-    """
-    spans: list[tuple[int, int]] = []
-    stack: list[int] = []
-    previous: Command | None = None
-    for command in commands:
-        defined = (
-            previous is not None
-            and previous.name in DEFINITION_COMMANDS
-            and not previous.arguments
-            and command.start == previous.name_end
-        )
-        if command.name == "fi":
-            if stack:
-                start = stack.pop()
-                spans.append((start, command.start))
-        elif (
-            command.name.startswith("if")
-            and command.name not in _ARGUMENT_CONDITIONALS
-            and not defined
-        ):
-            stack.append(command.start)
-        previous = command
-    return merge_spans(spans)
-
-
-# The point-in-span tests below share one lookup over merged, sorted spans but
-# differ in whether each boundary belongs to the span; callers depend on that.
-
-
-def _span_starting_at_or_before(
-    spans: Sequence[tuple[int, int]], offset: int
-) -> tuple[int, int] | None:
-    """Return the last span that starts at or before ``offset``.
-
-    Args:
-        spans: Merged, sorted ``(start, end)`` spans.
-        offset: The offset to look up.
-
-    Returns:
-        The span, or ``None`` when every span starts after ``offset``.
-    """
-    index = bisect.bisect_right(spans, (offset, float("inf"))) - 1
-    return spans[index] if index >= 0 else None
-
-
-def in_conditional(spans: Sequence[tuple[int, int]], offset: int) -> bool:
-    r"""Return whether ``offset`` lies strictly inside one of the merged ``conditional_spans``.
-
-    The opening ``\if…`` (at a span's start) and the closing ``\fi`` (at its end)
-    are outside, so only enclosed commands count as conditional.
-
-    Args:
-        spans: The merged spans from :func:`conditional_spans`.
-        offset: The offset to test.
-
-    Returns:
-        ``True`` when ``start < offset < end`` for one of the spans.
-    """
-    span = _span_starting_at_or_before(spans, offset)
-    return span is not None and span[0] < offset < span[1]
-
-
-def in_half_open_span(spans: Sequence[tuple[int, int]], offset: int) -> bool:
-    """Return whether ``start <= offset < end`` for one of the merged ``spans``.
-
-    Args:
-        spans: Merged, sorted ``(start, end)`` spans.
-        offset: The offset to test.
-
-    Returns:
-        ``True`` when one of the spans holds ``offset``, its end excluded.
-    """
-    span = _span_starting_at_or_before(spans, offset)
-    return span is not None and span[0] <= offset < span[1]
-
-
-def in_closed_span(spans: Sequence[tuple[int, int]], offset: int) -> bool:
-    """Return whether ``start <= offset <= end`` for one of the merged ``spans``.
-
-    Args:
-        spans: Merged, sorted ``(start, end)`` spans.
-        offset: The offset to test.
-
-    Returns:
-        ``True`` when one of the spans holds ``offset``, its end included.
-    """
-    span = _span_starting_at_or_before(spans, offset)
-    return span is not None and span[0] <= offset <= span[1]

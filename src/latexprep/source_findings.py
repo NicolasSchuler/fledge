@@ -8,13 +8,22 @@ sources report through one object and a repeated finding is recorded once.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from dataclasses import replace
+from pathlib import PurePosixPath
 
 from .finding_text import more_suffix
 from .findings import Finding
+from .source_file_commands import (
+    BIBLIOGRAPHY_RESOURCE_COMMANDS,
+    OPAQUE_FILE_COMMANDS,
+)
+from .tex_commands import TEX_SOURCE_SUFFIXES
 
 # Most paths named in one message; the rest are counted.
 MAX_LISTED_PATHS = 5
+# Most lines a merged finding lists in its details.
+MAX_LISTED_LINES = 10
 # Appended to advice for constructs the scan cannot follow, to say when they matter.
 NEEDED_FOR_RESTRUCTURING = (
     'Flat layout (layout = "flat") and source transformations need this; '
@@ -117,6 +126,114 @@ class GraphFindings:
         if finding not in self.findings:
             self.findings.append(finding)
 
+    def merge_per_rule(self, merged: Callable[[str], bool]) -> None:
+        r"""Merge the uncertainties of each file that ``merged`` selects into one per rule.
+
+        Class and package files are macro code: ``\csname``, conditional loads and computed
+        file names are routine there, and none of them hides manuscript text. One finding
+        per rule and file says what flat layout cannot follow, at its first line, with the
+        commands, lines and count in its details. Errors are never merged, and neither are
+        findings that differ in what they can hide (:func:`_hiding_class`): a figure in a
+        macro and an ``\input`` in a macro stay two findings, so that the ``\input`` is
+        still a gap in the manuscript.
+
+        Args:
+            merged: Whether the uncertainties of a project file are merged.
+        """
+        groups: dict[tuple[str, str, str], list[Finding]] = {}
+        for item in self.uncertainties:
+            if item.path and merged(item.path):
+                key = (item.path, item.rule, _hiding_class(item))
+                groups.setdefault(key, []).append(item)
+        replacements = {id(items[0]): _merged(items) for items in groups.values() if len(items) > 1}
+        dropped = {id(item) for items in groups.values() if len(items) > 1 for item in items[1:]}
+        for target in (self.findings, self.uncertainties):
+            target[:] = [
+                replacements.get(id(item), item) for item in target if id(item) not in dropped
+            ]
+
     def add(self, finding: Finding) -> None:
         """Record a finding of another kind, such as a lookup-order note."""
         self.findings.append(finding)
+
+
+def _reads_no_source(finding: Finding) -> bool:
+    r"""Return whether the command a finding concerns reads no manuscript source.
+
+    That is a command of ``OPAQUE_FILE_COMMANDS``, or an unknown command each of whose
+    possible file names has a suffix outside ``TEX_SOURCE_SUFFIXES``, as in
+    ``\plot{data.csv}``; ``\loadparts{abstract.tex, logo.png}`` may read source. A
+    finding that names no command, such as a cycle or a parse limit, may hide anything.
+    """
+    command = finding.details.get("command")
+    if not isinstance(command, str):
+        return False
+    if command in OPAQUE_FILE_COMMANDS:
+        return True
+    argument = finding.details.get("argument")
+    if finding.rule != "source.custom_path" or not isinstance(argument, str):
+        return False
+    suffixes = [PurePosixPath(item.strip()).suffix.lower() for item in argument.split(",")]
+    return all(suffix and suffix not in TEX_SOURCE_SUFFIXES for suffix in suffixes)
+
+
+def _hiding_class(finding: Finding) -> str:
+    """Return what a source finding can hide, so that only alike findings are merged."""
+    if _reads_no_source(finding):
+        return "nothing"
+    if finding.details.get("command") in BIBLIOGRAPHY_RESOURCE_COMMANDS:
+        return "bibliography"
+    return "text"
+
+
+def can_hide_citations(finding: Finding) -> bool:
+    r"""Return whether a source finding can hide a citation or a bibliography declaration.
+
+    Only a finding about a file that holds no TeX source, such as a figure inside
+    ``\subfloat{…}``, cannot; ``\InputIfFileExists`` and ``\includefrom`` read source.
+    """
+    return not _reads_no_source(finding)
+
+
+def can_hide_manuscript_text(finding: Finding) -> bool:
+    """Return whether a source finding can hide manuscript text, a float or a declaration.
+
+    As :func:`can_hide_citations`, and a bibliography resource holds no manuscript text
+    either.
+    """
+    return (
+        can_hide_citations(finding)
+        and finding.details.get("command") not in BIBLIOGRAPHY_RESOURCE_COMMANDS
+    )
+
+
+def _merged(items: list[Finding]) -> Finding:
+    """Return one finding that stands for several of one rule in one file.
+
+    Args:
+        items: The findings, at least two, in the order they were found.
+
+    Returns:
+        The first finding by line, its message followed by the count and the commands. It
+        keeps the first finding's ``command`` only when every merged finding names one
+        command: a merged group of several commands names none, and so may hide anything
+        that :func:`_hiding_class` allowed for each of them.
+    """
+    first = min(items, key=lambda item: item.line or 0)
+    names = sorted({str(item.details["command"]) for item in items if "command" in item.details})
+    details = {key: value for key, value in first.details.items() if key != "command"}
+    if len(names) == 1 and all("command" in item.details for item in items):
+        details["command"] = names[0]
+    commands = ", ".join("\\" + name for name in names)
+    listed = f" ({commands})" if names else ""
+    return replace(
+        first,
+        message=f"{first.message} This class or package file has {len(items)} "
+        f"such findings{listed}.",
+        details={
+            **details,
+            "commands": names,
+            "occurrences": len(items),
+            "lines": sorted({item.line for item in items if item.line})[:MAX_LISTED_LINES],
+        },
+    )

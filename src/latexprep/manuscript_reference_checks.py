@@ -16,7 +16,7 @@ from .finding_weight import ADVISORY
 from .findings import Finding
 from .manuscript_check_options import ManuscriptCheckOptions
 from .manuscript_policy_kernel import CheckOutcome, Policy, Reading, policy_finding
-from .tex_lexer import command_end, in_conditional
+from .tex_spans import command_end, in_conditional
 
 _HARDCODED = Policy(
     "manuscript.hardcoded_references", "Checked hard-coded reference candidates.", ADVISORY

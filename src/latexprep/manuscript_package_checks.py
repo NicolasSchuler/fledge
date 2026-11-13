@@ -28,7 +28,7 @@ from .tex_commands import (
     MACRO_DEFINITION_COMMANDS,
     OUTPUT_DRIVER_OPTIONS,
 )
-from .tex_lexer import (
+from .tex_spans import (
     command_end,
     conditional_spans,
     definition_spans,

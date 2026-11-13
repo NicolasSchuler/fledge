@@ -99,6 +99,131 @@ MACRO_DEFINITION_COMMANDS = (
         "newcounter",
     }
 )
+# How many control sequences after each command it names instead of running them: the
+# name a definition defines (and, for \let and \futurelet, the tokens it copies) and the
+# tokens a conditional test compares. ``\renewcommand\setcitestyle`` and
+# ``\ifx\citeauthoryear\undefined`` run no citation. A command-definition command names
+# the sequence after it, or the one alone in its first brace group.
+NAMED_OPERAND_COUNTS: dict[str, int] = {
+    **dict.fromkeys(("def", "gdef", "edef", "xdef", "newif", "ifdefined"), 1),
+    "let": 2,
+    "ifx": 2,
+    # \futurelet\cs\a\b defines \cs; \a then runs.
+    "futurelet": 1,
+    **dict.fromkeys(COMMAND_DEFINITION_COMMANDS, 1),
+}
+# TeX primitives that read a parameter text and then a braced body for the name they define.
+PRIMITIVE_BODY_DEFINITIONS = frozenset({"def", "gdef", "edef", "xdef"})
+# Commands that turn the next control sequence into characters or a diagnostic, as in
+# ``\string\documentclass`` inside an error message, so that it is never run or defined.
+STRINGIFYING_COMMANDS = frozenset({"string", "meaning", "show"})
+
+# Commands whose brace arguments TeX typesets once, where the command stands: text
+# formatting, boxes and colour, captions, headings and notes, subfigures, table cells and
+# environments. A citation or figure inside one runs as surely as one outside any group, unlike
+# one in the argument of an unknown macro, which may drop, repeat or delay it.
+TYPESET_ARGUMENT_COMMANDS = frozenset(
+    {
+        # Text formatting.
+        "emph",
+        "textbf",
+        "textit",
+        "textmd",
+        "textnormal",
+        "textrm",
+        "textsc",
+        "textsf",
+        "textsl",
+        "texttt",
+        "textup",
+        "textsuperscript",
+        "textsubscript",
+        "underline",
+        "uline",
+        "sout",
+        "hl",
+        "text",
+        "mbox",
+        "centerline",
+        "ensuremath",
+        # Boxes, scaling and colour.
+        "makebox",
+        "fbox",
+        "framebox",
+        "parbox",
+        "raisebox",
+        "resizebox",
+        "scalebox",
+        "rotatebox",
+        "reflectbox",
+        "adjustbox",
+        "colorbox",
+        "fcolorbox",
+        "textcolor",
+        "shortstack",
+        # Captions, headings and notes.
+        "caption",
+        "captionof",
+        "subcaption",
+        "subcaptionbox",
+        "part",
+        "chapter",
+        "section",
+        "subsection",
+        "subsubsection",
+        "paragraph",
+        "subparagraph",
+        "footnote",
+        "footnotetext",
+        "thanks",
+        "marginpar",
+        # Subfigures and table cells.
+        "subfloat",
+        "subfigure",
+        "subtable",
+        "multicolumn",
+        "multirow",
+        "makecell",
+        "thead",
+        # Groups after an environment's end; those after its \begin are owned by the
+        # environment itself (``begin{figure}``, see ``tex_lexer.Group``).
+        "end",
+        # Declarations and spacing that take no argument: the lexer records a brace group
+        # after them as an argument, but TeX reads it as a bare group in the text.
+        "item",
+        "centering",
+        "raggedright",
+        "raggedleft",
+        "noindent",
+        "par",
+        "\\",
+        "newline",
+        "hfill",
+        "vfill",
+        "quad",
+        "qquad",
+        "normalfont",
+        "bfseries",
+        "itshape",
+        "scshape",
+        "ttfamily",
+        "sffamily",
+        "rmfamily",
+        "upshape",
+        "mdseries",
+        "em",
+        "tiny",
+        "scriptsize",
+        "footnotesize",
+        "small",
+        "normalsize",
+        "large",
+        "Large",
+        "LARGE",
+        "huge",
+        "Huge",
+    }
+)
 
 # Commands, in their lower-case spelling, that print a citation of the keys in their
 # first argument. natbib and biblatex also define a capitalised twin of most of them
@@ -111,6 +236,13 @@ PRINTED_CITATION_COMMANDS = frozenset(
 # Every command that adds the keys in its first argument to the bibliography:
 # \nocite does so without printing a citation.
 CITATION_COMMANDS = PRINTED_CITATION_COMMANDS | {"nocite"}
+# Commands that set how citations and the bibliography look, never which entries are
+# cited: natbib, ACM and LNCS style switches and the bibliography's fonts and spacing.
+# Their names contain "cite" or "bib", but running one adds no citation.
+CITATION_STYLE_COMMANDS = frozenset(
+    "citestyle setcitestyle bibpunct bibstyle citeauthoryear citenumfont bibnumfmt "
+    "bibsection bibfont bibliofont bibsep bibhang bibname bibliographystyle".split()
+)
 # biblatex commands that take one optional-argument pair and key group per citation.
 MULTICITE_COMMANDS = frozenset(
     "cites parencites textcites autocites footcites footcitetexts smartcites supercites".split()

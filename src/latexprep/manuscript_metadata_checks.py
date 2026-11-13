@@ -25,7 +25,7 @@ from .literal_text import is_placeholder_text, key_value_items, plain_argument_t
 from .manuscript_check_options import ManuscriptCheckOptions
 from .manuscript_policy_kernel import CheckOutcome, Policy, Reading, listing, policy_finding
 from .manuscript_vocabulary import METADATA_COMMANDS, ORCID_COMMANDS
-from .tex_lexer import in_conditional
+from .tex_spans import in_conditional
 from .uncertainty_reasons import CONDITIONAL_FLOW, context_reasons
 
 _REQUIRED_METADATA = Policy(

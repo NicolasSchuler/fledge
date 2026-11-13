@@ -39,12 +39,11 @@ from .tex_lexer import (
     ParseLimitExceeded,
     blank_regions,
     comment_starts,
-    conditional_spans,
-    in_conditional,
     read_group,
     scan_commands,
     source_regions,
 )
+from .tex_spans import conditional_spans, in_conditional
 from .text_edits import OverlappingEdits, TextEdit, apply_text_edits, unified_diff_text, with_bom
 
 # Problems named in a message; the finding's details list every one.

@@ -8,16 +8,18 @@ from unittest.mock import patch
 from latexprep.tex_lexer import (
     MAX_ARGUMENT_CHARS,
     ParseLimitExceeded,
-    conditional_spans,
-    in_closed_span,
-    in_conditional,
-    in_half_open_span,
     mask_literals,
-    merge_spans,
     scan_commands,
     scan_source_commands,
     source_regions,
     split_argument_items,
+)
+from latexprep.tex_spans import (
+    conditional_spans,
+    in_closed_span,
+    in_conditional,
+    in_half_open_span,
+    merge_spans,
 )
 
 

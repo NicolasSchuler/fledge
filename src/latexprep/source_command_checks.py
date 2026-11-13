@@ -12,8 +12,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
-from dataclasses import dataclass
-from pathlib import PurePosixPath
+from dataclasses import dataclass, replace
 
 from .literal_text import HEADING_DEPTHS, KEY_ARGUMENT_COMMANDS, REFERENCE_COMMANDS, TEXT_WRAPPERS
 from .source_file_commands import (
@@ -27,7 +26,14 @@ from .source_file_commands import (
 )
 from .source_findings import NEEDED_FOR_RESTRUCTURING, GraphFindings
 from .source_loading import ParsedSource
-from .tex_lexer import Command, conditional_spans, in_conditional, split_argument_items
+from .tex_lexer import Command, split_argument_items
+from .tex_spans import (
+    conditional_spans,
+    defined_names,
+    definition_spans,
+    in_conditional,
+    runs_in_place,
+)
 
 _UNSUPPORTED_COMMANDS = frozenset(
     {
@@ -116,10 +122,6 @@ _PATH_LIKE = re.compile(
     re.IGNORECASE | re.VERBOSE,
 )
 _DECLARED_IDENTITY_COMMANDS = frozenset({"ProvidesPackage", "ProvidesClass", "ProvidesFile"})
-# Class and package files, whose run-time commands are reported once per file.
-_PACKAGE_SUFFIXES = frozenset({".cls", ".sty"})
-# How many lines of those commands a per-file finding lists.
-_MAX_LISTED_LINES = 10
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,12 +136,45 @@ class SourceChecks:
             established while a file is checked, so it only rules out names no project
             file could match.
         findings: Where the checks record their uncertainties.
+        definitions: The merged definition spans of the source (``definition_spans``).
+        defined: The commands and environments the source defines (``defined_names``).
     """
 
     path: str
     source: ParsedSource
     known_paths: set[str]
     findings: GraphFindings
+    definitions: tuple[tuple[int, int], ...] = ()
+    defined: frozenset[str] = frozenset()
+
+    def uncertain(
+        self,
+        command: Command,
+        rule: str,
+        message: str,
+        suggestion: str | None = None,
+        details: dict[str, object] | None = None,
+    ) -> None:
+        """Record what the scan cannot follow about ``command``, naming the command.
+
+        The command's name is always part of the details, so that later stages can tell a
+        figure the scan cannot place from a source file it cannot read.
+
+        Args:
+            command: The command the finding concerns.
+            rule: The descriptive dotted rule name of the finding.
+            message: The message of the finding.
+            suggestion: The fix for this occurrence, if any.
+            details: Further evidence for renderers and JSON.
+        """
+        self.findings.uncertain(
+            rule,
+            message,
+            self.path,
+            command.line,
+            suggestion,
+            {"command": command.name, **(details or {})},
+        )
 
     def names_project_file(self, command: Command) -> bool:
         """Return whether a class/package reference can name a file inside the project.
@@ -169,8 +204,12 @@ class SourceChecks:
 
 
 def _is_file_command(command: Command) -> bool:
-    """Return whether ``command`` names a file or declares the graphics search path."""
-    return command.name in FILE_COMMANDS or command.name == "graphicspath"
+    r"""Return whether ``command`` names a file or declares the graphics search path.
+
+    A file command that a definition or conditional test only names, as in
+    ``\let\input\relax``, reads no file.
+    """
+    return not command.named and (command.name in FILE_COMMANDS or command.name == "graphicspath")
 
 
 def _check_conditional_dependencies(checks: SourceChecks) -> None:
@@ -185,12 +224,11 @@ def _check_conditional_dependencies(checks: SourceChecks) -> None:
         # Toolchain classes and packages are covered by recorded build inputs.
         if command.name in TOOLCHAIN_FILE_COMMANDS and not checks.names_project_file(command):
             continue
-        checks.findings.uncertain(
+        checks.uncertain(
+            command,
             "source.conditional_dependency",
             "Conditional TeX control flow encloses a file reference; "
             "the static scan does not establish which branch executes.",
-            checks.path,
-            command.line,
             suggestion="Make the dependency unconditional so it can be followed. "
             'With layout = "preserve" the files the build read are shipped anyway.',
         )
@@ -221,11 +259,10 @@ def _check_subfiles_v1(checks: SourceChecks, command: Command) -> None:
         and "subfiles" in {item.value for item in split_argument_items(command.arguments[0])}
         and any("v1" in option.value.split(",") for option in command.options)
     ):
-        checks.findings.uncertain(
+        checks.uncertain(
+            command,
             "source.subfile_structure",
             "The subfiles v1 preamble execution mode is unsupported.",
-            checks.path,
-            command.line,
         )
 
 
@@ -241,11 +278,10 @@ def _check_provides_identity(checks: SourceChecks, command: Command) -> None:
         and command.arguments
         and "/" in command.arguments[0].value
     ):
-        checks.findings.uncertain(
+        checks.uncertain(
+            command,
             "source.path_identity",
             "The declared package, class, or file identity contains a directory path.",
-            checks.path,
-            command.line,
             "Flat layout would move this file and change the declared identity; "
             'use layout = "preserve" to keep it.',
         )
@@ -263,12 +299,11 @@ def _check_unsupported_or_custom_path(checks: SourceChecks, command: Command) ->
         command: The command to check.
     """
     if command.name in _UNSUPPORTED_COMMANDS:
-        checks.findings.uncertain(
+        checks.uncertain(
+            command,
             "source.unsupported_command",
             f"\\{command.name} may depend on paths or runtime lookup "
             "outside the supported literal subset.",
-            checks.path,
-            command.line,
             "Replace this command with a literal file reference the scan can follow. "
             + NEEDED_FOR_RESTRUCTURING,
             {"command": command.name},
@@ -286,12 +321,11 @@ def _check_unsupported_or_custom_path(checks: SourceChecks, command: Command) ->
             _PATH_LIKE.search(argument.value)
             or ("/" in argument.value and argument.value.strip() in checks.known_paths)
         ):
-            checks.findings.uncertain(
+            checks.uncertain(
+                command,
                 "source.custom_path",
                 f"\\{command.name} has a possible file argument "
                 "whose lookup semantics are unknown.",
-                checks.path,
-                command.line,
                 "Name the file with a supported command such as \\input or "
                 "\\includegraphics. " + NEEDED_FOR_RESTRUCTURING,
                 {"command": command.name, "argument": argument.value},
@@ -319,11 +353,10 @@ def _check_option_paths(checks: SourceChecks, command: Command) -> None:
         return
     for option in command.options:
         if is_literal_text(option.value) and _PATH_LIKE.search(option.value):
-            checks.findings.uncertain(
+            checks.uncertain(
+                command,
                 "source.path_option",
                 f"\\{command.name} has a file-like option with unsupported lookup semantics.",
-                checks.path,
-                command.line,
                 "Simplify the option so it no longer looks like a file path. "
                 + NEEDED_FOR_RESTRUCTURING,
             )
@@ -340,17 +373,19 @@ def _check_nested(checks: SourceChecks, command: Command) -> None:
         checks: The source being checked.
         command: The command to check.
     """
-    if not _is_file_command(command) or not command.depth or command.name == "graphicspath":
+    if not _is_file_command(command) or command.name == "graphicspath":
+        return
+    # A figure in a caption, a subfigure or a box runs where it stands.
+    if runs_in_place(command, checks.definitions, checks.defined):
         return
     # Toolchain classes and packages are covered by recorded build inputs.
     if command.name in TOOLCHAIN_FILE_COMMANDS and not checks.names_project_file(command):
         return
-    checks.findings.uncertain(
+    checks.uncertain(
+        command,
         "source.nested_file_command",
         f"\\{command.name} occurs inside a group or macro argument; "
         "its execution context is not established.",
-        checks.path,
-        command.line,
         "Use a direct literal reference outside groups and macro arguments. "
         + NEEDED_FOR_RESTRUCTURING,
     )
@@ -369,21 +404,19 @@ def _check_filename_argument(checks: SourceChecks, command: Command) -> None:
         return
     index = file_argument_index(command.name)
     if len(command.arguments) <= index:
-        checks.findings.uncertain(
+        checks.uncertain(
+            command,
             "source.dynamic_path",
             f"\\{command.name} does not have a supported literal filename argument.",
-            checks.path,
-            command.line,
         )
         return
     argument = command.arguments[index]
     source = checks.source
     if source.text[argument.start : argument.end] != source.masked[argument.start : argument.end]:
-        checks.findings.uncertain(
+        checks.uncertain(
+            command,
             "source.path_literal_context",
             f"\\{command.name} contains comments or literal commands inside its path argument.",
-            checks.path,
-            command.line,
             "Use a plain filename argument before flattening.",
         )
 
@@ -396,56 +429,22 @@ _COMMAND_CHECKS: tuple[Callable[[SourceChecks, Command], None], ...] = (
     _check_nested,
     _check_filename_argument,
 )
-# The checks for a run-time command of a class or package file, reported per file instead.
-_COMMAND_CHECKS_AFTER_PATHS = tuple(
-    check for check in _COMMAND_CHECKS if check is not _check_unsupported_or_custom_path
-)
-
-
-def _report_package_runtime_commands(checks: SourceChecks, commands: list[Command]) -> None:
-    r"""Report the run-time commands of one class or package file as a single uncertainty.
-
-    Class and package files are macro code, so ``\csname`` and ``\catcode`` are routine
-    there; one finding per file says what flat layout cannot follow without listing each.
-
-    Args:
-        checks: The class or package file being checked.
-        commands: Its commands from ``_UNSUPPORTED_COMMANDS``, in source order.
-    """
-    names = sorted({command.name for command in commands})
-    listed = ", ".join(f"\\{name}" for name in names)
-    checks.findings.uncertain(
-        "source.unsupported_command",
-        f"{len(commands)} commands in this class or package file may depend on paths or "
-        f"runtime lookup outside the supported literal subset: {listed}.",
-        checks.path,
-        commands[0].line,
-        "Only flat layout and source transformations need these followed: "
-        + NEEDED_FOR_RESTRUCTURING,
-        {
-            "commands": names,
-            "occurrences": len(commands),
-            "lines": [command.line for command in commands[:_MAX_LISTED_LINES]],
-        },
-    )
 
 
 def check_source(checks: SourceChecks) -> None:
     """Run every check over a freshly parsed source: conditionals, literals, then commands.
 
-    In a class or package file, the run-time commands are collected into one finding.
+    A class or package file reports each finding here; the graph merges them per rule
+    (``GraphFindings.merge_per_rule``).
     """
+    commands = checks.source.commands
+    checks = replace(
+        checks,
+        definitions=tuple(definition_spans(checks.source.masked, commands)),
+        defined=frozenset(defined_names(commands)),
+    )
     _check_conditional_dependencies(checks)
     _check_unclosed_literals(checks)
-    package_file = PurePosixPath(checks.path).suffix.lower() in _PACKAGE_SUFFIXES
-    runtime_commands: list[Command] = []
     for command in checks.source.commands:
-        if package_file and command.name in _UNSUPPORTED_COMMANDS:
-            runtime_commands.append(command)
-            checks_to_run = _COMMAND_CHECKS_AFTER_PATHS
-        else:
-            checks_to_run = _COMMAND_CHECKS
-        for check in checks_to_run:
+        for check in _COMMAND_CHECKS:
             check(checks, command)
-    if runtime_commands:
-        _report_package_runtime_commands(checks, runtime_commands)

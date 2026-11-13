@@ -23,7 +23,8 @@ from .findings import Finding
 from .literal_text import is_placeholder_text, plain_argument_text
 from .option_config import TextFormat, require_text, require_unique_strings
 from .tex_commands import COMMAND_DEFINITION_COMMANDS, PRIMITIVE_DEFINITION_COMMANDS
-from .tex_lexer import Command, command_end, in_conditional
+from .tex_lexer import Command
+from .tex_spans import command_end, in_conditional
 
 _RULE = "manuscript.author_records"
 _MAX_REPORTED_RECORDS = 100
