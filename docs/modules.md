@@ -123,6 +123,9 @@ a network connection, and each imports only other modules of this layer. (81 mod
 | `bibliography_preprints` | Whether a bibliography entry is a preprint, in the forms that common tools export |
 | `bibliography_venues` | Venue names of bibliography entries: how one is written, and the name it stands for |
 | `style_rules` | Data-only catalogue for the style suggestions of the `STY` family |
+| `chktex_rules` | Data-only catalogue entry for the optional chktex lint, whose warnings are suggestions |
+| `chktex_configuration` | A project's `.chktexrc`: read it within bounds and refuse what is unsafe for chktex |
+| `chktex_output` | The warnings chktex printed, read strictly from the output format Fledge gives it |
 
 ## Infrastructure adapters
 
@@ -255,6 +258,7 @@ an output format. (61 modules)
 | `style_references` | Unused labels, reference names printed twice and `\ref` to equations (`STY2xx`) |
 | `style_typography` | Typography suggestions over the prose of the document body (`STY301` to `STY307`) |
 | `style_suggestions` | Run the selected style suggestions; float placement, spelling variants, accessibility metadata |
+| `chktex_lint` | The optional chktex lint: chktex's warnings about a document's sources, as suggestions |
 
 ## Orchestration
 

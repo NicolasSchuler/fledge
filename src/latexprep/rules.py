@@ -22,6 +22,7 @@ from types import MappingProxyType
 from .bibliography_check_rules import RULES as BIBLIOGRAPHY_RULES
 from .bibliography_transform_rules import RULES as BIBLIOGRAPHY_TRANSFORM_RULES
 from .build_check_rules import RULES as BUILD_RULES
+from .chktex_rules import RULES as CHKTEX_RULES
 from .core_rules import RULES as CORE_RULES
 from .loaded_options_rules import RULES as LOADED_OPTIONS_RULES
 from .manuscript_check_rules import RULES as MANUSCRIPT_RULES
@@ -85,6 +86,7 @@ RULES = _catalogue(
     BIBLIOGRAPHY_TRANSFORM_RULES,
     PDF_ARTWORK_RULES,
     STYLE_RULES,
+    CHKTEX_RULES,
 )
 BY_CODE = MappingProxyType({rule.code: rule for rule in RULES})
 BY_NAME = MappingProxyType({name: rule for rule in RULES for name in (rule.name, *rule.aliases)})

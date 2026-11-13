@@ -110,6 +110,9 @@ MODULES_BY_LAYER: dict[str, tuple[str, ...]] = {
         "bibliography_preprints",
         "bibliography_venues",
         "style_rules",
+        "chktex_rules",
+        "chktex_configuration",
+        "chktex_output",
     ),
     "adapters": (
         "biber_toolchain",
@@ -225,6 +228,7 @@ MODULES_BY_LAYER: dict[str, tuple[str, ...]] = {
         "style_references",
         "style_typography",
         "style_suggestions",
+        "chktex_lint",
     ),
     "orchestration": (
         "config",

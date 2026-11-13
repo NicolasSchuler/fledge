@@ -24,6 +24,7 @@ preparation-options
 submission-text
 doctor
 reports
+chktex
 continuous-integration
 troubleshooting
 examples

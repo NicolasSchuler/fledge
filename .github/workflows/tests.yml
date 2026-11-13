@@ -227,7 +227,7 @@ jobs:
           sudo /Library/TeX/texbin/tlmgr update --self
           sudo /Library/TeX/texbin/tlmgr install latexmk biber biblatex hyperref \
             import subfiles embedfile cm-super tex-gyre glossaries mfirstuc \
-            tracklang xfor nomencl bbm-macros bbm
+            tracklang xfor nomencl bbm-macros bbm chktex
       - name: Show tool versions
         run: |
           latexmk -v | head -n 2
@@ -252,6 +252,7 @@ jobs:
           tests/test_integration_packages.py
           tests/test_integration_backends.py
           tests/test_integration_bibliography.py
+          tests/test_integration_chktex.py
           tests/test_integration_comparisons.py
           tests/test_integration_engines.py
           tests/test_integration_inputs.py
@@ -341,7 +342,7 @@ jobs:
             latexmk biber \
             texlive-latex-base texlive-latex-recommended texlive-fonts-recommended \
             texlive-bibtex-extra texlive-latex-extra texlive-xetex texlive-luatex \
-            cm-super tex-gyre
+            cm-super tex-gyre chktex
       # A small scheme plus the packages the live tests need: those of the macOS job, the
       # XeTeX and LuaTeX engines, and what the Ubuntu leg gets from its apt packages
       # (recommended LaTeX and font packages, bibtex-extra). That is about 280 MB to
@@ -401,7 +402,7 @@ jobs:
             collection-latexrecommended collection-fontsrecommended collection-bibtexextra \
             collection-xetex collection-luatex \
             latexmk biber biblatex hyperref import subfiles embedfile cm-super tex-gyre \
-            glossaries mfirstuc tracklang xfor nomencl bbm-macros bbm
+            glossaries mfirstuc tracklang xfor nomencl bbm-macros bbm chktex
           test -x "$bin_directory/pdflatex"
           echo "$bin_directory" >> "$GITHUB_PATH"
       # Ubuntu does not package tex-fmt, but the formatting step of the live
@@ -466,6 +467,7 @@ jobs:
           tests/test_integration_packages.py
           tests/test_integration_backends.py
           tests/test_integration_bibliography.py
+          tests/test_integration_chktex.py
           tests/test_integration_comparisons.py
           tests/test_integration_engines.py
           tests/test_integration_inputs.py

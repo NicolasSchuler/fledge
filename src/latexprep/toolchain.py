@@ -29,6 +29,7 @@ _SANDBOXED_TOOL_NAMES = (
     "xdvipdfmx",
     "kpsewhich",
     "makeindex",
+    "chktex",
     "tex-fmt",
     "pdfinfo",
     "pdftotext",
@@ -51,6 +52,11 @@ _BIBER = (
     "TeX Live: brew install --cask basictex, then sudo tlmgr install biber; "
     "or sudo apt install biber"
 )
+# MacTeX and a full TeX Live include chktex; BasicTeX and Debian's TeX Live do not.
+_CHKTEX = (
+    "TeX Live: brew install --cask basictex, then sudo tlmgr install chktex; "
+    "or sudo apt install chktex"
+)
 _INSTALL_HINTS: dict[str, str] = {
     **dict.fromkeys(
         ("pdfinfo", "pdftotext", "pdftoppm", "pdffonts", "pdfimages", "pdfdetach", "pdftohtml"),
@@ -62,6 +68,7 @@ _INSTALL_HINTS: dict[str, str] = {
     "https://github.com/WGUNDERWOOD/tex-fmt/releases",
     "latexmk": _LATEXMK,
     "biber": _BIBER,
+    "chktex": _CHKTEX,
     **dict.fromkeys(
         ("pdflatex", "xelatex", "lualatex", "bibtex", "xdvipdfmx", "kpsewhich", "makeindex"),
         _TEX_LIVE,

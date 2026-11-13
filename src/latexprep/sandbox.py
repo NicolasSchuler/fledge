@@ -55,6 +55,9 @@ _LINUX_SYSTEM_RESOURCES = (
     "/etc/ld.so.cache",
     "/etc/fonts",
     "/etc/texmf",
+    # The global configuration of the chktex that Debian and Ubuntu package apart from
+    # TeX Live; a TeX Live chktex reads its own from the distribution tree instead.
+    "/etc/chktexrc",
     "/etc/localtime",
     "/var/lib/texmf",
     "/var/cache/fontconfig",

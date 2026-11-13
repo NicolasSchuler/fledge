@@ -20,6 +20,9 @@ from .bibliography_integrity import check_bibliography_integrity
 from .build_checks import check_local_package_shadows
 from .build_result import BuildResult
 from .cancellation import run_in_thread
+from .check_policy import suggestion_selected
+from .chktex_lint import CHKTEX_MEMORY_MB, lint_with_chktex
+from .chktex_rules import CHKTEX_WARNING
 from .config import Settings
 from .engine_selection import choose_engine, read_engine_comment
 from .errors import PreparationError
@@ -57,6 +60,7 @@ class TaskName(StrEnum):
         ONLINE_REFERENCES: The online reference checks of the original sources.
         MANUSCRIPT_CHECKS: The manuscript checks, which need a selected main file.
         SUBMISSION_READINESS: The submission-readiness advisories.
+        CHKTEX_LINT: The optional chktex lint, which runs only when CHK001 is selected.
         BASELINE_BUILD: The build of the unchanged sources.
         BASELINE_CONFIGURED_PDF_CHECKS: The configured PDF checks of the baseline PDF.
         BASELINE_PACKAGE_SHADOWS: The local package shadow check of the baseline build.
@@ -83,6 +87,7 @@ class TaskName(StrEnum):
     ONLINE_REFERENCES = "online reference checks"
     MANUSCRIPT_CHECKS = "manuscript checks"
     SUBMISSION_READINESS = "submission readiness"
+    CHKTEX_LINT = "chktex lint"
     BASELINE_BUILD = "baseline build"
     BASELINE_CONFIGURED_PDF_CHECKS = "baseline configured PDF checks"
     BASELINE_PACKAGE_SHADOWS = "baseline local package shadows"
@@ -434,6 +439,56 @@ def _online_references(
     )
 
 
+def _chktex_lint(context: JobContext, root: Path, main: str) -> Awaitable[list[Finding]]:
+    """Run the chktex lint of ``main`` under ``root`` in the job's ``chktex`` work folder.
+
+    Args:
+        context: The job, whose runner runs chktex and which shares the source analysis.
+        root: The source tree.
+        main: The main file.
+
+    Returns:
+        An awaitable of the lint's findings.
+    """
+    return lint_with_chktex(
+        root,
+        main,
+        context.work / "chktex",
+        context.runner,
+        analysed=context.sources.get(root, main),
+    )
+
+
+def _chktex_tasks(
+    context: JobContext, snapshot: Callable[[], Path], main: str | None
+) -> list[Task]:
+    """Build the chktex lint task when CHK001 is selected and a main file is known.
+
+    The lint reads the project as imported, which ``snapshot()`` returns while the tasks are
+    built: the inputs that ``prepare`` selects later hold only the files the build read, and
+    leave out the project's ``.chktexrc``. The lint needs no build; its task holds a lease
+    for the chktex runs.
+
+    Args:
+        context: The job.
+        snapshot: Returns the source tree; called once, here.
+        main: The main file, or ``None``.
+
+    Returns:
+        The task, or nothing.
+    """
+    if main is None or not suggestion_selected(context.settings.checks, CHKTEX_WARNING.code):
+        return []
+    root, selected_main = snapshot(), main
+    return [
+        Task(
+            TaskName.CHKTEX_LINT,
+            lambda: _chktex_lint(context, root, selected_main),
+            memory_mb=CHKTEX_MEMORY_MB,
+        )
+    ]
+
+
 def _configured_pdf_checks(
     context: JobContext, pdf: Path, root: Path, main: str, directory: str, role: BuiltPdfRole
 ) -> Awaitable[list[Finding]]:
@@ -469,11 +524,12 @@ def source_analysis_tasks(
 
     Checks that need a main file are left out without one. The online reference checks
     are included unless the job prepares a package for real, which checks them once on
-    the final extraction instead.
+    the final extraction instead. The chktex lint is included only when CHK001 is selected.
 
     Args:
         context: The job.
-        snapshot: Returns the source tree to check; it is called when a task starts.
+        snapshot: Returns the source tree to check; it is called when a task starts, and
+            once while the tasks are built for the chktex lint.
         main: The main file, or ``None``.
 
     Returns:
@@ -503,6 +559,7 @@ def source_analysis_tasks(
             ),
         )
     )
+    tasks.extend(_chktex_tasks(context, snapshot, main))
     # A released package needs evidence about its transformed references. Run
     # online checks once per document, on the final extraction for preparation,
     # without spending a second request allowance on the original snapshot.
