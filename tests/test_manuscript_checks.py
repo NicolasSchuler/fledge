@@ -7,12 +7,22 @@ import unittest
 from dataclasses import FrozenInstanceError, replace
 from unittest.mock import patch
 
+from latexprep.analysed_source import AnalysedSource
 from latexprep.errors import PreparationError
 from latexprep.findings import Finding
 from latexprep.manuscript_check_options import ManuscriptCheckOptions
 from latexprep.manuscript_checks import check_manuscript_policies
 from latexprep.manuscript_metadata_checks import read_literal_metadata
 from tests.support import ProjectTestCase
+
+# A growth test compares the processor time of a count and of twice that count: a linear
+# scan takes about twice as long, one that copies the rest of the text per command about
+# four times as long.
+LAYOUT_GROWTH_COMMANDS = 5_000
+LAYOUT_TAIL_WORDS_PER_COMMAND = 100
+MAX_GROWTH_FACTOR = 3.0
+# Measurements below this are clock noise, so a fast scan is not judged on them.
+MIN_MEASURED_SECONDS = 0.05
 
 
 class ManuscriptDetailTests(ProjectTestCase):
@@ -147,6 +157,8 @@ class ManuscriptDetailTests(ProjectTestCase):
             r"\titlespacing*{\section}{0pt}{2pt}{1pt}",
             r"\setlength{\abovedisplayskip}{0pt}",
             r"\setlength\belowdisplayskip{-2pt plus 1pt}",
+            r"\setlength\textwidth{5in}",
+            r"\addtolength \textheight{2cm}",
             r"\addtolength{\abovedisplayshortskip}{-3pt}",
             r"\belowdisplayskip=0pt",
             r"\abovedisplayskip\z@",
@@ -169,6 +181,48 @@ class ManuscriptDetailTests(ProjectTestCase):
         )
         clean = self.result(ordinary, options, "layout_manipulation")
         self.assertEqual(clean.status, "passed", clean.details)
+
+    def test_a_length_used_as_a_box_size_is_not_an_override(self) -> None:
+        options = ManuscriptCheckOptions(check_layout_manipulation=True)
+        for source in (
+            r"\vbox to\textheight{\vfil Text.}",
+            r"\hbox to \textwidth {\hfil Text.}",
+        ):
+            with self.subTest(source=source):
+                # The box primitives are not interpreted, so the policy is inconclusive.
+                result = self.result(source, options, "layout_manipulation")
+                self.assertEqual(result.details["matches"], [])
+                self.assertNotEqual(result.status, "failed")
+
+    def layout_seconds(self, count: int) -> float:
+        r"""Return the processor time of ``MAN002`` over ``count`` spacing commands and a long tail.
+
+        The prose after the commands grows with their number, so reading the rest of the
+        document for each command would grow with the square of ``count``.
+
+        Args:
+            count: How many unbraced spacing and length commands precede the prose.
+
+        Returns:
+            The least processor time of three checks, in seconds; the document is analysed
+            once beforehand and not timed.
+        """
+        body = "\\vskip 1pt\\textwidth " * count + "word " * (LAYOUT_TAIL_WORDS_PER_COMMAND * count)
+        self.write("main.tex", "\\documentclass{article}\n" + body)
+        analysed = AnalysedSource(self.root, "main.tex")
+        self.assertTrue(analysed.expanded.commands)
+        options = ManuscriptCheckOptions(check_layout_manipulation=True)
+        best = float("inf")
+        for _ in range(3):
+            started = time.process_time()
+            check_manuscript_policies(self.root, "main.tex", options, analysed=analysed)
+            best = min(best, time.process_time() - started)
+        return best
+
+    def test_layout_values_are_read_in_linear_time_before_a_long_document(self) -> None:
+        small = self.layout_seconds(LAYOUT_GROWTH_COMMANDS)
+        large = self.layout_seconds(2 * LAYOUT_GROWTH_COMMANDS)
+        self.assertLess(large, MAX_GROWTH_FACTOR * max(small, MIN_MEASURED_SECONDS))
 
     def test_layout_values_are_read_in_linear_time(self) -> None:
         options = ManuscriptCheckOptions(check_layout_manipulation=True)
@@ -410,9 +464,24 @@ class ManuscriptDetailTests(ProjectTestCase):
         result = self.result(described, options, "figure_descriptions")
         self.assertEqual(result.status, "passed", result.details)
         for figure in (
+            r"\begin{figure}\includegraphics[artifact=true]{rule}\end{figure}",
+            r"\begin{figure}\includegraphics[artifact = {true}]{rule}\end{figure}",
+            r"\begin{figure}\includegraphics[alt={TODO}, alt=A plot]{a}\end{figure}",
+        ):
+            with self.subTest(figure=figure):
+                accepted = self.result(figure, options, "figure_descriptions")
+                self.assertEqual(accepted.status, "passed", accepted.details)
+        for figure in (
             r"\begin{figure}\includegraphics[alt=A plot]{a}\includegraphics{b}\end{figure}",
             r"\begin{figure}\includegraphics[alt={TODO}]{a}\end{figure}",
             r"\begin{figure}\includegraphics[alt={}]{a}\end{figure}",
+            # LaTeX's keys are case-sensitive, and a key set to false marks nothing.
+            r"\begin{figure}\includegraphics[artifact=false]{a}\end{figure}",
+            r"\begin{figure}\includegraphics[ALT=A plot]{a}\end{figure}",
+            r"\begin{figure}\includegraphics[Artifact]{a}\end{figure}",
+            r"\begin{figure}\includegraphics[artifact=True]{a}\end{figure}",
+            r"\begin{figure}\includegraphics[artifact, artifact=false]{a}\end{figure}",
+            r"\begin{figure}\includegraphics[alt=A plot, alt={}]{a}\end{figure}",
         ):
             with self.subTest(figure=figure):
                 missing = self.result(figure, options, "figure_descriptions")

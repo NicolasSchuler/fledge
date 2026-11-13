@@ -76,6 +76,9 @@ _DESCRIPTIONS = _FloatRule(
     "{figures} without a usable Description",
 )
 _FLOAT_RULES = (_CAPTIONS, _LABELS, _LABEL_ORDER, _REFERENCES, _REFERENCE_ORDER, _DESCRIPTIONS)
+# The values of the \includegraphics key artifact that mark a graphic as decorative: the bare
+# key and true. LaTeX's keys are case-sensitive, so no other spelling counts.
+_ARTIFACT_VALUES = frozenset({None, "true"})
 
 
 @dataclass(slots=True)
@@ -315,23 +318,31 @@ class _FloatScan:
         r"""Return whether every ``\includegraphics`` of a figure has alt text or is decorative.
 
         LaTeX's tagging support reads ``alt=...`` as the alternative text of a graphic and
-        ``artifact`` as a mark that the graphic is decorative. A figure without
-        ``\includegraphics`` is not described this way.
+        ``artifact`` (or ``artifact=true``) as a mark that the graphic is decorative. Its keys
+        are case-sensitive and a later setting of a key replaces an earlier one, so only
+        these exact spellings count, the last one deciding; ``artifact=false``, ``ALT=`` and
+        anything else do not describe a graphic. A figure without ``\includegraphics`` is not
+        described this way.
 
         Args:
             region: The figure region.
 
         Returns:
             Whether the figure has graphics and each has nonempty, non-placeholder alt text
-            or the ``artifact`` key.
+            or is marked as an artifact.
         """
         graphics = [command for command in region.commands if command.name == "includegraphics"]
         for command in graphics:
-            items = [item for option in command.options for item in key_value_items(option.value)]
-            if any(key == "artifact" for key, _ in items):
+            items = [
+                item
+                for option in command.options
+                for item in key_value_items(option.value, fold_keys=False)
+            ]
+            artifact = [value for key, value in items if key == "artifact"]
+            if artifact and artifact[-1] in _ARTIFACT_VALUES:
                 continue
-            alt = next((value for key, value in items if key == "alt" and value), None)
-            if alt is None:
+            alt = next((value for key, value in reversed(items) if key == "alt"), None)
+            if not alt:
                 return False
             text, unknown = plain_text(alt)
             self.note(unknown, _DESCRIPTIONS)

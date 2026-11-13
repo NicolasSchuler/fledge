@@ -6,7 +6,8 @@ already blanked). Typography and wording checks need the prose alone, so
 that hold keys, file names or values rather than prose, keeping every offset, so a match
 in the prose maps back to its file and line. A suggestion is reported once per
 occurrence, so that a ``% fledge: ignore CODE`` comment can silence one; each rule
-reports at most ``MAX_FINDINGS_PER_RULE`` and counts the rest in one more finding.
+reports at most ``MAX_FINDINGS_PER_RULE`` and counts the rest in one more finding. A
+document whose commands could not be read reports each selected suggestion as not checked.
 """
 
 from __future__ import annotations
@@ -26,6 +27,8 @@ from .tex_lexer import Command, Region, blank_regions, command_end, merge_spans
 
 # Suggestions listed per rule; the rest are counted in one further finding.
 MAX_FINDINGS_PER_RULE = 50
+# Reasons a document was not read that a not-checked suggestion lists in its details.
+_MAX_UNREAD_REASONS = 5
 # Commands whose arguments are prose, with the position of the first such argument; the
 # arguments of every other command hold keys, file names or values and are blanked.
 _PROSE_ARGUMENTS = {
@@ -246,3 +249,46 @@ def occurrence_findings(
             )
         )
     return findings
+
+
+def unread_document_reasons(document: ExpandedDocument) -> list[str]:
+    """Say why the commands of a document could not be read, if they could not.
+
+    The style suggestions read the commands of the expanded document. When a parsing limit
+    stopped the expansion, or the main file itself could not be read, there are none, and
+    a suggestion that found nothing would claim a clean document.
+
+    Args:
+        document: The expanded document.
+
+    Returns:
+        At most ``_MAX_UNREAD_REASONS`` of the document's source-graph gaps when its
+        commands could not be read; an empty list when they could.
+    """
+    if not document.parse_limit_exceeded and document.graph.main in document.selected:
+        return []
+    return document.graph_uncertainty[:_MAX_UNREAD_REASONS] or ["the manuscript was not read"]
+
+
+def not_checked_finding(document: ExpandedDocument, rule: str, reasons: list[str]) -> Finding:
+    """Report that a suggestion was not looked for, because the document was not read.
+
+    Args:
+        document: The expanded document, whose main file the finding names.
+        rule: The rule name of the finding.
+        reasons: Why the document was not read, as :func:`unread_document_reasons` says.
+
+    Returns:
+        An inconclusive, incomplete suggestion that lists the reasons in its details.
+    """
+    return Finding(
+        rule,
+        "Not checked: the manuscript's TeX commands could not be read, so this suggestion "
+        "was not looked for.",
+        severity="suggestion",
+        status="inconclusive",
+        path=document.graph.main,
+        evidence_kind=EvidenceKind.HEURISTIC,
+        incomplete=True,
+        details={"not_checked": reasons},
+    )

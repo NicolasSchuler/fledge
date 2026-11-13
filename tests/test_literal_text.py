@@ -84,6 +84,10 @@ class LiteralTextTests(unittest.TestCase):
             key_value_items(r" width=\linewidth, Alt={A plot, in blue} ,artifact,, =x"),
             [("width", r"\linewidth"), ("alt", "A plot, in blue"), ("artifact", None)],
         )
+        self.assertEqual(
+            key_value_items(" ALT = x, Artifact", fold_keys=False),
+            [("ALT", "x"), ("Artifact", None)],
+        )
         self.assertEqual(key_value_items(""), [])
         # 100,000 unclosed braces take milliseconds when the split is linear; a quadratic
         # scan would take minutes. Processor time is not inflated by a loaded machine.

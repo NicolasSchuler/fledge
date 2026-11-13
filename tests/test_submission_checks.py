@@ -35,6 +35,12 @@ from tests.support import (
     single_file_project,
 )
 
+# Characters of hostile text for the identity-hint patterns. A linear scan of the slowest
+# input takes about 0.1 s here, and coverage tracing in CI makes it about ten times slower;
+# a pattern that backtracks quadratically over this much text takes minutes.
+HOSTILE_CHARACTERS = 200_000
+LINEAR_TIME_LIMIT_SECONDS = 10.0
+
 
 class SubmissionTests(ProjectTestCase):
     """Each submission check, its options and limits, and the messages it reports.
@@ -365,6 +371,7 @@ class SubmissionTests(ProjectTestCase):
             "As we previously showed in this setting\n\\citep{key}, it holds.",
             r"Following \citet{key}, we earlier proposed a variant.",
             r"Our prior work \parencite{key} is related.",
+            r"In our previous work \cite{key} we used Python.",
         )
         for text in flagged:
             with self.subTest(text=text):
@@ -377,6 +384,7 @@ class SubmissionTests(ProjectTestCase):
             r"We previously showed nothing. In our earlier work we used Python.",
             "Our prior work hours were long. " + "x" * 120 + r" \cite{key}.",
             r"The authors of \cite{key} previously showed a bound.",
+            "In our previous work we used Python.",
             r"% In our earlier paper \cite{key}",
         )
         for text in ordinary:
@@ -386,7 +394,7 @@ class SubmissionTests(ProjectTestCase):
 
     def test_self_citation_patterns_scan_hostile_text_in_linear_time(self) -> None:
         options = SubmissionOptions(scan_identity_hints=True)
-        size = 200_000
+        size = HOSTILE_CHARACTERS
         for text in (
             "in our earlier work " * (size // 20),
             r"\cite{a} " * (size // 9),
@@ -396,7 +404,7 @@ class SubmissionTests(ProjectTestCase):
                 self.write("main.tex", text)
                 started = time.perf_counter()
                 self.result("submission.identity_hints", options)
-                self.assertLess(time.perf_counter() - started, 2.0)
+                self.assertLess(time.perf_counter() - started, LINEAR_TIME_LIMIT_SECONDS)
 
     def test_secrets_are_redacted(self) -> None:
         options = SubmissionOptions(scan_secrets=True, filename_max_length=8)

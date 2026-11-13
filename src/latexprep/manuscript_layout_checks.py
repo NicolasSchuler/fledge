@@ -53,6 +53,10 @@ _LINE_NUMBER_COMMANDS = {"linenumbers", "runninglinenumbers", "pagewiselinenumbe
 _LINE_NUMBER_OPTIONS = {"lineno", "linenumbers"}
 # Source characters read after a spacing or length command to see whether it sets a value.
 _VALUE_LOOKAHEAD_CHARS = 80
+# Source characters read before a length for the \setlength or \addtolength that sets it.
+_LENGTH_COMMAND_LOOKBEHIND_CHARS = 32
+# \setlength or \addtolength, then only white space up to the end of the text read.
+_LENGTH_COMMAND_BEFORE = re.compile(r"\\(setlength|addtolength)\s*\Z")
 # Source characters of a layout command quoted in the details.
 _SNIPPET_CHARS = 160
 # A caption skip below this many points squeezes the caption against its float; the
@@ -155,7 +159,7 @@ def _negative_spacing(document: ExpandedDocument, command: Command) -> bool:
     value = (
         command.arguments[0].value
         if command.arguments
-        else document.text[command.name_end :][:_VALUE_LOOKAHEAD_CHARS]
+        else document.text[command.name_end : command.name_end + _VALUE_LOOKAHEAD_CHARS]
     )
     return bool(re.match(r"\s*-", value))
 
@@ -196,23 +200,48 @@ def _length_setting(_document: ExpandedDocument, command: Command) -> bool:
     return _sets_layout_length(target, value, added=command.name == "addtolength")
 
 
+def _length_command_before(document: ExpandedDocument, command: Command) -> str | None:
+    r"""Name the ``\setlength`` or ``\addtolength`` written right before a length, if any.
+
+    Only a few characters before the length are read, so many lengths stay linear.
+
+    Args:
+        document: The expanded document.
+        command: The length command.
+
+    Returns:
+        ``setlength`` or ``addtolength`` when the length is its unbraced first argument, as
+        in ``\setlength\textwidth{5in}``; ``None`` otherwise.
+    """
+    before = document.text[max(0, command.start - _LENGTH_COMMAND_LOOKBEHIND_CHARS) : command.start]
+    match = _LENGTH_COMMAND_BEFORE.search(before)
+    return match.group(1) if match else None
+
+
 def _length_assignment(document: ExpandedDocument, command: Command) -> bool:
     r"""Return whether a length command is given a value: ``\textwidth=5in``.
 
-    A braced group right after the length is its value, as in ``\setlength\textwidth{5in}``;
-    otherwise the source after the command is read. A page-geometry length counts with a
-    numeric value, a display skip only with zero or less.
+    A braced group right after the length is its value only when ``\setlength`` or
+    ``\addtolength`` stands before the length, as in ``\setlength\textwidth{5in}``; a
+    group after a length used as a value, as in ``\vbox to\textheight{...}``, is not.
+    Without a group the source after the command is read. A page-geometry length counts
+    with a numeric value, a display skip only with zero or less.
 
     Args:
-        document: The expanded document, read after the command for an unbraced value.
+        document: The expanded document, read around the command for the command that sets
+            it and for an unbraced value.
         command: A page-geometry length or a display skip.
 
     Returns:
         ``True`` for a layout length override.
     """
     if command.arguments:
-        return _sets_layout_length(command.name, command.arguments[0].value)
-    following = document.text[command_end(command) :][:_VALUE_LOOKAHEAD_CHARS]
+        setter = _length_command_before(document, command)
+        return setter is not None and _sets_layout_length(
+            command.name, command.arguments[0].value, added=setter == "addtolength"
+        )
+    end = command_end(command)
+    following = document.text[end : end + _VALUE_LOOKAHEAD_CHARS]
     assignment = _ASSIGNMENT.match(following)
     value = following[assignment.end() :] if assignment else following
     if command.name in LENGTH_COMMANDS:
@@ -322,18 +351,22 @@ def _layout_overrides(document: ExpandedDocument) -> list[dict[str, object]]:
     """
     # A command inside a conditional may never execute, so it is reported as an
     # interpretation gap rather than as a confirmed override.
-    return [
-        document.located(
-            command.start,
-            command=command.name,
-            source=document.text[
-                command.start : min(command_end(command), command.start + _SNIPPET_CHARS)
-            ],
+    overrides = []
+    for command in document.commands:
+        cancellation_point()
+        if not _is_layout_override(document, command) or in_conditional(
+            document.conditionals, command.start
+        ):
+            continue
+        snippet_end = min(command_end(command), command.start + _SNIPPET_CHARS)
+        overrides.append(
+            document.located(
+                command.start,
+                command=command.name,
+                source=document.text[command.start : snippet_end],
+            )
         )
-        for command in document.commands
-        if _is_layout_override(document, command)
-        and not in_conditional(document.conditionals, command.start)
-    ]
+    return overrides
 
 
 def layout_checks(reading: Reading, options: ManuscriptCheckOptions) -> list[Finding]:

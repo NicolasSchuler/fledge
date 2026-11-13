@@ -12,6 +12,7 @@ number in parentheses, which ``\ref`` leaves out.
 from __future__ import annotations
 
 import re
+from bisect import bisect_right
 from collections.abc import Iterator
 
 from .cancellation import cancellation_point
@@ -72,6 +73,44 @@ def _mentions(command: Command) -> Iterator[str]:
             yield item.value
 
 
+def _shortest_prefixes(prefixes: set[str]) -> list[str]:
+    """Return the prefixes that extend no other prefix, sorted.
+
+    A label that starts with a longer prefix also starts with the shorter one it extends, so
+    the shorter one decides alone. In sorted order a prefix comes before its extensions,
+    which follow it directly.
+
+    Args:
+        prefixes: The literal prefixes of dynamic references, none of them empty.
+
+    Returns:
+        The prefixes no other prefix is a prefix of, in sorted order.
+    """
+    shortest: list[str] = []
+    for prefix in sorted(prefixes):
+        if not shortest or not prefix.startswith(shortest[-1]):
+            shortest.append(prefix)
+    return shortest
+
+
+def _has_prefix(shortest: list[str], name: str) -> bool:
+    """Return whether ``name`` starts with one of the sorted prefixes, none extending another.
+
+    A prefix of ``name`` sorts at or before it, and any string between that prefix and
+    ``name`` would extend the prefix, so only the last prefix at or before ``name`` can
+    match. One binary search replaces a comparison with every prefix.
+
+    Args:
+        shortest: Prefixes as :func:`_shortest_prefixes` returns them.
+        name: The label.
+
+    Returns:
+        Whether a prefix of ``name`` is in ``shortest``.
+    """
+    index = bisect_right(shortest, name)
+    return bool(index) and name.startswith(shortest[index - 1])
+
+
 def unused_labels(context: StyleContext) -> list[Occurrence]:
     r"""Find literal labels that no command names.
 
@@ -107,15 +146,15 @@ def unused_labels(context: StyleContext) -> list[Occurrence]:
                 if not dynamic.start():
                     return []
                 prefixes.add(value[: dynamic.start()])
-    return [
-        Occurrence(
-            offset,
-            f"Label {name!r} is never referenced.",
-            details={"label": name},
-        )
-        for name, offset in labels
-        if name not in mentioned and not name.startswith(tuple(prefixes))
-    ]
+    shortest = _shortest_prefixes(prefixes)
+    occurrences = []
+    for name, offset in labels:
+        cancellation_point()
+        if name not in mentioned and not _has_prefix(shortest, name):
+            occurrences.append(
+                Occurrence(offset, f"Label {name!r} is never referenced.", details={"label": name})
+            )
+    return occurrences
 
 
 def doubled_reference_names(context: StyleContext) -> list[Occurrence]:

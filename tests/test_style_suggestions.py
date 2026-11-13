@@ -8,18 +8,21 @@ complexity tests feed hostile text to every new pattern and expect a linear scan
 from __future__ import annotations
 
 import time
+from unittest.mock import patch
 
 from latexprep.check_selection import CheckSelection
 from latexprep.config import Settings
 from latexprep.core import run_job
+from latexprep.expanded_document import expand_document
 from latexprep.findings import Finding
 from latexprep.inline_suppressions import split_silenced_suggestions
 from latexprep.job_context import JobRequest
 from latexprep.manuscript_check_options import ManuscriptCheckOptions
 from latexprep.manuscript_checks import check_manuscript_policies
 from latexprep.rules import BY_CODE
+from latexprep.style_references import unused_labels
 from latexprep.style_suggestions import STYLE_CODES
-from latexprep.style_support import MAX_FINDINGS_PER_RULE
+from latexprep.style_support import MAX_FINDINGS_PER_RULE, StyleContext
 from tests.support import AsyncProjectTestCase, ProjectTestCase, clean_case
 
 # Characters of hostile text; a pattern that backtracks quadratically takes minutes.
@@ -27,6 +30,12 @@ HOSTILE_CHARACTERS = 200_000
 # A linear scan takes about 0.3 s here, and coverage tracing in CI makes it about ten
 # times slower; the budget leaves room for that and still catches quadratic backtracking.
 LINEAR_TIME_LIMIT_SECONDS = 10.0
+# A growth test compares the processor time of a count and of twice that count: a linear
+# scan takes about twice as long, one that compares every pair about four times as long.
+GROWTH_SMALL_COUNT = 10_000
+MAX_GROWTH_FACTOR = 3.0
+# Measurements below this are clock noise, so a fast scan is not judged on them.
+MIN_MEASURED_SECONDS = 0.05
 DOCUMENT_START = "\\documentclass{article}\n\\begin{document}\n"
 
 
@@ -115,6 +124,27 @@ class SelectionTests(StyleTestCase):
         self.assertEqual(len(findings), MAX_FINDINGS_PER_RULE + 1)
         self.assertEqual(findings[-1].details, {"not_listed": 3})
         self.assertIsNone(findings[-1].line)
+
+
+class UnreadDocumentTests(StyleTestCase):
+    """A document whose commands could not be read reports each selected suggestion unchecked."""
+
+    def test_a_document_past_the_command_limit_reports_each_suggestion_as_not_checked(
+        self,
+    ) -> None:
+        body = "\\label{unused}\\section{A} Figure~\\cref{x} and more..."
+        # The lexer's limit stops the main file; the expansion's limit stops the spliced text.
+        for module in ("latexprep.tex_lexer", "latexprep.expanded_document"):
+            with self.subTest(limit=module), patch(f"{module}.MAX_COMMANDS", 3):
+                findings = self.suggestions(body, "STY")
+                self.assertEqual([finding.code for finding in findings], list(STYLE_CODES))
+                for finding in findings:
+                    self.assertEqual(
+                        (finding.severity, finding.status, finding.incomplete),
+                        ("suggestion", "inconclusive", True),
+                    )
+                    self.assertEqual(finding.path, "main.tex")
+                    self.assertTrue(finding.details["not_checked"])
 
 
 class StyleJobTests(AsyncProjectTestCase):
@@ -241,6 +271,33 @@ class ReferenceTests(StyleTestCase):
         self.assertEqual(anything, [])
         clean = self.suggestions("\\label{a}\\ref{a}\\label{b}\\pageref{b}", "STY201")
         self.assertEqual(clean, [])
+
+    def unused_label_seconds(self, count: int) -> float:
+        r"""Return the least processor time of three ``STY201`` runs over ``count`` labels.
+
+        Each label comes with a reference built from a macro parameter whose literal prefix
+        matches no label, so a scan that compares every pair compares ``count`` squared.
+
+        Args:
+            count: How many labels and dynamic references the document has.
+
+        Returns:
+            The processor time of the fastest run, in seconds.
+        """
+        body = "".join(f"\\label{{label{index}}}\\ref{{prefix{index}#1}}" for index in range(count))
+        self.write("main.tex", DOCUMENT_START + body + "\n\\end{document}\n")
+        context = StyleContext(expand_document(self.root, "main.tex"))
+        best = float("inf")
+        for _ in range(3):
+            started = time.process_time()
+            self.assertEqual(len(unused_labels(context)), count)
+            best = min(best, time.process_time() - started)
+        return best
+
+    def test_unused_labels_grow_linearly_with_dynamic_reference_prefixes(self) -> None:
+        small = self.unused_label_seconds(GROWTH_SMALL_COUNT)
+        large = self.unused_label_seconds(2 * GROWTH_SMALL_COUNT)
+        self.assertLess(large, MAX_GROWTH_FACTOR * max(small, MIN_MEASURED_SECONDS))
 
     def test_doubled_reference_names(self) -> None:
         body = (

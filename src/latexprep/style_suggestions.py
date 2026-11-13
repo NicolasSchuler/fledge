@@ -28,7 +28,13 @@ from .manuscript_vocabulary import FLOAT_ENVIRONMENTS
 from .rules import BY_CODE
 from .style_obsolete import obsolete_commands, obsolete_packages
 from .style_references import doubled_reference_names, equation_references, unused_labels
-from .style_support import Occurrence, StyleContext, occurrence_findings
+from .style_support import (
+    Occurrence,
+    StyleContext,
+    not_checked_finding,
+    occurrence_findings,
+    unread_document_reasons,
+)
 from .style_typography import (
     consecutive_citations,
     ellipses,
@@ -218,13 +224,21 @@ def style_suggestions(
             runs, which then replaces ``STY501``.
 
     Returns:
-        The suggestions, by code and then in source order.
+        The suggestions, by code and then in source order. When the document's commands
+        could not be read, one inconclusive finding per selected suggestion says so instead.
     """
+    codes = [
+        code
+        for code in _CHECKS
+        if code in selected and not (code == "STY501" and document_metadata_checked)
+    ]
+    unread = unread_document_reasons(document)
+    if unread:
+        return [not_checked_finding(document, BY_CODE[code].name, unread) for code in codes]
     context = StyleContext(document)
     findings: list[Finding] = []
-    for code, check in _CHECKS.items():
-        if code not in selected or (code == "STY501" and document_metadata_checked):
-            continue
+    for code in codes:
+        check = _CHECKS[code]
         if code == "STY101":
             occurrences = obsolete_packages(context, drivers=not output_drivers_checked)
         else:

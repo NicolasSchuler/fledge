@@ -155,6 +155,8 @@ class ExpandedDocument:
             absent.
         conditionals: The spans of conditional control flow in ``text``.
         body_start: Where the document body starts in ``text``.
+        parse_limit_exceeded: Whether the spliced text exceeded a bounded parsing limit, so
+            that ``commands`` is empty whatever the text holds.
     """
 
     graph: SourceGraph
@@ -167,6 +169,7 @@ class ExpandedDocument:
     conditionals: list[tuple[int, int]]
     # Offset just after \begin{document}; zero when the document has no body opener.
     body_start: int
+    parse_limit_exceeded: bool
     _segment_starts: list[int] = field(repr=False)
     _command_starts: list[int] = field(repr=False)
     _newlines: list[int] = field(repr=False)
@@ -427,6 +430,7 @@ def expand_document(
     graph = graph or SourceGraph.build(root, main)
     selected = reachable_sources(graph)
     splice = _Splice(graph, _graph_gaps(graph, selected))
+    parse_limit_exceeded = False
     try:
         if graph.main in selected:
             assert graph.main is not None
@@ -437,6 +441,7 @@ def expand_document(
         splice.uncertainty.append("expanded manuscript exceeded a bounded parsing limit")
         text = "".join(splice.chunks)
         commands = []
+        parse_limit_exceeded = True
     graph_uncertainty = sorted(set(splice.uncertainty))
     conditionals = conditional_spans(commands)
     presence_uncertainty = list(graph_uncertainty)
@@ -459,6 +464,7 @@ def expand_document(
         presence_uncertainty=presence_uncertainty,
         conditionals=conditionals,
         body_start=command_end(opening) if opening is not None else 0,
+        parse_limit_exceeded=parse_limit_exceeded,
         _segment_starts=[segment.start for segment in splice.segments],
         _command_starts=[command.start for command in commands],
         _newlines=[index for index, char in enumerate(text) if char == "\n"],

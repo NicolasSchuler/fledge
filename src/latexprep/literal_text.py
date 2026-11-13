@@ -448,15 +448,17 @@ def reference_labels(command: Command) -> list[Argument]:
     )
 
 
-def key_value_items(value: str) -> list[tuple[str, str | None]]:
+def key_value_items(value: str, *, fold_keys: bool = True) -> list[tuple[str, str | None]]:
     r"""Split a ``key=value`` list at the commas outside braces, as option lists are written.
 
-    Keys are stripped and folded to lower case; a value keeps its inner text, without the
-    braces around a whole braced value. Empty items are dropped. The scan is one pass over
-    ``value``.
+    Keys are stripped and, unless ``fold_keys`` is false, folded to lower case; a value keeps
+    its inner text, without the braces around a whole braced value. Empty items are dropped.
+    The scan is one pass over ``value``.
 
     Args:
         value: The list as written, such as ``width=\linewidth, alt={A plot, in blue}``.
+        fold_keys: Whether keys are folded to lower case; keys that ``l3keys`` reads, which
+            are case-sensitive, keep their spelling with ``False``.
 
     Returns:
         Each key with its value, or ``None`` for an item without ``=``.
@@ -480,5 +482,6 @@ def key_value_items(value: str) -> list[tuple[str, str | None]]:
         text = rest.strip()
         if text.startswith("{") and text.endswith("}"):
             text = text[1:-1].strip()
-        pairs.append((key.strip().lower(), text if separator else None))
+        key = key.strip()
+        pairs.append((key.lower() if fold_keys else key, text if separator else None))
     return pairs

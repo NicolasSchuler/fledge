@@ -97,7 +97,7 @@ _SELF_CITATION = (
 _HINT = re.compile(
     r"(?i)\\(?:acknowledg(?:e)?ments?|thanks)\b|"
     r"\\(?:section\*?|begin)\s*\{acknowledg(?:e)?ments?\}|"
-    r"\b(?:at our (?:university|institution|laboratory)|in our previous work|"
+    r"\b(?:at our (?:university|institution|laboratory)|"
     r"our (?:institution|laboratory|university)|the authors are (?:at|from))\b|"
     rf"(?:{_SELF_CITATION})[^.]{{0,{_CITATION_WINDOW}}}?{_CITATION}|"
     rf"{_CITATION}[^.]{{0,{_CITATION_WINDOW}}}?(?:{_SELF_CITATION})"
