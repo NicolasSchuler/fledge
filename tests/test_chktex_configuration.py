@@ -30,9 +30,10 @@ from latexprep.chktex_output import (
 )
 from tests.support import ProjectTestCase
 
-# Inputs far larger than real ones must still be read well within this; linear readers
-# need milliseconds.
-_LINEAR_TIME_LIMIT_SECONDS = 1.0
+# Inputs far larger than real ones must still be read well within this. A linear reader
+# needs about 0.15 s for the largest input here, and coverage tracing in CI makes it about
+# ten times slower; quadratic reading of these inputs would take minutes.
+_LINEAR_TIME_LIMIT_SECONDS = 10.0
 _TOKEN = "0123456789abcdef"
 
 

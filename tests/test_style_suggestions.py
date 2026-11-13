@@ -22,9 +22,11 @@ from latexprep.style_suggestions import STYLE_CODES
 from latexprep.style_support import MAX_FINDINGS_PER_RULE
 from tests.support import AsyncProjectTestCase, ProjectTestCase, clean_case
 
-# Characters of hostile text; a pattern that backtracks quadratically takes many seconds.
+# Characters of hostile text; a pattern that backtracks quadratically takes minutes.
 HOSTILE_CHARACTERS = 200_000
-LINEAR_TIME_LIMIT_SECONDS = 2.0
+# A linear scan takes about 0.3 s here, and coverage tracing in CI makes it about ten
+# times slower; the budget leaves room for that and still catches quadratic backtracking.
+LINEAR_TIME_LIMIT_SECONDS = 10.0
 DOCUMENT_START = "\\documentclass{article}\n\\begin{document}\n"
 
 

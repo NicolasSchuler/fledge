@@ -54,6 +54,8 @@ Second page.
 """
 
 CLEAN_ARTICLE = r"""\documentclass{article}
+\usepackage{hyperref}
+\hypersetup{pdftitle={A Camera-Ready Study}}
 \title{A Camera-Ready Study}
 \author{Ada Example}
 \date{}
@@ -362,9 +364,9 @@ class LiveFailingPolicyTests(LiveProjectTestCase):
 
         docs/configuration.md "Start from a preset": camera-ready switches on embedded fonts
         without Type 3, consistent page size, no encryption, JavaScript or attachments, title
-        and author metadata and the forbidden class options and packages (TEX102, TEX103); a
-        clean article with a title and an author passes each of them, and the report records
-        the preset.
+        and author metadata, a PDF Title (PDF206) and the forbidden class options and packages
+        (TEX102, TEX103); a clean article with a title, an author and a hyperref PDF Title
+        passes each of them, and the report records the preset.
         """
         source = write_project(self.base / "paper", {"main.tex": CLEAN_ARTICLE})
         config = self.settings_file()
@@ -381,6 +383,7 @@ class LiveFailingPolicyTests(LiveProjectTestCase):
             "PDF108",
             "PDF109",
             "MAN008",
+            "PDF206",
             "TEX102",
             "TEX103",
         ):
