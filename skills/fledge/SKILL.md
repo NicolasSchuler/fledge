@@ -13,7 +13,7 @@ Run it as `fledge` (the macOS installer puts it at `~/.local/bin/fledge`; from a
 source checkout, `python -m latexprep` works too). Check it is available with
 `fledge --version`. If it is missing, ask the user before installing anything.
 Fledge is not on PyPI yet: install a release tag from GitHub, such as
-`pipx install "git+https://github.com/NicolasSchuler/fledge.git@v0.3.1"` (the
+`pipx install "git+https://github.com/NicolasSchuler/fledge.git@v0.4.0"` (the
 newest tag is listed at https://github.com/NicolasSchuler/fledge/tags). The PyPI
 package named `fledge` is an unrelated project. TeX and Poppler are separate
 installs. Documentation: https://nicolasschuler.github.io/fledge/

@@ -7,7 +7,7 @@ breaking changes are listed under their own heading.
 
 The version is defined once, as `__version__` in `src/latexprep/__init__.py`.
 
-## [Unreleased]
+## [0.4.0] - 2026-11-13
 
 ### Breaking changes
 
@@ -636,5 +636,6 @@ the first release of `fledge-latex` is 0.3.0.
   stays untested (other distributions, WSL 2); the CI guide shows the steps for a
   Linux runner.
 
+[0.4.0]: https://github.com/NicolasSchuler/fledge/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/NicolasSchuler/fledge/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/NicolasSchuler/fledge/compare/v0.2.0...v0.3.0

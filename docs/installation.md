@@ -12,11 +12,11 @@ Fledge is a Python 3.11+ command-line tool. Building a paper (`check` and
 ## macOS installer
 
 The installer runs from a copy of Fledge's source. Clone a release tag (here
-`v0.3.1`; the [tags page](https://github.com/NicolasSchuler/fledge/tags) lists
+`v0.4.0`; the [tags page](https://github.com/NicolasSchuler/fledge/tags) lists
 the newest), then preview the plan and install:
 
 ```sh
-git clone --branch v0.3.1 https://github.com/NicolasSchuler/fledge.git
+git clone --branch v0.4.0 https://github.com/NicolasSchuler/fledge.git
 cd fledge
 bash install.sh --dry-run
 bash install.sh
@@ -69,13 +69,13 @@ then, install a release tag straight from GitHub into its own environment with
 either tool. Both need Git:
 
 ```sh
-pipx install "git+https://github.com/NicolasSchuler/fledge.git@v0.3.1"
+pipx install "git+https://github.com/NicolasSchuler/fledge.git@v0.4.0"
 # or
-uv tool install "git+https://github.com/NicolasSchuler/fledge.git@v0.3.1"
+uv tool install "git+https://github.com/NicolasSchuler/fledge.git@v0.4.0"
 fledge --version
 ```
 
-Replace `v0.3.1` with the newest tag on the
+Replace `v0.4.0` with the newest tag on the
 [tags page](https://github.com/NicolasSchuler/fledge/tags). This installs the
 `fledge` command, and `latex-prep` for older scripts. It does not install TeX or
 Poppler; add them as described under [Tools](#tools), and for [Linux](#linux)

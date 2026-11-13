@@ -13,7 +13,7 @@ On macOS, run the installer from a clone of a release tag. It asks before
 installing anything and sets up TeX and Poppler too:
 
 ```sh
-git clone --branch v0.3.1 https://github.com/NicolasSchuler/fledge.git
+git clone --branch v0.4.0 https://github.com/NicolasSchuler/fledge.git
 cd fledge
 bash install.sh
 ```
@@ -22,7 +22,7 @@ Elsewhere, or if TeX and Poppler are already installed, install the same tag
 with pipx (or `uv tool install` with the same argument):
 
 ```sh
-pipx install "git+https://github.com/NicolasSchuler/fledge.git@v0.3.1"
+pipx install "git+https://github.com/NicolasSchuler/fledge.git@v0.4.0"
 ```
 
 Use the newest tag on the [tags page](https://github.com/NicolasSchuler/fledge/tags).

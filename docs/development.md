@@ -421,7 +421,7 @@ tag they name with every release until then.
    presets, and uploads the files as the `python-distributions` artifact, but
    never publishes.
 4. Create a GitHub release: choose or create the tag `vX.Y.Z` (for the current
-   version, `v0.3.1`) on `main` and publish the release. Publishing starts the
+   version, `v0.4.0`) on `main` and publish the release. Publishing starts the
    workflow, which verifies the tag, builds, smoke-tests and then uploads to PyPI
    from the `pypi` environment. Approve the deployment if you added a reviewer.
 5. Check the result in a clean environment: `pipx install fledge-latex==X.Y.Z`,

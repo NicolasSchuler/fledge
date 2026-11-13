@@ -57,7 +57,7 @@ jobs:
           sudo /Library/TeX/texbin/tlmgr install latexmk biber biblatex hyperref cm-super
       # Until Fledge is on PyPI, install a release tag from GitHub.
       - name: Install Fledge
-        run: python -m pip install "git+https://github.com/NicolasSchuler/fledge.git@v0.3.1"
+        run: python -m pip install "git+https://github.com/NicolasSchuler/fledge.git@v0.4.0"
       - name: Check the paper
         run: |
           mkdir -p "$RUNNER_TEMP/fledge"
@@ -99,7 +99,7 @@ Fledge's own workflows; a tool such as Dependabot can keep them current.
   `latexmk`, Biber and BibLaTeX. A package your paper needs but the runner lacks
   is reported as a build failure; add it to the `tlmgr install` line.
 - **Fledge** is installed from a release tag, so every run uses the same checks.
-  Fledge is not on PyPI yet; replace `v0.3.1` with the newest tag on the
+  Fledge is not on PyPI yet; replace `v0.4.0` with the newest tag on the
   [tags page](https://github.com/NicolasSchuler/fledge/tags) when you want a newer
   release.
 - **`--output-format ci`** prints each finding as a GitHub annotation titled with
