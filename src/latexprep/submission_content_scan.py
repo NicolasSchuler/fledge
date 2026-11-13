@@ -21,7 +21,7 @@ from collections.abc import Iterable
 from dataclasses import KW_ONLY, dataclass, field
 from functools import lru_cache
 from itertools import islice
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import NamedTuple
 from urllib.parse import unquote
 
@@ -41,6 +41,8 @@ from .tex_commands import (
 from .tex_comments import tex_comments
 from .tex_lexer import blank_regions, source_regions
 
+# Class, package and style files, which define document commands instead of using them.
+_PACKAGE_CODE_SUFFIXES = frozenset({".cls", ".sty", ".def", ".cfg", ".bst"})
 # File types read as UTF-8 text; every other file is matched by name only.
 _TEXT_EXTENSIONS = {
     ".tex",
@@ -474,9 +476,12 @@ class ContentScan:
                 }
 
     def _active_source(self, name: str, text: str) -> None:
-        """Scan active TeX outside literal regions for identity hints and shell-escape constructs.
+        r"""Scan active TeX outside literal regions for identity hints and shell-escape constructs.
 
-        An unclosed literal region leaves the scans of the lexical rules incomplete.
+        An unclosed literal region leaves the scans of the lexical rules incomplete. Class,
+        package and style files are not searched for identity hints: they define commands
+        such as ``\thanks`` rather than acknowledge anyone. Identity terms are still
+        searched there.
 
         Args:
             name: The project path of the file.
@@ -488,7 +493,10 @@ class ContentScan:
             self.lexical_issues.append(
                 "A TeX literal region is unclosed; active-source scan is incomplete."
             )
+        package_code = PurePosixPath(name).suffix.lower() in _PACKAGE_CODE_SUFFIXES
         for rule, pattern in ((self.identity_hints, _HINT), (self.shell_escape, _SHELL)):
+            if rule is self.identity_hints and package_code:
+                continue
             if rule.enabled and rule.matches.has_room:
                 rule.matches.extend_until_full(
                     {"path": name, "line": masked.count("\n", 0, match.start()) + 1}
@@ -505,7 +513,8 @@ class ContentScan:
             "including other document roots; "
             "PDF contents require the separate extracted-text/metadata scan. "
             f"Identity terms are Unicode-normalized, {term_rule_description(self.options)}; "
-            "hints and shell preflight use active TeX; "
+            "hints use active TeX outside class, package and style files, "
+            "shell preflight uses active TeX; "
             "private-note checks use TeX comments."
         )
         details: dict[str, object] = {

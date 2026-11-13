@@ -23,6 +23,10 @@ The version is defined once, as `__version__` in `src/latexprep/__init__.py`.
   toolchain packages loaded inside their macros no longer raise `TEX309`, and a final
   `\endinput` followed only by comments no longer counts as unresolved. An unclear
   declaration leaves `TEX103` incomplete only when it could name a forbidden package.
+- **`PRV003` no longer reports a class or style file's own definitions.** A shipped
+  `IEEEtran.cls` defines `\thanks`, which matched as an acknowledgement hint eight times.
+  `.cls`, `.sty`, `.def`, `.cfg` and `.bst` files are no longer searched for identity
+  hints; the identity terms you list (`PRV001`) are still searched there.
 
 ## [0.4.0] - 2026-11-13
 

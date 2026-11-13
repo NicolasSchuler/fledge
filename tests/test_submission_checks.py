@@ -363,6 +363,20 @@ class SubmissionTests(ProjectTestCase):
         self.assertEqual(result.severity, "warning")
         self.assertEqual(self.incomplete(rule, options).status, "inconclusive")
 
+    def test_class_and_style_files_are_not_searched_for_identity_hints(self) -> None:
+        options = SubmissionOptions(scan_identity_hints=True, identity_terms=("Jane Smith",))
+        self.write("main.tex", "\\documentclass{venue}\nText.\n")
+        definitions = "\\let\\venue@thanks\\thanks\n\\long\\def\\thanks#1{\\footnotemark}\n"
+        for name in ("venue.cls", "venue.sty", "venue.bst"):
+            with self.subTest(name=name):
+                self.write(name, definitions + "% Maintained by Jane Smith\n")
+                self.assertEqual(self.result("submission.identity_hints", options).status, "passed")
+                terms = self.result("submission.identity_terms", options)
+                self.assertEqual(terms.status, "failed")
+                (self.root / name).unlink()
+        self.write("macros.tex", definitions)
+        self.assertEqual(self.result("submission.identity_hints", options).status, "failed")
+
     def test_self_citation_phrasing_counts_only_beside_a_citation(self) -> None:
         rule = "submission.identity_hints"
         options = SubmissionOptions(scan_identity_hints=True)

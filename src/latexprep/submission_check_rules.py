@@ -73,12 +73,16 @@ RULES = (
             "Optionally flag acknowledgement declarations and literal "
             "self-identifying phrases in active source as advisory hints. Self-citation "
             "phrasing ('in our earlier work', 'we previously showed', 'our prior work') "
-            "counts only next to a citation command in the same sentence."
+            "counts only next to a citation command in the same sentence. Class, package "
+            "and style files are not searched, because they define commands such as "
+            "\\thanks rather than use them."
         ),
         tests=(
             "tests.test_submission_checks.SubmissionTests.test_identity_hints",
             "tests.test_submission_checks.SubmissionTests"
             ".test_self_citation_phrasing_counts_only_beside_a_citation",
+            "tests.test_submission_checks.SubmissionTests"
+            ".test_class_and_style_files_are_not_searched_for_identity_hints",
         ),
         fix="Review these heuristic hints in context; do not rewrite self-citations blindly.",
         reviewable=True,
