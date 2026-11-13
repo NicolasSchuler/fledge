@@ -9,21 +9,25 @@ undefined citations and leftover TODOs. Your project is never edited.
 
 ## Install
 
-On macOS, run the installer from this checkout or an extracted source
-distribution. It asks before installing anything and sets up TeX and Poppler too:
+On macOS, run the installer from a clone of a release tag. It asks before
+installing anything and sets up TeX and Poppler too:
 
 ```sh
+git clone --branch v0.3.1 https://github.com/NicolasSchuler/fledge.git
+cd fledge
 bash install.sh
 ```
 
-Elsewhere, or if TeX and Poppler are already installed:
+Elsewhere, or if TeX and Poppler are already installed, install the same tag
+with pipx (or `uv tool install` with the same argument):
 
 ```sh
-pipx install fledge-latex   # or: uv tool install fledge-latex
+pipx install "git+https://github.com/NicolasSchuler/fledge.git@v0.3.1"
 ```
 
-Install `fledge-latex`, not `fledge`: the PyPI package named `fledge` is an
-unrelated project. The command is still `fledge`. Builds need TeX and Poppler;
+Use the newest tag on the [tags page](https://github.com/NicolasSchuler/fledge/tags).
+Fledge is not on PyPI yet; a release there as `fledge-latex` is planned. The
+PyPI package named `fledge` is an unrelated project. Builds need TeX and Poppler;
 see the [installation guide](https://nicolasschuler.github.io/fledge/installation.html)
 for Linux, Windows (WSL 2) and manual setup.
 

@@ -13,20 +13,28 @@ fledge doctor path/to/paper
 fledge doctor path/to/paper --config path/to/settings.toml --json
 ```
 
-Without a project argument, the command uses defaults and does not discover
-settings from the current directory. An explicit `--config` still applies.
-With a project argument, normal nearby configuration discovery applies.
+Without INPUT, a project folder or ZIP, the command uses defaults and does not
+discover settings from the current directory. An explicit `--config` still
+applies. With INPUT, normal nearby configuration discovery applies.
 `--isolated` disables discovery. It cannot be combined with `--config`.
 
 A project selects settings, not source files to test. When several documents
 select different engines, each distinct engine is exercised. `--engine` changes
-the default engine; a document's explicit engine still takes precedence.
+the default engine; a document's explicit engine still takes precedence. The
+doctor does not read the main file, so a `% !TEX program` comment there does not
+choose its engine: with the default `engine = "auto"` it tests pdfLaTeX, and
+`fledge doctor --engine xelatex` tests the engine such a comment names.
 Configured acceptance constraints, such as page limits and required metadata,
 are not applied to the built-in document.
 
 The core tools are `latexmk`, the selected engine and Poppler's `pdfinfo`,
 `pdftotext`, `pdftoppm`, `pdffonts`, `pdfdetach` and `pdfimages`. XeLaTeX also
-needs `xdvipdfmx`. An explicit BibTeX or Biber backend makes that tool required
+needs `xdvipdfmx`. The built-in document contains a bullet list, whose bullet
+comes from the text-companion font: without `cm-super`, which provides that font
+in Type 1 form, the build fails with "Font tcrm1000 at 600 not found" here rather
+than on your first paper (see [a missing font](troubleshooting.md#a-missing-font)).
+The terminal report ends with a table of the tools it used and their versions.
+An explicit BibTeX or Biber backend makes that tool required
 and selects a tiny bibliography fixture. With the default automatic strategy,
 the doctor also compiles a tiny cited document through BibTeX and another
 through biblatex and Biber, each when its tool is installed. A missing tool or a
@@ -52,7 +60,7 @@ also bound the diagnostics. Cancellation stops the normal runtime's subprocesses
 
 A pass covers this built-in fixture and the named engines. It does not establish
 that your custom classes, fonts, bibliography packages or actual manuscript will
-build. Use `fledge check PROJECT` for project-specific evidence.
+build. Use `fledge check path/to/paper` for project-specific evidence.
 
 The normal [exit codes](reports.md#exit-codes) apply: `0` passed, `1` passed with
 advisories, `4` a failed diagnostic (a missing or unusable required tool, a sandbox

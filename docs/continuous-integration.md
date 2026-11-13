@@ -55,8 +55,9 @@ jobs:
         run: |
           sudo /Library/TeX/texbin/tlmgr update --self
           sudo /Library/TeX/texbin/tlmgr install latexmk biber biblatex hyperref cm-super
+      # Until Fledge is on PyPI, install a release tag from GitHub.
       - name: Install Fledge
-        run: python -m pip install fledge-latex
+        run: python -m pip install "git+https://github.com/NicolasSchuler/fledge.git@v0.3.1"
       - name: Check the paper
         run: |
           mkdir -p "$RUNNER_TEMP/fledge"
@@ -97,8 +98,10 @@ Fledge's own workflows; a tool such as Dependabot can keep them current.
 - **TeX and Poppler.** BasicTeX is a small TeX Live distribution, and `tlmgr` adds
   `latexmk`, Biber and BibLaTeX. A package your paper needs but the runner lacks
   is reported as a build failure; add it to the `tlmgr install` line.
-  Pin the version of Fledge, for example `fledge-latex==0.3.1`, if you want the
-  same checks on every run.
+- **Fledge** is installed from a release tag, so every run uses the same checks.
+  Fledge is not on PyPI yet; replace `v0.3.1` with the newest tag on the
+  [tags page](https://github.com/NicolasSchuler/fledge/tags) when you want a newer
+  release.
 - **`--output-format ci`** prints each finding as a GitHub annotation titled with
   its code and title, and a final notice with the verdict; `--quiet` leaves out the
   progress messages. When the paper is a folder of the repository, such as `paper`,
@@ -107,8 +110,8 @@ Fledge's own workflows; a tool such as Dependabot can keep them current.
   the repository, so [settings and presets](configuration.md) apply in CI exactly
   as they do on your machine.
 - **Reports and output** go to the runner's temporary directory because Fledge
-  never writes into the project it reads. `--output` must name a directory that
-  does not exist yet.
+  never writes into the project it reads. `--output` must name a new or empty
+  folder; on a fresh runner it never exists yet.
 - **`prepare`** repeats the checks, then rebuilds the PDF from the submission ZIP
   it wrote and compares it with the original. `check` comes first for a quicker
   verdict; `prepare` builds again, so the job takes longer.

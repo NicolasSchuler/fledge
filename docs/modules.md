@@ -1,6 +1,6 @@
 # Module map
 
-Fledge is one flat package, `latexprep`, of about two hundred modules. This page assigns every
+Fledge is one flat package, `latexprep`, of about 250 modules. This page assigns every
 module to exactly one layer and states what it is responsible for. Look here before adding a
 module, to decide where it belongs and what it may import.
 
@@ -32,7 +32,7 @@ The vocabulary and the pure logic everything else shares: findings, the report, 
 catalogue of check codes and its data-only `*_rules.py` modules, settings choices and option
 schemas, the bounded TeX and BibTeX readers, the literal source graph, text, path and file
 helpers, and the cancellation and resource-budget primitives. None starts a process or opens
-a network connection, and each imports only other modules of this layer. (81 modules)
+a network connection, and each imports only other modules of this layer. (90 modules)
 
 | Module | Responsibility |
 | --- | --- |
@@ -132,7 +132,7 @@ a network connection, and each imports only other modules of this layer. (81 mod
 The boundary to the outside world: restricted tool execution and its sandboxes, the PDF tool
 sessions, the build with `latexmk` and its evidence, the HTTP client for online lookups, project
 import and the submission archive, and settings discovery. They import the domain layer and each
-other, never a check, the job workflow or an output format. (35 modules)
+other, never a check, the job workflow or an output format. (41 modules)
 
 | Module | Responsibility |
 | --- | --- |
@@ -184,7 +184,7 @@ The checks and the transformations: bibliography, manuscript, build, PDF, online
 source checks, the planners that edit a staged copy (source and bibliography transformations, flat
 layout, cleanup, metadata edits), and the two policies that decide which checks run and which
 findings a review accepts. They import the domain and adapter layers, never the job workflow or
-an output format. (61 modules)
+an output format. (71 modules)
 
 | Module | Responsibility |
 | --- | --- |

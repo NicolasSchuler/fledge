@@ -19,7 +19,7 @@ are different files (`TEX007`).
 `BLD001` and `BLD002` come from TeX's log; `BIB101` and `TEX004` come from
 Fledge's own source scan and point at the line. Correct the misspelled key, add
 the missing `\label` or bibliography entry, or declare the right `.bib` file,
-then rerun. The [quick start](quickstart.md#3-read-the-result) shows an example.
+then rerun. The [quick start](quickstart.md#4-read-the-result) shows an example.
 
 ### `TEX324`: ambiguous main file
 
@@ -40,17 +40,21 @@ While a citation error is present, `BIB102` can be a side effect of it.
 ### `TEX009`: generated bibliography not shipped
 
 The paper uses BibTeX or Biber, but no generated `main.bbl` sits beside the main
-file. Services that compile without running BibTeX or Biber, such as arXiv, then
-show empty citations. By default this is a not-applicable note, listed only
-with `--show-passed`, that does not change the outcome;
-`[submission_checks] require_bbl = true`, which the `arxiv` preset sets, makes
-it a warning. To fix it, build locally and keep the generated
-`main.bbl` (and, for biblatex, `main.run.xml`) next to `main.tex`. `prepare`
-ships them automatically, also with `--layout flat`. With BibTeX you can instead
-inline the bibliography with `source_transforms.inline_bibliography`. A `.bbl`
-from Biber must match the biblatex version of the compiling service.
+file. A service that compiles without running BibTeX or Biber then shows empty
+citations. Most services, arXiv among them, run the tool themselves when no
+`.bbl` is uploaded, so by default this is a not-applicable note, listed only with
+`--show-passed`, that does not change the outcome.
 
-`BIB109`, which the `arxiv` preset also enables, checks that the shipped `.bbl`
+If your venue does not run BibTeX or Biber, set
+`[submission_checks] venue_runs_bibliography_tools = false`. The note then
+becomes a warning, and `prepare` ships the `.bbl` its verified build generated,
+also with `--layout flat` (see [generated files](preparation-options.md#generated-files)).
+For `check`, build locally and keep the generated `main.bbl` next to `main.tex`.
+With BibTeX you can instead inline the bibliography with
+`source_transforms.inline_bibliography`. A `.bbl` from Biber must match the
+biblatex version of the compiling service.
+
+`BIB109` (`submission_checks.check_bbl_coverage`) checks that the shipped `.bbl`
 contains every cited key. A missing key is an error: rebuild the bibliography
 after your last citation change. Without a shipped `.bbl`, `BIB109` is
 inconclusive and defers to `TEX009`.
@@ -88,8 +92,9 @@ reported comments in your sources. A deliberate marker can be accepted with a
 
 ### `build.execution_unavailable`, `pdf.inspection_unavailable`, `BLD202`: tool unavailable
 
-A required tool is missing, or the build sandbox cannot start; the run is
-blocked (exit 3). When TeX itself is missing, one finding names every missing
+A required tool is missing, or the build sandbox cannot start. Fledge could not
+check the paper, so the run ends with outcome `error` and exit code 4, not with
+the exit code 3 of a paper that needs a fix. When TeX itself is missing, one finding names every missing
 tool among `latexmk` and the engine and gives the install command for your
 system, such as `brew install --cask basictex` on macOS. Missing Poppler tools
 appear as `pdf.inspection_unavailable`, and a missing BibTeX or Biber as
@@ -166,7 +171,10 @@ which Fledge's builds cannot. For minted, build once locally with `-shell-escape
 the TeX Live release of the receiving service, and keep the `_minted` folder in the project;
 Fledge then uses the cached highlighting. Convert SVG figures to PDF yourself
 (`rsvg-convert -f pdf -o figure.pdf figure.svg`) and EPS figures with
-`epstopdf figure.eps`, then include the PDF files.
+`epstopdf figure.eps`, then include the PDF files. An EPS or PS figure without its
+converted PDF blocks preparation (`TEX011`): older TeX Live releases would print
+the file name in place of the figure without an error, and arXiv converts no
+figures either.
 
 ### A tool refused because it lives in your home folder
 
@@ -186,11 +194,11 @@ pipx puts commands in `~/.local/bin`. Run `pipx ensurepath`, then open a new ter
 | Command not found | With the installer, use `~/.local/bin/fledge`; with manual setup, activate the environment and try `python -m latexprep --help`. |
 | Installer refuses an existing destination | Choose a fresh `--prefix` and a `--bin-dir` without a `fledge` launcher, or [uninstall](installation.md#upgrade-or-uninstall) first. |
 | Exit code 64 | Invalid command-line syntax; see `fledge COMMAND --help`. [Other exit codes](reports.md#exit-codes). |
-| "Request error" (exit 4) | The command cannot run as given: an unusable `--output` or report path, a missing input, a `--main` that names no document (the message lists the ones found) or an invalid setting value. The `execution.request` finding names the source of the problem and the fix; nothing was built. |
+| `Error:` and `Hint:` on stderr (exit 4) | The command cannot run as given: an unusable `--output` or report path, a missing input, a `--main` that names no document (the message lists the ones found), an unknown selector or an invalid setting value. The two lines name the problem and the fix; nothing was built. With `--json`, the report holds them as an `execution.request` finding. |
 | `execution.internal` finding, or an `execution.task` finding with a `traceback` detail (exit 70) | A defect, not a problem with your paper. Keep the command and the JSON report when reporting it, and rerun with `--debug` to print the traceback. The other checks' results are still in the report. |
 | Unexpected configuration | Check `execution.config_path` and `execution.preset` in the JSON report; use `--config FILE` or `--isolated`. |
 | Unknown setting or selector | The request error suggests the closest valid name, such as `max_pages` for `max_page`, or the closest codes for a selector. See [choose checks](configuration.md#choose-checks) and `fledge rules`. |
-| Output already exists | Choose a new path outside the input. |
+| Output already exists | Choose a new or empty folder outside the input, or add `--force` to replace an output that Fledge wrote there earlier. Any other existing folder or file is refused. See [output folders and reruns](workflow.md#output-folders-and-reruns). |
 | Isolation failure or Biber preparation failure | See [installation](installation.md#tools) and [Biber on macOS](workflow-reference.md#biber-on-macos). |
 | Build failed | See [build failed](#build-failed): the first `BLD009` finding and its next step, and `details.log_tail` in the JSON or HTML report for the last 60 lines of the TeX log. |
 | Missing or incomplete build trace | Resolve the reported build evidence. Preparation cannot choose package contents safely without a complete trace. |

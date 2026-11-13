@@ -38,6 +38,7 @@ comment_policy = "private" # retain, private, or all
 merge_inputs = false
 # inline_bibliography = "main.bbl"
 filename_overrides = { "figures/chart.pdf" = "result-chart.pdf" }
+suppress_included_pdf_information = true # TEX204
 
 [formatting_options]
 exclude = ["generated/*.tex"]
@@ -73,6 +74,17 @@ line `% tex-fmt: off` and ends at `% tex-fmt: on`; the prefixes `fmt` and
 honors `% tex-fmt: off`; the other prefixes protect regions in Fledge's checks. An
 unmatched marker makes the result inconclusive.
 Filename overrides require `layout = "flat"` and retain flattening safety checks.
+
+`suppress_included_pdf_information` (`TEX204`, set by the `anonymous-review`
+preset) adds one line after the leading comments of the prepared main file:
+`\pdfsuppressptexinfo=-1` for pdfLaTeX or `\pdfvariable suppressoptionalinfo 15`
+for LuaLaTeX. pdfTeX and LuaTeX otherwise copy each included PDF's information
+dictionary (author, title, creator) and file name into the built PDF, where
+`PRV105` reports identity terms and home-folder paths. The line does not cover the
+included pages' XMP and application data (PieceInfo), which are still copied, and
+the figure files themselves are not rewritten; re-export a figure whose metadata
+must not be shared. XeLaTeX copies none of this. A main file that already sets
+either value is left unchanged.
 
 ## Generated files
 
@@ -135,7 +147,8 @@ engine = "lualatex"
 ```
 
 Each document gets its own source copy, baseline, transformed build, ZIP and
-fresh archive rebuild. Selection patterns are case-sensitive project-relative
+fresh archive rebuild; as for a single document, the transformed build is
+skipped when staging changed nothing. Selection patterns are case-sensitive project-relative
 globs; each pattern must match a file and the selected root must be included.
 These patterns restrict candidate inputs; they do not force every match into the
 final package. Omitting `include` makes every imported file in that document's
@@ -190,7 +203,11 @@ Pixel tolerances affect only baseline-versus-prepared rendering, and are recorde
 with the measured differences. Text, page counts and page dimensions remain
 separate checks. Repeated baselines and the final archive rebuild use exact
 comparison. All comparisons retain bounded 144-DPI evidence, not a semantic
-equivalence guarantee.
+equivalence guarantee. Pages are rendered in ranges, several per `pdftoppm`
+process, and a PDF that two comparisons share is rendered once. When staging
+changed nothing, the prepared PDF is the baseline PDF, so there is no
+baseline-versus-prepared comparison and its tolerances do not apply; the archive
+rebuild is still compared exactly.
 
 Accepted exceptions keep the original failed result and add its explicit reason;
 a successful release with such decisions reports `accepted_exceptions` (exit 2).
@@ -278,7 +295,7 @@ fledge inspect ./paper --output-format ci
 ```
 
 Grayscale previews are PNG pages kept outside the source ZIP: under `previews/`
-in a preparation output, or in a new `--preview-output` directory for `check` and
+in a preparation output, or in a new or empty `--preview-output` folder for `check` and
 `pdf check`. Preview export and bundle publication succeed or roll back together.
 [Report formats](workflow-reference.md#report-formats) describes the HTML, CI and
 diagnostic outputs.

@@ -27,9 +27,9 @@ image resolution stay as placeholders for you to fill in.
 
 | Preset | Switches on |
 | --- | --- |
-| `arxiv` | Embedded fonts; private-comment, secret, shell-escape and unused-file scans; a required generated `.bbl` that covers every cited key; removes private comments from the prepared copy. Placeholders: ZIP size, filename characters, TeX Live year |
-| `anonymous-review` | Embedded fonts, no attachments; identity-hint, private-comment, secret and unused-file scans; layout-manipulation and float-structure checks. Placeholders: page limit, identity terms, image-metadata terms, ZIP size, review line numbers |
-| `camera-ready` | Embedded fonts without Type 3, consistent page size, no encryption, JavaScript or attachments; title and author metadata, ORCID, float structure and hygiene scans. Placeholders: page limit and size, document class, image resolution, declarations, PDF metadata, forbidden line numbers, TeX Live year, figure color space |
+| `arxiv` | Embedded fonts; private-comment, secret, shell-escape and unused-file scans; no fixed output drivers or `psfig` (`MAN018`); describes what arXiv runs: BibTeX and Biber but not makeindex or makeglossaries, so generated index and glossary files ship and a missing one warns (`TEX012`), and pdfLaTeX or XeLaTeX but not LuaLaTeX (`TEX013`); removes private comments from the prepared copy. Placeholders: ZIP size, filename characters, `.bbl` coverage and format version, TeX Live year |
+| `anonymous-review` | Embedded fonts, no attachments; identity-hint, private-comment, secret and unused-file scans; layout-manipulation and float-structure checks; keeps the information of included PDF figures out of the prepared PDF (`TEX204`). Placeholders: page limit, identity terms, image-metadata terms, ZIP size, review line numbers, Type 3 fonts, comment removal |
+| `camera-ready` | Embedded fonts without Type 3, consistent page size, no encryption, JavaScript or attachments; a PDF Title (`PDF206`); title and author metadata, ORCID, float structure and hygiene scans; DOIs for articles and proceedings papers, protected capitals in titles and works cited twice (`BIB104`, `BIB107`, `BIB108`). Placeholders: page limit and size, document class, image resolution, declarations, PDF Author, forbidden line numbers, tagged PDF (`MAN019`), TeX Live year, figure color space |
 
 ```sh
 fledge init --list
@@ -114,17 +114,39 @@ Checks that are off do not become passes. Terminal reports end with a short
 is not mistaken for a full audit. JSON reports list the same areas in
 `execution.not_checked`, each with its codes and the settings that enable them.
 
-Some default checks concern submission readiness: a note, listed only with
-`--show-passed`, when no generated `.bbl` is shipped for services that do not
-run BibTeX or Biber, such as arXiv (`TEX009`;
-`submission_checks.require_bbl = true` makes it a warning), packages
-declared before `hyperref` that must follow it (`TEX010`), EPS figures in a PDF
-build (`TEX011`) and private-note markers in comments (`PRV007`).
-Related opt-in policies check review line numbers (`MAN017`), figure color
-spaces (`PDF313`), the TeX Live release (`BLD105`), whether a shipped `.bbl`
-covers every cited key (`BIB109`) and whether a shipped biblatex `.bbl` has the
-format version the receiving service expects (`BIB110`,
+Some default checks concern submission readiness: packages declared before
+`hyperref` that must follow it (`TEX010`), EPS and PS figures, which block
+preparation unless their converted PDF is shipped (`TEX011`), private-note
+markers in comments (`PRV007`), home-folder paths in figure metadata (`PRV104`)
+and the information that included PDF figures leave in the built PDF (`PRV105`).
+Three more depend on what the receiving service runs, which you describe as
+shown below: a missing generated `.bbl` (`TEX009`) or index and glossary file
+(`TEX012`), and an engine the service does not offer (`TEX013`).
+
+Related opt-in policies check review line numbers (`MAN017`), output driver
+options such as `[pdftex]` and the `psfig` package, which break on a service
+that chooses the engine (`MAN018`, `manuscript_checks.forbid_output_drivers`, on
+in the `arxiv` preset), a `\DocumentMetadata` declaration with the document
+language and tagging (`MAN019`, `manuscript_checks.require_document_metadata`),
+figure color spaces (`PDF313`), the TeX Live release (`BLD105`), whether a
+shipped `.bbl` covers every cited key (`BIB109`) and whether a shipped biblatex
+`.bbl` has the format version the receiving service expects (`BIB110`,
 `submission_checks.biblatex_bbl_format_version`).
+
+### Describe the receiving service
+
+Three settings under `[submission_checks]` say what the service you submit to
+does itself. They decide which generated files `prepare` ships and when a missing
+one is a warning:
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `venue_runs_bibliography_tools` | `true` | The service runs BibTeX or Biber. With `false`, `prepare` ships the generated `.bbl` and a missing one warns (`TEX009`) |
+| `venue_runs_index_tools` | `true` | The service runs makeindex and makeglossaries. With `false`, a missing index, glossary or nomenclature file warns (`TEX012`); the `arxiv` preset sets it |
+| `venue_engines` | `[]` (any) | The engines the service compiles with; a build with another engine warns (`TEX013`). The `arxiv` preset lists `pdflatex` and `xelatex` |
+
+[Generated files](preparation-options.md#generated-files) explains what
+`prepare` ships and how the archive rebuild proves that the files suffice.
 
 ## Discovery and precedence
 

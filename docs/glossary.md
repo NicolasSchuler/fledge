@@ -17,7 +17,7 @@ code
 
 check
   One test Fledge can run, identified by its code. Checks are
-  [on by default, opt-in or always enforced](checks.md).
+  [on by default, opt-in, suggestions or always enforced](checks.md).
 
 rule
   The catalogue entry that describes a check: its code, title, scope and typical
@@ -26,7 +26,7 @@ rule
 
 severity
   How much a finding matters: `error` blocks a release, `warning` is an
-  advisory, `info` is informational.
+  advisory, `info` is informational and `suggestion` is optional style advice.
 
 status
   What happened: `failed` (a problem was found), `inconclusive` (Fledge could not
@@ -37,9 +37,26 @@ advisory
   A warning that does not block a release, such as a TODO marker. A run whose
   only problems are advisories ends `passed_with_advisories` with exit code 1.
 
+suggestion
+  Optional advice, such as a style convention, from a check that runs only when
+  selected (`--select ALL --select STY`). Suggestions are listed in a section of
+  their own and never change the outcome or the exit code; a
+  `% fledge: ignore CODE` comment silences one where it occurs.
+
 blocked
-  The outcome when a required check failed or lacked evidence. A blocked
-  `prepare` publishes no output; exit code 3.
+  The outcome when the paper needs a fix: a required check failed, or its
+  evidence is incomplete because of the sources. A blocked `prepare` publishes
+  no output; exit code 3.
+
+error (outcome)
+  The outcome when Fledge could not check the paper: a missing or unusable tool,
+  a sandbox that cannot start, a time or resource limit, an unreadable input,
+  no single main file or invalid settings. Nothing is published; exit code 4.
+  Fix the setup or the command, not the paper.
+
+internal error
+  The outcome `internal_error`: a defect in Fledge stopped the run. Exit code 70;
+  report it with the command and the JSON report.
 
 incomplete
   A check that ran but could not reach a decision (status `inconclusive`), for

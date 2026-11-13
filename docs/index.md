@@ -6,6 +6,7 @@ checks that it matches your original. Your project is never edited.
 
 New here? [Install Fledge](installation.md), then [prepare your paper](quickstart.md).
 To try it without your own paper or TeX, use the [offline example](examples.md).
+Common questions are answered in the [FAQ](faq.md).
 
 ```{toctree}
 :maxdepth: 2
@@ -13,6 +14,15 @@ To try it without your own paper or TeX, use the [offline example](examples.md).
 
 installation
 quickstart
+```
+
+```{toctree}
+:maxdepth: 1
+:caption: Venue guides
+
+venue-arxiv
+venue-anonymous-review
+venue-camera-ready
 ```
 
 ```{toctree}
@@ -27,6 +37,7 @@ reports
 chktex
 continuous-integration
 troubleshooting
+faq
 examples
 agents
 ```
@@ -40,6 +51,7 @@ workflow
 workflow-reference
 limitations
 glossary
+changelog
 ```
 
 ```{toctree}

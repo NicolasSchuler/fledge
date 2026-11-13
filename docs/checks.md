@@ -11,13 +11,17 @@ fledge rule BIB101
 fledge rule PDF104 --json
 ```
 
-Checks fall into three groups:
+Checks fall into four groups:
 
 - **On by default** checks run without configuration: TODO markers, unresolved
   citations and references, unused bibliography entries and TeX log problems.
 - **Opt-in** checks need a setting from you, such as a page limit, a required
   document class or `require_embedded_fonts = true`. A [preset](configuration.md#start-from-a-preset)
   switches on a useful set at once. Fledge never invents a limit.
+- **Suggestions** give optional style advice and run only when you select them,
+  for example with `--select ALL --select STY`. They are listed in a section of
+  their own and never change the outcome or the exit code (see
+  [suggestions](reports.md#suggestions)).
 - **Always-enforced** guards keep the prepared copy safe and faithful, for
   example missing or out-of-project files and PDF preservation. They run
   whenever their stage runs, and ignoring their code does not switch them off.
@@ -32,8 +36,10 @@ A check that did not run, or could not decide, never counts as a pass. The
 | `TEX` | Source diagnostics, literal manuscript constraints and gaps in the source graph (`TEX3xx`) |
 | `MAN` | Manuscript, author, declaration and float checks |
 | `BIB` | Bibliography structure, citation coverage and metadata; `BIB2xx` guard bibliography edits |
-| `BLD` | TeX log problems, overflow tolerance and loaded-package policies |
-| `PRV` | Identity terms, privacy hints, secrets and shell escape |
+| `BLD` | TeX log problems, the engine and fonts a build used, overflow tolerance and loaded-package policies |
+| `STY` | Style suggestions: obsolete LaTeX, references, typography, consistent spelling and PDF tagging |
+| `CHK` | The optional chktex lint, as suggestions |
+| `PRV` | Identity terms, privacy hints, figure and included-PDF metadata, secrets and shell escape |
 | `PKG` | Flattening safety, filenames, deliverables, archive size and template files |
 | `PDF` | Page limits, page size, fonts, text, metadata, artwork and tagged structure |
 | `NET` | Online DOI, metadata, notice and link checks |

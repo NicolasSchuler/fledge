@@ -1,6 +1,6 @@
 # Fledge architecture
 
-Architecture based on [the requirements](requirements.md). The application uses Python with a CLI, a shared application core, and isolated tool execution. A later web interface calls the same job API; its deployment model remains open. The [README](README.md) describes the implemented subset and current limitations. The [module map](docs/modules.md) assigns every module of the flat `latexprep` package to one of five layers and states its responsibility; [Code layout](#code-layout) below relates those layers to the components described here.
+Architecture based on [the requirements](requirements.md). The application uses Python with a CLI, a shared application core, and isolated tool execution. A later web interface calls the same job API; its deployment model remains open. The [workflow reference](docs/workflow-reference.md) describes the implemented subset and the [limitations](docs/limitations.md) page what it does not cover. The [module map](docs/modules.md) assigns every module of the flat `latexprep` package to one of five layers and states its responsibility; [Code layout](#code-layout) below relates those layers to the components described here.
 
 ## Component diagram
 

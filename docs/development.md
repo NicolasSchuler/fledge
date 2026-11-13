@@ -369,9 +369,10 @@ To run Fledge on a paper repository rather than on Fledge itself, see
 
 ## Release to PyPI
 
-Fledge is published on PyPI as `fledge-latex`. The PyPI project named `fledge` is
-an unrelated project, which is why the distribution has a different name from the
-command. The `fledge` and `latex-prep` commands and the `latexprep` module are
+Fledge's distribution is named `fledge-latex`; it is not on PyPI yet, and the
+user documentation installs release tags from GitHub until it is. The PyPI
+project named `fledge` is an unrelated project, which is why the distribution has
+a different name from the command. The `fledge` and `latex-prep` commands and the `latexprep` module are
 unchanged. The Release workflow uses PyPI trusted publishing (OpenID Connect), so
 no PyPI token is stored in GitHub.
 
@@ -397,10 +398,12 @@ no PyPI token is stored in GitHub.
 A pending publisher does not reserve the name, and the project does not exist
 until the first release uploads. Someone else could register `fledge-latex`
 first, so publish soon after registering. The first successful upload creates the
-project and turns the pending publisher into an ordinary one. Because the
-[installation guide](installation.md#install-with-pipx-or-uv) tells readers to run
-`pipx install fledge-latex`, publish the first release soon after that page
-reaches `main`.
+project and turns the pending publisher into an ordinary one. Until then, the
+[installation guide](installation.md#install-with-pipx-or-uv), the README, the
+[CI recipe](continuous-integration.md) and the agent skill install a release tag
+from GitHub (`pipx install "git+https://github.com/NicolasSchuler/fledge.git@vX.Y.Z"`).
+After the first upload, switch them to `pipx install fledge-latex`, and update the
+tag they name with every release until then.
 
 ### Each release
 

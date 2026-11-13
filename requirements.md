@@ -7,14 +7,15 @@ Date: 6 October 2026
 > **Read this as the original plan, not as documentation of Fledge.** For what the
 > tool does today, read the [documentation](https://nicolasschuler.github.io/fledge/),
 > starting with `docs/workflow-reference.md` and `docs/checks.md`. Decisions the
-> body below still lists as open have been settled: the package is published as
-> `fledge-latex` under the MIT license, settings are TOML files (`fledge.toml`; the
+> body below still lists as open have been settled: the distribution is named
+> `fledge-latex` and released under the MIT license, settings are TOML files (`fledge.toml`; the
 > `--config submission.yaml` example below is illustrative only), there is no
 > `report` command, and PDF inspection uses Poppler with optional qpdf and MuPDF
 > adapters.
 
 Implementation coverage and remaining checks are tracked in the
-[check backlog](docs/check-backlog.md); the [README](README.md) describes shipped behavior.
+[check backlog](docs/check-backlog.md); the [workflow reference](docs/workflow-reference.md)
+and the [limitations](docs/limitations.md) page describe shipped behavior.
 
 ## Purpose and scope
 
@@ -322,7 +323,7 @@ Expose structured job inputs, progress events, cancellation, results, and artifa
 
 Reuse established tools through adapters with explicit options and supported versions. `latexmk` is a candidate for build orchestration, `tex-fmt` for source formatting, and `bibtex-tidy` for bibliography formatting and duplicate suggestions. `arxiv-latex-cleaner` is a candidate for selected cleanup operations, subject to the same preservation checks; its broad deletion and compression options must not bypass the tool's change policy. [latexmk](https://ctan.org/pkg/latexmk), [bibtex-tidy](https://github.com/FlamingTempura/bibtex-tidy), [arxiv-latex-cleaner](https://github.com/google-research/arxiv-latex-cleaner)
 
-Python is the selected implementation language. The initial implementation uses external Poppler tools for PDF inspection and comparison; deeper PDF analysis remains an adapter choice. The core needs project discovery, checks, transformations, configuration resolution, build control, verification, packaging, and reporting as testable components. A third-party plugin ecosystem and a new general TeX parser are outside the initial scope. Reusing a cleanup tool with a publisher name must not introduce a publisher-policy maintenance obligation. See the [implementation status](README.md) for the supported subset; this requirements document continues to describe the full planned release.
+Python is the selected implementation language. The initial implementation uses external Poppler tools for PDF inspection and comparison; deeper PDF analysis remains an adapter choice. The core needs project discovery, checks, transformations, configuration resolution, build control, verification, packaging, and reporting as testable components. A third-party plugin ecosystem and a new general TeX parser are outside the initial scope. Reusing a cleanup tool with a publisher name must not introduce a publisher-policy maintenance obligation. See the [workflow reference](docs/workflow-reference.md) and the [limitations](docs/limitations.md) for the supported subset; this requirements document continues to describe the full planned release.
 
 - Local analysis must send no manuscript content off-device. Network operations and external AI services require separate enablement, declared payloads, and bounded execution.
 - Failures in one optional checker must not erase completed results. A missing required checker prevents a pass; an optional skipped checker remains visible.

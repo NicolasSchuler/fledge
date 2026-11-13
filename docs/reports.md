@@ -195,7 +195,7 @@ from the JSON report. An internal error still writes the report, as an
 
 `prepare` writes `report.json` with a successful output; `--json-report FILE` (also
 spelled `--report`) saves the same JSON for any run, including a blocked one. This excerpt is from the
-blocked run in the [quick start](quickstart.md#3-read-the-result), with most
+blocked run in the [quick start](quickstart.md#4-read-the-result), with most
 findings, settings and tool details removed:
 
 ```json
@@ -302,7 +302,12 @@ a field is removed, renamed or changes meaning. `fledge rules --json` lists the
 checks under `rules`; each check says whether it is `mandatory` (check selection never
 removes its findings), whether it is `reviewable` (an explicit review decision may
 suppress or accept it), whether it is a `suggestion` and, as `reference_url`, which
-page explains it, if any.
+page explains it, if any. `activation` says when it runs: `default` (without
+settings), `opt-in` (once configured), `suggestion` (only when selected) or
+`always` (a guard that ignoring its code does not switch off). `enabled_by` lists
+what switches on an opt-in check or a suggestion, such as `"max_pages"`,
+`"required_fields in [bibliography_checks]"` or `"--select ALL --select STY101"`,
+and is empty for the others.
 
 Version 3 added the outcome `internal_error` (exit 70) and the severity
 `suggestion`, and moved runs that Fledge could not check, such as a missing tool,
@@ -364,12 +369,26 @@ decision to you. Suggestions never change the outcome or the exit code. Every
 format shows them in a section of their own, after the findings, and counts them
 separately; in JSON their `severity` is `suggestion`.
 
+| Suggestions | What they cover | Needs |
+| --- | --- | --- |
+| `STY1` | Obsolete packages, driver options and commands (`times`, `subfigure`, `\bf`, `$$`, `eqnarray`), `[h]`-only floats and `center` inside floats | Sources only |
+| `STY2` | Unused labels, names printed twice (`Figure~\cref`) and `\ref` to an equation | Sources only |
+| `STY3` | Missing ties before references, `et al.` spacing, hyphenated number ranges, straight quotes, `...`, a space before `\footnote` and `\cite\cite` | Sources only |
+| `STY4` | Two spellings of one term, such as modelling and modeling | Sources only |
+| `STY5` | No `\DocumentMetadata` with the document language and tagging | Sources only |
+| `BIB111`–`BIB113` | A cited preprint, a URL that repeats the DOI, one venue spelled several ways | Sources only |
+| `BLD013`–`BLD015` | hyperref's PDF-string warnings, obsolete packages and commands named in the log, and BibTeX or Biber warnings | A build (`check` or `prepare`) |
+| `CHK001` | The warnings of chktex, the LaTeX lint tool; see [lint with chktex](chktex.md) | chktex installed |
+
 Suggestions are off by default: `ALL` in the check selection does not switch them
 on. Select a suggestion by its code, family or prefix beside `ALL` in
 `[checks] select` of the settings file, or with `--select` on the command line,
-which replaces the configured selection. An `--ignore` or `[checks] ignore` entry
-still wins. `fledge rules --json` marks each suggestion with `"suggestion": true`,
-and `fledge rule CODE` names the page that explains it.
+which replaces the configured selection. For example, `--select ALL --select STY3`
+adds the typography suggestions and `--select ALL --select STY --select BIB11`
+all style and bibliography suggestions. An `--ignore` or `[checks] ignore` entry
+still wins. `fledge rules STY` lists one family, `fledge rules --json` marks each
+suggestion with `"activation": "suggestion"`, and `fledge rule CODE` names the
+page that explains it.
 
 To silence one suggestion where it occurs, put a TeX comment
 `% fledge: ignore CODE`, with the code the report shows, at the end of its line,
@@ -380,6 +399,19 @@ spaces:
 % fledge: ignore CODE
 The sentence the suggestion is about.
 Another sentence the suggestions are about. % fledge: ignore CODE, OTHERCODE
+```
+
+The same comment works in a `.bib` file, in `inspect`, `check`, `prepare` and
+`bib check` alike. A bibliography suggestion is reported at the line where its
+entry starts, so put the comment on the line before the entry:
+
+```bibtex
+% fledge: ignore BIB112
+@article{smith2024,
+  title = {An example},
+  doi = {10.1000/example},
+  url = {https://doi.org/10.1000/example}
+}
 ```
 
 A `\%` is text, not a comment. Such comments silence suggestions only. Warnings

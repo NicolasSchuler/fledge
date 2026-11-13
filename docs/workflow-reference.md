@@ -16,9 +16,10 @@ limits and the exact source syntax the scanner supports.
 | Formatting and source edits | `tex-fmt` diffs/idempotence, project exclusions, protected regions and blank-line policies; opt-in comment cleanup, standalone input merging and selected BibTeX `.bbl` inlining |
 | Builds | Fresh isolated copies, controlled `latexmk` with glossary, acronym and nomenclature rules, the engine from `--engine`, the `engine` setting or a `% !TEX program` comment, explicit bibliography-backend selection, shell escape disabled, host-font and log-derived checks, and recorder-observed package/date/shadow policies |
 | PDF | Page/text/region and artwork measurements, explicit heading expectations, bounded Type 3/structure checks, configured contrast samples, grayscale previews and text/render comparisons |
-| Privacy and bundle | Configured identity scans, bounded image-metadata scans, guarded source metadata edits and final-PDF rechecks; filename/type/deliverable/size/template policies |
+| Privacy and bundle | Configured identity scans, bounded figure-metadata scans, home-folder paths and included-PDF information in the built PDF, an opt-in line that keeps included-PDF information out, guarded source metadata edits and final-PDF rechecks; filename/type/deliverable/size/template policies |
+| Suggestions | Opt-in style advice (`STY`), bibliography suggestions, build-log notes and the chktex lint, reported apart from the outcome and silenced with `% fledge: ignore CODE` |
 | Online references | Separately enabled DOI, Crossref metadata/candidate/notice and public-link checks with request limits; no automatic corrections |
-| Packaging | Build-traced and literal dependencies plus extra files listed in `[package] include`; independent document selections; deterministic ZIP, fresh extraction and rebuild for each; all selected packages must verify before release |
+| Packaging | Build-traced and literal dependencies plus extra files listed in `[package] include`; generated index, glossary and (when the venue needs it) bibliography files; independent document selections; deterministic ZIP, fresh extraction and rebuild for each; all selected packages must verify before release |
 | Interface | CLI and standalone PDF inspection; terminal/compact/JSON/HTML/CI reports, scoped review decisions, unverified diagnostic exports and a rule catalogue |
 | Concurrency | Shared CPU/memory/build/render admission; overlapping PDF branches and inventories; bounded page-rendering and formatting workers; serial mode |
 
@@ -50,11 +51,17 @@ paths for required deliverables; flattening remaps them.
 
 Preliminary cleanup removes OS and version-control metadata, editor backups and
 rebuildable auxiliary files (`.aux`, `.log`, `.out`, `.nav`, `.snm`, `.vrb`,
-`.xdv`, index and glossary files, and `_minted*` directories), never a `.bbl`.
-When a `<main>.bbl`, or for biblatex `<main>.run.xml`, sits beside the main
-file and the build read a regenerated file of that name, `prepare` ships the
-existing file; it survives cleanup and `--layout flat`. The package inventory lists it under
-`details.generated_bibliography`.
+`.xdv`, `.run.xml`, the index and glossary inputs `.idx` and `.glo`, and
+`_minted*` directories). It never removes a generated file that TeX reads back:
+a `.bbl`, an index (`.ind`) or a glossary, acronym or nomenclature list.
+
+`prepare` ships the index, glossary and nomenclature files its verified build
+generated, and the `.bbl` only when `submission_checks.venue_runs_bibliography_tools`
+is `false`; a supplied `.bbl` that the build regenerated is otherwise left out.
+The archive rebuild then runs with those tools blocked, which proves the shipped
+files suffice. Shipped generated files survive cleanup and `--layout flat`. The
+`package.dependencies` finding lists them under `details.generated_files`; see
+[generated files](preparation-options.md#generated-files).
 
 ## Settings tables
 
@@ -132,8 +139,9 @@ finds candidates there.
 
 `--jobs` sets how many operations may run at once on this computer, `--build-jobs`
 how many TeX builds may overlap and `--render-jobs` how many PDF pages may be rendered
-at once; `fledge check --help` shows the defaults. `--jobs 1` runs everything one
-after another.
+at once. The defaults follow the CPUs Fledge may use: `jobs` is the number of CPUs,
+at most 4, `render_jobs` half of them, from 1 to 4, and `build_jobs` is 1;
+`fledge check --help` shows them too. `--jobs 1` runs everything one after another.
 
 ```sh
 fledge prepare ./paper --output /tmp/prepared-paper \
@@ -147,6 +155,15 @@ overlap; page pairs and formatting files use bounded workers. The baseline,
 transformation, prepared build and archive rebuild gates stay ordered, and
 publication waits for every required result. `--build-jobs` bounds overlapping
 builds of independent document packages.
+
+When staging changed nothing, so that the prepared copy holds the baseline's
+sources byte for byte (no edit applied and no file left out), `prepare` reuses
+the baseline build instead of building the same sources again: the
+`transformed` stage is recorded as `skipped`, that build's findings and the
+comparison of the baseline PDF with itself are left out, and the archive rebuild
+still runs and must match. Comparisons render ranges of pages in one `pdftoppm`
+process each, and each PDF of a job is rendered and measured once, so the
+prepared PDF that two comparisons share is not rendered twice.
 
 Every expensive step shares one CPU and memory budget. The coordinator reserves
 128 MiB; render reservations account for both RGB buffers. Renderer and formatter

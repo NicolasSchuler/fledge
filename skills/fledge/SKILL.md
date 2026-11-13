@@ -6,13 +6,15 @@ description: Check and prepare LaTeX papers for submission with the Fledge CLI. 
 # Fledge: check and prepare LaTeX submissions
 
 Fledge inspects a LaTeX project (a folder or ZIP), builds it in an isolated
-sandbox, checks the PDF, and writes a verified submission bundle to a **new**
-output directory. It never edits the user's original files.
+sandbox, checks the PDF, and writes a verified submission bundle to a **new or
+empty** output directory. It never edits the user's original files.
 
 Run it as `fledge` (the macOS installer puts it at `~/.local/bin/fledge`; from a
 source checkout, `python -m latexprep` works too). Check it is available with
-`fledge --version`. If it is missing, ask the user before installing anything: the
-PyPI distribution is `fledge-latex` (`pipx install fledge-latex`), and the PyPI
+`fledge --version`. If it is missing, ask the user before installing anything.
+Fledge is not on PyPI yet: install a release tag from GitHub, such as
+`pipx install "git+https://github.com/NicolasSchuler/fledge.git@v0.3.1"` (the
+newest tag is listed at https://github.com/NicolasSchuler/fledge/tags). The PyPI
 package named `fledge` is an unrelated project. TeX and Poppler are separate
 installs. Documentation: https://nicolasschuler.github.io/fledge/
 
@@ -95,9 +97,16 @@ the JSON report's `execution.not_checked`; a pass covers only what ran.
 - Do not change scientific content, citations or wording to silence a heuristic
   (`TEX001` TODO markers, `MAN*` style advice) without asking the user.
 - `TEX009` (no generated `.bbl` shipped) is a not-applicable note by default,
-  listed only with `--show-passed`, and matters only for services that do not
-  run BibTeX or Biber, such as arXiv (the `arxiv` preset makes it a warning). `prepare` ships a `main.bbl` that sits beside
-  `main.tex` automatically.
+  listed only with `--show-passed`. It matters only for a service that does not
+  run BibTeX or Biber; arXiv does run them. Only with
+  `submission_checks.venue_runs_bibliography_tools = false` is it a warning, and
+  `prepare` then ships the `.bbl` its verified build generated. `prepare` always
+  ships the index and glossary files its build generated (`TEX012`).
+- `TEX011` (EPS or PS figures) blocks unless the converted PDF is shipped: convert
+  the figure to PDF; the sandbox cannot.
+- The engine comes from `--engine`, the `engine` setting or a
+  `% !TEX program = xelatex` comment in the main file, otherwise pdfLaTeX;
+  `BLD106` says which engine built the document and why.
 
 ## Configure instead of working around
 
@@ -124,8 +133,10 @@ Online reference checks are off by default and need both an individual switch in
 
 ## Safety rules
 
-- Fledge never modifies the input. The `--output`, `--report` and
-  `--html-report` paths must not exist yet and must be outside the input folder.
+- Fledge never modifies the input. The `--output` folder must be new or empty,
+  and the `--report` and `--html-report` files new; all must be outside the input
+  folder. `--force` replaces only an output or report that Fledge wrote earlier;
+  ask the user before using it.
 - A `blocked` run publishes nothing. Do not report a submission as ready unless
   `prepare` exited 0 or 1 and wrote `NEW_DIR/submission.zip`.
 - Builds run sandboxed with shell escape and network disabled. If a build fails

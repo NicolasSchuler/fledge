@@ -11,13 +11,18 @@ Fledge is a Python 3.11+ command-line tool. Building a paper (`check` and
 
 ## macOS installer
 
-From the [source checkout](https://github.com/NicolasSchuler/fledge) or an
-extracted source distribution, preview the plan and then install:
+The installer runs from a copy of Fledge's source. Clone a release tag (here
+`v0.3.1`; the [tags page](https://github.com/NicolasSchuler/fledge/tags) lists
+the newest), then preview the plan and install:
 
 ```sh
+git clone --branch v0.3.1 https://github.com/NicolasSchuler/fledge.git
+cd fledge
 bash install.sh --dry-run
 bash install.sh
 ```
+
+An extracted source distribution works the same way.
 
 The installer reuses tools you already have, shows its plan and asks before
 changing anything. It supplies Python 3.11+, `latexmk`, pdfLaTeX, BibTeX and
@@ -55,31 +60,34 @@ removes the prefix and the launcher, and only when the installer wrote that
 launcher for that prefix; otherwise nothing is removed. It refuses a symlinked
 prefix or one containing your home directory, and it leaves Homebrew, TeX,
 Poppler, shell files and your projects untouched. To upgrade, uninstall, then run
-the installer from the newer source.
+the installer from the newer source, such as a clone of the newer tag.
 
 ## Install with pipx or uv
 
-Fledge is published on PyPI as `fledge-latex`. Install it into its own
-environment with either tool:
+Fledge is not on PyPI yet; a release there, as `fledge-latex`, is planned. Until
+then, install a release tag straight from GitHub into its own environment with
+either tool. Both need Git:
 
 ```sh
-pipx install fledge-latex
+pipx install "git+https://github.com/NicolasSchuler/fledge.git@v0.3.1"
 # or
-uv tool install fledge-latex
+uv tool install "git+https://github.com/NicolasSchuler/fledge.git@v0.3.1"
 fledge --version
 ```
 
-This installs the `fledge` command, and `latex-prep` for older scripts. It does
-not install TeX or Poppler; add them as described under [Tools](#tools), and for
-[Linux](#linux) and [Windows](#windows) below. The command finds them through
-your shell's `PATH`, unlike the macOS installer's launcher, which saves the tool
-directories it detected. To upgrade or remove it, use `pipx upgrade fledge-latex`
-or `uv tool upgrade fledge-latex`, and `pipx uninstall fledge-latex` or
+Replace `v0.3.1` with the newest tag on the
+[tags page](https://github.com/NicolasSchuler/fledge/tags). This installs the
+`fledge` command, and `latex-prep` for older scripts. It does not install TeX or
+Poppler; add them as described under [Tools](#tools), and for [Linux](#linux)
+and [Windows](#windows) below. The command finds them through your shell's
+`PATH`, unlike the macOS installer's launcher, which saves the tool directories
+it detected. To upgrade, run the same command with the newer tag and `--force`.
+To remove Fledge, use `pipx uninstall fledge-latex` or
 `uv tool uninstall fledge-latex`.
 
 ```{warning}
-Install `fledge-latex`, not `fledge`. The PyPI package named `fledge` is an
-unrelated project, so `pip install fledge` does not install this tool.
+The PyPI package named `fledge` is an unrelated project, so `pip install fledge`
+does not install this tool. Fledge's own distribution is named `fledge-latex`.
 ```
 
 ## Manual installation from source
@@ -173,7 +181,7 @@ Fledge was previously named `latex-prep`. Existing setups keep working:
 - Do not install the former `latex-preparation` distribution next to
   `fledge-latex`: both provide the `latexprep` module. Use a fresh Python
   environment, or remove it with `python -m pip uninstall latex-preparation`.
-- Before this package was published, installations from a source checkout were
-  registered as `fledge`. Remove such an installation with
-  `python -m pip uninstall fledge` before installing `fledge-latex` into the same
-  environment. The `fledge` package on PyPI is an unrelated project.
+- Before version 0.3.0, installations from a source checkout were registered as
+  `fledge`. Remove such an installation with `python -m pip uninstall fledge`
+  before installing `fledge-latex` into the same environment. The `fledge`
+  package on PyPI is an unrelated project.

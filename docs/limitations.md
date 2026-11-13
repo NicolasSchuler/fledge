@@ -19,10 +19,14 @@ direct. No Fledge result guarantees that a venue will accept a submission.
   the Linux instructions in [installation](installation.md#windows); that route
   has not been tested live.
 - **No unsandboxed fallback exists.** If the sandbox cannot start, for example
-  inside another sandbox or under a restrictive host policy, builds are blocked.
+  inside another sandbox or under a restrictive host policy, builds cannot run
+  and the run ends with exit code 4.
 - **Optional `qpdf` and MuPDF checks** are tested against recorded tool output,
   not against the live tools. If either tool is missing, its checks are
   reported as incomplete.
+- **The chktex lint (`CHK001`) is only lightly tested on Linux.** It has run live
+  under the macOS sandbox; its Bubblewrap configuration on Linux has not yet been
+  confirmed in a live run. See [lint with chktex](chktex.md).
 - **Builds never generate bitmap fonts.** The build environment disables
   `mktexpk`, so a font that exists only as METAFONT source, for example
   T1-encoded Computer Modern without the `cm-super` package, ends the build
@@ -85,6 +89,11 @@ These questions need a person, even when a related check passes:
 - PDF comparison checks page count, extracted text and 144-DPI renders. Details
   below that resolution and differences inside PDF internals can go unnoticed.
   Rendering stops at 300 pages.
+- Figure metadata is reported, never removed. Fledge does not rewrite figure
+  files, and `suppress_included_pdf_information` (`TEX204`) keeps only the
+  information dictionary and file name of included PDFs out of the built PDF:
+  pdfLaTeX and LuaLaTeX still copy each included page's XMP and application data
+  (PieceInfo). Re-export a figure whose metadata must not be shared.
 - HTML captures at most eight affected page pairs and 12 MiB of PNG data.
   Visual previews explain recorded differences, not every page or PDF object.
 - Submission-text export supports literal declarations and common formatting.

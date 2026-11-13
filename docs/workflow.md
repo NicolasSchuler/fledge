@@ -29,9 +29,11 @@ your project ──copy──▶ snapshot ──build──▶ baseline PDF
    build never reads but must still ship go in
    [`[package] include`](configuration.md#package-contents). A conservative
    cleanup also removes rebuildable debris such as `.aux`, `.log` and editor
-   backups, but never a `.bbl`; `--no-cleanup` skips only that cleanup. A
-   generated `main.bbl` (and `main.run.xml`) beside the main file is kept
-   automatically for services that do not run BibTeX or Biber.
+   backups, but never a generated file that TeX reads back; `--no-cleanup`
+   skips only that cleanup. The index, glossary and nomenclature files that the
+   build generated ship for services that do not run makeindex or
+   makeglossaries, and the generated `.bbl` ships when you say the venue does not
+   run BibTeX or Biber (see [generated files](preparation-options.md#generated-files)).
 4. **Checks.** Source, bibliography and PDF checks run on the selected inputs
    and the baseline PDF: missing files, citations, labels, TODO markers and
    anything you configured.
@@ -39,9 +41,13 @@ your project ──copy──▶ snapshot ──build──▶ baseline PDF
    as `--layout flat`, comment removal or bibliography formatting. See
    [preparation options](preparation-options.md).
 6. **Prepared build and comparison.** The changed copy is rebuilt and compared
-   with the baseline by page count, extracted text and page renders.
+   with the baseline by page count, extracted text and page renders. When
+   staging changed nothing, the copy is the baseline's sources byte for byte, so
+   Fledge reuses the baseline build and reports this stage as `skipped`.
 7. **Archive rebuild.** Fledge writes the ZIP, extracts it into a fresh
-   directory, builds it again and requires an exact match. Source and
+   directory, builds it again and requires an exact match. This step always
+   runs. Generated files that ship are not regenerated here: the tools that wrote
+   them are blocked, which proves the shipped files suffice. Source and
    bibliography policies run again on the extracted files.
 8. **Publish.** Only now does the output appear in the `--output` folder. A
    blocked, expired or cancelled run publishes nothing.
