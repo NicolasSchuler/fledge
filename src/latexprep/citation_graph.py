@@ -12,16 +12,20 @@ What the .bib files say about themselves lives in ``bibliography_index``.
 
 from __future__ import annotations
 
+import functools
+import re
 from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import NamedTuple
 
 from .analysed_source import AnalysedSource, reuse_or_analyse
 from .cancellation import cancellation_point
 from .errors import PreparationError
 from .expanded_document import commands_before_end, package_code_sources, reachable_sources
+from .file_safety import read_regular_file
 from .findings import Finding
+from .literal_text import PACKAGE_COMMANDS, first_argument_names
 from .source_file_commands import (
     BIBLIOGRAPHY_RESOURCE_COMMANDS,
 )
@@ -210,10 +214,12 @@ def resource_declarations(
 
     Returns:
         The resolved resources, and a reason for each declaration that could not be
-        resolved.
+        resolved. A resource that BibTeX reads from the TeX installation, such as
+        ``IEEEabrv.bib``, is resolved but not a project resource (``installed_resources``).
     """
     resources: set[str] = set()
     reasons: list[str] = []
+    installed = _installed_resource_keys(inspection)
     for name in sorted(selected):
         cancellation_point()
         for command in commands_before_end(inspection.sources[name]):
@@ -227,11 +233,67 @@ def resource_declarations(
                 )
                 if target and target[1] in _RESOURCE_COMMANDS:
                     resources.add(target[0])
+                elif (name, command.start, argument.value) in installed:
+                    path = installed[name, command.start, argument.value]
+                    if not _string_definitions_only(path):
+                        reasons.append(
+                            f"{name}:{command.line}: {PurePosixPath(path).name} from the TeX "
+                            "installation holds entries that are not inspected"
+                        )
                 else:
                     reasons.append(
                         f"{name}:{command.line}: bibliography resource could not be resolved"
                     )
     return resources, reasons
+
+
+# An entry or other record that is not an @string, @comment or @preamble declaration.
+_ENTRY_RECORD = re.compile(rb"@[ \t]*(?!string\b|comment\b|preamble\b)[A-Za-z]", re.IGNORECASE)
+_MAX_INSTALLED_BIB_BYTES = 16 * 1024 * 1024
+
+
+@functools.lru_cache(maxsize=32)
+def _string_definitions_only(path: str) -> bool:
+    """Return whether an installation .bib file holds only abbreviations, as IEEEabrv.bib does.
+
+    Its entries are not inspected, so a citation of one stays uncertain; a file that
+    cannot be read is treated as holding entries.
+    """
+    try:
+        data = read_regular_file(Path(path), _MAX_INSTALLED_BIB_BYTES)
+    except OSError:
+        return False
+    return _ENTRY_RECORD.search(data) is None
+
+
+def _installed_resource_keys(inspection: SourceGraph) -> dict[tuple[str, int, str], str]:
+    """Return the installation path of each bibliography resource found there, by its argument.
+
+    Args:
+        inspection: The source graph of the manuscript.
+
+    Returns:
+        The path, keyed by the file, command offset and name of each reference.
+    """
+    return {
+        (item.path, item.command.start, item.reference): item.installed
+        for item in inspection.system_references
+        if item.command.name in _RESOURCE_COMMANDS and item.installed is not None
+    }
+
+
+def installed_resources(inspection: SourceGraph, selected: set[str]) -> list[str]:
+    """Return the installation paths of the selected sources' bibliography resources.
+
+    Args:
+        inspection: The source graph of the manuscript.
+        selected: The selected sources, by relative path.
+
+    Returns:
+        The distinct paths in source order.
+    """
+    keys = _installed_resource_keys(inspection)
+    return list(dict.fromkeys(path for key, path in keys.items() if key[0] in selected))
 
 
 class StyleReference(NamedTuple):
@@ -254,10 +316,13 @@ class BibliographySelection(NamedTuple):
             scope.
         styles: The named BibTeX styles; ``None`` when no selected document could be read, so
             the BibTeX style in use is unknown.
+        installed: The installation paths of declared resources that the TeX installation
+            provides, such as IEEE's ``IEEEabrv.bib``.
     """
 
     resources: set[str] | None
     styles: list[StyleReference] | None
+    installed: tuple[str, ...] = ()
 
 
 def bibliography_styles(inspection: SourceGraph, selected: set[str]) -> list[StyleReference]:
@@ -281,6 +346,27 @@ def bibliography_styles(inspection: SourceGraph, selected: set[str]) -> list[Sty
             local = target[0] if target and target[1] == "bibliographystyle" else None
             styles.append(StyleReference(argument.value.strip(), local))
     return styles
+
+
+def uses_biblatex(graph: SourceGraph, selected: set[str]) -> bool:
+    """Return whether a selected source declares an ``addbibresource`` or loads biblatex.
+
+    Args:
+        graph: The literal source graph.
+        selected: The selected sources to search.
+
+    Returns:
+        ``True`` when the document uses biblatex.
+    """
+    for name in selected:
+        for command in commands_before_end(graph.sources[name]):
+            if command.name == "addbibresource":
+                return True
+            if command.name in PACKAGE_COMMANDS and "biblatex" in (
+                first_argument_names(command) or []
+            ):
+                return True
+    return False
 
 
 def selected_bibliography(
@@ -307,7 +393,11 @@ def selected_bibliography(
         return BibliographySelection(None, None)
     selected = reachable_sources(inspection)
     resources, _ = resource_declarations(inspection, selected)
-    return BibliographySelection(resources or None, bibliography_styles(inspection, selected))
+    return BibliographySelection(
+        resources or None,
+        bibliography_styles(inspection, selected),
+        tuple(installed_resources(inspection, selected)),
+    )
 
 
 def require_directory(root: Path, purpose: str) -> None:

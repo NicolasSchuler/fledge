@@ -143,6 +143,34 @@ class BibliographyFilesTests(ProjectTestCase):
             ],
         )
 
+    def test_bytes_that_are_not_utf8_outside_every_record_are_read_as_bibtex_does(self):
+        # TeX Live's IEEEabrv.bib has one Latin-1 byte in its opening comment.
+        self.write(
+            "abbrev.bib",
+            b"% Nicol\xe1s Barabino\n@string{J = {Journal}}\n"
+            b"@comment{caf\xe9}\nbetween \xff entries\n@misc{k, title = {T}}\n",
+        )
+        load = self.read("abbrev.bib")
+        self.assertEqual(load.problems, [])
+        [document] = load.documents
+        self.assertTrue(document.valid)
+        self.assertEqual(document.foreign_bytes, 3)
+        self.assertEqual([entry.key for entry in document.entries], ["k"])
+        self.assertEqual(document.line(document.entries[0].start), 5)
+
+    def test_a_byte_that_is_not_utf8_inside_a_record_or_unparsed_text_is_refused(self):
+        cases = {
+            "value.bib": b"@misc{k, title = {caf\xe9}}\n",
+            "key.bib": b"@misc{k\xe9, title = {T}}\n",
+            "string.bib": b"@string{J\xe9 = {Journal}}\n",
+            "closing.bib": b"@misc{k, title = {T} \xe9}\n",
+            "after-error.bib": b"@misc{k, title = {T}\n\xe9\n",
+        }
+        for name, content in cases.items():
+            with self.subTest(name=name):
+                self.write(name, content)
+                self.assertEqual(self.kinds(self.read(name)), [(name, ProblemKind.NOT_UTF8)])
+
     def test_a_project_root_reached_through_a_link_is_still_readable(self):
         self.write("real/refs.bib")
         link = self.root / "project"

@@ -38,7 +38,15 @@ from .manuscript_vocabulary import (
 )
 from .tex_commands import PRIMITIVE_DEFINITION_COMMANDS
 from .tex_lexer import CONTROL_SEQUENCE, Command, skip_space
-from .tex_spans import command_end, definition_spans, in_conditional, in_half_open_span
+from .tex_spans import (
+    command_end,
+    definition_spans,
+    in_conditional,
+    in_half_open_span,
+    macro_definitions,
+    merge_spans,
+)
+from .uncertainty_reasons import CONDITIONAL_FLOW
 
 _LAYOUT = Policy("manuscript.layout_manipulation", "Checked layout override candidates.", ADVISORY)
 _LINE_NUMBER_RULE = "manuscript.line_numbers"
@@ -332,24 +340,35 @@ def _is_layout_override(document: ExpandedDocument, command: Command) -> bool:
     return command.name in LAYOUT_COMMANDS
 
 
-def _layout_overrides(document: ExpandedDocument) -> list[dict[str, object]]:
-    """Locate the layout override candidates outside conditionals.
+def _layout_overrides(document: ExpandedDocument) -> tuple[list[dict[str, object]], list[str]]:
+    r"""Locate the layout override candidates.
+
+    A candidate inside the definition of a macro that the document never uses, such as
+    the ``\BibTeX`` logo the IEEE template defines, overrides nothing and is left out;
+    one in a macro that is used is reported where it is defined. A candidate inside a
+    conditional may never execute, so it is an interpretation gap rather than a
+    confirmed override.
 
     Args:
         document: The expanded document to scan.
 
     Returns:
         Each candidate's location with its command name and a source snippet of at most
-        ``_SNIPPET_CHARS`` characters.
+        ``_SNIPPET_CHARS`` characters, and one reason per candidate inside a conditional.
     """
-    # A command inside a conditional may never execute, so it is reported as an
-    # interpretation gap rather than as a confirmed override.
+    unused = _unused_definition_bodies(document)
     overrides = []
+    reasons = []
     for command in document.commands:
         cancellation_point()
-        if not _is_layout_override(document, command) or in_conditional(
-            document.conditionals, command.start
-        ):
+        if not _is_layout_override(document, command) or in_half_open_span(unused, command.start):
+            continue
+        if in_conditional(document.conditionals, command.start):
+            location = document.location(command.start)
+            reasons.append(
+                f"layout override candidate \\{command.name} at {location.path}:"
+                f"{location.line} inside {CONDITIONAL_FLOW}"
+            )
             continue
         snippet_end = min(command_end(command), command.start + _SNIPPET_CHARS)
         overrides.append(
@@ -359,7 +378,65 @@ def _layout_overrides(document: ExpandedDocument) -> list[dict[str, object]]:
                 source=document.text[command.start : snippet_end],
             )
         )
-    return overrides
+    return overrides, reasons
+
+
+# Definitions that make a new name, which nothing but the document can run; a redefinition
+# or a \def may replace a hook that LaTeX itself runs, such as \footnoterule.
+_NEW_NAME_DEFINITIONS = frozenset(
+    {
+        "newcommand",
+        "providecommand",
+        "DeclareRobustCommand",
+        "NewDocumentCommand",
+        "ProvideDocumentCommand",
+        "newenvironment",
+        "NewDocumentEnvironment",
+        "def",
+        "gdef",
+        "edef",
+        "xdef",
+    }
+)
+
+
+def _unused_definition_bodies(document: ExpandedDocument) -> list[tuple[int, int]]:
+    r"""Return the replacement texts of the project's new macros that nothing uses.
+
+    A macro counts as used when a command or ``\begin`` names it anywhere or ``\let``
+    copies it. A redefinition (``\renewcommand``), an alias made by ``\let`` and a name
+    with ``@``, which LaTeX's own code may run, never count as unused; neither does a
+    name that any other kind of definition also defines.
+
+    Args:
+        document: The expanded document.
+
+    Returns:
+        The merged spans of those replacement texts.
+    """
+    commands = document.commands
+    used = {command.name for command in commands if not command.named}
+    used |= {
+        f"begin{{{command.arguments[0].value.strip()}}}"
+        for command in commands
+        if command.name == "begin" and command.arguments
+    }
+    used |= {command.name for command in commands if command.named_by == "let"}
+    definers: dict[str, set[str]] = {}
+    for command in commands:
+        if command.named_by is not None:
+            definers.setdefault(command.name, set()).add(command.named_by)
+        elif "environment" in command.name.casefold() and command.arguments:
+            name = f"begin{{{command.arguments[0].value.strip()}}}"
+            definers.setdefault(name, set()).add(command.name)
+    return merge_spans(
+        (definition.start, definition.end)
+        for definition in macro_definitions(document.text, commands)
+        if definition.name not in used
+        and "@" not in definition.name
+        and definers.get(definition.name)
+        and definers[definition.name] <= _NEW_NAME_DEFINITIONS
+    )
 
 
 def layout_checks(reading: Reading, options: ManuscriptCheckOptions) -> list[Finding]:
@@ -375,7 +452,8 @@ def layout_checks(reading: Reading, options: ManuscriptCheckOptions) -> list[Fin
     """
     if not options.check_layout_manipulation:
         return []
-    outcome = CheckOutcome(_layout_overrides(reading.document), reading.uncertainty)
+    overrides, reasons = _layout_overrides(reading.document)
+    outcome = CheckOutcome(overrides, [*reading.uncertainty, *reasons])
     return [policy_finding(_LAYOUT, outcome)]
 
 

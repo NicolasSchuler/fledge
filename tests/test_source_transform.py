@@ -258,8 +258,11 @@ class SuppressionTests(ProjectTestCase):
         expected = (
             "%!TEX program = lualatex\r\n%\r\n\r\n"
             + SUPPRESS_INCLUDED_PDF_INFORMATION
-            + "\r\n\\documentclass{article}\r\n\\begin{document}Text.\\end{document}\r\n"
+            + "\\documentclass{article}\r\n\\begin{document}Text.\\end{document}\r\n"
         )
+        # In front of \documentclass, so that findings about the prepared copy keep the
+        # original's line numbers.
+        self.assertEqual(expected.count("\n"), source.count("\n"))
         self.assertEqual(plan.contents["main.tex"].decode(), expected)
         self.assertEqual(plan.originals["main.tex"], original)
         self.assertEqual((self.root / "main.tex").read_bytes(), original)

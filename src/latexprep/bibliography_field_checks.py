@@ -88,25 +88,36 @@ def _descending(first: str, last: str) -> bool:
     return (len(first), first) > (len(last), last)
 
 
-def page_verdict(value: str) -> Verdict:
+def page_verdict(value: str, *, bibtex_styles: bool | None = True) -> Verdict:
     """Judge a literal ``pages`` value: ranges must ascend and use one notation.
 
     Single pages and comma-separated ranges with matching letter prefixes are supported,
     and so is the article-number notation of ACM and other journals: ``263:1--263:52``
     is pages 1 to 52 of article 263. A range across two article numbers is unsupported.
+    A typed en or em dash (U+2013, U+2014), as the ACM Digital Library exports, is a
+    range for biblatex; a BibTeX style finds no hyphen in it and prints one page, "p.".
 
     Args:
         value: The literal field value.
+        bibtex_styles: Whether a BibTeX style formats the value, rather than biblatex;
+            ``None`` when that is unknown, as without a selected main file.
 
     Returns:
-        A failed verdict for an empty value, descending endpoints or a malformed numeric
-        range, an inconclusive one for brace markup or an unsupported notation, and
-        otherwise a passed one.
+        A failed verdict for an empty value, descending endpoints, a malformed numeric
+        range or a typed dash a BibTeX style reads as one page, an inconclusive one for
+        brace markup, an unsupported notation or a typed dash under an unknown backend,
+        and otherwise a passed one.
     """
     if not value:
         return Verdict("failed", "empty page field")
     if any(character in value for character in "{}"):
         return Verdict("inconclusive", "brace markup")
+    if bibtex_styles is not False and any(character in value for character in "–—"):
+        return Verdict(
+            "failed" if bibtex_styles else "inconclusive",
+            "a typed dash, which BibTeX styles read as a single page (p. instead of pp.); "
+            "write -- instead",
+        )
     unknown = False
     for part in value.split(","):
         part = part.strip()
@@ -295,7 +306,9 @@ def _escapes_only_underscores(bib_fields: list[Field]) -> bool:
     return atom.kind == "literal" and has_only_escaped_underscores(atom.value)
 
 
-def _field_syntax(reference: LocatedEntry, rule: str, bib_fields: list[Field]) -> Finding | None:
+def _field_syntax(
+    reference: LocatedEntry, rule: str, bib_fields: list[Field], *, bibtex_styles: bool | None
+) -> Finding | None:
     """Run one literal field syntax check on an entry's fields of that name.
 
     Args:
@@ -303,13 +316,17 @@ def _field_syntax(reference: LocatedEntry, rule: str, bib_fields: list[Field]) -
         rule: The check, a key of ``_FIELD_CHECKS``.
         bib_fields: The entry's fields that the check reads; anything but one literal
             value is inconclusive.
+        bibtex_styles: Whether a BibTeX style formats the entries, rather than biblatex;
+            ``None`` when that is unknown.
 
     Returns:
         A finding for a value that did not pass, or ``None``.
     """
     name, verdict_of, evidence = _FIELD_CHECKS[rule]
     value = field_literal(bib_fields[0]) if len(bib_fields) == 1 else None
-    if value is not None:
+    if value is not None and rule == "page_ranges":
+        verdict = page_verdict(value, bibtex_styles=bibtex_styles)
+    elif value is not None:
         verdict = verdict_of(value)
     elif rule == "url_syntax" and _escapes_only_underscores(bib_fields):
         verdict = Verdict("inconclusive", ESCAPED_UNDERSCORE_REASON)
@@ -332,6 +349,8 @@ def check_entry_fields(
     uncertainties: list[Uncertainty],
     options: BibliographyOptions,
     results: ResultCollector,
+    *,
+    bibtex_styles: bool | None = None,
 ) -> None:
     """Run the configured field checks over ``references`` and summarize each of them.
 
@@ -342,6 +361,8 @@ def check_entry_fields(
         options: Which checks run, the required fields by entry type and the DOI entry
             types.
         results: The collector that receives the findings and the summaries.
+        bibtex_styles: Whether a BibTeX style formats the entries, rather than biblatex;
+            ``None`` when that is unknown.
     """
     requirements = dict(options.required_fields)
     enabled = {
@@ -369,7 +390,7 @@ def check_entry_fields(
             add("missing_doi", _doi_presence(reference))
         for rule, (name, _, _) in _FIELD_CHECKS.items():
             if enabled[rule] and (bib_fields := entry.fields_named(name)):
-                add(rule, _field_syntax(reference, rule, bib_fields))
+                add(rule, _field_syntax(reference, rule, bib_fields, bibtex_styles=bibtex_styles))
     for rule, row in rows.items():
         spec = SummarySpec(
             rule,

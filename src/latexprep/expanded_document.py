@@ -168,10 +168,9 @@ class ExpandedDocument:
         commands: The commands of ``text``.
         segments: Where each span of ``text`` was copied from.
         graph_uncertainty: Source-graph gaps: missing inputs, unparsable files,
-            bounded-limit stops.
-        presence_uncertainty: Graph gaps plus conditional control flow, which can add or
-            remove any declaration and therefore defeats every claim that something is
-            absent.
+            bounded-limit stops. Conditional control flow is not one: both branches are in
+            ``text``, and each check decides what a command inside ``conditionals`` means
+            for it.
         conditionals: The spans of conditional control flow in ``text``.
         body_start: Where the document body starts in ``text``.
         parse_limit_exceeded: Whether the spliced text exceeded a bounded parsing limit, so
@@ -184,7 +183,6 @@ class ExpandedDocument:
     commands: list[Command]
     segments: list[SourceSegment]
     graph_uncertainty: list[str]
-    presence_uncertainty: list[str]
     conditionals: list[tuple[int, int]]
     # Offset just after \begin{document}; zero when the document has no body opener.
     body_start: int
@@ -454,11 +452,6 @@ def expand_document(
         parse_limit_exceeded = True
     graph_uncertainty = sorted(set(splice.uncertainty))
     conditionals = conditional_spans(commands)
-    presence_uncertainty = list(graph_uncertainty)
-    if conditionals:
-        presence_uncertainty.append(
-            "conditional source control flow can add or remove declarations"
-        )
     # Preamble declarations configure the toolchain; they are not manuscript content.
     opening = next(
         (command for command in commands if command.begins("document") and not command.depth),
@@ -471,7 +464,6 @@ def expand_document(
         commands=commands,
         segments=splice.segments,
         graph_uncertainty=graph_uncertainty,
-        presence_uncertainty=presence_uncertainty,
         conditionals=conditionals,
         body_start=command_end(opening) if opening is not None else 0,
         parse_limit_exceeded=parse_limit_exceeded,

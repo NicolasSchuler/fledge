@@ -34,6 +34,7 @@ from .tex_spans import (
     definition_spans,
     in_conditional,
     in_half_open_span,
+    opens_conditional,
 )
 from .uncertainty_reasons import context_reasons
 
@@ -83,7 +84,7 @@ _PACKAGE_GENERATORS = {
 _INERT_IN_PACKAGE_CONDITIONALS = (
     INTERPRETED_COMMANDS
     | MACRO_DEFINITION_COMMANDS
-    | {"ProvidesPackage", "ProvidesClass", "ProvidesFile", "NeedsTeXFormat"}
+    | {"ProvidesPackage", "ProvidesClass", "ProvidesFile", "NeedsTeXFormat", "else", "or", "fi"}
 )
 
 
@@ -106,6 +107,16 @@ def _package_declarations(document: ExpandedDocument) -> tuple[list[Declaration]
         # presence must not turn the whole inventory inconclusive.
         conditionals = conditional_spans(source.commands)
         definitions = definition_spans(source.masked, source.commands)
+        # LaTeX refuses \usepackage after \begin{document}, so the main file's body
+        # cannot hold or generate a package declaration.
+        body = next(
+            (
+                command.start
+                for command in source.commands
+                if path == document.graph.main and command.begins("document") and not command.depth
+            ),
+            None,
+        )
         for command in commands_before_end(source):
             conditional = in_conditional(conditionals, command.start)
             if command.name == "endinput" and (
@@ -121,6 +132,9 @@ def _package_declarations(document: ExpandedDocument) -> tuple[list[Declaration]
             if command.name not in PACKAGE_COMMANDS:
                 if (
                     conditional
+                    and (body is None or command.start < body)
+                    and not command.named
+                    and not opens_conditional(command)
                     and not in_half_open_span(definitions, command.start)
                     and command.name not in _INERT_IN_PACKAGE_CONDITIONALS
                 ):

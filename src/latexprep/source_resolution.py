@@ -9,10 +9,12 @@ of its findings. It does not walk files (``source_graph``) or judge commands
 (``source_command_checks``), and it records nothing itself: the caller applies the
 returned ``Resolution``.
 
-A bare ``\input{name}`` that the project lacks may name a file of the TeX installation,
-such as ``glyphtounicode.tex``. The job asks the installation once about such names
-(``tex_installation``) and makes the answer current with :func:`installed_inputs_known`;
-without an answer the name is reported missing, as before.
+A bare ``\input{name}``, ``\bibliography{name}`` or ``\includegraphics{name}`` that the
+project lacks may name a file of the TeX installation, such as ``glyphtounicode.tex``,
+IEEE's ``IEEEabrv.bib`` or the sample figure ``example-image-a.pdf``. The job
+asks the installation once about such names (``tex_installation``) and makes the answer
+current with :func:`installed_inputs_known`; without an answer the name is reported
+missing, as before.
 """
 
 from __future__ import annotations
@@ -31,7 +33,9 @@ from .findings import EvidenceKind, Finding
 from .path_safety import lexically_escapes
 from .project_files import is_parsed_source, path_comparison_key, project_files
 from .source_file_commands import (
+    COMMA_LIST_FILE_COMMANDS,
     DEFAULT_SUFFIXES_BY_FILE_COMMAND,
+    GRAPHICS_SUFFIXES,
     INSTALLATION_INPUT_COMMANDS,
     TOOLCHAIN_FILE_COMMANDS,
     is_literal_text,
@@ -45,6 +49,9 @@ COPY_INTO_PROJECT = (
 )
 # A file name the TeX installation may hold: letters, digits and ``.-_+``, no directory.
 _INSTALLATION_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,127}")
+# The suffixes asked for a figure name without one; graphicx would try more, but the
+# installation's figures, such as mwe's example-image-a, come in these.
+_INSTALLED_GRAPHICS_SUFFIXES = (".pdf", ".png", ".jpg", ".eps")
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,11 +60,16 @@ class InstalledInputs:
 
     Attributes:
         asked: The file names the installation was asked about, each with its suffix.
-        found: The subset that the installation holds.
+        found: The installation path of each asked name that the installation holds.
+        identical: The project's class and package files whose bytes equal the
+            installation's copy of the same name, by project path. TeX reads the same
+            text from either, so they are analysed as the installation's files are: not
+            as project source.
     """
 
     asked: frozenset[str]
-    found: frozenset[str]
+    found: Mapping[str, str]
+    identical: frozenset[str] = frozenset()
 
 
 _installed_inputs: ContextVar[InstalledInputs | None] = ContextVar(
@@ -82,24 +94,34 @@ def installed_inputs_known(answer: InstalledInputs | None) -> Generator[None]:
         _installed_inputs.reset(token)
 
 
-def installation_file_name(reference: str) -> str | None:
-    r"""Return the file name an ``\input`` reference asks the TeX installation for.
+def installation_file_names(reference: str, command: str = "input") -> tuple[str, ...]:
+    r"""Return the file names a bare ``\input``, ``\bibliography`` or figure name may have.
 
     Args:
-        reference: The name as ``\input`` writes it.
+        reference: The name as the command writes it.
+        command: ``input``, ``bibliography`` or ``includegraphics``, without the backslash.
 
     Returns:
-        The name with ``.tex`` when it has no suffix, or ``None`` when the reference has a
-        directory or characters no installation file name has.
+        For ``\input``, the name with ``.tex`` when it has no suffix; for
+        ``\bibliography``, the name with ``.bib`` unless it ends with it, as BibTeX reads
+        it; for a figure without a graphics suffix, the name with each suffix that TeX
+        Live's sample figures such as ``example-image`` come in. Nothing when the
+        reference has a directory or characters no installation file name has.
     """
     value = reference.strip()
     if not _INSTALLATION_NAME.fullmatch(value) or value.endswith("."):
-        return None
-    return value if PurePosixPath(value).suffix else value + ".tex"
+        return ()
+    if command == "bibliography":
+        return (value if value.endswith(".bib") else value + ".bib",)
+    if command == "includegraphics":
+        if PurePosixPath(value).suffix.lower() in GRAPHICS_SUFFIXES:
+            return (value,)
+        return tuple(value + suffix for suffix in _INSTALLED_GRAPHICS_SUFFIXES)
+    return (value if PurePosixPath(value).suffix else value + ".tex",)
 
 
 def installation_candidates(root: Path) -> list[str]:
-    r"""Return the bare ``\input`` names in the project's sources that no project file has.
+    r"""Return the bare input, bibliography and figure names that no project file has.
 
     Only these may be files of the TeX installation. The sources are lexed, not walked:
     the analysis builds the one source graph later, with the installation's answer. A
@@ -109,12 +131,15 @@ def installation_candidates(root: Path) -> list[str]:
         root: The project folder.
 
     Returns:
-        The distinct file names, with their suffixes, in project order.
+        The distinct file names, with their suffixes, in project order; figure names,
+        each under several suffixes, after the input and bibliography names.
     """
     files = project_files(root)
     project_names = {PurePosixPath(name).name for name in files}
     budget, ignored = LoadBudget(), GraphFindings([], [])
     names: dict[str, None] = {}
+    # Figures come last: each is asked under several suffixes, and the lookup is bounded.
+    figures: dict[str, None] = {}
     for name, path in files.items():
         cancellation_point()
         source = load_source(name, path, budget, ignored) if is_parsed_source(name, path) else None
@@ -125,11 +150,58 @@ def installation_candidates(root: Path) -> list[str]:
                 or not command.arguments
             ):
                 continue
-            value = command.arguments[0].value.strip()
-            file_name = installation_file_name(value)
-            if file_name and not {value, file_name} & project_names:
-                names[file_name] = None
-    return list(names)
+            argument = command.arguments[0].value
+            values = argument.split(",") if command.name in COMMA_LIST_FILE_COMMANDS else [argument]
+            for value in (item.strip() for item in values):
+                file_names = installation_file_names(value, command.name)
+                if file_names and not {value, *file_names} & project_names:
+                    found = figures if command.name == "includegraphics" else names
+                    found.update(dict.fromkeys(file_names))
+    return [*names, *(name for name in figures if name not in names)]
+
+
+def installed_copy(path: str) -> bool:
+    """Return whether a project file is a byte-identical copy of the installation's file.
+
+    Args:
+        path: The project path of a class or package file.
+
+    Returns:
+        ``True`` when the installation was asked and its copy has the same bytes.
+    """
+    installed = _installed_inputs.get()
+    return installed is not None and path in installed.identical
+
+
+def package_code_candidates(root: Path) -> dict[str, list[str]]:
+    """Return the project's class and package files by file name, as the installation names them.
+
+    Args:
+        root: The project folder.
+
+    Returns:
+        The project paths of each ``.cls`` and ``.sty`` file name, in project order.
+    """
+    found: dict[str, list[str]] = {}
+    for name in project_files(root):
+        file_name = PurePosixPath(name).name
+        if PurePosixPath(name).suffix in {".cls", ".sty"} and _INSTALLATION_NAME.fullmatch(
+            file_name
+        ):
+            found.setdefault(file_name, []).append(name)
+    return found
+
+
+def installation_query(root: Path) -> tuple[list[str], dict[str, list[str]]]:
+    """Return what to ask the TeX installation: missing input names and the project's classes.
+
+    Args:
+        root: The project folder.
+
+    Returns:
+        The ``installation_candidates`` and the ``package_code_candidates``.
+    """
+    return installation_candidates(root), package_code_candidates(root)
 
 
 # Commands that also look for the name from each enclosing directory, as TeX does when a
@@ -141,7 +213,10 @@ _URL_SCHEME = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*:")
 
 
 class SystemReference(NamedTuple):
-    """A class, package or style reference left for the TeX toolchain to resolve.
+    r"""A reference left for the TeX toolchain to resolve from its installation.
+
+    Classes, packages and styles are left to the toolchain unasked; an ``\input`` or
+    ``\bibliography`` name only once the installation said that it holds the file.
 
     Attributes:
         path: The project file the reference appears in.
@@ -149,12 +224,14 @@ class SystemReference(NamedTuple):
         reference: The name as the command writes it.
         basename: The file name TeX looks for: ``reference`` with the command's default
             suffix when it has none.
+        installed: The installation path of the file, when the installation was asked.
     """
 
     path: str
     command: Command
     reference: str
     basename: str
+    installed: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -486,13 +563,16 @@ def resolve_reference(
         basename = value if PurePosixPath(value).suffix else value + suffix
         return Resolution(system=SystemReference(reference.path, command, value, basename))
     installed = _installed_inputs.get()
-    name = installation_file_name(reference.value)
-    if command.name in INSTALLATION_INPUT_COMMANDS and installed is not None and name:
-        if name in installed.found:
+    names = installation_file_names(reference.value, command.name)
+    if command.name in INSTALLATION_INPUT_COMMANDS and installed is not None and names:
+        held = [name for name in names if name in installed.found]
+        if held:
             return Resolution(
-                system=SystemReference(reference.path, command, reference.value, name)
+                system=SystemReference(
+                    reference.path, command, reference.value, held[0], installed.found[held[0]]
+                )
             )
-        if name in installed.asked:
+        if all(name in installed.asked for name in names):
             _report_missing(reference, candidates, tree, findings, installation_asked=True)
             return Resolution()
     _report_missing(reference, candidates, tree, findings)

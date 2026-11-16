@@ -1,7 +1,8 @@
 r"""Ask the TeX installation which files it holds, through ``kpsewhich`` under isolation.
 
 A project may read a file of the installation by its bare name, as
-``\input{glyphtounicode}`` does, and a local class may shadow a system one. Both ask
+``\input{glyphtounicode}`` and ``\bibliography{IEEEabrv}`` do, and a local class may
+shadow a system one. Both ask
 ``kpsewhich`` from an empty folder, so that the project's own files cannot answer, and
 both share the bounds and the reading of its output here.
 """
@@ -9,17 +10,19 @@ both share the bounds and the reading of its output here.
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePosixPath
 
 from .command_runner import CommandRunner
 from .errors import PreparationError
+from .file_safety import read_regular_file
 from .source_resolution import InstalledInputs
 
 logger = logging.getLogger(__name__)
 
-# Most names one lookup asks about; a project that lacks more is reported as it is.
-MAX_INSTALLATION_NAMES = 32
+# Most names one lookup asks about, a figure counting once per suffix; a project that lacks
+# more is reported as it is.
+MAX_INSTALLATION_NAMES = 64
 
 
 async def installed_files(
@@ -50,9 +53,9 @@ async def installed_files(
     await runner.tool_version(["kpsewhich", "--version"], work / "version")
     lookup = work / "lookup"
     lookup.mkdir()
-    execution = await runner.run(
-        ["kpsewhich", "--format=tex", *names], cwd=lookup, workspace=lookup
-    )
+    # Without --format, kpsewhich searches by suffix: TeX's paths for .tex, .cls or .def
+    # and for unknown suffixes, BibTeX's for .bib.
+    execution = await runner.run(["kpsewhich", *names], cwd=lookup, workspace=lookup)
     # kpsewhich exits with the number of names it found no file for.
     if not execution.within_limits or not 0 <= execution.returncode <= len(names):
         raise PreparationError(
@@ -90,12 +93,56 @@ async def ask_installation(
         the installation cannot answer; the names are then reported missing as before.
     """
     asked = list(names[:MAX_INSTALLATION_NAMES])
+    if len(names) > len(asked):
+        logger.warning(
+            "TeX installation lookup asks about %d of %d names; the rest are reported missing",
+            len(asked),
+            len(names),
+        )
     if not asked:
         return None
     try:
         found = await installed_files(asked, work, runner)
     except (PreparationError, OSError) as error:
-        logger.info("TeX installation lookup for %d input names failed: %s", len(asked), error)
+        logger.warning(
+            "TeX installation lookup for %d input names failed, so they are reported missing: %s",
+            len(asked),
+            error,
+        )
         return None
     logger.debug("TeX installation holds %d of %d input names", len(found), len(asked))
-    return InstalledInputs(frozenset(asked), frozenset(found))
+    return InstalledInputs(frozenset(asked), found)
+
+
+# Larger class or package files are left to the analysis.
+_MAX_COMPARED_BYTES = 8 * 1024 * 1024
+
+
+def identical_copies(
+    root: Path, packages: Mapping[str, Sequence[str]], found: Mapping[str, str]
+) -> frozenset[str]:
+    """Return the project's class and package files whose bytes equal the installation's copy.
+
+    Args:
+        root: The project folder.
+        packages: The project paths of each class and package file name.
+        found: The installation path of each file name the installation holds.
+
+    Returns:
+        The project paths of the identical copies; a file that cannot be read is not one.
+    """
+    identical = set()
+    for name, paths in packages.items():
+        if name not in found:
+            continue
+        try:
+            installed = read_regular_file(Path(found[name]), _MAX_COMPARED_BYTES)
+        except OSError:
+            continue
+        for path in paths:
+            try:
+                if read_regular_file(root / path, _MAX_COMPARED_BYTES) == installed:
+                    identical.add(path)
+            except OSError:
+                continue
+    return frozenset(identical)

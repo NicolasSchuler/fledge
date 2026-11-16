@@ -24,13 +24,12 @@ from pathlib import Path, PurePosixPath
 from typing import NamedTuple
 
 from .cancellation import cancellation_point
-from .citation_graph import build_citation_graph, resource_declarations
+from .citation_graph import build_citation_graph, resource_declarations, uses_biblatex
 from .expanded_document import commands_before_end
 from .file_safety import read_regular_file
 from .file_scan import MAX_SCAN_MATCHES
 from .finding_text import list_locations, more_suffix
 from .findings import EvidenceKind, Finding
-from .literal_text import PACKAGE_COMMANDS, first_argument_names
 from .option_config import require_text, require_unique_strings, validate_scalars
 from .rules import code_for
 from .setting_choices import ENGINES, Engine
@@ -179,27 +178,6 @@ def _first_declaration(
     return None, None
 
 
-def _uses_biblatex(graph: SourceGraph, selected: set[str]) -> bool:
-    """Return whether a selected source declares an ``addbibresource`` or loads biblatex.
-
-    Args:
-        graph: The literal source graph.
-        selected: The selected sources to search.
-
-    Returns:
-        ``True`` when the document uses biblatex.
-    """
-    for name in selected:
-        for command in commands_before_end(graph.sources[name]):
-            if command.name == "addbibresource":
-                return True
-            if command.name in PACKAGE_COMMANDS and "biblatex" in (
-                first_argument_names(command) or []
-            ):
-                return True
-    return False
-
-
 def _skip_label(text: str, cursor: int) -> int:
     """Skip the optional ``[label]`` that starts at ``cursor``; its brackets and braces may nest.
 
@@ -321,7 +299,7 @@ def check_bbl(
     if not bib:
         return _without_bib(main, options)
     expected = (PurePosixPath(main).parent / (PurePosixPath(main).stem + ".bbl")).as_posix()
-    backend = Backend.BIBLATEX if _uses_biblatex(graph, selected) else Backend.BIBTEX
+    backend = Backend.BIBLATEX if uses_biblatex(graph, selected) else Backend.BIBTEX
     plan = _Plan(main, expected, bib, backend, expected in graph.files)
     findings = [_presence(graph, selected, plan, options)]
     if options.check_bbl_coverage:

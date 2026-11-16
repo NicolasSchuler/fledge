@@ -70,12 +70,14 @@ RULES = (
         title="Missing source dependencies",
         description=(
             "Detect absent files named by supported literal source commands. A bare "
-            "\\input name that the project lacks, such as glyphtounicode, is first looked up "
-            "in the TeX installation."
+            "\\input, \\bibliography or \\includegraphics name that the project lacks, such "
+            "as glyphtounicode, IEEEabrv or example-image, is first looked up in the TeX "
+            "installation; a file found there is not shipped."
         ),
         tests=(
             "tests.test_source_analysis.SourceAnalysisTests.test_absolute_outside_and_missing_dependencies_are_errors",
             "tests.test_tex_installation.InstallationResolutionTests.test_a_name_the_installation_lacks_is_missing_from_both",
+            "tests.test_tex_installation.InstalledBibliographyTests.test_an_installed_bibliography_is_resolved_and_not_a_project_resource",
         ),
         fix="Include the missing dependency or correct the literal file path.",
         mandatory=True,
@@ -354,11 +356,13 @@ RULES = (
         description=(
             "Check string macros against local definitions, built-in month names and the "
             "macros of the named bibliography style (the journal macros of the standard styles, "
-            "and the MACRO definitions of a project-shipped .bst file); incomplete parse "
-            "coverage is inconclusive."
+            "and the MACRO definitions of a project-shipped .bst file) and the @string "
+            "definitions of a .bib file read from the TeX installation, such as IEEEabrv; "
+            "incomplete parse coverage is inconclusive."
         ),
         tests=(
             "tests.test_bibliography.BibliographyTests.test_literal_relationships_and_builtin_months_are_checked",
+            "tests.test_tex_installation.InstalledBibliographyTests.test_its_string_macros_are_defined_and_others_still_reported",
         ),
         fix="Define the missing string macro or replace it with the intended literal text.",
         mandatory=True,
@@ -418,12 +422,15 @@ RULES = (
         name="bibliography.input",
         title="Unreadable bibliography files",
         description=(
-            "Report a .bib file that is a symbolic link, cannot be read, is not UTF-8 or "
-            "exceeds the bibliography size limit. It is neither inspected nor normalized, so "
-            "the checks over its entries are incomplete."
+            "Report a .bib file that is a symbolic link, cannot be read, has bytes that are "
+            "not UTF-8 inside an entry or exceeds the bibliography size limit. It is neither "
+            "inspected nor normalized, so the checks over its entries are incomplete. Bytes "
+            "outside every entry, which BibTeX skips, are accepted; such a file is inspected "
+            "but never rewritten."
         ),
         tests=(
             "tests.test_bibliography.BibliographyTests.test_non_utf8_and_symbolic_link_inputs_are_not_modified",
+            "tests.test_bibliography_files.BibliographyFilesTests.test_bytes_that_are_not_utf8_outside_every_record_are_read_as_bibtex_does",
         ),
         fix=(
             "Make the file readable, save it as UTF-8 and keep it within the size limit, or "

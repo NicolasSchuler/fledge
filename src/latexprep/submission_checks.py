@@ -464,8 +464,9 @@ def _unused(
 ) -> Finding:
     """List the asset files outside the selected literal dependency graph.
 
-    The finding is advisory, and inconclusive whenever the file inventory or the
-    dependency graph is incomplete; no candidate is safe to delete based on it.
+    The finding is advisory, and inconclusive whenever the file inventory is incomplete,
+    or the dependency graph is and some asset lies outside it; no candidate is safe to
+    delete based on it.
 
     Args:
         root: The project directory.
@@ -486,18 +487,20 @@ def _unused(
             analysis = analyze_sources(root, main, analysed=analysed)
             if analysis.main is None:
                 incomplete.append("No unambiguous selected document root is available.")
-            if any(
+            candidates = [
+                {"path": name}
+                for name, path in files.items()
+                if path.suffix.lower() in _ASSET_EXTENSIONS and name not in analysis.dependencies
+            ]
+            # A dependency the graph missed can only make a used file look unused; with no
+            # candidate at all, a gap in the graph cannot change the answer.
+            if candidates and any(
                 item.status == "inconclusive" or item.severity == "error"
                 for item in analysis.findings
             ):
                 incomplete.append(
                     "The selected literal dependency graph has missing or uncertain inputs."
                 )
-            candidates = [
-                {"path": name}
-                for name, path in files.items()
-                if path.suffix.lower() in _ASSET_EXTENSIONS and name not in analysis.dependencies
-            ]
         except OSError:
             incomplete.append("The selected source dependency graph could not be inspected.")
     rule = ScanRule(

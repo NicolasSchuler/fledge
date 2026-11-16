@@ -415,7 +415,7 @@ def inspect_bibliography_integrity(
     analysis = reuse_or_analyse(root, main, analysed)
     selection = selected_bibliography(root, main, analysed=analysis)
     documents, findings = _load_bibliographies(root, selection.resources, analysis.bib_files)
-    style = style_macros(root, selection.styles)
+    style = style_macros(root, selection.styles, selection.installed)
     return documents, _integrity_findings(documents, findings, style)
 
 

@@ -21,12 +21,13 @@ from .expanded_document import ExpandedDocument
 from .finding_text import plural
 from .finding_weight import Weight
 from .findings import EvidenceKind, Finding
-from .literal_text import is_placeholder_text, key_value_items, plain_argument_text
+from .literal_text import is_placeholder_text, key_value_items, plain_argument_text, plain_text
 from .manuscript_check_options import ManuscriptCheckOptions
 from .manuscript_policy_kernel import CheckOutcome, Policy, Reading, listing, policy_finding
 from .manuscript_vocabulary import METADATA_COMMANDS, ORCID_COMMANDS
-from .tex_spans import in_conditional
-from .uncertainty_reasons import CONDITIONAL_FLOW, context_reasons
+from .tex_lexer import Command
+from .tex_spans import conditional_branches, defined_names, in_conditional, opens_conditional
+from .uncertainty_reasons import CONDITIONAL_FLOW, context_reasons, grouped_reason
 
 _REQUIRED_METADATA = Policy(
     "manuscript.required_metadata", "Checked configured literal metadata presence."
@@ -52,7 +53,7 @@ _ORCID_X_VALUE = 10  # the check value that is written as the letter X
 
 @dataclass(slots=True)
 class MetadataValue:
-    """One declaration of a metadata field and what is unclear about it.
+    r"""One declaration of a metadata field and what is unclear about it.
 
     Attributes:
         path: The source file of the declaration, or ``None``.
@@ -60,6 +61,12 @@ class MetadataValue:
         value: The plain text of the declaration's argument.
         uncertainty: Why the argument or the control flow around it is unclear.
         placeholder: Whether the value is placeholder text.
+        start: The offset of the declaration in the expanded document.
+        literal: Whether the declaration gives literal text that a command beside it
+            cannot take away: its only unclear constructs are commands of the class or
+            packages, such as llncs's ``\inst``, not macros the project defines. Its value
+            may still be unclear for a comparison with the PDF's properties.
+        present: Whether it is literal, not placeholder text, and runs where it stands.
     """
 
     path: str | None
@@ -67,6 +74,9 @@ class MetadataValue:
     value: str
     uncertainty: list[str]
     placeholder: bool
+    start: int
+    literal: bool = False
+    present: bool = False
 
     def as_dict(self) -> dict[str, object]:
         """Render the declaration as report details."""
@@ -87,25 +97,95 @@ def _metadata(document: ExpandedDocument) -> tuple[dict[str, list[MetadataValue]
 
     Returns:
         The declarations of every field in ``METADATA_COMMANDS``, in source order, and the
-        document's presence uncertainty.
+        document's source-graph gaps.
     """
     values: dict[str, list[MetadataValue]] = {name: [] for name in METADATA_COMMANDS}
-    # Metadata lives in the preamble, so only the declarations' own arguments and
-    # control flow that could add or remove a declaration bear on this reading.
-    reasons = list(document.presence_uncertainty)
+    # Metadata lives in the preamble, so only the declarations' own arguments and the
+    # control flow around each declaration bear on this reading.
+    reasons = list(document.graph_uncertainty)
+    project = defined_names(document.commands)
     for command in document.commands:
         for name, commands in METADATA_COMMANDS.items():
             if command.name not in commands:
                 continue
-            value, unknown = plain_argument_text(command)
-            unknown.extend(context_reasons(command, document.conditionals, "metadata"))
+            value, unknown = _argument_text(document, command)
+            placeholder = is_placeholder_text(value)
+            literal = bool(value) and all(
+                item.startswith("\\") and item.removeprefix("\\") not in project for item in unknown
+            )
+            context = context_reasons(command, document.conditionals, "metadata")
+            unknown.extend(context)
             location = document.location(command.start)
             values[name].append(
                 MetadataValue(
-                    location.path, location.line, value, unknown, is_placeholder_text(value)
+                    location.path,
+                    location.line,
+                    value,
+                    unknown,
+                    placeholder,
+                    command.start,
+                    literal,
+                    literal and not placeholder and not context,
                 )
             )
     return values, reasons
+
+
+def _argument_text(document: ExpandedDocument, command: Command) -> tuple[str, list[str]]:
+    r"""Return a declaration's literal text and the constructs that leave it unclear.
+
+    A conditional inside the argument whose branches type no text, such as
+    ``\title{Study\ifdefined\final\thanks{Funding}\fi}``, leaves the rest as the value;
+    one that may type text keeps the value unclear.
+
+    Args:
+        document: The expanded document.
+        command: The declaration.
+
+    Returns:
+        The text and its unresolved constructs, as ``plain_argument_text`` gives them.
+    """
+    value, unknown = plain_argument_text(command)
+    if not unknown or not command.arguments:
+        return value, unknown
+    argument = command.arguments[0]
+    raw = list(document.text[argument.start : argument.end])
+    blanked = False
+    for start, end in document.conditionals:
+        if not argument.start <= start < end < argument.end:
+            continue
+        stop = end + len("\\fi")
+        if not _types_nothing(document, start, stop):
+            return value, unknown
+        raw[start - argument.start : stop - argument.start] = " " * (stop - start)
+        blanked = True
+    if not blanked:
+        return value, unknown
+    outside, unclear = plain_text("".join(raw))
+    if outside.strip() and not unclear:
+        return " ".join(outside.split()), []
+    return value, unknown
+
+
+def _types_nothing(document: ExpandedDocument, start: int, stop: int) -> bool:
+    r"""Return whether a conditional's text holds nothing but its control words and notes.
+
+    Args:
+        document: The expanded document.
+        start: The offset of the conditional's opening ``\if…``.
+        stop: The offset just after its ``\fi``.
+
+    Returns:
+        ``True`` when, without its control words and named operands, the conditional
+        gives no literal text and nothing unclear, as a lone ``\thanks`` does.
+    """
+    raw = list(document.text[start:stop])
+    for command in document.between(start, stop):
+        if command.named or opens_conditional(command) or command.name in {"else", "or", "fi"}:
+            end = command.name_end
+            raw[command.start - start : end - start] = " " * (end - command.start)
+    text, unclear = plain_text("".join(raw))
+    return not text.strip() and not unclear
 
 
 def read_literal_metadata(
@@ -151,8 +231,57 @@ def read_literal_metadata(
     return values, sorted(set(reasons))
 
 
+def _branch_alternatives(document: ExpandedDocument, items: list[MetadataValue]) -> bool:
+    r"""Return whether two declarations are the two branches of one ``\if…\else…\fi``.
+
+    Then one of them runs whichever branch is taken, as with
+    ``\ifdefined\cameraready\author{…}\else\author{Anonymous}\fi``. The conditional
+    must not lie inside another one, and each declaration must give literal text.
+
+    Args:
+        document: The expanded document.
+        items: The declarations of one field.
+
+    Returns:
+        Whether the declarations are such alternatives.
+    """
+    grouped = grouped_reason("metadata")
+    if len(items) != 2 or any(not item.literal or grouped in item.uncertainty for item in items):
+        return False
+    first, second = items[0].start, items[1].start
+    commands = document.commands
+    for index, command in enumerate(commands):
+        if command.start >= first:
+            break
+        if not opens_conditional(command) or in_conditional(document.conditionals, command.start):
+            continue
+        found = conditional_branches(commands, index)
+        if found is None or len(found[0]) != 2:
+            continue
+        (then_start, then_end), (else_start, else_end) = found[0]
+        if (
+            then_start <= first < then_end
+            and else_start <= second < else_end
+            and not _nested_opener(commands, then_start, first)
+            and not _nested_opener(commands, else_start, second)
+        ):
+            return True
+    return False
+
+
+def _nested_opener(commands: list[Command], start: int, offset: int) -> bool:
+    """Return whether another conditional opens between a branch's start and a declaration."""
+    return any(
+        start <= command.start < offset and opens_conditional(command) for command in commands
+    )
+
+
 def _required_metadata_finding(document: ExpandedDocument, required: tuple[str, ...]) -> Finding:
     """Check that each required metadata field has a literal, non-placeholder value.
+
+    A field declared in both branches of one conditional is declared whichever branch
+    runs; when one branch gives placeholder text, such as an anonymous review author,
+    the result stays open and says so.
 
     Args:
         document: The expanded document to read.
@@ -163,9 +292,28 @@ def _required_metadata_finding(document: ExpandedDocument, required: tuple[str, 
         field.
     """
     metadata, reasons = _metadata(document)
+    resolved: set[str] = set()
     for name in required:
-        reasons.extend(reason for item in metadata[name] for reason in item.uncertainty)
-        if len(metadata[name]) > 1:
+        items = metadata[name]
+        last = items[-1] if items else None
+        if last is not None and last.present:
+            # A clear last declaration proves the field declared whether declarations
+            # add up, as acmart, amsart and REVTeX take one \author per author, or the
+            # last one replaces the others, as \title does.
+            resolved.add(name)
+            continue
+        if _branch_alternatives(document, items):
+            resolved.add(name)
+            reasons.extend(
+                f"one branch of the conditional around {name} gives placeholder text "
+                f"{item.value!r} at {item.path}:{item.line}"
+                for item in items
+                if item.placeholder or not item.value
+            )
+            continue
+        # Without a clear last declaration, every unclear one may be the missing field.
+        reasons.extend(reason for item in items for reason in item.uncertainty)
+        if len(items) > 1 and any(item.value and not item.placeholder for item in items):
             reasons.append(f"multiple {name} declarations have unresolved combination semantics")
     # Absent metadata could be declared by any construct the scan could not
     # read, so only a fully interpreted preamble confirms that it is missing.
@@ -181,7 +329,12 @@ def _required_metadata_finding(document: ExpandedDocument, required: tuple[str, 
     count = plural(len(required), "required metadata field")
     # The details list every metadata field, so an unclear optional field is
     # reported evidence too and keeps the result from being waived.
-    other_gaps = any(item.uncertainty for items in metadata.values() for item in items)
+    other_gaps = any(
+        item.uncertainty
+        for name, items in metadata.items()
+        if name not in resolved
+        for item in items
+    )
     return policy_finding(
         _REQUIRED_METADATA,
         CheckOutcome(missing, reasons, other_gaps),
@@ -215,11 +368,23 @@ def _orcid_checksum_valid(identifier: str) -> bool:
     return digits[-1] == ("X" if check == _ORCID_X_VALUE else str(check))
 
 
+def _orcid_command(command: Command) -> bool:
+    r"""Return whether a command takes an ORCID iD: ``\orcid``, llncs's ``\orcidID`` and others.
+
+    Any command whose name holds "orcid" counts, so a class or project macro that passes
+    an identifier on is read too.
+    """
+    return command.name in ORCID_COMMANDS or "orcid" in command.name.casefold()
+
+
 def _orcid_finding(reading: Reading) -> Finding:
     """Check the syntax and checksum of each literal ORCID identifier.
 
-    An ORCID command without a literal argument, or inside a conditional, is an
-    interpretation gap. An ``https://orcid.org/`` prefix is accepted.
+    Every command that takes an ORCID iD is read, in either branch of a conditional: a
+    checksum is wrong whichever branch runs. An argument that is not literal is an
+    interpretation gap. Other commands do not hide an identifier from this check: one
+    that passes it on carries it as literal text in a command whose name holds "orcid".
+    An ``https://orcid.org/`` prefix is accepted.
 
     Args:
         reading: The expanded document and its document-wide interpretation gaps.
@@ -230,16 +395,13 @@ def _orcid_finding(reading: Reading) -> Finding:
     document = reading.document
     identifiers = []
     invalid = []
-    reasons = list(reading.uncertainty)
+    reasons = list(document.graph_uncertainty)
     for command in document.commands:
-        if command.name not in ORCID_COMMANDS:
+        if command.named or not _orcid_command(command) or not command.arguments:
             continue
-        value = command.arguments[0].value.strip() if command.arguments else ""
-        if "\\" in value or not command.arguments:
-            reasons.append("ORCID is not a literal argument")
-            continue
-        if in_conditional(document.conditionals, command.start):
-            reasons.append(f"ORCID declared inside {CONDITIONAL_FLOW}")
+        value = command.arguments[0].value.strip()
+        if "\\" in value:
+            reasons.append(f"ORCID in \\{command.name} is not a literal argument")
             continue
         identifier = _ORCID_URL_PREFIX.sub("", value)
         syntax = bool(_ORCID_IDENTIFIER.fullmatch(identifier))

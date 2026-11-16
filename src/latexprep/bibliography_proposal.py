@@ -107,11 +107,18 @@ def require_valid(document: BibDocument) -> BibDocument:
         ``document`` unchanged.
 
     Raises:
-        ProposalBlocked: The document's bibliography syntax is incomplete.
+        ProposalBlocked: The document's bibliography syntax is incomplete, or it holds bytes
+            that are not UTF-8, which a rewrite would change.
     """
     if not document.valid:
         raise ProposalBlocked(
             f"{document.path}: repair the incomplete bibliography syntax first.",
+            path=document.path,
+        )
+    if document.foreign_bytes:
+        raise ProposalBlocked(
+            f"{document.path}: save the file as UTF-8 first; it holds bytes that are not "
+            "UTF-8 outside its entries, which a rewrite would change.",
             path=document.path,
         )
     return document

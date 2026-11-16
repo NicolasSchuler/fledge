@@ -70,12 +70,14 @@ class ManuscriptDetailTests(ProjectTestCase):
         violating: str,
         *,
         advisory: bool = False,
+        reads_both_branches: bool = False,
     ) -> None:
         """Assert that a policy passes, fails and turns inconclusive as it should.
 
         ``valid`` must pass as an info finding. ``violating`` must fail with ``code`` and
         list its matches, and inside a conditional it must be inconclusive and record the
-        uncertainty.
+        uncertainty, unless the policy reads text in either branch, as a scan of typed
+        text or of ORCID checksums does: then it still fails.
 
         Args:
             suffix: The rule name after ``manuscript.``.
@@ -84,6 +86,7 @@ class ManuscriptDetailTests(ProjectTestCase):
             valid: A body that satisfies the policy.
             violating: A body that violates it.
             advisory: Whether the failure is a heuristic warning instead of a derived error.
+            reads_both_branches: Whether a violation inside a conditional still fails.
         """
         good = self.result(valid, options, suffix)
         self.assertEqual(good.status, "passed", good.details)
@@ -95,6 +98,9 @@ class ManuscriptDetailTests(ProjectTestCase):
         self.assertEqual(bad.evidence_kind, "heuristic" if advisory else "derived")
         self.assertTrue(bad.details["matches"])
         uncertain = self.result("\\iftrue\n" + violating + "\n\\fi", options, suffix)
+        if reads_both_branches:
+            self.assertEqual(uncertain.status, "failed", uncertain.details)
+            return
         self.assertEqual(uncertain.status, "inconclusive", uncertain.details)
         self.assertTrue(uncertain.details["uncertainty"])
 
@@ -321,6 +327,7 @@ class ManuscriptDetailTests(ProjectTestCase):
             r"Figure~\ref{fig:x}. \verb|Table 2| \url{Figure 3}",
             "Figure 2 and Table 4 provide details.",
             advisory=True,
+            reads_both_branches=True,
         )
 
     def test_required_metadata(self) -> None:
@@ -344,6 +351,7 @@ class ManuscriptDetailTests(ProjectTestCase):
             ManuscriptCheckOptions(check_orcid=True),
             r"\orcid{0000-0002-1825-0097}",
             r"\orcid{0000-0002-1825-0098}",
+            reads_both_branches=True,
         )
         for value in ("https://orcid.org/0000-0002-1825-0097", "0000-0002-1694-233X"):
             result = self.result(
@@ -366,12 +374,22 @@ class ManuscriptDetailTests(ProjectTestCase):
         result = self.result(body, ManuscriptCheckOptions(check_orcid=True), "orcid")
         self.assertEqual((result.status, result.severity), ("passed", "info"), result.details)
         self.assertEqual(result.details["uncertainty"], [])
+        # A command does not hide an identifier: one that passes it on carries it as a
+        # literal argument, so a class or package macro leaves the check decided.
         unknown = self.result(
-            "\\begin{document}\\customorcidmacro\\end{document}",
+            "\\begin{document}\\IEEEauthorblockA{KASTEL}\\customlogo\\end{document}",
             ManuscriptCheckOptions(check_orcid=True),
             "orcid",
         )
-        self.assertEqual(unknown.status, "inconclusive")
+        self.assertEqual(unknown.status, "passed", unknown.details)
+
+    def test_every_command_named_for_orcid_is_validated(self) -> None:
+        # llncs writes \orcidID; its sample ships the malformed 2222--3333-4444-5555.
+        options = ManuscriptCheckOptions(check_orcid=True)
+        invalid = self.result(r"\author{A\orcidID{2222--3333-4444-5555}}", options, "orcid")
+        self.assertEqual(invalid.status, "failed", invalid.details)
+        valid = self.result(r"\author{A\orcidID{0000-0002-1825-0097}}", options, "orcid")
+        self.assertEqual(valid.status, "passed", valid.details)
 
     def test_required_declarations(self) -> None:
         options = ManuscriptCheckOptions(required_declarations=("Data Availability", "Funding"))
@@ -830,6 +848,180 @@ class ManuscriptDetailTests(ProjectTestCase):
         values, reasons = read_literal_metadata(self.root, "main.tex", ("title",))
         self.assertEqual(values, {"title": "A paper"})
         self.assertTrue(reasons)
+
+    def test_ieee_camera_ready_reads_author_blocks_conditionals_and_thanks(self) -> None:
+        # The IEEE conference template, as a camera-ready source: a funding \thanks in the
+        # title inside a switch, IEEEtran author blocks and an unused \BibTeX logo.
+        preamble = (
+            "\\def\\BibTeX{{\\rm B\\kern-.05em{\\sc i\\kern-.025em b}\\kern-.08em T\\kern-.1667em"
+            "\\lower.7ex\\hbox{E}\\kern-.125emX}}\n"
+            "\\title{Not There Yet\\ifdefined\\cameraready\\thanks{Funded by KASTEL.}\\fi}\n"
+        )
+        authors = (
+            '\\author{\\IEEEauthorblockN{Ada Th{\\o}rv{\\"a}ld}'
+            "\\IEEEauthorblockA{\\textit{KASTEL}\\\\ Karlsruhe, Germany}}\n"
+        )
+        body = (
+            "\\begin{document}\n\\maketitle\n\\section{Introduction}\n"
+            "Agentic \\ac{ai} \\ifdefined\\cameraready changes\\else may change\\fi{} this.\n"
+            "\\end{document}\n"
+        )
+        options = ManuscriptCheckOptions(
+            required_metadata=("title", "author"),
+            check_orcid=True,
+            check_layout_manipulation=True,
+            check_empty_sections=True,
+            check_hardcoded_references=True,
+        )
+        findings = {item.rule: item for item in self.results(preamble + authors + body, options)}
+        for rule in (
+            "required_metadata",
+            "orcid",
+            "layout_manipulation",
+            "empty_sections",
+            "hardcoded_references",
+        ):
+            with self.subTest(rule=rule):
+                finding = findings["manuscript." + rule]
+                self.assertEqual(finding.status, "passed", finding.details)
+        title = findings["manuscript.required_metadata"].details["metadata"]["title"][0]
+        self.assertEqual(title["value"], "Not There Yet")
+
+    def test_author_alternatives_of_a_review_switch(self) -> None:
+        options = ManuscriptCheckOptions(required_metadata=("author",))
+        anonymous = self.result(
+            "\\ifdefined\\cameraready\\author{Ada Example}"
+            "\\else\\author{Anonymous Author(s)}\\fi\n",
+            options,
+            "required_metadata",
+        )
+        self.assertEqual(anonymous.status, "inconclusive")
+        self.assertIn("placeholder text 'Anonymous Author(s)'", anonymous.message)
+        named = self.result(
+            "\\ifcamera\\author{Ada Example}\\else\\author{Ada Example and Bo Sample}\\fi\n",
+            options,
+            "required_metadata",
+        )
+        self.assertEqual(named.status, "passed", named.details)
+        # Without \else, the declaration may not run at all.
+        optional = self.result(
+            "\\ifcamera\\author{Ada Example}\\fi\n", options, "required_metadata"
+        )
+        self.assertEqual(optional.status, "inconclusive")
+
+    def test_one_author_per_declaration_is_present_and_empty_ones_are_missing(self) -> None:
+        options = ManuscriptCheckOptions(required_metadata=("author",))
+        acmart = self.result(
+            "\\author{Ada Example}\n\\author{Bo Sample}\n", options, "required_metadata"
+        )
+        self.assertEqual(acmart.status, "passed", acmart.details)
+        amsart = self.result("\\author{}\n\\author{}\n", options, "required_metadata")
+        self.assertEqual(amsart.status, "failed", amsart.details)
+
+    def test_class_commands_beside_an_author_name_leave_it_present(self) -> None:
+        options = ManuscriptCheckOptions(required_metadata=("author",))
+        # llncs, IEEEtran journals and JMLR put such commands next to the names.
+        llncs = self.result(
+            "\\author{Ada Example\\inst{1} \\and Bo Sample\\IEEEmembership{Member}}\n",
+            options,
+            "required_metadata",
+        )
+        self.assertEqual(llncs.status, "passed", llncs.details)
+        # A macro the project defines may drop its argument, so the name may not be typeset.
+        hidden = self.result(
+            "\\newcommand\\hide[1]{}\n\\author{\\hide{Ada Example}}\n", options, "required_metadata"
+        )
+        self.assertEqual(hidden.status, "inconclusive", hidden.details)
+
+    def test_layout_in_environments_redefinitions_and_aliases_stays_a_candidate(self) -> None:
+        options = ManuscriptCheckOptions(check_layout_manipulation=True)
+        sources = {
+            "environment": "\\newenvironment{tight}{\\vspace{-5mm}}{}\n"
+            "\\begin{document}\\begin{tight}Text\\end{tight}\\end{document}\n",
+            # LaTeX itself runs a redefined hook such as \footnoterule.
+            "redefinition": "\\renewcommand{\\footnoterule}{\\vspace{-2pt}\\hrule}\n"
+            "\\begin{document}Text\\end{document}\n",
+            "alias": "\\newcommand\\squeeze{\\vspace{-3mm}}\\let\\tight\\squeeze\n"
+            "\\begin{document}Text\\tight\\end{document}\n",
+            "kernel": "\\makeatletter\\def\\@squeeze{\\vspace{-3mm}}\\makeatother\n"
+            "\\begin{document}Text\\end{document}\n",
+        }
+        for name, source in sources.items():
+            with self.subTest(name=name):
+                result = self.result(source, options, "layout_manipulation")
+                self.assertEqual(result.status, "failed", result.details)
+
+    def test_a_reference_inside_a_conditional_does_not_satisfy_float_references(self) -> None:
+        # \iffalse ... \fi is the usual way to comment text out.
+        result = self.result(
+            "\\begin{document}\\begin{figure}\\caption{A}\\label{f}\\end{figure}\n"
+            "\\iffalse See Figure~\\ref{f}.\\fi\n\\end{document}\n",
+            ManuscriptCheckOptions(require_float_references=True),
+            "float_references",
+        )
+        self.assertEqual(result.status, "inconclusive", result.details)
+
+    def test_a_title_conditional_that_types_text_keeps_the_value_unclear(self) -> None:
+        typed, typed_gaps = self.metadata("\\title{Study\\ifcamera: Full Version\\fi}\n")
+        self.assertNotIn("title", typed)
+        self.assertTrue(typed_gaps)
+        thanks, _ = self.metadata("\\title{Study\\ifdefined\\final\\thanks{Funded.}\\fi}\n")
+        self.assertEqual(thanks.get("title"), "Study")
+
+    def metadata(self, preamble: str) -> tuple[dict[str, str], list[str]]:
+        """Return the literal title metadata of an article with ``preamble``."""
+        self.write("main.tex", "\\documentclass{article}\n" + preamble)
+        return read_literal_metadata(self.root, "main.tex", ("title",))
+
+    def test_a_declaration_nested_in_its_own_conditional_is_no_alternative(self) -> None:
+        result = self.result(
+            "\\ifa\\ifb\\author{Ada Example}\\fi\\else\\author{Bo Sample}\\fi\n",
+            ManuscriptCheckOptions(required_metadata=("author",)),
+            "required_metadata",
+        )
+        self.assertEqual(result.status, "inconclusive", result.details)
+
+    def test_nested_conditionals_in_the_preamble_leave_the_package_inventory_decided(
+        self,
+    ) -> None:
+        result = self.result(
+            "\\usepackage{graphicx}\n\\ifx\\a\\b \\ifx\\c\\d \\fi \\fi\n",
+            ManuscriptCheckOptions(allowed_packages=("graphicx",)),
+            "package_allowlist",
+        )
+        self.assertEqual(result.status, "passed", result.details)
+
+    def test_layout_in_a_used_macro_is_a_candidate_and_in_an_unused_one_is_not(self) -> None:
+        options = ManuscriptCheckOptions(check_layout_manipulation=True)
+        used = self.result(
+            "\\newcommand\\squeeze{\\vspace{-3mm}}\n\\begin{document}\nText.\\squeeze\n"
+            "\\end{document}\n",
+            options,
+            "layout_manipulation",
+        )
+        self.assertEqual(used.status, "failed", used.details)
+        unused = self.result(
+            "\\newcommand\\squeeze{\\vspace{-3mm}}\n\\begin{document}\nText.\n\\end{document}\n",
+            options,
+            "layout_manipulation",
+        )
+        self.assertEqual(unused.status, "passed", unused.details)
+        conditional = self.result(
+            "\\begin{document}\nText.\\ifdraft\\vspace{-3mm}\\fi\n\\end{document}\n",
+            options,
+            "layout_manipulation",
+        )
+        self.assertEqual(conditional.status, "inconclusive")
+        self.assertIn("inside conditional source control flow", conditional.message)
+
+    def test_a_conditional_inside_a_float_still_leaves_its_caption_open(self) -> None:
+        # Conditionals are no document-wide gap, but a region that holds one is unclear.
+        result = self.result(
+            "\\begin{document}\\begin{figure}\\ifdraft\\caption{A}\\fi\\end{figure}\\end{document}",
+            ManuscriptCheckOptions(require_float_captions=True),
+            "float_captions",
+        )
+        self.assertEqual(result.status, "inconclusive", result.details)
 
     def test_duplicate_metadata_empty_label_and_multi_reference_order(self) -> None:
         metadata = self.result(

@@ -2,9 +2,12 @@ r"""Hard-coded figure, table, section and equation numbers in prose (``MAN007``)
 
 An advisory scan for text such as "Figure 2", "Table 3", "Section 4" or "Equation (5)",
 which stops matching when the numbering changes. Command invocations and their
-arguments are blanked first, so a ``\ref{...}`` or a literal example never counts, and
-a match inside a conditional is skipped. Whether the text refers to a manuscript
-object is left to the author; nothing is inferred.
+arguments are blanked first, so a ``\ref{...}`` or a literal example never counts. Text
+in either branch of a conditional is typed text too, so it is matched. Whether the text
+refers to a manuscript object is left to the author; nothing is inferred. Gaps in the
+source graph and uses of the project's own macros that the reading could not interpret
+leave the scan incomplete; a command from a class or package does not type the author's
+prose.
 """
 
 from __future__ import annotations
@@ -16,7 +19,7 @@ from .finding_weight import ADVISORY
 from .findings import Finding
 from .manuscript_check_options import ManuscriptCheckOptions
 from .manuscript_policy_kernel import CheckOutcome, Policy, Reading, policy_finding
-from .tex_spans import command_end, in_conditional
+from .tex_spans import command_end
 
 _HARDCODED = Policy(
     "manuscript.hardcoded_references", "Checked hard-coded reference candidates.", ADVISORY
@@ -54,8 +57,7 @@ def reference_checks(reading: Reading, options: ManuscriptCheckOptions) -> list[
     matches = [
         document.located(match.start(), text=match.group())
         for match in _HARDCODED_REFERENCE.finditer("".join(buffer))
-        if not in_conditional(document.conditionals, match.start())
     ]
     failure = plural(len(matches), "hard-coded reference candidate")
-    outcome = CheckOutcome(matches, reading.uncertainty)
+    outcome = CheckOutcome(matches, [*document.graph_uncertainty, *reading.project_macro_reasons()])
     return [policy_finding(_HARDCODED, outcome, failure=failure)]

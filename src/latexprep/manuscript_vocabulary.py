@@ -13,8 +13,10 @@ policy's module instead.
 from __future__ import annotations
 
 from .literal_text import (
+    ACCENT_MARKS,
     HEADING_DEPTHS,
     KNOWN_TEXT_COMMANDS,
+    LETTER_COMMANDS,
     PACKAGE_COMMANDS,
     REFERENCE_COMMANDS,
     TEXT_WRAPPERS,
@@ -315,6 +317,9 @@ NEUTRAL_COMMANDS = frozenset(
     | _PLAIN_TEXT_COMMANDS
     | _COLOR_COMMANDS
     | _RELATIVE_WIDTHS
+    | set(ACCENT_MARKS)
+    | set(LETTER_COMMANDS)
+    | {"$", "@", "LaTeXe", "ldots", "dots"}
 )
 # Lists, whose labels name an item, and threeparttable's table notes.
 LIST_ENVIRONMENTS = frozenset(

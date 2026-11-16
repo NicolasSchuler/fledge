@@ -266,7 +266,8 @@ def _identity(finding: Finding) -> tuple[object, ...]:
     # The same result re-checked at another stage (baseline, transformed, archive
     # rebuild or final sources) is one issue for a reader; JSON keeps every stage.
     # Copies with different evidence or review decisions stay apart, so no result
-    # hides distinct measurements or an unaccepted copy.
+    # hides distinct measurements or an unaccepted copy. How many bytes a scan read is
+    # bookkeeping: the prepared copy holds a few more bytes and the same matches.
     details = finding.details
     return (
         finding.rule,
@@ -281,7 +282,11 @@ def _identity(finding: Finding) -> tuple[object, ...]:
         finding.evidence_kind,
         finding.incomplete,
         json.dumps(
-            {key: value for key, value in details.items() if key != DetailKey.STAGE},
+            {
+                key: value
+                for key, value in details.items()
+                if key not in {DetailKey.STAGE, DetailKey.BYTES_READ}
+            },
             sort_keys=True,
         ),
         review_marker(finding),

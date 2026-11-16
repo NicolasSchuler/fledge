@@ -405,7 +405,7 @@ class BibliographyCheckTests(ProjectTestCase):
         self.write(
             "references.bib",
             "@misc{single,pages=12}\n@misc{prefixed,pages={S2--S10}}\n"
-            "@misc{multiple,pages={1, 3--5, 9–12}}",
+            "@misc{multiple,pages={1, 3--5, 9-12}}",
         )
         self.assertEqual([row.status for row in self.rows("page_ranges")], ["passed"])
         self.write("references.bib", "@misc{reversed,pages={20--10}}\n@misc{bad,pages={10---12}}")
@@ -419,7 +419,7 @@ class BibliographyCheckTests(ProjectTestCase):
         self.write(
             "references.bib",
             "@article{acm,pages={263:1--263:52}}\n@article{one,pages={51:1}}\n"
-            "@article{dash,pages={32:699–32:721}}",
+            "@article{hyphen,pages={32:699-32:721}}",
         )
         self.assertEqual([row.status for row in self.rows("page_ranges")], ["passed"])
         self.write(
@@ -428,6 +428,31 @@ class BibliographyCheckTests(ProjectTestCase):
         )
         rows = {row.details["entry"]: row.status for row in self.rows("page_ranges")}
         self.assertEqual(rows, {"reversed": "failed", "across": "inconclusive"})
+
+    def test_a_typed_dash_is_one_page_for_bibtex_styles_and_a_range_for_biblatex(self) -> None:
+        # The ACM Digital Library exports en dashes; IEEEtran.bst then prints "p." for a page range.
+        bibliography = "@article{dsm,pages={337–356}}\n@article{em,pages={32:699—32:721}}\n"
+        self.manuscript()
+        self.write("references.bib", bibliography)
+        rows = self.rows("page_ranges")
+        self.assertEqual(
+            {row.details["entry"]: row.status for row in rows}, {"dsm": "failed", "em": "failed"}
+        )
+        self.assertIn("write -- instead", rows[0].message)
+        self.write(
+            "main.tex",
+            "\\documentclass{article}\n\\usepackage{biblatex}\n\\addbibresource{references.bib}\n"
+            "\\begin{document}\n\\printbibliography\n\\end{document}\n",
+        )
+        self.assertEqual([row.status for row in self.rows("page_ranges")], ["passed"])
+        # Without a main file, as in a bibliography-only folder, the backend is unknown.
+        (self.root / "main.tex").unlink()
+        rows = [
+            item
+            for item in check_bibliography_coverage_and_fields(self.root, None, self.options)
+            if item.rule == "bibliography.page_ranges"
+        ]
+        self.assertEqual({row.status for row in rows}, {"inconclusive"})
 
     def test_page_range_unknown_notation_and_macros_are_inconclusive(self) -> None:
         self.manuscript()

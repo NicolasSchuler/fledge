@@ -327,6 +327,45 @@ class LiveSourceProjectTests(AsyncLiveProjectTestCase):
         [error] = _with_code(missing.report, "TEX005")
         self.assertIn("and from the TeX installation", error.message)
 
+    async def test_a_bibliography_of_the_tex_installation_is_not_a_missing_dependency(
+        self,
+    ) -> None:
+        r"""Check that ``\bibliography{IEEEabrv,refs}`` with IEEE's TeX Live file prepares.
+
+        Documented claim: a bare ``\bibliography`` name that the project lacks is looked up
+        in the TeX installation before it is reported missing (docs/checks.md, TEX005); its
+        ``@string`` abbreviations count as defined and the file is not shipped.
+        """
+        self.require_tools("kpsewhich", "bibtex")
+        body = "Text~\\cite{key}.\n\\bibliographystyle{IEEEtran}\n\\bibliography{IEEEabrv,refs}"
+        bib = "@article{key, author = {A. Author}, title = {T}, journal = IEEE_J_SE, year = 2020}\n"
+        prepared = await self.prepare_files(
+            "installation-bibliography", {"main.tex": _document(body), "refs.bib": bib}
+        )
+        for code in ("TEX005", "BIB003", "BIB008"):
+            with self.subTest(code=code):
+                self.assertEqual(_with_code(prepared.report, code), [])
+        self.assert_published(prepared)
+        self.assertFalse((prepared.output / "sources" / "IEEEabrv.bib").exists())
+
+    async def test_a_figure_of_the_tex_installation_is_not_a_missing_dependency(self) -> None:
+        r"""Check that elsarticle's ``\includegraphics{example-image-a}`` prepares.
+
+        Documented claim: a bare figure name that the project lacks is looked up in the TeX
+        installation, as mwe's sample figures are found by TeX (docs/checks.md, TEX005).
+        """
+        self.require_tools("kpsewhich")
+        prepared = await self.prepare_files(
+            "installation-figure",
+            {
+                "main.tex": _document(
+                    "\\includegraphics{example-image-a}", "\\usepackage{graphicx}\n"
+                )
+            },
+        )
+        self.assertEqual(_with_code(prepared.report, "TEX005"), [])
+        self.assert_published(prepared)
+
     async def test_absolute_input_outside_the_project_blocks(self) -> None:
         """Check that TEX006 blocks the job for a literal absolute input outside the project.
 

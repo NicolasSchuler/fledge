@@ -28,7 +28,7 @@ from urllib.parse import unquote
 from .cancellation import cancellation_point
 from .comment_markers import MarkerCategory, marker_pattern
 from .file_scan import ByteBudget
-from .findings import Finding
+from .findings import DetailKey, Finding
 from .redaction import SECRET_PATTERNS, redact_secrets
 from .submission_options import SubmissionOptions
 from .submission_scan_findings import ScanLimits, ScanRule, scan_finding
@@ -520,7 +520,7 @@ class ContentScan:
         )
         details: dict[str, object] = {
             "reported_match_limit": self.limits.max_matches,
-            "bytes_read": self.budget.used,
+            DetailKey.BYTES_READ: self.budget.used,
         }
         return [
             scan_finding(

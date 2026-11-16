@@ -276,7 +276,6 @@ class AnalysedSourceTests(unittest.TestCase):
                     document.segments,
                     document.commands,
                     document.graph_uncertainty,
-                    document.presence_uncertainty,
                     document.conditionals,
                 )
             )

@@ -132,7 +132,14 @@ class BibliographyTransformTests(ProjectTestCase):
         self.assertEqual(repeated[2][0].status, "passed")
 
     def test_format_refuses_partial_or_unreadable_bibliographies(self) -> None:
-        for value in ("@misc{k,title={", b"@misc{k,title={\xff}}", "% note\r@misc{k}\r"):
+        partial_or_unreadable = (
+            "@misc{k,title={",
+            b"@misc{k,title={\xff}}",
+            "% note\r@misc{k}\r",
+            # Read for the checks, but a rewrite would change the byte outside the entry.
+            b"% Nicol\xe1s\n@misc{k,title={T}}\n",
+        )
+        for value in partial_or_unreadable:
             with self.subTest(value=value):
                 self.write("references.bib", value)
                 self.assert_blocked(self.plan(format_entries=True), "BIB201")

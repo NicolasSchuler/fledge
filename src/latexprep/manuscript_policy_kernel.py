@@ -42,6 +42,7 @@ from .tex_spans import (
     in_half_open_span,
     macro_definitions,
     merge_spans,
+    opens_conditional,
 )
 from .uncertainty_reasons import CONDITIONAL_FLOW
 
@@ -159,6 +160,19 @@ class Reading:
         )
         return _unknown_reasons(unknown, start, end)
 
+    def project_macro_reasons(self) -> list[str]:
+        """Describe the uses of the project's own macros that the reading could not interpret.
+
+        A class or package command does not type the author's prose; a macro the project
+        defines may, so a scan of typed text keeps these gaps only.
+
+        Returns:
+            One reason naming those macros, or an empty list.
+        """
+        project = defined_names(self.document.commands)
+        own = [item for item in self.unknown if _defined_label(item[1]) in project]
+        return _unknown_reasons(own, 0, len(self.document.text))
+
     def scope(self, region: EnvironmentRegion) -> None:
         """Attach only the interpretation gaps that fall inside this region.
 
@@ -207,8 +221,8 @@ def interpret(document: ExpandedDocument) -> Reading:
         document: The expanded document to read.
 
     Returns:
-        The reading, whose document-wide uncertainty adds the document's presence
-        uncertainty and unclosed drawings to the unexpanded constructs.
+        The reading, whose document-wide uncertainty adds the source-graph gaps and
+        unclosed drawings to the unexpanded constructs.
     """
     definitions = definition_spans(document.text, document.commands)
     neutral = _NeutralDefinitions.of(document)
@@ -223,7 +237,16 @@ def interpret(document: ExpandedDocument) -> Reading:
     layout_only: set[int] = set()
     for command in document.commands:
         cancellation_point()
-        if command.start < document.body_start or in_half_open_span(definitions, command.start):
+        if (
+            command.start < document.body_start
+            or in_half_open_span(definitions, command.start)
+            or command.named
+        ):
+            continue
+        if opens_conditional(command) or command.name in _CONDITIONAL_WORDS:
+            # Both branches are read; a check of a region learns that the region holds
+            # control flow, a document-wide claim does not depend on which branch runs.
+            unknown.append((command.start, CONDITIONAL_FLOW))
             continue
         if command.name in COUNTER_CHANGES:
             unknown.append((command.start, "explicit counter modification"))
@@ -237,11 +260,27 @@ def interpret(document: ExpandedDocument) -> Reading:
             if neutral.covers(command, layout=True):
                 layout_only.add(command.start)
     uncertainty = [
-        *document.presence_uncertainty,
+        *document.graph_uncertainty,
         *drawing_reasons,
-        *_unknown_reasons(unknown, 0, len(document.text)),
+        *_unknown_reasons(
+            [item for item in unknown if item[1] != CONDITIONAL_FLOW], 0, len(document.text)
+        ),
     ]
     return Reading(document, unknown, uncertainty, frozenset(layout_only), tuple(definitions))
+
+
+def _defined_label(label: str) -> str:
+    r"""Return the name ``defined_names`` gives the construct of an unknown label.
+
+    ``\name`` becomes ``name``, and ``environment name`` becomes ``begin{name}``.
+    """
+    if label.startswith("environment "):
+        return f"begin{{{label.removeprefix('environment ')}}}"
+    return label.removeprefix("\\")
+
+
+# The words of a primitive conditional after its opening \if…: its branches and its end.
+_CONDITIONAL_WORDS = frozenset({"else", "or", "fi"})
 
 
 def _unknown_label(command: Command) -> str | None:

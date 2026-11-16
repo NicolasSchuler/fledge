@@ -258,7 +258,7 @@ class BuildCheckTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(finding.path, "article.cls")
                 if code == 2:
                     self.assertIn("kpsewhich failed (2)", finding.message)
-                self.assertEqual(runner.calls[0][0], ["kpsewhich", "--format=tex", "article.cls"])
+                self.assertEqual(runner.calls[0][0], ["kpsewhich", "article.cls"])
             # Two local files with one name cannot share a lookup or its workspace.
             duplicated = replace(
                 result,

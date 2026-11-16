@@ -775,7 +775,11 @@ def _after_leading_comments(text: str) -> int:
 
 
 def _plan_suppression(main: str, texts: dict[str, str], plan: SourceTransformPlan) -> None:
-    """Plan the suppression line at the start of the main source, after its leading comments.
+    r"""Plan the suppression at the start of the main source's first line after its comments.
+
+    It goes in front of that line, usually ``\documentclass``, rather than on a line of
+    its own, so that every line keeps its number: findings about the prepared copy then
+    name the same lines as findings about the original.
 
     A main source that already sets either suppression mask outside comments and literal
     regions is left unchanged, and the finding says so.
@@ -812,14 +816,13 @@ def _plan_suppression(main: str, texts: dict[str, str], plan: SourceTransformPla
     newline = "\r\n" if "\r\n" in text else "\n"
     # A last comment line without a line end would otherwise swallow the inserted line.
     before = newline if offset and text[offset - 1] not in "\r\n" else ""
-    texts[main] = (
-        text[:offset] + before + SUPPRESS_INCLUDED_PDF_INFORMATION + newline + text[offset:]
-    )
+    texts[main] = text[:offset] + before + SUPPRESS_INCLUDED_PDF_INFORMATION + text[offset:]
     line = text.count("\n", 0, offset) + (2 if before else 1)
     plan.findings.append(
         Finding(
             _SUPPRESSION_RULE,
-            f"Planned a line at {main}:{line} that keeps included PDFs' information "
+            f"Planned a setting at the start of {main}:{line} that keeps included PDFs' "
+            "information "
             "dictionaries and file names out of the PDF built by pdfLaTeX or LuaLaTeX.",
             severity="info",
             status="passed",

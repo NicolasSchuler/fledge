@@ -35,8 +35,12 @@ from .text_edits import TextEdit, apply_text_edits
 
 # Formatting wrappers whose argument is retained as ordinary text. \centerline is the
 # plain TeX form of a centred line, kept here so that it is read, not left unresolved.
+# IEEEtran's author blocks and affiliation marks print their argument too.
 TEXT_WRAPPERS = frozenset(
     {
+        "IEEEauthorblockN",
+        "IEEEauthorblockA",
+        "IEEEauthorrefmark",
         "emph",
         "textbf",
         "textit",
@@ -170,6 +174,8 @@ _NONCONTENT_ARGUMENTS = {
             "refstepcounter",
             "setstretch",
             "stepcounter",
+            # A title or author footnote, such as a funding note: not part of the field.
+            "thanks",
             "thispagestyle",
             "vphantom",
             "vskip",
@@ -184,7 +190,43 @@ _NONCONTENT_ARGUMENTS = {
     "setlength": 2,
 }
 _SPACE_COMMANDS = frozenset({"par", "newline", "linebreak", "and", "sep", "\\", ",", ";", "!", " "})
-_CHARACTER_COMMANDS = frozenset({"%", "&", "#", "_", "{", "}"})
+_CHARACTER_COMMANDS = frozenset({"%", "&", "#", "_", "{", "}", "$"})
+# LaTeX's text accents, by the combining character each puts on the letter that follows,
+# as in Schr\"odinger or \v{c}; they are text, never an interpretation gap.
+ACCENT_MARKS = {
+    "'": "\u0301",
+    "`": "\u0300",
+    "^": "\u0302",
+    '"': "\u0308",
+    "~": "\u0303",
+    "=": "\u0304",
+    ".": "\u0307",
+    "c": "\u0327",
+    "v": "\u030c",
+    "u": "\u0306",
+    "H": "\u030b",
+    "r": "\u030a",
+    "k": "\u0328",
+    "d": "\u0323",
+    "b": "\u0331",
+}
+# LaTeX's special letters, as in Th{\o}rv{\"a}ld, and the letter each prints.
+LETTER_COMMANDS = {
+    "ae": "æ",
+    "AE": "Æ",
+    "oe": "œ",
+    "OE": "Œ",
+    "aa": "å",
+    "AA": "Å",
+    "o": "ø",
+    "O": "Ø",
+    "l": "ł",
+    "L": "Ł",
+    "ss": "ß",
+    "i": "ı",
+    "j": "ȷ",
+}
+_ELLIPSIS_COMMANDS = frozenset({"ldots", "dots", "textellipsis"})
 
 
 class _Interpretation(NamedTuple):
@@ -205,6 +247,11 @@ _INTERPRETATIONS: dict[str, _Interpretation] = {
     **{name: _Interpretation(name) for name in _CHARACTER_COMMANDS},
     **{name: _Interpretation(" ") for name in _SPACE_COMMANDS | _NONCONTENT_COMMANDS},
     **{name: _Interpretation(name) for name in ("TeX", "LaTeX")},
+    "LaTeXe": _Interpretation("LaTeX2e"),
+    "@": _Interpretation(""),
+    **{name: _Interpretation("") for name in ACCENT_MARKS},
+    **{name: _Interpretation(letter) for name, letter in LETTER_COMMANDS.items()},
+    **{name: _Interpretation("…") for name in _ELLIPSIS_COMMANDS},
     **{name: _Interpretation("") for name in TEXT_WRAPPERS},
     **{name: _Interpretation(" ", 1) for name in KEY_ARGUMENT_COMMANDS - RANGE_REFERENCE_COMMANDS},
     **{name: _Interpretation(" ", 2) for name in RANGE_REFERENCE_COMMANDS},
@@ -254,6 +301,12 @@ _PLACEHOLDER_VALUES = frozenset(
         "your title",
         "your affiliation",
         "email address",
+        # The author line of an anonymous review version.
+        "anonymous",
+        "anonymous author",
+        "anonymous authors",
+        "anonymous author(s)",
+        "anonymous submission",
     }
 )
 

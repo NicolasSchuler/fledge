@@ -40,7 +40,7 @@ from .publication import VerifiedPackage
 from .report import Outcome, Report
 from .review_policy import BASELINE_VERSUS_PREPARED_STAGE
 from .scheduler import Scheduler, Task, TaskResult
-from .source_resolution import InstalledInputs, installation_candidates, installed_inputs_known
+from .source_resolution import InstalledInputs, installation_query, installed_inputs_known
 from .staging import (
     apply_contents,
     flatten_sources,
@@ -49,7 +49,7 @@ from .staging import (
     trees_identical,
 )
 from .task_reporting import InputSelection, PackageLayout, TaskReporter
-from .tex_installation import ask_installation
+from .tex_installation import ask_installation, identical_copies
 
 _SELECT_SUBMISSION_INPUTS_STAGE = "select submission inputs"
 # Rule names of the online checks all start with this; none means they never ran.
@@ -195,21 +195,30 @@ class DocumentRun:
             return await self._run_stages()
 
     async def _ask_installation(self) -> InstalledInputs | None:
-        r"""Ask the TeX installation for the bare ``\input`` names that the project lacks.
+        r"""Ask the TeX installation about missing input names and the project's own classes.
 
         Returns:
             Its answer, or ``None`` when no name is missing or it cannot answer.
         """
         if self.main is None:
             return None
-        names = await self.context.thread_operation(
-            "installation input names", installation_candidates, self.imported
+        names, packages = await self.context.thread_operation(
+            "installation input names", installation_query, self.imported
         )
-        if not names:
+        if not names and not packages:
             return None
-        self.context.emit(f"Looking up {len(names)} missing input file(s) in the TeX installation")
+        self.context.emit(
+            f"Looking up {len(names)} missing input file(s) and {len(packages)} class or "
+            "package file(s) in the TeX installation"
+        )
         work = self.context.work / "installation-lookup"
-        return await ask_installation(names, work, self.context.runner)
+        answer = await ask_installation([*names, *packages], work, self.context.runner)
+        if answer is None or not packages:
+            return answer
+        identical = await self.context.thread_operation(
+            "installed package copies", identical_copies, self.imported, packages, answer.found
+        )
+        return replace(answer, identical=identical)
 
     async def _run_stages(self) -> VerifiedPackage | None:
         """Run the document's stages.

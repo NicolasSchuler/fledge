@@ -14,7 +14,7 @@ from .expanded_document import (
     environment_regions,
     expand_document,
 )
-from .literal_text import KEYWORD_ENVIRONMENTS, TEXT_WRAPPERS
+from .literal_text import ACCENT_MARKS, KEYWORD_ENVIRONMENTS, LETTER_COMMANDS, TEXT_WRAPPERS
 from .tex_commands import MACRO_DEFINITION_COMMANDS, PRIMITIVE_DEFINITION_COMMANDS
 from .tex_lexer import (
     MAX_ARGUMENT_CHARS,
@@ -42,34 +42,11 @@ FieldStatus = Literal["ready", "empty", "missing", "unresolved"]
 # Document-text grammar, unlike the lexer's package-code CONTROL_SEQUENCE: "@" is
 # not a letter, and a control symbol may be any character, including a line break.
 _TEXT_CONTROL_SEQUENCE = re.compile(r"\\([A-Za-z]+|.)", re.S)
-_ACCENTS = {
-    "'": "́",
-    "`": "̀",
-    "^": "̂",
-    '"': "̈",
-    "~": "̃",
-    "=": "̄",
-    ".": "̇",
-    "c": "̧",
-    "v": "̌",
-    "u": "̆",
-    "H": "̋",
-    "r": "̊",
-}
+_ACCENTS = ACCENT_MARKS
 _SYMBOLS = {
     "LaTeX": "LaTeX",
     "TeX": "TeX",
-    "ae": "æ",
-    "AE": "Æ",
-    "oe": "œ",
-    "OE": "Œ",
-    "aa": "å",
-    "AA": "Å",
-    "o": "ø",
-    "O": "Ø",
-    "ss": "ß",
-    "i": "ı",
-    "j": "ȷ",
+    **LETTER_COMMANDS,
     "textendash": "–",
     "textemdash": "—",
 }

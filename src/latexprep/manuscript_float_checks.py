@@ -49,10 +49,11 @@ from .tex_spans import (
     command_end,
     defined_names,
     in_closed_span,
+    in_conditional,
     merge_spans,
     runs_in_place,
 )
-from .uncertainty_reasons import grouped_reason
+from .uncertainty_reasons import CONDITIONAL_FLOW, grouped_reason
 
 
 class _FloatRule(NamedTuple):
@@ -116,6 +117,8 @@ class _FloatRecord:
             violations.
         described: Whether a figure has a nonempty, non-placeholder Description; ``None`` for
             tables.
+        conditionally_referenced: Whether a reference inside a conditional names one of
+            its labels, so that a missing external reference is not confirmed.
     """
 
     location: Location
@@ -127,6 +130,7 @@ class _FloatRecord:
     first_reference_offset: int | None
     misplaced_labels: list[dict[str, object]]
     described: bool | None
+    conditionally_referenced: bool = False
 
     def summary(self) -> dict[str, object]:
         """Render where the float is and what kind it is, as report details."""
@@ -156,6 +160,7 @@ class _FloatScan:
         floats: The float regions to read.
         uncertainty: The interpretation gaps collected for each float rule.
         first_references: The offset of the first external reference to each label.
+        conditional_references: The labels named by references inside a conditional.
         label_counts: How often each literal label occurs in the whole document.
         labels_seen: The float labels read so far.
         records: One record per float read, in order.
@@ -173,6 +178,7 @@ class _FloatScan:
         default_factory=lambda: {rule: [] for rule in _FLOAT_RULES}
     )
     first_references: dict[str, int] = field(default_factory=dict)
+    conditional_references: set[str] = field(default_factory=set)
     label_counts: Counter[str] = field(default_factory=Counter)
     labels_seen: set[str] = field(default_factory=set)
     records: list[_FloatRecord] = field(default_factory=list)
@@ -221,15 +227,25 @@ class _FloatScan:
             self.records.append(self._record(region))
 
     def _collect_first_references(self) -> None:
-        """Record the first offset of each label referenced outside every float.
+        r"""Record the first offset of each label referenced outside every float.
 
-        A grouped or nonliteral reference is a gap for both reference rules.
+        A grouped or nonliteral reference is a gap for both reference rules, and so is a
+        reference inside a conditional, which may never be typeset (``\iffalse`` is the
+        usual way to comment text out).
         """
         float_spans = merge_spans((region.command.start, region.end) for region in self.floats)
         for command in self.document.commands:
             if command.name not in REFERENCE_COMMANDS:
                 continue
             if in_closed_span(float_spans, command.start):
+                continue
+            if in_conditional(self.document.conditionals, command.start):
+                self.conditional_references.update(
+                    name.strip()
+                    for argument in reference_labels(command)
+                    for name in argument.value.split(",")
+                )
+                self.note([CONDITIONAL_FLOW + " around a reference"], _REFERENCES, _REFERENCE_ORDER)
                 continue
             labels = reference_labels(command)
             if (
@@ -295,6 +311,7 @@ class _FloatScan:
             first_reference_offset=first,
             misplaced_labels=misplaced,
             described=self._described(region) if kind == "figure" else None,
+            conditionally_referenced=bool(set(referenced) & self.conditional_references),
         )
 
     def _read_captions(self, captions: list[Command]) -> list[dict[str, object]]:
@@ -527,7 +544,7 @@ def _float_violations(records: list[_FloatRecord]) -> dict[_FloatRule, list[dict
         _REFERENCES: [
             {**record.summary(), "labels": record.labels}
             for record in confirmed
-            if record.first_reference_offset is None
+            if record.first_reference_offset is None and not record.conditionally_referenced
         ],
         _REFERENCE_ORDER: out_of_order,
         _DESCRIPTIONS: [

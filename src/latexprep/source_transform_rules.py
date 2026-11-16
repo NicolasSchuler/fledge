@@ -79,8 +79,9 @@ RULES = (
         title="Included-PDF information kept out of the built PDF",
         description=(
             "Opt-in (source_transforms.suppress_included_pdf_information, set by the "
-            "anonymous-review preset; prepare only): add one line after the leading comments "
-            "of the prepared main file that sets \\pdfsuppressptexinfo=-1 for pdfLaTeX or "
+            "anonymous-review preset; prepare only): put a setting in front of the first line "
+            "after the leading comments of the prepared main file, so that no line moves, that "
+            "sets \\pdfsuppressptexinfo=-1 for pdfLaTeX or "
             "\\pdfvariable suppressoptionalinfo 15 for LuaLaTeX. pdfTeX and LuaTeX otherwise "
             "copy each included PDF's information dictionary (author, title, creator) and "
             "file name into the output as /PTEX.InfoDict and /PTEX.FileName. The included "
@@ -93,7 +94,7 @@ RULES = (
             "tests.test_source_transform.SuppressionTests.test_existing_settings_and_unreadable_main_are_respected",
         ),
         fix=(
-            "Review the added line in the prepared copy's diff; remove an existing "
+            "Review the added setting in the prepared copy's diff; remove an existing "
             "\\pdfsuppressptexinfo setting that contradicts it, or re-export figures whose "
             "page-level metadata must not be shared."
         ),

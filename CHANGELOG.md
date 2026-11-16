@@ -20,6 +20,44 @@ The version is defined once, as `__version__` in `src/latexprep/__init__.py`.
 
 ### Fixed
 
+- **Files of the TeX installation named by `\bibliography` or `\includegraphics` are no
+  longer missing.** `\bibliography{IEEEabrv,references}`, as IEEE's template asks, and
+  sample figures such as `\includegraphics{example-image-a}` in the elsarticle, JMLR, ACL
+  and CVPR templates gave a `TEX005` error that blocked every command although TeX built
+  the paper. Such names are now looked up in the TeX installation like bare `\input`
+  names; a file found there is not shipped, and the `@string` abbreviations of an
+  installed `.bib` file count as defined for `BIB004`.
+- **A `.bib` file with a byte that is not UTF-8 outside its entries is read.** TeX Live's
+  own `IEEEabrv.bib` has one Latin-1 byte in its opening comment, and a copy of it in the
+  project blocked with `BIB008`. BibTeX skips text between entries, so such a file is now
+  inspected; it is never rewritten, so its bytes stay exact. A byte inside an entry is
+  still `BIB008`.
+- **`--preset camera-ready` no longer blocks ordinary IEEE, ACM, AMS and REVTeX papers on
+  undecidable metadata.** IEEEtran's author blocks, LaTeX accents and special letters
+  (`Th{\o}rv{\"a}ld`), `\thanks` in the title and one `\author` per author made
+  `MAN008` and `MAN009` an error-weight "inconclusive". An author given in both branches
+  of `\if…\else…\fi` is present whichever branch runs; when one branch is placeholder
+  text such as "Anonymous Author(s)", `MAN008` says so. `MAN009` now checks every
+  command whose name holds "orcid", such as llncs's `\orcidID`, in either branch.
+- **A conditional no longer makes every manuscript check inconclusive.** One
+  `\ifdefined\cameraready` anywhere left `MAN002`, `MAN007` and `MAN009` undecided. Each
+  check now judges the commands inside conditionals itself: `MAN002` names a layout
+  candidate in a conditional as a gap, and `MAN007` reports hard-coded references in
+  either branch. `MAN002` also ignores the body of a macro the document never uses, such
+  as the IEEE template's `\BibTeX` logo, and `MAN006` no longer turns inconclusive for a
+  section that has text.
+- **Findings of the prepared copy keep the original's line numbers.** The
+  `anonymous-review` preset's `TEX204` setting was inserted as a line of its own, so each
+  finding of the prepared copy named the next line and was listed twice. The setting now
+  goes in front of the first line after the leading comments.
+- **A venue class identical to TeX Live's copy is treated as TeX Live's.** A bundled,
+  unchanged `IEEEtran.cls` gave a `TEX312` warning whose advice could not be followed and
+  left `PKG302`, `PKG106` and `MAN018` inconclusive. It still ships, but it is no longer
+  walked or checked as project source. `PKG106` is also decided whenever no asset lies
+  outside the dependency graph.
+- **`BIB105` reports a typed dash in `pages` for BibTeX styles.** `pages = {337–356}`, as
+  the ACM Digital Library exports it, is one page to a BibTeX style, which prints "p.
+  337–356". biblatex reads it as a range, so it still passes there.
 - **A venue class or style file shipped in the project no longer makes the manuscript
   checks inconclusive.** Its macro code (`\catcode`, `\csname`, packages loaded inside
   macros) was counted as a gap in the manuscript text, so a project with its own

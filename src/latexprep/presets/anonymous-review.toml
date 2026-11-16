@@ -59,7 +59,7 @@ check_float_reference_order = true # MAN015: floats first referenced in source o
 # require_line_numbers = true
 
 [source_transforms]
-# prepare only (TEX204): add a line to the prepared main file that stops pdfLaTeX and
+# prepare only (TEX204): add a setting to the prepared main file that stops pdfLaTeX and
 # LuaLaTeX from copying each included PDF figure's author, title and file name into the
 # PDF reviewers receive. Figure files themselves, and their page-level XMP, are unchanged.
 suppress_included_pdf_information = true

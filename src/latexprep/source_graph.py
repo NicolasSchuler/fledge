@@ -51,6 +51,7 @@ from .source_resolution import (
     ProjectTree,
     Reference,
     SystemReference,
+    installed_copy,
     project_path,
     resolve_reference,
 )
@@ -196,6 +197,15 @@ class _Visit:
 # "project" reads every source file (to discover document roots); "selected" reads
 # only the sources reached from an explicit main file.
 GraphScope = Literal["project", "selected"]
+
+
+def _installed_package_copy(name: str) -> bool:
+    """Return whether a project file is a class or package identical to the installation's copy.
+
+    TeX reads the same text from either, so the analysis treats it as the installation's
+    file: it neither walks nor checks it as project source.
+    """
+    return name.endswith((".cls", ".sty")) and installed_copy(name)
 
 
 class SourceGraph:
@@ -351,7 +361,8 @@ class SourceGraph:
         if source is None:
             return None
         self.sources[name] = source
-        check_source(SourceChecks(name, source, self.known_paths, self._reporter))
+        if not _installed_package_copy(name):
+            check_source(SourceChecks(name, source, self.known_paths, self._reporter))
         return source
 
     def _select_main(self, main: str | None) -> str | None:
@@ -883,7 +894,9 @@ class SourceGraph:
             if command.name == "subfile":
                 subfile_context = (posixpath.dirname(target), *visit.context)
                 self._visit(_Frame(target, search, subfile_context, True), visit.inner_stack)
-            if command.name in TRAVERSED_COMMANDS:
+            if command.name in TRAVERSED_COMMANDS and not _installed_package_copy(target):
+                # A byte-identical copy of an installed class or package is read as the
+                # installation's file is: TeX runs it, the analysis does not walk it.
                 search = self._visit(_Frame(target, search, visit.context), visit.inner_stack)
         return search
 

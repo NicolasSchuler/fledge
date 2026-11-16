@@ -445,7 +445,8 @@ def plan_bibliography(
 def normalize_dois(root: Path, main: str | None = None) -> BibliographyProposal:
     """Propose literal DOI prefix removal; callers explicitly select and apply it.
 
-    Invalid files and repeated DOI fields are left unchanged.
+    Invalid files, files with bytes that are not UTF-8 and repeated DOI fields are left
+    unchanged.
 
     Args:
         root: The project directory.
@@ -466,7 +467,7 @@ def normalize_dois(root: Path, main: str | None = None) -> BibliographyProposal:
     changes: list[Change] = []
     for document in documents:
         cancellation_point()
-        if not document.valid:
+        if not document.valid or document.foreign_bytes:
             continue
         edits: list[TextEdit] = []
         for entry in document.entries:

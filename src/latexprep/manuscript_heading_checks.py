@@ -225,6 +225,10 @@ def _empty_sections_finding(document: ExpandedDocument, headings: list[Heading])
     unknown = list(document.graph_uncertainty)
     for heading in headings:
         nonempty, content_reasons = _content(document, heading.body_start, heading.end)
+        if nonempty:
+            # Literal text is content whatever else the section holds or wherever its
+            # heading runs; only an apparently empty section needs every gap closed.
+            continue
         local = [*heading.uncertainty, *content_reasons]
         unknown.extend(local)
         if not nonempty and not local:

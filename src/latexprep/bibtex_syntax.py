@@ -155,6 +155,9 @@ class BibDocument:
         records: The entries and declarations in source order; ``@comment`` blocks are
             skipped.
         syntax_error: The first syntax error, or ``None`` when the whole file parsed.
+        foreign_bytes: How many bytes that are not UTF-8 the file holds outside its
+            records, each shown in ``text`` as U+FFFD. BibTeX skips such text, so the
+            records are read, but the file is never rewritten: its bytes would change.
     """
 
     path: str
@@ -162,6 +165,7 @@ class BibDocument:
     bom: bool = False
     records: list[Entry | Declaration] = field(default_factory=list)
     syntax_error: SyntaxProblem | None = None
+    foreign_bytes: int = 0
     # Offsets of the line breaks, found when the first line number is asked for.
     _newlines: list[int] | None = field(default=None, init=False, repr=False, compare=False)
 
@@ -671,9 +675,81 @@ class BibFileReader:
         except FileTooLargeError:
             return None
         self.total_bytes += len(raw)
-        text = raw.decode("utf-8")
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError as error:
+            return _parse_with_foreign_bytes(name, raw, error), len(raw)
         bom = text.startswith("﻿")
         return parse_bibtex(name, text[1:] if bom else text, bom=bom), len(raw)
+
+
+# Python's surrogateescape decoding gives each byte that is not UTF-8 one of these.
+_ESCAPED_BYTES = re.compile("[\udc80-\udcff]")
+
+
+def _parse_with_foreign_bytes(name: str, raw: bytes, error: UnicodeDecodeError) -> BibDocument:
+    """Parse a file whose bytes that are not UTF-8 all lie outside its records.
+
+    TeX Live's own ``IEEEabrv.bib`` has one Latin-1 byte in its opening comment. BibTeX
+    reads bytes and skips text between records, so such a file is read; a byte inside a
+    record, or after a syntax error where the records are unknown, is not.
+
+    Args:
+        name: The name to record as the document's ``path``.
+        raw: The bytes of the file.
+        error: The error of the strict decoding, raised again when the file is refused.
+
+    Returns:
+        The document, its foreign bytes shown as U+FFFD and counted.
+
+    Raises:
+        UnicodeDecodeError: A byte that is not UTF-8 lies inside a record or after the first
+            syntax error.
+    """
+    escaped = raw.decode("utf-8", "surrogateescape")
+    bom = escaped.startswith("\ufeff")
+    body = escaped[1:] if bom else escaped
+    offsets = [match.start() for match in _ESCAPED_BYTES.finditer(body)]
+    document = parse_bibtex(name, _ESCAPED_BYTES.sub("\ufffd", body), bom=bom)
+    extents = sorted(_record_extent(document.text, record) for record in document.records)
+    starts = [start for start, _ in extents]
+    limit = len(body) if document.syntax_error is None else document.syntax_error.offset
+    for offset in offsets:
+        index = bisect_right(starts, offset) - 1
+        if offset >= limit or (index >= 0 and offset < extents[index][1]):
+            raise error
+    document.foreign_bytes = len(offsets)
+    return document
+
+
+def _record_extent(text: str, record: Entry | Declaration) -> tuple[int, int]:
+    """Return the span from a record's ``@`` to just past its closing delimiter.
+
+    After the last value only white space, a comma and the closing delimiter can follow
+    in a record that parsed.
+
+    Args:
+        text: The document text.
+        record: A record that parsed.
+
+    Returns:
+        The start and end offsets.
+    """
+    ends = [atom.outer_end for item in record.fields for atom in item.atoms]
+    if not ends:
+        closing = min(
+            (
+                index
+                for index in (text.find("}", record.start), text.find(")", record.start))
+                if index >= 0
+            ),
+            default=len(text) - 1,
+        )
+        return record.start, closing + 1
+    end = max(ends)
+    while end < len(text) and (text[end].isspace() or text[end] == ","):
+        end += 1
+    return record.start, min(end + 1, len(text))
 
 
 def mebibytes(count: int) -> str:

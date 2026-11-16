@@ -586,6 +586,11 @@ class SubmissionTests(ProjectTestCase):
         self.assertTrue((self.root / "other.png").exists())
         self.write("main.tex", r"\documentclass{article}\input{\dynamic}")
         self.assertEqual(self.result(rule, options).status, "inconclusive")
+        # A gap in the graph can only make a used file look unused: without any asset
+        # outside the graph, as with a bare IEEEtran paper, nothing can be unused.
+        (self.root / "used.png").unlink()
+        (self.root / "other.png").unlink()
+        self.assertEqual(self.result(rule, options).status, "passed")
 
     def test_template_references(self) -> None:
         rule = "submission.template_reference"

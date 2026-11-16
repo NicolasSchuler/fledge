@@ -110,10 +110,13 @@ class DetailKey(StrEnum):
         DIMENSIONS_PT: The page dimensions, in PDF points.
         BOUNDS_PT: Boxes as left, top, right and bottom, in PDF points.
         BBOX: A box, read when ``bounds_pt`` is absent.
+        BYTES_READ: How many bytes a scan read, which differs between a project and its
+            prepared copy without changing what the scan found.
     """
 
     DOCUMENT = "document"
     STAGE = "stage"
+    BYTES_READ = "bytes_read"
     PAGE = "page"
     INPUT_LINE = "input_line"
     REVIEW = "review"
