@@ -90,7 +90,14 @@ These questions need a person, even when a related check passes:
   Dynamic file paths, font-family lookup and legacy `subfiles` preamble behavior
   are unsupported; flattening stops instead of guessing.
 - Build entry filenames must use ASCII letters, digits, underscores, dots or
-  hyphens and end in `.tex`. Source analysis requires UTF-8 text.
+  hyphens and end in `.tex`. A source file that is not UTF-8, such as Latin-1, is read
+  for the checks with its other bytes taken as Windows-1252, so findings may quote its
+  accented words differently from the paper; it is never changed, and the privacy
+  scans of its text stay incomplete (`TEX328`). In such a file a label, citation key
+  or file name with letters outside ASCII is compared as Fledge reads it, not as the
+  bytes TeX compares, so `inspect` can accept a name that the build rejects. UTF-16
+  and other text with NUL bytes, and text that may be in Shift-JIS, GBK or Big5, is not
+  read (`TEX301`).
 - PDF comparison checks page count, extracted text and 144-DPI renders. Details
   below that resolution and differences inside PDF internals can go unnoticed.
   Rendering stops at 300 pages.

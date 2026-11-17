@@ -487,6 +487,7 @@ class CheckPolicyTests(ProjectTestCase):
             "TEX005",
             "TEX006",
             "TEX007",
+            "TEX328",
             "TEX201",
             "TEX202",
             "TEX203",

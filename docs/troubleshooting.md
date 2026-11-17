@@ -27,10 +27,30 @@ The finding is named `project.main_selection`. The project contains more than on
 file with `\documentclass`, such as a paper and its slides, and Fledge does not
 guess. A file that another candidate reads with a literal `\input` or `\include`,
 such as a `body.tex` that holds `\begin{document}`, belongs to that document and is
-not counted; a file that is not valid UTF-8 still counts and is reported as `TEX301`.
+not counted; a file that is not valid UTF-8 still counts and is reported as `TEX328`.
 Pass `--main main.tex`, set `main = "main.tex"` in `fledge.toml`, or configure
 [independent packages](preparation-options.md#independent-manuscript-and-supplement-packages)
 for several documents.
+
+### `TEX328`: a source file that is not UTF-8
+
+A file in Latin-1 or another byte encoding, as older papers and papers with
+`\usepackage[latin1]{inputenc}` have. Fledge reads its commands, so files, references,
+packages, floats and metadata are checked as usual, and the file is packaged as it is,
+byte for byte. What it cannot do is change the file: comment removal, input merging,
+flat layout, citation-key renames and the `TEX204` setting stop, and the privacy scans
+of its text (`PRV001`, `PRV003`–`PRV006`) stay incomplete, because a name or a note in
+another encoding could be missed. `TEX328` names the file and the line of the first
+byte that is not UTF-8. To get those, convert a copy, for example with
+`iconv -f cp1252 -t utf-8 main.tex > main-utf8.tex` (Windows-1252 covers Latin-1 and is
+how Fledge reads the file), and replace `\usepackage[latin1]{inputenc}` by
+`\usepackage[utf8]{inputenc}` or remove it.
+
+Two kinds of file are not read at all and are reported as `TEX301`: text with NUL
+bytes, such as UTF-16, and text that may be in Shift-JIS, GBK or Big5, where a
+backslash or a brace can be the second byte of a character. The second kind includes
+the rare Western file in which every accented letter stands in front of a letter or a
+brace, such as an English paper whose only such byte is in `\label{sec:Poincaré}`.
 
 ### `BIB102`: unused bibliography entries
 

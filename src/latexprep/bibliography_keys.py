@@ -338,6 +338,13 @@ def map_keys(
     count = 0
     for path, changes in _citation_edits(inspection, mapping).items():
         source = inspection.sources[path]
+        if source.foreign:
+            # Its text was read approximately and does not encode back to its bytes.
+            raise ProposalBlocked(
+                f"{path} is not valid UTF-8 (TEX328), so its citations cannot be rewritten; "
+                "convert it to UTF-8 first.",
+                path=path,
+            )
         sources[path] = with_bom(apply_edits(source.text, changes, path=path), bom=source.bom)
         count += len(changes)
     return KeyMapping(mapping, sources, count)

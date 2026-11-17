@@ -829,13 +829,29 @@ class PlacedGapTests(ProjectTestCase):
         )
 
     def test_unreadable_package_in_the_preamble_cannot_change_the_class_options(self) -> None:
-        self.write("algorithm.sty", b"%% Copyright (C) Rog\xe9rio\n\\ProvidesPackage{algorithm}\n")
-        results = self.statuses(
-            "\\documentclass{article}\n\\usepackage{algorithm}\n\\begin{document}\n\\end{document}\n"
+        main = (
+            "\\documentclass{article}\n\\usepackage{algorithm}\n"
+            "\\begin{document}\n\\end{document}\n"
         )
+        # Not UTF-8 and with a NUL byte: the package cannot be read, and may load any
+        # package itself.
+        self.write("algorithm.sty", b"\\ProvidesPackage{algorithm}\x00\xff\n")
+        results = self.statuses(main)
         self.assertEqual(results[CLASS_OPTIONS], "passed")
-        # The package that could not be read may load any package itself.
         self.assertEqual(results[PACKAGES], "inconclusive")
+        # A Latin-1 byte in its copyright line, as in the algorithm.sty that venue kits
+        # ship: the package is read, and it loads nothing that is forbidden.
+        self.write("algorithm.sty", b"%% Copyright (C) Rog\xe9rio\n\\ProvidesPackage{algorithm}\n")
+        results = self.statuses(main)
+        self.assertEqual(results[CLASS_OPTIONS], "passed")
+        self.assertEqual(results[PACKAGES], "passed")
+        # Counter-test: what such a package loads is read too.
+        self.write(
+            "algorithm.sty",
+            b"%% Copyright (C) Rog\xe9rio\n\\ProvidesPackage{algorithm}\n"
+            b"\\RequirePackage{showframe}\n",
+        )
+        self.assertNotEqual(self.statuses(main)[PACKAGES], "passed")
 
 
 if __name__ == "__main__":

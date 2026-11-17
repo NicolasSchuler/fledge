@@ -631,7 +631,8 @@ class BibliographyCheckTests(ProjectTestCase):
     def test_all_root_discovery_and_conditional_metadata_do_not_claim_completeness(self) -> None:
         self.manuscript("\\nocite{*}")
         self.write("references.bib", "@misc{known}")
-        self.write("unreadable.tex", b"\\documentclass{article}\xff")
+        # A NUL byte: not text in any encoding that is read, unlike a Latin-1 file.
+        self.write("unreadable.tex", b"\\documentclass{article}\x00\xff")
         rows = self.check(all_roots=True)
         self.assertTrue(all(row.status == "inconclusive" for row in rows))
         self.assertTrue(any("All-root discovery" in row.message for row in rows))

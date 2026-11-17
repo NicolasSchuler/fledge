@@ -157,14 +157,23 @@ class GraphFindings:
         self.findings.append(finding)
 
 
+# The finding for a source that is not valid UTF-8 and was read all the same
+# (``source_loading``). It keeps the graph from being complete, so nothing rewrites the
+# file, but it hides no command, citation or text from a check.
+FOREIGN_ENCODING_RULE = "source.foreign_encoding"
+
+
 def _reads_no_source(finding: Finding) -> bool:
     r"""Return whether the command a finding concerns reads no manuscript source.
 
     That is a command of ``OPAQUE_FILE_COMMANDS``, or an unknown command each of whose
     possible file names has a suffix outside ``TEX_SOURCE_SUFFIXES``, as in
     ``\plot{data.csv}``; ``\loadparts{abstract.tex, logo.png}`` may read source. A
-    finding that names no command, such as a cycle or a parse limit, may hide anything.
+    finding that names no command, such as a cycle or a parse limit, may hide anything,
+    except the note that a source is not UTF-8: that source was read.
     """
+    if finding.rule == FOREIGN_ENCODING_RULE:
+        return True
     command = finding.details.get("command")
     if not isinstance(command, str):
         return False

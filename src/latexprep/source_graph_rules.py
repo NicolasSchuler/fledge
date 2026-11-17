@@ -12,11 +12,14 @@ RULES = (
     Rule(
         code="TEX301",
         name="source.encoding",
-        title="Unreadable or non-UTF-8 source",
+        title="Unreadable source",
         description=(
-            "Report a project source that could not be read or is not valid UTF-8. The file "
-            "is neither scanned nor changed, so its commands and references are unknown and "
-            "the checks that depend on them are incomplete."
+            "Report a project source that could not be read, or that is not text Fledge can "
+            "read safely: UTF-16 and other text with NUL bytes, and text that may be in "
+            "Shift-JIS, GBK or Big5, where a backslash or brace can be half of a character. "
+            "The file is neither scanned nor changed, so its commands and references are "
+            "unknown and the checks that depend on them are incomplete. A file in Latin-1 or "
+            "another single-byte encoding is read; see TEX328."
         ),
         tests=(
             "tests.test_source_analysis.SourceAnalysisTests.test_read_failures_and_encoding_failures_are_told_apart_without_local_paths",
@@ -418,6 +421,29 @@ RULES = (
             "tests.test_source_analysis.SourceAnalysisTests.test_invalid_main_does_not_read_external_file",
         ),
         fix="Give the main file relative to the project folder, for example --main paper/main.tex.",
+        mandatory=True,
+    ),
+    Rule(
+        code="TEX328",
+        name="source.foreign_encoding",
+        title="Source that is not UTF-8",
+        description=(
+            "Report a project source that is not valid UTF-8, such as a Latin-1 file. Its "
+            "commands are read, with the bytes that are not UTF-8 taken as Windows-1252, so "
+            "the checks of files, references, packages, floats and metadata apply; its "
+            "wording, and names with letters outside ASCII, are compared as that reading "
+            "gives them. The file is never changed: comment removal, merging, flat layout, "
+            "citation-key renames and every other transformation of it are refused, and the "
+            "privacy scans of its text stay incomplete."
+        ),
+        tests=(
+            "tests.test_source_encoding.ForeignEncodingTests.test_the_commands_of_a_latin1_source_are_read",
+            "tests.test_source_encoding.ForeignEncodingTests.test_a_source_that_is_not_utf8_is_never_rewritten",
+        ),
+        fix=(
+            "Convert an explicit copy to UTF-8 (iconv -f cp1252 -t utf-8) and declare it with "
+            "\\usepackage[utf8]{inputenc} where the engine needs that, then repeat the check."
+        ),
         mandatory=True,
     ),
     Rule(

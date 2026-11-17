@@ -918,12 +918,24 @@ def read_submission_text(root: Path, main: str | None = None) -> dict[str, Submi
     """
     document = expand_document(root, main)
     redefined, active_characters = local_definitions(document, _FIELD_DECLARATIONS)
+    # The text of a source that is not UTF-8 is read as Windows-1252, which may not be what
+    # the paper prints, so no field is offered as ready to paste.
+    sources = document.graph.sources
+    foreign = sorted(
+        name for name in document.selected if name in sources and sources[name].foreign
+    )
     reader = _FieldReader(
         document,
         _original_text(document),
         # A conditional matters to a field only where it encloses a declaration of it, which
         # that declaration reports, or a file input, which is a graph gap.
-        list(document.graph_uncertainty),
+        [
+            *document.graph_uncertainty,
+            *(
+                f"{name}: not valid UTF-8, so its text may differ from the paper"
+                for name in foreign
+            ),
+        ],
         redefined,
         active_characters,
     )

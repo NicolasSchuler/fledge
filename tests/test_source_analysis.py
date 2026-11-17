@@ -91,10 +91,25 @@ class SourceAnalysisTests(ProjectTestCase):
             b"See \\ref{sec:Poincar\xe9}.\n\\end{document}\n",
         )
         self.assertEqual(discover_roots(self.root), ["main.tex"])
-        # The source checks still refuse the file's text: TEX301 makes them incomplete.
+        # The byte stands in front of a brace and nothing rules out a double-byte
+        # encoding, in which the brace would be half of a character: the file is the main
+        # file, but its text is left unread (TEX301).
         result = analyze_sources(self.root, "main.tex")
         self.assertEqual(result.main, "main.tex")
         self.assertIn("source.encoding", {item.rule for item in result.findings})
+        self.assertFalse(result.complete)
+        # With a Latin-1 letter in front of a blank the file can only be single-byte text:
+        # it is read, its label and reference are found, and TEX328 notes that it is not
+        # UTF-8 and keeps the graph from counting as complete, so nothing rewrites it.
+        self.write(
+            "main.tex",
+            b"\\documentclass{article}\n\\begin{document}\n\\section{A}\\label{sec:a}\n"
+            b"Henri Poincar\xe9 in \\ref{sec:a}.\n\\end{document}\n",
+        )
+        result = analyze_sources(self.root, "main.tex")
+        rules = {item.rule for item in result.findings}
+        self.assertIn("source.foreign_encoding", rules)
+        self.assertFalse(rules & {"source.encoding", "source.unresolved_reference"})
         self.assertFalse(result.complete)
 
     def test_a_file_without_a_document_class_is_not_a_root_in_any_encoding(self) -> None:
@@ -217,7 +232,8 @@ class SourceAnalysisTests(ProjectTestCase):
     ) -> None:
         self.write("main.tex", "\\documentclass{article}\n\\input{body}\n")
         for body, rule in (
-            (b"caf\xe9", "source.encoding"),
+            (b"caf\xe9", "source.foreign_encoding"),
+            (b"caf\x00\xe9", "source.encoding"),
             (b"\\input{", "source.argument_limit"),
         ):
             with self.subTest(rule=rule):
@@ -318,10 +334,18 @@ class SourceAnalysisTests(ProjectTestCase):
 
     def test_unsupported_encoding_and_large_files_are_explicit(self) -> None:
         self.write("main.tex", "\\documentclass{article}\n\\input{body}")
-        self.write("body.tex", b"caf\xe9")
-        plan = plan_flatten(self.root, "main.tex")
-        self.assertIn("source.encoding", {item.rule for item in plan.findings})
-        self.assertTrue(has_blockers(plan.findings))
+        # A file that is not UTF-8 is read but cannot be rewritten; one with NUL bytes is
+        # not read at all. Flat layout refuses both.
+        for body, rule in (
+            (b"caf\xe9", "source.foreign_encoding"),
+            (b"\x00\xe9", "source.encoding"),
+        ):
+            with self.subTest(rule=rule):
+                self.write("body.tex", body)
+                plan = plan_flatten(self.root, "main.tex")
+                self.assertIn(rule, {item.rule for item in plan.findings})
+                self.assertTrue(has_blockers(plan.findings))
+                self.assertNotIn("body.tex", plan.contents)
         self.write("body.tex", b"x" * (8 * 1024 * 1024 + 1))
         plan = plan_flatten(self.root, "main.tex")
         self.assertIn("source.size_limit", {item.rule for item in plan.findings})
@@ -352,11 +376,12 @@ class SourceAnalysisTests(ProjectTestCase):
 
     def test_read_failures_and_encoding_failures_are_told_apart_without_local_paths(self) -> None:
         self.write("main.tex", "\\documentclass{article}\n\\input{body}\n")
-        self.write("body.tex", b"caf\xe9")
+        # UTF-16: not text that a byte-wise reader finds commands in.
+        self.write("body.tex", "café".encode("utf-16"))
         encoding = self.finding(
             analyze_selected_sources(self.root, "main.tex").findings, "source.encoding"
         )
-        self.assertIn("not valid UTF-8", encoding.message)
+        self.assertIn("not text in an encoding that can be read", encoding.message)
         self.write("body.tex", "Readable once permissions are fixed.\n")
         (self.root / "body.tex").chmod(0)
         self.addCleanup((self.root / "body.tex").chmod, 0o600)

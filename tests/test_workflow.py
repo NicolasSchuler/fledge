@@ -261,8 +261,9 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
                 rules = {item.rule for item in result.findings}
                 self.assertNotIn("project.main_selection", rules)
                 self.assertNotEqual(result.outcome, "error")
-                # The foreign byte is a finding of its own, which leaves the scan incomplete.
-                self.assertEqual("source.encoding" in rules, case == "latin1")
+                # The foreign byte is a note of its own: the file is read and never changed.
+                self.assertEqual("source.foreign_encoding" in rules, case == "latin1")
+                self.assertNotIn("source.encoding", rules)
 
     async def test_ambiguous_root_blocks_without_running_tools(self):
         with tempfile.TemporaryDirectory() as directory:

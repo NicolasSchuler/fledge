@@ -277,6 +277,20 @@ The version is defined once, as `__version__` in `src/latexprep/__init__.py`.
 
 ### Changed
 
+- **A source file that is not UTF-8 is read for the checks (`TEX328`).** A paper in
+  Latin-1, as `\usepackage[latin1]{inputenc}` reads it, was neither scanned nor changed
+  (`TEX301`), so every configured check was inconclusive and each preset blocked the
+  paper: eight of ninety-six papers and templates tried, older and non-English ones
+  above all.
+  The commands of TeX are ASCII in such encodings, so the file is now read, with the
+  bytes that are not UTF-8 taken as Windows-1252, and files, references, packages,
+  floats and metadata are checked. The new `TEX328` notes it, with the line of the first
+  such byte. The file is still never changed, and it is packaged byte for byte: comment
+  removal, input merging, flat layout, citation-key renames and the `TEX204` setting
+  stop, the privacy scans of its text stay incomplete, and `fledge submission-text`
+  offers none of its fields as ready. `TEX301` now reports only a file that cannot be
+  read safely: UTF-16 and other text with NUL bytes, and text that may be in Shift-JIS,
+  GBK or Big5, where a backslash or brace can be half of a character.
 - **The review presets no longer block on the order of first references (`MAN015`).**
   `anonymous-review` and `camera-ready` switched on `check_float_reference_order`, and a
   paper whose introduction previews a results figure, or whose appendix tables are cited

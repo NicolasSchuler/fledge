@@ -167,13 +167,16 @@ class SourceGraphCleanCases(ProjectTestCase):
         self.assertNotIn("source.context_ambiguity", rules_of(plan.findings))
         self.assertFalse(has_blockers(plan.findings), plan.findings)
 
-    @clean_case("TEX301", "TEX302")
+    @clean_case("TEX301", "TEX302", "TEX328")
     def test_a_utf8_source_inside_the_size_limit_is_read(self) -> None:
         self.write("main.tex", DOCUMENT + "\\input{body}\n")
         self.write("body.tex", "Caf\u00e9 \u00fcber na\u00efve.\n".encode())
         analysis = self.analyse()
         self.assertIn("body.tex", analysis.dependencies)
-        self.assertFalse(rules_of(analysis.findings) & {"source.encoding", "source.size_limit"})
+        self.assertFalse(
+            rules_of(analysis.findings)
+            & {"source.encoding", "source.foreign_encoding", "source.size_limit"}
+        )
 
     @clean_case("TEX304", "TEX305")
     def test_closed_arguments_and_few_commands_stay_within_the_lexical_bounds(self) -> None:

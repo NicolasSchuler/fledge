@@ -732,8 +732,9 @@ def _plan_comment_removal(
 ) -> None:
     """Plan comment removal in every document source; the others are copied verbatim.
 
-    Sources that could not be parsed are reported as a problem, since comment removal
-    needs to read every source file.
+    Sources that could not be parsed, and document sources that are not UTF-8 and so
+    have no proposed text, are reported as a problem, since comment removal needs to read
+    every source file and to rewrite the document sources.
 
     Args:
         graph: The dependency graph of the project.
@@ -741,13 +742,21 @@ def _plan_comment_removal(
         policy: Which comment bodies to remove.
         plan: The plan that receives the findings.
     """
-    if graph.unparsed:
-        unparsed = sorted(graph.unparsed)
+    # A document source that is not UTF-8 was read, but its text does not encode back to
+    # its bytes, so its comments cannot be removed either.
+    unchangeable = {
+        name
+        for name in graph.sources.keys() - texts.keys()
+        if PurePosixPath(name).suffix.lower() in ROOT_SUFFIXES
+    }
+    unparsed = sorted(graph.unparsed | unchangeable)
+    if unparsed:
         _problem(
             plan,
             _COMMENT_RULE,
-            "Some source files could not be parsed safely: "
-            f"{listed_names(unparsed)}. Comment removal needs to read every source file.",
+            "Some source files could not be parsed or changed safely: "
+            f"{listed_names(unparsed)}. Comment removal needs to read and rewrite every "
+            "source file.",
             suggestion="Make these files readable UTF-8 text without symbolic links, or leave "
             "them out of the package, then prepare again.",
             details={"files": unparsed},
@@ -795,7 +804,8 @@ def _plan_suppression(main: str, texts: dict[str, str], plan: SourceTransformPla
         _problem(
             plan,
             _SUPPRESSION_RULE,
-            "The main source could not be read, so the suppression line cannot be added.",
+            "The main source could not be read or is not UTF-8, so the suppression line "
+            "cannot be added.",
             main,
         )
         return
@@ -905,7 +915,9 @@ def plan_source_transforms(
         # The same source findings that source analysis reports for an unusable main.
         plan.findings.extend([*graph.findings, *lint_sources(graph)])
         return plan
-    texts = {name: source.text for name, source in graph.sources.items()}
+    # A source that is not valid UTF-8 is read for the checks and never rewritten: it gets
+    # no proposed text, so every transformation leaves it out or reports that it cannot.
+    texts = {name: source.text for name, source in graph.sources.items() if not source.foreign}
     if options.comment_policy != "retain":
         _plan_comment_removal(graph, texts, options.comment_policy, plan)
     try:

@@ -187,8 +187,9 @@ class PackageCodeLimitTests(ProjectTestCase):
 
     def test_an_unreadable_input_or_class_file_is_a_citation_gap(self) -> None:
         for main, name, data in (
-            ("\\documentclass{article}", "chapter.tex", b"\\cite{key}\xff\n"),
-            ("\\documentclass{venue}", "venue.cls", b"\\LoadClass{article}\xff\n"),
+            # A NUL byte makes a file unreadable; one that is only not UTF-8 is read.
+            ("\\documentclass{article}", "chapter.tex", b"\\cite{key}\x00\xff\n"),
+            ("\\documentclass{venue}", "venue.cls", b"\\LoadClass{article}\x00\xff\n"),
         ):
             with self.subTest(name=name):
                 self.write(

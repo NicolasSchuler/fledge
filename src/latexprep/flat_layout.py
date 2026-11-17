@@ -531,6 +531,10 @@ def _rewrite_sources(graph: SourceGraph, mapping: dict[str, str]) -> _Rewrites:
     changes: list[Change] = []
     for name, replacements in edits.items():
         source = graph.sources[name]
+        if source.foreign:
+            # A source that is not UTF-8 is never rewritten; its TEX328 finding already
+            # makes the plan unusable.
+            continue
         rewritten = apply_text_edits(
             source.text,
             (
