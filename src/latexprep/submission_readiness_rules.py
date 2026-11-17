@@ -215,7 +215,7 @@ RULES = (
         ),
         fix=(
             "Delete or rewrite the reported comments before submission, or set "
-            "source_transforms.comment_policy = 'all' so the prepared copy omits comments."
+            'source_transforms.comment_policy = "all" so the prepared copy omits comments.'
         ),
     ),
 )

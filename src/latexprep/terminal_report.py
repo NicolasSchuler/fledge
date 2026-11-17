@@ -79,7 +79,7 @@ def _finding_style(finding: Finding) -> str:
     return {"error": "red", "warning": "yellow", "info": "cyan"}.get(finding.severity, "cyan")
 
 
-def _detail(console: Console, label: str, value: str, *, style: str = "") -> None:
+def _detail(console: Console, label: str, value: str, *, style: str = "", indent: int = 2) -> None:
     """Print one indented ``label: value`` line, with ``value`` sanitized for the terminal.
 
     Args:
@@ -87,11 +87,45 @@ def _detail(console: Console, label: str, value: str, *, style: str = "") -> Non
         label: The label, printed in cyan.
         value: The untrusted text after the label.
         style: The Rich style of the value.
+        indent: How many columns the line, and each line it wraps to, is indented.
     """
     line = Text()
     line.append(f"{label}: ", style="cyan")
     line.append(sanitize_terminal_text(value), style=style)
-    console.print(Padding(line, (0, 0, 0, 2), expand=False), overflow="fold")
+    console.print(Padding(line, (0, 0, 0, indent), expand=False), overflow="fold")
+
+
+def _where(location: str) -> Text:
+    """Return the ``Where:`` line of a finding: the place as text, its stage dimmed.
+
+    The place, a file and line, is what the reader acts on, so it keeps the weight of the
+    text around it; the stage in brackets after it only says which step reported it.
+    """
+    place = one_line(location)
+    stage = ""
+    if place.endswith("]") and " [" in place:
+        place, _, stage = place.rpartition(" [")
+        stage = " [" + stage
+    line = Text()
+    line.append("Where: ", style="cyan")
+    line.append(place)
+    line.append(stage, style="dim")
+    return line
+
+
+# How the lines of a unified diff are styled, by their first characters; the file header
+# comes before the added and removed lines it would otherwise match.
+_DIFF_STYLES = (("+++", "bold"), ("---", "bold"), ("@@", "cyan"), ("+", "green"), ("-", "red"))
+
+
+def _diff_text(diff: str) -> Text:
+    """Return a unified diff with removed lines red, added lines green and hunks cyan."""
+    text = Text()
+    for index, line in enumerate(sanitize_terminal_text(diff.rstrip()).split("\n")):
+        style = next((style for prefix, style in _DIFF_STYLES if line.startswith(prefix)), "")
+        text.append("\n" if index else "")
+        text.append(line, style=style)
+    return text
 
 
 def _measured_total(files: list[dict], field: str) -> str:
@@ -141,8 +175,9 @@ def _print_package_summary(
     included = [item for item in files if item.get("status") == "included"]
     excluded = [item for item in files if item.get("status") == "excluded"]
     console.print()
-    title = Text("Package contents", style="bold cyan")
-    title.append(f" — {one_line(str(package.get('document', 'project')))}", style="default")
+    title = Text()
+    title.append("Package contents", style="bold cyan")
+    title.append(f" — {one_line(str(package.get('document', 'project')))}")
     title.append(f" [{sanitize_terminal_text(status)}]", style=style)
     console.print(title, overflow="fold")
     console.print(
@@ -176,7 +211,10 @@ def _print_package_summary(
         console.print(Text("  Largest compressed entries:", style="cyan"))
         for item in contributors:
             _detail(
-                console, size_label(item["compressed_bytes"]), one_line(str(item.get("path", "")))
+                console,
+                size_label(item["compressed_bytes"]),
+                one_line(str(item.get("path", ""))),
+                indent=4,
             )
 
 
@@ -190,8 +228,10 @@ def _print_package_files(files: list[dict], console: Console) -> None:
     console.print(Text("  Files:", style="cyan"))
     for item in files:
         file_status = str(item.get("status", "unknown"))
-        text = Text(f"  [{sanitize_terminal_text(file_status)}] ", style="cyan")
-        text.append(one_line(str(item.get("path") or item.get("source", ""))), style="default")
+        # Only the status is a label; the name and the sizes are read as text.
+        text = Text("    ")
+        text.append(f"[{sanitize_terminal_text(file_status)}]", style="cyan")
+        text.append(" " + one_line(str(item.get("path") or item.get("source", ""))))
         if item.get("source") != item.get("path"):
             text.append(f" (source: {one_line(str(item.get('source', '')))})")
         text.append(
@@ -200,7 +240,7 @@ def _print_package_files(files: list[dict], console: Console) -> None:
         )
         console.print(text, overflow="fold")
         for reason in item.get("reasons", []):
-            _detail(console, "Reason", str(reason))
+            _detail(console, "Reason", str(reason), indent=6)
 
 
 def _print_package(package: dict[str, object], console: Console, *, show_files: bool) -> None:
@@ -247,7 +287,10 @@ def _print_summary(
         console: The console to print on.
     """
     style = OUTCOME_STYLES[report.outcome]
-    summary = Text(report.outcome.replace("_", " ").capitalize(), style=style)
+    # Only the outcome carries its color: the scope and the counts are read as text, and a
+    # dimmed color is hard to read on dark and on light backgrounds alike.
+    summary = Text()
+    summary.append(report.outcome.replace("_", " ").capitalize(), style=style)
     summary.append(f" — {one_line(report.scope)}")
     summary.append(f"\n{result_counts(report)}", style="dim")
     console.print(Panel(summary, border_style=style, padding=(0, 1), expand=False))
@@ -262,7 +305,8 @@ def _print_summary(
 def _print_heading(view: FindingView, console: Console) -> None:
     """Print the code, title and ``[SEVERITY / status]`` of a finding as one line."""
     color = _finding_style(view.finding)
-    heading = Text(one_line(f"{view.code}  {view.title}"), style=f"bold {color}")
+    heading = Text()
+    heading.append(one_line(f"{view.code}  {view.title}"), style=f"bold {color}")
     heading.append(f"  [{view.finding.severity.upper()} / {view.status_label}]", style=color)
     console.print(heading)
 
@@ -272,7 +316,7 @@ def _print_view(view: FindingView, console: Console) -> None:
     console.print()
     _print_heading(view, console)
     if view.location:
-        _detail(console, "Where", one_line(view.location), style="dim")
+        console.print(Padding(_where(view.location), (0, 0, 0, 2), expand=False), overflow="fold")
     console.print(Padding(Text(sanitize_terminal_text(view.message)), (0, 0, 0, 2), expand=False))
     if view.evidence:
         _detail(console, "Evidence", one_line(view.evidence))
@@ -296,10 +340,13 @@ def _print_follow_ons(views: list[FindingView], console: Console) -> None:
         )
     )
     for view in views:
-        heading = Text(one_line(f"{view.code}  {view.title}"), style=_finding_style(view.finding))
-        heading.append(f"  [{view.finding.severity.upper()} / {view.status_label}]")
+        color = _finding_style(view.finding)
+        heading = Text()
+        heading.append(one_line(f"{view.code}  {view.title}"), style=color)
+        heading.append(f"  [{view.finding.severity.upper()} / {view.status_label}]", style=color)
         console.print(Padding(heading, (0, 0, 0, 4)), overflow="fold")
-        detail = Text(f"{one_line(view.location)}: ", style="dim")
+        detail = Text()
+        detail.append(f"{one_line(view.location)}: ", style="dim")
         detail.append(_clipped_message(view.message))
         console.print(Padding(detail, (0, 0, 0, 6)), overflow="fold")
 
@@ -356,7 +403,8 @@ def _print_suggestions(views: list[FindingView], silenced: int, console: Console
         Text("\nSuggestions (they never change the result or the exit code)", style="bold")
     )
     for view in views:
-        line = Text(one_line(f"{view.code}  {view.title}"), style="cyan")
+        line = Text()
+        line.append(one_line(f"{view.code}  {view.title}"), style="cyan")
         line.append(f"  {one_line(view.location)}", style="dim")
         console.print(Padding(line, (0, 0, 0, 2)), overflow="fold")
         console.print(Padding(Text(sanitize_terminal_text(view.message)), (0, 0, 0, 4)))
@@ -406,15 +454,13 @@ def _print_changes(report: RedactedReport, options: RenderOptions, console: Cons
         return
     for change in report.changes:
         destination = f" -> {change.destination}" if change.destination else ""
-        console.print(
-            Text(
-                sanitize_terminal_text(
-                    f"  {change.kind}: {change.path}{destination} — {change.reason}"
-                )
-            )
+        _detail(
+            console,
+            sanitize_terminal_text(str(change.kind)),
+            f"{change.path}{destination} — {change.reason}",
         )
         if options.show_diff and change.diff:
-            console.print(Text(sanitize_terminal_text(change.diff.rstrip())))
+            console.print(_diff_text(change.diff))
 
 
 def _print_artifacts_and_hints(
@@ -439,7 +485,7 @@ def _print_artifacts_and_hints(
     if report.artifacts:
         console.print(Text("\nArtifacts", style="bold cyan"))
         for name, path in report.artifacts.items():
-            console.print(Text(one_line(f"{name}: {path}")), overflow="fold")
+            _detail(console, one_line(str(name)), one_line(str(path)))
     settings_file = options.settings_file or records.config_path
     if report.outcome.passed and (
         summary := not_checked_summary(records.not_checked, settings_file)

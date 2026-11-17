@@ -14,7 +14,7 @@ from rich.text import Text
 from latexprep.compact_report import render_compact
 from latexprep.finding_view import RenderOptions
 from latexprep.findings import Finding
-from latexprep.report import Outcome, Report
+from latexprep.report import Change, ChangeKind, Outcome, Report
 from latexprep.terminal_console import stderr_console, stdout_console
 from latexprep.terminal_report import print_report, render_terminal
 from latexprep.text_safety import sanitize_terminal_text
@@ -28,7 +28,14 @@ class TerminalBuffer(StringIO):
         return True
 
 
-def render(report: Report, width: int, *, color: bool = False, show_files: bool = False) -> str:
+def render(
+    report: Report,
+    width: int,
+    *,
+    color: bool = False,
+    show_files: bool = False,
+    show_diff: bool = False,
+) -> str:
     """Render ``report`` as the terminal report on a console ``width`` columns wide.
 
     Args:
@@ -36,6 +43,7 @@ def render(report: Report, width: int, *, color: bool = False, show_files: bool 
         width: The console width, in columns.
         color: Whether to render as a terminal with the standard colour system.
         show_files: Whether to show the full file inventory of the package.
+        show_diff: Whether to show the diff of every change.
 
     Returns:
         The rendered text, with colour codes when ``color`` is set.
@@ -49,8 +57,36 @@ def render(report: Report, width: int, *, color: bool = False, show_files: bool 
         no_color=not color,
         markup=True,
     )
-    print_report(report, console, options=RenderOptions(show_files=show_files))
+    options = RenderOptions(show_files=show_files, show_diff=show_diff)
+    print_report(report, console, options=options)
     return output.getvalue()
+
+
+def styled(report: Report, **options: bool) -> dict[str, set[str]]:
+    """Return the styles of each piece of text in the coloured terminal report.
+
+    Args:
+        report: The report to render, 100 columns wide.
+        **options: ``show_files`` and ``show_diff``, as for :func:`render`.
+
+    Returns:
+        The styles of every run of text that has one, by the text without its surrounding
+        blanks; text printed in the terminal's own colour and weight is not listed.
+    """
+    text = Text.from_ansi(render(report, 100, color=True, **options))
+    styles: dict[str, set[str]] = {}
+    for span in text.spans:
+        piece = text.plain[span.start : span.end].strip()
+        if piece:
+            style = str(span.style)
+            for number, name in _ANSI_COLOURS.items():
+                style = style.replace(f"color({number})", name)
+            styles.setdefault(piece, set()).add(style)
+    return styles
+
+
+# The standard colours, as Rich names them when it reads escape sequences back.
+_ANSI_COLOURS = {1: "red", 2: "green", 3: "yellow", 6: "cyan"}
 
 
 def package(status: str = "verified") -> dict:
@@ -171,6 +207,100 @@ class TerminalPresentationTests(unittest.TestCase):
                 text = render(Report("check", outcome=outcome), 80, color=True)
                 self.assertRegex(text, rf"\x1b\[[0-9;]*{ansi}m")
                 self.assertIn(outcome.replace("_", " ").capitalize(), text)
+
+    def test_only_the_outcome_carries_its_colour_in_the_summary(self):
+        # The scope and the counts are read as text: in the outcome's colour, and dimmed
+        # on top of it, they were hard to read on dark and on light backgrounds alike.
+        report = Report("check", outcome=Outcome.BLOCKED, scope="source checks only")
+        styles = styled(report)
+        self.assertEqual(styles["Blocked"], {"bold red"})
+        counts = next(piece for piece in styles if piece.startswith("0 errors"))
+        self.assertEqual(styles[counts], {"dim"})
+        self.assertNotIn("— source checks only", styles)
+        self.assertFalse([piece for piece in styles if "source checks only" in piece])
+
+    def test_a_finding_reads_as_heading_labels_and_plain_text(self):
+        report = Report(
+            "check",
+            outcome=Outcome.BLOCKED,
+            findings=[
+                Finding(
+                    "manuscript.forbidden_packages",
+                    "A forbidden package is loaded.",
+                    severity="error",
+                    path="main.tex",
+                    line=3,
+                    details={"stage": "manuscript details"},
+                )
+            ],
+        )
+        styles = styled(report)
+        heading = next(piece for piece in styles if piece.startswith("TEX103"))
+        self.assertEqual(styles[heading], {"bold red"})
+        # The severity and status stand beside the heading in its colour, not in bold.
+        self.assertEqual(styles["[ERROR / failed]"], {"red"})
+        self.assertEqual(styles["Where:"], {"cyan"})
+        # The place is what the reader acts on: plain text. Only the stage is dimmed.
+        self.assertEqual(styles["[manuscript details]"], {"dim"})
+        self.assertNotIn("main.tex:3", styles)
+        self.assertFalse([piece for piece in styles if "A forbidden package" in piece])
+
+    def test_follow_on_results_keep_their_message_readable(self):
+        problem = Finding(
+            "build.tex_error",
+            "./extra.tex:3: Undefined control sequence.",
+            severity="error",
+            path="extra.tex",
+            line=3,
+            details={"document": "main.tex", "stage": "baseline"},
+        )
+        summary = Finding(
+            "package.independent_documents",
+            "At least one selected document package failed verification.",
+            severity="error",
+        )
+        styles = styled(Report("prepare", outcome=Outcome.BLOCKED, findings=[summary, problem]))
+        follow_on = next(piece for piece in styles if piece.startswith("PKG301"))
+        self.assertEqual(styles[follow_on], {"red"})
+        self.assertFalse([piece for piece in styles if "failed verification" in piece])
+
+    def test_a_diff_marks_removed_and_added_lines_and_changes_are_labelled(self):
+        diff = "--- main.tex\n+++ main.tex\n@@ -1,2 +1,2 @@\n \\title{A}\n-% note\n+%\n"
+        report = Report(
+            "prepare",
+            outcome=Outcome.PASSED,
+            changes=[
+                Change("main.tex", kind=ChangeKind.REWRITE, reason="Comments removed.", diff=diff)
+            ],
+            artifacts={"archive": "/tmp/out/submission.zip"},
+        )
+        styles = styled(report, show_diff=True)
+        self.assertEqual(styles["--- main.tex"], {"bold"})
+        self.assertEqual(styles["+++ main.tex"], {"bold"})
+        self.assertEqual(styles["@@ -1,2 +1,2 @@"], {"cyan"})
+        self.assertEqual(styles["-% note"], {"red"})
+        self.assertEqual(styles["+%"], {"green"})
+        self.assertNotIn("\\title{A}", styles)
+        self.assertEqual(styles["rewrite:"], {"cyan"})
+        self.assertEqual(styles["archive:"], {"cyan"})
+        plain = render(report, 100, show_diff=True)
+        self.assertIn("\n  rewrite: main.tex — Comments removed.\n", plain)
+        self.assertIn("\nArtifacts\n  archive: /tmp/out/submission.zip\n", plain)
+        # Without colour the same text is printed, and no escape sequence.
+        self.assertNotIn("\x1b", plain)
+
+    def test_package_files_are_listed_under_their_headings(self):
+        report = Report("prepare", outcome=Outcome.PASSED, package_contents=[package()])
+        plain = render(report, 100, show_files=True)
+        self.assertIn("\n  Largest compressed entries:\n    10 B: sections__results.tex\n", plain)
+        self.assertIn("\n  Files:\n    [included] sections__results.tex", plain)
+        self.assertIn("\n      Reason: Literal input dependency\n", plain)
+        styles = styled(report, show_files=True)
+        self.assertEqual(styles["Package contents"], {"bold cyan"})
+        self.assertEqual(styles["[verified]"], {"green"})
+        self.assertEqual(styles["[included]"], {"cyan"})
+        # Names and sizes are text, not labels.
+        self.assertFalse([piece for piece in styles if "uncompressed 100 B" in piece])
 
     def test_source_controls_and_rich_tags_are_literal_in_all_sections(self):
         malicious = "[bold]paper[/bold]\x1b]8;;https://example.invalid\x07\x1b[31m\x85.tex"

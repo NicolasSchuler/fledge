@@ -291,6 +291,17 @@ The version is defined once, as `__version__` in `src/latexprep/__init__.py`.
   offers none of its fields as ready. `TEX301` now reports only a file that cannot be
   read safely: UTF-16 and other text with NUL bytes, and text that may be in Shift-JIS,
   GBK or Big5, where a backslash or brace can be half of a character.
+- **The terminal report colors only what a color is about, and keeps what you act on
+  readable.** The summary box printed its whole text in the outcome's color, with the
+  counts dimmed on top of it, which was hard to read on dark and on light backgrounds.
+  Only the outcome is colored now. The file and line of a finding and the message of a
+  follow-on result are plain text instead of dimmed text; the stage in brackets stays
+  dim. A diff shown with `--diff` has its removed lines in red, its added lines in
+  green and its hunk headers in cyan. Files, their inclusion reasons and the largest
+  entries of a package are indented under their headings, artifacts and changes carry
+  the same cyan labels as `Where:` and `Next:`, and the advice of `PRV007` writes the
+  setting as TOML does (`comment_policy = "all"`). Without a terminal, or with
+  `NO_COLOR`, the text is the same and carries no color codes.
 - **The review presets no longer block on the order of first references (`MAN015`).**
   `anonymous-review` and `camera-ready` switched on `check_float_reference_order`, and a
   paper whose introduction previews a results figure, or whose appendix tables are cited
