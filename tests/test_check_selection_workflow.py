@@ -38,9 +38,11 @@ class CheckSelectionWorkflowTests(AsyncProjectTestCase):
 
     async def test_selected_source_check_and_required_dependency_guard_both_run(self):
         main = self.source / "main.tex"
+        # A name with a folder is never a file of the TeX installation, so the missing
+        # file is an error on a computer with TeX and on one without.
         main.write_text(
             "\\documentclass{article}\n\\begin{document}\n"
-            "TODO finish.\\todo{edit}\\input{missing}\n\\end{document}\n"
+            "TODO finish.\\todo{edit}\\input{sections/missing}\n\\end{document}\n"
         )
         report = await run_job(
             JobRequest(

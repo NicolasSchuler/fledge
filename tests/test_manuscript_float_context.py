@@ -14,7 +14,7 @@ from latexprep.findings import Finding
 from latexprep.manuscript_check_options import ManuscriptCheckOptions
 from latexprep.manuscript_checks import check_manuscript_policies
 from latexprep.tex_lexer import scan_source_commands
-from latexprep.tex_spans import macro_definitions
+from latexprep.tex_spans import definition_spans, macro_definitions
 from tests.support import ProjectTestCase, clean_case
 
 FLOATS = ManuscriptCheckOptions(
@@ -31,6 +31,11 @@ FLOAT_RULES = (
     "float_references",
     "float_reference_order",
 )
+# The policies take about 3.5 times as long as one reading of the definition spans of this
+# many nested definitions, with and without coverage tracing; reading every body again
+# for each definition takes several hundred times as long.
+NESTED_DEFINITIONS = 800
+MAX_READINGS_OF_NESTED_DEFINITIONS = 12
 
 
 class FloatContextTests(ProjectTestCase):
@@ -267,13 +272,24 @@ class FloatContextTests(ProjectTestCase):
         self.assertNotEqual(results["float_labels"].status, "failed")
 
     def test_reading_nested_definitions_stays_bounded(self) -> None:
-        text = "".join(f"\\def\\m{index}{{x " for index in range(1500)) + "}" * 1500
-        self.write(
-            "main.tex", "\\documentclass{article}\n" + text + "\n\\begin{document}\\end{document}\n"
+        # Each nested definition spans the rest of the text, so finding where all of them
+        # end takes time quadratic in their number, however the policies read them. The
+        # policies may cost a small multiple of one such reading; reading every body
+        # again for each definition would cost hundreds of them. Both are measured here,
+        # so the limit holds on a slow computer and under coverage tracing.
+        text = (
+            "".join(f"\\def\\m{index}{{x " for index in range(NESTED_DEFINITIONS))
+            + "}" * NESTED_DEFINITIONS
         )
-        started = time.monotonic()
+        source = "\\documentclass{article}\n" + text + "\n\\begin{document}\\end{document}\n"
+        self.write("main.tex", source)
+        started = time.process_time()
+        definition_spans(source, scan_source_commands(source))
+        one_reading = time.process_time() - started
+        started = time.process_time()
         check_manuscript_policies(self.root, "main.tex", FLOATS)
-        self.assertLess(time.monotonic() - started, 20)
+        whole = time.process_time() - started
+        self.assertLess(whole, MAX_READINGS_OF_NESTED_DEFINITIONS * one_reading)
 
     def test_a_drawing_in_a_box_with_tikz_value_macros_is_read(self) -> None:
         self.assert_passed(

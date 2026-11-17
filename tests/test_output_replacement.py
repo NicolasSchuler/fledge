@@ -529,13 +529,16 @@ class PreviewRerunTests(ProjectTestCase):
     def setUp(self) -> None:
         """Write a passing project ``paper``, a ``broken`` one and earlier previews ``previews``.
 
-        ``broken`` inputs a file that does not exist, which the paper must fix.
+        ``broken`` inputs a file that does not exist, which the paper must fix. The name
+        has a folder, so it is never looked up in the TeX installation and the run is
+        blocked on a computer with TeX and on one without.
         """
         super().setUp()
         minimal_project(self.root / "paper")
         self.write(
             "broken/main.tex",
-            "\\documentclass{article}\n\\begin{document}\n\\input{absent}\n\\end{document}\n",
+            "\\documentclass{article}\n\\begin{document}\n"
+            "\\input{sections/absent}\n\\end{document}\n",
         )
         self.previews = self.root / "previews"
         self.previews.mkdir()
