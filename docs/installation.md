@@ -152,7 +152,7 @@ inside it. That route has not been tested live.
 
 | Operation | Tools |
 | --- | --- |
-| `inspect`, `bib check` | Python package only |
+| `inspect`, `bib check` | Python package only; with TeX installed, `kpsewhich` also confirms files that the TeX installation supplies |
 | `check`, `prepare` | `latexmk`, the selected TeX engine and packages, the bibliography backend (BibTeX or [Biber](workflow-reference.md#biber-on-macos)), plus Poppler |
 | PDF analysis and comparison | `pdfinfo`, `pdftotext`, `pdftoppm`, `pdffonts`, `pdfdetach`, `pdfimages`; `pdftohtml` for text geometry |
 | Formatting and optional PDF checks | `tex-fmt`; `qpdf` and MuPDF's `mutool` |

@@ -94,7 +94,8 @@ RULES = (
             "Check supported numeric and matching-prefix page ranges for malformed "
             "or descending endpoints. Single pages, comma-separated ranges and article-number "
             "pages such as 263:1--263:52 are supported; Roman numerals, macros and unfamiliar "
-            "notations are explicitly inconclusive."
+            "notations are explicitly inconclusive. A typed en or em dash is one page to a "
+            "BibTeX style (p. instead of pp.) and is reported; biblatex reads it as a range."
         ),
         tests=(
             "tests.test_bibliography_checks.BibliographyCheckTests.test_page_ranges_accept_single_prefixed_and_multiple_ranges",

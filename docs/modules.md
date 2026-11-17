@@ -133,7 +133,7 @@ a network connection, and each imports only other modules of this layer. (91 mod
 The boundary to the outside world: restricted tool execution and its sandboxes, the PDF tool
 sessions, the build with `latexmk` and its evidence, the HTTP client for online lookups, project
 import and the submission archive, and settings discovery. They import the domain layer and each
-other, never a check, the job workflow or an output format. (41 modules)
+other, never a check, the job workflow or an output format. (42 modules)
 
 | Module | Responsibility |
 | --- | --- |
@@ -186,7 +186,7 @@ The checks and the transformations: bibliography, manuscript, build, PDF, online
 source checks, the planners that edit a staged copy (source and bibliography transformations, flat
 layout, cleanup, metadata edits), and the two policies that decide which checks run and which
 findings a review accepts. They import the domain and adapter layers, never the job workflow or
-an output format. (71 modules)
+an output format. (75 modules)
 
 | Module | Responsibility |
 | --- | --- |

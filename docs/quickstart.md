@@ -23,7 +23,9 @@ fledge inspect /path/to/paper --main main.tex
 
 `inspect` reads your sources and bibliography in seconds without compiling, so
 it needs no TeX and finds missing files, undefined citations and leftover TODO
-markers before the first build. It cannot see build or PDF problems; the next
+markers before the first build. Without TeX it cannot tell whether a bare name
+such as `example-image` is a file of the TeX installation, and reports it as a
+warning instead of deciding. It cannot see build or PDF problems; the next
 step adds them. Fix what it reports, or move on when it passes.
 
 The input can also be a ZIP of the project. From Overleaf, download the
@@ -68,10 +70,11 @@ Document: main.tex
 Settings: defaults (no settings file)
 No issues found within this command's stated scope.
 …
-sources: /private/tmp/submission/sources
-archive: /private/tmp/submission/submission.zip
-pdf: /private/tmp/submission/manuscript.pdf
-report: /private/tmp/submission/report.json
+Artifacts
+  sources: /private/tmp/submission/sources
+  archive: /private/tmp/submission/submission.zip
+  pdf: /private/tmp/submission/manuscript.pdf
+  report: /private/tmp/submission/report.json
 
 Not checked (needs your settings): anonymity, page limit, ZIP size limit, forbidden packages, strict font embedding, image resolution, 95 other opt-in checks. Set them in fledge.toml (start with fledge init --preset anonymous-review|arxiv|camera-ready); see https://nicolasschuler.github.io/fledge/configuration.html
 

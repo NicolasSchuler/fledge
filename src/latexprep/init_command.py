@@ -304,8 +304,9 @@ def _announce_precedence(target: Path, previous: Path | None, current: Path | No
 def init_command(directory: Path, preset: str | None, *, force: bool, list_presets: bool) -> int:
     r"""Write fledge.toml into DIRECTORY (default: the current directory).
 
-    The file names the main file when exactly one file declares \documentclass,
-    and lists the candidates for you to choose from when several do. Presets
+    The file names the main file when exactly one main file is found (a file with
+    \documentclass that no other one reads), and lists the candidates for you to
+    choose from when several are. Presets
     switch on generic checks and leave venue values, such as page limits and
     identity terms, as commented placeholders for you to fill in. They are
     starting points, not certifications of compliance. An existing fledge.toml

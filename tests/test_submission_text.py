@@ -112,6 +112,17 @@ class SubmissionTextTests(ProjectTestCase):
         plain = runner.invoke(submission_text_command, [str(self.root)])
         self.assertEqual((plain.exit_code, plain.stdout), (4, ""))
 
+    def test_an_input_that_does_not_exist_ends_like_any_other_unreadable_input(self) -> None:
+        missing = str(self.root / "no-such-paper")
+        runner = CliRunner()
+        plain = runner.invoke(submission_text_command, [missing])
+        self.assertEqual(plain.exit_code, 4, plain.output)
+        self.assertEqual(plain.stdout, "")
+        self.assertIn("was not found", plain.stderr)
+        as_json = runner.invoke(submission_text_command, [missing, "--json"])
+        self.assertEqual(as_json.exit_code, 4, as_json.output)
+        self.assertEqual(set(json.loads(as_json.stdout)), {"schema_version", "error"})
+
     def test_definitions_and_unclosed_environments_are_not_ready(self) -> None:
         self.write(
             r"\documentclass{article}\newcommand{\sample}{\title{Example}}"

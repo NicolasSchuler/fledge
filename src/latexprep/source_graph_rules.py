@@ -369,7 +369,9 @@ RULES = (
         title="No single main file selected",
         description=(
             "Report an input in which no single main file could be selected: several files "
-            "declare a document class, or none does. Fledge does not pick one."
+            "declare a document class, or none does. Fledge does not pick one. A file that "
+            "another candidate reads with a literal \\input or \\include, such as a body.tex "
+            "holding \\begin{document}, is part of that document and not a second main file."
         ),
         tests=(
             "tests.test_workflow.WorkflowTests.test_input_without_a_document_says_no_main_file_was_found",

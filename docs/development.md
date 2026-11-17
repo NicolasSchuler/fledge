@@ -598,15 +598,19 @@ The architecture document includes target design: per-task timeout/artifact
 descriptors and a structured progress-event schema are not implemented as
 described there. Current execution uses progress strings and a shared whole-job
 deadline alongside per-tool limits. PDF measurements are still parsed by each check
-that reads them. Checkers that read TeX source share two public modules:
+that reads them. Checkers that read TeX source share three public modules:
 {download}`tex_lexer.py <../src/latexprep/tex_lexer.py>` provides the bounded
 lexical subset (commands and their argument groups, comment and verbatim
-masking, conditional spans), and
+masking),
+{download}`tex_spans.py <../src/latexprep/tex_spans.py>` the spans of definitions
+and conditionals and whether a command runs where it stands, and
 {download}`source_graph.py <../src/latexprep/source_graph.py>` builds the literal
 dependency graph of one selected main file with `SourceGraph.build`. The graph
 is split by concern: `source_loading.py` reads and lexes a file within the byte and
 command budgets, `source_command_checks.py` judges its commands,
-`source_resolution.py` turns a file name into a project file, and
+`source_resolution.py` turns a file name into a project file,
+`tex_installation.py` asks the TeX installation, through `kpsewhich`, for a file
+that a bare name may mean, and
 `source_file_commands.py` holds the command tables they share. Reports about a graph
 are in `source_analysis.py` (roots, dependencies, lint) and `flat_layout.py` (flat-layout
 plans).

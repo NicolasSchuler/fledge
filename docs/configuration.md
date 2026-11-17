@@ -116,7 +116,8 @@ is not mistaken for a full audit. JSON reports list the same areas in
 
 Some default checks concern submission readiness: packages declared before
 `hyperref` that must follow it (`TEX010`), EPS and PS figures, which block
-preparation unless their converted PDF is shipped (`TEX011`), private-note
+preparation unless their converted PDF is shipped (`TEX011`), a package that the
+chosen engine cannot run, such as fontspec under pdfLaTeX (`TEX014`), private-note
 markers in comments (`PRV007`), home-folder paths in figure metadata (`PRV104`)
 and the information that included PDF figures leave in the built PDF (`PRV105`).
 Three more depend on what the receiving service runs, which you describe as

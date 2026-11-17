@@ -172,7 +172,8 @@ prepared PDF that two comparisons share is not rendered twice.
 
 Every expensive step shares one CPU and memory budget. The coordinator reserves
 128 MiB; render reservations account for both RGB buffers. Renderer and formatter
-subprocesses each have a 128 MiB cap. One monitor samples aggregate memory and
+subprocesses each have a 128 MiB cap. A PDF measurement such as `pdfimages -list`
+may use 64 MiB plus 2 MiB for each MiB of the PDF, at most `build_memory_mb`. One monitor samples aggregate memory and
 temporary disk use; these are sampled limits that can overshoot briefly, not
 operating-system guarantees. Memory is read from the process table (`ps`); a
 sample in which `ps` does not answer within 2 seconds is skipped and memory is
@@ -246,6 +247,15 @@ reference that matches several files is resolved in TeX's lookup order, and
 not `TEX002` editing commands. `TODO` and label scans skip local `.sty` and
 `.cls` files.
 
+A construct that the scanner cannot follow counts only where it can run and only for
+the checks it could change: before `\documentclass` for the class options (`TEX102`),
+before `\begin{document}` for the packages (`TEX103`), and inside a definition only
+where the macro is used. The project's own `.cls` and `.sty` files are package code:
+a `\catcode` or `\csname` there keeps flat layout and source transformations from
+using the file (one `TEX312` or `TEX307` per file) and leaves the checks of text,
+citations and declarations conclusive. A class file identical to TeX Live's copy is
+shipped and read as TeX Live's.
+
 Manuscript checks report a confirmed violation as failed even when unrelated
 constructs are uncertain; uncertainty is scoped to the checked region and to the
 document body. An abstract word limit with unresolved macros uses a word-count
@@ -257,12 +267,17 @@ XMP; an EXIF MakerNote or unsupported IPTC layout is recorded as a limitation.
 `bib check`, `inspect` and online checks read only the `.bib` resources the
 selected document declares, so an unused backup `.bib` neither blocks nor spends
 requests; without a resolvable declaration every `.bib` file is read. Citation
-coverage stays conclusive with ordinary `\newcommand` and `\if…` constructs; only
-cite-related definitions or citations inside conditionals add uncertainty.
+coverage stays conclusive with ordinary `\newcommand` and `\if…` constructs, with a
+test that only names a citation command (`\ifx\citeauthoryear\undefined`) and with
+style switches such as `\citestyle`. A redefinition of `\cite`, a citation inside a
+conditional, also in a `.sty`, and an input or class file that cannot be read leave
+it incomplete.
 
 PDF comparison uses page count, extracted text and exact RGB page renders at 144
-DPI. Explicit tolerances and accepted exceptions apply only to baseline versus
+DPI. When a page does not fit the raster limits at that resolution (16 million
+pixels, 8192 per side), as on an A0 poster, every page is rendered at the highest
+resolution, down to 36 DPI, at which all pages fit, and the report names it; a page
+too large even at 36 DPI cannot be compared. Explicit tolerances and accepted exceptions apply only to baseline versus
 prepared; repeated baselines, supplied reference PDFs and archive rebuilds are
 compared exactly. PDF inspection supports up to 5000 pages; rendering is capped
-at 300 pages and 16 million pixels per page, with an inconclusive result beyond
-that. A figure PDF without font resources passes the figure-font policy.
+at 300 pages, with an inconclusive result beyond that. A figure PDF without font resources passes the figure-font policy.

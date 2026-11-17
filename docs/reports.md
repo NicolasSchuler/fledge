@@ -8,7 +8,12 @@ build, PDF preservation and the fresh ZIP rebuild.
 ## The terminal summary
 
 Rich styles the outcome, groups findings and aligns artifacts without relying
-on color to convey status. Live terminals show the current stage and elapsed
+on color to convey status. In the summary box only the outcome is colored. A
+finding's heading takes the color of its severity (red for an error, yellow for a
+warning, cyan for information, green when it passed), labels such as `Where:` are
+cyan, and the file and line of a finding stay plain text so that they remain
+readable. A diff shown with `--diff` has removed lines in red, added lines in green
+and hunk headers in cyan. Live terminals show the current stage and elapsed
 time on stderr. Redirected output uses plain stage lines; `--quiet` suppresses
 progress. `NO_COLOR` disables color. JSON, compact and selected submission-text
 fields remain suitable for scripts.
@@ -28,12 +33,12 @@ TEX001  Unfinished text markers  [WARNING / failed]
   Next: Finish or remove the marked draft text after reviewing its context.
 
 Artifacts
-sources: /private/tmp/submission/sources
-archive: /private/tmp/submission/submission.zip
-pdf: /private/tmp/submission/manuscript.pdf
-report: /private/tmp/submission/report.json
+  sources: /private/tmp/submission/sources
+  archive: /private/tmp/submission/submission.zip
+  pdf: /private/tmp/submission/manuscript.pdf
+  report: /private/tmp/submission/report.json
 
-Not checked (needs your settings): anonymity, page limit, ZIP size limit, forbidden packages, strict font embedding, image resolution, 93 other opt-in checks. Set them in fledge.toml (start with fledge init --preset anonymous-review|arxiv|camera-ready); see https://nicolasschuler.github.io/fledge/configuration.html
+Not checked (needs your settings): anonymity, page limit, ZIP size limit, forbidden packages, strict font embedding, image resolution, 95 other opt-in checks. Set them in fledge.toml (start with fledge init --preset anonymous-review|arxiv|camera-ready); see https://nicolasschuler.github.io/fledge/configuration.html
 
 Explain a check: fledge rule TEX001
 

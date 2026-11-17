@@ -92,15 +92,18 @@ These questions need a person, even when a related check passes:
 - Build entry filenames must use ASCII letters, digits, underscores, dots or
   hyphens and end in `.tex`. A source file that is not UTF-8, such as Latin-1, is read
   for the checks with its other bytes taken as Windows-1252, so findings may quote its
-  accented words differently from the paper; it is never changed, and the privacy
+  accented words differently from the paper; it is never changed, so a `prepare`
+  that asks for an edit to it, such as comment removal, is blocked, and the privacy
   scans of its text stay incomplete (`TEX328`). In such a file a label, citation key
   or file name with letters outside ASCII is compared as Fledge reads it, not as the
   bytes TeX compares, so `inspect` can accept a name that the build rejects. UTF-16
   and other text with NUL bytes, and text that may be in Shift-JIS, GBK or Big5, is not
   read (`TEX301`).
-- PDF comparison checks page count, extracted text and 144-DPI renders. Details
-  below that resolution and differences inside PDF internals can go unnoticed.
-  Rendering stops at 300 pages.
+- PDF comparison checks page count, extracted text and 144-DPI renders. A document
+  with a page too large for that resolution, such as an A0 poster, is rendered at a
+  lower one, down to 36 DPI, which the report names. Details below the resolution
+  used and differences inside PDF internals can go unnoticed. Rendering stops at 300
+  pages.
 - Figure metadata is reported, never removed. Fledge does not rewrite figure
   files, and `suppress_included_pdf_information` (`TEX204`) keeps only the
   information dictionary and file name of included PDFs out of the built PDF:

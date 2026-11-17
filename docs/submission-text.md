@@ -4,7 +4,8 @@
 project folder or ZIP. It reads source without compiling TeX or accessing the
 network, and leaves the original project unchanged. Select the main document
 with `--main main.tex`, or use `main` in the discovered project settings.
-`--config FILE` selects settings explicitly; `--isolated` ignores discovery.
+`--config FILE` selects settings explicitly; `--isolated` ignores discovery, and
+`-q` suppresses notes on stderr.
 
 ```sh
 fledge submission-text paper --field title
@@ -30,24 +31,33 @@ Meaningful single hyphens remain intact. `\texttt{...}` retains literal dashes
 and quotes, such as `--jobs`. URL commands retain their address, and `\href`
 retains its visible link text. Keywords retain the source punctuation
 and order; explicit `\sep` and `\and` become `; ` to preserve keyword phrases.
+Font switches such as `\small`, `\upshape` or `\bf` are dropped, so
+`{\upshape\LaTeX}` reads "LaTeX". A `\thanks` note in the title and an LNCS
+`\keywords` inside the abstract are left out of the field.
 Terminal control and directional characters are displayed as visible Unicode
 escapes and make the affected field unresolved.
 
-Simple inline mathematics such as `$n=100$` and common lowercase Greek letters
-can be converted literally. Scripts, fractions, complex mathematical commands,
+Simple inline mathematics such as `$n=100$` or `$20.5\%$` and common lowercase
+Greek letters can be converted literally. Scripts, fractions, complex mathematical commands,
 citations, references and custom macros need manual conversion. Their original
 fragments remain visible in the draft, and affected fields are unresolved.
 No macro execution, citation numbering or inferred scientific wording is used.
-Supported converter commands that are locally defined or redefined in the
-selected literal source graph also need manual review. Their original fragments
+Supported converter commands that the paper's `.tex` files or its own packages
+define or redefine also need manual review. Their original fragments
 remain in the draft, even when the replacement looks simple. Unrelated command
-definitions do not block an otherwise ready field.
+definitions do not block an otherwise ready field. Definitions in the document
+class, such as a shipped `llncs.cls`, do not count, and neither does a venue
+package's definition of a field declaration such as the `abstract` or `keywords`
+environment: they say how the field is typeset, not what it says.
 Locally assigned active characters, such as a redefined `~`, also require
 review when they appear in the field; the draft retains the original LaTeX.
 
 Multiple declarations are shown as candidates rather than choosing one.
-Conditional, nested or unclosed declarations and incomplete source graphs need
-source clarification. The supported declarations are `\title{...}`,
+A conditional matters only where it encloses a declaration or an input, and one
+whose branches give the same text is resolved. Other conditional, nested or
+unclosed declarations and incomplete source graphs need source clarification. A
+field read from a source file that is not UTF-8 (`TEX328`) is never offered as
+ready, because its text may differ from what the paper shows. The supported declarations are `\title{...}`,
 `\abstract{...}`, the `abstract` environment, `\keywords{...}`, and the
 `keywords`, `keyword` and `IEEEkeywords` environments. Unsupported class-specific
 declarations and legacy subfiles behavior are outside this bounded converter.

@@ -158,8 +158,9 @@ RULES = (
         name="manuscript.orcid",
         title="Literal ORCID syntax and checksum",
         description=(
-            "Validate literal identifiers in orcid, ORCID and orcidlink commands with the ISO "
-            "7064 MOD 11-2 checksum; validity does not establish ownership."
+            "Validate literal identifiers in every command whose name holds orcid, such as "
+            "orcid, orcidlink and the orcidID of llncs, in either branch of a conditional, "
+            "with the ISO 7064 MOD 11-2 checksum; validity does not establish ownership."
         ),
         tests=(
             "tests.test_manuscript_checks.ManuscriptDetailTests.test_orcid",

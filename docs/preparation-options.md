@@ -76,9 +76,11 @@ unmatched marker makes the result inconclusive.
 Filename overrides require `layout = "flat"` and retain flattening safety checks.
 
 `suppress_included_pdf_information` (`TEX204`, set by the `anonymous-review`
-preset) adds one line after the leading comments of the prepared main file:
+preset) puts one setting in front of the first line after the leading comments of
+the prepared main file, usually `\documentclass`:
 `\pdfsuppressptexinfo=-1` for pdfLaTeX or `\pdfvariable suppressoptionalinfo 15`
-for LuaLaTeX. pdfTeX and LuaTeX otherwise copy each included PDF's information
+for LuaLaTeX. No line moves, so findings about the prepared copy name the same lines
+as findings about the original. pdfTeX and LuaTeX otherwise copy each included PDF's information
 dictionary (author, title, creator) and file name into the built PDF, where
 `PRV105` reports identity terms and home-folder paths. The line does not cover the
 included pages' XMP and application data (PieceInfo), which are still copied, and
@@ -202,9 +204,10 @@ reason = "The marker is an intentional example discussed in the manuscript."
 Pixel tolerances affect only baseline-versus-prepared rendering, and are recorded
 with the measured differences. Text, page counts and page dimensions remain
 separate checks. Repeated baselines and the final archive rebuild use exact
-comparison. All comparisons retain bounded 144-DPI evidence, not a semantic
-equivalence guarantee. Pages are rendered in ranges, several per `pdftoppm`
-process, and a PDF that two comparisons share is rendered once. When staging
+comparison. All comparisons retain bounded rendered evidence (144 DPI, less for
+very large pages), not a semantic equivalence guarantee. Pages are rendered in
+ranges, several per `pdftoppm` process, and a PDF that two comparisons share is
+rendered once. When staging
 changed nothing, the prepared PDF is the baseline PDF, so there is no
 baseline-versus-prepared comparison and its tolerances do not apply; the archive
 rebuild is still compared exactly.

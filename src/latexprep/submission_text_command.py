@@ -16,7 +16,7 @@ import click
 from rich.text import Text
 
 from .cli_inputs import choose_input
-from .cli_options import FledgeCommand
+from .cli_options import FledgeCommand, input_argument
 from .command_options import (
     debug_option,
     main_option,
@@ -105,7 +105,7 @@ def _print_one_field(name: str, fields: dict[str, SubmissionField]) -> None:
     short_help="Preview title, abstract and keywords for a submission form.",
     examples=SUBMISSION_TEXT_EXAMPLES,
 )
-@click.argument("source", type=click.Path(exists=True, path_type=Path), metavar="INPUT")
+@input_argument
 @main_option
 @click.option(
     "--field",

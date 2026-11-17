@@ -14,6 +14,14 @@ command is not in the project. The build then fails too (`build.failed`,
 Paths are case-sensitive on many submission systems, so `Fig.pdf` and `fig.pdf`
 are different files (`TEX007`).
 
+Three kinds of name are not reported as missing. A bare name that the TeX
+installation supplies, such as `glyphtounicode`, `IEEEabrv` or `example-image`, is
+looked up there and is not shipped; without TeX installed it is an inconclusive
+warning instead. A `.bib` file is not needed when the `.bbl` named after the main
+file sits beside it, as in an arXiv upload. A file named only in a macro
+definition, option code or conditional of the project's own class or package file
+is an inconclusive warning, because that code may never run.
+
 ### `BLD001`, `BLD002`, `BIB101`, `TEX004`: undefined citation or reference
 
 `BLD001` and `BLD002` come from TeX's log; `BIB101` and `TEX004` come from
@@ -37,11 +45,14 @@ for several documents.
 A file in Latin-1 or another byte encoding, as older papers and papers with
 `\usepackage[latin1]{inputenc}` have. Fledge reads its commands, so files, references,
 packages, floats and metadata are checked as usual, and the file is packaged as it is,
-byte for byte. What it cannot do is change the file: comment removal, input merging,
-flat layout, citation-key renames and the `TEX204` setting stop, and the privacy scans
-of its text (`PRV001`, `PRV003`–`PRV006`) stay incomplete, because a name or a note in
-another encoding could be missed. `TEX328` names the file and the line of the first
-byte that is not UTF-8. To get those, convert a copy, for example with
+byte for byte. What it cannot do is change the file, so a `prepare` that asks for
+comment removal, input merging, flat layout, a citation-key rename or the `TEX204`
+setting is blocked. The `arxiv` preset asks for comment removal and the
+`anonymous-review` preset for `TEX204`, so `prepare` under either stops on such a
+file, while `inspect` and `check` go on. The privacy scans of its text (`PRV001`,
+`PRV003`–`PRV006`) stay incomplete, because a name or a note in another encoding
+could be missed. `TEX328` names the file and the line of the first byte that is not
+UTF-8. To get the edits and the scans, convert a copy, for example with
 `iconv -f cp1252 -t utf-8 main.tex > main-utf8.tex` (Windows-1252 covers Latin-1 and is
 how Fledge reads the file), and replace `\usepackage[latin1]{inputenc}` by
 `\usepackage[utf8]{inputenc}` or remove it.
@@ -187,7 +198,10 @@ written for XeLaTeX or LuaLaTeX. Fledge follows a `% !TEX program = xelatex` com
 first lines of the main file, as most editors do, or `--engine` and the
 [engine setting](configuration.md#choose-the-tex-engine). `TEX014` reports a package the
 chosen engine cannot run, such as fontspec under pdfLaTeX, before any build, so
-`fledge inspect` finds it too. `BLD106` records which engine built the document and why. A project `latexmkrc` is never executed; `BLD107` says what it
+`fledge inspect` finds it too. Other packages are bound to one engine as well: bidi,
+xepersian and xeCJK need XeLaTeX, luatexja and luacode need LuaLaTeX, and ctex needs
+an engine for which the computer has one of its font sets. When a build fails on one
+of them, `BLD009` names the engine and how to choose it. `BLD106` records which engine built the document and why. A project `latexmkrc` is never executed; `BLD107` says what it
 would have changed.
 
 ### Shell escape, SVG and EPS figures

@@ -82,8 +82,8 @@ The version is defined once, as `__version__` in `src/latexprep/__init__.py`.
   conditional or grouped citation or bibliography resource in a `.sty` keeps the
   citation evidence incomplete, and subfiles are document text, not package code.
 - **An unreadable input or class file leaves the citation evidence incomplete.** A
-  file that `\input` or `\documentclass` names but that cannot be read (invalid
-  UTF-8, too large, a link) was left out of the citation checks without a gap, so
+  file that `\input` or `\documentclass` names but that cannot be read (UTF-16
+  text, too large, a link) was left out of the citation checks without a gap, so
   `BIB101` could pass without having read it.
 - **`PRV003` no longer reports a class or style file's own definitions.** A shipped
   `IEEEtran.cls` defines `\thanks`, which matched as an acknowledgement hint eight times.
@@ -248,7 +248,7 @@ The version is defined once, as `__version__` in `src/latexprep/__init__.py`.
   definition, does not make a second document part of the paper.
 - **A main file that is not valid UTF-8 is still found.** One Latin-1 byte gave "no file
   with `\documentclass` was found" and exit 4. The file is now selected, its encoding is
-  reported as `TEX301`, and the checks that read its text are incomplete.
+  reported as `TEX328`, and the checks that read its text are incomplete.
 - **Inline images no longer stop the PDF image inventory.** `pdfimages` lists them
   without an object number, and such a row ended `check` and `prepare` with exit 4, for
   example on Elsevier's CAS template.
@@ -257,6 +257,9 @@ The version is defined once, as `__version__` in `src/latexprep/__init__.py`.
   J2K and goes on; Fledge took the first line for damaged input (exit 4). The pair of
   lines is a repair now. An error after it, or the first line without the second, is
   still damaged input.
+- **`fledge submission-text` reports an input that does not exist with exit code 4.**
+  It ended with the usage code 64 and, with `--json`, without the error object that
+  every other unreadable input gets.
 - **PDF measurements get memory in proportion to the PDF.** The tools may use 64 MiB
   plus 2 MiB per MiB of the PDF, at most `build_memory_mb`, so `pdfimages` no longer
   runs out of memory on a large PDF full of JPEG 2000 figures (exit 4).

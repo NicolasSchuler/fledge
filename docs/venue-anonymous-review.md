@@ -50,6 +50,12 @@ sources, or `submission.zip` when the venue asks for sources.
 | PDF | Embedded fonts (`PDF104`) and no attachments (`PDF109`) |
 | Layout | Layout manipulation such as negative spacing or shrunken margins (`MAN002`, advisory) and floats: a caption on every figure and table (`MAN011`) and labels after their captions (`MAN013`) block; a missing label (`MAN012`) and a float the text never refers to (`MAN014`) are reported as warnings, through `[checks] advisory`; the order of first references (`MAN015`) is a commented-out line of the preset |
 
+The `TEX204` setting cannot be written into a main file that is not UTF-8, such as
+Latin-1 (`TEX328`), because Fledge never rewrites such a file; `prepare` then stops
+with `TEX204`. [Convert the file](troubleshooting.md#tex328-a-source-file-that-is-not-utf-8),
+or set `suppress_included_pdf_information = false` in `[source_transforms]` and check
+`PRV105` yourself.
+
 ## Fill in the placeholders
 
 Copy these from the venue's current call for papers:

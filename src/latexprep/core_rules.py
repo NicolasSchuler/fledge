@@ -40,7 +40,8 @@ RULES = (
         title="Duplicate literal labels",
         description=(
             "Find repeated literal labels in the selected source graph without expanding "
-            "TeX macros. Advisory heuristic."
+            "TeX macros. Advisory heuristic. Without a selected main file, labels of "
+            "separate documents are not compared."
         ),
         tests=(
             "tests.test_source_commands.SourceCommandTests.test_markers_labels_and_refs_are_heuristics_not_blockers",
@@ -55,7 +56,8 @@ RULES = (
         title="Unresolved literal references",
         description=(
             "Find literal references without a matching scanned label. Generated labels may"
-            " make this inconclusive; advisory heuristic."
+            " make this inconclusive; advisory heuristic. Without a selected main file, "
+            "references are not checked against the labels of separate documents."
         ),
         tests=(
             "tests.test_source_commands.SourceCommandTests.test_markers_labels_and_refs_are_heuristics_not_blockers",

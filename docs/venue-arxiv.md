@@ -38,6 +38,11 @@ ZIP with your TeX installation; arXiv builds its own.
 prepared copy, or set `comment_policy = "all"` in `[source_transforms]` to remove
 every removable comment.
 
+Comments cannot be removed from a source file that is not UTF-8, such as Latin-1
+(`TEX328`), because Fledge never rewrites such a file; `prepare` then stops with
+`TEX201`. [Convert the file](troubleshooting.md#tex328-a-source-file-that-is-not-utf-8),
+or set `comment_policy = "retain"` and remove the comments yourself.
+
 ## Fill in the placeholders
 
 The generated `fledge.toml` leaves values that change over time as commented
