@@ -294,7 +294,19 @@ class PdfDetailTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         options = PdfCheckOptions(required_metadata=("Title",))
+        # A JPEG 2000 image stored as a bare codestream: Poppler reports an error, reads
+        # the image as J2K and goes on.
+        recovered_jpeg_2000 = (
+            "Syntax Error: Malformed JP2 file format: first box must be JPEG 2000 signature "
+            "box<0a>\n"
+            "Syntax Warning: Unable to read header\n"
+            "Syntax Warning: Did no succeed opening JPX Stream as JP2, trying as J2K.\n"
+        )
         for stderr in (
+            # A truncated codestream: the second attempt fails too.
+            recovered_jpeg_2000
+            + "Syntax Error: Stream too short<0a>\n"
+            + "Syntax Error: Did no succeed opening JPX Stream.\n",
             "Syntax Error (257): Unknown compression method in flate stream\n",
             "Syntax Error: Unknown operator 'BAD'\n",
             "I/O Error: Couldn't open file 'document.pdf'\n",
@@ -318,6 +330,7 @@ class PdfDetailTests(unittest.IsolatedAsyncioTestCase):
             "Syntax Warning: x\n",
             "Unimplemented Feature: x\n",
             "warning: ignoring zero sized extgstate\n",
+            recovered_jpeg_2000,
         ):
             with self.subTest(stderr=stderr):
                 await self.assert_status(options, "passed", stderr=stderr)

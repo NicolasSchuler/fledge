@@ -34,7 +34,7 @@ from .measurement_findings import (
     findings_or_unavailable,
     unavailable_finding,
 )
-from .pdf_tool_output import page_count, pdfinfo_properties
+from .pdf_tool_output import page_count, pdfinfo_properties, refuse_reported_errors
 from .resource_budget import ResourceBudget
 
 _T = TypeVar("_T")
@@ -335,15 +335,6 @@ async def freeze_pdf_inputs(
         return work, frozen
 
 
-# Poppler reports damaged input as "<Category> Error: ...", for example "Syntax Error",
-# "Config Error", "Command Line Error", "I/O Error", "Permission Error" or "Internal
-# Error", and, when it knows the byte offset, as "Syntax Error (257): ..."; MuPDF reports
-# "error: ...". Any "error:" in a tool's own words counts, wherever it stands on the line.
-# Warnings ("Syntax Warning") and "Unimplemented Feature" describe repairs or gaps the
-# tool worked around, so they do not make the evidence incomplete.
-_TOOL_ERROR_REPORT = re.compile(r"\berror(?: \(\d+\))?:", re.IGNORECASE)
-
-
 def _require_complete(result: CommandResult, tool: str) -> None:
     """Refuse the result of a command that failed, hit a limit or reported an error.
 
@@ -353,14 +344,11 @@ def _require_complete(result: CommandResult, tool: str) -> None:
 
     Raises:
         PreparationError: The command did not complete normally, or the tool reported
-            damaged or incomplete input.
+            damaged or incomplete input (:func:`refuse_reported_errors`).
     """
     if (reason := result.failure_reason(tool)) is not None:
         raise PreparationError(reason)
-    if _TOOL_ERROR_REPORT.search(result.stderr):
-        raise PreparationError(
-            f"{tool} reported damaged or incomplete input: {result.stderr[:1000]}"
-        )
+    refuse_reported_errors(result.stderr, tool)
 
 
 @dataclass(frozen=True, slots=True)

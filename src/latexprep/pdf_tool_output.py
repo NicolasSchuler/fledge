@@ -46,6 +46,42 @@ COLOR_OPERATIONS = frozenset(
 )
 
 
+# Poppler reports damaged input as "<Category> Error: ...", for example "Syntax Error",
+# "Config Error", "Command Line Error", "I/O Error", "Permission Error" or "Internal
+# Error", and, when it knows the byte offset, as "Syntax Error (257): ..."; MuPDF reports
+# "error: ...". Any "error:" in a tool's own words counts, wherever it stands on the line.
+# Warnings ("Syntax Warning") and "Unimplemented Feature" describe repairs or gaps the
+# tool worked around, so they do not make the evidence incomplete.
+_TOOL_ERROR_REPORT = re.compile(r"\berror(?: \(\d+\))?:", re.IGNORECASE)
+# One error that Poppler recovers from: a JPEG 2000 image stored as a bare codestream.
+# OpenJPEG refuses it as a JP2 file, which Poppler passes on as an error, and Poppler then
+# reads it as J2K and says so (in its own spelling, "Did no succeed"). The image is read
+# in full; if the second attempt fails as well, Poppler prints another error, which no
+# longer matches. The error counts as a repair only together with the line that follows.
+_RECOVERED_JPEG_2000 = re.compile(
+    r"^Syntax Error: Malformed JP2 file format: first box must be JPEG 2000 signature box"
+    r"(?:<0a>)?[ \t]*\n"
+    r"(?:Syntax Warning: Unable to read header[ \t]*\n)?"
+    r"Syntax Warning: Did not? succeed opening JPX Stream as JP2, trying as J2K\.?[ \t]*$",
+    re.MULTILINE,
+)
+
+
+def refuse_reported_errors(stderr: str, tool: str) -> None:
+    """Refuse what a tool printed when it reports damaged or incomplete input.
+
+    Args:
+        stderr: What the tool wrote to standard error.
+        tool: The tool's name, as the error mentions it.
+
+    Raises:
+        PreparationError: The tool reported an error other than one it recovered from
+            (``_RECOVERED_JPEG_2000``).
+    """
+    if _TOOL_ERROR_REPORT.search(_RECOVERED_JPEG_2000.sub("", stderr)):
+        raise PreparationError(f"{tool} reported damaged or incomplete input: {stderr[:1000]}")
+
+
 def _property_lines(output: str) -> Iterator[tuple[str, str]]:
     """Yield the key and value of each ``key: value`` line of pdfinfo output.
 

@@ -26,6 +26,7 @@ from latexprep.pdf_tool_output import (
     parse_mupdf_trace,
     parse_tool_xml,
     pdfinfo_properties,
+    refuse_reported_errors,
     split_text_pages,
 )
 from latexprep.pdf_tools import (
@@ -193,6 +194,49 @@ class PdfinfoPropertyTests(unittest.TestCase):
                 self.assertRaisesRegex(PreparationError, "Ambiguous duplicate"),
             ):
                 pdfinfo_properties(output)
+
+
+# What pdfimages (Poppler 26.11) prints for one JPEG 2000 image stored as a bare
+# codestream, as in a 37 MiB paper of such figures: it reads the image as J2K and goes on.
+RECOVERED_JPEG_2000 = (
+    "Syntax Error: Malformed JP2 file format: first box must be JPEG 2000 signature box<0a>\n"
+    "Syntax Warning: Unable to read header\n"
+    "Syntax Warning: Did no succeed opening JPX Stream as JP2, trying as J2K.\n"
+)
+
+
+class ReportedErrorTests(unittest.TestCase):
+    """Which lines of a tool's standard error mean damaged or incomplete input."""
+
+    def test_an_error_the_tool_recovered_from_is_a_repair(self) -> None:
+        for stderr in (
+            "",
+            "Syntax Warning: Invalid Font Weight\n",
+            RECOVERED_JPEG_2000,
+            RECOVERED_JPEG_2000 * 40,
+            # Without the header warning, and with the spelling corrected.
+            "Syntax Error: Malformed JP2 file format: first box must be JPEG 2000 signature "
+            "box\nSyntax Warning: Did not succeed opening JPX Stream as JP2, trying as J2K.\n",
+        ):
+            with self.subTest(stderr=stderr[:60]):
+                refuse_reported_errors(stderr, "pdfimages")
+
+    def test_every_other_error_still_means_damaged_input(self) -> None:
+        for stderr in (
+            "Syntax Error (257): Illegal character\n",
+            "error: cannot open document\n",
+            # The second attempt failed too.
+            RECOVERED_JPEG_2000 + "Syntax Error: Did not succeed opening JPX Stream.\n",
+            # The error without the line that says the image was read another way.
+            RECOVERED_JPEG_2000.splitlines(keepends=True)[0],
+            RECOVERED_JPEG_2000.replace("trying as J2K", "giving up"),
+            RECOVERED_JPEG_2000 + "Syntax Error: Couldn't find trailer dictionary\n",
+        ):
+            with (
+                self.subTest(stderr=stderr[-60:]),
+                self.assertRaisesRegex(PreparationError, "pdfimages reported damaged"),
+            ):
+                refuse_reported_errors(stderr, "pdfimages")
 
 
 class FontPolicyTests(unittest.TestCase):

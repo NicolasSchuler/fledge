@@ -252,6 +252,11 @@ The version is defined once, as `__version__` in `src/latexprep/__init__.py`.
 - **Inline images no longer stop the PDF image inventory.** `pdfimages` lists them
   without an object number, and such a row ended `check` and `prepare` with exit 4, for
   example on Elsevier's CAS template.
+- **A JPEG 2000 figure stored as a bare codestream no longer ends a run as "could not
+  check".** Poppler first reports "Malformed JP2 file format", then reads the image as
+  J2K and goes on; Fledge took the first line for damaged input (exit 4). The pair of
+  lines is a repair now. An error after it, or the first line without the second, is
+  still damaged input.
 - **PDF measurements get memory in proportion to the PDF.** The tools may use 64 MiB
   plus 2 MiB per MiB of the PDF, at most `build_memory_mb`, so `pdfimages` no longer
   runs out of memory on a large PDF full of JPEG 2000 figures (exit 4).
