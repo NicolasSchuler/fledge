@@ -61,6 +61,10 @@ _VERBATIM_END = {
 }
 # Commands whose argument is read verbatim, either braced or between a repeated delimiter.
 _VERBATIM_COMMANDS = frozenset({"verb", "lstinline", "mintinline", "url", "nolinkurl", "path"})
+# Characters that cannot delimit the argument of ``\url`` and kin: where one of them follows,
+# the command is named, as in ``\providecommand{\url}[1]{...}``, ``\def\url#1{...}`` or
+# ``\ifx\url\undefined``, and takes no argument. ``\verb`` accepts any delimiter.
+_NO_LITERAL_DELIMITER = "}\\#"
 # The url package's \path takes a braced or ``|``-delimited argument. TikZ shares the name
 # for \path[options] (a) -- (b), whose arguments are ordinary markup, not literal text.
 _URL_PATH_OPENERS = "{|"
@@ -459,12 +463,15 @@ def _verbatim_command(text: str, name: str, pos: int) -> _LiteralEnd | None:
     Returns:
         Where the argument ends and whether it was closed; an unclosed argument runs to
         the end of the text (braced) or of the line (delimited). ``None`` when no argument
-        follows, because the text ends or whitespace comes next.
+        follows, because the text ends, whitespace comes next, or the command is only
+        named (see ``_NO_LITERAL_DELIMITER``).
     """
     cursor = pos + 1 if text.startswith("*", pos) else pos
     if name != "verb":
         cursor = _skip_verbatim_options(text, cursor, name)
     if cursor >= len(text) or text[cursor].isspace():
+        return None
+    if name != "verb" and text[cursor] in _NO_LITERAL_DELIMITER:
         return None
     if text[cursor] == "{" and name != "verb":
         argument = read_group(text, cursor)

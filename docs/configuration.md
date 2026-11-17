@@ -274,7 +274,7 @@ papers; raise a limit when an error message names it.
 | `render_jobs` | Half the number of CPUs, from 1 to 4 | PDF pages rendered at once (`--render-jobs`) |
 | `timeout_seconds` | 120 | One tool command (`--timeout-seconds`) |
 | `job_timeout_seconds` | 600 | The whole job (`--job-timeout-seconds`) |
-| `build_memory_mb` | 1024 | Memory of one build command |
+| `build_memory_mb` | 1024 | Memory of one build command, and the most that one PDF measurement may use |
 | `memory_mb` | 2048 | Memory shared by all running tools; it must allow `build_memory_mb` plus 128 MiB for the coordinator |
 | `max_temporary_bytes` | 2147483648 (2 GiB) | Temporary data of the whole job |
 
@@ -282,7 +282,10 @@ The parallelism defaults follow the CPUs that Fledge may use, so a laptop with
 eight cores runs four operations and four page renders at once, and a two-core
 runner two and one. Every operation still reserves its share of `memory_mb`, so on
 a machine with many cores and a small memory budget the extra workers wait rather
-than overcommit. Reports record the values in effect under `settings`. On the
+than overcommit. A PDF measurement, such as `pdffonts` or `pdfimages -list`, may
+use 64 MiB plus 2 MiB for each MiB of the PDF, at most `build_memory_mb`, so a
+40 MiB PDF full of figures gets 144 MiB. Reports record the values in effect
+under `settings`. On the
 command line, an out-of-range number, such as `--jobs 0` or `--max-pages 0`, is a
 usage error (exit code 64), and `--help` shows each range.
 

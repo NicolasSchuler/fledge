@@ -45,7 +45,6 @@ CHECKS_WITHOUT_CLEAN_CASE: frozenset[str] = frozenset(
         "TEX011",
         "TEX303",
         "TEX307",
-        "TEX311",
         "TEX312",
         "TEX324",
     }

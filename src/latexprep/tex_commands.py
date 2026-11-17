@@ -63,17 +63,29 @@ MATH_MARKER = re.compile(rf"{MATH_DELIMITER.pattern}|\\begin\{{(?:{MATH_ENVIRONM
 PRIMITIVE_DEFINITION_COMMANDS = frozenset({"def", "gdef", "edef", "xdef", "let", "futurelet"})
 # Tokens after these commands name a macro being defined, not a conditional being run.
 DEFINITION_COMMANDS = PRIMITIVE_DEFINITION_COMMANDS | {"newif", "global", "long", "protected"}
-# LaTeX commands that define one command, with its name in braces.
+# Commands that define one command, with its name in braces or right after them: those of
+# LaTeX, etoolbox's robust forms, and the kernel's copies (\NewCommandCopy{\new}{\old}),
+# whose second argument, the copied command, is read as the replacement text.
 COMMAND_DEFINITION_COMMANDS = frozenset(
     {
         "newcommand",
         "renewcommand",
         "providecommand",
         "DeclareRobustCommand",
+        "newrobustcmd",
+        "renewrobustcmd",
+        "providerobustcmd",
+        "NewCommandCopy",
+        "RenewCommandCopy",
+        "DeclareCommandCopy",
         "NewDocumentCommand",
         "RenewDocumentCommand",
         "ProvideDocumentCommand",
         "DeclareDocumentCommand",
+        "NewExpandableDocumentCommand",
+        "RenewExpandableDocumentCommand",
+        "ProvideExpandableDocumentCommand",
+        "DeclareExpandableDocumentCommand",
     }
 )
 # Commands whose arguments declare a macro or environment. Neither the command nor
@@ -119,6 +131,10 @@ ARGUMENT_SPECIFICATION_DEFINITIONS = frozenset(
         "RenewDocumentCommand",
         "ProvideDocumentCommand",
         "DeclareDocumentCommand",
+        "NewExpandableDocumentCommand",
+        "RenewExpandableDocumentCommand",
+        "ProvideExpandableDocumentCommand",
+        "DeclareExpandableDocumentCommand",
     }
 )
 # Commands that define an environment from their first argument, with its begin and end
@@ -213,6 +229,13 @@ TYPESET_ARGUMENT_COMMANDS = frozenset(
         "multirow",
         "makecell",
         "thead",
+        # Float layout: the jmlr class's \floatconts{label}{caption}{content} and floatrow's
+        # boxes, which take the caption and the content.
+        "floatconts",
+        "ffigbox",
+        "ttabbox",
+        "fcapside",
+        "floatbox",
         # Groups after an environment's end; those after its \begin are owned by the
         # environment itself (``begin{figure}``, see ``tex_lexer.Group``).
         "end",

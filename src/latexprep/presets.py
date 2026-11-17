@@ -19,7 +19,8 @@ PRESETS: dict[str, str] = {
     "anonymous-review": (
         "Double-blind review: identity hints, your identity terms, figure metadata, float structure"
     ),
-    "arxiv": "Public source upload: shipped .bbl, private comments, secrets, unused files, fonts",
+    "arxiv": "Public source upload: .bib for arXiv's BibTeX, private comments, secrets, unused "
+    "files, fonts",
     "camera-ready": "Final version: strict PDF fonts and page size, metadata, float structure",
 }
 

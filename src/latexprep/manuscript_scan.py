@@ -4,21 +4,26 @@
 class and package declarations, the headings, and the abstract and keyword blocks of
 every source that contributes manuscript content. The scan is lexical and never executes
 TeX. Anything it cannot interpret becomes a reason attached to the declaration it
-affects, or a reason for the graph as a whole (``graph_reasons``); no reason ever
-becomes a verdict here. Counting follows the convention stated in ``COUNT_METHOD``.
-This module owns the evidence, not the constraints applied to it.
+affects, or a gap of the graph as a whole (``graph_reasons``) together with the parts of
+the document where the construct may run; no reason ever becomes a verdict here.
+Counting follows the convention stated in ``COUNT_METHOD``. This module owns the
+evidence, not the constraints applied to it.
 """
 
 from __future__ import annotations
 
 import re
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Literal
 
 from .expanded_document import (
     CONTENT_INPUT_COMMANDS,
+    EVERY_PART,
+    DocumentPart,
+    ExpandedDocument,
     commands_before_end,
+    finding_reason,
     package_code_sources,
 )
 from .literal_text import (
@@ -32,12 +37,13 @@ from .literal_text import (
     plain_text,
     scan_literal_text,
 )
+from .source_command_checks import DeferredBodies
 from .source_findings import can_hide_manuscript_text
-from .source_graph import INCOMPLETE_GRAPH_RULES, SourceGraph
+from .source_graph import INCOMPLETE_GRAPH_RULES
 from .source_loading import ParsedSource
-from .tex_commands import MATH_MARKER
+from .tex_commands import MATH_MARKER, TYPESET_ARGUMENT_COMMANDS
 from .tex_lexer import CONTROL_SEQUENCE, Command
-from .tex_spans import conditional_spans, in_conditional
+from .tex_spans import conditional_spans, definition_spans, in_conditional, in_half_open_span
 from .uncertainty_reasons import context_reasons
 
 COUNT_METHOD = (
@@ -56,9 +62,42 @@ KEYWORD_COUNT_METHOD = (
 _WORD = re.compile(r"[^\W_]+(?:['’\-‑][^\W_]+)*")
 _KEYWORD_SEPARATOR = re.compile(r"[,;]|\\(?:sep|and)\b")
 _CITATION_AND_REFERENCE_COMMANDS = KEY_ARGUMENT_COMMANDS - {"label", "nocite"}
-_SYNTAX_CHANGING_COMMANDS = {"csname", "catcode", "scantokens"}
+# \PassOptionsToClass changes the class options only before the class is loaded.
+_CLASS_PARTS = frozenset({DocumentPart.PROLOGUE})
+# LaTeX tests that run one of their branch arguments at once, where they stand.
+_IMMEDIATE_BRANCHES = frozenset(
+    {
+        "@ifclassloaded",
+        "@ifpackageloaded",
+        "@ifclasswith",
+        "@ifpackagewith",
+        "@ifundefined",
+        "@ifdefinable",
+        "@ifnextchar",
+        "@ifstar",
+        "IfClassLoadedTF",
+        "IfPackageLoadedTF",
+        "IfFileExists",
+    }
+)
 
 _BlockKind = Literal["abstract", "keywords"]
+
+
+@dataclass(frozen=True, slots=True)
+class GraphGap:
+    """Why the graph as a whole is unclear, and where in the document that construct may run.
+
+    A check that reads only some parts of the document, such as the package declarations
+    of the preamble, ignores a gap that cannot run there.
+
+    Attributes:
+        reason: The reason, naming the file where it can.
+        parts: The parts of the document where the construct may run.
+    """
+
+    reason: str
+    parts: frozenset[DocumentPart] = EVERY_PART
 
 
 @dataclass(frozen=True, slots=True)
@@ -282,28 +321,33 @@ class _BlockReader:
         self.result.append(Block(self.name, opening.line, value, self._reasons(opening)))
 
 
-def graph_reasons(graph: SourceGraph, selected: set[str], content: set[str]) -> list[str]:
-    """Explain why the selected graph as a whole cannot be read as one literal manuscript.
+def graph_reasons(
+    document: ExpandedDocument, selected: set[str], content: set[str]
+) -> list[GraphGap]:
+    r"""Explain why the selected graph as a whole cannot be read as one literal manuscript.
 
     Args:
-        graph: The source graph.
+        document: The expanded document of the graph, which places each construct in the
+            parts of the document where it may run.
         selected: The sources selected for the scan.
         content: The selected sources that contribute manuscript content.
 
     Returns:
-        The reasons: an uninspected main source, subfiles, repeated inclusions, and
+        The gaps: an uninspected main source, subfiles, repeated inclusions, and
         incomplete-graph findings within the scope of the selection. Findings inside
         package code (``package_code_sources``) are left out: they are gaps of the
         dependency graph, not of the literal declarations and content these checks read. A
         class or package file that could not be read at all is not package code, so it
-        still counts.
+        still counts, where it is loaded. A construct that never runs, after
+        ``\end{document}`` or in a definition that is never used, is no gap.
     """
-    reasons: list[str] = []
+    graph = document.graph
+    gaps: list[GraphGap] = []
     if graph.main not in selected:
-        reasons.append("selected main source could not be inspected")
+        gaps.append(GraphGap("selected main source could not be inspected"))
     if graph.subfile_targets:
-        reasons.append(
-            "subfile body/preamble content interpretation is not supported by this check"
+        gaps.append(
+            GraphGap("subfile body/preamble content interpretation is not supported by this check")
         )
     occurrences = Counter(
         target
@@ -312,23 +356,25 @@ def graph_reasons(graph: SourceGraph, selected: set[str], content: set[str]) -> 
     )
     for name, count in occurrences.items():
         if count > 1:
-            reasons.append(f"{name}: repeated source inclusion is not expanded for counts")
+            gaps.append(GraphGap(f"{name}: repeated source inclusion is not expanded for counts"))
     scope = (
         selected
         | {graph.main}
         | {target for (name, _, _), (target, _) in graph.references.items() if name in selected}
     )
     package_code = package_code_sources(graph, selected)
-    reasons.extend(
-        f"{item.path}: {item.message}"
-        for item in graph.findings
-        if item.path in scope
-        and item.path not in package_code
-        and item.rule in INCOMPLETE_GRAPH_RULES
-        and item.status != "passed"
-        and can_hide_manuscript_text(item)
-    )
-    return reasons
+    for item in graph.findings:
+        if (
+            item.path in scope
+            and item.path not in package_code
+            and item.rule in INCOMPLETE_GRAPH_RULES
+            and item.status != "passed"
+            and can_hide_manuscript_text(item)
+        ):
+            parts = document.finding_parts(item)
+            if parts:
+                gaps.append(GraphGap(finding_reason(item), parts))
+    return gaps
 
 
 @dataclass
@@ -337,7 +383,8 @@ class ManuscriptScan:
 
     Attributes:
         graph_reasons: Why the graph as a whole cannot be read as one literal
-            manuscript.
+            manuscript, with where each construct may run.
+        document: The expanded document, which places a construct in the document.
         classes: The document class declarations.
         packages: The package declarations.
         headings: The literal headings of content sources.
@@ -345,12 +392,20 @@ class ManuscriptScan:
         keywords: The keyword blocks of content sources.
     """
 
-    graph_reasons: list[str]
+    graph_reasons: list[GraphGap]
+    document: ExpandedDocument
     classes: list[Declaration] = field(default_factory=list)
     packages: list[Declaration] = field(default_factory=list)
     headings: list[LiteralHeading] = field(default_factory=list)
     abstracts: list[Block] = field(default_factory=list)
     keywords: list[Block] = field(default_factory=list)
+    # Why the rest of the source being read may not run: an \endinput before it that a
+    # branch in this file may execute.
+    _stopped: list[str] = field(default_factory=list, init=False, repr=False)
+    # The definition spans and deferred bodies of the source being read, once needed.
+    _definitions: tuple[list[tuple[int, int]], DeferredBodies] | None = field(
+        default=None, init=False, repr=False
+    )
 
     def read(self, name: str, source: ParsedSource, *, content: bool) -> None:
         """Collect one source; only content sources supply abstracts, keywords and headings.
@@ -363,50 +418,106 @@ class ManuscriptScan:
         # Only primitive \if…\fi ranges hide declarations. A \newif-defined name or a
         # branch-taking package conditional executes nothing by itself.
         conditionals = conditional_spans(source.commands)
-        for command in commands_before_end(source):
+        self._stopped = []
+        self._definitions = None
+        stopped_at: int | None = None
+        # Package code is read past an \endinput that a conditional may skip: the
+        # declarations after it may not run, which only they need to say.
+        for command in commands_before_end(source, may_not_run=() if content else conditionals):
             conditional = in_conditional(conditionals, command.start)
-            if command.name == "endinput":
-                self._end_of_input(name, source, command, conditional=conditional)
+            if command.name == "endinput" and self._end_of_input(
+                name, source, command, conditional=conditional, content=content
+            ):
+                stopped_at = command.line if stopped_at is None else stopped_at
             if command.name == "documentclass" or command.name in PACKAGE_COMMANDS:
                 self._declaration(name, command, conditionals)
             if content:
                 self._content_command(name, command, conditionals)
         if content:
-            self.abstracts.extend(_BlockReader(name, source, "abstract", conditionals).read())
-            self.keywords.extend(_BlockReader(name, source, "keywords", conditionals).read())
+            for kind, target in (("abstract", self.abstracts), ("keywords", self.keywords)):
+                blocks = _BlockReader(name, source, kind, conditionals).read()
+                target.extend(
+                    replace(block, uncertain=(*block.uncertain, *self._stopped))
+                    if stopped_at is not None and block.line >= stopped_at
+                    else block
+                    for block in blocks
+                )
 
     def _end_of_input(
-        self, name: str, source: ParsedSource, command: Command, *, conditional: bool
-    ) -> None:
+        self, name: str, source: ParsedSource, command: Command, *, conditional: bool, content: bool
+    ) -> bool:
         r"""Note an ``\endinput`` whose effect the scan cannot establish.
+
+        An ``\endinput`` in the argument of a command that runs it here, as natbib's
+        ``\@ifclassloaded{agu2001}{…\endinput}{}``, may stop this file: what follows is
+        unclear, not the whole graph. So is what follows one that a primitive conditional
+        encloses in package code, as in ``\ifnolinenumbers\endinput\fi``. One in a
+        definition stops the file where the definition is used, and a conditional one in a
+        content source stops the scan of the file, so both are gaps where they may run.
 
         Args:
             name: The source file.
             source: The parsed source.
             command: The ``\endinput`` command.
             conditional: Whether the command lies inside a conditional.
+            content: Whether the source contributes manuscript content.
+
+        Returns:
+            Whether the declarations after the command are unclear.
         """
         rest = source.masked[command.start + len("\\endinput") :]
         # Nothing but white space and comments follows: whether it runs changes nothing.
         if not rest.strip():
-            return
-        if command.depth or conditional:
-            self.graph_reasons.append(
-                f"{name}:{command.line}: grouped, macro-defined, or conditional "
-                "\\endinput has an unresolved execution context"
-            )
-            return
+            return False
+        unclear = (
+            f"{name}:{command.line}: grouped, macro-defined, or conditional "
+            "\\endinput has an unresolved execution context"
+        )
+        if command.depth:
+            if self._definitions is None:
+                spans = definition_spans(source.masked, source.commands)
+                self._definitions = (spans, DeferredBodies(source.masked, source.commands, spans))
+            spans, bodies = self._definitions
+            holder = bodies.holder(command.start)
+            if holder is not None:
+                parts = self.document.uses_of(holder)
+                if parts:
+                    self.graph_reasons.append(GraphGap(unclear, parts))
+                return False
+            if _runs_here(command, spans):
+                return self._may_stop(name, command)
+            # A hook or an unknown macro may run its argument later, in another file.
+            self.graph_reasons.append(GraphGap(unclear))
+            return False
+        if conditional:
+            if not content:
+                return self._may_stop(name, command)
+            self.graph_reasons.append(GraphGap(unclear, self.document.parts_at(name, command.line)))
+            return False
         suffix = rest.split("\n", 1)[0]
         if suffix.strip():
             self.graph_reasons.append(
-                f"{name}:{command.line}: tokens after \\endinput on the same "
-                "physical line have unresolved execution semantics"
+                GraphGap(
+                    f"{name}:{command.line}: tokens after \\endinput on the same "
+                    "physical line have unresolved execution semantics",
+                    self.document.parts_at(name, command.line),
+                )
             )
+        return False
+
+    def _may_stop(self, name: str, command: Command) -> bool:
+        r"""Note that what follows an ``\endinput`` in this source may not run; return ``True``."""
+        # The first such \endinput already leaves everything after it unclear.
+        if not self._stopped:
+            self._stopped.append(f"{name}:{command.line}: may follow an \\endinput that runs")
+        return True
 
     def _declaration(
         self, name: str, command: Command, conditionals: list[tuple[int, int]]
     ) -> None:
         """Record a document class or package declaration with its names and options.
+
+        Empty class options, as a trailing comma leaves, are skipped as LaTeX skips them.
 
         Args:
             name: The source file.
@@ -415,11 +526,11 @@ class ManuscriptScan:
         """
         names = first_argument_names(command)
         options = (
-            literal_list(command.options[0].value)
+            literal_list(command.options[0].value, skip_empty=True)
             if command.options and command.options[0].value.strip()
             else []
         )
-        uncertainty = context_reasons(command, conditionals, "declaration")
+        uncertainty = [*context_reasons(command, conditionals, "declaration"), *self._stopped]
         if names is None or (command.name == "documentclass" and options is None):
             uncertainty.append("nonliteral declaration or options")
         target = self.classes if command.name == "documentclass" else self.packages
@@ -436,7 +547,12 @@ class ManuscriptScan:
     def _content_command(
         self, name: str, command: Command, conditionals: list[tuple[int, int]]
     ) -> None:
-        """Record a heading of a content source, or the graph gap a command causes.
+        r"""Record a heading of a content source, or the graph gap a command causes.
+
+        ``\PassOptionsToClass`` is a gap of the class options only where it can still reach
+        the class, before or at the ``\documentclass`` declaration. A command that can
+        generate or change syntax (``\csname``) is a source-graph finding, placed by
+        :func:`graph_reasons`.
 
         Args:
             name: The source file.
@@ -444,13 +560,15 @@ class ManuscriptScan:
             conditionals: The spans of the source's primitive conditionals.
         """
         if command.name == "PassOptionsToClass":
-            self.graph_reasons.append(
-                f"{name}: class options are also passed outside the documentclass declaration"
-            )
-        elif command.name in _SYNTAX_CHANGING_COMMANDS:
-            self.graph_reasons.append(
-                f"{name}: \\{command.name} can generate or change source syntax"
-            )
+            parts = self.document.parts_at(name, command.line) & _CLASS_PARTS
+            if parts:
+                self.graph_reasons.append(
+                    GraphGap(
+                        f"{name}: class options are also passed outside the documentclass "
+                        "declaration",
+                        parts,
+                    )
+                )
         elif command.name in HEADING_DEPTHS:
             title, unknown = (
                 plain_text(command.arguments[0].value)
@@ -461,11 +579,43 @@ class ManuscriptScan:
             # required name, so it cannot support a "missing" claim either.
             resolved = bool(command.arguments) and not unknown
             unknown.extend(context_reasons(command, conditionals, "heading"))
+            unknown.extend(self._stopped)
             self.headings.append(
                 LiteralHeading(
                     name, command.line, " ".join(title.split()), command.name, resolved, unknown
                 )
             )
+
+
+def _runs_here(command: Command, definitions: list[tuple[int, int]]) -> bool:
+    r"""Return whether a grouped command runs in this file, where it stands, if at all.
+
+    That holds outside definitions when every group around it is a bare group, a typeset
+    argument, an environment, or a branch of a test that LaTeX decides at once
+    (``\@ifclassloaded``). A hook such as ``\AtBeginDocument`` or an unknown macro may run
+    its argument later, in another file.
+
+    Args:
+        command: The grouped command.
+        definitions: The merged definition spans of its source.
+
+    Returns:
+        Whether it runs here.
+    """
+    if in_half_open_span(definitions, command.start):
+        return False
+    group = command.group
+    while group is not None:
+        owner = group.owner
+        if not (
+            owner is None
+            or owner in _IMMEDIATE_BRANCHES
+            or owner in TYPESET_ARGUMENT_COMMANDS
+            or owner.startswith("begin{")
+        ):
+            return False
+        group = group.parent
+    return True
 
 
 def abstract_count(block: Block) -> AbstractCount:

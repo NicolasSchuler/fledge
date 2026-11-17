@@ -131,9 +131,15 @@ class SourceDiscoveryTests(ProjectTestCase):
         target = self.write("elsewhere.txt", ROOT_DOCUMENT)
         (self.root / "linked.tex").symlink_to(target)
         os.mkfifo(self.root / "pipe.tex")
-        self.write("binary.tex", b"\xff\xfe\\documentclass{article}")
         roots = returns_promptly(lambda: discover_roots(self.root))
         self.assertEqual(roots, ["main.tex"])
+
+    def test_undecodable_bytes_do_not_hide_a_document_class(self) -> None:
+        # The source analysis reports the encoding (TEX301); the choice of the main file
+        # does not depend on it.
+        self.write("binary.tex", b"\xff\xfe\\documentclass{article}")
+        self.write("notes.tex", b"\xff\xfe\\section{Notes}")
+        self.assertEqual(returns_promptly(lambda: discover_roots(self.root)), ["binary.tex"])
 
 
 class SourceGraphLoadTests(ProjectTestCase):

@@ -108,6 +108,26 @@ class LiteralTextTests(unittest.TestCase):
                 self.assertEqual(result.text, expected)
                 self.assertEqual(result.unresolved, [])
 
+    def test_a_line_break_with_spacing_opens_no_display_math(self) -> None:
+        # The WACV author block: "\\[4pt]" is a line break, and its second backslash
+        # before the bracket is no \[.
+        for source in (r"Ada\\[4pt] Lab", r"Ada\\*[2mm]Lab", r"Ada \\ [1ex] Lab", r"Ada\\Lab"):
+            with self.subTest(source=source):
+                result = scan_literal_text(source)
+                self.assertEqual(result.text.split(), ["Ada", "Lab"])
+                self.assertEqual(result.unresolved, [])
+        # A real display after a line break, and a lone \[, are still read as math.
+        display = scan_literal_text(r"Ada\\\[x\] Lab")
+        self.assertEqual((display.text.split(), display.unresolved), (["Ada", "Lab"], []))
+        self.assertIn("unbalanced math delimiters", scan_literal_text(r"Ada \[ Lab").unresolved)
+
+    def test_spaces_and_font_switches_of_author_lines_are_known(self) -> None:
+        result = scan_literal_text(
+            r"\mdseries Ada\quad Bo\qquad Cy\enspace{\scshape Di} {\slshape E}"
+        )
+        self.assertEqual(result.text.split(), ["Ada", "Bo", "Cy", "Di", "E"])
+        self.assertEqual(result.unresolved, [])
+
     def test_more_commands_than_the_lexer_bound_is_uncertain_not_partly_interpreted(self) -> None:
         with patch("latexprep.tex_lexer.MAX_COMMANDS", 3):
             result = scan_literal_text("\\emph{a} " * 10)

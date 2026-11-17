@@ -48,6 +48,11 @@ direct. No Fledge result guarantees that a venue will accept a submission.
   Glossaries that need `xindy` or `bib2gls`, and glossary types other than the main
   glossary and the acronyms, are not built. For a glossary written for `xindy`,
   `TEX012` says so; run makeglossaries locally and ship the `.gls` file.
+- **The memory of a PDF measurement follows the size of the PDF, not its images.**
+  `pdfimages -list` opens every image, and a JPEG 2000 image takes far more memory
+  to open than its compressed size suggests. A small PDF with a very large image of
+  that kind can exceed the limit of 64 MiB plus 2 MiB for each MiB of the PDF; the
+  run then ends with exit code 4 and a message that names the limit.
 - **A double quote in the temporary directory path** makes `latexmk` refuse to
   build. Fledge reports the failed build; point `TMPDIR` at a path without
   quotes. Spaces and non-ASCII characters in that path are fine.

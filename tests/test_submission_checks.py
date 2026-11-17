@@ -476,6 +476,27 @@ class SubmissionTests(ProjectTestCase):
         self.assertEqual(result.status, "failed")
         self.assertEqual(result.details["matches"], [{"path": "figures/plot.tikz", "line": 1}])
 
+    def test_private_comment_scan_leaves_out_class_and_package_files(self) -> None:
+        # Venue files such as icml2026.sty and cvpr.sty carry their maintainers' TODO notes.
+        rule = "submission.private_comments"
+        options = SubmissionOptions(scan_private_comments=True)
+        self.write("main.tex", "\\documentclass{venue}\n\\usepackage{venue}\n% ordinary\n")
+        self.write("venue.cls", "% FIXME: the margins of the old template\n\\LoadClass{article}\n")
+        self.write("venue.sty", "% TODO: tune the spacing\n\\ProvidesPackage{venue}\n")
+        self.write("venue.bst", "% TODO check the sorting\n")
+        self.assertEqual(self.result(rule, options).status, "passed")
+        # The paper's own comments are still read, and identity terms still in package files.
+        self.write("sections/intro.tex", "% TODO remove before submission\n")
+        result = self.result(rule, options)
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.details["matches"], [{"path": "sections/intro.tex", "line": 1}])
+        self.write("venue.sty", "% Written by Jane Smith\n\\ProvidesPackage{venue}\n")
+        identity = self.result(
+            "submission.identity_terms", SubmissionOptions(identity_terms=("Jane Smith",))
+        )
+        self.assertEqual(identity.status, "failed")
+        self.assertEqual(identity.details["matches"][0]["path"], "venue.sty")
+
     def test_comment_scan_ignores_literal_regions_and_marks_unclosed_input(self) -> None:
         options = SubmissionOptions(scan_private_comments=True)
         rule = "submission.private_comments"

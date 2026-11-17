@@ -32,7 +32,12 @@ from latexprep.report import Report
 from latexprep.resource_budget import ResourceBudget
 from latexprep.runtime import ToolRunner
 from latexprep.workflow_options import ComparisonOptions
-from tests.pdf_fakes import ConfigurablePdfRunner, FakePdfRunner
+from tests.pdf_fakes import (
+    CAS_DC_IMAGE_INVENTORY,
+    CAS_DC_PAGES,
+    ConfigurablePdfRunner,
+    FakePdfRunner,
+)
 from tests.support import live_test
 
 
@@ -476,6 +481,30 @@ class PdfConstraintTests(unittest.IsolatedAsyncioTestCase):
         )["pdf.image_resolution"]
         self.assertEqual(low.status, "failed")
         self.assertEqual(low.details["below_minimum"][0]["type"], "stencil")
+
+    async def test_inline_image_rows_are_measured_like_other_placements(self) -> None:
+        # The cas-dc template stopped the run with exit 4: its inline rows have 15 values.
+        runner = ConfigurablePdfRunner(
+            pages=CAS_DC_PAGES, outputs={"pdfimages": CAS_DC_IMAGE_INVENTORY}
+        )
+        findings = await self.inspect(PdfInspectionOptions(), runner=runner)
+        self.assertNotIn("pdf.images_unavailable", findings)
+        images = findings["pdf.images"].details["images"]
+        self.assertEqual([image["number"] for image in images], [0, 1, 2, 3, 4, 5])
+        self.assertEqual(images[4], images[4] | {"page": 6, "type": "stencil", "x_dpi": 1.0})
+
+    async def test_a_short_row_that_is_not_inline_still_stops_the_image_inventory(self) -> None:
+        header, rule, *rows = CAS_DC_IMAGE_INVENTORY.splitlines()
+        short = rows[0].replace("  23  0 ", "  23 ")  # object without its ID
+        for row in (short, rows[4].replace("[inline]", "[object]")):
+            runner = ConfigurablePdfRunner(
+                pages=CAS_DC_PAGES, outputs={"pdfimages": f"{header}\n{rule}\n{row}\n"}
+            )
+            findings = await self.inspect(PdfInspectionOptions(min_image_dpi=300), runner=runner)
+            with self.subTest(row=row):
+                unavailable = findings["pdf.images_unavailable"]
+                self.assertIn("unrecognized image inventory row", unavailable.message)
+                self.assertEqual(findings["pdf.image_resolution"].status, "inconclusive")
 
     @live_test("Opt-in live PDF tools")
     async def test_live_pdfimages_inventory_accepts_a_real_stencil_mask(self) -> None:

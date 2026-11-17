@@ -131,7 +131,12 @@ Known credential patterns and credential-bearing URLs are redacted in every
 report format, including settings, tool inventories and diffs. A plain URL
 username (`ssh://git@host`) or a `mailto:` address is not a secret, whereas
 `user:password@` and token-like usernames are redacted; short secrets are
-replaced only as whole words. Redaction protects report handoff. It does not
+replaced only as whole words. A setting or tool record whose name ends like a
+credential's (`password`, `api_key`, `token`) has its value redacted wherever it
+appears. The keys of a finding's `details` name what the check observed, so they
+never mark a value as a secret: BIB107 lists the words of a title under `tokens`,
+and those words stay visible; the text of the details is still searched for
+credentials. Redaction protects report handoff. It does not
 remove credentials from the submitted sources; the opt-in `PRV004` secret scan
 finds candidates there.
 
@@ -169,8 +174,15 @@ Every expensive step shares one CPU and memory budget. The coordinator reserves
 128 MiB; render reservations account for both RGB buffers. Renderer and formatter
 subprocesses each have a 128 MiB cap. One monitor samples aggregate memory and
 temporary disk use; these are sampled limits that can overshoot briefly, not
-operating-system guarantees. JSON `execution` records estimates, observed peaks,
-timings and whether accounting was available.
+operating-system guarantees. Memory is read from the process table (`ps`); a
+sample in which `ps` does not answer within 2 seconds is skipped and memory is
+measured again at the next one, while the disk limits still apply. After three
+such samples in a row, or after one when the last measurement was above three
+quarters of a memory limit, the run stops the programs and ends as "could not
+check" (exit code 4, or 3 when the paper also needs a fix), because Fledge could
+not watch the programs it runs; this says nothing about the paper. JSON `execution`
+records estimates, observed peaks, timings, how many samples found `ps` too slow
+(`slow_process_tables`) and whether accounting was available.
 
 The default whole-job deadline is 600 seconds, the per-tool timeout is 120
 seconds and the temporary-data ceiling is 2 GiB. Configure `memory_mb`,

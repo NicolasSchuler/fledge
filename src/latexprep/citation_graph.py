@@ -233,18 +233,43 @@ def resource_declarations(
                 )
                 if target and target[1] in _RESOURCE_COMMANDS:
                     resources.add(target[0])
-                elif (name, command.start, argument.value) in installed:
-                    path = installed[name, command.start, argument.value]
-                    if not _string_definitions_only(path):
-                        reasons.append(
-                            f"{name}:{command.line}: {PurePosixPath(path).name} from the TeX "
-                            "installation holds entries that are not inspected"
-                        )
-                else:
-                    reasons.append(
-                        f"{name}:{command.line}: bibliography resource could not be resolved"
-                    )
+                elif reason := _unread_resource_reason(
+                    inspection, installed, (name, command.start, argument.value)
+                ):
+                    reasons.append(f"{name}:{command.line}: {reason}")
     return resources, reasons
+
+
+def _unread_resource_reason(
+    inspection: SourceGraph,
+    installed: dict[tuple[str, int, str], str],
+    key: tuple[str, int, str],
+) -> str | None:
+    """Say why the entries of a bibliography resource that no project file holds are unknown.
+
+    Args:
+        inspection: The source graph of the manuscript.
+        installed: The installation path of each resource found there, by its argument.
+        key: The file, command offset and name of the resource's argument.
+
+    Returns:
+        The reason, or ``None`` for an installation file that holds only ``@string``
+        abbreviations, which hides no entry.
+    """
+    if key in inspection.shipped_bibliographies:
+        database = key[2] if key[2].endswith(".bib") else key[2] + ".bib"
+        return (
+            f"{database} is not in the project; the build reads the shipped "
+            f"{inspection.shipped_bibliographies[key]}, whose entries are not inspected"
+        )
+    if key in installed:
+        if _string_definitions_only(installed[key]):
+            return None
+        return (
+            f"{PurePosixPath(installed[key]).name} from the TeX installation holds entries "
+            "that are not inspected"
+        )
+    return "bibliography resource could not be resolved"
 
 
 # An entry or other record that is not an @string, @comment or @preamble declaration.

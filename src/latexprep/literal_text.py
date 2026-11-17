@@ -59,10 +59,40 @@ TEXT_WRAPPERS = frozenset(
         "centerline",
     }
 )
-# cleveref and zref-clever references that take a comma-separated list of labels.
-LIST_REFERENCE_COMMANDS = frozenset({"cref", "Cref", "labelcref", "cpageref", "Cpageref", "zcref"})
+# References that take a comma-separated list of labels: those of cleveref and zref-clever,
+# and those of the jmlr class (jmlrutils), which PMLR papers use for every float.
+LIST_REFERENCE_COMMANDS = frozenset(
+    {
+        "cref",
+        "Cref",
+        "labelcref",
+        "cpageref",
+        "Cpageref",
+        "zcref",
+        "figureref",
+        "subfigref",
+        "tableref",
+        "subtabref",
+        "sectionref",
+        "appendixref",
+        "partref",
+        "equationref",
+        "algorithmref",
+        "theoremref",
+        "lemmaref",
+        "corollaryref",
+        "definitionref",
+        "conjectureref",
+        "axiomref",
+        "exampleref",
+        "remarkref",
+    }
+)
 # cleveref references to a range, whose first two arguments are labels.
 RANGE_REFERENCE_COMMANDS = frozenset({"crefrange", "Crefrange"})
+# Commands whose first argument defines a label. The jmlr class's
+# \floatconts{label}{caption}{content} typesets the label after the caption it takes.
+LABEL_COMMANDS = frozenset({"label", "floatconts"})
 # Cross-references: their arguments are label keys.
 REFERENCE_COMMANDS = frozenset(
     {
@@ -118,6 +148,7 @@ _NONCONTENT_COMMANDS = frozenset(
         "listoffigures",
         "listoftables",
         "maketitle",
+        "mdseries",
         "medskip",
         "midrule",
         "newpage",
@@ -133,8 +164,10 @@ _NONCONTENT_COMMANDS = frozenset(
         "relax",
         "rmfamily",
         "scriptsize",
+        "scshape",
         "selectfont",
         "sffamily",
+        "slshape",
         "small",
         "smallskip",
         "strut",
@@ -189,7 +222,24 @@ _NONCONTENT_ARGUMENTS = {
     "setcounter": 2,
     "setlength": 2,
 }
-_SPACE_COMMANDS = frozenset({"par", "newline", "linebreak", "and", "sep", "\\", ",", ";", "!", " "})
+# Breaks and spaces, among them the \quad and \qquad that separate names in author lines.
+_SPACE_COMMANDS = frozenset(
+    {
+        "par",
+        "newline",
+        "linebreak",
+        "and",
+        "sep",
+        "quad",
+        "qquad",
+        "enspace",
+        "\\",
+        ",",
+        ";",
+        "!",
+        " ",
+    }
+)
 _CHARACTER_COMMANDS = frozenset({"%", "&", "#", "_", "{", "}", "$"})
 # LaTeX's text accents, by the combining character each puts on the letter that follows,
 # as in Schr\"odinger or \v{c}; they are text, never an interpretation gap.
@@ -286,6 +336,10 @@ _MATH_PATTERNS = tuple(
     )
 )
 
+# A line break \\ with its optional star and spacing, as in \\[4pt] or \\*. LaTeX reads the
+# bracket after spaces too; the spacing is a length, so it is bounded.
+_LINE_BREAK = re.compile(r"\\\\\*?(?:\s*\[[^\]\[{}]{0,64}\])?")
+
 _PLACEHOLDER_MARKER = marker_pattern(
     MarkerCategory.EDIT_MARKER,
     MarkerCategory.TO_BE_DETERMINED,
@@ -342,6 +396,9 @@ def scan_literal_text(value: str) -> LiteralText:
     value = mask_literals(value)
     uncertain: set[str] = set()
     unresolved_macros = 0
+    # A line break, with its star and spacing option, before the math delimiters are read:
+    # the second backslash of \\[4pt] does not open display math.
+    value = _LINE_BREAK.sub(r"\\newline ", value)
     value = re.sub(
         rf"\\begin\{{({MATH_ENVIRONMENT_PATTERN})\}}.*?\\end\{{\1\}}", " ", value, flags=re.S
     )
@@ -430,13 +487,17 @@ def normalize_heading(value: str) -> str:
     return " ".join(value.split()).casefold()
 
 
-def literal_list(value: str) -> list[str] | None:
+def literal_list(value: str, *, skip_empty: bool = False) -> list[str] | None:
     """Split a comma-separated literal name list; ``None`` when any item is not literal.
 
-    A list holding a TeX special character or a NUL, or an empty item, is not literal.
+    A list holding a TeX special character or a NUL is not literal, and neither is one
+    with an empty item unless ``skip_empty`` is set.
 
     Args:
         value: The list as written.
+        skip_empty: Whether empty items are left out, as LaTeX's option parser leaves out
+            the empty option after a trailing or doubled comma, instead of making the list
+            nonliteral.
 
     Returns:
         The stripped items, or ``None``.
@@ -444,6 +505,8 @@ def literal_list(value: str) -> list[str] | None:
     if re.search(r"[\\{}#$^~&%\x00]", value):
         return None
     items = [item.strip() for item in value.split(",")]
+    if skip_empty:
+        return [item for item in items if item]
     return items if all(items) else None
 
 

@@ -3,14 +3,18 @@
 Each test draws a fixed number of inputs from ``random.Random`` with a fixed seed, so a failure
 repeats, and asserts an invariant instead of an expected result: an archive that is damaged is
 refused with the documented error and leaves nothing behind, masking keeps the offsets of the
-text, an accepted path stays inside the project, and a damaged image never raises an
-unhandled error. The counts are small enough for a unit run (each test takes well under two
-seconds); raise them locally to hunt for a defect.
+text, an accepted path stays inside the project, a damaged image never raises an
+unhandled error, a varied pdfimages inventory gives valid placements or the documented
+error, and a report keeps every ordinary word while hiding every secret. The counts are
+small enough for a unit run (each test takes well under two seconds); raise them locally
+to hunt for a defect.
 """
 
 from __future__ import annotations
 
 import io
+import json
+import math
 import posixpath
 import random
 import struct
@@ -21,18 +25,27 @@ import zlib
 from pathlib import Path
 
 from latexprep.errors import PreparationError
+from latexprep.finding_view import RenderOptions
+from latexprep.findings import Finding
+from latexprep.html_report import render_redacted_html
 from latexprep.image_metadata import check_image_metadata
 from latexprep.metadata_privacy import MetadataPrivacyOptions
 from latexprep.path_safety import relative_path_problem
+from latexprep.pdf_inspection import parse_image_inventory
 from latexprep.project import import_project
+from latexprep.report import Outcome, Report, redact_report, redacted_json
+from latexprep.terminal_report import render_redacted_terminal
 from latexprep.tex_lexer import ParseLimitExceeded, mask_literals, source_regions
 from latexprep.text_edits import OverlappingEdits, TextEdit, apply_text_edits
+from tests.pdf_fakes import CAS_DC_IMAGE_INVENTORY, CAS_DC_PAGES
 
 ZIP_CASES = 2500
 LEXER_CASES = 3000
 EDIT_CASES = 1500
 PATH_CASES = 20000
 IMAGE_CASES = 3000
+INVENTORY_CASES = 3000
+REPORT_CASES = 400
 
 
 def valid_archive(*, zip64: bool) -> bytes:
@@ -345,6 +358,270 @@ class ImageMetadataTests(unittest.TestCase):
                 self.assertIn(finding.status, {"passed", "failed", "inconclusive"}, case)
                 statuses[finding.status] = statuses.get(finding.status, 0) + 1
         self.assertGreater(len(statuses), 1, statuses)
+
+
+# Values that pdfimages prints in some column, and values it should never print there.
+_INVENTORY_VALUES = (
+    "-",
+    "[inline]",
+    "0",
+    "-1",
+    "1e309",
+    "nan",
+    "inf",
+    "-0",
+    "9" * 40,
+    "1_000",
+    "١٢",
+    "2033",
+    "stencil",
+    "smask",
+    "jpeg",
+    "100%",
+    "x" * 200,
+)
+
+
+def varied_inventory(rng: random.Random, original: str) -> str:
+    """Return the captured ``pdfimages -list`` output with its rows or columns varied.
+
+    A variation drops, repeats or replaces values of a row, swaps or repeats rows, joins
+    two rows, or cuts the text off anywhere, as a damaged or unexpected tool output would.
+
+    Args:
+        rng: The source of randomness.
+        original: The captured output: a header, its rule and the rows.
+
+    Returns:
+        The varied output.
+    """
+    lines = original.splitlines()
+    for _ in range(rng.randint(1, 3)):
+        mode = rng.randrange(6)
+        index = rng.randrange(2, len(lines))
+        values = lines[index].split()
+        position = rng.randrange(len(values))
+        if mode == 0:
+            del values[position]
+        elif mode == 1:
+            values.insert(position, rng.choice(values))
+        elif mode == 2:
+            values[position] = rng.choice(_INVENTORY_VALUES)
+        elif mode == 3:
+            lines.insert(rng.randrange(2, len(lines) + 1), rng.choice(lines[2:]))
+            continue
+        elif mode == 4:
+            if index + 1 < len(lines):
+                values.extend(lines.pop(index + 1).split())
+        else:
+            text = "\n".join(lines)
+            return text[: rng.randrange(len(text) + 1)]
+        lines[index] = rng.choice((" ", "  ", "\t")).join(values)
+    return "\n".join(lines) + "\n"
+
+
+class ImageInventoryTests(unittest.TestCase):
+    """A varied pdfimages inventory gives valid placements or the documented error."""
+
+    def test_varied_inventories_parse_to_valid_placements_or_are_refused(self) -> None:
+        rng = random.Random(20261119)
+        self.assertEqual(len(parse_image_inventory(CAS_DC_IMAGE_INVENTORY, CAS_DC_PAGES)), 6)
+        outcomes = {"parsed": 0, "refused": 0}
+        for case in range(INVENTORY_CASES):
+            output = varied_inventory(rng, CAS_DC_IMAGE_INVENTORY)
+            try:
+                placements = parse_image_inventory(output, CAS_DC_PAGES)
+            except PreparationError:
+                outcomes["refused"] += 1
+                continue
+            outcomes["parsed"] += 1
+            for placement in placements:
+                self.assertIn(placement.page, range(1, CAS_DC_PAGES + 1), (case, output))
+                self.assertGreaterEqual(min(placement.width_px, placement.height_px), 1)
+                self.assertGreaterEqual(placement.number, 0)
+                for dpi in (placement.x_dpi, placement.y_dpi):
+                    self.assertTrue(math.isfinite(dpi) and dpi >= 0, (case, output))
+        self.assertTrue(all(outcomes.values()), outcomes)
+
+
+# Detail keys whose names end like a credential's; the words below them are ordinary.
+SECRET_LIKE_KEYS = (
+    "tokens",
+    "token",
+    "password",
+    "passwords",
+    "secret",
+    "secrets",
+    "api_key",
+    "apiKey",
+    "access-token",
+    "client_secret",
+    "credentials",
+    "signature",
+    "Authorization",
+    "PrivateKey",
+    "passphrase",
+)
+# Words of manuscripts and of Fledge's own report text, short ones included.
+ORDINARY_WORDS = (
+    "PDF",
+    "GPU",
+    "iPhone",
+    "LaTeX",
+    "Bayesian",
+    "compilation",
+    "checks",
+    "source",
+    "bibliography",
+    "passed",
+    "error",
+    "main",
+    "title",
+    "author",
+    "Blocked",
+    "the",
+    "of",
+    "a",
+    "x",
+    "2020",
+)
+# Credentials as they are written in project sources; ``{}`` stands for the secret.
+SECRET_TEMPLATES = (
+    "token={}",
+    "password: {}",
+    "see https://reader:{}@example.org/data",
+    "-----BEGIN PRIVATE KEY-----\n{}\n-----END PRIVATE KEY-----",
+)
+
+
+def detail_value(rng: random.Random, words: list[str], depth: int = 0) -> object:
+    """Return an ordinary detail value: a word, a list of words or a record with secret-like keys.
+
+    Every word used is appended to ``words``.
+
+    Args:
+        rng: The source of randomness.
+        words: The words used so far.
+        depth: The nesting depth of the value.
+
+    Returns:
+        The value.
+    """
+    shape = rng.randrange(3 if depth < 2 else 2)
+    if shape == 0:
+        word = rng.choice(ORDINARY_WORDS)
+        words.append(word)
+        return word
+    if shape == 1:
+        chosen = rng.sample(ORDINARY_WORDS, rng.randint(1, 4))
+        words.extend(chosen)
+        return chosen
+    return {
+        key: detail_value(rng, words, depth + 1)
+        for key in rng.sample(SECRET_LIKE_KEYS, rng.randint(1, 3))
+    }
+
+
+def generated_secret(rng: random.Random) -> str:
+    """Return a credential of 12 to 20 letters and digits that is no ordinary word."""
+    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+    body = "".join(rng.choice(alphabet) for _ in range(rng.randint(10, 18)))
+    return body + str(rng.randint(10, 99))
+
+
+class ReportRedactionTests(unittest.TestCase):
+    """Redaction keeps ordinary words under secret-like detail keys and hides real secrets."""
+
+    def generated_report(
+        self, rng: random.Random, *, with_secrets: bool
+    ) -> tuple[Report, list[str], list[str], list[str]]:
+        """Return a report of generated findings and what its renderings must show or hide.
+
+        Args:
+            rng: The source of randomness.
+            with_secrets: Whether some findings quote a credential from a project source.
+
+        Returns:
+            The report, the words of its details, the words of its messages and the
+            secrets it holds.
+        """
+        detail_words: list[str] = []
+        message_words: list[str] = []
+        secrets: list[str] = []
+        findings = []
+        for _ in range(rng.randint(1, 4)):
+            words = rng.sample(ORDINARY_WORDS, rng.randint(1, 5))
+            message_words.extend(words)
+            details = {
+                key: detail_value(rng, detail_words)
+                for key in rng.sample(SECRET_LIKE_KEYS, rng.randint(1, 4))
+            }
+            if with_secrets and rng.random() < 0.7:
+                secret = generated_secret(rng)
+                secrets.append(secret)
+                # Sources reach a report as a quoted excerpt or a log tail.
+                details[rng.choice(("excerpt", "log_tail"))] = rng.choice(SECRET_TEMPLATES).format(
+                    secret
+                )
+            findings.append(
+                Finding(
+                    "source.edit_marker",
+                    "Observed " + " ".join(words) + ".",
+                    path="main.tex",
+                    line=rng.randint(1, 50),
+                    details=details,
+                )
+            )
+        report = Report(
+            "inspect", outcome=Outcome.PASSED_WITH_ADVISORIES, scope="fixture", findings=findings
+        )
+        return report, detail_words, message_words, secrets
+
+    def renderings(self, report: Report) -> dict[str, str]:
+        """Return the JSON, terminal and HTML renderings of ``report``, redacted once."""
+        public = redact_report(report)
+        return {
+            "json": redacted_json(public),
+            "terminal": render_redacted_terminal(public, options=RenderOptions(show_passed=True)),
+            "html": render_redacted_html(public),
+        }
+
+    def test_ordinary_words_under_secret_like_detail_keys_stay_in_every_format(self) -> None:
+        rng = random.Random(20261116)
+        for case in range(REPORT_CASES):
+            report, detail_words, message_words, _ = self.generated_report(rng, with_secrets=False)
+            outputs = self.renderings(report)
+            for name, text in outputs.items():
+                self.assertNotIn("REDACTED", text, (case, name))
+                flowing = " ".join(text.split())
+                for word in message_words:
+                    self.assertIn(word, flowing, (case, name))
+            serialized = json.loads(outputs["json"])
+            details = json.dumps([item["details"] for item in serialized["findings"]])
+            for word in detail_words:
+                self.assertIn(word, details, case)
+
+    def test_secrets_from_sources_are_hidden_and_ordinary_words_kept(self) -> None:
+        rng = random.Random(20261117)
+        hidden = 0
+        for case in range(REPORT_CASES):
+            report, detail_words, message_words, secrets = self.generated_report(
+                rng, with_secrets=True
+            )
+            outputs = self.renderings(report)
+            for name, text in outputs.items():
+                for secret in secrets:
+                    self.assertNotIn(secret, text, (case, name))
+                flowing = " ".join(text.split())
+                for word in message_words:
+                    self.assertIn(word, flowing, (case, name))
+            details = json.dumps(
+                [item["details"] for item in json.loads(outputs["json"])["findings"]]
+            )
+            for word in detail_words:
+                self.assertIn(word, details, case)
+            hidden += len(secrets)
+        self.assertGreater(hidden, REPORT_CASES // 2)
 
 
 if __name__ == "__main__":

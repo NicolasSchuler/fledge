@@ -280,6 +280,45 @@ class RedactionTests(unittest.TestCase):
         result = redact_data({"diff": "+-----BEGIN PRIVATE KEY-----\n+" + body})
         self.assert_hidden(result, body, "BEGIN PRIVATE KEY")
 
+    def test_private_key_body_lines_without_key_material_are_not_secrets(self) -> None:
+        # A diff of removed TeX comments leaves "-%" lines inside the block.
+        diff = (
+            "-% -----BEGIN PRIVATE KEY-----\n-% MIIExampleBody98765\n-% \n"
+            "-% -----END PRIVATE KEY-----\n+%\n+%\n"
+        )
+        result = redact_data({"diff": diff, "message": "Use % for a comment; see -% and +."})
+        self.assert_hidden(result, "MIIExampleBody98765")
+        self.assertEqual(result["message"], "Use % for a comment; see -% and +.")
+        self.assertTrue(result["diff"].endswith("\n+%\n+%\n"), result["diff"])
+
+    def test_keys_name_no_secret_inside_descriptive_records(self) -> None:
+        value = {
+            "findings": [
+                {
+                    "message": "Fast PDF parsing on a GPU",
+                    "details": {"tokens": ["PDF", "GPU"], "nested": {"password": "parsing"}},
+                },
+                {"message": "Fast", "details": {"log_tail": "password=LoggedSecret8642"}},
+            ],
+            "settings": {"password": "Fast"},
+            "summary": "LoggedSecret8642 in a log",
+        }
+        result = redact_data(value, descriptive_keys={"details"})
+        first, second = result["findings"]
+        self.assertEqual(first["details"], value["findings"][0]["details"])
+        self.assertEqual(first["message"], "Fast PDF parsing on a GPU".replace("Fast", REDACTED))
+        # Text inside a descriptive record is still searched, and keys outside still count.
+        self.assertEqual(second["details"]["log_tail"], "password=" + REDACTED)
+        self.assert_hidden(result, "LoggedSecret8642")
+        self.assertEqual(result["settings"]["password"], REDACTED)
+        # Below a sensitive key, a descriptive key does not lift the secret.
+        self.assertEqual(
+            redact_data({"password": {"details": "hunter"}}, descriptive_keys={"details"}),
+            {"password": {"details": REDACTED}},
+        )
+        # Without descriptive keys, a secret-like key name marks its words, as before.
+        self.assert_hidden(redact_data(value)["findings"][0], "PDF", "GPU", "parsing")
+
     def test_sensitive_lists_and_encoded_mapping_keys(self) -> None:
         result = redact_data(
             {

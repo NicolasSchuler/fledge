@@ -57,6 +57,19 @@ _UNICODE_ENGINE_MARKERS = (
     "requires luatex or xetex",
     "cannot be used with pdftex",
 )
+# What a package bound to one engine says under another: bidi and xepersian ("can not use
+# pdftex. The bidi package requires XeTeX."), xeCJK ("requires XeTeX to function"), luatexja
+# ("requires Lua(HB)(La)TeX") and luacode ("LuaTeX is required for this package").
+_XETEX_MARKERS = ("requires xetex", "requires xelatex")
+_LUATEX_MARKERS = (
+    "requires lua(hb)(la)tex",
+    "requires luatex",
+    "requires lualatex",
+    "luatex is required",
+)
+# ctex under an engine for which this computer has none of its font sets, which for pdfLaTeX
+# is the usual case outside Windows.
+_CTEX_FONT_SET = re.compile(r"ctex fontset `[^']{1,40}' is unavailable in current mode")
 # The file that epstopdf would have written for pdfLaTeX and LuaLaTeX, and what xdvipdfmx
 # prints when it cannot run Ghostscript on an EPS figure for XeLaTeX.
 _EPS_MARKERS = ("-eps-converted-to.pdf", "-->rungs", "image format conversion for")
@@ -167,17 +180,40 @@ def _eps_figure(message: str) -> str | None:
     )
 
 
-def _unicode_engine(message: str) -> str | None:
-    """Explain a package such as fontspec that pdfLaTeX cannot run."""
-    lowered = message.lower()
-    if not any(marker in lowered for marker in _UNICODE_ENGINE_MARKERS):
-        return None
+def _engine_advice(problem: str, program: str, alternative: str = "") -> str:
+    """Say how to choose the engine ``program`` after stating the ``problem``."""
     return (
-        "The document needs XeLaTeX or LuaLaTeX, but it was built with pdfLaTeX. Add "
-        "`% !TEX program = xelatex` (or lualatex) as the first line of the main file, which "
-        "Fledge and most editors follow, or pass --engine xelatex, or set "
-        f'engine = "xelatex" in fledge.toml. See {BUILD_FAILED_GUIDE}.'
+        f"{problem} Add `% !TEX program = {program}`{alternative} as the first line of the "
+        f"main file, which Fledge and most editors follow, or pass --engine {program}, or set "
+        f'engine = "{program}" in fledge.toml. See {BUILD_FAILED_GUIDE}.'
     )
+
+
+def _unicode_engine(message: str) -> str | None:
+    """Explain a package that the engine of this build cannot run, such as fontspec or bidi."""
+    lowered = message.lower()
+    if any(marker in lowered for marker in _UNICODE_ENGINE_MARKERS):
+        return _engine_advice(
+            "The document needs XeLaTeX or LuaLaTeX, but it was built with pdfLaTeX.",
+            "xelatex",
+            " (or lualatex)",
+        )
+    if any(marker in lowered for marker in _XETEX_MARKERS):
+        return _engine_advice(
+            "The document needs XeLaTeX, but it was built with another engine.", "xelatex"
+        )
+    if any(marker in lowered for marker in _LUATEX_MARKERS):
+        return _engine_advice(
+            "The document needs LuaLaTeX, but it was built with another engine.", "lualatex"
+        )
+    if _CTEX_FONT_SET.search(lowered):
+        return _engine_advice(
+            "ctex has no font set for the engine of this build on this computer; Chinese "
+            "documents are usually built with XeLaTeX or LuaLaTeX.",
+            "xelatex",
+            " (or lualatex)",
+        )
+    return None
 
 
 # Each entry receives a message and returns the next step, or ``None`` for a message of

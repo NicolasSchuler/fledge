@@ -109,7 +109,9 @@ RULES = (
         title="Private comments and unfinished notes",
         description=(
             "Optionally scan TeX comments for unfinished markers and private-note "
-            "phrases without changing licensing, directives or meaningful comments."
+            "phrases without changing licensing, directives or meaningful comments. Comments "
+            "in class, package, style and bibliography-style files, such as a venue's, are "
+            "their maintainers' notes and are not scanned."
         ),
         tests=("tests.test_submission_checks.SubmissionTests.test_private_comments",),
         fix="Review flagged comments and remove only material that should not be submitted.",

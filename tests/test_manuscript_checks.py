@@ -453,12 +453,13 @@ class ManuscriptDetailTests(ProjectTestCase):
             r"See \ref{fig:a}, then \ref{fig:b}." + floats,
             r"See \ref{fig:b}, then \ref{fig:a}." + floats,
         )
-        missing = self.result(
+        # Floats that nobody references have no first reference to place: the reference
+        # check reports them, and the order check compares only the others.
+        missing = self.results(
             floats,
-            ManuscriptCheckOptions(check_float_reference_order=True),
-            "float_reference_order",
+            ManuscriptCheckOptions(require_float_references=True, check_float_reference_order=True),
         )
-        self.assertEqual(missing.status, "inconclusive")
+        self.assertEqual([item.status for item in missing], ["failed", "passed"])
 
     def test_figure_descriptions(self) -> None:
         self.policy(
@@ -784,15 +785,22 @@ class ManuscriptDetailTests(ProjectTestCase):
                     item for item in results if item.rule.endswith("float_references")
                 )
                 self.assertEqual(references.status, "inconclusive")
-        # Duplicate labels make reference attribution ambiguous, but with no
-        # reference anywhere in the document the absence itself is confirmed.
+        # Duplicate labels make a reference to them ambiguous, but with no reference
+        # anywhere in the document the absence itself is confirmed.
         duplicated = self.result(
             r"\begin{figure}\label{same}\end{figure}\begin{figure}\label{same}\end{figure}",
             options,
             "float_references",
         )
         self.assertEqual(duplicated.status, "failed")
-        self.assertIn("ambiguous reference targets", str(duplicated.details["uncertainty"]))
+        referenced = self.result(
+            r"See \ref{same}.\begin{figure}\label{same}\end{figure}"
+            r"\begin{figure}\label{same}\end{figure}",
+            options,
+            "float_references",
+        )
+        self.assertEqual(referenced.status, "inconclusive")
+        self.assertIn("ambiguous reference targets", referenced.message)
 
     def test_input_cycle_missing_input_and_bounds_are_inconclusive(self) -> None:
         options = ManuscriptCheckOptions(require_float_captions=True)
@@ -1080,12 +1088,13 @@ class ManuscriptDetailTests(ProjectTestCase):
             "heading_depth",
         )
         self.assertEqual(bare.status, "failed")
+        # A group after an inclusion is text; it leaves the float after it checked.
         grouped = self.result(
-            r"\input{body}{\generatedcontent}",
+            r"\input{body}{\small Closing.}\begin{figure}Plot.\end{figure}",
             ManuscriptCheckOptions(require_float_captions=True),
             "float_captions",
         )
-        self.assertEqual(grouped.status, "inconclusive")
+        self.assertEqual(grouped.status, "failed")
 
     def test_duplicate_label_outside_float_prevents_reference_target_claim(self) -> None:
         result = self.result(

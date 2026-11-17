@@ -42,6 +42,9 @@ UNFINISHED_SCOPE = "run did not finish"
 # The scope of the content-free report that ``Report.redacted_copy`` returns in place of a
 # report it cannot sanitize; publication recognises a withheld report by it.
 WITHHELD_SCOPE = "report sanitization"
+# Finding details describe what a check observed: their keys name the observation, as
+# ``tokens`` names the words of a title, so a key's name never makes a detail a secret.
+_DESCRIPTIVE_RECORDS = frozenset({"details"})
 
 
 class Outcome(StrEnum):
@@ -240,7 +243,7 @@ class Report:
             The sanitized report, or a report without content that names the cause when
             the output cannot be sanitized safely.
         """
-        values = redact_data(asdict(self))
+        values = redact_data(asdict(self), descriptive_keys=_DESCRIPTIVE_RECORDS)
         if not isinstance(values, dict):
             return _withheld_report(self.command, _REDACTION_LIMIT_CAUSE)
         # Artifact paths name the files a job published, which callers and scripts open,

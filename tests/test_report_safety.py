@@ -25,8 +25,14 @@ from latexprep.job_context import JobRequest
 from latexprep.online_checks import OnlineOptions
 from latexprep.pdf_artwork_options import PdfArtworkOptions
 from latexprep.report import Change, ChangeKind, Outcome, Report
+from latexprep.source_transform import SourceTransformOptions
 from latexprep.terminal_report import render_terminal
-from tests.support import build_with_loaded_class, controlled_backends, single_file_project
+from tests.support import (
+    ProjectTestCase,
+    build_with_loaded_class,
+    controlled_backends,
+    single_file_project,
+)
 
 
 class ReportSafetyTests(unittest.TestCase):
@@ -159,6 +165,43 @@ class ReportSafetyTests(unittest.TestCase):
         self.assertEqual(public["stages"], [])
         self.assertIn("raw details were withheld", public["findings"][0]["message"])
         self.assertIn("report.redaction_limit", render_compact(report))
+
+
+class OrdinaryWordTests(ProjectTestCase):
+    """Words of the manuscript that a check lists under a detail key are not secrets."""
+
+    def test_title_words_of_the_capitalization_check_stay_visible_under_camera_ready(self):
+        # BIB107 lists the words of a title under the detail key ``tokens``, whose name
+        # ends like a credential's; "PDF" was then replaced everywhere in the report.
+        project = self.write_project(
+            {
+                "main.tex": "\\documentclass{article}\n\\begin{document}\nText \\cite{k1}.\n"
+                "\\bibliographystyle{plain}\n\\bibliography{refs}\n\\end{document}\n",
+                "refs.bib": "@article{k1,\n  author = {A. Author},\n"
+                "  title = {Fast PDF parsing},\n  journal = {J},\n  year = {2020}\n}\n",
+            }
+        )
+        outputs = {}
+        for output_format in ("terminal", "json"):
+            response = CliRunner().invoke(
+                cli,
+                [
+                    "inspect",
+                    str(project),
+                    "--preset",
+                    "camera-ready",
+                    "--quiet",
+                    "--output-format",
+                    output_format,
+                ],
+            )
+            self.assertNotIn("REDACTED", response.output, output_format)
+            outputs[output_format] = response.output
+        self.assertIn("PDF checks not run", " ".join(outputs["terminal"].split()))
+        [finding] = [
+            item for item in json.loads(outputs["json"])["findings"] if item["code"] == "BIB107"
+        ]
+        self.assertEqual(finding["details"]["tokens"], ["PDF"])
 
 
 class WithheldReportTests(unittest.TestCase):
@@ -425,3 +468,45 @@ class ReportPublicationSafetyTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn(credential, str(report.settings))
             self.assertNotIn(credential, (root / "out/report.json").read_text())
             self.assertTrue((root / "out/submission.zip").is_file())
+
+    async def test_secrets_in_project_sources_stay_hidden_in_every_format(self):
+        # Removing comments puts the source lines into the diff of a change.
+        secrets = ("QzR7vK2mX9pL4wT8", "Hk5Jd8Lq2Vn7Rx3c", "Pw9Xc4Lm7Qa2Zt6v", "MIIEvQIBADANBgkq")
+        body = (
+            "Text.\n"
+            f"% token={secrets[0]}\n"
+            f"% password: {secrets[1]}\n"
+            f"% see https://reader:{secrets[2]}@example.org/data\n"
+            "% -----BEGIN PRIVATE KEY-----\n"
+            f"% {secrets[3]}hkiG9w0BAQEFAAS\n"
+            "% -----END PRIVATE KEY-----\n"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            source = root / "input"
+            single_file_project(source, body=body)
+            settings = Settings(source_transforms=SourceTransformOptions(comment_policy="all"))
+            backends = controlled_backends(build=build_with_loaded_class)
+            report = await run_job(
+                JobRequest("prepare", source, settings, root / "out"), backends=backends
+            )
+            saved = (root / "out/report.json").read_text()
+        self.assertEqual(report.outcome, "passed", report.to_dict())
+        options = RenderOptions(show_diff=True, show_passed=True)
+        outputs = {
+            "saved json": saved,
+            "json": report.to_json(),
+            "terminal": render_terminal(report, options=options),
+            "compact": render_compact(report, options=options),
+            "html": render_html(report),
+            "ci": render_ci_annotations(report),
+        }
+        for name, text in outputs.items():
+            with self.subTest(format=name):
+                for secret in secrets:
+                    self.assertNotIn(secret, text)
+        [change] = report.changes
+        self.assertIn("REDACTED", change.diff)
+        # The comment markers left in place are no part of the private key.
+        self.assertIn("\n+%\n", change.diff)
+        self.assertIn("\n Text.\n", change.diff)

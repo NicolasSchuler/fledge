@@ -27,7 +27,7 @@ from .tex_commands import (
 from .tex_lexer import CONTROL_SEQUENCE, Argument, Command, end_of_line, read_group
 
 # Package conditionals that take braced branches instead of ending with \fi.
-_ARGUMENT_CONDITIONALS = frozenset(
+ARGUMENT_CONDITIONALS = frozenset(
     {
         "ifthenelse",
         "iftoggle",
@@ -332,7 +332,7 @@ def opens_conditional(command: Command) -> bool:
     return (
         not command.named
         and command.name.startswith("if")
-        and command.name not in _ARGUMENT_CONDITIONALS
+        and command.name not in ARGUMENT_CONDITIONALS
     )
 
 

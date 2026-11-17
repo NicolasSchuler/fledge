@@ -28,6 +28,80 @@ class SourceAnalysisTests(ProjectTestCase):
         self.assertEqual(discover_roots(self.root), ["paper/main.tex"])
         self.assertEqual(analyze_sources(self.root).main, "paper/main.tex")
 
+    def test_a_body_the_main_file_inputs_is_not_a_second_root(self) -> None:
+        # From the public reproduction ``body-input``: main.tex holds the preamble and
+        # reads body.tex, which opens and closes the document environment.
+        self.write("paper/main.tex", "\\documentclass{article}\n\\input{body}\n")
+        self.write("paper/body.tex", "\\begin{document}\nText.\n\\end{document}\n")
+        self.assertEqual(discover_roots(self.root), ["paper/main.tex"])
+        graph = SourceGraph.build(self.root, None)
+        self.assertEqual((graph.main, graph.roots), ("paper/main.tex", ["paper/main.tex"]))
+        self.assertEqual(SourceGraph.build(self.root, "paper/main.tex").other_roots(), [])
+
+    def test_a_header_the_main_file_inputs_is_not_the_root(self) -> None:
+        self.write("main.tex", "\\input{header.tex}\n\\begin{document}\nText.\n\\end{document}\n")
+        self.write("header.tex", "\\documentclass{article}\n")
+        self.assertEqual(discover_roots(self.root), ["main.tex"])
+
+    def test_documents_that_do_not_read_each_other_stay_separate_roots(self) -> None:
+        self.write("paper.tex", "\\documentclass{article}\n\\input{body}\n")
+        self.write("body.tex", "\\begin{document}\nText.\n\\end{document}\n")
+        self.write("supplement.tex", "\\documentclass{article}\n\\input{other/body}\n")
+        self.write("response.tex", "\\begin{document}\nA reply.\n\\end{document}\n")
+        self.assertEqual(discover_roots(self.root), ["paper.tex", "response.tex", "supplement.tex"])
+        # Two candidates that read each other leave the choice to the user.
+        self.write("a.tex", "\\documentclass{article}\n\\input{b}\n")
+        self.write("b.tex", "\\documentclass{article}\n\\input{a}\n")
+        for name in ("paper.tex", "body.tex", "supplement.tex", "response.tex"):
+            (self.root / name).unlink()
+        self.assertEqual(discover_roots(self.root), ["a.tex", "b.tex"])
+
+    def test_a_document_read_only_by_an_input_that_may_not_run_stays_a_root(self) -> None:
+        # Review: \iffalse\input{supplement}\fi merged a second document into the paper,
+        # which was then blamed for the supplement's packages.
+        supplement = "\\documentclass{article}\n\\begin{document}\nMore.\n\\end{document}\n"
+        for reading in (
+            "\\iffalse\n\\input{supplement}\n\\fi\n",
+            "\\newcommand\\withsupplement{\\input{supplement}}\n",
+            "\\maybe{\\input{supplement}}\n",
+            "% \\input{supplement}\n",
+        ):
+            with self.subTest(reading=reading):
+                self.write(
+                    "paper.tex",
+                    "\\documentclass{article}\n"
+                    + reading
+                    + "\\begin{document}\nText.\n\\end{document}\n",
+                )
+                self.write("supplement.tex", supplement)
+                self.assertEqual(discover_roots(self.root), ["paper.tex", "supplement.tex"])
+        # An input in a bare group or a typeset argument runs where it stands.
+        self.write(
+            "paper.tex",
+            "\\documentclass{article}\n\\begin{document}\n{\\small\\input{supplement}}\n"
+            "\\end{document}\n",
+        )
+        self.assertEqual(discover_roots(self.root), ["paper.tex"])
+
+    def test_a_main_file_that_is_not_utf8_is_still_found(self) -> None:
+        # From the public reproduction ``latin1-label``: one Latin-1 byte in a label.
+        self.write(
+            "main.tex",
+            b"\\documentclass{article}\n\\begin{document}\n\\section{A}\\label{sec:Poincar\xe9}\n"
+            b"See \\ref{sec:Poincar\xe9}.\n\\end{document}\n",
+        )
+        self.assertEqual(discover_roots(self.root), ["main.tex"])
+        # The source checks still refuse the file's text: TEX301 makes them incomplete.
+        result = analyze_sources(self.root, "main.tex")
+        self.assertEqual(result.main, "main.tex")
+        self.assertIn("source.encoding", {item.rule for item in result.findings})
+        self.assertFalse(result.complete)
+
+    def test_a_file_without_a_document_class_is_not_a_root_in_any_encoding(self) -> None:
+        self.write("notes.tex", b"\\section{Poincar\xe9}\nText.\n")
+        self.write("chapter.tex", "\\section{Plain}\n")
+        self.assertEqual(discover_roots(self.root), [])
+
     def test_multiple_roots_need_explicit_selection(self) -> None:
         self.write("a.tex", "\\documentclass{article}")
         self.write("b.tex", "\\documentclass{article}")

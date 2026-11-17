@@ -45,7 +45,7 @@ from .source_file_commands import (
     is_literal_text,
 )
 from .source_findings import GraphFindings, listed_names
-from .source_loading import LoadBudget, ParsedSource, is_document_root, load_source
+from .source_loading import LoadBudget, ParsedSource, document_roots, load_source
 from .source_resolution import (
     LookupScope,
     ProjectTree,
@@ -55,7 +55,11 @@ from .source_resolution import (
     project_path,
     resolve_reference,
 )
-from .tex_commands import ROOT_SUFFIXES
+from .tex_commands import (
+    ENVIRONMENT_DEFINITION_COMMANDS,
+    MACRO_DEFINITION_COMMANDS,
+    ROOT_SUFFIXES,
+)
 from .tex_lexer import (
     MAX_COMMANDS,
     Argument,
@@ -64,6 +68,7 @@ from .tex_lexer import (
     skip_space,
     split_argument_items,
 )
+from .tex_spans import conditional_spans, in_conditional
 
 MAX_INPUT_DEPTH = 128
 # The findings of a project without exactly one document root to select.
@@ -127,6 +132,13 @@ _PACKAGE_SUFFIXES = frozenset({".cls", ".sty"})
 def _is_package_file(path: str) -> bool:
     """Return whether a project file is a class or package file, whose findings are merged."""
     return PurePosixPath(path).suffix.lower() in _PACKAGE_SUFFIXES
+
+
+# The owners of a brace group whose code runs only later, if at all: the body of a macro
+# or environment definition, and the code of a class or package option.
+_DEFERRED_CODE_OWNERS = (
+    MACRO_DEFINITION_COMMANDS | ENVIRONMENT_DEFINITION_COMMANDS | {"DeclareOption"}
+)
 
 
 class ArgumentLocation(NamedTuple):
@@ -228,6 +240,9 @@ class SourceGraph:
         search_arguments: The arguments a flat layout must rewrite for directory changes,
             by location, with their replacement text.
         system_references: The class, package and style references left to the toolchain.
+        shipped_bibliographies: The shipped ``.bbl`` the build reads in place of each
+            bibliography database the project lacks, keyed by the file, command offset and
+            name of the reference.
         visited: The files the walk read.
         subfile_targets: The files read as supported ``\subfile`` bodies.
         subfiles_package_loaded: Whether the walk has seen the ``subfiles`` package loaded.
@@ -247,6 +262,7 @@ class SourceGraph:
         # Search-path arguments and their flat-layout replacements.
         self.search_arguments: dict[ArgumentLocation, str] = {}
         self.system_references: list[SystemReference] = []
+        self.shipped_bibliographies: dict[tuple[str, int, str], str] = {}
         self.visited: set[str] = set()
         self.subfile_targets: set[str] = set()
         self.subfiles_package_loaded = False
@@ -259,6 +275,7 @@ class SourceGraph:
         self._budget = LoadBudget()
         self._attempted: set[str] = set()
         self._events = 0
+        self._conditionals: dict[str, list[tuple[int, int]]] = {}
 
     @classmethod
     def build(cls, root: Path, main: str | None, *, scope: GraphScope = "project") -> Self:
@@ -341,11 +358,13 @@ class SourceGraph:
 
     def _document_roots(self) -> list[str]:
         """Return the loaded sources that are document roots and have a root file suffix."""
-        return [
-            name
-            for name, source in self.sources.items()
-            if Path(name).suffix.lower() in ROOT_SUFFIXES and is_document_root(source.commands)
-        ]
+        return document_roots(
+            {
+                name: source.commands
+                for name, source in self.sources.items()
+                if Path(name).suffix.lower() in ROOT_SUFFIXES
+            }
+        )
 
     def _load(self, name: str) -> ParsedSource | None:
         """Return the parsed source of ``name``, loading and checking it on first use.
@@ -425,9 +444,36 @@ class SourceGraph:
     def _tree(self) -> ProjectTree:
         """Return the project files and compilation directory as a lookup tree.
 
-        A linked candidate is passed to :meth:`_load`, which reports the link.
+        A linked candidate is passed to :meth:`_load`, which reports the link. The ``.bbl``
+        the build reads is the main file's name with ``.bbl``, beside it.
         """
-        return ProjectTree(self.files, self.cwd, self._load)
+        if self.main is None:
+            return ProjectTree(self.files, self.cwd, self._load)
+        bbl = posixpath.join(self.cwd, PurePosixPath(self.main).stem + ".bbl")
+        return ProjectTree(self.files, self.cwd, self._load, bbl)
+
+    def _in_deferred_package_code(self, visit: _Visit, command: Command) -> bool:
+        """Return whether a command of a class or package file may never run.
+
+        That is a command in the body of a definition, in the code of an option or inside
+        a conditional: whether it runs depends on how the document uses the code, which the
+        scan does not evaluate. The document's own files are not package code.
+
+        Args:
+            visit: The file that holds the command.
+            command: The command.
+
+        Returns:
+            Whether the file is a class or package file and the command sits in such code.
+        """
+        if not _is_package_file(visit.path):
+            return False
+        if any(owner in _DEFERRED_CODE_OWNERS for owner in command.groups):
+            return True
+        spans = self._conditionals.get(visit.path)
+        if spans is None:
+            spans = self._conditionals[visit.path] = conditional_spans(visit.source.commands)
+        return in_conditional(spans, command.start)
 
     def _project_path(self, visit: _Visit, command: Command, value: str, base: str) -> str | None:
         """Return the project-relative path ``value`` names under ``base``.
@@ -914,11 +960,15 @@ class SourceGraph:
         Returns:
             The project file found, or ``None``.
         """
+        deferred = self._in_deferred_package_code(visit, command)
         resolution = resolve_reference(
-            Reference(value, visit.path, command), scope, self._tree(), self._reporter
+            Reference(value, visit.path, command, deferred), scope, self._tree(), self._reporter
         )
         if resolution.target is not None:
             self.dependencies.add(resolution.target)
         if resolution.system is not None:
             self.system_references.append(resolution.system)
+        if resolution.shipped_bbl is not None:
+            key = (visit.path, command.start, value)
+            self.shipped_bibliographies[key] = resolution.shipped_bbl
         return resolution.target

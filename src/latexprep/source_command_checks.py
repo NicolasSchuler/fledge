@@ -11,7 +11,9 @@ a reference (``source_graph``) or resolve a path (``source_resolution``).
 from __future__ import annotations
 
 import re
-from collections.abc import Callable
+from bisect import bisect_right
+from collections import defaultdict
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 
 from .literal_text import HEADING_DEPTHS, KEY_ARGUMENT_COMMANDS, REFERENCE_COMMANDS, TEXT_WRAPPERS
@@ -26,12 +28,15 @@ from .source_file_commands import (
 )
 from .source_findings import NEEDED_FOR_RESTRUCTURING, GraphFindings
 from .source_loading import ParsedSource
+from .tex_commands import COMMAND_DEFINITION_COMMANDS
 from .tex_lexer import Command, split_argument_items
 from .tex_spans import (
+    MacroDefinition,
     conditional_spans,
     defined_names,
     definition_spans,
     in_conditional,
+    macro_definitions,
     runs_in_place,
 )
 
@@ -93,6 +98,9 @@ _TEXT_COMMANDS = frozenset(
         "author",
         "thanks",
         "footnote",
+        # List items: a group after \item or \bibitem is text or a key, never a file.
+        "item",
+        "bibitem",
         # Package, class and file declarations, and their messages.
         "ProvidesPackage",
         "ProvidesClass",
@@ -122,6 +130,75 @@ _PATH_LIKE = re.compile(
     re.IGNORECASE | re.VERBOSE,
 )
 _DECLARED_IDENTITY_COMMANDS = frozenset({"ProvidesPackage", "ProvidesClass", "ProvidesFile"})
+# Tests that only compare the token \csname builds, as the bibliography boilerplate
+# \expandafter\ifx\csname url\endcsname\relax does: nothing it names runs there.
+_COMPARING_TESTS = frozenset({"ifx", "ifdefined"})
+# Definitions that store their replacement text unexpanded, so that what it holds runs only
+# where the defined command is used; \edef and \xdef expand their body where they stand.
+_DEFERRING_DEFINITIONS = COMMAND_DEFINITION_COMMANDS | {
+    "def",
+    "gdef",
+    "newcommandx",
+    "renewcommandx",
+}
+
+
+class DeferredBodies:
+    r"""The replacement texts of one source that run only where their definition is used.
+
+    These are the bodies of ``\newcommand``, ``\def`` and their relatives and the begin and
+    end code of environment definitions. The body of ``\edef`` and ``\xdef`` is expanded
+    where the definition stands, and ``\let`` copies a token, so neither is one.
+
+    Args:
+        text: The text the commands were scanned from.
+        commands: The commands of ``text``, in order.
+        spans: The merged :func:`~latexprep.tex_spans.definition_spans` of ``text``.
+    """
+
+    def __init__(
+        self, text: str, commands: Sequence[Command], spans: Sequence[tuple[int, int]]
+    ) -> None:
+        defining: dict[str, list[tuple[int, str]]] = defaultdict(list)
+        for command in commands:
+            if command.named_by is not None:
+                defining[command.name].append((command.start, command.named_by))
+        bodies: list[MacroDefinition] = []
+        for definition in macro_definitions(text, commands):
+            if definition.start == definition.end:
+                continue
+            names = defining.get(definition.name, [])
+            index = bisect_right(names, (definition.start, "")) - 1
+            if definition.name.startswith("begin{") or (
+                index >= 0 and names[index][1] in _DEFERRING_DEFINITIONS
+            ):
+                bodies.append(definition)
+        bodies.sort(key=lambda item: item.start)
+        self._bodies = bodies
+        self._starts = [item.start for item in bodies]
+        self._spans = list(spans)
+
+    def holder(self, offset: int) -> str | None:
+        """Return what the innermost deferred body around ``offset`` defines, if any.
+
+        Args:
+            offset: The offset to place.
+
+        Returns:
+            The defined command without its backslash, or ``begin{name}`` for an
+            environment; ``None`` outside every deferred body.
+        """
+        span = bisect_right(self._spans, (offset, float("inf"))) - 1
+        if span < 0 or not self._spans[span][0] <= offset < self._spans[span][1]:
+            return None
+        # Only the bodies inside the definition span around the offset can hold it.
+        index = bisect_right(self._starts, offset) - 1
+        while index >= 0 and self._bodies[index].start >= self._spans[span][0]:
+            body = self._bodies[index]
+            if offset < body.end:
+                return body.name
+            index -= 1
+        return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,6 +215,8 @@ class SourceChecks:
         findings: Where the checks record their uncertainties.
         definitions: The merged definition spans of the source (``definition_spans``).
         defined: The commands and environments the source defines (``defined_names``).
+        deferred: The replacement texts of the source that run only where they are used,
+            or ``None`` before :func:`check_source` reads them.
     """
 
     path: str
@@ -146,6 +225,7 @@ class SourceChecks:
     findings: GraphFindings
     definitions: tuple[tuple[int, int], ...] = ()
     defined: frozenset[str] = frozenset()
+    deferred: DeferredBodies | None = None
 
     def uncertain(
         self,
@@ -288,17 +368,25 @@ def _check_provides_identity(checks: SourceChecks, command: Command) -> None:
 
 
 def _check_unsupported_or_custom_path(checks: SourceChecks, command: Command) -> None:
-    """Report a command that reads files at run time, or an unknown one handed a path.
+    r"""Report a command that reads files at run time, or an unknown one handed a path.
 
     An unknown command is one that is not a file, text or macro-name command; its options
     and arguments are suspect when they look like a file name or match a known project
-    path that has a directory.
+    path that has a directory. A ``\csname`` that a conditional test only compares runs
+    nothing. A command in a deferred replacement text (:class:`DeferredBodies`) runs where
+    the definition is used, so the finding names that definition in ``definition_of``.
 
     Args:
         checks: The source being checked.
         command: The command to check.
     """
     if command.name in _UNSUPPORTED_COMMANDS:
+        if command.name == "csname" and command.named_by in _COMPARING_TESTS:
+            return
+        details: dict[str, object] = {"command": command.name}
+        holder = checks.deferred.holder(command.start) if checks.deferred else None
+        if holder is not None:
+            details["definition_of"] = holder
         checks.uncertain(
             command,
             "source.unsupported_command",
@@ -306,7 +394,7 @@ def _check_unsupported_or_custom_path(checks: SourceChecks, command: Command) ->
             "outside the supported literal subset.",
             "Replace this command with a literal file reference the scan can follow. "
             + NEEDED_FOR_RESTRUCTURING,
-            {"command": command.name},
+            details,
         )
         return
     if (
@@ -438,10 +526,12 @@ def check_source(checks: SourceChecks) -> None:
     (``GraphFindings.merge_per_rule``).
     """
     commands = checks.source.commands
+    spans = definition_spans(checks.source.masked, commands)
     checks = replace(
         checks,
-        definitions=tuple(definition_spans(checks.source.masked, commands)),
+        definitions=tuple(spans),
         defined=frozenset(defined_names(commands)),
+        deferred=DeferredBodies(checks.source.masked, commands, spans),
     )
     _check_conditional_dependencies(checks)
     _check_unclosed_literals(checks)

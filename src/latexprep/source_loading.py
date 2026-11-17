@@ -3,19 +3,24 @@
 ``load_source`` turns a project file into a ``ParsedSource`` or reports, through
 ``GraphFindings``, why the lexical subset cannot use it: a link, a file over the size
 limit, one that cannot be read or decoded, a group the lexer cannot bound, or a
-project over the command budget. It owns the budgets one graph spends while loading;
-it does not decide which files to load (``project_files``), judge the commands in a
-source (``source_command_checks``) or follow references (``source_graph``).
+project over the command budget. ``document_roots`` says which loaded sources are
+documents of their own, for the graph and for root discovery alike. It owns the budgets
+one graph spends while loading; it does not decide which files to load
+(``project_files``), judge the commands in a source (``source_command_checks``) or
+follow references (``source_graph``).
 """
 
 from __future__ import annotations
 
 import codecs
+import posixpath
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 from .file_safety import FileTooLargeError, read_regular_file
 from .limits import KIB, MIB
+from .source_file_commands import DEFAULT_SUFFIXES_BY_FILE_COMMAND, is_literal_text
 from .source_findings import GraphFindings
 from .tex_lexer import (
     MAX_ARGUMENT_CHARS,
@@ -30,7 +35,11 @@ from .tex_lexer import (
     scan_commands,
     source_regions,
 )
+from .tex_spans import conditional_spans, in_conditional, runs_in_place
 from .text_edits import with_bom
+
+# The commands with which a main file reads part of its own document from another file.
+_DOCUMENT_INPUT_COMMANDS = frozenset({"input", "include"})
 
 # What to tell the user for each way an argument can defeat the lexer's bounds.
 _ARGUMENT_LIMIT_ADVICE: dict[ParseLimit, tuple[str, str]] = {
@@ -88,11 +97,74 @@ class ParsedSource:
         return with_bom(self.text if text is None else text, bom=self.bom).encode("utf-8")
 
 
-def is_document_root(commands: list[Command]) -> bool:
+def is_document_root(commands: Sequence[Command]) -> bool:
     """Return whether a source declares a document class or opens the document environment."""
     return any(
         command.name == "documentclass" or command.begins("document") for command in commands
     )
+
+
+def _literal_inputs(name: str, commands: Sequence[Command]) -> Iterator[str]:
+    r"""Yield the project paths that the literal ``\input`` and ``\include`` of a file may name.
+
+    The file is read as a main file, so a name resolves against its own directory, as
+    itself and with the ``.tex`` suffix TeX tries first. Only a command that runs where it
+    stands counts: one inside a conditional, a definition or the argument of a command
+    that may drop it, as in ``\iffalse\input{supplement}\fi``, may read nothing.
+
+    Args:
+        name: The project-relative path of the reading file.
+        commands: The commands of the reading file.
+
+    Yields:
+        Each project path a literal argument may name.
+    """
+    directory = posixpath.dirname(name)
+    conditionals = conditional_spans(list(commands))
+    for command in commands:
+        if (
+            command.name not in _DOCUMENT_INPUT_COMMANDS
+            or command.named_by
+            or not command.arguments
+            or in_conditional(conditionals, command.start)
+            or not runs_in_place(command, (), frozenset())
+        ):
+            continue
+        value = command.arguments[0].value.strip()
+        if is_literal_text(value):
+            path = posixpath.normpath(posixpath.join(directory, value))
+            yield path
+            yield from (path + suffix for suffix in DEFAULT_SUFFIXES_BY_FILE_COMMAND[command.name])
+
+
+def document_roots(commands_by_name: Mapping[str, Sequence[Command]]) -> list[str]:
+    r"""Return the files that are documents of their own, in the order given.
+
+    A candidate declares a document class or opens the document environment. A candidate
+    that another candidate reads with a literal ``\input`` or ``\include`` that runs where
+    it stands is part of that document, as a ``body.tex`` that holds ``\begin{document}``
+    or a ``header.tex`` that holds ``\documentclass``, and is not a root. When that would
+    leave no root, as for two candidates that read each other, every candidate is
+    returned, so the choice is left to the user instead of being made here.
+
+    Args:
+        commands_by_name: The commands of each source that may be a main file, by its
+            project-relative path.
+
+    Returns:
+        The project-relative paths of the roots.
+    """
+    candidates = {
+        name: commands for name, commands in commands_by_name.items() if is_document_root(commands)
+    }
+    read_by_others = {
+        path
+        for name, commands in candidates.items()
+        for path in _literal_inputs(name, commands)
+        if path != name
+    }
+    roots = [name for name in candidates if name not in read_by_others]
+    return roots or list(candidates)
 
 
 @dataclass(slots=True)

@@ -418,3 +418,93 @@ class SubmissionTextVenueTests(ProjectTestCase):
         fields = self.fields("\\usepackage{mymacros}\n\\title{Cats \\& Dogs}\n", "\\maketitle\n")
         self.assertEqual(fields["title"].status, "unresolved")
         self.assertIn("Locally defined command needs manual review: \\&", fields["title"].issues)
+
+    def test_a_venue_style_does_not_make_its_fields_locally_defined(self) -> None:
+        # A venue's .sty, loaded with \usepackage, typesets the abstract and the keywords
+        # the way a venue class does; it does not change what they say.
+        self.write(
+            "venue.sty",
+            "\\ProvidesPackage{venue}\n"
+            "\\renewenvironment{abstract}{\\section*{Abstract}}{}\n"
+            "\\newenvironment{keywords}{\\par\\textbf{Keywords:}}{}\n"
+            "\\def\\title#1{\\gdef\\@title{#1}}\n",
+        )
+        self.write(
+            "main.tex",
+            "\\documentclass{article}\n\\usepackage{venue}\n\\title{A Title}\n"
+            "\\begin{document}\n\\maketitle\n\\begin{abstract}\nWe study things.\n"
+            "\\end{abstract}\n\\begin{keywords}\nFirst keyword \\sep Second keyword\n"
+            "\\end{keywords}\n\\end{document}\n",
+        )
+        fields = read_submission_text(self.root, "main.tex")
+        self.assertEqual(
+            {name: (item.status, item.draft, item.issues) for name, item in fields.items()},
+            {
+                "title": ("ready", "A Title", []),
+                "abstract": ("ready", "We study things.", []),
+                "keywords": ("ready", "First keyword; Second keyword", []),
+            },
+        )
+
+    def test_the_authors_own_definition_of_a_field_still_counts(self) -> None:
+        # The same definition in a .tex file of the paper, or of a text macro in a .sty,
+        # may change what the field says.
+        self.write("defs.tex", "\\renewenvironment{abstract}{Summary: }{}\n")
+        self.write(
+            "venue.sty",
+            "\\ProvidesPackage{venue}\n\\newcommand\\method{TraceGate}\n",
+        )
+        self.write(
+            "main.tex",
+            "\\documentclass{article}\n\\usepackage{venue}\n\\input{defs}\n"
+            "\\title{The \\method{} tool}\n\\begin{document}\n\\begin{abstract}\nText.\n"
+            "\\end{abstract}\n\\end{document}\n",
+        )
+        fields = read_submission_text(self.root, "main.tex")
+        self.assertEqual(fields["abstract"].status, "unresolved")
+        self.assertIn(
+            "Locally defined declaration needs manual review: abstract", fields["abstract"].issues
+        )
+        self.assertEqual(fields["title"].status, "unresolved")
+        self.assertIn(
+            "Locally defined command needs manual review: \\method", fields["title"].issues
+        )
+
+    def test_font_shape_series_family_and_size_switches_change_no_text(self) -> None:
+        self.assertEqual(convert_text(r"The {\upshape\LaTeX} way"), ("The LaTeX way", []))
+        for switch in (
+            "upshape",
+            "slshape",
+            "scshape",
+            "mdseries",
+            "rmfamily",
+            "sffamily",
+            "ttfamily",
+            "small",
+            "footnotesize",
+            "large",
+            "Large",
+            "normalsize",
+            "bf",
+            "it",
+            "sc",
+            "sl",
+        ):
+            with self.subTest(switch=switch):
+                self.assertEqual(convert_text(f"A {{\\{switch} B}} C"), ("A B C", []))
+        # Typewriter text keeps its punctuation as typed; roman text restores it.
+        self.assertEqual(convert_text(r"{\ttfamily a--b} c--d"), ("a--b c–d", []))
+        self.assertEqual(convert_text(r"{\tt a--b}"), ("a--b", []))
+        self.assertEqual(convert_text(r"\texttt{{\rmfamily a--b} c--d}"), ("a–b c--d", []))
+        # A command that is no font switch is still kept and reported.
+        self.assertEqual(
+            convert_text(r"{\fancyshape B}"),
+            ("\\fancyshape B", ["Unsupported command: \\fancyshape"]),
+        )
+
+    def test_keyword_separators_take_no_space_before_them(self) -> None:
+        self.assertEqual(
+            convert_text(r"First keyword \sep Second keyword \and Third", keyword_separators=True),
+            ("First keyword; Second keyword; Third", []),
+        )
+        self.assertEqual(convert_text(r"A \and B"), ("A B", []))

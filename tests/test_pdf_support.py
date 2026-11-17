@@ -11,7 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from latexprep.cancellation import cancellation_point
-from latexprep.command_runner import CommandResult
+from latexprep.command_runner import CommandResult, RuntimeLimits
 from latexprep.errors import PreparationError
 from latexprep.findings import Finding
 from latexprep.measurement_findings import EVIDENCE_LIMITATION_SUGGESTION, TOOL_FAILURE_SUGGESTION
@@ -25,6 +25,7 @@ from latexprep.pdf_tool_output import (
     normalized_text_pages,
     parse_mupdf_trace,
     parse_tool_xml,
+    pdfinfo_properties,
     split_text_pages,
 )
 from latexprep.pdf_tools import (
@@ -148,6 +149,50 @@ class TextPageTests(unittest.TestCase):
     def test_normalized_pages_share_the_boundary_policy(self) -> None:
         with self.assertRaisesRegex(PreparationError, "page boundary"):
             normalized_text_pages("a\fb", 2)
+
+
+# What pdfinfo (Poppler 26.11) prints for a file that declares PDF/X, from its Title on.
+PDFX_INFO = (
+    "Title:           A print-ready PDF\n"
+    "Author:          A. Writer\n"
+    "Tagged:          no\n"
+    "Pages:           1\n"
+    "PDF version:     1.7\n"
+    "PDF subtype:    PDF/X-1:2001\n"
+    "    Title:         ISO 15930 - Electronic document file format for prepress digital"
+    " data exchange (PDF/X)\n"
+    "    Abbreviation:  PDF/X-1:2001\n"
+    "    Subtitle:      Part 1: Complete exchange using CMYK data (PDF/X-1 and PDF/X-1a)\n"
+    "    Standard:      ISO 15930-1\n"
+)
+
+
+class PdfinfoPropertyTests(unittest.TestCase):
+    """Reading the property lines of pdfinfo and refusing ambiguous ones."""
+
+    def test_the_description_of_a_declared_standard_is_not_a_second_title(self) -> None:
+        fields = pdfinfo_properties(PDFX_INFO)
+        self.assertEqual(fields["Title"], "A print-ready PDF")
+        self.assertEqual(fields["PDF subtype"], "PDF/X-1:2001")
+        self.assertNotIn("Abbreviation", fields)
+        self.assertNotIn("Standard", fields)
+
+    def test_a_repeated_property_outside_that_description_is_still_refused(self) -> None:
+        for output in (
+            "Pages: 2\nTitle: a\nTitle: b\n",
+            # Indented, but not under the subtype line.
+            "Title: a\n    Title: b\nPages: 2\n",
+            # After the description has ended.
+            PDFX_INFO + "Title:           Another\n",
+            PDFX_INFO + "Pages:           3\n",
+            # A line without a colon ends the description.
+            "Pages: 1\nTitle: a\nPDF subtype: PDF/X\ncontinued\n    Title: b\n",
+        ):
+            with (
+                self.subTest(output=output),
+                self.assertRaisesRegex(PreparationError, "Ambiguous duplicate"),
+            ):
+                pdfinfo_properties(output)
 
 
 class FontPolicyTests(unittest.TestCase):
@@ -394,6 +439,114 @@ class SessionOpeningTests(SessionTestCase):
                 self.pdf, self.work(), runner, explicit, default_to_runner_budget=default
             )
             self.assertIs(supplied.budget, explicit)
+
+
+class MemoryRecordingRunner(FakeCommandRunner):
+    """A runner that records the memory cap of each command and the lease held for it.
+
+    Args:
+        limits: The runtime limits.
+        budget: The runner's own budget, if any.
+        watched: The budget whose held lease is recorded; the runner's own by default.
+        exceed: Whether every command reports that it exceeded its cap, as the resource
+            monitor words it.
+
+    Attributes:
+        caps: The ``memory_mb`` of each command other than a version probe.
+        leases: The memory of the lease of ``watched`` held during each of those commands,
+            or ``None``.
+    """
+
+    def __init__(
+        self,
+        limits: RuntimeLimits,
+        budget: ResourceBudget | None = None,
+        *,
+        watched: ResourceBudget | None = None,
+        exceed: bool = False,
+    ) -> None:
+        super().__init__(default="page num type\n---\n")
+        self.limits = limits
+        self.budget = budget
+        self.watched = watched or budget
+        self.exceed = exceed
+        self.caps: list[int | None] = []
+        self.leases: list[int | None] = []
+
+    async def run(
+        self,
+        argv: list[str],
+        cwd: Path,
+        workspace: Path,
+        *,
+        readonly_inputs: tuple[Path, ...] = (),
+        memory_mb: int | None = None,
+    ) -> CommandResult:
+        """Record the cap and the held lease, then answer as the base runner or as stopped.
+
+        The arguments are those of :meth:`CommandRunner.run`.
+        """
+        result = await super().run(
+            argv, cwd, workspace, readonly_inputs=readonly_inputs, memory_mb=memory_mb
+        )
+        if argv[-1] == "-v":
+            return result
+        lease = self.watched.current_lease if self.watched is not None else None
+        self.caps.append(memory_mb)
+        self.leases.append(lease.memory_mb if lease is not None else None)
+        if self.exceed:
+            exceeded = f"Aggregate tool memory exceeded {memory_mb} MiB"
+            return CommandResult(-9, "", "", resolved_command=argv, resource_exceeded=exceeded)
+        return result
+
+
+class MeasurementMemoryTests(SessionTestCase):
+    """The memory limit of a read-only measurement follows the size of the PDF it reads."""
+
+    def large_pdf(self, mib: int) -> Path:
+        """Write a PDF of ``mib`` MiB and return its path."""
+        path = self.root / f"large-{mib}.pdf"
+        path.write_bytes(b"%PDF-" + b"0" * (mib * 1024 * 1024 - 5))
+        return path
+
+    async def measure(self, pdf: Path, runner: MemoryRecordingRunner, budget=None) -> None:
+        """Open a session over ``pdf`` and run one ``pdfimages -list`` measurement."""
+        session = await PdfToolSession.open(self.work(), {"document": pdf}, runner, budget)
+        await session.measure("images", ["pdfimages", "-list", DOCUMENT], lambda r: r.stdout)
+
+    async def test_a_large_pdf_gets_more_memory_and_an_equal_lease(self) -> None:
+        # pdfimages needed between 96 and 112 MiB for a 37 MiB paper and was stopped at 64.
+        cases = ((self.pdf, 64), (self.large_pdf(10), 84), (self.large_pdf(37), 138))
+        for pdf, expected in cases:
+            budget = ResourceBudget(2, 2048)
+            runner = MemoryRecordingRunner(RuntimeLimits(max_memory_mb=1024), watched=budget)
+            await self.measure(pdf, runner, budget)
+            with self.subTest(pdf=pdf.name):
+                # The lease that admits the command holds exactly its cap.
+                self.assertEqual((runner.caps, runner.leases), ([expected], [expected]))
+
+    async def test_the_limit_stops_at_the_memory_of_one_command_and_at_the_held_lease(self) -> None:
+        pdf = self.large_pdf(37)
+        runner = MemoryRecordingRunner(RuntimeLimits(max_memory_mb=100))
+        await self.measure(pdf, runner, ResourceBudget(2, 2048))
+        self.assertEqual(runner.caps, [100])
+        # A session without a budget runs under the lease its caller already holds.
+        budget = ResourceBudget(2, 2048)
+        runner = MemoryRecordingRunner(RuntimeLimits(max_memory_mb=1024), budget)
+        async with budget.lease("caller", memory_mb=90):
+            await self.measure(pdf, runner)
+        self.assertEqual(runner.caps, [90])
+        # ... or under a lease the runner takes from its own budget.
+        own = ResourceBudget(1, 200, coordinator_memory_mb=128)
+        runner = MemoryRecordingRunner(RuntimeLimits(max_memory_mb=1024), own)
+        await self.measure(pdf, runner)
+        self.assertEqual(runner.caps, [72])
+
+    async def test_a_tool_over_its_limit_still_could_not_check_and_names_the_limit(self) -> None:
+        runner = MemoryRecordingRunner(RuntimeLimits(max_memory_mb=1024), exceed=True)
+        with self.assertRaises(PreparationError) as raised:
+            await self.measure(self.large_pdf(10), runner, ResourceBudget(2, 2048))
+        self.assertEqual(str(raised.exception), "Aggregate tool memory exceeded 84 MiB")
 
 
 class PreflightTests(SessionTestCase):

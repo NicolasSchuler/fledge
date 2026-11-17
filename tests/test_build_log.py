@@ -247,6 +247,28 @@ class FailureHelpTests(unittest.IsolatedAsyncioTestCase):
                 "either XeTeX or LuaTeX.",
                 "% !TEX program = xelatex",
             ),
+            # Packages bound to one engine, as pdfLaTeX reports them (TeX Live 2026).
+            (
+                "! Fatal Package bidi Error: Oops! can not use pdftex. The bidi package "
+                "requires XeTeX.",
+                "needs XeLaTeX, but",
+            ),
+            (
+                "! Critical Package xeCJK Error: The xeCJK package requires XeTeX to function.",
+                "--engine xelatex",
+            ),
+            (
+                "! Package luatexja-core Error: This package requires Lua(HB)(La)TeX.",
+                "% !TEX program = lualatex",
+            ),
+            (
+                "! Package luacode Error: LuaTeX is required for this package. Aborting..",
+                'engine = "lualatex"',
+            ),
+            (
+                "! Critical Package ctex Error: CTeX fontset `mac' is unavailable in current mode.",
+                "% !TEX program = xelatex` (or lualatex)",
+            ),
             ("! LaTeX Error: File `acmart-custom.cls' not found.", "tlmgr search --global --file"),
             ("! LaTeX Error: File `acmart-custom.cls' not found.", "TEXMFHOME"),
             (
@@ -282,6 +304,9 @@ class FailureHelpTests(unittest.IsolatedAsyncioTestCase):
             "! Undefined control sequence.",
             "! LaTeX Error: File `figure.png' not found.",
             "! Missing $ inserted.",
+            # An engine named without the wording of a package that refuses to run.
+            "! Package fontenc Error: Encoding TU is meant for XeTeX and LuaTeX.",
+            "! Package ctex Error: CTeX fontset `fandol' is used.",
         ):
             with self.subTest(message=message):
                 self.assertIsNone(explain_build_message(message))

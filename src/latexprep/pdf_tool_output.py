@@ -14,7 +14,7 @@ from __future__ import annotations
 import math
 import re
 import xml.etree.ElementTree as ET
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from typing import NamedTuple
 
@@ -30,6 +30,8 @@ MAX_PARSED_NODES = 50_000
 # reported sizes are treated as damaged geometry, which also keeps raster arithmetic finite.
 MAX_PAGE_DIMENSION_PT = 14_400
 METADATA_FIELDS = frozenset({"Title", "Author", "Subject", "Keywords", "Creator", "Producer"})
+# The pdfinfo line that is followed by an indented description of a declared standard.
+_SUBTYPE_KEY = "PDF subtype"
 # MuPDF trace operations that paint with a color space.
 COLOR_OPERATIONS = frozenset(
     {
@@ -44,12 +46,29 @@ COLOR_OPERATIONS = frozenset(
 )
 
 
+def _property_lines(output: str) -> Iterator[tuple[str, str]]:
+    """Yield the key and value of each ``key: value`` line of pdfinfo output.
+
+    A line is split at its first colon. For a file that declares PDF/A, PDF/X or PDF/E,
+    pdfinfo describes the standard in indented lines under ``PDF subtype:`` (``Title``,
+    ``Abbreviation``, ``Subtitle``, ``Standard``); those name the standard, not the
+    document, and are left out.
+    """
+    describes_subtype = False
+    for line in output.splitlines():
+        if ":" not in line:
+            describes_subtype = False
+            continue
+        if describes_subtype and line[:1].isspace():
+            continue
+        key, value = line.split(":", 1)
+        describes_subtype = key.strip() == _SUBTYPE_KEY
+        yield key.strip(), value.strip()
+
+
 def pdfinfo_fields(output: str) -> dict[str, str]:
-    """Read the ``key: value`` lines of pdfinfo output, split at each line's first colon."""
-    return {
-        key.strip(): value.strip()
-        for key, value in (line.split(":", 1) for line in output.splitlines() if ":" in line)
-    }
+    """Read the property lines of pdfinfo output, as :func:`_property_lines` yields them."""
+    return dict(_property_lines(output))
 
 
 def page_count(fields: dict[str, str], maximum: int = MAX_INSPECTION_PAGES) -> int:
@@ -85,7 +104,7 @@ def pdfinfo_properties(output: str) -> dict[str, str]:
             once, or the page count is invalid.
     """
     fields = pdfinfo_fields(output)
-    keys = [line.split(":", 1)[0].strip() for line in output.splitlines() if ":" in line]
+    keys = [key for key, _ in _property_lines(output)]
     if any(keys.count(key) != 1 for key in (*METADATA_FIELDS, "Pages", "Tagged") if key in keys):
         raise PreparationError("Ambiguous duplicate pdfinfo properties prevent reliable comparison")
     page_count(fields)

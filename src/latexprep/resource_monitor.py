@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import os
 import time
 from collections.abc import AsyncGenerator, Sequence
@@ -25,12 +26,34 @@ from .limits import MAX_WORKSPACE_ENTRIES
 from .process_control import kill_process_group, kill_unfinished, start_process
 from .process_table import ProcessSample, ProcessTable
 
+logger = logging.getLogger(__name__)
+
 # Processes one tool command may have running at once, its own group included. TeX and
 # its helpers (latexmk, bibtex or biber, makeindex, dvipdfmx) use a handful; a fork bomb
 # reaches this within a sample.
 _MAX_GROUP_PROCESSES = 32
 _PROCESS_TABLE_TIMEOUT_SECONDS = 2
 _PROCESS_LISTING_PROGRAM = "/bin/ps"
+# Job samples in a row whose process table may fail to answer in time before memory
+# accounting counts as unavailable. A busy machine delays ``ps`` now and then; three misses
+# leave the job without a memory measurement for at most about seven seconds.
+_MAX_SLOW_PROCESS_TABLES = 3
+_SLOW_PROCESS_TABLE_PROBLEM = (
+    f"the process table ({_PROCESS_LISTING_PROGRAM}) did not answer within "
+    f"{_PROCESS_TABLE_TIMEOUT_SECONDS} seconds in {_MAX_SLOW_PROCESS_TABLES} samples in a row, "
+    "so Fledge could not watch the memory of the programs it runs. This says nothing about "
+    "the paper; run Fledge again when the computer is less busy, or with fewer --jobs"
+)
+# A job whose last measured memory was above this share of a limit gets no skipped sample:
+# a machine that swaps because of the job is what makes the process table slow, and that
+# is when the memory limits matter most.
+_NEAR_MEMORY_LIMIT = 0.75
+_SLOW_NEAR_LIMIT_PROBLEM = (
+    f"the process table ({_PROCESS_LISTING_PROGRAM}) did not answer within "
+    f"{_PROCESS_TABLE_TIMEOUT_SECONDS} seconds while the job was close to a memory limit, "
+    "so Fledge could not watch the memory of the programs it runs. Run Fledge again when "
+    "the computer is less busy, or raise memory_mb or build_memory_mb"
+)
 # A workspace may hold this many times the single-file ceiling in total. The ceiling
 # bounds one runaway file; the multiple bounds many files that are each below it. A build
 # copies the sources into its workspace, so the settings keep the import total within it.
@@ -121,6 +144,8 @@ class ResourceStatistics:
         peak_command_memory_limit_mb: The largest sum of the memory limits of the active
             commands.
         samples: The number of job samples taken.
+        slow_process_tables: The number of job samples whose process table did not
+            answer in time, so that memory was not measured.
         monitor_seconds: The time spent taking job samples.
         commands: The number of commands registered.
         version_probes: The number of tool version commands run.
@@ -142,6 +167,7 @@ class ResourceStatistics:
     peak_command_memory_reservation_mb: int = 0
     peak_command_memory_limit_mb: int = 0
     samples: int = 0
+    slow_process_tables: int = 0
     monitor_seconds: float = 0.0
     commands: int = 0
     version_probes: int = 0
@@ -347,6 +373,10 @@ class ResourceMonitor:
         self.statistics = statistics
         self.active_commands: dict[int, ActiveCommand] = {}
         self.scope: JobScope | None = None
+        # Job samples in a row whose process table did not answer in time.
+        self._slow_process_tables = 0
+        # Whether the last memory measurement was close to a limit of the job or a command.
+        self._near_memory_limit = False
 
     @property
     def failure(self) -> str | None:
@@ -526,33 +556,94 @@ class ResourceMonitor:
         limit = statistics.memory_limit_mb
         if parent_kb + tool_kb > limit * 1024:
             self.fail_job(f"{_JOB_MEMORY_VIOLATION} {limit} MiB")
+        near = parent_kb + tool_kb > _NEAR_MEMORY_LIMIT * limit * 1024
         for pid, command in commands.items():
             usage = group_usage(samples, pid, command.memory_mb)
             statistics.peak_command_rss_mb = _peak(
                 statistics.peak_command_rss_mb, usage.resident_kb / 1024
             )
+            near = near or usage.resident_kb > _NEAR_MEMORY_LIMIT * command.memory_mb * 1024
             if usage.failure:
                 command.fail(usage.failure)
+        self._near_memory_limit = near
+
+    async def _job_processes(self, commands: dict[int, ActiveCommand]) -> list[ProcessSample]:
+        """List the processes for one job sample, tolerating a few slow process tables.
+
+        A process table that does not answer in time says nothing about the job: a busy
+        machine is enough. Such a sample is skipped, and memory is measured again at the
+        next one; the storage limits are checked in every sample all the same. Only after
+        ``_MAX_SLOW_PROCESS_TABLES`` slow samples in a row, after one slow sample of a job
+        whose last measurement was close to a memory limit, or after any other failure of
+        the listing, is memory accounting unavailable; once a command has been
+        registered, that fails the job, because no command may run unaccounted for long.
+
+        Args:
+            commands: The commands active when the sample started, by process id.
+
+        Returns:
+            The sampled processes, or nothing when the sample was skipped or failed.
+        """
+        statistics = self.statistics
+        try:
+            samples = await self.sample_processes()
+        except TimeoutError:
+            self._slow_process_tables += 1
+            statistics.slow_process_tables += 1
+            if self._near_memory_limit:
+                logger.info(
+                    "process table: no answer within %s s while the job was close to a memory "
+                    "limit; memory accounting is unavailable",
+                    _PROCESS_TABLE_TIMEOUT_SECONDS,
+                )
+                self._accounting_failed(commands, _SLOW_NEAR_LIMIT_PROBLEM)
+                return []
+            if self._slow_process_tables < _MAX_SLOW_PROCESS_TABLES:
+                logger.debug(
+                    "process table: no answer within %s s (%d in a row); retrying at the next "
+                    "sample",
+                    _PROCESS_TABLE_TIMEOUT_SECONDS,
+                    self._slow_process_tables,
+                )
+                return []
+            logger.info(
+                "process table: no answer within %s s in %d samples in a row; memory "
+                "accounting is unavailable",
+                _PROCESS_TABLE_TIMEOUT_SECONDS,
+                self._slow_process_tables,
+            )
+            self._accounting_failed(commands, _SLOW_PROCESS_TABLE_PROBLEM)
+            return []
+        # OSError and ValueError: the listing could not start or its output was invalid.
+        except (OSError, ValueError, PreparationError) as error:
+            self._accounting_failed(commands, str(error) or type(error).__name__)
+            return []
+        self._slow_process_tables = 0
+        return samples
+
+    def _accounting_failed(self, commands: dict[int, ActiveCommand], problem: str) -> None:
+        """Record that memory accounting is unavailable and fail a job that runs commands.
+
+        Args:
+            commands: The commands active when the sample started, by process id.
+            problem: Why the processes could not be listed.
+        """
+        self.statistics.memory_accounting = MemoryAccounting.UNAVAILABLE
+        self.statistics.memory_accounting_problem = problem
+        if commands or self.active_commands or self.statistics.commands:
+            self.fail_job(f"Job resource accounting failed: {problem}")
 
     async def sample_job(self, scope: JobScope) -> None:
         """Take one sample of the whole job; a monitor subclass may replace this.
 
         A failed process listing makes memory accounting unavailable and, once any
-        command has been registered, fails the job.
+        command has been registered, fails the job; a slow one is first retried at the
+        next samples (see :meth:`_job_processes`).
         """
         start = time.monotonic()
         try:
             commands = dict(self.active_commands)
-            try:
-                samples = await self.sample_processes()
-            # OSError includes the TimeoutError of a process table that never answered.
-            except (OSError, ValueError, PreparationError) as error:
-                problem = str(error) or type(error).__name__
-                self.statistics.memory_accounting = MemoryAccounting.UNAVAILABLE
-                self.statistics.memory_accounting_problem = problem
-                if commands or self.active_commands or self.statistics.commands:
-                    self.fail_job(f"Job resource accounting failed: {problem}")
-                samples = []
+            samples = await self._job_processes(commands)
             if samples:
                 self._account_memory(samples, commands)
             # Walking the workspaces and the job tree is blocking and grows with

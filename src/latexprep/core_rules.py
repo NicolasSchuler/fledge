@@ -72,12 +72,20 @@ RULES = (
             "Detect absent files named by supported literal source commands. A bare "
             "\\input, \\bibliography or \\includegraphics name that the project lacks, such "
             "as glyphtounicode, IEEEabrv or example-image, is first looked up in the TeX "
-            "installation; a file found there is not shipped."
+            "installation; a file found there is not shipped, and when the installation "
+            "cannot be asked (no kpsewhich on the search path) the name is an inconclusive "
+            "warning. A missing .bib is not needed when the .bbl named after the main file "
+            "is shipped beside it, as in an arXiv upload. A missing file named in a macro "
+            "definition, option code or conditional of a project class or package file is "
+            "an inconclusive warning, because that code may never run."
         ),
         tests=(
             "tests.test_source_analysis.SourceAnalysisTests.test_absolute_outside_and_missing_dependencies_are_errors",
             "tests.test_tex_installation.InstallationResolutionTests.test_a_name_the_installation_lacks_is_missing_from_both",
             "tests.test_tex_installation.InstalledBibliographyTests.test_an_installed_bibliography_is_resolved_and_not_a_project_resource",
+            "tests.test_tex_installation.UnansweredInstallationTests.test_a_name_with_a_directory_or_only_the_project_could_hold_is_still_missing",
+            "tests.test_source_resolution.ShippedBibliographyTests.test_the_bbl_of_another_main_file_does_not_stand_in",
+            "tests.test_source_resolution.PackageCodeReferenceTests.test_a_missing_figure_of_the_documents_own_files_still_fails",
         ),
         fix="Include the missing dependency or correct the literal file path.",
         mandatory=True,

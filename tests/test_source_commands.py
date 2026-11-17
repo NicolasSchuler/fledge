@@ -7,7 +7,7 @@ import unittest
 from latexprep.findings import has_blockers
 from latexprep.flat_layout import plan_flatten
 from latexprep.source_analysis import analyze_selected_sources, analyze_sources
-from tests.support import ProjectTestCase
+from tests.support import ProjectTestCase, clean_case
 
 
 class SourceCommandTests(ProjectTestCase):
@@ -238,6 +238,59 @@ class SourceCommandTests(ProjectTestCase):
         self.assertTrue(selected.complete, selected.findings)
         self.assertEqual(selected.dependencies, {"main.tex", "body.tex"})
         self.assert_usable(plan_flatten(self.root, "main.tex"))
+
+    def findings_of(self, rule: str, body: str) -> list:
+        """Write ``body`` into a document and return the source findings of ``rule``.
+
+        Args:
+            rule: The rule of the findings to return.
+            body: The text between the class declaration and the end of the file.
+
+        Returns:
+            The findings of ``rule``.
+        """
+        self.write("main.tex", "\\documentclass{article}\n" + body)
+        return [
+            item for item in analyze_sources(self.root, "main.tex").findings if item.rule == rule
+        ]
+
+    @clean_case("TEX311")
+    def test_a_group_after_an_item_is_text_not_a_file_argument(self) -> None:
+        self.assertEqual(
+            self.findings_of(
+                "source.custom_path",
+                "\\begin{document}\n\\begin{itemize}\n\\item {natbib.sty} for citations.\n"
+                "\\end{itemize}\n\\begin{thebibliography}{1}\\bibitem{ref.tex} A.\n"
+                "\\end{thebibliography}\n\\end{document}\n",
+            ),
+            [],
+        )
+
+    def test_an_unknown_command_handed_a_file_name_is_still_reported(self) -> None:
+        self.write("chapter.tex", "Chapter.\n")
+        found = self.findings_of("source.custom_path", "\\loadfile{chapter.tex}\n")
+        self.assertEqual([(item.path, item.line) for item in found], [("main.tex", 2)])
+        self.assertEqual(found[0].code, "TEX311")
+
+    def test_a_compared_csname_runs_nothing_and_a_defined_one_names_its_definition(self) -> None:
+        self.assertEqual(
+            self.findings_of(
+                "source.unsupported_command",
+                "\\expandafter\\ifx\\csname url\\endcsname\\relax\\fi\n"
+                "\\expandafter\\ifdefined\\csname href\\endcsname\\fi\n",
+            ),
+            [],
+        )
+        found = self.findings_of(
+            "source.unsupported_command",
+            "\\newcommand{\\mark}[1]{\\csname m@#1\\endcsname}\n"
+            "\\def\\other{\\catcode`\\@=11 }\n\\edef\\now{\\csname x\\endcsname}\n"
+            "\\csname cite\\endcsname{key}\n",
+        )
+        self.assertEqual(
+            [(item.line, item.details.get("definition_of")) for item in found],
+            [(2, "mark"), (3, "other"), (4, None), (5, None)],
+        )
 
 
 if __name__ == "__main__":

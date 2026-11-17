@@ -198,7 +198,8 @@ class DocumentRun:
         r"""Ask the TeX installation about missing input names and the project's own classes.
 
         Returns:
-            Its answer, or ``None`` when no name is missing or it cannot answer.
+            Its answer, an unanswered one when it cannot answer, or ``None`` when no name is
+            missing and the project has no class or package file.
         """
         if self.main is None:
             return None
@@ -213,7 +214,7 @@ class DocumentRun:
         )
         work = self.context.work / "installation-lookup"
         answer = await ask_installation([*names, *packages], work, self.context.runner)
-        if answer is None or not packages:
+        if answer is None or not answer.answered or not packages:
             return answer
         identical = await self.context.thread_operation(
             "installed package copies", identical_copies, self.imported, packages, answer.found

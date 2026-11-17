@@ -193,6 +193,8 @@ class _Scan:
     Exceeding any limit raises ``_RedactionLimitExceeded``.
 
     Attributes:
+        descriptive_keys: The mapping keys below which a key's name never makes a value a
+            secret; see :func:`redact_data`.
         nodes: The values visited.
         text_chars: The characters of text inspected.
         secret_chars: The characters of the distinct secrets collected.
@@ -201,6 +203,7 @@ class _Scan:
         ancestors: The ids of the containers being visited, so a cycle is refused.
     """
 
+    descriptive_keys: frozenset[str] = frozenset()
     nodes: int = 0
     text_chars: int = 0
     secret_chars: int = 0
@@ -255,14 +258,22 @@ class _Scan:
             self.add(match.group())
 
     def _add_private_keys(self, value: str) -> None:
-        """Record every private-key block in ``value`` and each line of its body."""
+        """Record every private-key block in ``value`` and each line of its body.
+
+        A body line without a letter or digit, such as the ``-%`` that a diff of a TeX
+        comment leaves, holds no key material and is not recorded; as a secret it would
+        remove every comment sign from the report.
+        """
         for match in _PRIVATE_BLOCK.finditer(value):
             self.add(match.group())
             # PEM body lines may also appear alone in tool output or a diff.
             for line in match.group("body").splitlines():
-                self.add(line.strip())
+                candidates = [line.strip()]
                 if line.startswith(("+", "-", " ")):
-                    self.add(line[1:].strip())
+                    candidates.append(line[1:].strip())
+                for candidate in candidates:
+                    if any(char.isalnum() for char in candidate):
+                        self.add(candidate)
 
     def _add_assigned_secrets(self, value: str) -> None:
         """Record the values assigned to a sensitive name, such as ``password = "..."``."""
@@ -303,7 +314,7 @@ class _Scan:
                 self.add(unquote_plus(match.group("value")))
 
     def collect_secrets_and_copy(
-        self, value: Any, depth: int = 0, *, sensitive: bool = False
+        self, value: Any, depth: int = 0, *, sensitive: bool = False, descriptive: bool = False
     ) -> Any:
         """Copy a JSON-shaped value while recording the secrets in its text.
 
@@ -314,6 +325,8 @@ class _Scan:
             value: The value to copy.
             depth: The nesting depth of ``value``.
             sensitive: Whether ``value`` lies below a sensitive key.
+            descriptive: Whether ``value`` lies below one of ``descriptive_keys``, where
+                a key's name never makes a value a secret.
 
         Returns:
             The copy.
@@ -337,27 +350,52 @@ class _Scan:
         self.ancestors.add(identity)
         try:
             if isinstance(value, dict):
-                copied = {}
-                for key, item in value.items():
-                    if isinstance(key, str):
-                        self.inspect(key)
-                        child_sensitive = sensitive or _sensitive_key(key)
-                    elif key is None or type(key) in {bool, int, float}:
-                        child_sensitive = sensitive
-                    else:
-                        key = "[REDACTED: unsupported key]"
-                        child_sensitive = True
-                    copied[key] = self.collect_secrets_and_copy(
-                        item, depth + 1, sensitive=child_sensitive
-                    )
-                return copied
+                return self._copy_mapping(
+                    value, depth, sensitive=sensitive, descriptive=descriptive
+                )
             items = [
-                self.collect_secrets_and_copy(item, depth + 1, sensitive=sensitive)
+                self.collect_secrets_and_copy(
+                    item, depth + 1, sensitive=sensitive, descriptive=descriptive
+                )
                 for item in value
             ]
             return tuple(items) if isinstance(value, tuple) else items
         finally:
             self.ancestors.remove(identity)
+
+    def _copy_mapping(
+        self, value: dict[Any, Any], depth: int, *, sensitive: bool, descriptive: bool
+    ) -> dict[Any, Any]:
+        """Copy a dictionary for :meth:`collect_secrets_and_copy`, inspecting its keys.
+
+        A key names a secret by its name only outside a descriptive record, and an
+        unsupported key makes its value a secret.
+
+        Args:
+            value: The dictionary to copy.
+            depth: The nesting depth of ``value``.
+            sensitive: Whether ``value`` lies below a sensitive key.
+            descriptive: Whether ``value`` lies below one of ``descriptive_keys``.
+
+        Returns:
+            The copy.
+        """
+        copied = {}
+        for key, item in value.items():
+            child_descriptive = descriptive
+            if isinstance(key, str):
+                self.inspect(key)
+                child_sensitive = sensitive or (not descriptive and _sensitive_key(key))
+                child_descriptive = descriptive or key in self.descriptive_keys
+            elif key is None or type(key) in {bool, int, float}:
+                child_sensitive = sensitive
+            else:
+                key = "[REDACTED: unsupported key]"
+                child_sensitive = True
+            copied[key] = self.collect_secrets_and_copy(
+                item, depth + 1, sensitive=child_sensitive, descriptive=child_descriptive
+            )
+        return copied
 
 
 def _replacement_patterns(
@@ -440,15 +478,32 @@ class _Replacer:
         return item
 
 
-def redact_data(value: Any) -> Any:
+def redact_data(value: Any, *, descriptive_keys: Collection[str] = ()) -> Any:
     """Return a sanitized copy, or one fixed marker if complete scanning is unsafe.
 
     Strings with encoded credentials are decoded for replacement; other strings
     retain their original spelling. If any depth/size/work bound is exceeded, the
     entire value is withheld so credentials hidden beyond the bound cannot leak via
     an earlier field. Callers must never fall back to the unsanitized input.
+
+    A mapping key whose name ends like a credential's (``password``, ``api_key``,
+    ``tokens``) makes every string below it a secret, which is then replaced wherever
+    it occurs. Below one of ``descriptive_keys`` that rule does not apply: such a record
+    describes what a check observed, so its keys name the observation, as ``tokens``
+    names the words of a title, and its values are ordinary words that must not vanish
+    from the rest of the report. Its text, keys included, is still searched for
+    credentials by their shape, by assignments such as ``password=...``, in URLs and
+    in private-key blocks.
+
+    Args:
+        value: The JSON-shaped value.
+        descriptive_keys: The mapping keys, at any depth, whose values are descriptive
+            records.
+
+    Returns:
+        The sanitized copy, or ``LIMIT_REDACTION``.
     """
-    scan = _Scan()
+    scan = _Scan(descriptive_keys=frozenset(descriptive_keys))
     try:
         copied = scan.collect_secrets_and_copy(value)
         if scan.text_chars * max(1, len(scan.secrets)) > MAX_REPLACEMENT_WORK:

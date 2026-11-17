@@ -138,6 +138,140 @@ The version is defined once, as `__version__` in `src/latexprep/__init__.py`.
   their own captions and labels, and a reference to one counts as a reference to its
   figure. A label inside an equation or a list is not the float's label, and a
   reference inside `\textbf{…}` or a caption counts.
+- **An unknown command or a gap elsewhere no longer leaves the figure and table checks
+  undecided (`MAN011`–`MAN015`).** `\rho`, `\fbox`, a project macro, `\csname` in a
+  definition or a group after `\input` made the five checks inconclusive for every
+  float, which blocked most real papers under the review presets. A caption, label or
+  reference that was read now stands, and a float without one is inconclusive only when
+  something inside it, or text that was not read, could supply it. The report names the
+  float and what it lacks, and a failure says how many floats could not be judged. What
+  still counts is what may take the evidence away: a macro of the paper that may hold a
+  label, however it is defined (`\newrobustcmd`, `\NewCommandCopy`, `\@namedef`,
+  `\csdef`, a name built with `\csname`), and a caption or label inside `lrbox` or an
+  environment of the paper that may not typeset it. A label that is not literal or
+  stands in a macro's argument is a label that was not read, so `MAN012` and `MAN014`
+  are inconclusive for its float instead of failed.
+- **Labels inside their caption and floats in minipages are placed correctly
+  (`MAN013`).** `\caption{…\label{x}}` and REVTeX's `\caption{\label{x}…}` were reported
+  as labels before their caption, and two minipages, each with a caption and a label,
+  left the check inconclusive.
+- **References that the checks did not read no longer fail a float (`MAN014`,
+  `MAN015`).** A project macro such as `\newcommand\Fig[1]{Figure~\ref{fig:#1}}` is read
+  at each use, a `\ref` inside a macro that typesets its argument counts, and so does a
+  reference from another float's caption. `\crefrange{a}{c}` and `\ref{a}--\ref{c}`
+  cover the floats between their ends. Any other unread reference makes the two checks
+  inconclusive instead of failed, and so does a use of a reference command that the
+  paper defines anew without a reference in it (`\renewcommand\ref[1]{}`). `MAN015`
+  names the float cited late instead of every float after it, leaves floats that
+  `MAN014` reports as unreferenced out of the comparison, and follows the citations in
+  running text: a reference in another float's caption is printed where LaTeX places
+  that float, so it cites nothing early.
+- **The float macro and the references of the JMLR class are read (`MAN011`–`MAN015`,
+  `TEX004`).** PMLR papers write `\floatconts{label}{\caption{…}}{content}` and refer
+  with `\figureref` and `\tableref`, which left every float check inconclusive.
+  floatrow's `\ffigbox`, `\ttabbox` and `\floatbox` are read as well.
+- **One unreadable construct no longer makes unrelated checks inconclusive.** `\csname`,
+  `\catcode` or `\scantokens` inside a macro definition, or in bibliography boilerplate
+  such as `\expandafter\ifx\csname url\endcsname\relax`, made the class-option, package,
+  float and author checks inconclusive across the whole project. A construct now counts
+  only where it can run: before `\documentclass` for the class options (`TEX102`),
+  before `\begin{document}` for packages (`TEX103`). One inside a definition counts
+  where the macro is used. `\PassOptionsToClass` after `\documentclass`, and anything
+  after `\end{document}`, change nothing. A `\begin{document}` inside a conditional does
+  not end the preamble: what follows it, up to the opener that runs, may still load a
+  package.
+- **`\item {natbib.sty}` is text, not a file reference.** It gave a `TEX311` warning and
+  twenty inconclusive results under `--preset camera-ready`.
+- **`\input{sec}` followed by a group, and `\resizebox{…}{!}{\input{x}}`, are read.**
+  The CVPR author kit's layout made the float and author checks inconclusive. A group
+  after an `\input` is text, and an `\input` in an argument that is typeset in place is
+  read where it stands.
+- **A trailing comma in the class options is accepted (`TEX102`),** as LaTeX accepts
+  `\documentclass[11pt,a4paper,]{article}`. The check was inconclusive.
+- **A grouped or conditional `\endinput` in a bundled package leaves only the
+  declarations after it unclear,** as in natbib's guard against AGU classes and in the
+  line-number package of Astronomy & Astrophysics, instead of the class-option and
+  package checks of the whole project. A bundled package that is not UTF-8 no longer
+  leaves the class options undecided.
+- **A class that names `\url` without using it is read (`TEX102`, `TEX103`).**
+  `\newcommand{\marker}{\and \url}` in `lipics-v2021.cls`, and `\def\url#1{…}` or
+  `\providecommand{\url}[1]{…}` elsewhere, were read as a `\url` whose argument starts
+  at the next character, which swallowed a brace and blocked every LIPIcs paper under
+  each preset.
+- **Reasons no longer start with "None:"** when a finding names no file.
+- **A title or author written out as text is present whatever stands beside it
+  (`MAN008`, `MAN009`).** `\qquad`, `\mdseries`, `\texorpdfstring`, `\corref`,
+  `\orcidlink`, a project word such as `\confName`, or a project macro that prints its
+  argument left the required-metadata and ORCID checks inconclusive, and so did any
+  part of the project that was not read. Text that was found now stands; a gap counts
+  only while a required field is still missing. A project macro that may drop its
+  argument, an author given only as a macro or an ORCID, and an author inside a
+  conditional still leave the check open; so does a name that a command may select
+  away, as in `\iftoggle{blind}{Anonymous Author(s)}{#1}`, and for the ORCID check a
+  file that was not read. ICML's `\icmltitle` and `\icmlauthor` and
+  asmeconf's `\SetAuthors` declare the fields, an identifier given as a macro parameter
+  (`\orcidlink{#1}` in a definition) is a gap instead of an invalid ORCID, and
+  `\\[4pt]` is a line break, not unbalanced display math.
+- **An upload that ships the built bibliography instead of the `.bib` file is no longer
+  blocked (`TEX005`).** `\bibliography{refs}` without `refs.bib` was an error even when
+  `main.bbl`, which the build reads instead, sat beside the main file, as in many arXiv
+  uploads. The missing database is now a passed note naming that `.bbl`, and the
+  bibliography checks that read entries say that they did not inspect it. A `.bbl` of
+  another name or folder does not count, and neither does one without entries or one in
+  BibTeX's format beside a biblatex resource.
+- **A missing file in unused code of a bundled class no longer blocks (`TEX005`).** A
+  project copy of a class such as acmart names files in macros and options that only
+  some formats run (`\includegraphics{acm-jdslogo}`). A missing file inside a macro
+  definition, option code or conditional of a project class or package file is now an
+  inconclusive warning; one the class always runs, and any in the document's own files,
+  is still an error.
+- **`fledge inspect` without TeX no longer reports files of the TeX installation as
+  missing (`TEX005`).** Without `kpsewhich` on the search path,
+  `\includegraphics{example-image-a}` and similar bare names were an error with exit 3,
+  although the same check passed with TeX. Such names are now an inconclusive warning
+  saying that the TeX installation could not be asked; names with a folder, and
+  `\include` chapters, are still errors.
+- **A file that the main file reads is not a second main file (`TEX324`).** A
+  `body.tex` that holds `\begin{document}`, or a header file that holds
+  `\documentclass`, stopped every command with exit 4 when the main file read it with
+  `\input` or `\include`. An inclusion that may not run, inside a conditional or a
+  definition, does not make a second document part of the paper.
+- **A main file that is not valid UTF-8 is still found.** One Latin-1 byte gave "no file
+  with `\documentclass` was found" and exit 4. The file is now selected, its encoding is
+  reported as `TEX301`, and the checks that read its text are incomplete.
+- **Inline images no longer stop the PDF image inventory.** `pdfimages` lists them
+  without an object number, and such a row ended `check` and `prepare` with exit 4, for
+  example on Elsevier's CAS template.
+- **PDF measurements get memory in proportion to the PDF.** The tools may use 64 MiB
+  plus 2 MiB per MiB of the PDF, at most `build_memory_mb`, so `pdfimages` no longer
+  runs out of memory on a large PDF full of JPEG 2000 figures (exit 4).
+- **Reports no longer replace ordinary words with `[REDACTED]`.** The keys of a
+  finding's details name what a check observed, so they no longer mark a value as a
+  secret: under `--preset camera-ready`, `BIB107` lists title words under `tokens`, and
+  each of those words vanished from the whole report. The details are still searched
+  for credentials, and a private-key block in a diff of TeX comments no longer removes
+  every `%` sign.
+- **A process table that answers slowly no longer stops a run.** A sample whose `ps`
+  takes over two seconds is skipped while the disk limits still apply. Only three such
+  samples in a row, or one while the job is close to a memory limit, end the run, as
+  "could not check" with a message that this says nothing about the paper. The JSON
+  report counts them as `slow_process_tables`.
+- **A PDF that declares PDF/X, PDF/A or PDF/E is inspected.** `pdfinfo` describes the
+  declared standard in indented lines, one of them named `Title`, which Fledge read as a
+  second document title and ended `check` and `prepare` with exit 4.
+- **A build stopped by a package that needs another engine says which engine.** bidi,
+  xepersian and xeCJK (XeLaTeX), luatexja and luacode (LuaLaTeX) and ctex without a
+  font set gave only "Fix the reported TeX error"; `BLD009` now names the engine and
+  how to choose it, as it did for fontspec.
+- **`fledge submission-text` reads more venue papers.** The abstract and keywords of a
+  paper whose venue `.sty` defines those environments are ready, keywords print as
+  "one; two", and font switches such as `\upshape`, `\scshape`, `\ttfamily`, `\small`
+  and `\bf` are dropped, so `{\upshape\LaTeX}` reads "LaTeX".
+- **`PRV005` no longer reports TODO notes in the comments of class, package and style
+  files,** such as `icml2026.sty` or `cvpr.sty`.
+- **`PDF206`'s advice names `\hypersetup{pdftitle={...}, pdfauthor={...}}`.**
+- **The `arxiv` preset's description no longer claims that it ships a `.bbl`.** It
+  ships the `.bib` files for arXiv's own BibTeX run.
 
 ### Changed
 

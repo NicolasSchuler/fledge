@@ -19,7 +19,13 @@ from typing import ClassVar, NamedTuple
 from .analysed_source import AnalysedSource, reuse_or_analyse
 from .cancellation import cancellation_point
 from .errors import SettingsError
-from .expanded_document import CONTENT_INPUT_COMMANDS, reachable_sources
+from .expanded_document import (
+    CONTENT_INPUT_COMMANDS,
+    EVERY_PART,
+    DocumentPart,
+    ExpandedDocument,
+    reachable_sources,
+)
 from .finding_text import check_status, list_locations, more_suffix, plural
 from .finding_weight import POLICY
 from .findings import Finding, Status
@@ -28,6 +34,7 @@ from .manuscript_scan import (
     COUNT_METHOD,
     KEYWORD_COUNT_METHOD,
     AbstractCount,
+    GraphGap,
     KeywordCount,
     LiteralHeading,
     ManuscriptScan,
@@ -42,7 +49,11 @@ from .option_config import (
     require_unique_strings,
     validate_scalars,
 )
-from .source_graph import SourceGraph
+
+# The class and its options are fixed by the \documentclass declaration and what runs
+# before it; packages can be loaded only up to \begin{document}.
+_CLASS_PARTS = frozenset({DocumentPart.PROLOGUE})
+_PACKAGE_PARTS = frozenset({DocumentPart.PROLOGUE, DocumentPart.PREAMBLE})
 
 
 @dataclass(frozen=True)
@@ -200,7 +211,7 @@ class _Evidence:
 
     Attributes:
         main: The main file, which a finding names when no single item is located.
-        graph_reasons: The sorted, distinct reasons the graph as a whole is unclear.
+        graph_gaps: Why the graph as a whole is unclear, with where each construct may run.
         classes: The document class declarations.
         packages: The direct package declarations.
         abstracts: The word count of each abstract.
@@ -211,7 +222,7 @@ class _Evidence:
     """
 
     main: str
-    graph_reasons: list[str]
+    graph_gaps: list[GraphGap]
     classes: list[Declaration]
     packages: list[Declaration]
     abstracts: list[AbstractCount]
@@ -220,11 +231,22 @@ class _Evidence:
     sources: set[str]
     content_sources: set[str]
 
+    def graph_reasons(self, parts: frozenset[DocumentPart] = EVERY_PART) -> list[str]:
+        """Return the sorted, distinct reasons of the graph gaps that may run in ``parts``.
+
+        Args:
+            parts: The parts of the document that a constraint reads.
+
+        Returns:
+            The reasons.
+        """
+        return sorted({gap.reason for gap in self.graph_gaps if gap.parts & parts})
+
     @property
     def class_uncertain(self) -> bool:
-        """Whether the class is unclear: graph gaps, not one declaration, or an unclear one."""
+        """Whether the class is unclear: gaps before it, not one declaration, or an unclear one."""
         return bool(
-            self.graph_reasons
+            self.graph_reasons(_CLASS_PARTS)
             or len(self.classes) != 1
             or any(item["uncertainty"] for item in self.classes)
         )
@@ -233,7 +255,7 @@ class _Evidence:
     def abstract_uncertain(self) -> bool:
         """Whether the abstract is unclear: graph gaps, several abstracts, or an unclear one."""
         return bool(
-            self.graph_reasons
+            self.graph_reasons()
             or len(self.abstracts) > 1
             or any(item.uncertainty for item in self.abstracts)
         )
@@ -242,23 +264,26 @@ class _Evidence:
         self,
         item_gaps: Iterable[Sequence[str]],
         item_reasons: Iterable[Sequence[str]] | None = None,
+        parts: frozenset[DocumentPart] = EVERY_PART,
     ) -> _Gaps:
-        """Combine the graph's reasons and each item's, in order.
+        """Combine the graph's reasons for ``parts`` and each item's, in order.
 
         Args:
             item_gaps: Each item's interpretation gaps; they alone, with the graph's
                 reasons, make the evidence incomplete.
             item_reasons: What the message may quote, which can add reasons that only
                 explain an inconclusive result; it defaults to ``item_gaps``.
+            parts: The parts of the document that the constraint reads.
 
         Returns:
             The quotable reasons, and whether the evidence is incomplete.
         """
+        graph = self.graph_reasons(parts)
         gap_groups = [list(group) for group in item_gaps]
         quoted = gap_groups if item_reasons is None else [list(group) for group in item_reasons]
         return _Gaps(
-            [*self.graph_reasons, *(reason for group in quoted for reason in group)],
-            bool([*self.graph_reasons, *(reason for group in gap_groups for reason in group)]),
+            [*graph, *(reason for group in quoted for reason in group)],
+            bool([*graph, *(reason for group in gap_groups for reason in group)]),
         )
 
     def finding(
@@ -335,7 +360,7 @@ def _inventory_finding(evidence: _Evidence) -> Finding:
             "abstracts": [item.as_dict() for item in evidence.abstracts],
             "keywords": [item.as_dict() for item in evidence.keywords],
             "headings": [item.as_dict() for item in evidence.headings],
-            "uncertainty": evidence.graph_reasons,
+            "uncertainty": evidence.graph_reasons(),
             "word_count_method": COUNT_METHOD,
             "scope": "Literal source declarations only; no TeX execution "
             "or toolchain package inventory.",
@@ -365,9 +390,13 @@ def _document_class_finding(evidence: _Evidence, expected: str) -> Finding:
             f"Declared document class: {', '.join(actual) if actual else 'unavailable'}; "
             f"expected: {expected}.",
             status,
-            {"expected": expected, "declarations": classes, "uncertainty": evidence.graph_reasons},
+            {
+                "expected": expected,
+                "declarations": classes,
+                "uncertainty": evidence.graph_reasons(_CLASS_PARTS),
+            },
         ),
-        evidence.gaps(_uncertainty(classes)),
+        evidence.gaps(_uncertainty(classes), parts=_CLASS_PARTS),
         _where(classes),
     )
 
@@ -403,10 +432,10 @@ def _class_options_finding(evidence: _Evidence, options: ManuscriptOptions) -> F
                 "missing": missing,
                 "present_forbidden": forbidden,
                 "declarations": classes,
-                "uncertainty": evidence.graph_reasons,
+                "uncertainty": evidence.graph_reasons(_CLASS_PARTS),
             },
         ),
-        evidence.gaps(_uncertainty(classes)),
+        evidence.gaps(_uncertainty(classes), parts=_CLASS_PARTS),
         _where(classes),
     )
 
@@ -439,7 +468,7 @@ def _forbidden_packages_finding(evidence: _Evidence, forbidden: tuple[str, ...])
         if item["uncertainty"]
         and (not isinstance(item["names"], list) or set(item["names"]) & set(forbidden))
     ]
-    uncertain = bool(evidence.graph_reasons or unclear)
+    uncertain = bool(evidence.graph_reasons(_PACKAGE_PARTS) or unclear)
     found = [name for item in matches for name in item["names"] or [] if name in forbidden]
     return evidence.finding(
         "manuscript.forbidden_packages",
@@ -452,11 +481,11 @@ def _forbidden_packages_finding(evidence: _Evidence, forbidden: tuple[str, ...])
                 "forbidden": list(forbidden),
                 "matches": matches,
                 "declarations": packages,
-                "uncertainty": evidence.graph_reasons,
+                "uncertainty": evidence.graph_reasons(_PACKAGE_PARTS),
                 "scope": "Does not establish the transitive packages loaded by TeX.",
             },
         ),
-        evidence.gaps(_uncertainty(unclear)),
+        evidence.gaps(_uncertainty(unclear), parts=_PACKAGE_PARTS),
         _where(matches),
     )
 
@@ -496,7 +525,7 @@ def _abstract_required_finding(evidence: _Evidence) -> Finding:
             status,
             {
                 "abstracts": [item.as_dict() for item in abstracts],
-                "uncertainty": evidence.graph_reasons,
+                "uncertainty": evidence.graph_reasons(),
             },
         ),
         _abstract_gaps(evidence),
@@ -557,7 +586,7 @@ def _abstract_words_finding(
                 "word_count_range": list(bounds) if bounds is not None else None,
                 "abstracts": [item.as_dict() for item in abstracts],
                 "counting_method": COUNT_METHOD,
-                "uncertainty": evidence.graph_reasons,
+                "uncertainty": evidence.graph_reasons(),
             },
         ),
         _abstract_gaps(evidence),
@@ -584,7 +613,7 @@ def _keyword_count_finding(
     keywords = evidence.keywords
     count = keywords[0].count if len(keywords) == 1 else 0
     uncertain = bool(
-        evidence.graph_reasons or len(keywords) > 1 or any(item.uncertainty for item in keywords)
+        evidence.graph_reasons() or len(keywords) > 1 or any(item.uncertainty for item in keywords)
     )
     if uncertain:
         status: Status = "inconclusive"
@@ -603,7 +632,7 @@ def _keyword_count_finding(
                 "count": count,
                 "keywords": [item.as_dict() for item in keywords],
                 "counting_method": KEYWORD_COUNT_METHOD,
-                "uncertainty": evidence.graph_reasons,
+                "uncertainty": evidence.graph_reasons(),
             },
         ),
         evidence.gaps(item.uncertainty for item in keywords),
@@ -627,7 +656,7 @@ def _required_sections_finding(evidence: _Evidence, required: tuple[str, ...]) -
     # A heading with an unresolved title could carry any required name, so no
     # absence claim survives it. A resolved but conditional heading only
     # prevents a claim about its own name.
-    opaque = bool(evidence.graph_reasons) or any(not item.title_resolved for item in headings)
+    opaque = bool(evidence.graph_reasons()) or any(not item.title_resolved for item in headings)
     unresolved_names = {
         normalize_heading(item.heading)
         for item in headings
@@ -644,7 +673,7 @@ def _required_sections_finding(evidence: _Evidence, required: tuple[str, ...]) -
         else:
             missing.append(heading)
     uncertain = bool(
-        unconfirmed or evidence.graph_reasons or any(item.uncertainty for item in headings)
+        unconfirmed or evidence.graph_reasons() or any(item.uncertainty for item in headings)
     )
     if missing:
         message = f"Missing required literal headings: {', '.join(missing)}"
@@ -668,34 +697,36 @@ def _required_sections_finding(evidence: _Evidence, required: tuple[str, ...]) -
                 "headings": [item.as_dict() for item in headings],
                 "matching": "Case-insensitive, collapsed whitespace, "
                 "common literal formatting wrappers removed.",
-                "uncertainty": evidence.graph_reasons,
+                "uncertainty": evidence.graph_reasons(),
             },
         ),
         evidence.gaps(item.uncertainty for item in headings),
     )
 
 
-def _collect_evidence(main: str, graph: SourceGraph) -> _Evidence:
+def _collect_evidence(main: str, document: ExpandedDocument) -> _Evidence:
     """Scan the sources the main file reaches for the declarations the constraints need.
 
     Args:
         main: The main file.
-        graph: The source graph of the main file.
+        document: The expanded document of the main file's source graph, which places each
+            gap in the parts of the document where it may run.
 
     Returns:
         The collected evidence.
     """
+    graph = document.graph
     selected = reachable_sources(graph)
     # Content follows input/include/import edges. Definitions inside class/style files are
     # package evidence, not manuscript abstracts, keywords, or section headings.
     content = reachable_sources(graph, CONTENT_INPUT_COMMANDS)
-    scan = ManuscriptScan(graph_reasons(graph, selected, content))
+    scan = ManuscriptScan(graph_reasons(document, selected, content), document)
     for name in sorted(selected):
         cancellation_point()
         scan.read(name, graph.sources[name], content=name in content)
     return _Evidence(
         main=main,
-        graph_reasons=sorted(set(scan.graph_reasons)),
+        graph_gaps=scan.graph_reasons,
         classes=scan.classes,
         packages=scan.packages,
         abstracts=[abstract_count(block) for block in scan.abstracts],
@@ -724,7 +755,7 @@ def check_manuscript(
     """
     if options == ManuscriptOptions():
         return []
-    evidence = _collect_evidence(main, reuse_or_analyse(root, main, analysed).graph)
+    evidence = _collect_evidence(main, reuse_or_analyse(root, main, analysed).expanded)
     findings = [_inventory_finding(evidence)]
     if options.expected_document_class is not None:
         findings.append(_document_class_finding(evidence, options.expected_document_class))

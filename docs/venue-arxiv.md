@@ -63,7 +63,10 @@ check_bbl_coverage = true                # BIB109: the .bbl contains every cited
 ```
 
 `prepare` then ships the `.bbl` its verified build generated, and a missing one is
-a warning (`TEX009`). A biblatex `.bbl` must have the format version that the
+a warning (`TEX009`). A project that already holds only the `.bbl` named after the
+main file, without the `.bib` files, is fine as it is: the build reads that `.bbl`, so
+the missing database is not a missing file (`TEX005`), and the bibliography checks
+that read entries say that they could not. A biblatex `.bbl` must have the format version that the
 biblatex of arXiv's TeX Live release reads; the second line of a `.bbl` built
 with that release shows it.
 

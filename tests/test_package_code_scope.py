@@ -176,10 +176,14 @@ class PackageCodeLimitTests(ProjectTestCase):
         )
         self.write("part.tex", "\\section{Part}\\cite{key}\n")
         self.assertTrue(expand_document(self.root, "main.tex").graph_uncertainty)
-        options = ManuscriptOptions(forbidden_packages=("showframe",))
+        options = ManuscriptOptions(required_sections=("Part",))
         results = {item.rule: item for item in check_manuscript(self.root, "main.tex", options)}
-        self.assertEqual(results["manuscript.forbidden_packages"].status, "inconclusive")
+        self.assertEqual(results["manuscript.required_sections"].status, "inconclusive")
         self.assertTrue(any(gap.startswith("part.tex") for gap in self.citation_gaps()))
+        # A subfile in the body cannot load a package, so the package check is decided.
+        packages = ManuscriptOptions(forbidden_packages=("showframe",))
+        results = {item.rule: item for item in check_manuscript(self.root, "main.tex", packages)}
+        self.assertEqual(results["manuscript.forbidden_packages"].status, "passed")
 
     def test_an_unreadable_input_or_class_file_is_a_citation_gap(self) -> None:
         for main, name, data in (

@@ -89,8 +89,10 @@ async def ask_installation(
         runner: The runner of ``kpsewhich``.
 
     Returns:
-        The names asked about and those found, or ``None`` when there is nothing to ask or
-        the installation cannot answer; the names are then reported missing as before.
+        The names asked about and those found; an unanswered ``InstalledInputs`` when the
+        installation cannot answer, as without ``kpsewhich`` on the search path, so that
+        a bare name it may hold is not reported missing; ``None`` when there is nothing to
+        ask.
     """
     asked = list(names[:MAX_INSTALLATION_NAMES])
     if len(names) > len(asked):
@@ -105,11 +107,12 @@ async def ask_installation(
         found = await installed_files(asked, work, runner)
     except (PreparationError, OSError) as error:
         logger.warning(
-            "TeX installation lookup for %d input names failed, so they are reported missing: %s",
+            "TeX installation lookup for %d input names failed, so the bare names it may hold "
+            "are reported as not checked: %s",
             len(asked),
             error,
         )
-        return None
+        return InstalledInputs(frozenset(), {}, answered=False)
     logger.debug("TeX installation holds %d of %d input names", len(found), len(asked))
     return InstalledInputs(frozenset(asked), found)
 

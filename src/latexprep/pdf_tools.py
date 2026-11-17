@@ -28,7 +28,7 @@ from .cancellation import bounded_map, run_in_thread
 from .command_runner import CommandResult, CommandRunner, ToolVersion
 from .errors import PreparationError
 from .findings import Finding
-from .limits import DEFAULT_LEASE_MEMORY_MB
+from .limits import DEFAULT_LEASE_MEMORY_MB, MIB
 from .measurement_findings import (
     EVIDENCE_LIMITATION_SUGGESTION,
     findings_or_unavailable,
@@ -42,6 +42,8 @@ _T = TypeVar("_T")
 logger = logging.getLogger(__name__)
 
 MEASUREMENT_RENDER_MEMORY_MB = 128
+# MiB a measurement may use per MiB of its PDF; see PdfToolSession.measurement_memory_mb.
+_MEASUREMENT_MEMORY_PER_INPUT_MIB = 2
 # Every external tool the PDF adapters can run; qpdf alone reports its version with --version.
 PDF_TOOLS = frozenset(
     {
@@ -535,6 +537,25 @@ class PdfToolSession:
         async with self.lease(f"PDF {name}"):
             return await self.run_without_lease(name, argv)
 
+    def measurement_memory_mb(self, argv: Sequence[str]) -> int:
+        """Return the memory a measurement of ``argv`` may use and reserves, in MiB.
+
+        ``pdfimages -list`` opens every image: on a 37 MiB paper of JPEG 2000 figures it
+        used 96 to 112 MiB. So ``DEFAULT_LEASE_MEMORY_MB`` grows by 2 MiB per MiB of the
+        largest PDF ``argv`` reads, up to ``build_memory_mb`` and what the budget grants:
+        the session's, else the caller's lease, else the runner's. Cap and lease are equal.
+        """
+        size = max(
+            (path.stat().st_size for key, path in self.inputs.items() if pdf_input(key) in argv),
+            default=0,
+        )
+        wanted = DEFAULT_LEASE_MEMORY_MB + size * _MEASUREMENT_MEMORY_PER_INPUT_MIB // MIB
+        ceilings = [self.runner.limits.max_memory_mb]
+        if (budget := self.budget or self.runner.budget) is not None:
+            held = budget.current_lease if self.budget is None else None
+            ceilings.append(held.memory_mb if held is not None else budget.available_memory_mb)
+        return min(wanted, *ceilings)
+
     async def measure(
         self,
         name: str,
@@ -572,11 +593,20 @@ class PdfToolSession:
         """
         key = tuple(argv)
         memo = self.memo
-        async with memo.locks.setdefault(key, asyncio.Lock()), self.lease(name):
+        memory_mb = self.measurement_memory_mb(argv)
+        async with (
+            memo.locks.setdefault(key, asyncio.Lock()),
+            self.lease(name, memory_mb=memory_mb),
+        ):
             measured = memo.results.get(key)
             if measured is None:
-                logger.debug("PDF measurement %s: not remembered, running %s", name, key[0])
-                result = await self.run_without_lease(name, argv, memory_mb=DEFAULT_LEASE_MEMORY_MB)
+                logger.debug(
+                    "PDF measurement %s: not remembered, running %s in %d MiB",
+                    name,
+                    key[0],
+                    memory_mb,
+                )
+                result = await self.run_without_lease(name, argv, memory_mb=memory_mb)
                 self._require_bounded_output(result)
                 measured = memo.results[key] = _Measured(result, self.versions[key[0]])
             else:

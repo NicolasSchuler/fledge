@@ -124,6 +124,14 @@ class PresetContentTests(unittest.TestCase):
             self.assertIn('# required_color_space = ""', section)
         self.assertIn("venue_runs_index_tools = false", preset_text("arxiv"))
 
+    def test_the_arxiv_description_says_what_the_preset_ships(self):
+        # arXiv runs BibTeX or Biber itself, so the preset ships the .bib files and no .bbl.
+        self.assertTrue(
+            preset_values("arxiv")["submission_checks"]["venue_runs_bibliography_tools"]
+        )
+        self.assertNotIn(".bbl", PRESETS["arxiv"])
+        self.assertIn(".bib", PRESETS["arxiv"])
+
     def test_unknown_preset_error_lists_valid_names(self):
         with self.assertRaisesRegex(PreparationError, "anonymous-review, arxiv, camera-ready"):
             load_settings(None, {}, preset="neurips")

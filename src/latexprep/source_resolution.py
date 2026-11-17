@@ -13,8 +13,14 @@ A bare ``\input{name}``, ``\bibliography{name}`` or ``\includegraphics{name}`` t
 project lacks may name a file of the TeX installation, such as ``glyphtounicode.tex``,
 IEEE's ``IEEEabrv.bib`` or the sample figure ``example-image-a.pdf``. The job
 asks the installation once about such names (``tex_installation``) and makes the answer
-current with :func:`installed_inputs_known`; without an answer the name is reported
-missing, as before.
+current with :func:`installed_inputs_known`. When the installation could not be asked,
+such a name is reported as not checked rather than missing; without a question, as
+outside a job, it is reported missing.
+
+A missing file is a confirmed missing dependency only where the build needs it. A
+bibliography database is not needed when the ``.bbl`` the build reads is shipped beside
+the main file, and a reference in a macro definition or conditional of a class or package
+file runs only if that code runs, which the scan cannot decide.
 """
 
 from __future__ import annotations
@@ -29,10 +35,12 @@ from pathlib import Path, PurePosixPath
 from typing import NamedTuple
 
 from .cancellation import cancellation_point
+from .file_safety import read_file_prefix
 from .findings import EvidenceKind, Finding
 from .path_safety import lexically_escapes
 from .project_files import is_parsed_source, path_comparison_key, project_files
 from .source_file_commands import (
+    BIBLIOGRAPHY_RESOURCE_COMMANDS,
     COMMA_LIST_FILE_COMMANDS,
     DEFAULT_SUFFIXES_BY_FILE_COMMAND,
     GRAPHICS_SUFFIXES,
@@ -65,11 +73,15 @@ class InstalledInputs:
             installation's copy of the same name, by project path. TeX reads the same
             text from either, so they are analysed as the installation's files are: not
             as project source.
+        answered: Whether the installation answered. ``False`` when it could not be asked,
+            as without ``kpsewhich`` on the search path; ``asked`` and ``found`` are then
+            empty, and a bare name the installation may hold is neither found nor missing.
     """
 
     asked: frozenset[str]
     found: Mapping[str, str]
     identical: frozenset[str] = frozenset()
+    answered: bool = True
 
 
 _installed_inputs: ContextVar[InstalledInputs | None] = ContextVar(
@@ -242,11 +254,15 @@ class Reference:
         value: The file name as the command writes it.
         path: The project file the command appears in.
         command: The command that names the file.
+        deferred: Whether the command sits in a class or package file inside a macro
+            definition or a conditional, where it runs only if the macro is used or the
+            condition holds.
     """
 
     value: str
     path: str
     command: Command
+    deferred: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -277,11 +293,14 @@ class ProjectTree:
         cwd: The compilation directory, relative to the project root.
         on_link: Called with the name of every linked file the lookup passes over, so the
             graph can report that it was skipped.
+        bibliography_output: The ``.bbl`` the build reads for a bibliography: the main
+            file's name with ``.bbl``, beside it. ``None`` when no main file is selected.
     """
 
     files: Mapping[str, Path]
     cwd: str
     on_link: Callable[[str], object]
+    bibliography_output: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -291,10 +310,13 @@ class Resolution:
     Attributes:
         target: The project file found, if any.
         system: The reference left to the toolchain, if any.
+        shipped_bbl: The shipped ``.bbl`` the build reads in place of a bibliography
+            database the project lacks, if any.
     """
 
     target: str | None = None
     system: SystemReference | None = None
+    shipped_bbl: str | None = None
 
 
 def project_path(
@@ -480,15 +502,10 @@ def _report_ambiguity(reference: Reference, found: list[str], findings: GraphFin
     )
 
 
-def _report_missing(
-    reference: Reference,
-    candidates: list[str],
-    tree: ProjectTree,
-    findings: GraphFindings,
-    *,
-    installation_asked: bool = False,
-) -> None:
-    """Report a file that does not exist: a case-only mismatch, or one absent altogether.
+def _report_case_mismatch(
+    reference: Reference, candidates: list[str], tree: ProjectTree, findings: GraphFindings
+) -> bool:
+    """Report project files whose names differ from a candidate only in case or normalization.
 
     Args:
         reference: The file name and the command that writes it.
@@ -496,24 +513,44 @@ def _report_missing(
         tree: The project files, searched for names that differ only in case or Unicode
             normalization.
         findings: Where the error is recorded.
-        installation_asked: Whether the TeX installation was asked for the name and lacks
-            it too.
+
+    Returns:
+        Whether such a file exists and was reported.
     """
     command = reference.command
     keys = {path_comparison_key(candidate) for candidate in candidates}
     mismatches = sorted(path for path in tree.files if path_comparison_key(path) in keys)
-    if mismatches:
-        findings.error(
-            "source.case_mismatch",
-            f"Dependency {reference.value!r} differs in case or Unicode normalization "
-            f"from: {', '.join(mismatches)}.",
-            reference.path,
-            command.line,
-            {"reference": reference.value, "candidates": mismatches, "command": command.name},
-            suggestion=f"Change the reference to match {mismatches[0]!r} exactly, "
-            "or rename the file.",
-        )
-        return
+    if not mismatches:
+        return False
+    findings.error(
+        "source.case_mismatch",
+        f"Dependency {reference.value!r} differs in case or Unicode normalization "
+        f"from: {', '.join(mismatches)}.",
+        reference.path,
+        command.line,
+        {"reference": reference.value, "candidates": mismatches, "command": command.name},
+        suggestion=f"Change the reference to match {mismatches[0]!r} exactly, or rename the file.",
+    )
+    return True
+
+
+def _report_missing(
+    reference: Reference,
+    candidates: list[str],
+    findings: GraphFindings,
+    *,
+    installation_asked: bool = False,
+) -> None:
+    """Report a file that exists neither in the project nor, if asked, in the installation.
+
+    Args:
+        reference: The file name and the command that writes it.
+        candidates: The files the lookup tried, in order.
+        findings: Where the error is recorded.
+        installation_asked: Whether the TeX installation was asked for the name and lacks
+            it too.
+    """
+    command = reference.command
     tried = list(dict.fromkeys(candidates))
     findings.error(
         "source.missing_dependency",
@@ -527,24 +564,191 @@ def _report_missing(
     )
 
 
+# How much of a shipped .bbl is read to see that it holds entries, and what an entry
+# looks like: BibTeX styles write \bibitem (harvard \harvarditem, amsrefs \bib), and
+# biblatex writes \entry inside a \datalist.
+_BBL_PREFIX_BYTES = 256 * 1024
+_BIBLATEX_ENTRY = re.compile(rb"\\entry\s*\{")
+_BBL_ENTRY = re.compile(rb"\\(?:bibitem|harvarditem|bib)(?![A-Za-z@])|" + _BIBLATEX_ENTRY.pattern)
+
+
+def _shipped_bibliography(reference: Reference, tree: ProjectTree) -> str | None:
+    r"""Return the shipped ``.bbl`` that the build reads in place of a missing database.
+
+    LaTeX reads the bibliography of ``\bibliography`` and biblatex's resources from the
+    ``.bbl`` named after the main file, in its directory. Without the database the build
+    runs no BibTeX or Biber and reads that file as it is, and arXiv gives an uploaded one
+    precedence over its own run. A ``.bbl`` of another name or folder belongs to another
+    document, and one without entries, or one in BibTeX's format beside a biblatex
+    resource, is not a bibliography the build can use.
+
+    Args:
+        reference: The file name and the command that writes it.
+        tree: The project files and the ``.bbl`` the build reads.
+
+    Returns:
+        The project path of the ``.bbl``, or ``None`` for another command or when it is
+        not shipped as a regular file that holds entries.
+    """
+    bbl = tree.bibliography_output
+    if (
+        bbl is None
+        or reference.command.name not in BIBLIOGRAPHY_RESOURCE_COMMANDS
+        or bbl not in tree.files
+    ):
+        return None
+    try:
+        head = read_file_prefix(tree.files[bbl], _BBL_PREFIX_BYTES)
+    except OSError:
+        return None  # a link, a special file or one that cannot be read
+    entries = _BIBLATEX_ENTRY if reference.command.name == "addbibresource" else _BBL_ENTRY
+    return bbl if entries.search(head) else None
+
+
+def _note_shipped_bibliography(
+    reference: Reference, candidates: list[str], bbl: str, findings: GraphFindings
+) -> None:
+    """Note that a bibliography database is not needed because its ``.bbl`` is shipped.
+
+    The note is a passed result of the missing-dependency check, recorded with
+    ``findings.add``.
+
+    Args:
+        reference: The file name and the command that writes it.
+        candidates: The files the lookup tried, in order; the first names the database.
+        bbl: The shipped ``.bbl``.
+        findings: Where the note is recorded.
+    """
+    database = PurePosixPath(candidates[0]).name if candidates else reference.value
+    findings.add(
+        Finding(
+            "source.missing_dependency",
+            f"{database} is not in the project; the build reads the shipped {bbl} in its "
+            "place, so the bibliography database is not needed.",
+            severity="info",
+            status="passed",
+            path=reference.path,
+            line=reference.command.line,
+            details={
+                "reference": reference.value,
+                "command": reference.command.name,
+                "shipped_bbl": bbl,
+            },
+        )
+    )
+
+
+def _report_unconfirmed(
+    reference: Reference, candidates: list[str], findings: GraphFindings, *, cause: str
+) -> None:
+    """Record a file the project lacks whose absence the scan cannot confirm.
+
+    The finding is an inconclusive warning, so it does not block.
+
+    Args:
+        reference: The file name and the command that writes it.
+        candidates: The files the lookup tried, in order.
+        findings: Where the uncertainty is recorded.
+        cause: ``installation`` when the TeX installation could not be asked about a bare
+            name, ``deferred`` for a reference in package code that may never run.
+    """
+    command = reference.command
+    tried = listed_names(list(dict.fromkeys(candidates)))
+    if cause == "installation":
+        message = (
+            f"Literal dependency {reference.value!r} is not in the project, and the TeX "
+            f"installation could not be asked whether it holds it; looked for {tried}."
+        )
+        suggestion = (
+            "Run Fledge where the TeX installation's kpsewhich is on the search path, or "
+            f"add the file to the project or correct the name in \\{command.name}."
+        )
+    else:
+        message = (
+            f"Literal dependency {reference.value!r} is missing from the project; it is "
+            "named in a macro definition or conditional of package code, which runs only "
+            f"if the macro is used or the condition holds; looked for {tried}."
+        )
+        suggestion = "If the document runs this code, add the file to the project."
+    findings.uncertain(
+        "source.missing_dependency",
+        message,
+        reference.path,
+        command.line,
+        suggestion,
+        {"reference": reference.value, "candidates": candidates, "command": command.name},
+    )
+
+
+def _resolve_outside_project(
+    reference: Reference, candidates: list[str], tree: ProjectTree, findings: GraphFindings
+) -> Resolution:
+    """Resolve a reference that no project file satisfies, or report why it is missing.
+
+    A bare name the TeX installation holds is a toolchain reference. A case-only mismatch
+    is an error. A bibliography database whose ``.bbl`` is shipped is not needed. A bare
+    name the installation could not be asked about, and a reference in package code that
+    may never run, are not confirmed missing. Anything else is a missing dependency.
+
+    Args:
+        reference: The file name and the command that writes it.
+        candidates: The files the lookup tried, in order.
+        tree: The project files and the ``.bbl`` the build reads.
+        findings: Where problems with the reference are recorded.
+
+    Returns:
+        The toolchain reference, the shipped ``.bbl``, or an empty ``Resolution``.
+    """
+    command = reference.command
+    installed = _installed_inputs.get()
+    names = (
+        installation_file_names(reference.value, command.name)
+        if installed is not None and command.name in INSTALLATION_INPUT_COMMANDS
+        else ()
+    )
+    held = [name for name in names if installed is not None and name in installed.found]
+    if installed is not None and held:
+        system = SystemReference(
+            reference.path, command, reference.value, held[0], installed.found[held[0]]
+        )
+        return Resolution(system=system)
+    if _report_case_mismatch(reference, candidates, tree, findings):
+        return Resolution()
+    if (bbl := _shipped_bibliography(reference, tree)) is not None:
+        _note_shipped_bibliography(reference, candidates, bbl, findings)
+        return Resolution(shipped_bbl=bbl)
+    if installed is not None and names and not installed.answered:
+        _report_unconfirmed(reference, candidates, findings, cause="installation")
+    elif reference.deferred:
+        _report_unconfirmed(reference, candidates, findings, cause="deferred")
+    else:
+        asked = installed is not None and bool(names) and installed.asked.issuperset(names)
+        _report_missing(reference, candidates, findings, installation_asked=asked)
+    return Resolution()
+
+
 def resolve_reference(
     reference: Reference, scope: LookupScope, tree: ProjectTree, findings: GraphFindings
 ) -> Resolution:
     """Find the project file ``reference`` names, or report why none can be chosen.
 
     A found file is returned as ``target``. A class, package or style that is not in the
-    project and has no directory is left to the toolchain and returned as ``system``.
-    Anything else is recorded in ``findings`` and returns an empty ``Resolution``.
-    Several matching files are noted as an ambiguity and the first in lookup order wins.
+    project and has no directory is left to the toolchain and returned as ``system``, as
+    is a bare name the TeX installation holds. A bibliography database the project lacks
+    whose ``.bbl`` is shipped returns that file as ``shipped_bbl``. Anything else is
+    recorded in ``findings`` and returns an empty ``Resolution``. Several matching files
+    are noted as an ambiguity and the first in lookup order wins.
 
     Args:
         reference: The file name and the command that writes it.
         scope: The directories the lookup may start from.
-        tree: The project files, the compilation directory and the callback for links.
+        tree: The project files, the compilation directory, the callback for links and the
+            ``.bbl`` the build reads.
         findings: Where problems with the reference are recorded.
 
     Returns:
-        The file found, the toolchain reference, or an empty ``Resolution``.
+        The file found, the toolchain reference, the shipped ``.bbl``, or an empty
+        ``Resolution``.
     """
     paths = _lookup_bases(reference, scope, tree, findings)
     if paths is None:
@@ -562,18 +766,4 @@ def resolve_reference(
         value = reference.value
         basename = value if PurePosixPath(value).suffix else value + suffix
         return Resolution(system=SystemReference(reference.path, command, value, basename))
-    installed = _installed_inputs.get()
-    names = installation_file_names(reference.value, command.name)
-    if command.name in INSTALLATION_INPUT_COMMANDS and installed is not None and names:
-        held = [name for name in names if name in installed.found]
-        if held:
-            return Resolution(
-                system=SystemReference(
-                    reference.path, command, reference.value, held[0], installed.found[held[0]]
-                )
-            )
-        if all(name in installed.asked for name in names):
-            _report_missing(reference, candidates, tree, findings, installation_asked=True)
-            return Resolution()
-    _report_missing(reference, candidates, tree, findings)
-    return Resolution()
+    return _resolve_outside_project(reference, candidates, tree, findings)

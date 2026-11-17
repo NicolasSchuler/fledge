@@ -238,6 +238,32 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("no file with \\documentclass was found", finding.message)
         self.assertNotIn("0 candidate roots", finding.message)
 
+    async def test_inputs_and_foreign_bytes_do_not_hide_the_main_file(self):
+        # Exit 4 ("could not check") was reported for a body.tex read by the main file and
+        # for a main file with one Latin-1 byte; both are papers with a single main file.
+        cases = {
+            "body": {
+                "main.tex": b"\\documentclass{article}\n\\input{body}\n",
+                "body.tex": b"\\begin{document}\nText.\n\\end{document}\n",
+            },
+            "latin1": {
+                "main.tex": b"\\documentclass{article}\n\\begin{document}\nPoincar\xe9\n"
+                b"\\end{document}\n"
+            },
+        }
+        for case, files in cases.items():
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                project = Path(directory) / "input"
+                project.mkdir()
+                for name, content in files.items():
+                    (project / name).write_bytes(content)
+                result = await run_job(JobRequest("inspect", project, Settings()))
+                rules = {item.rule for item in result.findings}
+                self.assertNotIn("project.main_selection", rules)
+                self.assertNotEqual(result.outcome, "error")
+                # The foreign byte is a finding of its own, which leaves the scan incomplete.
+                self.assertEqual("source.encoding" in rules, case == "latin1")
+
     async def test_ambiguous_root_blocks_without_running_tools(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)

@@ -6,10 +6,14 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock
 
-from latexprep.findings import Finding
+from latexprep.bibliography_checks import check_bibliography_coverage_and_fields
+from latexprep.citation_graph import resource_declarations
+from latexprep.expanded_document import reachable_sources
+from latexprep.findings import Finding, has_blockers
 from latexprep.project_files import is_parsed_source, known_path_index, path_comparison_key
 from latexprep.source_file_commands import DEFAULT_SUFFIXES_BY_FILE_COMMAND
 from latexprep.source_findings import MAX_LISTED_PATHS, GraphFindings, listed_names
+from latexprep.source_graph import SourceGraph
 from latexprep.source_resolution import (
     LookupScope,
     ProjectTree,
@@ -19,6 +23,7 @@ from latexprep.source_resolution import (
     resolve_reference,
 )
 from latexprep.tex_lexer import scan_source_commands
+from tests.support import ProjectTestCase, clean_case
 
 
 def reference(text: str) -> Reference:
@@ -103,6 +108,194 @@ class ProjectLookupTests(unittest.TestCase):
         assert result.system is not None
         self.assertEqual(result.system.basename, "amsmath.sty")
         self.assertEqual(findings, [])
+
+
+def missing_dependencies(graph: SourceGraph) -> dict[str, Finding]:
+    """Return the missing-dependency finding of each reference of ``graph``, by its name."""
+    return {
+        str(item.details["reference"]): item
+        for item in graph.findings
+        if item.rule == "source.missing_dependency"
+    }
+
+
+CITING_MAIN = (
+    "\\documentclass{article}\n\\begin{document}\nText \\cite{k1}.\n"
+    "\\bibliographystyle{plain}\n\\bibliography{refs}\n\\end{document}\n"
+)
+BUILT_BIBLIOGRAPHY = (
+    "\\begin{thebibliography}{1}\n\\bibitem{k1} A. Author. \\newblock Title. 2020.\n"
+    "\\end{thebibliography}\n"
+)
+
+
+class ShippedBibliographyTests(ProjectTestCase):
+    r"""An upload that ships the built ``<main>.bbl`` instead of the ``.bib`` database.
+
+    The build reads the ``.bbl`` named after the main file, beside it, and runs no BibTeX
+    without the database, so ``\bibliography{refs}`` needs no ``refs.bib``; that is the
+    usual form of an arXiv upload.
+    """
+
+    @clean_case("TEX005")
+    def test_the_main_files_bbl_stands_in_for_a_missing_database(self) -> None:
+        self.write("main.tex", CITING_MAIN)
+        self.write("main.bbl", BUILT_BIBLIOGRAPHY)
+        graph = SourceGraph.build(self.root, "main.tex")
+        note = missing_dependencies(graph)["refs"]
+        self.assertEqual((note.status, note.severity), ("passed", "info"))
+        self.assertIn("main.bbl", note.message)
+        self.assertFalse(has_blockers(graph.findings))
+        self.assertTrue(graph.is_complete)
+
+    def test_the_bibliography_checks_say_that_the_entries_were_not_inspected(self) -> None:
+        self.write("main.tex", CITING_MAIN)
+        self.write("main.bbl", BUILT_BIBLIOGRAPHY)
+        graph = SourceGraph.build(self.root, "main.tex")
+        resources, reasons = resource_declarations(graph, reachable_sources(graph))
+        self.assertEqual(resources, set())
+        self.assertEqual(len(reasons), 1)
+        self.assertIn("refs.bib is not in the project", reasons[0])
+        self.assertIn("main.bbl", reasons[0])
+        coverage = [
+            item
+            for item in check_bibliography_coverage_and_fields(self.root, "main.tex")
+            if item.code == "BIB101"
+        ]
+        self.assertTrue(coverage)
+        self.assertNotIn("passed", {item.status for item in coverage})
+        self.assertFalse(has_blockers(coverage))
+
+    def test_the_bbl_of_a_main_file_in_a_folder_is_read_beside_it(self) -> None:
+        self.write("paper/main.tex", CITING_MAIN)
+        self.write("paper/main.bbl", BUILT_BIBLIOGRAPHY)
+        graph = SourceGraph.build(self.root, "paper/main.tex")
+        self.assertEqual(missing_dependencies(graph)["refs"].status, "passed")
+
+    def test_without_a_bbl_the_missing_database_still_fails(self) -> None:
+        self.write("main.tex", CITING_MAIN)
+        graph = SourceGraph.build(self.root, "main.tex")
+        error = missing_dependencies(graph)["refs"]
+        self.assertEqual((error.status, error.severity), ("failed", "error"))
+
+    def test_a_bbl_without_entries_or_of_the_wrong_format_does_not_stand_in(self) -> None:
+        # Review: an empty main.bbl, or a BibTeX one beside a biblatex resource, excused
+        # the missing database although the build can print no bibliography from it.
+        biblatex_main = (
+            "\\documentclass{article}\n\\usepackage[backend=biber]{biblatex}\n"
+            "\\addbibresource{refs.bib}\n\\begin{document}\nText \\cite{k1}.\n"
+            "\\printbibliography\n\\end{document}\n"
+        )
+        biblatex_bbl = (
+            "\\refsection{0}\n  \\datalist[entry]{nty/global//global/global}\n"
+            "    \\entry{k1}{article}{}\n    \\endentry\n  \\enddatalist\n\\endrefsection\n"
+        )
+        for main, bbl, name in (
+            (CITING_MAIN, "", "refs"),
+            (CITING_MAIN, "% no entries yet\n\\bibliographystyle{plain}\n", "refs"),
+            (biblatex_main, BUILT_BIBLIOGRAPHY, "refs.bib"),
+        ):
+            with self.subTest(bbl=bbl):
+                self.write("main.tex", main)
+                self.write("main.bbl", bbl)
+                error = missing_dependencies(SourceGraph.build(self.root, "main.tex"))[name]
+                self.assertEqual((error.status, error.severity), ("failed", "error"))
+        # biblatex's own format stands in for its resource.
+        self.write("main.tex", biblatex_main)
+        self.write("main.bbl", biblatex_bbl)
+        note = missing_dependencies(SourceGraph.build(self.root, "main.tex"))["refs.bib"]
+        self.assertEqual(note.status, "passed")
+
+    def test_the_bbl_of_another_main_file_does_not_stand_in(self) -> None:
+        self.write("main.tex", CITING_MAIN)
+        for other in ("paper.bbl", "build/main.bbl", "refs.bbl"):
+            with self.subTest(other=other):
+                self.write(other, BUILT_BIBLIOGRAPHY)
+                graph = SourceGraph.build(self.root, "main.tex")
+                error = missing_dependencies(graph)["refs"]
+                self.assertEqual((error.status, error.severity), ("failed", "error"))
+                (self.root / other).unlink()
+
+    def test_a_main_file_in_a_folder_is_not_excused_by_a_bbl_at_the_root(self) -> None:
+        self.write("paper/main.tex", CITING_MAIN)
+        self.write("main.bbl", BUILT_BIBLIOGRAPHY)
+        graph = SourceGraph.build(self.root, "paper/main.tex")
+        self.assertEqual(missing_dependencies(graph)["refs"].status, "failed")
+
+    def test_a_missing_input_is_not_excused_by_the_bbl(self) -> None:
+        with_input = CITING_MAIN.replace("\\begin{document}", "\\input{body}\n\\begin{document}")
+        self.write("main.tex", with_input)
+        self.write("main.bbl", BUILT_BIBLIOGRAPHY)
+        graph = SourceGraph.build(self.root, "main.tex")
+        self.assertEqual(missing_dependencies(graph)["body"].status, "failed")
+
+
+VENUE_CLASS_WITH_LOGOS = (
+    "\\NeedsTeXFormat{LaTeX2e}\\ProvidesClass{venue}\n\\LoadClass{article}\n"
+    "\\RequirePackage{graphicx}\n\\newif\\if@venue@journal\n"
+    "\\DeclareOption{journal}{\\@venue@journaltrue}\\ProcessOptions\n"
+    "\\def\\venue@logobox{\\setbox0=\\vbox{\\includegraphics{venue-logo}}}\n"
+    "\\newcommand\\venue@badge{\\includegraphics[width=1cm]{venue-badge}}\n"
+    "\\if@venue@journal\n  \\AtBeginDocument{\\includegraphics{journal-logo}}\n\\fi\n"
+)
+
+
+class PackageCodeReferenceTests(ProjectTestCase):
+    r"""A file named in a bundled class runs only when the code around it runs.
+
+    In package code, a reference inside a macro definition runs only if the macro is used,
+    and one inside a conditional only if the condition holds, as for ``acmart.cls``'s
+    ``\includegraphics{acm-jdslogo}`` under its ``acmcp`` format. The scan cannot decide
+    either, so a missing file there is not a confirmed missing dependency.
+    """
+
+    def build(
+        self, main_body: str = "Text.\n", class_text: str = VENUE_CLASS_WITH_LOGOS
+    ) -> SourceGraph:
+        """Return the graph of a document of the bundled ``venue`` class.
+
+        Args:
+            main_body: The text of the document environment of ``main.tex``.
+            class_text: The source of the bundled ``venue.cls``.
+
+        Returns:
+            The graph built from ``main.tex``.
+        """
+        self.write(
+            "main.tex",
+            "\\documentclass{venue}\n\\begin{document}\n" + main_body + "\\end{document}\n",
+        )
+        self.write("venue.cls", class_text)
+        return SourceGraph.build(self.root, "main.tex")
+
+    def test_a_missing_figure_in_a_definition_or_conditional_of_a_bundled_class_is_open(
+        self,
+    ) -> None:
+        graph = self.build()
+        found = missing_dependencies(graph)
+        merged = found["venue-logo"]
+        self.assertEqual((merged.status, merged.severity), ("inconclusive", "warning"))
+        self.assertEqual(merged.path, "venue.cls")
+        self.assertIn("runs only if", merged.message)
+        self.assertEqual(merged.details["occurrences"], 3)
+        self.assertFalse(has_blockers(graph.findings))
+
+    def test_a_missing_figure_the_class_always_runs_still_fails(self) -> None:
+        graph = self.build(class_text=VENUE_CLASS_WITH_LOGOS + "\\includegraphics{always-logo}\n")
+        error = missing_dependencies(graph)["always-logo"]
+        self.assertEqual((error.status, error.severity), ("failed", "error"))
+
+    def test_a_missing_figure_of_the_documents_own_files_still_fails(self) -> None:
+        main_body = (
+            "\\newcommand{\\logo}{\\includegraphics{own-logo}}\n"
+            "\\ifdefined\\final\\includegraphics{final-figure}\\fi\n\\includegraphics{figure}\n"
+        )
+        graph = self.build(main_body)
+        found = missing_dependencies(graph)
+        for name in ("own-logo", "final-figure", "figure"):
+            with self.subTest(name=name):
+                self.assertEqual((found[name].status, found[name].severity), ("failed", "error"))
+        self.assertEqual(found["venue-logo"].status, "inconclusive")
 
 
 class ProjectFilesTests(unittest.TestCase):

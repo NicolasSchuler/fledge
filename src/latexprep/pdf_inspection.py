@@ -50,6 +50,9 @@ _IMAGE_TYPES = frozenset({"image", "stencil", "mask", "smask"})
 # Columns of a pdfimages -list row: page num type width height color comp bpc enc interp
 # object ID x-ppi y-ppi size ratio.
 _IMAGE_INVENTORY_COLUMNS = 16
+# The object column, and what an inline image, which has no object, shows there.
+_OBJECT_COLUMN = 10
+_INLINE_OBJECT = "[inline]"
 # Placements below the minimum DPI that the message names; the rest are counted.
 _MAX_LOW_DPI_LISTED = 8
 _POLICY_SUGGESTIONS = {
@@ -576,7 +579,7 @@ def _attachment_findings(output: str, context: _InspectionContext) -> list[Findi
 
 
 @dataclass(frozen=True, slots=True)
-class _RasterPlacement:
+class RasterPlacement:
     """One row of the pdfimages inventory: a raster placed on a page, with its effective DPI.
 
     Attributes:
@@ -620,13 +623,40 @@ class _RasterPlacement:
         }
 
 
-def _placement_reports(placements: list[_RasterPlacement]) -> list[dict[str, object]]:
+def _placement_reports(placements: list[RasterPlacement]) -> list[dict[str, object]]:
     """Return the report rows of ``placements``."""
     return [placement.to_report() for placement in placements]
 
 
-def _image_inventory(output: str, pages: int) -> list[_RasterPlacement]:
+def _inventory_values(line: str) -> list[str]:
+    """Split one pdfimages inventory row into its columns.
+
+    An inline image has no object, and pdfimages prints one ``[inline]`` across the
+    object and ID columns, so that row has one value fewer; both columns then hold
+    ``[inline]``.
+
+    Args:
+        line: The row.
+
+    Returns:
+        The values of all columns, in header order.
+
+    Raises:
+        PreparationError: The row has another number of values.
+    """
+    values = line.split()
+    if len(values) == _IMAGE_INVENTORY_COLUMNS - 1 and values[_OBJECT_COLUMN] == _INLINE_OBJECT:
+        values.insert(_OBJECT_COLUMN + 1, _INLINE_OBJECT)
+    if len(values) != _IMAGE_INVENTORY_COLUMNS:
+        raise PreparationError("pdfimages returned an unrecognized image inventory row")
+    return values
+
+
+def parse_image_inventory(output: str, pages: int) -> list[RasterPlacement]:
     """Parse the pdfimages inventory into raster placements.
+
+    Inline images are placements like the others; the inventory does not keep their
+    object numbers.
 
     Args:
         output: The image list of pdfimages.
@@ -639,16 +669,14 @@ def _image_inventory(output: str, pages: int) -> list[_RasterPlacement]:
         PreparationError: The header or a row is unrecognized, or a row holds invalid
             measurements.
     """
-    inventory: list[_RasterPlacement] = []
+    inventory: list[RasterPlacement] = []
     header = (
         "page num type width height color comp bpc enc interp object ID x-ppi y-ppi size ratio"
     ).split()
     for line in inventory_rows(output, header, "pdfimages"):
-        values = line.split()
-        if len(values) != _IMAGE_INVENTORY_COLUMNS:
-            raise PreparationError("pdfimages returned an unrecognized image inventory row")
+        values = _inventory_values(line)
         try:
-            placement = _RasterPlacement(
+            placement = RasterPlacement(
                 page=int(values[0]),
                 number=int(values[1]),
                 image_type=values[2],
@@ -673,7 +701,7 @@ def _image_inventory(output: str, pages: int) -> list[_RasterPlacement]:
     return inventory
 
 
-def _image_resolution_finding(inventory: list[_RasterPlacement], minimum_dpi: float) -> Finding:
+def _image_resolution_finding(inventory: list[RasterPlacement], minimum_dpi: float) -> Finding:
     """Compare the resolution of every raster placement with ``minimum_dpi``.
 
     A placement without a usable resolution makes the finding incomplete, and
@@ -738,7 +766,7 @@ def _image_findings(output: str, context: _InspectionContext) -> list[Finding]:
     Raises:
         PreparationError: The image list cannot be parsed.
     """
-    inventory = _image_inventory(output, context.pages)
+    inventory = parse_image_inventory(output, context.pages)
     findings = [
         Finding(
             PdfRule.IMAGES,

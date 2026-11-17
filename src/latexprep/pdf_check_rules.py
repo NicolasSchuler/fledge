@@ -89,7 +89,10 @@ RULES = (
         tests=(
             "tests.test_pdf_checks.PdfDetailTests.test_required_metadata_handles_missing_fields_and_ambiguous_evidence",
         ),
-        fix="Supply the required nonempty PDF properties in the document's export settings.",
+        fix=(
+            "Set the required PDF properties in the sources, for example with hyperref's "
+            "\\hypersetup{pdftitle={...}, pdfauthor={...}}, and build again."
+        ),
         reviewable=True,
     ),
     Rule(

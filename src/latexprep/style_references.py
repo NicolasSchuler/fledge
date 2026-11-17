@@ -16,7 +16,7 @@ from bisect import bisect_right
 from collections.abc import Iterator
 
 from .cancellation import cancellation_point
-from .literal_text import REFERENCE_COMMANDS
+from .literal_text import LABEL_COMMANDS, REFERENCE_COMMANDS
 from .style_support import Occurrence, StyleContext, math_environment_spans
 from .tex_lexer import Command, split_argument_items
 from .tex_spans import command_end, definition_spans, in_conditional, in_half_open_span, merge_spans
@@ -123,7 +123,7 @@ def unused_labels(context: StyleContext) -> list[Occurrence]:
     prefixes: set[str] = set()
     for command in document.commands:
         cancellation_point()
-        if command.name == "label":
+        if command.name in LABEL_COMMANDS:
             name = _literal_label(command)
             if name is not None and not (
                 in_half_open_span(definitions, command.start)

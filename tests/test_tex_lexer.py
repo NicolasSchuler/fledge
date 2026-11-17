@@ -94,6 +94,26 @@ class TexLexerTests(unittest.TestCase):
         commands = scan_source_commands("\\path[fill] (0,0) -- (1,1); \\node{x}")
         self.assertEqual([command.name for command in commands], ["path", "node"])
 
+    def test_a_literal_command_that_is_only_named_takes_no_argument(self) -> None:
+        # lipics-v2021.cls holds the token pair "\and \url"; a .bbl file defines \url.
+        for text in (
+            "\\newcommand{\\marker}{\\and \\url}\n",
+            "\\providecommand{\\url}[1]{\\texttt{#1}}\n",
+            "\\expandafter\\ifx\\csname url\\endcsname\\relax\\def\\url#1{\\texttt{#1}}\\fi\n",
+            "\\ifx\\nolinkurl\\undefined\\let\\nolinkurl\\url\\fi\n",
+            "\\def\\code{\\lstinline}\n",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(source_regions(text), ([], []))
+        # Any other character still opens the literal argument, and \verb takes every one.
+        text = "\\url|a%b| \\url{c%d} \\url!e%f! \\verb}x%y} \\verb#g%h#\n"
+        regions, unclosed = source_regions(text)
+        self.assertEqual(
+            [text[region.start : region.end] for region in regions],
+            ["\\url|a%b|", "\\url{c%d}", "\\url!e%f!", "\\verb}x%y}", "\\verb#g%h#"],
+        )
+        self.assertEqual(unclosed, [])
+
     def test_a_line_holding_only_a_comment_does_not_end_argument_scanning(self) -> None:
         text = (
             "\\input\n% note\n{file}\n\\includegraphics[width=3cm]\n  % one\n  % two\n  {figure}\n"

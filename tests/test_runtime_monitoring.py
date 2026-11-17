@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from latexprep.command_runner import CommandResult
 from latexprep.defects import is_expected_failure
 from latexprep.errors import PreparationError
+from latexprep.findings import Finding
 from latexprep.process_control import kill_process_group
 from latexprep.process_table import ProcessSample
 from latexprep.resource_budget import ResourceBudget
@@ -171,6 +172,132 @@ class ProcessListingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             runner.statistics().resource_exceeded,
             "Job resource accounting failed: KeyError: 'scope'",
+        )
+
+
+class SlowProcessTableTests(unittest.IsolatedAsyncioTestCase):
+    """A process table that answers late is retried; one that never answers stops the job.
+
+    A slow ``ps`` says nothing about the paper, so a sample without it is skipped and the next
+    one measures again; the storage limits hold in every sample. The samples are taken one by
+    one, without the monitor's sleeps, and the process table is a scripted list of answers.
+    """
+
+    def setUp(self) -> None:
+        """Create a temporary job directory ``self.root``."""
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve()
+
+    def monitor(self, answers: list[bool], memory_limit_mb: int = 1024) -> ScriptedProcessMonitor:
+        """Return a monitor of a job that has run a command, with a scripted process table.
+
+        Args:
+            answers: For each sample in turn, whether the process table answers; a missing
+                answer raises the ``TimeoutError`` of a table that did not answer in time.
+            memory_limit_mb: The memory limit of the job; each answer reports 20 MiB in use.
+
+        Returns:
+            The monitor.
+        """
+        script = iter(answers)
+
+        async def sample() -> list[ProcessSample]:
+            """Return this process with 20 MiB, or time out, as the script says."""
+            if not next(script):
+                raise TimeoutError
+            return [ProcessSample(os.getpid(), -1, 20 * 1024)]
+
+        monitor = ScriptedProcessMonitor(
+            SeatbeltSandbox(), ResourceStatistics(memory_limit_mb, None), sample
+        )
+        # A registered command makes failed accounting fail the job, as in a build.
+        monitor.statistics.commands = 1
+        return monitor
+
+    async def take_samples(self, monitor: ResourceMonitor, count: int, **limits: int) -> None:
+        """Take ``count`` job samples of ``self.root`` in a row.
+
+        Args:
+            monitor: The monitor that samples.
+            count: The number of samples.
+            **limits: ``max_temp_bytes`` and ``max_file_bytes`` of the job scope, if not the
+                default of one megabyte each.
+        """
+        scope = JobScope(
+            self.root,
+            limits.get("max_temp_bytes", 1_000_000),
+            limits.get("max_file_bytes", 1_000_000),
+        )
+        for _ in range(count):
+            await monitor.sample_job(scope)
+
+    async def test_slow_samples_are_retried_and_an_answer_resets_the_count(self) -> None:
+        monitor = self.monitor([False, False, True, False, False, True])
+        with self.assertLogs("latexprep.resource_monitor", "DEBUG") as logs:
+            await self.take_samples(monitor, 6)
+        statistics = monitor.statistics
+        self.assertIsNone(statistics.resource_exceeded)
+        self.assertIs(statistics.memory_accounting, MemoryAccounting.SAMPLED)
+        self.assertEqual(statistics.slow_process_tables, 4)
+        self.assertEqual(statistics.samples, 6)
+        self.assertEqual(len(logs.records), 4)
+        self.assertTrue(all(record.levelname == "DEBUG" for record in logs.records))
+        self.assertIn("retrying", logs.output[0])
+
+    async def test_a_process_table_that_never_answers_says_fledge_could_not_check(self) -> None:
+        monitor = self.monitor([False] * 3)
+        await self.take_samples(monitor, 2)
+        self.assertIsNone(monitor.statistics.resource_exceeded)
+        with self.assertLogs("latexprep.resource_monitor", "INFO") as logs:
+            await self.take_samples(monitor, 1)
+        failure = monitor.statistics.resource_exceeded or ""
+        self.assertTrue(failure.startswith("Job resource accounting failed: "), failure)
+        self.assertIn("did not answer within 2 seconds in 3 samples in a row", failure)
+        self.assertIn("says nothing about the paper", failure)
+        self.assertIs(monitor.statistics.memory_accounting, MemoryAccounting.UNAVAILABLE)
+        self.assertEqual(logs.records[-1].levelname, "INFO")
+        # The job's resource finding counts as "could not check" (exit 4), not as a paper fix.
+        finding = Finding("execution.resources", failure, severity="error", status="inconclusive")
+        self.assertTrue(finding.prevents_checking)
+
+    async def test_a_job_close_to_its_memory_limit_gets_no_skipped_sample(self) -> None:
+        # Review: a job that makes the machine swap is what slows the process table down,
+        # and skipping its samples left its memory unwatched when the limit mattered most.
+        monitor = self.monitor([True, False], memory_limit_mb=24)
+        await self.take_samples(monitor, 1)
+        self.assertIsNone(monitor.statistics.resource_exceeded)
+        with self.assertLogs("latexprep.resource_monitor", "INFO"):
+            await self.take_samples(monitor, 1)
+        failure = monitor.statistics.resource_exceeded or ""
+        self.assertTrue(failure.startswith("Job resource accounting failed: "), failure)
+        self.assertIn("while the job was close to a memory limit", failure)
+        finding = Finding("execution.resources", failure, severity="error", status="inconclusive")
+        self.assertTrue(finding.prevents_checking)
+        # With memory to spare, the same slow sample is skipped.
+        monitor = self.monitor([True, False], memory_limit_mb=1024)
+        await self.take_samples(monitor, 2)
+        self.assertIsNone(monitor.statistics.resource_exceeded)
+
+    async def test_storage_limits_hold_while_the_process_table_is_slow(self) -> None:
+        monitor = self.monitor([False])
+        (self.root / "output").write_bytes(b"x" * 2048)
+        await self.take_samples(monitor, 1, max_temp_bytes=1024)
+        self.assertEqual(
+            monitor.statistics.resource_exceeded, "Job temporary storage exceeded 1024 bytes"
+        )
+        self.assertEqual(monitor.statistics.peak_temp_bytes, 2048)
+
+    async def test_a_failing_process_table_still_stops_the_job_at_once(self) -> None:
+        async def broken() -> list[ProcessSample]:
+            raise PreparationError("Process memory accounting is unavailable")
+
+        monitor = ScriptedProcessMonitor(SeatbeltSandbox(), ResourceStatistics(1024, None), broken)
+        monitor.statistics.commands = 1
+        await self.take_samples(monitor, 1)
+        self.assertEqual(
+            monitor.statistics.resource_exceeded,
+            "Job resource accounting failed: Process memory accounting is unavailable",
         )
 
 

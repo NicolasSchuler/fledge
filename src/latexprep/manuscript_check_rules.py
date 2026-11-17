@@ -133,13 +133,19 @@ RULES = (
         title="Required literal author metadata",
         description=(
             "Require nonempty explicitly selected title, author, affiliation, email and "
-            "corresponding-author declarations in supported source commands; no identity or "
-            "per-author completeness claim."
+            "corresponding-author declarations in supported source commands, including ICML's "
+            "icmltitle and icmlauthor and asmeconf's SetAuthors; literal text satisfies a field "
+            "whatever unread command stands beside it. No identity or per-author completeness "
+            "claim."
         ),
         tests=(
             "tests.test_manuscript_checks.ManuscriptDetailTests.test_required_metadata",
             "tests.test_manuscript_checks.ManuscriptDetailTests"
             ".test_unknown_constructs_make_their_own_region_inconclusive",
+            "tests.test_manuscript_metadata_checks.AuthorMetadataTests"
+            ".test_a_project_macro_that_may_drop_its_argument_leaves_the_author_open",
+            "tests.test_manuscript_metadata_checks.AuthorMetadataTests"
+            ".test_icml_title_and_author_commands_declare_the_fields",
         ),
         fix=(
             "Supply the configured metadata using a supported literal command, or inspect the "
@@ -159,6 +165,8 @@ RULES = (
             "tests.test_manuscript_checks.ManuscriptDetailTests.test_orcid",
             "tests.test_manuscript_checks.ManuscriptDetailTests"
             ".test_obsolete_constructs_leave_the_orcid_check_decided",
+            "tests.test_manuscript_metadata_checks.AuthorMetadataTests"
+            ".test_identifiers_inside_orcidlink_are_checked_beside_unread_commands",
         ),
         fix=(
             "Correct the reported ORCID from the author's verified identifier; a valid "
@@ -187,9 +195,10 @@ RULES = (
         title="Required figure and table captions",
         description=(
             "Require nonempty literal caption commands in supported figure/table environments, "
-            "including starred environments and certain literal input boundaries. A float whose "
-            "own region could not be interpreted is reported as inconclusive without hiding "
-            "the floats that were confirmed."
+            "including starred environments and certain literal input boundaries. A caption "
+            "with literal text stands whatever else the float holds; a float without one is "
+            "inconclusive only when a construct inside it, such as a project macro or a file "
+            "that was not read, may supply the caption, and is named in the reasons."
         ),
         tests=(
             "tests.test_manuscript_checks.ManuscriptDetailTests.test_float_captions",
@@ -197,6 +206,9 @@ RULES = (
             ".test_unrelated_uncertainty_never_hides_a_confirmed_violation",
             "tests.test_manuscript_checks.ManuscriptDetailTests"
             ".test_failure_messages_report_counts_and_first_locations",
+            "tests.test_manuscript_float_context.FloatEvidenceTests"
+            ".test_an_unknown_macro_still_counts_where_the_evidence_is_missing",
+            "tests.test_manuscript_float_context.FloatEvidenceTests.test_text_that_was_not_read_still_counts",
         ),
         fix=(
             "Add a nonempty caption to the reported figure or table, or review unsupported "
@@ -210,9 +222,12 @@ RULES = (
         title="Required figure and table labels",
         description=(
             "Require a nonempty literal label associated with each supported figure/table "
-            "environment."
+            "environment. A failure also counts the floats that could not be judged."
         ),
-        tests=("tests.test_manuscript_checks.ManuscriptDetailTests.test_float_labels",),
+        tests=(
+            "tests.test_manuscript_checks.ManuscriptDetailTests.test_float_labels",
+            "tests.test_manuscript_float_context.FloatEvidenceTests.test_a_failure_says_how_many_floats_could_not_be_judged",
+        ),
         fix=(
             "Add an unambiguous literal label to the reported figure or table, normally after "
             "its caption."
@@ -224,11 +239,18 @@ RULES = (
         name="manuscript.float_label_order",
         title="Figure and table label placement",
         description=(
-            "Check that literal float labels follow a caption in source order. Subfigure "
-            "captions and labels belong to their subfigure and equation labels to their "
-            "equation; custom counter changes are inconclusive."
+            "Check that literal float labels follow a caption in source order; a label inside "
+            "the caption's argument follows it, and with several captions, as in side-by-side "
+            "minipages, each label follows the caption before it. Subfigure captions and "
+            "labels belong to their subfigure and equation labels to their equation. Control "
+            "flow, project macros, files that were not read and custom counter changes inside "
+            "a float are inconclusive, because they may hold a misplaced label."
         ),
-        tests=("tests.test_manuscript_checks.ManuscriptDetailTests.test_float_label_order",),
+        tests=(
+            "tests.test_manuscript_checks.ManuscriptDetailTests.test_float_label_order",
+            "tests.test_manuscript_float_context.FloatEvidenceTests.test_a_label_before_its_caption_still_fails",
+            "tests.test_manuscript_float_context.FloatEvidenceTests.test_labels_that_may_belong_to_another_caption_stay_open",
+        ),
         fix=(
             "Place the figure/table label after the corresponding caption and verify its "
             "resolved number after compilation."
@@ -240,10 +262,19 @@ RULES = (
         name="manuscript.float_references",
         title="Figure and table references",
         description=(
-            "Require an external supported literal reference to each labeled figure/table; "
-            "generated references and unsupported float structures are inconclusive."
+            "Require an external supported literal reference to each labeled figure/table, "
+            "from the text or from another float. A project macro whose definition holds a "
+            "reference is read at each use, a reference in the argument of a project macro "
+            "that typesets it counts, and a range refers to the floats between its ends. A "
+            "float without a reference is inconclusive, not failed, when a reference that "
+            "could not be read may name it."
         ),
-        tests=("tests.test_manuscript_checks.ManuscriptDetailTests.test_float_references",),
+        tests=(
+            "tests.test_manuscript_checks.ManuscriptDetailTests.test_float_references",
+            "tests.test_manuscript_float_context.FloatEvidenceTests"
+            ".test_a_reference_macro_that_names_another_float_or_hides_its_reference",
+            "tests.test_manuscript_float_context.FloatEvidenceTests.test_a_range_refers_to_the_floats_between_its_ends",
+        ),
         fix=(
             "Add a meaningful reference to the figure or table in the manuscript, or review "
             "unsupported generated references manually."
@@ -256,9 +287,16 @@ RULES = (
         title="Figure and table first-reference source order",
         description=(
             "Compare first literal reference order separately for figures and tables with "
-            "their source appearance; this does not infer rendered float order."
+            "their source appearance and name the floats cited late; this does not infer "
+            "rendered float order. Floats that the reference check reports as unreferenced "
+            "are left out of the comparison."
         ),
-        tests=("tests.test_manuscript_checks.ManuscriptDetailTests.test_float_reference_order",),
+        tests=(
+            "tests.test_manuscript_checks.ManuscriptDetailTests.test_float_reference_order",
+            "tests.test_manuscript_float_context.FloatEvidenceTests.test_the_order_check_names_the_float_cited_late",
+            "tests.test_manuscript_float_context.FloatEvidenceTests"
+            ".test_a_float_whose_first_reference_may_lie_elsewhere_keeps_the_order_open",
+        ),
         fix=(
             "Review figure/table introductions in source order and the compiled document; "
             "float placement may differ from source order."

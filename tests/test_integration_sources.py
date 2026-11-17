@@ -366,6 +366,67 @@ class LiveSourceProjectTests(AsyncLiveProjectTestCase):
         self.assertEqual(_with_code(prepared.report, "TEX005"), [])
         self.assert_published(prepared)
 
+    async def test_a_shipped_bbl_stands_in_for_a_missing_bibliography_database(self) -> None:
+        r"""Check that an upload with ``main.bbl`` and no ``refs.bib`` prepares and ships the bbl.
+
+        Documented claim: a ``.bbl`` that the build reads without regenerating it, because
+        no ``.bib`` file exists, is an ordinary input and always ships
+        (docs/preparation-options.md, "Generated files"), so the missing database is not a
+        missing dependency (docs/checks.md, TEX005). Without the ``.bbl`` it still is.
+        """
+        self.require_tools("bibtex")
+        body = "Text~\\cite{k1}.\n\\bibliographystyle{plain}\n\\bibliography{refs}"
+        built = (
+            "\\begin{thebibliography}{1}\n\\bibitem{k1} A.~Author. \\newblock Shipped title.\n"
+            "\\end{thebibliography}\n"
+        )
+        prepared = await self.prepare_files(
+            "shipped-bbl", {"main.tex": _document(body), "main.bbl": built}
+        )
+        self.assertEqual(
+            {item.status for item in _with_code(prepared.report, "TEX005")}, {"passed"}
+        )
+        archive = self.assert_published(prepared)
+        self.assertIn("main.bbl", archive)
+        self.assertIn("Shipped title", pdf_text(prepared.output / "manuscript.pdf"))
+        missing = await self.prepare_files("no-bbl", {"main.tex": _document(body)})
+        self.assert_blocked(missing)
+        self.assertEqual(
+            _results(_with_code(missing.report, "TEX005")), {("error", "failed", "main.tex")}
+        )
+
+    async def test_a_figure_in_unused_code_of_a_bundled_class_does_not_block(self) -> None:
+        r"""Check that a missing figure in a macro of a bundled class blocks only when it runs.
+
+        Documented claim: a missing file named in a macro definition, option code or
+        conditional of a project class is an inconclusive warning, because that code may
+        never run; one the class always runs is a missing dependency (docs/checks.md,
+        TEX005). The build agrees: the unused macro's figure is never read.
+        """
+        venue = (
+            "\\NeedsTeXFormat{LaTeX2e}\\ProvidesClass{venue}\n\\LoadClass{article}\n"
+            "\\RequirePackage{graphicx}\n"
+            "\\def\\venue@logobox{\\setbox0=\\hbox{\\includegraphics{venue-logo}}}\n"
+        )
+        prepared = await self.prepare_files(
+            "class-macro-figure",
+            {"main.tex": _document("Text.").replace("{article}", "{venue}"), "venue.cls": venue},
+        )
+        self.assertEqual(
+            _results(_with_code(prepared.report, "TEX005")),
+            {("warning", "inconclusive", "venue.cls")},
+        )
+        self.assert_published(prepared)
+        always = venue + "\\AtBeginDocument{\\includegraphics{venue-logo}}\n"
+        running = await self.prepare_files(
+            "class-running-figure",
+            {"main.tex": _document("Text.").replace("{article}", "{venue}"), "venue.cls": always},
+        )
+        self.assert_blocked(running)
+        self.assertIn(
+            ("error", "failed", "venue.cls"), _results(_with_code(running.report, "TEX005"))
+        )
+
     async def test_absolute_input_outside_the_project_blocks(self) -> None:
         """Check that TEX006 blocks the job for a literal absolute input outside the project.
 

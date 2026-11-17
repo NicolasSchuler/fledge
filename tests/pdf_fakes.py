@@ -17,6 +17,22 @@ from latexprep.pdf_artwork_options import PdfContrastSample
 from latexprep.pdf_check_options import PdfRegion
 from tests.fakes import FakeCommandRunner, Reply, ToolCall
 
+# What ``pdfimages -list`` (Poppler 26.11) printed for the six-page PDF of TeX Live 2026's
+# cas-dc template, built with pdfLaTeX and BibTeX: two author pictures, one photograph
+# placed twice, and two one-pixel inline stencils, whose object and ID columns hold a
+# single ``[inline]``, so their rows have 15 values instead of 16.
+CAS_DC_IMAGE_INVENTORY = """\
+page   num  type   width height color comp bpc  enc interp  object ID x-ppi y-ppi size ratio
+--------------------------------------------------------------------------------------------
+   3     0 image     225   225  rgb     3   8  jpeg   no        23  0  2033  2033 8764B 5.8%
+   3     1 image     225   225  rgb     3   8  jpeg   no        24  0  2033  2033 7736B 5.1%
+   4     2 image    5333  3000  rgb     3   8  jpeg   no        57  0  1798  1798  666K 1.4%
+   5     3 image    5333  3000  rgb     3   8  jpeg   no        57  0   866   866  666K 1.4%
+   6     4 stencil     1     1  -       1   1  image  no   [inline]       1     1    1B   -
+   6     5 stencil     1     1  -       1   1  image  no   [inline]       1     1    1B   -
+"""
+CAS_DC_PAGES = 6
+
 
 def geometry(*, pages: int = 1, rotation: int = 0, crop: str = "0 0 612 792") -> str:
     """Return the page geometry that ``pdfinfo -box`` prints for letter pages.

@@ -482,6 +482,8 @@ class PdfDetailTests(unittest.IsolatedAsyncioTestCase):
             options, "failed", info="Pages: 1\nTitle: Paper\nAuthor: \n"
         )
         self.assertEqual(failure.details["violations"], ["Author"])
+        # The advice names the command that sets the properties.
+        self.assertIn("\\hypersetup{pdftitle=", failure.next_step or "")
         await self.assert_status(
             options, "inconclusive", info="Pages: 1\nTitle: Paper\nTitle: Other\n"
         )

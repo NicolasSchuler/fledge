@@ -15,7 +15,8 @@ from .expanded_document import (
     expand_document,
 )
 from .literal_text import ACCENT_MARKS, KEYWORD_ENVIRONMENTS, LETTER_COMMANDS, TEXT_WRAPPERS
-from .tex_commands import MACRO_DEFINITION_COMMANDS, PRIMITIVE_DEFINITION_COMMANDS
+from .submission_definitions import TEXT_CONTROL_SEQUENCE, local_definitions
+from .tex_commands import OBSOLETE_FONT_SWITCHES
 from .tex_lexer import (
     MAX_ARGUMENT_CHARS,
     Argument,
@@ -38,10 +39,9 @@ from .text_safety import escape_single_line_text, is_unsafe_character
 FieldName = Literal["title", "abstract", "keywords"]
 FIELD_NAMES: tuple[FieldName, ...] = get_args(FieldName)
 FieldStatus = Literal["ready", "empty", "missing", "unresolved"]
+# The commands and environments that declare a field.
+_FIELD_DECLARATIONS = frozenset(FIELD_NAMES) | KEYWORD_ENVIRONMENTS
 
-# Document-text grammar, unlike the lexer's package-code CONTROL_SEQUENCE: "@" is
-# not a letter, and a control symbol may be any character, including a line break.
-_TEXT_CONTROL_SEQUENCE = re.compile(r"\\([A-Za-z]+|.)", re.S)
 _ACCENTS = ACCENT_MARKS
 _SYMBOLS = {
     "LaTeX": "LaTeX",
@@ -62,16 +62,25 @@ _PLAIN_MATH = re.compile(r"[A-Za-z0-9α-ω\s=+−.,()<>/\-]+")
 _VERBATIM_URL_COMMANDS = frozenset({"url", "nolinkurl", "path"})
 # Wrappers that restore ordinary punctuation inside typewriter text.
 _ROMAN_WRAPPERS = frozenset({"textrm", "textsf", "textnormal"})
+# Font switches that keep punctuation as typed, and those that restore ordinary punctuation.
+_TYPEWRITER_SWITCHES = frozenset({"ttfamily", "tt"})
+_ROMAN_SWITCHES = frozenset({"normalfont", "rmfamily", "sffamily", "rm", "sf"})
+# Commands that change how the text that follows looks, not what it says: font shape,
+# series, family and size, the obsolete two-letter switches, and paragraph switches.
+_FONT_SWITCHES = frozenset(
+    {
+        *"em itshape slshape scshape upshape bfseries mdseries protect noindent".split(),
+        *"tiny scriptsize footnotesize small normalsize large Large LARGE huge Huge".split(),
+        *_TYPEWRITER_SWITCHES,
+        *_ROMAN_SWITCHES,
+        *OBSOLETE_FONT_SWITCHES,
+    }
+)
 _LIGATURES = (("---", "—"), ("--", "–"), ("``", "“"), ("''", "”"))
 # Line breaks take an optional bracketed length or priority; other spacing does not,
 # so a bracket after them is ordinary text.
 _LINE_BREAK_COMMANDS = frozenset({"\\", "linebreak"})
 _MAX_GROUP_DEPTH = 32
-# Prefixes of a definition, which define nothing themselves.
-_PREFIXES = frozenset({"global", "long", "protected", "outer"})
-# Characters after a primitive definition that it cannot make active: groups, parameters
-# and comments.
-_NEVER_ACTIVE = frozenset("{}#%")
 
 
 @dataclass(frozen=True, slots=True)
@@ -161,7 +170,7 @@ def _mask_comments(value: str) -> str:
     cursor = 0
     while cursor < len(value):
         if value[cursor] == "\\":
-            token = _TEXT_CONTROL_SEQUENCE.match(value, cursor)
+            token = TEXT_CONTROL_SEQUENCE.match(value, cursor)
             if token and token.group(1) in _VERBATIM_URL_COMMANDS:
                 literal = read_group(value, skip_space(value, token.end()))
                 if literal is not None:
@@ -399,7 +408,7 @@ class _Converter:
         Returns:
             The offset after the converted construct.
         """
-        token = _TEXT_CONTROL_SEQUENCE.match(self.value, position)
+        token = TEXT_CONTROL_SEQUENCE.match(self.value, position)
         if token is None:
             self.out.append("\\")
             self.issues.append("Trailing backslash")
@@ -625,12 +634,23 @@ class _Converter:
             option = self._group(cursor, "[", "]")
             if option is not None:
                 cursor = option.end + 1
-        separator = self.context.keyword_separators and word.name in {"sep", "and"}
-        self.out.append("; " if separator else " ")
+        if self.context.keyword_separators and word.name in {"sep", "and"}:
+            # A separator follows its keyword directly: "one; two", not "one ; two".
+            while self.out and not self.out[-1].strip():
+                self.out.pop()
+            if self.out:
+                self.out[-1] = self.out[-1].rstrip()
+            self.out.append("; ")
+        else:
+            self.out.append(" ")
         return cursor
 
     def _font_switch(self, word: _ControlWord) -> int:
-        r"""Drop a font or paragraph switch; ``\normalfont`` restores ordinary punctuation.
+        r"""Drop a font, size or paragraph switch, which changes how text looks, not what it says.
+
+        A typewriter switch (``\ttfamily``, ``\tt``) keeps punctuation as typed, as
+        ``\texttt`` does, and ``\normalfont`` and the roman and sans-serif switches restore
+        ordinary punctuation.
 
         Args:
             word: The font switch.
@@ -638,9 +658,11 @@ class _Converter:
         Returns:
             The offset after the command and the spaces that follow it.
         """
-        if word.name == "normalfont":
-            # Recursive group conversion keeps this font reset local to
-            # its enclosing group, just like the typewriter wrapper.
+        # Recursive group conversion keeps the switch local to its enclosing group, just
+        # like a wrapper's argument.
+        if word.name in _TYPEWRITER_SWITCHES:
+            self.context = replace(self.context, literal_punctuation=True)
+        elif word.name in _ROMAN_SWITCHES:
             self.context = replace(self.context, literal_punctuation=False)
         return word.cursor
 
@@ -652,7 +674,7 @@ class _Converter:
         (_SYMBOLS, _symbol),
         ("%&#_{}$", _escaped_character),
         (("par", "newline", "linebreak", "\\", " ", ",", ";", "sep", "and"), _space),
-        (("em", "itshape", "bfseries", "normalfont", "protect", "noindent"), _font_switch),
+        (_FONT_SWITCHES, _font_switch),
         (("thanks", "keywords"), _note),
     )
 
@@ -694,52 +716,6 @@ class _Declaration(NamedTuple):
     reasons: list[str]
 
 
-def _local_definitions(document: ExpandedDocument) -> tuple[frozenset[str], frozenset[str]]:
-    r"""Return the commands, environments and active characters that the project itself defines.
-
-    A supported spelling does not establish meaning when the local project defines
-    it. Conditional or order-dependent activation is not inferred. The document class,
-    such as a shipped ``llncs.cls``, defines how ``\title`` or ``\\`` is typeset, not what
-    the field says, so its definitions do not count; those of the author's own ``.sty``
-    and ``.tex`` files do. A prefix such
-    as ``\global`` defines nothing itself, and a primitive definition followed by a brace,
-    a parameter or a comment makes no character active.
-
-    Args:
-        document: The expanded document whose selected sources are scanned.
-
-    Returns:
-        The names of the defined commands and environments, and the characters that
-        primitive definitions make active.
-    """
-    redefined: set[str] = set()
-    active_characters: set[str] = set()
-    for path in document.selected:
-        source = document.graph.sources.get(path)
-        if source is None or path.endswith(".cls"):
-            continue
-        for command in source.commands:
-            if command.name not in MACRO_DEFINITION_COMMANDS or command.name in _PREFIXES:
-                continue
-            if command.arguments and command.name not in PRIMITIVE_DEFINITION_COMMANDS:
-                target = command.arguments[0].value.strip()
-            else:
-                target = source.masked[command.name_end :].lstrip()
-            token = _TEXT_CONTROL_SEQUENCE.match(target)
-            if token is not None:
-                redefined.add(token.group(1))
-            elif (
-                target
-                and command.name in PRIMITIVE_DEFINITION_COMMANDS
-                and target[0] not in _NEVER_ACTIVE
-                and not target[0].isalnum()
-            ):
-                active_characters.add(target[0])
-            elif "environment" in command.name.casefold() and re.fullmatch(r"[A-Za-z]+", target):
-                redefined.add(target)
-    return frozenset(redefined), frozenset(active_characters)
-
-
 def _original_text(document: ExpandedDocument) -> str:
     """Return the raw source behind the masked expanded text, at the same offsets."""
     return "".join(
@@ -775,7 +751,7 @@ def _field_definition_spans(document: ExpandedDocument) -> list[tuple[int, int]]
             cursor = skip_space(text, cursor)
             if text[cursor : cursor + 1] == "=":
                 cursor = skip_space(text, cursor + 1)
-            token = _TEXT_CONTROL_SEQUENCE.match(text, cursor)
+            token = TEXT_CONTROL_SEQUENCE.match(text, cursor)
             cursor = token.end() if token is not None else cursor + 1
         spans.append((command.start, cursor))
     return merge_spans(spans)
@@ -941,7 +917,7 @@ def read_submission_text(root: Path, main: str | None = None) -> dict[str, Submi
         Each field, by name, in the order of ``FIELD_NAMES``.
     """
     document = expand_document(root, main)
-    redefined, active_characters = _local_definitions(document)
+    redefined, active_characters = local_definitions(document, _FIELD_DECLARATIONS)
     reader = _FieldReader(
         document,
         _original_text(document),

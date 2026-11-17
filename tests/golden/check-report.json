@@ -1075,6 +1075,7 @@
    "peak_command_memory_reservation_mb": "<measured>",
    "peak_command_memory_limit_mb": "<measured>",
    "samples": "<measured>",
+   "slow_process_tables": "<measured>",
    "monitor_seconds": "<measured>",
    "commands": "<measured>",
    "version_probes": "<measured>",

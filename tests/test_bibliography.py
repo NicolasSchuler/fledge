@@ -17,6 +17,7 @@ from latexprep.bibliography_transform import (
 from latexprep.bibtex_syntax import BibFileReader
 from latexprep.errors import PreparationError
 from latexprep.findings import Finding
+from latexprep.source_resolution import InstalledInputs, installed_inputs_known
 
 
 class BibliographyTests(unittest.TestCase):
@@ -356,6 +357,29 @@ class BibliographyTests(unittest.TestCase):
         self.assertEqual((finding.severity, finding.status), ("warning", "inconclusive"))
         self.assertIn("'ACM-Reference-Format' may define it", finding.message)
         self.assertIn("unless the style defines it", finding.suggestion or "")
+
+    # Open defect: BIB004 says "may define" for a macro that an installed .bst defines, as
+    # ACM-Reference-Format.bst defines csur. The TeX installation is never asked for a
+    # \bibliographystyle name: ``installation_file_names`` and ``installation_candidates``
+    # in source_resolution.py know only \input, \bibliography and figure names, and the
+    # installation's answer has no public accessor for the bibliography styles to read.
+    @unittest.expectedFailure
+    def test_macros_of_an_installed_style_are_read_from_its_file(self) -> None:
+        installation = Path(self.directory.name) / "installation"
+        installed = installation / "ACM-Reference-Format.bst"
+        installation.mkdir()
+        installed.write_text('MACRO {csur} {"ACM Computing Surveys"}\n', encoding="utf-8")
+        project = self.root / "paper"
+        self.root = project
+        self.write("@article{k, journal = csur}\n@article{j, journal = notamacro}")
+        name = "ACM-Reference-Format.bst"
+        answer = InstalledInputs(frozenset({name}), {name: str(installed)})
+        with installed_inputs_known(answer):
+            findings = self.macro_findings(
+                "\\bibliographystyle{ACM-Reference-Format}\\bibliography{references}"
+            )
+        self.assertEqual([item.message.split("'")[1] for item in findings], ["notamacro"])
+        self.assertEqual((findings[0].severity, findings[0].status), ("error", "failed"))
 
     def test_macros_of_a_shipped_style_are_read_from_its_file(self) -> None:
         self.write("@article{k, journal = myjournal}\n@article{j, journal = hidden}")

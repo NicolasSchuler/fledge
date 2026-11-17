@@ -20,14 +20,15 @@ from .analysed_source import AnalysedSource, reuse_or_analyse
 from .comment_markers import MarkerCategory, marker_pattern
 from .file_safety import read_regular_file
 from .findings import EvidenceKind, Finding
-from .literal_text import REFERENCE_COMMANDS, reference_labels
+from .literal_text import LABEL_COMMANDS, REFERENCE_COMMANDS, reference_labels
 from .project_files import project_files
 from .source_file_commands import is_literal_text
 from .source_graph import SourceGraph
-from .source_loading import ParsedSource, is_document_root
+from .source_loading import ParsedSource, document_roots
 from .tex_commands import MANUSCRIPT_SUFFIXES, ROOT_SUFFIXES
 from .tex_lexer import (
     MAX_SOURCE_BYTES,
+    Command,
     ParseLimitExceeded,
     scan_source_commands,
 )
@@ -73,28 +74,29 @@ class SourceAnalysis:
 
 
 def discover_roots(root: Path) -> list[str]:
-    """Find literal document roots; oversized, linked or non-UTF-8 files are skipped.
+    r"""Find literal document roots, as :func:`document_roots` defines them.
 
-    Full analysis reports skipped-source diagnostics. This preflight performs no
-    dependency lookup and never chooses between multiple plausible entry points.
+    Oversized, linked and unreadable files are skipped. A file that is not valid UTF-8
+    is read with its undecodable bytes replaced, only to find its commands: whether a
+    file is the main file does not depend on its encoding, and the commands that decide
+    it are ASCII. Full analysis still refuses such a file and reports it (TEX301), as it
+    reports the other skipped sources. This preflight resolves only the literal
+    ``\input`` and ``\include`` names between candidates and never chooses between
+    several plausible entry points.
 
     Returns:
         The project-relative paths of the roots.
     """
-    roots: list[str] = []
+    commands_by_name: dict[str, list[Command]] = {}
     for name, path in project_files(root).items():
         if path.suffix.lower() not in ROOT_SUFFIXES:
             continue
         try:
-            text = read_regular_file(path, MAX_SOURCE_BYTES).decode("utf-8-sig")
-        except (UnicodeDecodeError, OSError):
+            raw = read_regular_file(path, MAX_SOURCE_BYTES)
+            commands_by_name[name] = scan_source_commands(raw.decode("utf-8-sig", "replace"))
+        except (OSError, ParseLimitExceeded):
             continue
-        try:
-            if is_document_root(scan_source_commands(text)):
-                roots.append(name)
-        except ParseLimitExceeded:
-            continue
-    return roots
+    return document_roots(commands_by_name)
 
 
 def _manuscript_sources(graph: SourceGraph) -> Iterator[tuple[str, ParsedSource]]:
@@ -149,7 +151,7 @@ def _defined_labels(source: ParsedSource) -> list[tuple[str, int]]:
     """List the literal labels a source defines, with their lines."""
     labels = []
     for command in source.commands:
-        if command.name == "label" and command.arguments:
+        if command.name in LABEL_COMMANDS and command.arguments:
             value = command.arguments[0].value.strip()
             if is_literal_text(value):
                 labels.append((value, command.line))
@@ -257,11 +259,15 @@ def analyze_sources(
     """
     graph = reuse_or_analyse(root, main, analysed).graph
     # Every source file is read to discover roots, but a selected document is not
-    # described by lexical uncertainties of files outside its own graph.
+    # described by lexical uncertainties of files outside its own graph. A main file that
+    # could not be read is never visited, yet its uncertainty describes the document.
     outside = {
         id(item)
         for item in graph.uncertainties
-        if graph.main is not None and item.path is not None and item.path not in graph.visited
+        if graph.main is not None
+        and item.path is not None
+        and item.path not in graph.visited
+        and item.path != graph.main
     }
     findings = [
         *(item for item in graph.findings if id(item) not in outside),

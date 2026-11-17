@@ -408,7 +408,10 @@ class ContentScan:
                 self._identity_lines(name, text, comment_lines)
             )
         notes = self.private_comments.matches
-        if self.private_comments.enabled and notes.has_room:
+        # Class, package and style files are code, often a venue's, whose comments are
+        # their maintainers' notes ("TODO: tune the spacing"), not the authors'.
+        package_code = path.suffix.lower() in _PACKAGE_CODE_SUFFIXES
+        if self.private_comments.enabled and notes.has_room and not package_code:
             marked = (c for c in comments if _PRIVATE_COMMENT_MARKER.search(c.text))
             notes.items.extend(
                 {"path": name, "line": comment.line} for comment in islice(marked, notes.room)
@@ -516,7 +519,7 @@ class ContentScan:
             f"Identity terms are Unicode-normalized, {term_rule_description(self.options)}; "
             "hints use active TeX outside class, package and style files, "
             "shell preflight uses active TeX; "
-            "private-note checks use TeX comments."
+            "private-note checks use TeX comments outside class, package and style files."
         )
         details: dict[str, object] = {
             "reported_match_limit": self.limits.max_matches,

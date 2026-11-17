@@ -212,8 +212,11 @@ an output format. (71 modules)
 | `image_metadata` | Bounded scan of figure metadata for identity terms and home-folder paths |
 | `manuscript` | Configurable constraints on the literal declarations of one selected source graph |
 | `manuscript_abstract_checks` | Citations and uppercase abbreviations in the abstract (`MAN003`, `MAN004`) |
+| `manuscript_built_names` | The names that definitions build at run time (`\csname`, `\@namedef`, `\csdef`) and where their replacement text lies |
 | `manuscript_checks` | Opt-in, publisher-neutral checks of literal manuscript structures |
 | `manuscript_float_checks` | Captions, labels, references and descriptions of figures and tables (`MAN011` to `MAN016`) |
+| `manuscript_float_parts` | The spans inside a float whose captions and labels are not the float's own: subfigures, equations and lists |
+| `manuscript_float_references` | References to figures and tables, including those project macros make, and the text the float checks could not read |
 | `manuscript_heading_checks` | Heading depth, empty sections and required declarations (`MAN005`, `MAN006`, `MAN010`) |
 | `manuscript_layout_checks` | Layout override candidates (`MAN002`) and required or forbidden line numbers (`MAN017`) |
 | `manuscript_metadata_checks` | Required literal metadata and ORCID identifiers (`MAN008`, `MAN009`), and the reader |
@@ -252,6 +255,7 @@ an output format. (71 modules)
 | `submission_content_scan` | The single pass over every supplied file that finds identity terms, secrets and notes |
 | `submission_readiness_checks` | Cheap, deterministic submission-readiness checks over the literal source graph |
 | `submission_scan_findings` | Findings for the matches of a submission scan, and the wording they share |
+| `submission_definitions` | The project's definitions that may change what a submission field says |
 | `submission_text` | Bounded, source-only submission fields; unresolved content remains visible |
 | `bibliography_suggestions` | Optional advice about the entries of the .bib files: preprints, repeated DOIs and venues |
 | `online_findings` | How the outcome of an online request reads in a report: findings, reasons and next steps |

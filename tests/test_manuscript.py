@@ -7,7 +7,7 @@ import unittest
 from latexprep.errors import PreparationError
 from latexprep.findings import Finding
 from latexprep.manuscript import ManuscriptOptions, check_manuscript
-from tests.support import ProjectTestCase
+from tests.support import ProjectTestCase, clean_case
 
 
 class ManuscriptTests(ProjectTestCase):
@@ -640,6 +640,202 @@ class ManuscriptTests(ProjectTestCase):
                 with self.assertRaises(PreparationError) as raised:
                     ManuscriptOptions(**values)
                 self.assertIn(named, str(raised.exception))
+
+
+# The class-option and package constraints of the camera-ready preset.
+CAMERA_READY = ManuscriptOptions(
+    forbidden_class_options=("draft",), forbidden_packages=("showframe",)
+)
+CLASS_OPTIONS = "manuscript.class_options"
+PACKAGES = "manuscript.forbidden_packages"
+
+
+class PlacedGapTests(ProjectTestCase):
+    r"""A construct the scan cannot read matters only where it can change a constraint.
+
+    The class options are fixed by ``\documentclass`` and what runs before it, and packages
+    can be loaded only before ``\begin{document}``. Each relaxation comes with a case where
+    the same construct really can hide a violation and the constraint stays undecided.
+    """
+
+    def statuses(self, text: str, options: ManuscriptOptions = CAMERA_READY) -> dict[str, str]:
+        """Write ``main.tex`` with ``text`` and return the status of each finding by rule.
+
+        Args:
+            text: The whole source of ``main.tex``.
+            options: The constraints to check.
+
+        Returns:
+            The status of each finding, by rule.
+        """
+        self.write("main.tex", text)
+        return {item.rule: item.status for item in check_manuscript(self.root, "main.tex", options)}
+
+    @clean_case("TEX102", "TEX103")
+    def test_csname_in_a_definition_or_in_bibliography_boilerplate_decides_nothing(self) -> None:
+        for preamble, body in (
+            # Defined but never used: the \csname never runs.
+            ("\\newcommand{\\mark}[1]{\\expandafter\\xdef\\csname m@#1\\endcsname{x}}\n", ""),
+            # Used only in the body, where no package can be loaded.
+            ("\\newcommand{\\mark}[1]{\\csname m@#1\\endcsname}\n", "\\mark{a}\n"),
+            # A comparison builds a token and runs nothing.
+            (
+                "",
+                "\\begin{thebibliography}{1}\n\\expandafter\\ifx\\csname url\\endcsname\\relax\n"
+                "\\def\\url#1{\\texttt{#1}}\\fi\n\\bibitem{k} A.\n\\end{thebibliography}\n",
+            ),
+            # In the body, \catcode and \csname cannot reach the class or a package load.
+            ("", "\\providecommand\\x{\\catcode`\\%12\\relax}\\csname bibitem\\endcsname{k}\n"),
+        ):
+            with self.subTest(preamble=preamble, body=body):
+                results = self.statuses(
+                    "\\documentclass{article}\n\\usepackage{graphicx}\n"
+                    + preamble
+                    + "\\begin{document}\nText.\n"
+                    + body
+                    + "\\end{document}\n"
+                )
+                self.assertEqual(results[CLASS_OPTIONS], "passed")
+                self.assertEqual(results[PACKAGES], "passed")
+
+    def test_csname_that_may_load_a_package_keeps_the_package_check_open(self) -> None:
+        for preamble in (
+            "\\csname usepackage\\endcsname{showframe}\n",
+            "\\newcommand{\\load}{\\csname usepackage\\endcsname{showframe}}\n\\load\n",
+            "\\newcommand{\\load}[1]{\\csname #1\\endcsname{showframe}}\n"
+            "\\AtBeginDocument{}\\let\\loadit\\load\n",
+            "\\catcode`\\|=0 |usepackage{showframe}\n",
+        ):
+            with self.subTest(preamble=preamble):
+                results = self.statuses(
+                    "\\documentclass{article}\n" + preamble + "\\begin{document}\n\\end{document}\n"
+                )
+                self.assertEqual(results[PACKAGES], "inconclusive")
+                # After the class declaration nothing can change its options.
+                self.assertEqual(results[CLASS_OPTIONS], "passed")
+
+    def test_construct_before_the_class_keeps_the_class_options_open(self) -> None:
+        for prologue in (
+            "\\PassOptionsToClass{draft}{article}\n",
+            "\\csname PassOptionsToClass\\endcsname{draft}{article}\n",
+            "\\input{missing}\n",
+        ):
+            with self.subTest(prologue=prologue):
+                results = self.statuses(
+                    prologue + "\\documentclass{article}\n\\begin{document}\n\\end{document}\n"
+                )
+                self.assertEqual(results[CLASS_OPTIONS], "inconclusive")
+                self.assertEqual(results[PACKAGES], "inconclusive")
+        late = self.statuses(
+            "\\documentclass{article}\n\\PassOptionsToClass{draft}{article}\n"
+            "\\begin{document}\n\\end{document}\n"
+        )
+        self.assertEqual(late[CLASS_OPTIONS], "passed")
+
+    def test_missing_input_is_a_gap_where_it_can_hold_what_a_constraint_reads(self) -> None:
+        preamble = self.statuses(
+            "\\documentclass{article}\n\\input{settings}\n\\begin{document}\n\\end{document}\n"
+        )
+        self.assertEqual(preamble[PACKAGES], "inconclusive")
+        self.assertEqual(preamble[CLASS_OPTIONS], "passed")
+        body = self.statuses(
+            "\\documentclass{article}\n\\begin{document}\n\\input{chapter}\n\\end{document}\n",
+            ManuscriptOptions(forbidden_packages=("showframe",), required_sections=("Funding",)),
+        )
+        self.assertEqual(body[PACKAGES], "passed")
+        self.assertEqual(body["manuscript.required_sections"], "inconclusive")
+
+    def test_gap_after_the_end_of_the_document_never_runs(self) -> None:
+        results = self.statuses(
+            "\\documentclass{article}\n\\begin{document}\n\\end{document}\n"
+            "\\csname usepackage\\endcsname{showframe}\n\\input{missing}\n",
+            ManuscriptOptions(forbidden_packages=("showframe",), required_sections=("Funding",)),
+        )
+        self.assertEqual(results[PACKAGES], "passed")
+        self.assertEqual(results["manuscript.required_sections"], "failed")
+
+    @clean_case("TEX102")
+    def test_trailing_comma_and_comment_lines_in_class_options_are_literal(self) -> None:
+        for declaration in (
+            "\\documentclass[11pt,a4paper,]{article}",
+            "\\documentclass[%\n 11pt,\n%twocolumn,\n a4paper,\n]{article}",
+            "\\documentclass[11pt,%twocolumn\n a4paper]{article}",
+        ):
+            with self.subTest(declaration=declaration):
+                results = self.statuses(declaration + "\n\\begin{document}\n\\end{document}\n")
+                self.assertEqual(results[CLASS_OPTIONS], "passed")
+
+    def test_trailing_comma_does_not_hide_a_forbidden_class_option(self) -> None:
+        self.write("main.tex", "\\documentclass[11pt,draft,]{article}\n")
+        result = next(
+            item
+            for item in check_manuscript(self.root, "main.tex", CAMERA_READY)
+            if item.rule == CLASS_OPTIONS
+        )
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.details["present_forbidden"], ["draft"])
+
+    def test_a_document_opener_that_may_not_run_does_not_end_the_preamble(self) -> None:
+        # Review: \begin{document} inside \iffalse moved the start of the body, so that a
+        # package loaded after it, before the real opener, counted as body text.
+        loaded = "\\csname usepackage\\endcsname{showframe}\n"
+        for skipped in ("\\iffalse\n\\begin{document}\n\\fi\n", "\\ifdraft\\begin{document}\\fi\n"):
+            with self.subTest(skipped=skipped):
+                statuses = self.statuses(
+                    "\\documentclass{article}\n"
+                    + skipped
+                    + loaded
+                    + "\\begin{document}\nText.\n\\end{document}\n"
+                )
+                self.assertEqual(statuses[PACKAGES], "inconclusive")
+        # After the opener that runs, the same construct can load no package.
+        statuses = self.statuses(
+            "\\documentclass{article}\n\\begin{document}\n" + loaded + "Text.\n\\end{document}\n"
+        )
+        self.assertEqual(statuses[PACKAGES], "passed")
+
+    def test_grouped_endinput_in_a_bundled_package_leaves_only_what_follows_unclear(self) -> None:
+        guard = (
+            "\\ProvidesPackage{natbib}\n\\@ifclassloaded{agu2001}{\\PackageError{natbib}"
+            "{Already included}{Remove it}\n  \\endinput}{}\n"
+        )
+        main = (
+            "\\documentclass{article}\n\\usepackage{natbib}\n\\begin{document}\n\\end{document}\n"
+        )
+        self.write("natbib.sty", guard + "\\newcommand{\\citet}{x}\n")
+        results = self.statuses(main)
+        self.assertEqual(results[CLASS_OPTIONS], "passed")
+        self.assertEqual(results[PACKAGES], "passed")
+        # A forbidden package after the \endinput may or may not load: not a pass.
+        self.write("natbib.sty", guard + "\\RequirePackage{showframe}\n")
+        self.assertEqual(self.statuses(main)[PACKAGES], "inconclusive")
+        # A&A's line-number package stops behind a conditional of its own; what follows
+        # may not run, which no class option and no permitted package depends on.
+        switch = "\\newif\\ifnonumbers\n\\ifnonumbers\n  \\endinput\n\\fi\n"
+        self.write("natbib.sty", switch + "\\RequirePackage[switch]{lineno}\n")
+        results = self.statuses(main)
+        self.assertEqual(results[CLASS_OPTIONS], "passed")
+        self.assertEqual(results[PACKAGES], "passed")
+        # Counter-test: a forbidden package after it may or may not load.
+        self.write("natbib.sty", switch + "\\RequirePackage{showframe}\n")
+        self.assertEqual(self.statuses(main)[PACKAGES], "inconclusive")
+        # A hook may run the \endinput later, in another file.
+        self.write("natbib.sty", "\\AtBeginDocument{\\endinput}\n\\newcommand{\\citet}{x}\n")
+        self.assertEqual(
+            self.statuses(main, ManuscriptOptions(required_sections=("Funding",)))[
+                "manuscript.required_sections"
+            ],
+            "inconclusive",
+        )
+
+    def test_unreadable_package_in_the_preamble_cannot_change_the_class_options(self) -> None:
+        self.write("algorithm.sty", b"%% Copyright (C) Rog\xe9rio\n\\ProvidesPackage{algorithm}\n")
+        results = self.statuses(
+            "\\documentclass{article}\n\\usepackage{algorithm}\n\\begin{document}\n\\end{document}\n"
+        )
+        self.assertEqual(results[CLASS_OPTIONS], "passed")
+        # The package that could not be read may load any package itself.
+        self.assertEqual(results[PACKAGES], "inconclusive")
 
 
 if __name__ == "__main__":

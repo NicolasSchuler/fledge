@@ -25,7 +25,10 @@ then rerun. The [quick start](quickstart.md#4-read-the-result) shows an example.
 
 The finding is named `project.main_selection`. The project contains more than one
 file with `\documentclass`, such as a paper and its slides, and Fledge does not
-guess. Pass `--main main.tex`, set `main = "main.tex"` in `fledge.toml`, or configure
+guess. A file that another candidate reads with a literal `\input` or `\include`,
+such as a `body.tex` that holds `\begin{document}`, belongs to that document and is
+not counted; a file that is not valid UTF-8 still counts and is reported as `TEX301`.
+Pass `--main main.tex`, set `main = "main.tex"` in `fledge.toml`, or configure
 [independent packages](preparation-options.md#independent-manuscript-and-supplement-packages)
 for several documents.
 
@@ -100,7 +103,9 @@ system, such as `brew install --cask basictex` on macOS. Missing Poppler tools
 appear as `pdf.inspection_unavailable`, and a missing BibTeX or Biber as
 `BLD202`. Install the tools as described in [installation](installation.md#tools).
 If you run Fledge inside another sandbox, run it outside. `fledge inspect` needs
-no external tools and still works meanwhile.
+no external tools and still works meanwhile. Without TeX it cannot ask the TeX
+installation for files that a bare name such as `example-image` may mean, so it
+reports each such name as an inconclusive `TEX005` warning instead of a missing file.
 
 ## Build failed
 
