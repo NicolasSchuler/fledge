@@ -27,7 +27,7 @@ wants every file in one folder.
 | PDF objects | No encryption (`PDF106`), JavaScript (`PDF108`) or attachments (`PDF109`); the same page size on every page (`PDF102`) |
 | PDF properties | A PDF Title (`PDF206`), which viewers and screen readers show instead of the file name |
 | Front matter | Literal `\title` and `\author` (`MAN008`) and a valid checksum on any ORCID iD (`MAN009`) |
-| Floats | Captions, labels and references of figures and tables, in order (`MAN011`–`MAN015`) |
+| Floats | Captions, labels and references of figures and tables (`MAN011`–`MAN014`); the order of first references (`MAN015`) is a commented-out line of the preset |
 | Leftovers | The `draft` class option (`TEX102`), `showframe` (`TEX103`), private notes in comments (`PRV005`), credential-shaped text (`PRV004`), shell escape (`PRV006`), unused files (`PKG106`), empty sections (`MAN006`), "Figure 2" typed instead of a reference (`MAN007`) and layout manipulation (`MAN002`) |
 | Bibliography | DOIs for articles and proceedings papers (`BIB104`), capitals in titles protected from the style (`BIB107`) and one work cited twice, such as a preprint and its article (`BIB108`); all advisories |
 

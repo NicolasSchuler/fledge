@@ -89,13 +89,16 @@ class PresetContentTests(unittest.TestCase):
         self.assertTrue(review.submission_checks.scan_identity_hints)
         self.assertTrue(review.pdf.forbid_attachments)
         self.assertTrue(review.manuscript_checks.require_float_references)
+        # Citing a results figure early is common practice, so no preset blocks on it.
+        self.assertFalse(review.manuscript_checks.check_float_reference_order)
         self.assertEqual(review.source_transforms.comment_policy, "retain")
         self.assertFalse(review.manuscript_checks.require_line_numbers)
         self.assertFalse(review.bbl_checks.require_bbl)
         final = load_settings(None, {}, preset="camera-ready")
         self.assertTrue(final.pdf.forbid_type3_fonts and final.pdf.require_consistent_page_size)
         self.assertEqual(final.manuscript_checks.required_metadata, ("title", "author"))
-        self.assertTrue(final.manuscript_checks.check_float_reference_order)
+        self.assertTrue(final.manuscript_checks.require_float_references)
+        self.assertFalse(final.manuscript_checks.check_float_reference_order)
         self.assertFalse(final.manuscript_checks.forbid_line_numbers)
         self.assertIsNone(final.included_figure_artwork.required_color_space)
         self.assertIsNone(final.rendered_pdf_artwork.required_color_space)
@@ -104,10 +107,17 @@ class PresetContentTests(unittest.TestCase):
     def test_venue_value_placeholders_are_commented_out_with_their_codes(self):
         expected = {
             "arxiv": ("# expected_texlive_year = ", "BLD105"),
-            "anonymous-review": ("# require_line_numbers = true", "MAN017"),
+            "anonymous-review": (
+                "# require_line_numbers = true",
+                "MAN017",
+                "# check_float_reference_order = true",
+                "MAN015",
+            ),
             "camera-ready": (
                 "# forbid_line_numbers = true",
                 "MAN017",
+                "# check_float_reference_order = true",
+                "MAN015",
                 "# expected_texlive_year = ",
                 "BLD105",
                 "PDF313",

@@ -275,6 +275,12 @@ The version is defined once, as `__version__` in `src/latexprep/__init__.py`.
 
 ### Changed
 
+- **The review presets no longer block on the order of first references (`MAN015`).**
+  `anonymous-review` and `camera-ready` switched on `check_float_reference_order`, and a
+  paper whose introduction previews a results figure, or whose appendix tables are cited
+  in another order, was blocked. Thirteen of forty-one published papers tried were, and
+  no venue rejects for it. The setting is now a commented-out line of both presets;
+  captions, labels, label placement and references (`MAN011`–`MAN014`) still block.
 - **Clearer evidence for DBLP's escaped underscores (`BIB006`, `BIB106`).** A DOI or URL
   that contains `\_` now says that a style reading the field verbatim keeps the backslash,
   and to write a plain underscore, instead of a generic note about markup.

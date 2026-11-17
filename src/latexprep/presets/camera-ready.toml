@@ -47,7 +47,10 @@ require_float_captions = true # MAN011: every figure and table has a caption.
 require_float_labels = true # MAN012: every figure and table has a label.
 check_float_label_order = true # MAN013: labels follow captions.
 require_float_references = true # MAN014: every labelled float is referenced.
-check_float_reference_order = true # MAN015: floats first referenced in source order.
+# MAN015: floats first referenced in source order. Off in this preset: an introduction
+# that previews a results figure, or appendix tables cited in another order, is common
+# and no venue rejects it.
+# check_float_reference_order = true
 # MAN010: statements the publisher requires, by heading.
 # required_declarations = ["Data Availability", "Competing Interests"]
 # MAN017: reject line numbers left over from the review version.
