@@ -27,23 +27,26 @@ SILENCED_SUGGESTIONS_KEY = "silenced_suggestions"
 
 @dataclass(frozen=True, slots=True)
 class CheckSelectionRecord:
-    """The ``--select`` and ``--ignore`` selectors a run used.
+    """The check selectors a run used: ``select``, ``ignore`` and ``advisory``.
 
     Attributes:
         select: The ``--select`` selectors.
         ignore: The ``--ignore`` selectors.
         always_enforced: The codes of the guards that selection cannot switch off.
+        advisory: The selectors of the checks reported as warnings (``checks.advisory``).
     """
 
     select: tuple[str, ...]
     ignore: tuple[str, ...]
     always_enforced: tuple[str, ...] = ()
+    advisory: tuple[str, ...] = ()
 
     def to_report(self) -> dict[str, object]:
         """Return the entry as ``Report.execution`` carries it."""
         return {
             "select": list(self.select),
             "ignore": list(self.ignore),
+            "advisory": list(self.advisory),
             "always_enforced_when_applicable": list(self.always_enforced),
         }
 
@@ -136,7 +139,7 @@ def _strings(value: object) -> tuple[str, ...] | None:
 def read_check_selection(value: object) -> CheckSelectionRecord | None:
     """Read the selectors in an ``execution.check_selection`` entry, or ``None`` if it is malformed.
 
-    A missing ``select`` reads as ``ALL`` and a missing ``ignore`` as none.
+    A missing ``select`` reads as ``ALL`` and a missing ``ignore`` or ``advisory`` as none.
     """
     if not isinstance(value, Mapping):
         return None
@@ -145,7 +148,8 @@ def read_check_selection(value: object) -> CheckSelectionRecord | None:
     if select is None or ignore is None:
         return None
     always_enforced = _strings(value.get("always_enforced_when_applicable")) or ()
-    return CheckSelectionRecord(select, ignore, always_enforced)
+    advisory = _strings(value.get("advisory")) or ()
+    return CheckSelectionRecord(select, ignore, always_enforced, advisory)
 
 
 def read_not_checked(entries: object) -> tuple[NotCheckedArea, ...]:

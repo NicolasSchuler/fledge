@@ -237,7 +237,8 @@ findings, settings and tool details removed:
       "select": [
         "ALL"
       ],
-      "ignore": []
+      "ignore": [],
+      "advisory": []
     },
     "not_checked": [
       {

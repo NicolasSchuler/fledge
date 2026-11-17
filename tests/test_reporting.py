@@ -14,7 +14,8 @@ from unittest.mock import patch
 
 from latexprep.ci_annotations import render_ci_annotations
 from latexprep.compact_report import render_compact
-from latexprep.finding_view import RenderOptions, evidence_excerpt
+from latexprep.execution_records import CheckSelectionRecord
+from latexprep.finding_view import RenderOptions, evidence_excerpt, selection_description
 from latexprep.findings import Finding
 from latexprep.html_report import render_html
 from latexprep.measurement_findings import measurement_finding
@@ -594,6 +595,47 @@ class CiAnnotationTitleAndPathTests(unittest.TestCase):
                 # Paths inside a ZIP and outside the repository cannot be located in it.
                 self.assertEqual(annotation_prefix(root / "paper.zip"), "")
                 self.assertEqual(annotation_prefix(root.parent), "")
+
+
+class CheckSelectionLineTests(unittest.TestCase):
+    """The line that says what the check selection changed, and what it cannot change."""
+
+    GUARDS = ("PKG001", "TEX005")
+
+    def test_an_unchanged_selection_has_no_line(self) -> None:
+        self.assertIsNone(selection_description(None))
+        self.assertIsNone(selection_description(CheckSelectionRecord(("ALL",), (), self.GUARDS)))
+
+    def test_checks_reported_as_warnings_are_named(self) -> None:
+        line = selection_description(
+            CheckSelectionRecord(("ALL",), (), self.GUARDS, ("MAN012", "MAN014"))
+        )
+        self.assertEqual(line, "Checks: reported as warnings instead of errors: MAN012, MAN014")
+
+    def test_a_selector_that_covers_a_guard_says_that_the_guard_still_blocks(self) -> None:
+        for selector in ("ALL", "TEX", "TEX005"):
+            with self.subTest(selector=selector):
+                line = selection_description(
+                    CheckSelectionRecord(("ALL",), (), self.GUARDS, (selector,))
+                )
+                self.assertEqual(
+                    line,
+                    f"Checks: reported as warnings instead of errors: {selector}; "
+                    "always-enforced guards still block",
+                )
+
+    def test_a_restricted_selection_ends_with_what_it_retains(self) -> None:
+        restricted = CheckSelectionRecord(("MAN",), ("MAN001",), self.GUARDS)
+        self.assertEqual(
+            selection_description(restricted),
+            "Checks: select MAN; ignore MAN001; required validation retained",
+        )
+        with_advisory = CheckSelectionRecord(("MAN",), (), self.GUARDS, ("MAN012",))
+        self.assertEqual(
+            selection_description(with_advisory),
+            "Checks: select MAN; ignore (none); reported as warnings instead of errors: "
+            "MAN012; required validation retained",
+        )
 
 
 class SettingsLineTests(unittest.TestCase):

@@ -95,20 +95,23 @@ def selected_codes(selector: str) -> tuple[str, ...]:
 class CheckSelection:
     """Filter configured checks; selection never supplies missing options or consent.
 
-    Construction raises ``PreparationError`` when either field is not a tuple of strings
-    or holds an unknown selector, and stores the selectors with rule names resolved to
-    check codes.
+    Construction raises ``PreparationError`` when a field is not a tuple of strings or
+    holds an unknown selector, and stores the selectors with rule names resolved to check
+    codes.
 
     Attributes:
         select: The selectors of the checks to run.
         ignore: The selectors of the checks to leave out.
+        advisory: The selectors of the checks that run and are reported as warnings: a
+            violation or an undecided result of one never blocks.
     """
 
     select: tuple[str, ...] = ("ALL",)
     ignore: tuple[str, ...] = ()
+    advisory: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        for name in ("select", "ignore"):
+        for name in ("select", "ignore", "advisory"):
             selectors = getattr(self, name)
             if not isinstance(selectors, tuple) or any(
                 not isinstance(selector, str) for selector in selectors
@@ -138,8 +141,14 @@ class CheckSelection:
         select = resolve_selectors(select, "--select")
         ignore = resolve_selectors(ignore, "--ignore")
         return CheckSelection(
-            select=select or self.select, ignore=tuple(dict.fromkeys((*self.ignore, *ignore)))
+            select=select or self.select,
+            ignore=tuple(dict.fromkeys((*self.ignore, *ignore))),
+            advisory=self.advisory,
         )
+
+    def is_advisory(self, code: str) -> bool:
+        """Return whether the check ``code`` is listed in ``advisory``, by code or prefix."""
+        return any(selector == "ALL" or code.startswith(selector) for selector in self.advisory)
 
     def enabled(self, code: str) -> bool:
         """Return whether the check ``code`` is enabled.

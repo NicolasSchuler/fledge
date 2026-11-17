@@ -48,7 +48,7 @@ sources, or `submission.zip` when the venue asks for sources.
 | Included PDF figures | `PRV105` reports identity terms and home-folder paths that included PDFs leave in the built PDF; the preset's `suppress_included_pdf_information` (`TEX204`) keeps their information dictionaries and file names out of the PDF that `prepare` builds |
 | Comments and files | Private notes in comments (`PRV005`), credential-shaped text (`PRV004`) and unused files (`PKG106`), which matter when reviewers receive the source |
 | PDF | Embedded fonts (`PDF104`) and no attachments (`PDF109`) |
-| Layout | Layout manipulation such as negative spacing or shrunken margins (`MAN002`, advisory) and float captions, labels and references (`MAN011`–`MAN014`); the order of first references (`MAN015`) is a commented-out line of the preset |
+| Layout | Layout manipulation such as negative spacing or shrunken margins (`MAN002`, advisory) and floats: a caption on every figure and table (`MAN011`) and labels after their captions (`MAN013`) block; a missing label (`MAN012`) and a float the text never refers to (`MAN014`) are reported as warnings, through `[checks] advisory`; the order of first references (`MAN015`) is a commented-out line of the preset |
 
 ## Fill in the placeholders
 

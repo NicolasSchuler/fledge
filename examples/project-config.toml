@@ -9,5 +9,9 @@ ignore = []
 # Limit selectable checks to source and bibliography families:
 # select = ["TEX", "BIB"]
 
+# Report a check you switched on as a warning instead of an error, so that it
+# never blocks the run:
+# advisory = ["MAN012", "MAN014"]
+
 # Selection filters configured checks. It does not enable networking or edits,
 # supply thresholds, or bypass required build/archive verification.

@@ -411,13 +411,33 @@ def change_summary(report: RedactedReport) -> str:
 
 
 def selection_description(selection: CheckSelectionRecord | None) -> str | None:
-    """Describe what the check selection restricts, or ``None`` when every check was selected."""
-    if selection is None or (selection.select == ("ALL",) and not selection.ignore):
+    """Describe what the check selection changes, or ``None`` when it changes nothing.
+
+    That is which checks were selected or ignored, and which were reported as warnings
+    (``checks.advisory``) although their settings switch them on. Neither reaches the
+    always-enforced guards, and the line says so wherever a selector could suggest that
+    it does.
+    """
+    if selection is None:
         return None
-    return (
-        f"Checks: select {', '.join(selection.select) or '(none)'}; "
-        f"ignore {', '.join(selection.ignore) or '(none)'}; required validation retained"
-    )
+    parts = []
+    restricted = selection.select != ("ALL",) or bool(selection.ignore)
+    if restricted:
+        parts.append(
+            f"select {', '.join(selection.select) or '(none)'}; "
+            f"ignore {', '.join(selection.ignore) or '(none)'}"
+        )
+    if selection.advisory:
+        parts.append(f"reported as warnings instead of errors: {', '.join(selection.advisory)}")
+    if restricted:
+        parts.append("required validation retained")
+    elif any(
+        selector == "ALL" or code.startswith(selector)
+        for selector in selection.advisory
+        for code in selection.always_enforced
+    ):
+        parts.append("always-enforced guards still block")
+    return "Checks: " + "; ".join(parts) if parts else None
 
 
 def settings_description(report: RedactedReport, options: RenderOptions) -> str | None:

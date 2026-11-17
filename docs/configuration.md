@@ -133,6 +133,38 @@ shipped `.bbl` covers every cited key (`BIB109`) and whether a shipped biblatex
 `.bbl` has the format version the receiving service expects (`BIB110`,
 `submission_checks.biblatex_bbl_format_version`).
 
+### Report a check without letting it block
+
+A check that you switch on, such as `require_float_labels`, is a requirement: a
+violation, or a result that cannot be decided, is an error and blocks the run.
+`advisory` keeps such a check running and reports it as a warning instead:
+
+```toml
+[checks]
+advisory = ["MAN012", "MAN014"]
+
+[manuscript_checks]
+require_float_labels = true     # MAN012
+require_float_references = true # MAN014
+```
+
+A figure without a label is then listed with its place, and the run still passes
+with advisories (exit code 1) and, for `prepare`, writes the submission.
+`advisory` takes the same selectors as `select` and `ignore`, defaults to `[]`,
+and has no command-line option. It changes how hard a check hits, not whether
+it runs: a check that is ignored or not switched on stays off, and an
+[always-enforced guard](checks.md#always-enforced) listed in `advisory` blocks
+as before. The terminal report names the checks it treated this way, and JSON
+reports list the selectors under `execution.check_selection.advisory`. A finding
+reported this way is a warning in every respect, so a
+[suppression](preparation-options.md#preservation-and-explicit-exceptions) with a
+written reason can mark it as reviewed at one location.
+
+The `anonymous-review` and `camera-ready` presets list `MAN012` and `MAN014`:
+a teaser figure without a label, or an appendix figure that the text never
+cites, is common in published papers. To make one block, set `advisory`
+without it in your settings file, for example `advisory = []`.
+
 ### Describe the receiving service
 
 Three settings under `[submission_checks]` say what the service you submit to

@@ -339,13 +339,31 @@ def _selected_suggestion(finding: Finding, selection: CheckSelection) -> Finding
     return finding if finding.is_suggestion else replace(finding, severity="suggestion")
 
 
+def _weighted(finding: Finding, selection: CheckSelection) -> Finding:
+    """Return a blocking finding of a check listed in ``checks.advisory`` as a warning.
+
+    A mandatory check keeps its weight: what it guards cannot be waived by selection.
+    """
+    if (
+        finding.severity == "error"
+        and finding.code is not None
+        and finding.code not in MANDATORY_CODES
+        and selection.is_advisory(finding.code)
+    ):
+        return replace(finding, severity="warning")
+    return finding
+
+
 def selected_findings(findings: Iterable[Finding], selection: CheckSelection) -> list[Finding]:
     """Keep selected public checks and every mandatory or uncoded diagnostic.
 
     Consult the selection for any registered code rather than an optional-check
     allowlist, so new rule families cannot silently disappear from reports. A suggestion
     is kept only when a selector other than ``ALL`` selects it (see
-    :func:`suggestion_selected`), and always with the ``suggestion`` severity.
+    :func:`suggestion_selected`), and always with the ``suggestion`` severity. A check
+    listed in ``checks.advisory`` is kept as a warning, so that it never blocks: the
+    outcome of a run, its exit code and whether ``prepare`` writes the submission are
+    decided on findings that passed through this function.
 
     Args:
         findings: The findings to filter.
@@ -365,5 +383,5 @@ def selected_findings(findings: Iterable[Finding], selection: CheckSelection) ->
             or finding.code in MANDATORY_CODES
             or selection.enabled(finding.code)
         ):
-            kept.append(finding)
+            kept.append(_weighted(finding, selection))
     return kept

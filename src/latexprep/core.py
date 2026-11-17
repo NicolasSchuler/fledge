@@ -93,6 +93,7 @@ def _record_settings(request: JobRequest, report: Report) -> Settings:
             effective.checks.select,
             effective.checks.ignore,
             tuple(sorted(MANDATORY_CODES)),
+            effective.checks.advisory,
         ),
     )
     if request.command in DOCUMENT_COMMANDS:

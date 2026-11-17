@@ -14,6 +14,7 @@ from latexprep.findings import Finding
 from latexprep.job_context import JobRequest
 from latexprep.latexmk_build import build_project
 from latexprep.manuscript import ManuscriptOptions
+from latexprep.manuscript_check_options import ManuscriptCheckOptions
 from latexprep.online_checks import OnlineOptions
 from latexprep.pdf_artwork_options import PdfArtworkOptions
 from latexprep.report import Report
@@ -136,6 +137,32 @@ class CheckSelectionWorkflowTests(AsyncProjectTestCase):
         for rendered in (render_compact(report), render_terminal(report)):
             self.assertIn("ignore TEX001", rendered)
             self.assertIn("required validation retained", rendered)
+
+    async def test_an_advisory_check_is_reported_and_does_not_block_the_run(self):
+        # A figure without a label, which nothing refers to.
+        (self.source / "main.tex").write_text(
+            "\\documentclass{article}\n\\begin{document}\nText.\n"
+            "\\begin{figure}\\rule{1cm}{1cm}\\caption{A teaser.}\\end{figure}\n\\end{document}\n"
+        )
+        floats = ManuscriptCheckOptions(
+            require_float_captions=True, require_float_labels=True, require_float_references=True
+        )
+        blocked = await run_job(
+            JobRequest("inspect", self.source, Settings(manuscript_checks=floats))
+        )
+        self.assertEqual(blocked.outcome, "blocked")
+        settings = Settings(
+            manuscript_checks=floats, checks=CheckSelection(advisory=("MAN012", "MAN014"))
+        )
+        report = await run_job(JobRequest("inspect", self.source, settings))
+        self.assertEqual(report.outcome, "passed_with_advisories")
+        weights = {item.code: (item.status, item.severity) for item in report.findings}
+        self.assertEqual(weights["MAN012"], ("failed", "warning"))
+        self.assertEqual(weights["MAN014"], ("failed", "warning"))
+        self.assertEqual(report.execution["check_selection"]["advisory"], ["MAN012", "MAN014"])
+        for rendered in (render_compact(report), render_terminal(report)):
+            self.assertIn("reported as warnings instead of errors: MAN012, MAN014", rendered)
+            self.assertNotIn("required validation retained", rendered)
 
     async def test_source_and_pdf_identity_checks_have_independent_selection(self):
         (self.source / "main.tex").write_text(

@@ -44,6 +44,9 @@ class ExecutionRecordTests(unittest.TestCase):
         self.assertEqual(records.config_path, "/work/fledge.toml")
         self.assertEqual(records.preset, "arxiv")
         self.assertEqual(records.check_selection, CheckSelectionRecord(("TEX",), ("TEX001",)))
+        # The checks reported as warnings are read when the entry names them.
+        advisory = read_check_selection({"select": ["ALL"], "advisory": ["MAN012"]})
+        self.assertEqual(advisory, CheckSelectionRecord(("ALL",), (), (), ("MAN012",)))
         self.assertEqual(
             records.not_checked[0], NotCheckedArea("page_limit", "page limit", ("PDF001",), ())
         )
@@ -95,6 +98,7 @@ class ExecutionRecordTests(unittest.TestCase):
                 "check_selection": {
                     "select": ["ALL"],
                     "ignore": [],
+                    "advisory": [],
                     "always_enforced_when_applicable": ["TEX005"],
                 },
                 "not_checked": [

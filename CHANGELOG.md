@@ -18,6 +18,14 @@ The version is defined once, as `__version__` in `src/latexprep/__init__.py`.
   a document that could not build with the engine Fledge would choose. The warning names
   the declaration and how to choose an engine that runs it.
 
+- **`[checks] advisory` reports a switched-on check as a warning.** A check that a
+  setting switches on, such as `require_float_labels`, is a requirement: a violation or
+  an undecided result is an error and blocks. A code, prefix or rule name listed under
+  `advisory` keeps the check running and reports it as a warning, so the run passes
+  with advisories. An always-enforced guard listed there still blocks, and a check that
+  is ignored or not switched on stays off. The terminal report names the checks it
+  treated this way; JSON reports list them under `execution.check_selection.advisory`.
+
 ### Fixed
 
 - **Files of the TeX installation named by `\bibliography` or `\includegraphics` are no
@@ -302,6 +310,13 @@ The version is defined once, as `__version__` in `src/latexprep/__init__.py`.
   the same cyan labels as `Where:` and `Next:`, and the advice of `PRV007` writes the
   setting as TOML does (`comment_policy = "all"`). Without a terminal, or with
   `NO_COLOR`, the text is the same and carries no color codes.
+- **The review presets report a missing label and an unreferenced float as warnings
+  (`MAN012`, `MAN014`).** A teaser figure without a label, an appendix figure the text
+  never cites, or a figure cited as a typed "Fig. 2(b)" is common in published papers:
+  five of the eleven public papers that `anonymous-review` still blocked were blocked
+  by these two checks alone. Both presets list them under `[checks] advisory`. Set
+  `advisory = []` in your settings file to make them block. A missing caption
+  (`MAN011`) and a label in front of its caption (`MAN013`) still block.
 - **The review presets no longer block on the order of first references (`MAN015`).**
   `anonymous-review` and `camera-ready` switched on `check_float_reference_order`, and a
   paper whose introduction previews a results figure, or whose appendix tables are cited

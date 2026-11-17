@@ -195,7 +195,8 @@
    "select": [
     "ALL"
    ],
-   "ignore": []
+   "ignore": [],
+   "advisory": []
   },
   "structure_checks": {
    "heading_expectations": [],
@@ -548,6 +549,7 @@
     "ALL"
    ],
    "ignore": [],
+   "advisory": [],
    "always_enforced_when_applicable": [
     "BIB001",
     "BIB002",

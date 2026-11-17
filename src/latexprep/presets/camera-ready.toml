@@ -37,6 +37,13 @@ forbid_attachments = true # PDF109: no embedded files.
 
 # Venue-specific top-level settings: add them here, above the first [table].
 
+[checks]
+# MAN012 and MAN014 are reported as warnings and never block: a teaser figure without a
+# label, an appendix figure the text does not cite, or a figure cited as a typed
+# "Fig. 2(b)" is common in published papers. Remove a code from this list to make its
+# check block.
+advisory = ["MAN012", "MAN014"]
+
 [manuscript_checks]
 required_metadata = ["title", "author"] # MAN008: literal title and author commands.
 check_orcid = true # MAN009: checksum of any ORCID iD present.
@@ -44,9 +51,9 @@ check_layout_manipulation = true # MAN002: negative spacing and layout overrides
 check_empty_sections = true # MAN006: headings without content (advisory).
 check_hardcoded_references = true # MAN007: "Figure 2" typed instead of a reference (advisory).
 require_float_captions = true # MAN011: every figure and table has a caption.
-require_float_labels = true # MAN012: every figure and table has a label.
+require_float_labels = true # MAN012: every figure and table has a label (a warning).
 check_float_label_order = true # MAN013: labels follow captions.
-require_float_references = true # MAN014: every labelled float is referenced.
+require_float_references = true # MAN014: every labelled float is referenced (a warning).
 # MAN015: floats first referenced in source order. Off in this preset: an introduction
 # that previews a results figure, or appendix tables cited in another order, is common
 # and no venue rejects it.

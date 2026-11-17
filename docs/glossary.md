@@ -12,7 +12,7 @@ finding
 code
   The stable identifier of a check, such as `BIB101`: a three-letter family
   plus a number. Codes appear in reports, in `fledge rule CODE` and in
-  `[checks] select` and `ignore`. Operational findings, such as a failed build,
+  `[checks] select`, `ignore` and `advisory`. Operational findings, such as a failed build,
   have a name instead (`code: null` in JSON).
 
 check

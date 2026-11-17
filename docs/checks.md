@@ -1,7 +1,7 @@
 # Check catalogue
 
 Every check has a stable code, such as `TEX005`, that appears in reports and in
-`[checks] select` and `ignore`. Codes are never reused. To read one check's
+`[checks] select`, `ignore` and `advisory`. Codes are never reused. To read one check's
 scope and fix in the terminal, run `fledge rule CODE`; `fledge rules` lists all
 of them.
 

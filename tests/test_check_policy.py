@@ -559,6 +559,39 @@ class CheckPolicyTests(ProjectTestCase):
             [item for item in findings if item.code is None or not BY_CODE[item.code].suggestion],
         )
 
+    def test_an_advisory_check_warns_where_it_would_block(self) -> None:
+        # checks.advisory: a switched-on check that is reported and never blocks.
+        failed = Finding("manuscript.float_labels", "A float has no label.", severity="error")
+        undecided = Finding(
+            "manuscript.float_references", "Not decided.", severity="error", status="inconclusive"
+        )
+        passed = Finding("manuscript.float_captions", "Fine.", severity="info", status="passed")
+        other = Finding("manuscript.float_label_order", "Misplaced.", severity="error")
+        mandatory = Finding("source.missing_dependency", "Missing.", severity="error")
+        uncoded = Finding("build.failed", "Build failed", severity="error")
+        findings = [failed, undecided, passed, other, mandatory, uncoded]
+        advisory = CheckSelection(advisory=("MAN012", "MAN014", "TEX005"))
+        kept = selected_findings(findings, advisory)
+        self.assertEqual(
+            [(item.code, item.status, item.severity) for item in kept],
+            [
+                ("MAN012", "failed", "warning"),
+                ("MAN014", "inconclusive", "warning"),
+                ("MAN011", "passed", "info"),
+                ("MAN013", "failed", "error"),
+                # A mandatory check and a result without a code keep their weight.
+                ("TEX005", "failed", "error"),
+                (None, "failed", "error"),
+            ],
+        )
+        self.assertFalse(any(item.is_blocking for item in kept[:3]))
+        # The findings themselves are not changed, and without the setting nothing is.
+        self.assertEqual(failed.severity, "error")
+        self.assertEqual(selected_findings(findings, CheckSelection()), findings)
+        # An ignored check is still left out.
+        ignored = CheckSelection(ignore=("MAN012",), advisory=("MAN012",))
+        self.assertNotIn("MAN012", [item.code for item in selected_findings(findings, ignored)])
+
     def test_future_registered_code_is_selected_without_policy_allowlist(self) -> None:
         future = replace(BY_CODE["MAN001"], code="NEW001", name="future.check")
         finding = Finding(future.name, "Future check")

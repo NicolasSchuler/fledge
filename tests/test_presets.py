@@ -91,6 +91,10 @@ class PresetContentTests(unittest.TestCase):
         self.assertTrue(review.manuscript_checks.require_float_references)
         # Citing a results figure early is common practice, so no preset blocks on it.
         self.assertFalse(review.manuscript_checks.check_float_reference_order)
+        # A missing label or reference is reported and does not block either.
+        self.assertTrue(review.manuscript_checks.require_float_labels)
+        self.assertEqual(review.checks.advisory, ("MAN012", "MAN014"))
+        self.assertEqual(arxiv.checks.advisory, ())
         self.assertEqual(review.source_transforms.comment_policy, "retain")
         self.assertFalse(review.manuscript_checks.require_line_numbers)
         self.assertFalse(review.bbl_checks.require_bbl)
@@ -99,6 +103,7 @@ class PresetContentTests(unittest.TestCase):
         self.assertEqual(final.manuscript_checks.required_metadata, ("title", "author"))
         self.assertTrue(final.manuscript_checks.require_float_references)
         self.assertFalse(final.manuscript_checks.check_float_reference_order)
+        self.assertEqual(final.checks.advisory, ("MAN012", "MAN014"))
         self.assertFalse(final.manuscript_checks.forbid_line_numbers)
         self.assertIsNone(final.included_figure_artwork.required_color_space)
         self.assertIsNone(final.rendered_pdf_artwork.required_color_space)
@@ -172,6 +177,25 @@ class PresetPrecedenceTests(ProjectTestCase):
         # Keys the file does not mention keep the preset's value.
         self.assertTrue(settings.submission_checks.scan_private_comments)
         self.assertTrue(settings.pdf.forbid_attachments)
+
+    def test_a_settings_file_keeps_or_replaces_the_checks_a_preset_reports_as_warnings(self):
+        # Another key of the same table leaves the preset's list in place.
+        kept = load_settings(
+            self.config('[checks]\nignore = ["TEX001"]\n'), {}, preset="anonymous-review"
+        )
+        self.assertEqual(kept.checks.advisory, ("MAN012", "MAN014"))
+        self.assertEqual(kept.checks.ignore, ("TEX001",))
+        # An empty list makes both checks block again; a shorter one keeps the rest.
+        emptied = load_settings(
+            self.config("[checks]\nadvisory = []\n"), {}, preset="anonymous-review"
+        )
+        self.assertEqual(emptied.checks.advisory, ())
+        shorter = load_settings(
+            self.config('[checks]\nadvisory = ["MAN014"]\n'), {}, preset="camera-ready"
+        )
+        self.assertEqual(shorter.checks.advisory, ("MAN014",))
+        with self.assertRaisesRegex(PreparationError, "checks.advisory must be a list"):
+            load_settings(self.config('[checks]\nadvisory = "MAN012"\n'), {}, preset="arxiv")
 
     def test_command_line_overrides_beat_preset_and_settings_file(self):
         path = self.config('layout = "preserve"\n')

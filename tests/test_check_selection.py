@@ -51,10 +51,31 @@ class CheckSelectionTests(unittest.TestCase):
 
     def test_unknown_and_partial_family_selectors_are_rejected(self) -> None:
         for selector in ("", " ", " tex", "TE", "te", "TEX999", "BIB9", "TEX0010", "ALL1"):
-            for name in ("select", "ignore"):
+            for name in ("select", "ignore", "advisory"):
                 with self.subTest(name=name, selector=selector):
                     with self.assertRaisesRegex(PreparationError, "Unknown checks"):
                         CheckSelection(**{name: (selector,)})
+
+    def test_advisory_checks_are_named_by_code_prefix_or_rule_name(self) -> None:
+        selection = CheckSelection(advisory=("MAN012", "manuscript.float_references", "BIB1"))
+        self.assertEqual(selection.advisory, ("MAN012", "MAN014", "BIB1"))
+        for code, expected in (
+            ("MAN012", True),
+            ("MAN014", True),
+            ("BIB101", True),
+            ("MAN011", False),
+            ("BIB002", False),
+        ):
+            with self.subTest(code=code):
+                self.assertEqual(selection.is_advisory(code), expected)
+        self.assertFalse(CheckSelection().is_advisory("MAN012"))
+        self.assertTrue(CheckSelection(advisory=("ALL",)).is_advisory("TEX102"))
+        # Being advisory switches nothing on or off, and the command line keeps the list.
+        self.assertTrue(selection.enabled("MAN012"))
+        layered = selection.with_command_line(select=("MAN",), ignore=("MAN013",))
+        self.assertEqual(layered.advisory, selection.advisory)
+        with self.assertRaisesRegex(PreparationError, "checks.advisory must be an array"):
+            CheckSelection(advisory=["MAN012"])  # ty: ignore[invalid-argument-type]
 
     def test_rule_names_and_former_names_select_the_check_by_its_code(self) -> None:
         """Check that rule names and former names select a check as its code does.

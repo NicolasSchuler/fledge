@@ -89,6 +89,9 @@ It depends on its severity:
 - A **warning**: record a suppression with a written reason for that location
   under `[[reporting.suppressions]]`, which marks it as reviewed, or switch the
   check off with `[checks] ignore = ["CODE"]`.
+- An **error** of a check you switched on that should not stop the run: list
+  its code under `[checks] advisory`, and it is reported as a warning
+  ([configuration](configuration.md#report-a-check-without-letting-it-block)).
 - An **error**: fix it. A few eligible failures, such as an intended visual
   change, can be accepted with a reason under `[[reporting.accepted_exceptions]]`;
   the run then exits with 2. See
