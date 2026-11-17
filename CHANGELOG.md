@@ -154,7 +154,9 @@ The version is defined once, as `__version__` in `src/latexprep/__init__.py`.
 - **Labels inside their caption and floats in minipages are placed correctly
   (`MAN013`).** `\caption{…\label{x}}` and REVTeX's `\caption{\label{x}…}` were reported
   as labels before their caption, and two minipages, each with a caption and a label,
-  left the check inconclusive.
+  left the check inconclusive. A label inside `\subfigure[…]{…}` or `\subtable[…]{…}`,
+  the commands of the subfigure package, names that part and no longer counts as a
+  label of the float in front of its caption.
 - **References that the checks did not read no longer fail a float (`MAN014`,
   `MAN015`).** A project macro such as `\newcommand\Fig[1]{Figure~\ref{fig:#1}}` is read
   at each use, a `\ref` inside a macro that typesets its argument counts, and so does a

@@ -187,6 +187,22 @@ class FloatContextTests(ProjectTestCase):
                     f"\\end{{{environment}}}"
                 )
 
+    def test_a_label_in_a_subfigure_command_names_the_part_not_the_float(self) -> None:
+        # Held-out paper (subfigure package): \subfigure[caption]{\label{…}…} in front of
+        # the float's caption was reported as a label placed before the caption.
+        body = (
+            "See Figure~\\ref{fig:both}%s.\n\\begin{figure}\\centering\n"
+            "\\subfigure[First]{\\label{fig:both:a}\\includegraphics{a}}\n"
+            "\\subfigure[Second]{\\label{fig:both:b}\\includegraphics{b}}\n"
+            "%s\\caption{Both.}\\label{fig:both}\\end{figure}"
+        )
+        self.assert_passed(body % ("", ""))
+        # A reference to a part refers to the figure.
+        self.assert_passed((body % ("", "")).replace("\\ref{fig:both}", "\\ref{fig:both:a}"))
+        # Counter-test: a label of the float itself in front of its caption is still misplaced.
+        results = self.statuses(body % (" and \\ref{fig:early}", "\\label{fig:early}"))
+        self.assertEqual(results["float_label_order"].status, "failed")
+
     def test_a_subcaption_in_a_minipage_labels_the_subfigure(self) -> None:
         self.assert_passed(
             "See Figure~\\ref{fig:a}.\\begin{figure}\\begin{minipage}{.4\\linewidth}"

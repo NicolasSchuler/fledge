@@ -325,9 +325,11 @@ NEUTRAL_COMMANDS = frozenset(
 LIST_ENVIRONMENTS = frozenset(
     {"itemize", "enumerate", "description", "itemize*", "enumerate*", "description*", "tablenotes"}
 )
-# Subfigures (subfig's \subfloat, subcaption's \subcaptionbox and \subcaption): their
-# captions and labels belong to a part of the float (``manuscript_float_checks``).
-SUBFIGURE_COMMANDS = frozenset({"subfloat", "subcaptionbox"})
+# Subfigures (subfig's \subfloat, subcaption's \subcaptionbox and \subcaption, and the
+# \subfigure[caption]{body} and \subtable[caption]{body} commands of the subfigure
+# package and the jmlr class): their captions and labels belong to a part of the float
+# (``manuscript_float_checks``).
+SUBFIGURE_COMMANDS = frozenset({"subfloat", "subcaptionbox", "subfigure", "subtable"})
 SUBFIGURE_ENVIRONMENTS = frozenset({"subfigure", "subtable"})
 # Environments whose body is drawing or pseudo-code commands: TikZ, pgfplots, picture
 # and algorithms. Their commands draw or typeset steps; a caption, label or reference
