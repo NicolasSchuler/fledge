@@ -517,20 +517,8 @@ _SETTING_OPTIONS = tuple(item.name for item in fields(CommandOptions) if item.na
 _SETTING_FLAGS = {"apply_formatting": "--format"}
 
 
-def _check_input_and_outputs(options: CommandOptions, files: ReportFiles) -> None:
-    """Check that the input exists and that the output destinations are distinct.
-
-    Args:
-        options: The options of the command.
-        files: The requested report files; they are discarded when two destinations are
-            the same.
-
-    Raises:
-        RequestError: The input does not exist, or a report file would be saved inside the
-            output or preview folder.
-        PreparationError: Two of the output, JSON, HTML and diagnostics destinations are
-            the same.
-    """
+def _check_input(options: CommandOptions) -> None:
+    """Raise a request error with command-specific advice when the input does not exist."""
     source = options.source
     if not source.exists() and not source.is_symlink():
         raise RequestError(
@@ -539,24 +527,6 @@ def _check_input_and_outputs(options: CommandOptions, files: ReportFiles) -> Non
             if options.command is JobCommand.PDF
             else "Pass the path of the paper's LaTeX source folder or ZIP file; check the "
             "spelling and the current directory.",
-        )
-    # The job validates --output and --preview-output, naming the option at fault.
-    reports = [item for item in (files.json, files.html, files.diagnostics) if item is not None]
-    destinations = [*reports, *([options.output] if options.output is not None else [])]
-    if len({item.resolve() for item in destinations}) != len(destinations):
-        # Whichever file was written first would take the path of the others.
-        files.discard()
-        raise PreparationError("Output, JSON, HTML and diagnostics destinations must be distinct")
-    folders = [
-        item.resolve() for item in (options.output, options.preview_output) if item is not None
-    ]
-    if any(report.resolve().is_relative_to(folder) for report in reports for folder in folders):
-        # An existing output folder may be empty or replaced; a report inside it would clash.
-        files.discard()
-        raise RequestError(
-            "Report files must be saved outside the output and preview folders",
-            "Choose --json-report, --html-report and --diagnostics paths outside --output "
-            "and --preview-output; the output folder receives its own report.json.",
         )
 
 
@@ -717,8 +687,10 @@ def _deliver_report(
         a defect.
     """
     preview_images = pdf_previews.images if pdf_previews else None
+    outcome = report.outcome
     try:
         public, rendered = save_reports(report, files, preview_images)
+        outcome = public.outcome
         write_redacted_report(
             public,
             output_format,
@@ -743,7 +715,7 @@ def _deliver_report(
         failure = _internal_failure(error, " while writing the report")
         failure.show()
         return failure.exit_code
-    return report.outcome.exit_code
+    return outcome.exit_code
 
 
 def _interrupted_report_message(report: Report) -> str:
@@ -753,7 +725,7 @@ def _interrupted_report_message(report: Report) -> str:
         The message, which says whether the verified output was already published and
         stays in place.
     """
-    if report.artifacts:
+    if report.submission_written:
         return (
             "Cancelled while writing the report; the verified output was already published "
             "and stays in place"
@@ -789,7 +761,7 @@ def _checked_options(options: CommandOptions) -> CommandOptions:
             click.echo(choice.note, err=True)
     if options.command is JobCommand.PREPARE:
         require_destination(output=options.output, dry_run=options.dry_run)
-    warning = check_selection_note(options.command, options.select_checks)
+    warning = check_selection_note(options.command, options.select_checks, dry_run=options.dry_run)
     if warning is not None:
         click.echo(warning, err=True)
     return options
@@ -829,8 +801,10 @@ def _execute(command: JobCommand, arguments: dict[str, Any]) -> int:
             diagnostics=options.diagnostics,
             files=files,
             force=options.force,
+            output=options.output,
+            preview_output=options.preview_output,
         )
-        _check_input_and_outputs(options, files)
+        _check_input(options)
         settings = _load_command_settings(options, report)
         settings_file = _shown_settings_file(report)
         if files.html is not None or output_format is OutputFormat.HTML:

@@ -30,6 +30,8 @@ MAX_MEASUREMENT_PIXELS = 4_000_000
 MAX_MEASUREMENT_DIMENSION = 4000
 MIN_MEASUREMENT_DPI = 18
 MAX_MEASUREMENT_DPI = 144
+# Poppler's rounded point dimensions can differ from the raster by one pixel per side.
+RASTER_SIZE_TOLERANCE_PX = 1
 # Pairs of boxes or colors one measurement compares before it reports itself incomplete.
 MAX_PAIR_CHECKS = 250_000
 # WCAG adds this flare term to both luminances before taking their ratio: contrast is
@@ -99,6 +101,12 @@ def measurement_raster_size(size: tuple[float, float], dpi: int) -> tuple[int, i
     )
 
 
+def comparison_raster_size(size: tuple[float, float], dpi: int) -> tuple[int, int]:
+    """Return the reserved raster size, allowing for rounded pdfinfo dimensions."""
+    width, height = measurement_raster_size(size, dpi)
+    return width + RASTER_SIZE_TOLERANCE_PX, height + RASTER_SIZE_TOLERANCE_PX
+
+
 def exceeds_measurement_raster(dimensions: tuple[int, int]) -> bool:
     """Return whether a render of ``dimensions`` pixels is beyond the measurement limits."""
     return math.prod(dimensions) > MAX_MEASUREMENT_PIXELS or max(dimensions) > (
@@ -108,7 +116,7 @@ def exceeds_measurement_raster(dimensions: tuple[int, int]) -> bool:
 
 def _fits_raster(size: tuple[float, float], dpi: int) -> bool:
     """Return whether a page of ``size`` points rendered at ``dpi`` fits the raster limits."""
-    pixels = measurement_raster_size(size, dpi)
+    pixels = comparison_raster_size(size, dpi)
     return max(pixels) <= MAX_RASTER_DIMENSION and math.prod(pixels) <= MAX_RASTER_PIXELS
 
 

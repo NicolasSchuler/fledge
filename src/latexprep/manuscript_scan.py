@@ -261,7 +261,7 @@ class _BlockReader:
 
     def read(self) -> list[Block]:
         """Read the blocks in line order; an opener without a local closer is an unclear block."""
-        for command in commands_before_end(self.source):
+        for command in commands_before_end(self.source, may_not_run=self.conditionals):
             if command.name == self.kind:
                 self._command_block(command)
             elif command.name in {"begin", "end"} and command.arguments:
@@ -423,7 +423,7 @@ class ManuscriptScan:
         stopped_at: int | None = None
         # Package code is read past an \endinput that a conditional may skip: the
         # declarations after it may not run, which only they need to say.
-        for command in commands_before_end(source, may_not_run=() if content else conditionals):
+        for command in commands_before_end(source, may_not_run=conditionals):
             conditional = in_conditional(conditionals, command.start)
             if command.name == "endinput" and self._end_of_input(
                 name, source, command, conditional=conditional, content=content

@@ -89,12 +89,14 @@ class PdfMetadata:
             included PDF.
         decoded_bytes: The decompressed stream bytes the read needed, which callers that
             read many files count against a shared budget.
+        included_limitations: The kinds of included PDF metadata that could not be read.
     """
 
     entries: list[PdfMetadataEntry] = field(default_factory=list)
     limitations: list[str] = field(default_factory=list)
     included_objects: int = 0
     decoded_bytes: int = 0
+    included_limitations: list[str] = field(default_factory=list)
 
 
 class NotPdfError(PreparationError):
@@ -488,6 +490,7 @@ class _ObjectWalk:
         streams: Each stream object by object number.
         trailers: The trailer dictionaries, classic and cross-reference streams.
         limitations: The kinds of data that were deliberately not decoded.
+        included_limitations: The kinds of unreadable data known to come from included PDFs.
         decoded_bytes: The decompressed bytes so far.
         read_objects: The objects read so far.
     """
@@ -499,13 +502,16 @@ class _ObjectWalk:
         self.streams: dict[int, _Stream] = {}
         self.trailers: list[dict[str, object]] = []
         self.limitations: list[str] = []
+        self.included_limitations: list[str] = []
         self.decoded_bytes = 0
         self.read_objects = 0
 
-    def note(self, limitation: str) -> None:
+    def note(self, limitation: str, *, origin: MetadataOrigin | None = None) -> None:
         """Record a kind of data that was deliberately not decoded, once."""
         if limitation not in self.limitations:
             self.limitations.append(limitation)
+        if origin is MetadataOrigin.INCLUDED and limitation not in self.included_limitations:
+            self.included_limitations.append(limitation)
 
     def count(self) -> None:
         """Count one object read, every so often letting a cancellation through.
@@ -588,7 +594,7 @@ class _ObjectWalk:
             return data[position:], len(data)
         return data[position:end].rstrip(b"\r\n"), end
 
-    def decoded(self, stream: _Stream) -> bytes | None:
+    def decoded(self, stream: _Stream, *, origin: MetadataOrigin | None = None) -> bytes | None:
         """Return the decompressed data of a stream, or ``None`` for an unsupported filter.
 
         Raises:
@@ -603,7 +609,7 @@ class _ObjectWalk:
         elif names == ["FlateDecode"] and not _has_predictor(stream.dictionary):
             data = _inflate(stream.raw, self.limits.max_stream_bytes)
         else:
-            self.note("streams with filters other than FlateDecode")
+            self.note("streams with filters other than FlateDecode", origin=origin)
             return None
         self.decoded_bytes += len(data)
         if self.decoded_bytes > self.limits.max_decoded_bytes:
@@ -741,7 +747,7 @@ class _Collector:
                 return
             self.visited.add(value.number)
             if value.number in self.walk.streams:
-                self.walk.note("application data streams (PieceInfo)")
+                self.walk.note("application data streams (PieceInfo)", origin=origin)
                 return
             value = self.walk.resolve(value)
         if isinstance(value, bytes):
@@ -762,6 +768,8 @@ class _Collector:
             self.visited.add(value.number)
         resolved = self.walk.resolve(value)
         if not isinstance(resolved, dict):
+            if value is not None:
+                self.walk.note("unreadable information dictionaries", origin=origin)
             return
         for key, item in resolved.items():
             text = self.walk.resolve(item)
@@ -771,10 +779,13 @@ class _Collector:
     def xmp(self, number: int, origin: MetadataOrigin, prefix: str) -> None:
         """Record the properties of the XMP stream ``number``, once."""
         stream = self.walk.streams.get(number)
-        if stream is None or number in self.visited:
+        if number in self.visited:
+            return
+        if stream is None:
+            self.walk.note("unreadable XMP metadata streams", origin=origin)
             return
         self.visited.add(number)
-        data = self.walk.decoded(stream)
+        data = self.walk.decoded(stream, origin=origin)
         if data is None:
             return
         for name, text in xmp_fields(data):
@@ -792,13 +803,19 @@ def _included_forms(walk: _ObjectWalk) -> Iterator[dict[str, object]]:
 def _collect_included(collector: _Collector, form: dict[str, object]) -> None:
     """Record what pdfTeX or LuaTeX copied from an included PDF into one form XObject."""
     included = MetadataOrigin.INCLUDED
-    name = collector.walk.resolve(form.get("PTEX.FileName"))
-    if isinstance(name, bytes) and (text := pdf_text(name).strip()):
-        collector.add(included, "PTEX.FileName", text)
+    file_name = form.get("PTEX.FileName")
+    name = collector.walk.resolve(file_name)
+    if isinstance(name, bytes):
+        if text := pdf_text(name).strip():
+            collector.add(included, "PTEX.FileName", text)
+    elif file_name is not None:
+        collector.walk.note("unreadable included PDF file names", origin=included)
     collector.dictionary_strings(form.get("PTEX.InfoDict"), included, "PTEX.InfoDict")
     metadata = form.get("Metadata")
     if isinstance(metadata, Reference):
         collector.xmp(metadata.number, included, "included XMP")
+    elif metadata is not None:
+        collector.walk.note("unreadable XMP metadata streams", origin=included)
     if "PieceInfo" in form:
         collector.strings(form["PieceInfo"], included, "included PieceInfo")
 
@@ -849,5 +866,6 @@ def read_pdf_metadata(data: bytes, limits: PdfMetadataLimits | None = None) -> P
         _collect_included(collector, form)
     _collect_document(collector)
     collector.result.limitations = walk.limitations
+    collector.result.included_limitations = walk.included_limitations
     collector.result.decoded_bytes = walk.decoded_bytes
     return collector.result

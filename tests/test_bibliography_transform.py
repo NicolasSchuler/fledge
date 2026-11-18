@@ -245,6 +245,40 @@ class BibliographyTransformTests(ProjectTestCase):
         self.write("other.tex", "\\documentclass{article}\\cite{unused}\\bibliography{references}")
         self.assert_blocked(self.plan(cited_only=True), "BIB203")
 
+    def test_local_package_wrappers_block_pruning_and_key_changes_only_when_used(self) -> None:
+        package_definitions = (
+            r"\newcommand{\workref}[1]{\cite{#1}}",
+            r"\def\inner#1{\cite{#1}}\newcommand{\workref}[1]{\inner{#1}}",
+            r"\newcommand{\inner}[1]{\cite{#1}}\let\workref\inner",
+            r"\NewDocumentCommand{\workref}{m}{\cite{#1}}",
+        )
+        self.write("references.bib", "@misc{used}@misc{other}")
+        main = (
+            "\\documentclass{article}\n"
+            "\\usepackage{localrefs}\n"
+            "\\begin{document}\n"
+            "{citation}\n"
+            "\\bibliography{references}\n"
+            "\\end{document}\n"
+        )
+        for package in package_definitions:
+            with self.subTest(package=package):
+                self.write("localrefs.sty", package + "\n")
+                self.write("main.tex", main.replace("{citation}", r"\workref{used}"))
+                for options, code in (
+                    ({"cited_only": True}, "BIB203"),
+                    ({"key_renames": (("used", "renamed"),)}, "BIB204"),
+                ):
+                    proposal = self.plan(**options)
+                    self.assert_blocked(proposal, code)
+                    self.assertIn("citation-bearing command \\workref", proposal[2][0].message)
+        self.write("main.tex", main.replace("{citation}", r"\cite{used}"))
+        files, _, rows = self.plan(cited_only=True)
+        self.assertEqual(rows[0].status, "passed")
+        self.assertEqual(
+            [entry.key for entry in self.parsed(files["references.bib"]).entries], ["used"]
+        )
+
     def test_resolved_source_dependencies_do_not_block_pruning(self) -> None:
         self.manuscript("\\includegraphics{fig}\\cite{keep}")
         self.write("fig.pdf", b"%PDF-1.4")
@@ -315,6 +349,28 @@ class BibliographyTransformTests(ProjectTestCase):
         self.assertIn("@misc{canonical,title={Retained exact metadata}}", output)
         self.assertIn("related={canonical}", output)
         self.assertIn(b"\\cite{canonical,canonical,child}", proposed["main.tex"])
+
+    def test_a_merge_cannot_create_direct_or_transitive_inheritance_cycles(self) -> None:
+        self.manuscript(r"\cite{child}")
+        for bibliography in (
+            "@inproceedings{child,crossref={parent}}\n@proceedings{parent}",
+            "@inproceedings{child,crossref={intermediate}}\n"
+            "@misc{intermediate,xdata={parentalias}}\n@xdata{parent,ids={parentalias}}",
+        ):
+            with self.subTest(bibliography=bibliography):
+                self.write("references.bib", bibliography)
+                proposal = self.plan(merge_keys=(("parent", "child"),))
+                self.assert_blocked(proposal, "BIB204", status="failed")
+                self.assertIn("circular bibliography dependency", proposal[2][0].message)
+
+        self.write(
+            "references.bib",
+            "@misc{child,crossref={parent}}\n@proceedings{parent}\n"
+            "@proceedings{replacement}\n@misc{unrelated,xref={unrelated}}",
+        )
+        files, _, rows = self.plan(merge_keys=(("parent", "replacement"),))
+        self.assertEqual(rows[0].status, "passed")
+        self.assertIn(b"crossref={replacement}", files["references.bib"])
 
     def test_key_mapping_noop_and_invalid_reviewed_mappings(self) -> None:
         self.manuscript("\\cite{a}")

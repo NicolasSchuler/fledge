@@ -14,9 +14,10 @@ import re
 from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import replace
+from graphlib import CycleError, TopologicalSorter
 from typing import NamedTuple
 
-from .bibliography_index import LocatedEntry, index_entries, located_entries
+from .bibliography_index import EntryIndex, LocatedEntry, index_entries, located_entries
 from .bibliography_proposal import (
     ProposalBlocked,
     apply_edits,
@@ -26,8 +27,10 @@ from .bibliography_proposal import (
     unique_entries,
 )
 from .bibtex_layout import FieldSpan, entry_removal
-from .bibtex_syntax import BibDocument, Declaration
+from .bibtex_syntax import BibDocument, Declaration, field_literal
+from .cancellation import cancellation_point
 from .citation_graph import (
+    INHERITANCE_FIELDS,
     KEY_LIST_FIELDS,
     Citation,
     CitationGraph,
@@ -93,13 +96,16 @@ def _executable_preambles(documents: dict[str, BibDocument]) -> list[str]:
 
 def require_literal_graph(
     inspection: SourceGraph, graph: CitationGraph, documents: dict[str, BibDocument]
-) -> None:
+) -> EntryIndex:
     """Refuse key changes and pruning unless every key use is literal and resolved.
 
     Args:
         inspection: The source graph of the manuscript.
         graph: The citations of the selected sources.
         documents: The parsed .bib documents by relative path.
+
+    Returns:
+        The unambiguous index of the bibliography's entries.
 
     Raises:
         ProposalBlocked: The citations are uncertain, the package does not have exactly
@@ -121,6 +127,7 @@ def require_literal_graph(
     )
     if reasons:
         raise ProposalBlocked(joined_reasons(reasons))
+    return index
 
 
 def _key_list_edits(
@@ -226,7 +233,7 @@ def _require_consistent_request(
 
 
 def _build_mapping(
-    documents: dict[str, BibDocument],
+    index: EntryIndex,
     renames: dict[str, str],
     merges: dict[str, str],
     inline_keys: set[str],
@@ -236,7 +243,7 @@ def _build_mapping(
     A merge donor maps to its target's new key.
 
     Args:
-        documents: The parsed .bib documents by relative path.
+        index: The unambiguous keys and aliases of the original entries.
         renames: The new key of each renamed key.
         merges: The target key of each merge donor.
         inline_keys: The keys of inline bibliography entries.
@@ -251,7 +258,7 @@ def _build_mapping(
     mapping = dict(renames)
     for donor, target in merges.items():
         mapping[donor] = renames.get(target, target)
-    for alias, references in index_entries(located_entries(documents.values())).keys.items():
+    for alias, references in index.keys.items():
         key = references[0].entry.key
         if key in merges:
             mapping[alias] = mapping[key]
@@ -297,6 +304,62 @@ def _key_edits(
     return edits
 
 
+def _inheritance_edges(index: EntryIndex) -> set[tuple[str, str]]:
+    """Collect parent relationships using each entry's primary key, resolving aliases."""
+    edges: set[tuple[str, str]] = set()
+    for reference in index.entries:
+        cancellation_point()
+        entry = reference.entry
+        for item in entry.fields:
+            if item.name in INHERITANCE_FIELDS:
+                targets = citation_keys(field_literal(item) or "") or []
+                edges.update((entry.key, index.keys[target][0].entry.key) for target in targets)
+    return edges
+
+
+def _require_no_new_inheritance_cycles(
+    before: EntryIndex, after: EntryIndex, renames: dict[str, str], donors: set[str]
+) -> None:
+    """Refuse a merge that introduces a circular relationship to an inheritance parent."""
+    old_edges = {
+        (renames.get(child, child), renames.get(parent, parent))
+        for child, parent in _inheritance_edges(before)
+        if child not in donors and parent not in donors
+    }
+    edges = _inheritance_edges(after)
+    added = edges - old_edges
+    if not added:
+        return
+    parents: dict[str, set[str]] = defaultdict(set)
+    for child, parent in edges:
+        parents[child].add(parent)
+    try:
+        TopologicalSorter(parents).prepare()
+    except CycleError:
+        _require_acyclic_added_edges(parents, added)
+
+
+def _require_acyclic_added_edges(parents: dict[str, set[str]], added: set[tuple[str, str]]) -> None:
+    """Distinguish cycles introduced by new edges from unrelated cycles already present."""
+    children_by_parent: dict[str, set[str]] = defaultdict(set)
+    for child, parent in added:
+        children_by_parent[parent].add(child)
+    for parent, children in sorted(children_by_parent.items()):
+        pending, seen = [parent], {parent}
+        while pending:
+            cancellation_point()
+            key = pending.pop()
+            if key in children:
+                raise ProposalBlocked(
+                    f"The reviewed merge introduces a circular bibliography dependency "
+                    f"from {key!r} to {parent!r}.",
+                    status="failed",
+                )
+            next_keys = parents.get(key, set()) - seen
+            seen.update(next_keys)
+            pending.extend(sorted(next_keys, reverse=True))
+
+
 def map_keys(
     inspection: SourceGraph,
     graph: CitationGraph,
@@ -321,19 +384,23 @@ def map_keys(
 
     Raises:
         ProposalBlocked: A key use is not literal and resolved, the request is
-            inconsistent, an edit cannot be made, or the resulting keys are ambiguous.
+            inconsistent, an edit cannot be made, or the result has ambiguous keys
+            or newly circular inheritance.
     """
-    require_literal_graph(inspection, graph, documents)
+    index = require_literal_graph(inspection, graph, documents)
     entries = unique_entries(documents)
     renames, merges = dict(key_renames), dict(merge_keys)
     _require_consistent_request(entries, renames, merges)
-    mapping = _build_mapping(documents, renames, merges, graph.inline_keys)
+    mapping = _build_mapping(index, renames, merges, graph.inline_keys)
     replace_documents(documents, _key_edits(entries, renames, merges, mapping))
-    reasons = uncertainty_messages(index_entries(located_entries(documents.values())).uncertainties)
+    updated = index_entries(located_entries(documents.values()))
+    reasons = uncertainty_messages(updated.uncertainties)
     if reasons:
         raise ProposalBlocked(
             "The reviewed mapping is ambiguous: " + joined_reasons(reasons), status="failed"
         )
+    if merges:
+        _require_no_new_inheritance_cycles(index, updated, renames, set(merges))
     sources: dict[str, str] = {}
     count = 0
     for path, changes in _citation_edits(inspection, mapping).items():
@@ -379,8 +446,7 @@ def prune_unreachable(
             for citation in graph.citations
         ],
     )
-    require_literal_graph(inspection, remapped, documents)
-    index = index_entries(located_entries(documents.values()))
+    index = require_literal_graph(inspection, remapped, documents)
     keep = index.reachable(remapped)
     edits: dict[str, list[TextEdit]] = defaultdict(list)
     count = 0

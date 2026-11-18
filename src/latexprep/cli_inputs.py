@@ -17,26 +17,80 @@ import click
 from .check_selection import resolve_selectors, selected_codes
 from .errors import PreparationError
 from .job_context import JobCommand
+from .rules import BIBLIOGRAPHY_TRANSFORM_RULES, BY_NAME, SOURCE_TRANSFORM_RULES
+from .source_graph import INCOMPLETE_GRAPH_RULES
 from .text_safety import escape_single_line_text
 
-# The check families each command can never run, by code family. ``inspect`` builds no
-# PDF, ``bib check`` runs only the bibliography and online reference checks, and
-# ``pdf check`` reads nothing but the PDF.
+# The families a command does not run, with exceptions for checks shared across scopes.
 _FAMILIES_NOT_RUN: dict[JobCommand, frozenset[str]] = {
     JobCommand.INSPECT: frozenset({"BLD", "CMP", "FMT", "PDF"}),
-    JobCommand.BIBLIOGRAPHY: frozenset({"BLD", "CMP", "FMT", "MAN", "PDF", "STY"}),
-    JobCommand.PDF: frozenset({"BIB", "BLD", "FMT", "MAN", "NET", "PKG", "STY", "TEX"}),
+    JobCommand.CHECK: frozenset({"FMT"}),
+    JobCommand.BIBLIOGRAPHY: frozenset(
+        {"BLD", "CHK", "CMP", "FMT", "MAN", "PDF", "PKG", "PRV", "STY", "TEX"}
+    ),
+    JobCommand.PDF: frozenset(
+        {"BIB", "BLD", "CHK", "FMT", "MAN", "NET", "PKG", "PRV", "STY", "TEX"}
+    ),
 }
-# Checks of such a family that the command runs all the same: inspect checks the colour
-# space of the figures in the sources (PDF313) as part of its readiness checks.
+# Figure color space also has a source check. The bibliography command restates relevant
+# source-graph errors and includes import diagnostics. PDF privacy can run without TeX.
 _RUN_DESPITE_FAMILY: dict[JobCommand, frozenset[str]] = {
     JobCommand.INSPECT: frozenset({"PDF313"}),
+    JobCommand.BIBLIOGRAPHY: frozenset(
+        {"PKG005", *(BY_NAME[name].code for name in INCOMPLETE_GRAPH_RULES)}
+    ),
+    JobCommand.PDF: frozenset({"PRV002", "PRV004", "PRV105"}),
 }
-# Why a command cannot run the other checks, and which command can.
+# A dry run stops before flattening, checking the prepared bundle and verifying the archive.
+_RELEASE_CHECKS = frozenset(
+    {
+        "PKG001",
+        "PKG002",
+        "PKG003",
+        "PKG004",
+        "PKG006",
+        "PKG007",
+        "PKG008",
+        "PKG101",
+        "PKG102",
+        "PKG103",
+        "PKG104",
+        "PKG105",
+        "PKG201",
+        "PKG301",
+        "PKG303",
+        "PRV102",
+    }
+)
+_PREPARATION_CHECKS = frozenset(
+    {
+        *(rule.code for rule in SOURCE_TRANSFORM_RULES),
+        *(rule.code for rule in BIBLIOGRAPHY_TRANSFORM_RULES),
+        *(_RELEASE_CHECKS - {"PKG101", "PKG102", "PKG103", "PKG104"}),
+        "PKG302",
+        "PRV101",
+    }
+)
+_CODES_NOT_RUN: dict[JobCommand, frozenset[str]] = {
+    JobCommand.INSPECT: _PREPARATION_CHECKS | {"PRV105"},
+    JobCommand.CHECK: _PREPARATION_CHECKS,
+    JobCommand.BIBLIOGRAPHY: frozenset(
+        {"BIB109", "BIB110", *(rule.code for rule in BIBLIOGRAPHY_TRANSFORM_RULES)}
+    ),
+    JobCommand.PDF: frozenset({"CMP101", "PDF212"}),
+}
 _NOT_RUN_REASONS: dict[JobCommand, tuple[str, str]] = {
     JobCommand.INSPECT: (
-        "inspect does not build the PDF",
+        "inspect does not build the PDF or prepare a submission",
         "fledge check builds the PDF and runs them",
+    ),
+    JobCommand.CHECK: (
+        "check does not transform or package the sources",
+        "fledge prepare covers preparation and fledge fmt checks formatting",
+    ),
+    JobCommand.PREPARE: (
+        "a dry run stops before final packaging and verification",
+        "fledge prepare --output DIR verifies the package",
     ),
     JobCommand.BIBLIOGRAPHY: (
         "bib check runs only the bibliography and online reference checks",
@@ -148,11 +202,16 @@ def require_destination(*, output: Path | None, dry_run: bool) -> None:
         )
 
 
-def _runs(command: JobCommand, code: str) -> bool:
+def _runs(command: JobCommand, code: str, *, dry_run: bool) -> bool:
     """Return whether ``command`` can run the check ``code`` at all."""
     family = code.rstrip("0123456789")
-    return family not in _FAMILIES_NOT_RUN.get(command, frozenset()) or code in (
-        _RUN_DESPITE_FAMILY.get(command, frozenset())
+    available_family = family not in _FAMILIES_NOT_RUN.get(command, ()) or code in (
+        _RUN_DESPITE_FAMILY.get(command, ())
+    )
+    return (
+        available_family
+        and code not in _CODES_NOT_RUN.get(command, ())
+        and not (dry_run and code in _RELEASE_CHECKS)
     )
 
 
@@ -163,15 +222,32 @@ def _named(codes: list[str]) -> str:
     return f"{shown} and {hidden} more" if hidden > 0 else shown
 
 
-def check_selection_note(command: JobCommand, selectors: tuple[str, ...]) -> str | None:
+def _alternative(command: JobCommand, code: str, default: str) -> str:
+    """Point to a command that can run an unavailable check."""
+    if command is JobCommand.PREPARE:
+        return default
+    if code.startswith("FMT"):
+        return "fledge fmt checks formatting"
+    if code in _PREPARATION_CHECKS:
+        return "fledge prepare runs the preparation checks"
+    if command is JobCommand.PDF and code in _CODES_NOT_RUN[JobCommand.PDF]:
+        return "fledge check on the sources runs them when configured"
+    return default
+
+
+def check_selection_note(
+    command: JobCommand, selectors: tuple[str, ...], *, dry_run: bool = False
+) -> str | None:
     """Say which checks chosen with ``--select`` the command cannot run.
 
     Selectors that do not resolve are left to the settings validation, which names them.
-    ``ALL`` chooses whatever the command runs, so it never draws a note.
+    ``ALL`` chooses whatever the command runs; additional explicit choices still draw
+    a warning when they cannot run.
 
     Args:
         command: The job command.
         selectors: The values of ``--select``.
+        dry_run: Whether preparation stops after previewing transformations.
 
     Returns:
         A warning that names the checks this command cannot run, or ``None`` when it can
@@ -181,20 +257,21 @@ def check_selection_note(command: JobCommand, selectors: tuple[str, ...]) -> str
         click.UsageError: The command can run none of the chosen checks, so the run would
             pass without checking anything.
     """
-    if command not in _FAMILIES_NOT_RUN or not selectors:
+    if command not in _NOT_RUN_REASONS or not selectors:
         return None
     try:
         resolved = resolve_selectors(selectors, "--select")
     except PreparationError:
         return None
-    if "ALL" in resolved:
-        return None
-    chosen = list(dict.fromkeys(code for item in resolved for code in selected_codes(item)))
-    not_run = [code for code in chosen if not _runs(command, code)]
+    chosen = list(
+        dict.fromkeys(code for item in resolved if item != "ALL" for code in selected_codes(item))
+    )
+    not_run = [code for code in chosen if not _runs(command, code, dry_run=dry_run)]
     if not not_run:
         return None
-    reason, alternative = _NOT_RUN_REASONS[command]
-    if len(not_run) == len(chosen):
+    reason, default = _NOT_RUN_REASONS[command]
+    alternative = "; ".join(dict.fromkeys(_alternative(command, code, default) for code in not_run))
+    if len(not_run) == len(chosen) and "ALL" not in resolved:
         raise click.UsageError(
             f"--select chose only checks that this command cannot run ({_named(not_run)}): "
             f"{reason}; {alternative}."

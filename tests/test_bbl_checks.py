@@ -5,7 +5,11 @@ from __future__ import annotations
 import time
 import unittest
 
-from latexprep.bbl_checks import Backend, bbl_keys
+from latexprep.bbl_checks import Backend, BblOptions, bbl_keys, check_bbl
+from latexprep.expanded_document import reachable_sources
+from latexprep.source_graph import SourceGraph
+
+from .support import ProjectTestCase
 
 
 class BblKeysTests(unittest.TestCase):
@@ -41,6 +45,27 @@ class BblKeysTests(unittest.TestCase):
             (Backend.BIBTEX.display_name, Backend.BIBLATEX.display_name), ("BibTeX", "biblatex")
         )
 
+    def test_commented_and_literal_commands_do_not_define_bbl_keys(self):
+        bibtex = (
+            "% \\datalist{} \\entry{comment}{article}{}\n"
+            "\\bibitem[Label]{actual} \\verb|\\bibitem{verbatim}|\n"
+            "\\\\bibitem{escaped}\n"
+            "% \\bibitem{commented}\n"
+        )
+        self.assertEqual(bbl_keys(bibtex), ({"actual"}, Backend.BIBTEX))
+        biblatex = (
+            "\\datalist[entry]{test}\n"
+            "\\entry{actual}{article}{}\n"
+            "  \\verb{url}\n"
+            "  \\entry{fieldtext}{article}{}\n"
+            "  \\endverb\n"
+            "% \\entry{commented}{article}{}\n"
+            "% \\keyalias{commentedalias}{actual}\n"
+            "\\entry{next}{article}{}\n"
+            "\\keyalias{previousname}{actual}\n"
+        )
+        self.assertEqual(bbl_keys(biblatex), ({"actual", "next", "previousname"}, Backend.BIBLATEX))
+
     def test_a_large_bbl_is_read_in_linear_time(self):
         # Copying the rest of the text for every \bibitem would make four times the items
         # cost sixteen times as much, where a linear read costs four. The test compares the
@@ -58,6 +83,33 @@ class BblKeysTests(unittest.TestCase):
         small = processor_seconds(5_000)
         large = processor_seconds(20_000)
         self.assertLess(large, 10 * max(small, 2e-4))
+
+
+class ShippedBblTests(ProjectTestCase):
+    """The readiness checks when the generated bibliography is shipped alone."""
+
+    def test_a_shipped_bbl_is_checked_without_the_declared_bib_file(self) -> None:
+        self.write(
+            "main.tex",
+            "\\documentclass{article}\n\\usepackage{biblatex}\n"
+            "\\addbibresource{references.bib}\n"
+            "\\begin{document}\\cite{actual,other}\\printbibliography\\end{document}",
+        )
+        header = "% $ biblatex auxiliary file $\n% $ biblatex bbl format version 3.2 $\n"
+        settings = BblOptions(check_bbl_coverage=True, biblatex_bbl_format_version="3.3")
+        for second_entry, expected in (
+            ("% \\entry{other}{article}{}\n", "failed"),
+            ("\\entry{other}{article}{}\n", "passed"),
+        ):
+            with self.subTest(coverage=expected):
+                self.write("main.bbl", header + "\\entry{actual}{article}{}\n" + second_entry)
+                graph = SourceGraph.build(self.root, "main.tex")
+                findings = check_bbl(self.root, graph, reachable_sources(graph), settings)
+                self.assertEqual(
+                    {item.code: item.status for item in findings},
+                    {"TEX009": "passed", "BIB109": expected, "BIB110": "failed"},
+                )
+                self.assertEqual(findings[2].details["found_version"], "3.2")
 
 
 if __name__ == "__main__":

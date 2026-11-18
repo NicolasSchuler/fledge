@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import stat
 from pathlib import Path
 from typing import NamedTuple
 
@@ -19,6 +20,7 @@ from .command_options import debug_option
 from .config import Settings, parse_settings_text
 from .config_discovery import resolve_config_path
 from .errors import PreparationError
+from .file_safety import FileIdentity, write_new_file, write_sibling_temporary
 from .import_budget import ImportLimits
 from .main_selection import candidate_mains
 from .presets import PRESETS, preset_names, preset_text
@@ -222,30 +224,53 @@ def _next_steps(directory: Path) -> list[str]:
     ]
 
 
-def _check_target(target: Path, *, force: bool) -> None:
+def _check_target(target: Path, *, force: bool) -> os.stat_result | None:
     """Refuse to write through a link or special file, or over a file without ``--force``.
 
     Args:
         target: The settings file to write.
         force: Whether an existing regular file may be overwritten.
 
+    Returns:
+        The approved existing file's metadata, or ``None`` for a new file.
+
     Raises:
         InitError: The target is a link or not a regular file, or it exists and ``force``
             is false.
     """
-    if target.is_symlink() or (target.exists() and not target.is_file()):
+    try:
+        info = target.lstat()
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(info.st_mode):
         raise InitError(f"{target} is not a regular file; refusing to write through it")
-    if target.exists() and not force:
+    if not force:
         raise InitError(f"{target} already exists; pass --force to overwrite it")
+    return info
 
 
-def _write_settings(target: Path, text: str, *, force: bool) -> None:
+def _replace_settings(target: Path, data: bytes, earlier: os.stat_result) -> None:
+    """Publish complete settings over the approved existing file, keeping its permissions."""
+    temporary = write_sibling_temporary(target, data, private=True)
+    try:
+        current = target.lstat()
+        if not stat.S_ISREG(current.st_mode) or (
+            FileIdentity.from_stat(current) != FileIdentity.from_stat(earlier)
+        ):
+            raise InitError(f"{target} changed while preparing its replacement")
+        temporary.chmod(stat.S_IMODE(current.st_mode))
+        temporary.replace(target)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _write_settings(target: Path, text: str, earlier: os.stat_result | None) -> None:
     """Validate ``text`` as settings, then write it; an invalid file is never written.
 
     Args:
         target: The settings file to write.
         text: The settings text.
-        force: Whether to overwrite an existing file; otherwise the file must not exist.
+        earlier: The approved existing file's metadata, or ``None`` to require a new file.
 
     Raises:
         InitError: The text is not valid settings, or writing failed.
@@ -256,8 +281,10 @@ def _write_settings(target: Path, text: str, *, force: bool) -> None:
     except PreparationError as error:
         raise InitError(f"Cannot write a valid {target}: {error}") from error
     try:
-        with target.open("w" if force else "x", encoding="utf-8") as stream:
-            stream.write(text)
+        if earlier is None:
+            write_new_file(target, text.encode("utf-8"))
+        else:
+            _replace_settings(target, text.encode("utf-8"), earlier)
     except OSError as error:
         raise InitError(f"Cannot write a valid {target}: {error}") from error
 
@@ -318,10 +345,10 @@ def init_command(directory: Path, preset: str | None, *, force: bool, list_prese
         _print_presets()
         return 0
     target = directory / CONFIG_NAME
-    _check_target(target, force=force)
+    earlier = _check_target(target, force=force)
     text, main_note = settings_text(directory, preset)
     previous = _nearest_config(directory)
-    _write_settings(target, text, force=force)
+    _write_settings(target, text, earlier)
     origin = f" from the {preset} preset" if preset is not None else ""
     click.echo(f"Wrote {target}{origin}.")
     if main_note is not None:

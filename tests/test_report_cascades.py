@@ -536,10 +536,9 @@ def missing_figure_run() -> list[Finding]:
         ),
         baseline("build.failed", "Build tool exited with status 12.", path="main.tex"),
         baseline("build.missing_pdf", "No complete new PDF was produced.", path="main.tex"),
-        Finding(
+        baseline(
             "build.baseline",
             "Required baseline build did not succeed",
-            severity="error",
             status="inconclusive",
         ),
         baseline(
@@ -649,6 +648,49 @@ class FollowOnTests(unittest.TestCase):
         self.assertEqual(views[0].code, "build.timeout")
         self.assertTrue(all(view.cause == "build.timeout main.tex" for view in views[1:]))
         self.assertTrue(render_terminal(report).endswith("Could not check: Build timed out."))
+
+    def test_a_stopped_build_only_explains_its_own_stage(self):
+        timeout = baseline("build.timeout", "Stopped after 1 s.", path="main.tex")
+        log_error = Finding(
+            "build.tex_error",
+            "Undefined control sequence.",
+            severity="error",
+            path="main.tex",
+            details={"document": "main.tex", "stage": "archive"},
+        )
+        missing_pdf = baseline("build.missing_pdf", "No PDF.")
+        views = finding_views(
+            redact_report(Report("prepare", findings=[timeout, log_error, missing_pdf])),
+            show_hidden=False,
+        )
+        by_rule = {view.finding.rule: view for view in views}
+        self.assertEqual(by_rule["build.missing_pdf"].cause, "build.timeout main.tex")
+        self.assertEqual(by_rule["build.tex_error"].cause, "")
+
+    def test_source_restatements_only_follow_causes_in_their_document(self):
+        source = Finding(
+            "source.missing_dependency",
+            "Missing source.",
+            severity="error",
+            path="chapter.tex",
+            details={"document": "paper"},
+        )
+        details = {"uncertainty": ["chapter.tex: Missing source."]}
+        restatements = [
+            Finding(
+                "bibliography.citation_coverage",
+                "Citation coverage is incomplete.",
+                severity="error",
+                status="inconclusive",
+                details={**details, "document": document},
+            )
+            for document in ("paper", "supplement")
+        ]
+        views = finding_views(
+            redact_report(Report("check", findings=[source, *restatements])), show_hidden=False
+        )
+        by_document = {view.finding.document: view.cause for view in views if view.code == "BIB101"}
+        self.assertEqual(by_document, {"paper": "TEX005 chapter.tex", "supplement": ""})
 
 
 class BriefStatusTests(unittest.TestCase):

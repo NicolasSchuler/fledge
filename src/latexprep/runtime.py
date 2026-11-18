@@ -223,7 +223,7 @@ class _FrozenInputs:
         Raises:
             PreparationError: The input changed or exceeded the limit.
         """
-        descriptor = os.open(source, os.O_RDONLY | os.O_NOFOLLOW)
+        descriptor = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         with os.fdopen(descriptor, "rb") as incoming, destination.open("xb") as outgoing:
             if FileIdentity.from_stat(os.fstat(incoming.fileno())) != identity:
                 raise PreparationError("An input changed before it could be frozen")

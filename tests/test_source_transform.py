@@ -216,6 +216,28 @@ class SourceTransformTests(ProjectTestCase):
         )
         self.assertEqual(unsupported.contents, {})
 
+    def test_same_line_literal_content_prevents_standalone_line_transforms(self) -> None:
+        self.write("body.tex", "Body.\n")
+        self.write("references.bib", "@misc{key,title={Reference}}")
+        self.write(
+            "main.bbl",
+            "\\begin{thebibliography}{1}\n\\bibitem{key} Reference.\n\\end{thebibliography}\n",
+        )
+        for command, options in (
+            (r"\input{body}", {"merge_inputs": True}),
+            (r"\bibliography{references}", {"inline_bibliography": "main.bbl"}),
+        ):
+            with self.subTest(command=command):
+                self.write(
+                    "main.tex",
+                    "\\documentclass{article}\n\\begin{document}\n"
+                    + command
+                    + "\\verb|literal % text|\n\\end{document}\n",
+                )
+                plan = self.plan(**options)
+                self.assertTrue(has_blockers(plan.findings))
+                self.assertEqual(plan.contents, {})
+
     def test_combined_proposal_is_atomic_when_any_transform_is_unresolved(self) -> None:
         self.write("main.tex", "\\documentclass{article}\n% TODO remove\n\\include{body}\n")
         self.write("body.tex", "Body.\n")

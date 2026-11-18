@@ -10,6 +10,7 @@ from .config import Settings
 from .defects import REPORT_DEFECT_SUGGESTION, is_expected_failure, summarize_traceback
 from .document_run import run_project
 from .errors import PreparationError
+from .execution_records import SILENCED_SUGGESTIONS_KEY, record_silenced_suggestions
 from .findings import DOCUMENT_SUMMARY_RULE, Finding
 from .job_context import DOCUMENT_COMMANDS, JobCommand, JobContext, import_input
 from .job_report import is_blocked, job_outcome, select_and_review
@@ -32,7 +33,12 @@ def _document_settings(settings: Settings, document: DocumentOptions) -> Setting
 
 def _document_rules(rules: tuple[ReviewRule, ...], name: str) -> tuple[ReviewRule, ...]:
     """Select the review decisions for every document or this one, no longer document-specific."""
-    return tuple(replace(rule, document=None) for rule in rules if rule.document in {None, name})
+    # A global and a document-scoped decision may become identical in this document.
+    return tuple(
+        dict.fromkeys(
+            replace(rule, document=None) for rule in rules if rule.document in {None, name}
+        )
+    )
 
 
 def _document_reporting(reporting: ReportingOptions, name: str) -> ReportingOptions:
@@ -167,6 +173,11 @@ def _merge_document(report: Report, document: DocumentResult) -> None:
     )
     report.tools.update(child.tools)
     report.package_contents.extend(child.package_contents)
+    silenced = child.execution.get(SILENCED_SUGGESTIONS_KEY)
+    if isinstance(silenced, list):
+        record_silenced_suggestions(
+            report.execution, [{**item, "document": document.name} for item in silenced]
+        )
 
 
 async def run_documents(context: JobContext, report: Report) -> list[DocumentResult]:

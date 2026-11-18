@@ -13,7 +13,7 @@ from click.testing import CliRunner
 from latexprep.cli import USAGE_EXIT_CODE, cli
 from latexprep.cli_inputs import check_selection_note, choose_input
 from latexprep.job_context import JobCommand
-from latexprep.report import Outcome
+from latexprep.report import Outcome, Report
 from tests.support import ProjectTestCase
 
 
@@ -164,6 +164,31 @@ class PrepareDestinationTests(InputTestCase):
                 self.assertIn("outside the output and preview folders", finding["message"])
                 self.assertFalse((output / name).exists())
 
+    def test_an_early_request_error_cannot_write_a_report_inside_the_output(self) -> None:
+        earlier = self.write("submission/report.json", Report("prepare").to_json())
+        contents = earlier.read_bytes()
+        for source, flags in (
+            (self.root / "missing-input", ()),
+            (self.project, ("--html-report", str(self.root / "missing-parent/report.html"))),
+        ):
+            with self.subTest(source=source):
+                request, result = self.run_job_of(
+                    "prepare",
+                    str(source),
+                    "-o",
+                    str(earlier.parent),
+                    "--force",
+                    "--json-report",
+                    str(earlier),
+                    "--json",
+                    *flags,
+                )
+                self.assertIsNone(request)
+                self.assertEqual(result.exit_code, 4, result.output)
+                [finding] = json.loads(result.stdout)["findings"]
+                self.assertIn("outside the output and preview folders", finding["message"])
+                self.assertEqual(earlier.read_bytes(), contents)
+
     def test_an_existing_empty_folder_is_no_report_file(self) -> None:
         folder = self.root / "reports"
         folder.mkdir()
@@ -184,7 +209,12 @@ class CheckSelectionNoteTests(InputTestCase):
             (("inspect", str(self.project), "--select", "bld"), "fledge check"),
             (("bib", "check", str(self.project), "--select", "MAN"), "fledge inspect"),
             (("bib", "check", str(self.project), "--select", "STY"), "fledge inspect"),
+            (("bib", "check", str(self.project), "--select", "TEX001"), "fledge inspect"),
             (("pdf", "check", str(self.project), "--select", "STY3"), "fledge inspect"),
+            (("inspect", str(self.project), "--select", "PKG301"), "fledge prepare"),
+            (("pdf", "check", str(self.project), "--select", "CMP101"), "fledge check"),
+            (("check", str(self.project), "--select", "BIB201"), "fledge prepare"),
+            (("prepare", str(self.project), "--dry-run", "--select", "PKG303"), "fledge prepare"),
         ):
             with self.subTest(words=words):
                 request, result = self.run_job_of(*words)
@@ -205,12 +235,12 @@ class CheckSelectionNoteTests(InputTestCase):
         cases = (
             (JobCommand.INSPECT, ("PDF313",)),
             (JobCommand.INSPECT, ("ALL",)),
-            (JobCommand.INSPECT, ("TEX", "BIB1")),
+            (JobCommand.INSPECT, ("TEX1", "BIB1")),
             (JobCommand.INSPECT, ("ALL", "STY")),
             (JobCommand.CHECK, ("PDF001",)),
             (JobCommand.PREPARE, ("FMT",)),
-            (JobCommand.BIBLIOGRAPHY, ("BIB", "NET")),
-            (JobCommand.PDF, ("PDF", "CMP")),
+            (JobCommand.BIBLIOGRAPHY, ("BIB0", "NET")),
+            (JobCommand.PDF, ("PDF313", "CMP00")),
             (JobCommand.INSPECT, ("no-such-check",)),
         )
         for command, selectors in cases:
@@ -222,3 +252,9 @@ class CheckSelectionNoteTests(InputTestCase):
         assert note is not None
         self.assertRegex(note, r"^Warning: TEX\d{3}, .* and \d+ more will not run")
         self.assertIn("pdf check reads only the PDF", note)
+
+    def test_explicit_unavailable_checks_draw_a_warning_beside_all(self) -> None:
+        note = check_selection_note(JobCommand.PDF, ("ALL", "CMP101", "CMP001"))
+        assert note is not None
+        self.assertIn("CMP101 will not run", note)
+        self.assertNotIn("CMP001", note)

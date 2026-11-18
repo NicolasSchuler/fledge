@@ -353,7 +353,12 @@ def _own_line(text: str, command: Command) -> _OwnLine | None:
     line_break = text.find("\n", argument.end)
     end = len(text) if line_break < 0 else line_break + 1
     command_end = argument.end + (text[argument.end : argument.end + 1] == "}")
-    if text[start : command.start].strip() or mask_literals(text[command_end:end]).strip():
+    tail = text[command_end:end]
+    comment = next(
+        (region.start for region in source_regions(tail).regions if region.kind == "comment"),
+        len(tail),
+    )
+    if text[start : command.start].strip() or tail[:comment].strip():
         return None
     return _OwnLine(start, command_end, end)
 

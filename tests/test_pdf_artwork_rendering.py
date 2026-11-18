@@ -27,6 +27,7 @@ from latexprep.resource_budget import ResourceBudget
 from tests.pdf_fakes import (
     ArtworkRunner,
     contrast_sample,
+    gray_raster,
     raster,
     rgb_raster,
     trace,
@@ -160,6 +161,21 @@ class RenderedArtworkTests(unittest.IsolatedAsyncioTestCase):
         await self.status(options, "inconclusive", raster=b"P5\n1 1\n255\n\0")
         await self.status(options, "inconclusive", missing="pdftoppm")
         self.assertEqual(self.pdf.read_bytes(), b"%PDF-fixture")
+
+    async def test_grayscale_preview_accepts_a_rotated_non_square_page(self) -> None:
+        options = PdfArtworkOptions(grayscale_preview=True)
+        geometry = (
+            "Page 1 size: 80 x 120 pts\nPage 1 rot: 90\n"
+            "Page 1 MediaBox: 0 0 80 120\nPage 1 CropBox: 0 0 80 120\n"
+        )
+        finding = await self.status(
+            options, "passed", geometry=geometry, raster=gray_raster(width=120, height=80)
+        )
+        preview = Path(finding.details["artifacts"][0])
+        self.assertEqual(struct.unpack(">II", preview.read_bytes()[16:24]), (120, 80))
+        await self.status(
+            options, "inconclusive", geometry=geometry, raster=gray_raster(width=80, height=120)
+        )
 
     async def test_whole_document_renders_keep_the_rendering_page_cap(self) -> None:
         class LongDocumentRunner(ArtworkRunner):

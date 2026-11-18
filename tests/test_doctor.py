@@ -312,12 +312,39 @@ class DoctorTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Fledge setup test", (source / "main.tex").read_text())
             self.assertEqual(options.exclude, ())
             self.assertEqual(options.wrap_length, Settings().formatting_options.wrap_length)
-            return FormattingResult(contents={"main.tex": (source / "main.tex").read_bytes()})
+            return formatted
 
-        with patch("latexprep.doctor.format_project", side_effect=format_source):
-            report = await run_doctor(Settings(apply_formatting=True))
-        self.assertEqual(report.outcome, "passed", report.findings)
-        self.assertTrue(report.tools["tex-fmt"]["exercised"])
+        for changed in (True, False):
+            with self.subTest(changed=changed):
+                formatted = FormattingResult(
+                    contents={"main.tex": b"Formatted fixture"} if changed else {},
+                    findings=[
+                        Finding(
+                            "source.formatting",
+                            "Built-in source formatting result.",
+                            severity="warning" if changed else "info",
+                            status="failed" if changed else "passed",
+                        )
+                    ],
+                )
+                with patch("latexprep.doctor.format_project", side_effect=format_source):
+                    report = await run_doctor(Settings(apply_formatting=True))
+                self.assertEqual(report.outcome, "passed", report.findings)
+                self.assertTrue(report.tools["tex-fmt"]["exercised"])
+
+    async def test_formatter_failures_and_missing_evidence_block_diagnostics(self):
+        from latexprep.formatting import FormattingResult
+
+        failure = Finding("source.format_idempotence", "Unstable output", severity="error")
+        for findings in ([], [failure]):
+            with self.subTest(findings=findings):
+                with patch(
+                    "latexprep.doctor.format_project",
+                    return_value=FormattingResult(findings=findings),
+                ):
+                    report = await run_doctor(Settings(apply_formatting=True))
+                self.assertFalse(report.tools["tex-fmt"]["exercised"])
+                self.assertIn({"name": "formatting", "status": "failed"}, report.stages)
 
     async def test_failed_builtin_build_is_not_a_manuscript_finding(self):
         async def failed(source, main, work, engine, runner, **options):
@@ -617,6 +644,23 @@ class DoctorCommandTests(unittest.TestCase):
         self.assertEqual(run.call_args.args[0].engine, "auto")
         self.assertEqual(diagnostic_engines(run.call_args.args[0]), ("pdflatex",))
         discover.assert_not_called()
+
+    def test_engine_option_takes_precedence_over_per_document_engines(self):
+        from latexprep.report import Report
+
+        with tempfile.TemporaryDirectory() as temporary:
+            config = Path(temporary) / "fledge.toml"
+            config.write_text(
+                '[[workflow.documents]]\nname = "paper"\nmain = "main.tex"\nengine = "xelatex"\n',
+                encoding="utf-8",
+            )
+            response = Report("doctor", outcome=Outcome.PASSED)
+            with patch("latexprep.doctor_command.run_doctor", return_value=response) as run:
+                result = CliRunner().invoke(
+                    cli, ["doctor", "--config", str(config), "--engine", "lualatex", "--quiet"]
+                )
+            self.assertEqual(result.exit_code, 0, result.output)
+            self.assertEqual(diagnostic_engines(run.call_args.args[0]), ("lualatex",))
 
     def test_invalid_config_is_json_request_error(self):
         with tempfile.TemporaryDirectory() as temporary:

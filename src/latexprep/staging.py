@@ -23,8 +23,10 @@ from .bibliography_transform import normalize_dois, plan_bibliography
 from .cancellation import cancellation_point
 from .config import Settings
 from .errors import PreparationError
+from .file_safety import open_regular_file
 from .findings import Finding, has_blockers
 from .flat_layout import plan_flatten
+from .limits import IO_CHUNK_BYTES
 from .metadata_source_edits import plan_metadata_sanitization
 from .path_safety import is_contained
 from .project_cleanup import plan_cleanup
@@ -463,7 +465,13 @@ def flatten_sources(shipment: Path, work: Path, main: str, settings: Settings) -
     for old, new in sorted(flatten.mapping.items()):
         cancellation_point()
         with (flat / new).open("xb") as stream:
-            stream.write(flatten.contents.get(old, (shipment / old).read_bytes()))
+            if old in flatten.contents:
+                stream.write(flatten.contents[old])
+            else:
+                with open_regular_file(shipment / old, root=shipment) as (source, _):
+                    while chunk := source.read(IO_CHUNK_BYTES):
+                        cancellation_point()
+                        stream.write(chunk)
     return FlattenOutcome(
         flat, flatten.mapping[main], flatten.changes, flatten.findings, flatten.mapping
     )

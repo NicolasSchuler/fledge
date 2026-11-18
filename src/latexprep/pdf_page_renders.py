@@ -33,7 +33,7 @@ from typing import Final
 from .cancellation import run_in_thread
 from .errors import PreparationError
 from .limits import MIB
-from .pdf_geometry import COMPARISON_DPI, measurement_raster_size
+from .pdf_geometry import COMPARISON_DPI, comparison_raster_size
 from .pdf_job_sessions import PageDigests, PageRaster
 from .pdf_tools import (
     PdfToolSession,
@@ -191,8 +191,8 @@ class RenderOutcome:
 
 
 def raster_pixel_count(size: tuple[float, float], dpi: int = COMPARISON_DPI) -> int:
-    """Return the pixels of a page of ``size`` points rendered at ``dpi``."""
-    return math.prod(measurement_raster_size(size, dpi))
+    """Return the pixel reservation of a page of ``size`` points rendered at ``dpi``."""
+    return math.prod(comparison_raster_size(size, dpi))
 
 
 def pair_memory_mb(

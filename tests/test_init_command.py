@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import stat
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -77,6 +78,48 @@ class InitCommandTests(ProjectTestCase):
         self.assertEqual(result.exit_code, Outcome.ERROR.exit_code, result.output)
         self.assertIn("Cannot write a valid", result.output)
         self.assertEqual(self.target.read_text(), "jobs = 1\n")
+
+    def test_failed_write_leaves_the_destination_as_it_was(self):
+        def partial_write(stream, data):
+            """Write a prefix of the new settings, then simulate a write failure."""
+            stream.write(data[:5])
+            raise OSError("disk full")
+
+        for existing in (False, True):
+            with self.subTest(existing=existing):
+                arguments = [str(self.project)]
+                if existing:
+                    self.target.write_text("jobs = 1\n")
+                    arguments.append("--force")
+                with patch("latexprep.file_safety._write_file_bytes", side_effect=partial_write):
+                    result = self.init(*arguments)
+                self.assertEqual(result.exit_code, Outcome.ERROR.exit_code, result.output)
+                self.assertEqual(list(self.project.iterdir()), [self.target] if existing else [])
+                if existing:
+                    self.assertEqual(self.target.read_text(), "jobs = 1\n")
+
+    def test_replacement_preserves_permissions(self):
+        self.target.write_text("jobs = 1\n")
+        self.target.chmod(0o600)
+        result = self.init(str(self.project), "--force")
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(stat.S_IMODE(self.target.stat().st_mode), 0o600)
+
+    def test_init_does_not_replace_settings_that_appear_while_preparing(self):
+        def concurrent_settings(directory, preset):
+            """Publish another writer's configuration after init checked the destination."""
+            self.target.write_text("jobs = 1\n")
+            return STARTER, None
+
+        for existing in (False, True):
+            with self.subTest(existing=existing):
+                if existing:
+                    self.target.write_text("memory_mb = 2048\n")
+                with patch("latexprep.init_command.settings_text", side_effect=concurrent_settings):
+                    result = self.init(str(self.project), "--force")
+                self.assertEqual(result.exit_code, Outcome.ERROR.exit_code, result.output)
+                self.assertEqual(self.target.read_text(), "jobs = 1\n")
+                self.assertEqual(list(self.project.iterdir()), [self.target])
 
     def test_symlinked_target_is_never_written_through(self):
         outside = self.root / "outside.toml"

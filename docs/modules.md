@@ -55,7 +55,7 @@ a network connection, and each imports only other modules of this layer. (91 mod
 | `errors` | Expected failures that carry an actionable message, and the kinds callers tell apart |
 | `execution_records` | Typed records of the `Report.execution` entries that jobs write and renderers show |
 | `expanded_document` | The selected literal source graph read as one expanded document |
-| `file_safety` | Bounded, link-safe file helpers shared by tool execution, builds and packaging |
+| `file_safety` | Bounded, link-safe file reads and atomic publication of completed files |
 | `file_scan` | Bounded scans of supplied project files: an inventory and a byte budget for reading them |
 | `finding_text` | Wording and bookkeeping shared by the checks that build findings |
 | `finding_weight` | How hard a check hits when it does not pass: one mapping from outcome to severity |

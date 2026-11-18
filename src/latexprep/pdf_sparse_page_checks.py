@@ -23,6 +23,7 @@ from .pdf_check_options import PdfCheckOptions
 from .pdf_geometry import (
     MAX_MEASUREMENT_DIMENSION,
     MAX_MEASUREMENT_PIXELS,
+    RASTER_SIZE_TOLERANCE_PX,
     exceeds_measurement_raster,
     measurement_raster_size,
     read_measurement_raster,
@@ -31,10 +32,6 @@ from .pdf_rule_names import PdfRule
 from .pdf_tool_output import parse_page_sizes, require_rendered_pages
 from .pdf_tools import PdfToolSession, page_boxes_argv
 from .raster_pixels import InkMask
-
-# A render whose pixel size differs from the page-size computation by more than this is not
-# the page that was measured.
-_RASTER_SIZE_TOLERANCE_PX = 1
 
 
 class InkCoverage(NamedTuple):
@@ -54,7 +51,7 @@ class InkCoverage(NamedTuple):
 def _within_tolerance(actual: tuple[int, int], expected: tuple[int, int]) -> bool:
     """Return whether a render's pixel size is the expected one, give or take a pixel."""
     return all(
-        abs(measured - target) <= _RASTER_SIZE_TOLERANCE_PX
+        abs(measured - target) <= RASTER_SIZE_TOLERANCE_PX
         for measured, target in zip(actual, expected, strict=True)
     )
 

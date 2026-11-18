@@ -40,8 +40,11 @@ from .tex_spans import (
     conditional_spans,
     defined_names,
     definition_spans,
+    endinput_has_suffix,
     in_conditional,
+    is_source_terminator,
     runs_in_place,
+    stops_source,
 )
 
 # Commands that splice another manuscript source into the document. Class and
@@ -80,7 +83,7 @@ def finding_reason(finding: Finding) -> str:
 
 
 def commands_before_end(
-    source: ParsedSource, *, may_not_run: Sequence[tuple[int, int]] = ()
+    source: ParsedSource, *, may_not_run: Sequence[tuple[int, int]] | None = None
 ) -> list[Command]:
     r"""Collect the commands up to a top-level ``\end{document}`` or ``\endinput``.
 
@@ -88,27 +91,23 @@ def commands_before_end(
 
     Args:
         source: The parsed source.
-        may_not_run: Spans of primitive conditionals. An ``\endinput`` inside one may
-            not run, so it does not end the result; the caller decides what the commands
-            after it are worth.
+        may_not_run: Spans of primitive conditionals, computed when omitted. A stop
+            inside one may not run, so it remains in the result for callers to judge.
 
     Returns:
         The commands, in source order.
     """
+    conditionals = conditional_spans(source.commands) if may_not_run is None else may_not_run
     result: list[Command] = []
     for command in source.commands:
-        if command.ends("document") and command.depth == 0:
-            break
-        result.append(command)
-        if (
-            command.name == "endinput"
-            and command.depth == 0
-            and not in_conditional(may_not_run, command.start)
-        ):
+        if stops_source(command, conditionals):
             # TeX may still consume the current physical line. Keep the stop
             # token for uncertainty reporting, but never treat its suffix as
             # definitive evidence without interpreting TeX's token buffering.
+            if command.name == "endinput":
+                result.append(command)
             break
+        result.append(command)
     return result
 
 
@@ -579,13 +578,30 @@ class _Splice:
             self.definitions[path] = definition_spans(source.masked, source.commands)
         return runs_in_place(command, self.definitions[path], self.defined)
 
-    def _note_unclear_endinput(self, path: str, source: ParsedSource, command: Command) -> None:
-        r"""Record that ``\endinput`` stops this file where the text after it is not plain."""
-        suffix = source.masked[command_end(command) :].split("\n", 1)[0]
-        if command.depth or suffix.strip():
-            self.uncertainty.append(f"{path}: unresolved endinput context")
+    def _terminates_source(
+        self,
+        path: str,
+        source: ParsedSource,
+        command: Command,
+        conditionals: Sequence[tuple[int, int]],
+        *,
+        certain: bool,
+    ) -> bool:
+        r"""Record the scope and certainty of a source or document stop."""
+        if not is_source_terminator(command):
+            return False
+        stops = stops_source(command, conditionals)
+        if command.name == "endinput":
+            # TeX can keep reading the current physical line from its buffer.
+            if not stops or endinput_has_suffix(source.masked, command):
+                self.uncertainty.append(f"{path}: unresolved endinput context")
+        elif stops and certain:
+            self.stopped = True
+        else:
+            self.uncertainty.append(f"{path}: unresolved end{{document}} context")
+        return stops
 
-    def expand(self, path: str, stack: tuple[str, ...]) -> None:
+    def expand(self, path: str, stack: tuple[str, ...], *, certain: bool = True) -> None:
         """Append the masked text of ``path`` up to its end, splicing in each literal input.
 
         A cycle, excessive depth or a source that was not inspected is noted as
@@ -594,6 +610,7 @@ class _Splice:
         Args:
             path: The file to expand.
             stack: The files being expanded around ``path``, outermost first.
+            certain: Whether the inclusion runs wherever the current document does.
 
         Raises:
             ParseLimitExceeded: The expanded text or its commands exceed their bounds.
@@ -607,6 +624,7 @@ class _Splice:
             self.uncertainty.append(f"{path}: included source was not inspectable")
             return
         cursor = 0
+        conditionals = conditional_spans(source.commands)
         newlines = [index for index, char in enumerate(source.masked) if char == "\n"]
 
         def append_masked(start: int, end: int) -> None:
@@ -617,13 +635,12 @@ class _Splice:
             line = bisect_right(newlines, start - 1) + 1
             self.append(source.masked[start:end], path, line, start, comments)
 
-        for command in commands_before_end(source):
+        for command in source.commands:
             self._count_command(command)
-            if command.name == "endinput":
-                self._note_unclear_endinput(path, source, command)
+            if self._terminates_source(path, source, command, conditionals, certain=certain):
                 append_masked(cursor, command.start)
                 return
-            if command.name not in CONTENT_INPUT_COMMANDS:
+            if command.named or command.name not in CONTENT_INPUT_COMMANDS:
                 continue
             target = self._inclusion_target(
                 path, command, in_place=self._runs_in_place(path, source, command)
@@ -631,14 +648,17 @@ class _Splice:
             if target is None:
                 continue
             append_masked(cursor, command.start)
-            self.expand(target, (*stack, path))
+            self.expand(
+                target,
+                (*stack, path),
+                certain=certain
+                and not command.depth
+                and not in_conditional(conditionals, command.start),
+            )
             cursor = _end_of_inclusion(source, command)
             if self.stopped:
                 return
-        closing = _document_end(source)
-        append_masked(cursor, closing.start if closing else len(source.masked))
-        if closing:
-            self.stopped = True
+        append_masked(cursor, len(source.masked))
 
 
 def _end_of_inclusion(source: ParsedSource, command: Command) -> int:
@@ -651,14 +671,6 @@ def _end_of_inclusion(source: ParsedSource, command: Command) -> int:
     if source.masked[cursor : cursor + 1] == "}":
         cursor += 1
     return cursor
-
-
-def _document_end(source: ParsedSource) -> Command | None:
-    r"""Find the top-level ``\end{document}`` of a source, if it has one."""
-    return next(
-        (command for command in source.commands if command.ends("document") and not command.depth),
-        None,
-    )
 
 
 # A file that cannot be resolved only leaves the manuscript undecidable when it could

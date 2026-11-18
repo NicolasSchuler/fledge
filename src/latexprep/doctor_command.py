@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 
 import click
@@ -132,6 +133,11 @@ def doctor_command(
             else None
         )
         settings = load_settings(selected, {"engine": engine})
+        if engine is not None and settings.workflow.documents:
+            documents = tuple(
+                replace(document, engine=engine) for document in settings.workflow.documents
+            )
+            settings = replace(settings, workflow=replace(settings.workflow, documents=documents))
         job_started = True
         with TerminalProgress(stderr_console(), quiet=quiet) as progress:
             report = asyncio.run(run_doctor(settings, progress=progress))

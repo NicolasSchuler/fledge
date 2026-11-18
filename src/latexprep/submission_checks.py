@@ -731,6 +731,7 @@ def _included_information_finding(
     suggestion: str | None = None,
     *,
     weight: Weight = _INCLUDED_INFORMATION_WEIGHT,
+    incomplete: bool = False,
 ) -> Finding:
     """Build a ``privacy.included_pdf_information`` finding, by default with the advisory weight."""
     return Finding(
@@ -739,7 +740,7 @@ def _included_information_finding(
         severity=weight.severity(status),
         status=status,
         evidence_kind=weight.evidence_kind,
-        incomplete=status == "inconclusive",
+        incomplete=incomplete or status == "inconclusive",
         suggestion=suggestion,
         details={
             "scope": "Information that pdfTeX and LuaTeX copied from included PDFs into form "
@@ -816,17 +817,24 @@ def _included_information_findings(
 
     Returns:
         A finding naming the fields with a term or home-folder path (a warning, or for the
-        baseline of ``prepare`` information), a passed one when there is none, or no
-        finding when no included PDF left information in a PDF that is not published.
+        baseline of ``prepare`` information), an inconclusive result if part of the
+        included metadata was unreadable, or a clean result. A clean result without
+        included metadata only produces a finding for the published PDF.
     """
     entries = [entry for entry in metadata.entries if entry.origin is MetadataOrigin.INCLUDED]
-    if not entries:
+    limitations = metadata.included_limitations
+    if not entries and not limitations:
         if role != "published":
             return []
+        message = (
+            "The published PDF carries no information copied from included PDFs."
+            if not metadata.included_objects
+            else "The published PDF has no text in the checked included-PDF metadata fields."
+        )
         return [
             _included_information_finding(
                 "passed",
-                "The published PDF carries no information copied from included PDFs.",
+                message,
                 {"matches": [], "included_objects": metadata.included_objects},
             )
         ]
@@ -837,9 +845,18 @@ def _included_information_findings(
         "match_output_limited": limited,
         "included_objects": metadata.included_objects,
         "channels": sorted({entry.channel for entry in entries}),
-        "limitations": metadata.limitations,
+        "limitations": limitations,
     }
     copied = plural(metadata.included_objects, "included PDF")
+    if not matches and limitations:
+        return [
+            _included_information_finding(
+                "inconclusive",
+                f"Information copied from {copied} could not be fully checked. "
+                f"Unreadable metadata: {', '.join(limitations)}.",
+                details,
+            )
+        ]
     if not matches:
         return [
             _included_information_finding(
@@ -860,6 +877,7 @@ def _included_information_findings(
                 "this PDF; the PDF it publishes is checked on its own.",
                 details,
                 weight=_BASELINE_INFORMATION_WEIGHT,
+                incomplete=bool(limitations),
             )
         ]
     return [
@@ -869,5 +887,6 @@ def _included_information_findings(
             f"{fields}.",
             details,
             _SUPPRESSION_ADVICE,
+            incomplete=bool(limitations),
         )
     ]

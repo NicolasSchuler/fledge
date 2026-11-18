@@ -117,6 +117,39 @@ class InclusionTests(ProjectTestCase):
         self.assertIn("No literal document root could be selected.", gaps)
         self.assertFalse([gap for gap in gaps if gap.startswith("None")])
 
+    def test_conditional_terminators_preserve_later_source_with_uncertainty(self) -> None:
+        for terminator in (r"\endinput", r"\end{document}"):
+            with self.subTest(terminator=terminator):
+                self.write(
+                    "main.tex",
+                    "\\documentclass{article}\n\\iffalse\n" + terminator + "\n\\fi\n"
+                    "\\title{Literal title}\n\\begin{document}\nBody.\n\\end{document}\n",
+                )
+                document = expand_document(self.root, "main.tex")
+                self.assertIn(r"\title{Literal title}", document.text)
+                self.assertIn("Body.", document.text)
+                self.assertTrue(any(terminator[1:] in gap for gap in document.graph_uncertainty))
+
+    def test_endinput_stops_one_file_and_end_document_stops_the_walk(self) -> None:
+        self.write(
+            "main.tex",
+            "\\documentclass{article}\n\\begin{document}\n\\input{part}\n"
+            "\\input{following}\n\\end{document}\n\\input{missing}\n",
+        )
+        self.write("following.tex", "Parent continues.")
+        for terminator, dependencies in (
+            (r"\endinput", {"main.tex", "part.tex", "following.tex"}),
+            (r"\end{document}", {"main.tex", "part.tex"}),
+        ):
+            with self.subTest(terminator=terminator):
+                self.write("part.tex", "Part text.\n" + terminator + "\n\\input{absent}\n")
+                document = expand_document(self.root, "main.tex")
+                self.assertEqual(document.graph.dependencies, dependencies)
+                self.assertFalse(document.graph.findings, document.graph.findings)
+                self.assertEqual(
+                    "Parent continues." in document.text, "following.tex" in dependencies
+                )
+
 
 class DocumentPartTests(ProjectTestCase):
     """Where a line of a project file runs: before the class, in the preamble or the body."""

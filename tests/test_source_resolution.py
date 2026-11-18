@@ -11,14 +11,13 @@ from latexprep.citation_graph import resource_declarations
 from latexprep.expanded_document import reachable_sources
 from latexprep.findings import Finding, has_blockers
 from latexprep.project_files import is_parsed_source, known_path_index, path_comparison_key
-from latexprep.source_file_commands import DEFAULT_SUFFIXES_BY_FILE_COMMAND
+from latexprep.source_file_commands import DEFAULT_SUFFIXES_BY_FILE_COMMAND, candidate_paths
 from latexprep.source_findings import MAX_LISTED_PATHS, GraphFindings, listed_names
 from latexprep.source_graph import SourceGraph
 from latexprep.source_resolution import (
     LookupScope,
     ProjectTree,
     Reference,
-    candidate_paths,
     existing_files,
     resolve_reference,
 )
@@ -45,11 +44,18 @@ class CandidatePathTests(unittest.TestCase):
         self.assertEqual(candidates[-1], "fig/a")
         self.assertEqual(len(candidates), len(suffixes) + 1)
 
-    def test_a_name_with_a_suffix_is_tried_as_written_except_by_include(self) -> None:
+    def test_suffix_handling_depends_on_the_command(self) -> None:
         self.assertEqual(
             candidate_paths("input", ["a.tex", "b/a.tex"], (".tex",)), ["a.tex", "b/a.tex"]
         )
-        self.assertEqual(candidate_paths("include", ["a.tex"], (".tex",)), ["a.tex.tex"])
+        self.assertEqual(
+            candidate_paths("include", ["a.tex", "b.final", "c.tex.tex"], (".tex",)),
+            ["a.tex", "b.final.tex", "c.tex.tex"],
+        )
+        self.assertEqual(
+            candidate_paths("bibliography", ["a.final", "b.bib"], (".bib",)),
+            ["a.final.bib", "b.bib"],
+        )
 
     def test_paths_keep_their_order_so_the_first_base_wins(self) -> None:
         candidates = candidate_paths("input", ["inner/x", "x"], (".tex",))

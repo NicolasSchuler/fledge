@@ -20,7 +20,8 @@ from latexprep.config import Settings
 from latexprep.core import run_job
 from latexprep.errors import PreparationError, ToolUnavailableError
 from latexprep.expanded_document import reachable_sources
-from latexprep.findings import Finding
+from latexprep.findings import Finding, has_blockers
+from latexprep.flat_layout import plan_flatten
 from latexprep.job_context import JobRequest
 from latexprep.report import Report
 from latexprep.source_graph import SourceGraph
@@ -410,6 +411,29 @@ class InstalledCopyTests(ProjectTestCase):
         self.assertIn("venue.cls", graph.dependencies)
         self.assertNotIn("venue.cls", reachable_sources(graph))
         self.assertEqual([item for item in graph.findings if item.path == "venue.cls"], [])
+
+    def test_flat_layout_keeps_a_resolved_identical_copy_at_its_original_path(self) -> None:
+        self.installed.write_text(VENUE_CLASS)
+        found = {"venue.cls": str(self.installed)}
+        identical = identical_copies(self.root, package_code_candidates(self.root), found)
+        with installed_inputs_known(InstalledInputs(frozenset(found), found, identical=identical)):
+            plan = plan_flatten(self.root, "main.tex")
+        self.assertFalse(has_blockers(plan.findings), plan.findings)
+        self.assertEqual(plan.mapping["venue.cls"], "venue.cls")
+        self.assertNotIn("venue.cls", plan.contents)
+
+    def test_flat_layout_checks_unresolved_or_relocated_vendor_copies(self) -> None:
+        self.write("templates/venue.cls", VENUE_CLASS)
+        self.write("main.tex", "\\documentclass{templates/venue}\n")
+        found = {"venue.cls": str(self.installed)}
+        self.installed.write_text(VENUE_CLASS)
+        identical = identical_copies(self.root, package_code_candidates(self.root), found)
+        with installed_inputs_known(InstalledInputs(frozenset(found), found, identical=identical)):
+            plan = plan_flatten(self.root, "main.tex")
+        self.assertEqual(
+            {item.path for item in plan.findings if item.code == "PKG008"},
+            {"venue.cls", "templates/venue.cls"},
+        )
 
 
 if __name__ == "__main__":

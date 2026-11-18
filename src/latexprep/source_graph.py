@@ -68,7 +68,7 @@ from .tex_lexer import (
     skip_space,
     split_argument_items,
 )
-from .tex_spans import conditional_spans, in_conditional
+from .tex_spans import conditional_spans, in_conditional, stops_source
 
 MAX_INPUT_DEPTH = 128
 # The findings of a project without exactly one document root to select.
@@ -176,34 +176,39 @@ class _Frame(NamedTuple):
         context: The directories of the files entered so far, innermost first.
         subfile: Whether the file is read as a ``\subfile`` body, of which only the part
             between ``\begin{document}`` and ``\end{document}`` counts.
+        certain: Whether the file is entered unconditionally.
     """
 
     path: str
     search: tuple[str, ...]
     context: tuple[str, ...] = ()
     subfile: bool = False
+    certain: bool = True
 
 
 @dataclass(frozen=True, slots=True)
 class _Visit:
-    """The file being walked: its parsed source, the files above it, and its lookup context.
-
-    Attributes:
-        path: The project file being walked.
-        source: Its parsed source.
-        stack: The files being read above it.
-        context: The directories of the files entered so far, innermost first.
-    """
+    """The active source, the files above it and its lookup and execution context."""
 
     path: str
     source: ParsedSource
     stack: tuple[str, ...]
     context: tuple[str, ...]
+    conditionals: list[tuple[int, int]]
+    certain: bool
 
     @property
     def inner_stack(self) -> tuple[str, ...]:
         """The files above any file this one reads: those above it, and itself."""
         return (*self.stack, self.path)
+
+    def enters_certainly(self, command: Command) -> bool:
+        """Return whether a file command stands in a known execution context."""
+        return (
+            self.certain
+            and not command.depth
+            and not in_conditional(self.conditionals, command.start)
+        )
 
 
 # "project" reads every source file (to discover document roots); "selected" reads
@@ -244,6 +249,7 @@ class SourceGraph:
             bibliography database the project lacks, keyed by the file, command offset and
             name of the reference.
         visited: The files the walk read.
+        installed_package_copies: Dependencies identical to installed classes or packages.
         subfile_targets: The files read as supported ``\subfile`` bodies.
         subfiles_package_loaded: Whether the walk has seen the ``subfiles`` package loaded.
         roots: The document roots among the loaded sources.
@@ -264,6 +270,7 @@ class SourceGraph:
         self.system_references: list[SystemReference] = []
         self.shipped_bibliographies: dict[tuple[str, int, str], str] = {}
         self.visited: set[str] = set()
+        self.installed_package_copies: set[str] = set()
         self.subfile_targets: set[str] = set()
         self.subfiles_package_loaded = False
         self.roots: list[str] = []
@@ -276,6 +283,7 @@ class SourceGraph:
         self._attempted: set[str] = set()
         self._events = 0
         self._conditionals: dict[str, list[tuple[int, int]]] = {}
+        self._document_ended = False
 
     @classmethod
     def build(cls, root: Path, main: str | None, *, scope: GraphScope = "project") -> Self:
@@ -380,8 +388,9 @@ class SourceGraph:
         if source is None:
             return None
         self.sources[name] = source
+        conditionals = self._conditionals[name] = conditional_spans(source.commands)
         if not _installed_package_copy(name):
-            check_source(SourceChecks(name, source, self.known_paths, self._reporter))
+            check_source(SourceChecks(name, source, self.known_paths, self._reporter), conditionals)
         return source
 
     def _select_main(self, main: str | None) -> str | None:
@@ -470,10 +479,7 @@ class SourceGraph:
             return False
         if any(owner in _DEFERRED_CODE_OWNERS for owner in command.groups):
             return True
-        spans = self._conditionals.get(visit.path)
-        if spans is None:
-            spans = self._conditionals[visit.path] = conditional_spans(visit.source.commands)
-        return in_conditional(spans, command.start)
+        return in_conditional(visit.conditionals, command.start)
 
     def _project_path(self, visit: _Visit, command: Command, value: str, base: str) -> str | None:
         """Return the project-relative path ``value`` names under ``base``.
@@ -802,10 +808,16 @@ class SourceGraph:
         if source is None:
             return frame.search
         self.visited.add(name)
-        visit = _Visit(name, source, stack, frame.context)
+        conditionals = self._conditionals[name]
+        visit = _Visit(name, source, stack, frame.context, conditionals, frame.certain)
         commands = self._subfile_commands(name, source) if frame.subfile else source.commands
         search = frame.search
         for command in commands:
+            if self._document_ended:
+                break
+            if stops_source(command, conditionals):
+                self._document_ended = frame.certain and command.ends("document")
+                break
             self._events += 1
             if self._events > MAX_COMMANDS:
                 self._reporter.uncertain(
@@ -832,6 +844,8 @@ class SourceGraph:
         Returns:
             The graphics search path in force after the command.
         """
+        if command.named:
+            return search
         if command.name == "graphicspath":
             paths = self._search_paths(visit, command, visit.context)
             return search if paths is None else paths
@@ -894,7 +908,9 @@ class SourceGraph:
         location = ArgumentLocation(name, directory_argument.start, directory_argument.end)
         self.search_arguments[location] = "./"
         self._visit(
-            _Frame(target, search, (directory, *visit.context)),
+            _Frame(
+                target, search, (directory, *visit.context), certain=visit.enters_certainly(command)
+            ),
             visit.inner_stack,
         )
 
@@ -924,6 +940,7 @@ class SourceGraph:
             if font_directory is None:
                 return search
         source = visit.source
+        certain = visit.enters_certainly(command)
         for argument in split_argument_items(
             command.arguments[index], comma_separated=command.name in COMMA_LIST_FILE_COMMANDS
         ):
@@ -939,11 +956,17 @@ class SourceGraph:
             self._record_reference(visit.path, argument, target, command)
             if command.name == "subfile":
                 subfile_context = (posixpath.dirname(target), *visit.context)
-                self._visit(_Frame(target, search, subfile_context, True), visit.inner_stack)
-            if command.name in TRAVERSED_COMMANDS and not _installed_package_copy(target):
+                self._visit(
+                    _Frame(target, search, subfile_context, True, certain), visit.inner_stack
+                )
+            if command.name in TRAVERSED_COMMANDS and target not in self.installed_package_copies:
                 # A byte-identical copy of an installed class or package is read as the
                 # installation's file is: TeX runs it, the analysis does not walk it.
-                search = self._visit(_Frame(target, search, visit.context), visit.inner_stack)
+                search = self._visit(
+                    _Frame(target, search, visit.context, certain=certain), visit.inner_stack
+                )
+            if self._document_ended:
+                break
         return search
 
     def _resolve(
@@ -966,6 +989,8 @@ class SourceGraph:
         )
         if resolution.target is not None:
             self.dependencies.add(resolution.target)
+            if _installed_package_copy(resolution.target):
+                self.installed_package_copies.add(resolution.target)
         if resolution.system is not None:
             self.system_references.append(resolution.system)
         if resolution.shipped_bbl is not None:

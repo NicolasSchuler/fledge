@@ -14,7 +14,9 @@ from __future__ import annotations
 import html
 import re
 import unicodedata
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+from datetime import date
 from typing import Any, Literal
 
 from .bibtex_names import AuthorList, FamilyName, parse_author_list
@@ -22,6 +24,7 @@ from .crossref import CrossrefWork
 from .online_inputs import Reference
 
 MetadataOutcome = Literal["mismatch", "incomplete", "agreement"]
+_LITERAL_DATE = re.compile(r"[0-9]{4}(?:-[0-9]{2}){0,2}")
 
 
 def normalized_text(value: str) -> str:
@@ -145,11 +148,39 @@ def _single(value: str | None) -> list[str]:
     return [value] if value else []
 
 
+def _publication_year(values: Mapping[str, str | None]) -> str | None:
+    """Read the year or a literal ISO date, leaving ambiguous pairs unmeasured."""
+    year, written = values.get("year", ""), values.get("date", "")
+    if year is None or written is None:
+        return None
+    if not written:
+        return year
+    if not _LITERAL_DATE.fullmatch(written):
+        return None
+    try:
+        date.fromisoformat(written + "-01" * (2 - written.count("-")))
+    except ValueError:
+        return None
+    date_year = written[:4]
+    return date_year if not year or year == date_year else None
+
+
+def _publication_venue(values: Mapping[str, str | None]) -> str | None:
+    """Read the journal aliases, or use the book title when both aliases are absent."""
+    journal, journaltitle = values.get("journal", ""), values.get("journaltitle", "")
+    if journal is None or journaltitle is None:
+        return None
+    if journal and journaltitle and normalized_text(journal) != normalized_text(journaltitle):
+        return None
+    return journal or journaltitle or values.get("booktitle")
+
+
 def compare_work(reference: Reference, work: CrossrefWork) -> MetadataComparison:
     """Compare ``reference`` with ``work``; a field missing on either side is unmeasured.
 
     The authors come from the entry's raw author text when it has one, else from its
-    ``author`` value; the venue is the ``journal``, else the ``booktitle``.
+    ``author`` value. A literal ``date`` can supply the publication year and
+    ``journaltitle`` can supply the journal. Conflicting aliases are unmeasured.
 
     Args:
         reference: The bibliography entry.
@@ -166,8 +197,8 @@ def compare_work(reference: Reference, work: CrossrefWork) -> MetadataComparison
     pairs: dict[str, tuple[list[str], list[str]]] = {
         "title": (_single(values.get("title")), work.titles),
         "authors": ([name.full for name in authors.names] if authors else [], work.authors),
-        "year": (_single(values.get("year")), work.years),
-        "venue": (_single(values.get("journal") or values.get("booktitle")), work.venues),
+        "year": (_single(_publication_year(values)), work.years),
+        "venue": (_single(_publication_venue(values)), work.venues),
     }
     comparison = MetadataComparison()
     for name, (local, remote) in pairs.items():

@@ -1,8 +1,8 @@
 r"""Turning the file name in a command into the project file TeX would read.
 
 ``resolve_reference`` follows TeX's lookup: the name is joined to each directory the
-command may search, each default suffix is tried before the bare name, and the first
-existing file wins. A name that is not literal, or that escapes the project, is
+command may search, and the first file the command would read wins.
+A name that is not literal, or that escapes the project, is
 reported rather than guessed; an ambiguous lookup, a case-only mismatch and a missing
 file are reported with the paths that were tried. It owns that lookup and the wording
 of its findings. It does not walk files (``source_graph``) or judge commands
@@ -46,6 +46,7 @@ from .source_file_commands import (
     GRAPHICS_SUFFIXES,
     INSTALLATION_INPUT_COMMANDS,
     TOOLCHAIN_FILE_COMMANDS,
+    candidate_paths,
     is_literal_text,
 )
 from .source_findings import NEEDED_FOR_RESTRUCTURING, GraphFindings, listed_names
@@ -124,7 +125,7 @@ def installation_file_names(reference: str, command: str = "input") -> tuple[str
     if not _INSTALLATION_NAME.fullmatch(value) or value.endswith("."):
         return ()
     if command == "bibliography":
-        return (value if value.endswith(".bib") else value + ".bib",)
+        return tuple(candidate_paths(command, [value], DEFAULT_SUFFIXES_BY_FILE_COMMAND[command]))
     if command == "includegraphics":
         if PurePosixPath(value).suffix.lower() in GRAPHICS_SUFFIXES:
             return (value,)
@@ -418,33 +419,6 @@ def _lookup_bases(
             if path is not None:
                 paths.append(path)
     return paths
-
-
-def candidate_paths(command_name: str, paths: list[str], suffixes: tuple[str, ...]) -> list[str]:
-    r"""Return the files TeX tries for ``paths``: per path its default suffixes, then the bare name.
-
-    ``\include`` always appends ``.tex``; a name that already has a suffix is tried as
-    written. The order is TeX's lookup order: base paths first, then declared search
-    directories, and the extensions a command tries within one directory.
-
-    Args:
-        command_name: The name of the command, without the backslash.
-        paths: The project paths the name may mean, in TeX's order.
-        suffixes: The default suffixes of the command, in the order TeX tries them.
-
-    Returns:
-        The candidate files in lookup order; repeats are kept.
-    """
-    candidates: list[str] = []
-    for path in paths:
-        if command_name == "include":
-            candidates.append(path + ".tex")
-        elif PurePosixPath(path).suffix:
-            candidates.append(path)
-        else:
-            candidates.extend(path + suffix for suffix in suffixes)
-            candidates.append(path)
-    return candidates
 
 
 def existing_files(candidates: list[str], tree: ProjectTree) -> list[str]:
@@ -762,8 +736,7 @@ def resolve_reference(
     if found:
         return Resolution(target=found[0])
     if command.name in TOOLCHAIN_FILE_COMMANDS and "/" not in reference.value:
-        (suffix,) = suffixes
         value = reference.value
-        basename = value if PurePosixPath(value).suffix else value + suffix
+        basename = PurePosixPath(candidates[0]).name
         return Resolution(system=SystemReference(reference.path, command, value, basename))
     return _resolve_outside_project(reference, candidates, tree, findings)

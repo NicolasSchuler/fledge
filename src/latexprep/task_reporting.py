@@ -9,7 +9,7 @@ outcome is.
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import NamedTuple
 
@@ -23,7 +23,7 @@ from .build_result import BuildResult
 from .config import Settings
 from .document_tasks import BASELINE_STAGE, TaskName
 from .execution_records import record_silenced_suggestions
-from .findings import Finding, has_blockers
+from .findings import DetailKey, Finding, has_blockers
 from .inline_suppressions import split_silenced_suggestions
 from .job_report import record_findings
 from .package_inputs import InputSelectionResult
@@ -177,19 +177,29 @@ class TaskReporter:
             self.report.findings.extend(self._unsilenced(findings))
         elif result.name in _UNTAGGED_FINDING_TASKS:
             self.report.findings.extend(self._unsilenced(result.value))
+        elif result.name == TaskName.FINAL_SOURCE_CHECKS:
+            checked = result.value
+            record_findings(
+                self.report, self._unsilenced(checked.findings, checked.root), result.name
+            )
         else:
             record_findings(self.report, self._unsilenced(result.value), result.name)
 
-    def _unsilenced(self, findings: Iterable[Finding]) -> list[Finding]:
-        """Drop the suggestions that a comment in the original sources silences, recording them.
+    def _unsilenced(
+        self, findings: Iterable[Finding], source_root: Path | None = None
+    ) -> list[Finding]:
+        """Drop suggestions silenced in the sources where they were found, recording them.
 
         Args:
-            findings: The findings of a task that read the original sources.
+            findings: The findings of a task.
+            source_root: The analyzed snapshot, defaulting to the original import.
 
         Returns:
             The findings without the silenced suggestions.
         """
-        kept, silenced = split_silenced_suggestions(list(findings), self._source_root)
+        kept, silenced = split_silenced_suggestions(
+            list(findings), source_root if source_root is not None else self._source_root
+        )
         if silenced:
             record_silenced_suggestions(
                 self.report.execution, [item.to_report() for item in silenced]
@@ -252,7 +262,13 @@ class TaskReporter:
         ]
 
     def record_build(
-        self, result: BuildResult, stage: str, *, elapsed_seconds: float, queue_seconds: float
+        self,
+        result: BuildResult,
+        stage: str,
+        *,
+        elapsed_seconds: float,
+        queue_seconds: float,
+        source_root: Path | None = None,
     ) -> bool:
         """Record a build's findings, tools, timing and stage.
 
@@ -265,6 +281,7 @@ class TaskReporter:
             stage: The stage name of the build, which tags its findings.
             elapsed_seconds: How long the build ran.
             queue_seconds: How long the build waited before it started.
+            source_root: The tree the build read, defaulting to the original import.
 
         Returns:
             Whether the build succeeded and produced a PDF.
@@ -275,12 +292,14 @@ class TaskReporter:
             settings.engine,
         )
         toolchain_missing = any("missing_tools" in finding.details for finding in findings)
-        record_findings(report, findings, stage)
-        record_findings(report, check_build_details(result, settings.build_checks), stage)
+        observations = [
+            *self._unsilenced(findings, source_root),
+            *check_build_details(result, settings.build_checks),
+        ]
         if stage == BASELINE_STAGE and not toolchain_missing:
             # One observation per document: later builds use the same toolchain. Without
             # TeX the missing-toolchain finding already explains the absent version.
-            record_findings(report, [check_tex_distribution(result, settings.build_checks)], stage)
+            observations.append(check_tex_distribution(result, settings.build_checks))
         report.tools.update(result.tools.to_report())
         built = result.success and result.pdf is not None
         report.stages.append(
@@ -294,7 +313,7 @@ class TaskReporter:
         )
         # A missing toolchain is already reported once; a failed-build finding would repeat it.
         if not built and not toolchain_missing:
-            report.findings.append(
+            observations.append(
                 Finding(
                     f"build.{stage}",
                     f"Required {stage} build did not succeed",
@@ -303,6 +322,16 @@ class TaskReporter:
                     details=_failed_build_details(result, findings),
                 )
             )
+        if not built:
+            # Keep tool failures and unlocated log messages in the same document as
+            # the failed build's other log findings.
+            observations = [
+                replace(
+                    item, details={**item.details, DetailKey.DOCUMENT: self._inventory_document}
+                )
+                for item in observations
+            ]
+        record_findings(report, observations, stage)
         return built
 
 

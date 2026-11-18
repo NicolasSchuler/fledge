@@ -22,7 +22,7 @@ from typing import NamedTuple
 
 from .build_workspace import BuildLayout
 from .errors import PreparationError
-from .file_safety import FileTooLargeError, read_regular_file
+from .file_safety import FileTooLargeError, open_regular_file, read_regular_file
 from .generated_files import BIBLIOGRAPHY_SUFFIX, generated_kind, production_hint
 from .path_safety import is_link_free_regular_file
 from .setting_choices import Engine
@@ -146,6 +146,7 @@ class SubmissionDependencies:
             that list.
         xindy_lists: The files in ``never_created`` that the build left empty because the
             glossaries package writes them for xindy, which the isolated build does not run.
+        workspace: The trusted ancestor of the generated files, if collected from a build.
     """
 
     inputs: set[str] | None
@@ -157,6 +158,7 @@ class SubmissionDependencies:
     generated_files: Mapping[str, Path] = field(default_factory=dict)
     never_created: tuple[str, ...] = ()
     xindy_lists: tuple[str, ...] = ()
+    workspace: Path | None = None
 
     def to_details(self) -> dict[str, object]:
         """Build the report entry: what was consulted, and the counts or the uncertainty.
@@ -230,10 +232,8 @@ def _read_owned_bytes(path: Path, root: Path, max_bytes: int) -> bytes:
         PreparationError: The file is missing, linked, not regular or unreadable, or holds
             more than ``max_bytes``.
     """
-    if not is_link_free_regular_file(root, path):
-        raise PreparationError(f"{path.name} is missing or is not an owned regular file")
     try:
-        return read_regular_file(path, max_bytes)
+        return read_regular_file(path, max_bytes, root=root)
     except FileTooLargeError:
         raise PreparationError(f"{path.name} exceeds the dependency evidence size limit") from None
     except OSError:
@@ -636,9 +636,7 @@ def _read_primary_rule(request: DependencyRequest) -> list[_LatexmkRule]:
     stem = Path(request.main).stem
     main_path = layout.project / request.main
     rules = _parse_latexmk_database(
-        _read_evidence_lines(
-            layout.output / f"{stem}.fdb_latexmk", layout.output, request.max_bytes
-        )
+        _read_evidence_lines(layout.output / f"{stem}.fdb_latexmk", layout.work, request.max_bytes)
     )
     primary = next((rule for rule in rules if rule.name == request.engine), None)
     if primary is None or _absolute_path(primary.source, layout.cwd) != main_path:
@@ -852,17 +850,19 @@ def _never_created(request: DependencyRequest, rules: list[_LatexmkRule]) -> tup
                 path = _absolute_path(filename, layout.cwd)
             except PreparationError:
                 continue
-            if any(_has_entries(path.with_suffix(suffix)) for suffix in kind.tool_inputs):
-                base = layout.output if path.is_relative_to(layout.output) else layout.project
-                if path.is_relative_to(base):
-                    found.add(path.relative_to(base).as_posix())
+            base = layout.output if path.is_relative_to(layout.output) else layout.project
+            if path.is_relative_to(base) and any(
+                _has_entries(path.with_suffix(suffix), layout.work) for suffix in kind.tool_inputs
+            ):
+                found.add(path.relative_to(base).as_posix())
     return tuple(sorted(found))
 
 
-def _has_entries(path: Path) -> bool:
-    """Return whether ``path`` is a non-empty regular file, unlinked."""
+def _has_entries(path: Path, root: Path) -> bool:
+    """Return whether ``path`` is a non-empty regular file under ``root``."""
     try:
-        return path.is_file() and not path.is_symlink() and path.stat().st_size > 0
+        with open_regular_file(path, root=root) as (_, size):
+            return size > 0
     except OSError:
         return False
 
@@ -892,8 +892,8 @@ def _xindy_lists(request: DependencyRequest, rules: list[_LatexmkRule]) -> tuple
             continue
         if (
             path.is_relative_to(layout.output)
-            and _has_entries(path.with_suffix(tool_input))
-            and _records_xindy_style(path.with_suffix(".aux"), layout.output, request.max_bytes)
+            and _has_entries(path.with_suffix(tool_input), layout.work)
+            and _records_xindy_style(path.with_suffix(".aux"), layout.work, request.max_bytes)
         ):
             found.add(path.relative_to(layout.output).as_posix())
     return tuple(sorted(found))
@@ -950,4 +950,5 @@ def collect_submission_dependencies(request: DependencyRequest) -> SubmissionDep
         },
         never_created=tuple(sorted({*_never_created(request, rules), *xindy})),
         xindy_lists=xindy,
+        workspace=request.layout.work,
     )

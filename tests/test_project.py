@@ -505,6 +505,17 @@ class ProjectTests(unittest.TestCase):
         self.assertFalse((self.base / "import").exists())
         self.assertEqual((self.source / "large.tex").stat().st_size, 1025)
 
+    def test_zip_entry_budget_counts_implicit_parents_once(self) -> None:
+        member = ("chapters/intro.tex", b"Introduction")
+        implicit = self.make_zip([member])
+        with self.assertRaisesRegex(PreparationError, "entry limit"):
+            import_project(implicit, self.base / "too-small", ImportLimits(max_files=1))
+        explicit = self.make_zip([member, ("chapters/", b"")])
+        imported = import_project(
+            explicit, self.base / "import", ImportLimits(max_files=2), unwrap=False
+        )
+        self.assertEqual(imported.files, [member[0]])
+
     def test_zip_actual_stream_bytes_are_bounded_independently_of_metadata(self) -> None:
         archive = self.make_zip([("main.tex", b"x")])
         with patch.object(zipfile.ZipFile, "open", return_value=io.BytesIO(b"x" * 5)):

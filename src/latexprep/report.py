@@ -221,6 +221,13 @@ class Report:
     package_contents: list[dict[str, object]] = field(default_factory=list)
 
     @property
+    def submission_written(self) -> bool:
+        """Whether this preparation published a submission archive."""
+        return self.command == "prepare" and any(
+            name == "archive" or name.endswith(".archive") for name in self.artifacts
+        )
+
+    @property
     def is_request_error(self) -> bool:
         """Whether a rejected request or an input problem stopped the run before any check.
 

@@ -272,6 +272,15 @@ class PdfDetailTests(unittest.IsolatedAsyncioTestCase):
         await self.assert_status(options, "inconclusive", raster=blank[:-1])
         self.assertEqual(await self.check(replace(options, sparse_page_exemptions=(1,))), [])
 
+    async def test_sparse_pages_measure_the_crop_box(self) -> None:
+        cropped = geometry(crop="50 50 250 350").replace("612 x 792", "200 x 300")
+        runner = DetailRunner(geometry=cropped, raster=gray_raster(width=101, height=150))
+        [finding] = await self.check(PdfCheckOptions(min_page_ink_ratio=0.1), runner)
+        self.assertEqual(finding.status, "passed")
+        self.assertEqual(finding.details["raster_pixels"], [101, 150])
+        [argv] = [argv for argv, _, _ in runner.calls if argv[0] == "pdftoppm" and "-r" in argv]
+        self.assertIn("-cropbox", argv)
+
     async def test_documents_beyond_the_rendering_cap_keep_non_rendering_checks(self) -> None:
         many = geometry(pages=301)
         result = await self.check(

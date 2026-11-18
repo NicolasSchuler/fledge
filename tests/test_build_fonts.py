@@ -11,6 +11,7 @@ import struct
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from latexprep.build_fonts import (
     host_font_files,
@@ -199,7 +200,26 @@ class LuaotfloadFontTests(unittest.TestCase):
                 'return {\n ["resources"]={},\n ["filename"]="/System/Library/Fonts/'
                 'Supplemental/Georgia.ttf",\n}\n'
             )
-            (cache / "nocopy.luc").write_bytes(b"compiled")
             unrelated = Path(directory) / "main.aux"
-            files = luaotfload_font_files([cache / "georgia.luc", cache / "nocopy.luc", unrelated])
+            files = luaotfload_font_files(
+                [cache / "georgia.luc", unrelated], roots=(Path(directory),)
+            )
         self.assertEqual(files, ["/System/Library/Fonts/Supplemental/Georgia.ttf"])
+
+    def test_missing_font_evidence_is_inconclusive(self) -> None:
+        root = Path("/example/work")
+        cache = root / "luatex-cache/generic/fonts/otl/font.luc"
+        with (
+            patch("latexprep.build_fonts.read_regular_file", side_effect=FileNotFoundError),
+            self.assertRaisesRegex(PreparationError, "no readable text copy"),
+        ):
+            luaotfload_font_files([cache], roots=(root,))
+
+    def test_cache_outside_the_approved_roots_is_never_opened(self) -> None:
+        cache = Path("/example/other/luatex-cache/generic/fonts/otl/font.luc")
+        with (
+            patch("latexprep.build_fonts.read_regular_file") as read,
+            self.assertRaisesRegex(PreparationError, "outside the approved trees"),
+        ):
+            luaotfload_font_files([cache], roots=(Path("/example/work"),))
+        read.assert_not_called()

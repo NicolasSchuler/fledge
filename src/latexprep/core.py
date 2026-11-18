@@ -26,6 +26,7 @@ from .execution_records import (
     record_not_checked,
     record_pdf_previews,
 )
+from .file_safety import DirectoryIdentity
 from .findings import Finding
 from .job_context import (
     DOCUMENT_COMMANDS,
@@ -48,7 +49,7 @@ from .publication import (
     publish_documents,
     publish_package,
     publish_previews,
-    validate_destination,
+    validate_output_directory,
 )
 from .publication_folders import is_replaceable_output
 from .report import Outcome, Report
@@ -63,10 +64,12 @@ class _Destinations(NamedTuple):
     Attributes:
         output: The directory of the bundle, or ``None``.
         previews: The directory of explicit previews, or ``None``.
+        accepted: The entry identities, or absence, accepted at validation time.
     """
 
     output: Path | None
     previews: Path | None
+    accepted: dict[Path, DirectoryIdentity | None]
 
 
 def _record_settings(request: JobRequest, report: Report) -> Settings:
@@ -130,23 +133,20 @@ def _validate_destinations(request: JobRequest) -> _Destinations:
     Raises:
         RequestError: The preview output is the output, or one lies inside the other.
     """
-    output = (
-        validate_destination(
-            request.source, request.output, "output", folder=True, force=request.force
-        )
+    output, output_identity = (
+        validate_output_directory(request.source, request.output, "output", force=request.force)
         if request.output is not None
-        else None
+        else (None, None)
     )
-    preview_output = (
-        validate_destination(
+    preview_output, preview_identity = (
+        validate_output_directory(
             request.source,
             request.preview_output,
             "preview output",
-            folder=True,
             force=request.force,
         )
         if request.preview_output is not None
-        else None
+        else (None, None)
     )
     if (
         preview_output is not None
@@ -162,7 +162,12 @@ def _validate_destinations(request: JobRequest) -> _Destinations:
             "Choose a preview output directory that is neither inside nor the parent of the "
             "output directory.",
         )
-    return _Destinations(output, preview_output)
+    accepted = {
+        path: identity
+        for path, identity in ((output, output_identity), (preview_output, preview_identity))
+        if path is not None
+    }
+    return _Destinations(output, preview_output, accepted)
 
 
 def _validate_request(request: JobRequest, settings: Settings) -> _Destinations:
@@ -416,7 +421,9 @@ def _publish(
     # Previews go into the bundle only without an explicit preview directory.
     bundled_previews = previews if preview_output is None else ()
     replace_previous = _replaces_earlier_outputs(request, report.outcome)
-    with OutputTransaction(emit, report, replace_previous=replace_previous) as transaction:
+    with OutputTransaction(
+        emit, report, replace_previous=replace_previous, accepted=destinations.accepted
+    ) as transaction:
         try:
             refused = False
             if isinstance(outputs, VerifiedPackage):

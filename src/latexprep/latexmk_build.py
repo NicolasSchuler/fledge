@@ -59,6 +59,7 @@ from .engine_selection import (
     read_engine_comment,
 )
 from .errors import PreparationError, ToolUnavailableError
+from .file_safety import open_regular_file
 from .findings import Finding
 from .latexmk_command import BiberPlan, controlled_rules, latexmk_command
 from .loaded_options import (
@@ -73,7 +74,7 @@ from .option_config import require_unique_strings, validate_scalars
 from .path_safety import is_relative_posix_path
 from .runtime import ToolRunner
 from .setting_choices import BibliographyBackend, Engine, EngineSetting
-from .tool_launch import tool_state_directory
+from .tool_launch import kept_tex_cache_directory, tool_state_directory
 
 # Only these policy-level log errors may be deselected. Tool failures, incomplete
 # output/recorder evidence, TeX errors and unresolved reruns remain build failures.
@@ -352,13 +353,15 @@ async def _build_once(request: BuildRequest, runner: ToolRunner, biber: BiberPla
     result.findings.extend(bibliography.findings)
     result.tools.versions.update(bibliography.versions)
     pdf = layout.output / f"{request.stem}.pdf"
-    complete_pdf = _is_complete_pdf(pdf, runner.limits.max_file_bytes)
+    complete_pdf = _is_complete_pdf(pdf, runner.limits.max_file_bytes, root=layout.work)
     result.findings.extend(
         await run_in_thread(
             _output_findings,
             request,
             layout,
-            _OutputEvidence(recorder.inputs, declared_roots, result.log, complete_pdf),
+            _OutputEvidence(
+                recorder.inputs, declared_roots, result.log, complete_pdf, runner.font_cache
+            ),
         )
     )
     built = complete_pdf and not any(
@@ -396,12 +399,14 @@ class _OutputEvidence(NamedTuple):
         declared_roots: The declared resource roots.
         log: The final-pass log.
         complete_pdf: Whether the build produced a complete PDF.
+        font_cache: The runtime-owned read-only luaotfload cache, when prepared.
     """
 
     recorder_inputs: frozenset[Path]
     declared_roots: tuple[Path, ...]
     log: str
     complete_pdf: bool
+    font_cache: Path | None
 
 
 def _output_findings(
@@ -429,7 +434,7 @@ def _output_findings(
         ]
     if request.engine == "pdflatex":
         return []
-    return [_host_fonts(request, layout, evidence.recorder_inputs, evidence.declared_roots)]
+    return [_host_fonts(request, layout, evidence)]
 
 
 async def _probe_build_tools(
@@ -497,27 +502,32 @@ def _declared_roots(execution: CommandResult, runner: ToolRunner) -> tuple[Path,
 def _host_fonts(
     request: BuildRequest,
     layout: BuildLayout,
-    recorder_inputs: frozenset[Path],
-    declared_roots: tuple[Path, ...],
+    evidence: _OutputEvidence,
 ) -> Finding:
     """Report the fonts a XeLaTeX or LuaLaTeX build loaded from outside its trees.
 
     Args:
         request: The build, which names the engine.
         layout: The build's workspace, whose output holds the XDV file.
-        recorder_inputs: The files the recorder lists, which name LuaLaTeX's font caches.
-        declared_roots: The declared resource roots, among which the TeX distribution is.
+        evidence: Recorder inputs, declared resource roots and supported font cache.
 
     Returns:
         The host-font finding; an informational, inconclusive one when the XDV file could
         not be read.
     """
     label = ENGINE_LABELS[request.engine]
+    cache_roots = (kept_tex_cache_directory(layout.work),)
+    if evidence.font_cache is not None:
+        cache_roots += (evidence.font_cache,)
     try:
         files = (
-            xdv_font_files(layout.output / f"{request.stem}.xdv")
+            xdv_font_files(layout.output / f"{request.stem}.xdv", root=layout.work)
             if request.engine == "xelatex"
-            else luaotfload_font_files(recorder_inputs)
+            else luaotfload_font_files(
+                evidence.recorder_inputs,
+                roots=cache_roots,
+                workspace=layout.work,
+            )
         )
     except PreparationError as error:
         return Finding(
@@ -527,7 +537,7 @@ def _host_fonts(
             status="inconclusive",
             path=request.main,
         )
-    distribution = tex_distribution_trees(declared_roots)
+    distribution = tex_distribution_trees(evidence.declared_roots)
     hosted = host_font_files(files, distribution=distribution, project=layout.project)
     return host_fonts_finding(label, hosted, request.main)
 
@@ -554,7 +564,9 @@ async def _judge_bibliography(
     Raises:
         BiberRequired: A build that deferred Biber wrote a Biber control file.
     """
-    evidence = read_bibliography_evidence(layout.output, runner.limits.max_output_bytes)
+    evidence = read_bibliography_evidence(
+        layout.output, runner.limits.max_output_bytes, root=layout.work
+    )
     if biber.deferred and "biber" in evidence.observed_backends:
         raise BiberRequired
     verification = await verify_backend_tools(
@@ -634,10 +646,14 @@ def _read_log(request: BuildRequest, layout: BuildLayout, max_bytes: int) -> _Lo
     Returns:
         The log text and its findings, with one more when the log is incomplete.
     """
-    text, complete = read_bounded(layout.output / f"{request.stem}.log", max_bytes)
+    text, complete = read_bounded(
+        layout.output / f"{request.stem}.log", max_bytes, root=layout.work
+    )
     findings = log_findings(text, request.main, layout.project, layout.cwd)
     # BibTeX and Biber write their own warnings to <main>.blg; a build without one ran neither.
-    bibliography_log, _ = read_bounded(layout.output / f"{request.stem}.blg", max_bytes)
+    bibliography_log, _ = read_bounded(
+        layout.output / f"{request.stem}.blg", max_bytes, root=layout.work
+    )
     findings.extend(bibliography_log_findings(bibliography_log, request.main))
     if not complete:
         findings.append(
@@ -810,9 +826,13 @@ def _converter_suggestion(output: str) -> str | None:
     return None
 
 
-def _is_complete_pdf(pdf: Path, max_bytes: int) -> bool:
+def _is_complete_pdf(pdf: Path, max_bytes: int, *, root: Path) -> bool:
     """Return whether ``pdf`` is a file of at most ``max_bytes`` that starts with a PDF header."""
-    if not pdf.is_file() or not len(_PDF_HEADER) <= pdf.stat().st_size <= max_bytes:
+    try:
+        with open_regular_file(pdf, root=root) as (stream, size):
+            return (
+                len(_PDF_HEADER) <= size <= max_bytes
+                and stream.read(len(_PDF_HEADER)) == _PDF_HEADER
+            )
+    except OSError:
         return False
-    with pdf.open("rb") as stream:
-        return stream.read(len(_PDF_HEADER)) == _PDF_HEADER

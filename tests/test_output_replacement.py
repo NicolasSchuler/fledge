@@ -24,7 +24,12 @@ from latexprep.errors import PreparationError, RequestError
 from latexprep.findings import Finding
 from latexprep.job_context import JobRequest
 from latexprep.pdf_artwork_options import PdfArtworkOptions
-from latexprep.publication import OutputTransaction, publish_previews, validate_destination
+from latexprep.publication import (
+    OutputTransaction,
+    publish_previews,
+    validate_destination,
+    validate_output_directory,
+)
 from latexprep.publication_folders import OUTPUT_MARKER, is_fledge_output, is_fledge_report
 from latexprep.report import Outcome, Report
 from tests.support import ProjectTestCase, controlled_backends, minimal_project
@@ -150,6 +155,17 @@ class ReportFileRerunTests(ProjectTestCase):
             ["notes.json", "paper", "report.json"],
         )
 
+    def test_a_rejected_rerun_preserves_earlier_reports_even_with_force(self) -> None:
+        earlier = self.write("report.json", Report("inspect", outcome=Outcome.PASSED).to_json())
+        original = earlier.read_bytes()
+        result = CliRunner().invoke(
+            cli,
+            ["inspect", str(self.root / "missing"), "--report", str(earlier), "--force", "--json"],
+        )
+        self.assertEqual(result.exit_code, 4, result.output)
+        self.assertEqual(json.loads(result.stdout)["outcome"], "error")
+        self.assertEqual(earlier.read_bytes(), original)
+
     def test_a_replaced_report_file_keeps_its_permissions(self) -> None:
         # Under the usual umask, a report created like any new file would be 0644.
         self.addCleanup(os.umask, os.umask(0o022))
@@ -266,6 +282,47 @@ class TransactionTests(ProjectTestCase):
             raise RuntimeError("publication failed")
         self.assertTrue(empty.is_dir())
         self.assertEqual(list(empty.iterdir()), [])
+        self.assertEqual(leftovers(self.root), [])
+
+    def test_two_staged_replacements_preserve_the_first_commit(self) -> None:
+        output = self.earlier_output()
+        with self.assertRaisesRegex(PreparationError, "accepted output folder changed"):
+            with OutputTransaction(replace_previous=True) as second:
+                (second.create(output) / "second.txt").write_text("second")
+                with OutputTransaction(replace_previous=True) as first:
+                    (first.create(output) / "first.txt").write_text("first")
+        self.assertEqual((output / "first.txt").read_text(), "first")
+        self.assertFalse((output / "second.txt").exists())
+        self.assertEqual(leftovers(self.root), [])
+
+    def test_publication_rejects_a_new_destination_after_request_validation(self) -> None:
+        output = self.earlier_output()
+        source = self.root / "source"
+        source.mkdir()
+        path, identity = validate_output_directory(source, output, "output", force=True)
+        with OutputTransaction(replace_previous=True) as other:
+            (other.create(output) / "other.txt").write_text("other")
+        with (
+            self.assertRaisesRegex(PreparationError, "changed while the job ran"),
+            OutputTransaction(replace_previous=True, accepted={path: identity}) as transaction,
+        ):
+            transaction.create(path)
+        self.assertEqual((output / "other.txt").read_text(), "other")
+        self.assertEqual(leftovers(self.root), [])
+
+    def test_a_busy_publication_lock_retains_the_previous_output_and_clears_artifacts(self):
+        output = self.earlier_output()
+        report = Report(command="prepare")
+        report.artifacts["archive"] = str(output / "submission.zip")
+        with (
+            patch("latexprep.publication_folders.fcntl.flock", side_effect=BlockingIOError),
+            self.assertRaisesRegex(PreparationError, "Another publication is committing"),
+            OutputTransaction(report=report, replace_previous=True) as transaction,
+        ):
+            (transaction.create(output) / "new.txt").write_text("new")
+        self.assertTrue(is_fledge_output(output))
+        self.assertFalse((output / "new.txt").exists())
+        self.assertEqual(report.artifacts, {})
         self.assertEqual(leftovers(self.root), [])
 
     def test_a_link_planted_in_an_empty_folder_fails_the_run_and_is_never_followed(self) -> None:

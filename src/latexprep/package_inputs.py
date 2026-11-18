@@ -25,6 +25,7 @@ from typing import NamedTuple
 
 from .build_result import BuildResult
 from .cancellation import cancellation_point
+from .file_safety import open_regular_file
 from .findings import Finding
 from .generated_files import BIBLIOGRAPHY_SUFFIX, GENERATED_SUFFIXES, INDEX_SUFFIXES, generated_kind
 from .package_inventory import InventoryRow, selection_inventory, unused_reason
@@ -63,6 +64,7 @@ class InputEvidence:
         shipped_suffixes: The suffixes of the generated files the package carries from
             the build (see :func:`shipped_generated_suffixes`).
         uncertainty: Why the trace is incomplete, when ``observed`` is ``None``.
+        generated_root: The trusted workspace from which generated files may be copied.
     """
 
     observed: Set[str] | None
@@ -70,6 +72,7 @@ class InputEvidence:
     generated_files: Mapping[str, Path] = field(default_factory=dict)
     shipped_suffixes: frozenset[str] = frozenset(INDEX_SUFFIXES)
     uncertainty: tuple[str, ...] = ()
+    generated_root: Path | None = None
 
 
 class InputSelectionResult(NamedTuple):
@@ -108,6 +111,7 @@ def build_evidence(
         generated_files=dict(dependencies.generated_files) if dependencies else {},
         shipped_suffixes=shipped_suffixes,
         uncertainty=dependencies.uncertainty if dependencies else (),
+        generated_root=dependencies.workspace if dependencies else None,
     )
 
 
@@ -265,7 +269,11 @@ def _unusable_inputs(root: Path, included: Set[str]) -> list[Finding]:
 
 
 def _copy_inputs(
-    root: Path, destination: Path, included: Set[str], built: Mapping[str, Path]
+    root: Path,
+    destination: Path,
+    included: Set[str],
+    built: Mapping[str, Path],
+    generated_root: Path | None,
 ) -> None:
     """Copy the selected inputs and the shipped generated files into ``destination``.
 
@@ -274,6 +282,7 @@ def _copy_inputs(
         destination: The folder to create and copy into; it must not exist yet.
         included: The selected inputs, relative to ``root``.
         built: The build's generated files to copy, by their name in ``destination``.
+        generated_root: The trusted workspace for the generated files, when available.
     """
     destination.mkdir()
     sources = {name: root / name for name in included} | dict(built)
@@ -281,7 +290,11 @@ def _copy_inputs(
         cancellation_point()
         target = destination / name
         target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(sources[name], target)
+        source = sources[name]
+        # Production generated evidence always carries the workspace it came from.
+        read_root = (generated_root or source.parent) if name in built else root
+        with open_regular_file(source, root=read_root) as (stream, _), target.open("xb") as output:
+            shutil.copyfileobj(stream, output)
 
 
 def _shipped_generated_text(built: Set[str]) -> str:
@@ -370,7 +383,7 @@ def select_package_inputs(
         Change(name, kind=ChangeKind.EXCLUDE, reason=unused_reason(name, regenerated))
         for name in sorted(files - shipped)
     ]
-    _copy_inputs(root, destination, included, built)
+    _copy_inputs(root, destination, included, built, evidence.generated_root)
     inventory = selection_inventory(
         root,
         files=files,

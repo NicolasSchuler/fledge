@@ -44,10 +44,8 @@ from .citation_graph import (
     build_citation_graph,
     require_directory,
     uncertainty_messages,
-    uses_biblatex,
 )
 from .errors import PreparationError
-from .expanded_document import reachable_sources
 from .finding_text import more_suffix
 from .findings import EvidenceKind, Finding
 from .source_graph import UNPARSED_SOURCE_RULES, SourceGraph
@@ -385,11 +383,11 @@ def check_bibliography_coverage_and_fields(
         )
     )
     _coverage(scope.graphs, references, scope.coverage_gaps, options, results)
-    graph = analysis.graph
-    # Without a selected main file nothing says which backend formats the entries.
-    bibtex_styles = (
-        None if graph.main is None else not uses_biblatex(graph, reachable_sources(graph))
-    )
+    bibtex_styles: dict[str, bool] = {}
+    for graph in scope.graphs:
+        for resource in graph.resources:
+            # An en dash is unsuitable if any root using this resource has a BibTeX style.
+            bibtex_styles[resource] = bibtex_styles.get(resource, False) or not graph.uses_biblatex
     check_entry_fields(references, scope.field_gaps, options, results, bibtex_styles=bibtex_styles)
     if options.check_fuzzy_duplicates:
         find_fuzzy_duplicates(references, scope.field_gaps, options, results)

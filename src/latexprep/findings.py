@@ -256,7 +256,7 @@ class Finding:
         return definition.fix if definition and self.status == "failed" else None
 
 
-def stopped_build_stages(findings: Iterable[Finding]) -> frozenset[str]:
+def stopped_build_stages(findings: Iterable[Finding]) -> frozenset[tuple[str | None, str | None]]:
     """Return the stages whose build a tool, time or resource problem stopped.
 
     Such a build left a truncated log, so the other build results of its stage only
@@ -266,16 +266,18 @@ def stopped_build_stages(findings: Iterable[Finding]) -> frozenset[str]:
         findings: The findings of a run.
 
     Returns:
-        The stages, with an empty name for a finding without one.
+        The document and stage of each stopped build.
     """
     return frozenset(
-        item.stage or ""
+        (item.document, item.stage)
         for item in findings
         if item.is_blocking and item.prevents_checking and item.rule.startswith(_BUILD_FAMILY)
     )
 
 
-def follows_stopped_build(finding: Finding, stages: frozenset[str]) -> bool:
+def follows_stopped_build(
+    finding: Finding, stages: frozenset[tuple[str | None, str | None]]
+) -> bool:
     """Return whether ``finding`` is a build result of a stage whose build was stopped.
 
     Args:
@@ -288,7 +290,7 @@ def follows_stopped_build(finding: Finding, stages: frozenset[str]) -> bool:
     return (
         finding.rule.startswith(_BUILD_FAMILY)
         and not finding.prevents_checking
-        and (finding.stage or "") in stages
+        and (finding.document, finding.stage) in stages
     )
 
 

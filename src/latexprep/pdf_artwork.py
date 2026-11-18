@@ -286,7 +286,7 @@ async def _inspect_artwork(
         result.extend(trace_unavailable_findings(trace_rules, trace.failure))
     if ArtworkRule.TYPE3_GLYPH_PROGRAMS in configured:
         result.append(await _type3_finding(session, pages, options))
-    geometry = PageGeometry(frames.sizes, misaligned)
+    geometry = PageGeometry(frames.sizes, misaligned, frames.axis_swapped_pages)
     result.extend(await _rendered_findings(session, geometry, policy, configured))
     if color_space is not None and trace.document is not None:
         result.append(await _color_space_finding(session, trace.document, color_space))

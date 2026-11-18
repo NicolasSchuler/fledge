@@ -35,9 +35,11 @@ from .tex_spans import (
     conditional_spans,
     defined_names,
     definition_spans,
+    endinput_has_suffix,
     in_conditional,
     macro_definitions,
     runs_in_place,
+    stops_source,
 )
 
 _UNSUPPORTED_COMMANDS = frozenset(
@@ -292,12 +294,11 @@ def _is_file_command(command: Command) -> bool:
     return not command.named and (command.name in FILE_COMMANDS or command.name == "graphicspath")
 
 
-def _check_conditional_dependencies(checks: SourceChecks) -> None:
+def _check_conditional_dependencies(checks: SourceChecks, spans: list[tuple[int, int]]) -> None:
     """Report file references that sit inside a conditional, whose branch is not established.
 
     Toolchain classes and packages that cannot name a project file are left out.
     """
-    spans = conditional_spans(checks.source.commands)
     for command in checks.source.commands:
         if not _is_file_command(command) or not in_conditional(spans, command.start):
             continue
@@ -519,21 +520,42 @@ _COMMAND_CHECKS: tuple[Callable[[SourceChecks, Command], None], ...] = (
 )
 
 
-def check_source(checks: SourceChecks) -> None:
+def check_source(checks: SourceChecks, conditionals: list[tuple[int, int]] | None = None) -> None:
     """Run every check over a freshly parsed source: conditionals, literals, then commands.
 
     A class or package file reports each finding here; the graph merges them per rule
     (``GraphFindings.merge_per_rule``).
     """
-    commands = checks.source.commands
+    source = checks.source
+    commands = source.commands
+    if conditionals is None:
+        conditionals = conditional_spans(commands)
+    for index, command in enumerate(commands):
+        if stops_source(command, conditionals):
+            if endinput_has_suffix(source.masked, command):
+                checks.uncertain(
+                    command,
+                    "source.unsupported_command",
+                    "TeX may read more tokens on the same physical line after \\endinput.",
+                )
+            commands = commands[:index]
+            source = replace(
+                source,
+                commands=commands,
+                unclosed_literals=tuple(
+                    offset for offset in source.unclosed_literals if offset < command.start
+                ),
+            )
+            break
     spans = definition_spans(checks.source.masked, commands)
     checks = replace(
         checks,
+        source=source,
         definitions=tuple(spans),
         defined=frozenset(defined_names(commands)),
         deferred=DeferredBodies(checks.source.masked, commands, spans),
     )
-    _check_conditional_dependencies(checks)
+    _check_conditional_dependencies(checks, conditionals)
     _check_unclosed_literals(checks)
     for command in checks.source.commands:
         for check in _COMMAND_CHECKS:

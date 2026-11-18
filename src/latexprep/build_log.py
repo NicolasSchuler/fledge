@@ -164,19 +164,20 @@ _MAX_BIBLIOGRAPHY_WARNINGS = 20
 _BIBLIOGRAPHY_WARNING_RULE = "build.bibliography_warning"
 
 
-def read_bounded(path: Path, limit: int) -> tuple[str, bool]:
+def read_bounded(path: Path, limit: int, *, root: Path | None = None) -> tuple[str, bool]:
     """Read the first ``limit`` bytes of a regular, unlinked log as text.
 
     Args:
         path: The log file.
         limit: The largest number of bytes to read.
+        root: The trusted ancestor for a descriptor-relative, link-free read, if given.
 
     Returns:
         The text, decoded as UTF-8 with replacement characters, and whether it is the
         whole log. A missing, linked or unreadable log reads as empty and incomplete.
     """
     try:
-        data = read_file_prefix(path, limit + 1)
+        data = read_file_prefix(path, limit + 1, root=root)
     except OSError:
         return "", False
     return data[:limit].decode("utf-8", errors="replace"), len(data) <= limit

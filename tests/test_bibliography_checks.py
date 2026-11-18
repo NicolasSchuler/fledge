@@ -120,6 +120,24 @@ class BibliographyCheckTests(ProjectTestCase):
                 self.assertTrue(all(row.status == "inconclusive" for row in rows))
                 self.assertFalse(any(row.severity == "error" for row in rows))
 
+    def test_citations_from_a_local_package_wrapper_make_coverage_inconclusive(self) -> None:
+        self.write(
+            "main.tex",
+            "\\documentclass{article}\n\\usepackage{localrefs}\n"
+            "\\begin{document}\\cite{used}\\workref{other}\\bibliography{references}"
+            "\\end{document}",
+        )
+        self.write("localrefs.sty", r"\newcommand{\workref}[1]{\cite{#1}}")
+        self.write("references.bib", "@misc{used}@misc{other}")
+        rows = [
+            item
+            for item in self.check()
+            if item.rule in {"bibliography.citation_coverage", "bibliography.uncited_entries"}
+        ]
+        self.assertEqual({item.code for item in rows}, {"BIB101", "BIB102"})
+        self.assertEqual({item.status for item in rows}, {"inconclusive"})
+        self.assertTrue(any(r"\workref" in item.message for item in rows))
+
     def test_all_roots_keeps_citation_resolution_per_document(self) -> None:
         self.manuscript("\\cite{only_other}")
         self.write("references.bib", "@misc{only_main}")
@@ -453,6 +471,29 @@ class BibliographyCheckTests(ProjectTestCase):
             if item.rule == "bibliography.page_ranges"
         ]
         self.assertEqual({row.status for row in rows}, {"inconclusive"})
+
+    def test_all_root_page_ranges_use_each_resources_declaring_backends(self) -> None:
+        self.manuscript(resources="references,shared")
+        self.write(
+            "other.tex",
+            "\\documentclass{article}\n\\usepackage{biblatex}\n"
+            "\\addbibresource{other.bib}\\addbibresource{shared.bib}\n"
+            "\\begin{document}\\printbibliography\\end{document}",
+        )
+        for name in ("references", "other", "shared"):
+            self.write(f"{name}.bib", f"@article{{{name},pages={{10–20}}}}")
+        options = replace(self.options, all_roots=True)
+        for main in ("main.tex", "other.tex", None):
+            with self.subTest(main=main):
+                rows = [
+                    item
+                    for item in check_bibliography_coverage_and_fields(self.root, main, options)
+                    if item.rule == "bibliography.page_ranges"
+                ]
+                self.assertEqual(
+                    {(item.path, item.status) for item in rows},
+                    {("references.bib", "failed"), ("shared.bib", "failed")},
+                )
 
     def test_page_range_unknown_notation_and_macros_are_inconclusive(self) -> None:
         self.manuscript()

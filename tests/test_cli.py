@@ -640,7 +640,9 @@ class UnexpectedFailureTests(ProjectTestCase):
 
     def test_interrupt_while_writing_the_report_says_whether_output_was_published(self):
         published = Report(
-            "prepare", outcome=Outcome.PASSED, artifacts={"sources": str(self.root / "out")}
+            "prepare",
+            outcome=Outcome.PASSED,
+            artifacts={"archive": str(self.root / "out/submission.zip")},
         )
         unpublished = Report("check", outcome=Outcome.PASSED)
         for report, expected, forbidden in (

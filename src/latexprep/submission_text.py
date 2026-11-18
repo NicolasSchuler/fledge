@@ -240,12 +240,11 @@ class _Converter:
         them as escapes and is never copy-ready.
 
         Returns:
-            The draft, with whitespace collapsed, NFC-normalized and escaped onto one line,
-            and the escaped issues, sorted and without repeats.
+            The converted fragments joined with their whitespace intact, and any issues.
         """
         value = self.value
         if self.context.depth > _MAX_GROUP_DEPTH or len(value) > MAX_ARGUMENT_CHARS:
-            return escape_single_line_text(value), ["Text exceeds bounded conversion limits"]
+            return value, ["Text exceeds bounded conversion limits"]
         # The draft shows these characters as escapes, so the export is never copy-ready.
         if any(is_unsafe_character(char) and char not in "\n\r\t" for char in value):
             self.issues.append(
@@ -257,10 +256,7 @@ class _Converter:
         position = 0
         while position < len(value):
             position = self._step(position)
-        draft = unicodedata.normalize("NFC", " ".join("".join(self.out).split()))
-        return escape_single_line_text(draft), sorted(
-            {escape_single_line_text(issue) for issue in self.issues}
-        )
+        return "".join(self.out), self.issues
 
     def _group(self, start: int, opening: str = "{", closing: str = "}") -> Argument | None:
         """Read the balanced group at ``start``, ignoring delimiters inside comments.
@@ -462,6 +458,14 @@ class _Converter:
             # Without \else, the conditional may give nothing at all.
             branches.append((end, end))
         texts = [self._branch_text(start, stop) for start, stop in branches] or [("", [])]
+        if len(texts) > 1:
+            # A space already written before the conditional makes any leading space
+            # in a branch redundant. Trailing spaces can still separate the next word.
+            leading_space = bool(self.out and self.out[-1][-1:].isspace())
+            texts = [
+                (re.sub(r"\s+", " ", text.lstrip() if leading_space else text), issues)
+                for text, issues in texts
+            ]
         if len({text for text, _ in texts}) == 1 and not any(issues for _, issues in texts):
             self.out.append(texts[0][0])
         else:
@@ -472,7 +476,7 @@ class _Converter:
     def _branch_text(self, start: int, stop: int) -> tuple[str, list[str]]:
         """Convert one branch of a conditional in a context of its own."""
         context = self.context.nested(literal_punctuation=self.context.literal_punctuation)
-        return _Converter(self.value[start:stop], context).convert()
+        return _Converter(self.value[skip_space(self.value, start) : stop], context).convert()
 
     def _note(self, word: _ControlWord) -> int:
         r"""Drop a note that is not text of this field.
@@ -697,7 +701,12 @@ def convert_text(
         The single-line draft and the issues that need manual review.
     """
     context = _ConversionContext(keyword_separators, redefined_commands)
-    return _Converter(value, context).convert()
+    draft, issues = _Converter(value, context).convert()
+    if len(value) <= MAX_ARGUMENT_CHARS:
+        draft = unicodedata.normalize("NFC", " ".join(draft.split()))
+    return escape_single_line_text(draft), sorted(
+        {escape_single_line_text(issue) for issue in issues}
+    )
 
 
 class _Declaration(NamedTuple):

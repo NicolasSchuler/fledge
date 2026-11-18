@@ -18,7 +18,6 @@ from typing import Literal
 
 from .errors import PreparationError
 from .file_safety import FileTooLargeError, read_regular_file
-from .path_safety import is_contained
 from .tex_lexer import ParseLimitExceeded, scan_source_commands
 
 _MAX_CONTROL_FILES = 1000
@@ -71,7 +70,9 @@ class BibliographyEvidence:
         }
 
 
-def read_bibliography_evidence(output: Path, limit: int) -> BibliographyEvidence:
+def read_bibliography_evidence(
+    output: Path, limit: int, *, root: Path | None = None
+) -> BibliographyEvidence:
     """Read fresh backend control files; this does not assert a backend ran.
 
     A ``.bcf`` beside an ``.aux`` of the same stem shows Biber, so that ``.aux`` is not
@@ -81,10 +82,13 @@ def read_bibliography_evidence(output: Path, limit: int) -> BibliographyEvidence
     Args:
         output: The build's output directory, searched recursively.
         limit: The largest number of bytes all control files may hold together.
+        root: The trusted workspace containing the output directory, if given.
 
     Returns:
         The required backends, the control files that show them and the uncertainty.
     """
+    if output.is_symlink() or not output.is_dir():
+        return BibliographyEvidence((), (), ("Build output is not an owned directory",))
     backends: set[ObservedBackend] = set()
     controls: list[BibliographyControl] = []
     uncertainty: list[str] = []
@@ -101,16 +105,7 @@ def read_bibliography_evidence(output: Path, limit: int) -> BibliographyEvidence
     for path in sorted(files, key=lambda item: (item.suffix != ".bcf", str(item))):
         relative = path.relative_to(output).as_posix()
         try:
-            if not is_contained(output, path, regular_file=True):
-                raise PreparationError("control file is not an owned regular file")
-            try:
-                data = read_regular_file(path, limit - total)
-            except FileTooLargeError:
-                raise PreparationError(
-                    "combined control evidence exceeds the diagnostic size limit"
-                    if total
-                    else "control file exceeds the diagnostic size limit"
-                ) from None
+            data = _read_control(path, output if root is None else root, limit, total)
             total += len(data)
             text = data.decode("utf-8")
             if path.suffix == ".bcf":
@@ -130,6 +125,20 @@ def read_bibliography_evidence(output: Path, limit: int) -> BibliographyEvidence
         ) as error:
             uncertainty.append(f"{relative}: {error}")
     return BibliographyEvidence(tuple(sorted(backends)), tuple(controls), tuple(uncertainty))
+
+
+def _read_control(path: Path, root: Path, limit: int, total: int) -> bytes:
+    """Read one owned control file and explain a refusal in terms of the shared limit."""
+    try:
+        return read_regular_file(path, limit - total, root=root)
+    except FileTooLargeError:
+        raise PreparationError(
+            "combined control evidence exceeds the diagnostic size limit"
+            if total
+            else "control file exceeds the diagnostic size limit"
+        ) from None
+    except OSError:
+        raise PreparationError("control file is not an owned regular file") from None
 
 
 def _require_biber_control(text: str) -> None:

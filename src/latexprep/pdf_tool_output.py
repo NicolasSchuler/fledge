@@ -258,10 +258,12 @@ class PageFrames(NamedTuple):
     Attributes:
         unsupported_pages: The numbers of the pages whose frame cannot be aligned.
         sizes: The width and height of each page in points, in page order.
+        axis_swapped_pages: Pages with a rotation that exchanges the rendered width and height.
     """
 
     unsupported_pages: set[int]
     sizes: list[tuple[float, float]]
+    axis_swapped_pages: frozenset[int]
 
 
 def page_frames(output: str, pages: int) -> PageFrames:
@@ -275,7 +277,7 @@ def page_frames(output: str, pages: int) -> PageFrames:
         pages: The number of pages.
 
     Returns:
-        The unsupported pages and every page size.
+        The unsupported pages, every page size and the pages that render with swapped axes.
 
     Raises:
         PreparationError: A box has an unrecognized format or the page sizes are invalid.
@@ -298,7 +300,8 @@ def page_frames(output: str, pages: int) -> PageFrames:
         media, crop = entry.get("MediaBox"), entry.get("CropBox")
         if rotations.get(page) != 0 or media is None or crop != media or media[:2] != (0.0, 0.0):
             unsupported.add(page)
-    return PageFrames(unsupported, parse_page_sizes(output, pages))
+    swapped = frozenset(page for page, rotation in rotations.items() if rotation % 180 == 90)
+    return PageFrames(unsupported, parse_page_sizes(output, pages), swapped)
 
 
 def inventory_rows(output: str, header: Sequence[str], tool: str) -> list[str]:

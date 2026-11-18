@@ -14,8 +14,11 @@ from __future__ import annotations
 
 import functools
 import re
+from bisect import bisect_left
+from collections import defaultdict
 from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
+from itertools import pairwise
 from pathlib import Path, PurePosixPath
 from typing import NamedTuple
 
@@ -39,6 +42,7 @@ from .source_graph import (
 )
 from .source_loading import ParsedSource
 from .tex_commands import (
+    ARGUMENT_SPECIFICATION_DEFINITIONS,
     CITATION_COMMANDS,
     CITATION_STYLE_COMMANDS,
     COMMAND_DEFINITION_COMMANDS,
@@ -47,11 +51,13 @@ from .tex_commands import (
 )
 from .tex_lexer import Argument, Command, split_argument_items
 from .tex_spans import (
+    MacroDefinition,
     conditional_spans,
     defined_names,
     definition_spans,
     in_conditional,
     in_half_open_span,
+    macro_definitions,
     runs_in_place,
 )
 
@@ -62,8 +68,10 @@ _DEFINITION_GAP = "a macro definition of citation markup is not expanded"
 _EXECUTION_GAP = "macro or category-code execution is not expanded"
 _ENDINPUT_GAP = "endinput token buffering is unverified"
 _PACKAGE_MACHINERY_GAPS = frozenset({_DEFINITION_GAP, _EXECUTION_GAP, _ENDINPUT_GAP})
+# Entry fields that inherit metadata or refer to a parent entry.
+INHERITANCE_FIELDS = frozenset({"crossref", "xref", "xdata"})
 # Entry fields that name other entries' keys.
-RELATIONSHIP_FIELDS = frozenset({"crossref", "xref", "xdata", "related", "entryset"})
+RELATIONSHIP_FIELDS = INHERITANCE_FIELDS | {"related", "entryset"}
 # Fields holding literal key lists: relationships and biblatex's alternate keys.
 KEY_LIST_FIELDS = RELATIONSHIP_FIELDS | {"ids"}
 _MAX_LISTED_UNCERTAINTIES = 32
@@ -182,6 +190,8 @@ class CitationGraph:
         uncertainties: The gaps in the citation evidence itself.
         unused_uncertainties: Further gaps that only weaken claims that an entry is
             unused.
+        uses_biblatex: Whether a selected source declares a biblatex resource or
+            package.
     """
 
     main: str | None
@@ -191,6 +201,7 @@ class CitationGraph:
     nocite_all: bool = False
     uncertainties: list[Uncertainty] = field(default_factory=list)
     unused_uncertainties: list[Uncertainty] = field(default_factory=list)
+    uses_biblatex: bool = False
 
     @property
     def reasons(self) -> list[str]:
@@ -204,13 +215,14 @@ class CitationGraph:
 
 
 def resource_declarations(
-    inspection: SourceGraph, selected: set[str]
+    inspection: SourceGraph, selected: set[str], *, inspected_bbl: str | None = None
 ) -> tuple[set[str], list[str]]:
     """Resolve literal bibliography resource declarations in the selected sources.
 
     Args:
         inspection: The source graph of the manuscript.
         selected: The selected sources, by relative path.
+        inspected_bbl: The shipped .bbl whose keys this check reads directly, if any.
 
     Returns:
         The resolved resources, and a reason for each declaration that could not be
@@ -234,7 +246,7 @@ def resource_declarations(
                 if target and target[1] in _RESOURCE_COMMANDS:
                     resources.add(target[0])
                 elif reason := _unread_resource_reason(
-                    inspection, installed, (name, command.start, argument.value)
+                    inspection, installed, (name, command.start, argument.value), inspected_bbl
                 ):
                     reasons.append(f"{name}:{command.line}: {reason}")
     return resources, reasons
@@ -244,6 +256,7 @@ def _unread_resource_reason(
     inspection: SourceGraph,
     installed: dict[tuple[str, int, str], str],
     key: tuple[str, int, str],
+    inspected_bbl: str | None,
 ) -> str | None:
     """Say why the entries of a bibliography resource that no project file holds are unknown.
 
@@ -251,16 +264,19 @@ def _unread_resource_reason(
         inspection: The source graph of the manuscript.
         installed: The installation path of each resource found there, by its argument.
         key: The file, command offset and name of the resource's argument.
+        inspected_bbl: The shipped .bbl whose keys this check reads directly, if any.
 
     Returns:
         The reason, or ``None`` for an installation file that holds only ``@string``
         abbreviations, which hides no entry.
     """
-    if key in inspection.shipped_bibliographies:
+    if (shipped := inspection.shipped_bibliographies.get(key)) is not None:
+        if shipped == inspected_bbl:
+            return None
         database = key[2] if key[2].endswith(".bib") else key[2] + ".bib"
         return (
             f"{database} is not in the project; the build reads the shipped "
-            f"{inspection.shipped_bibliographies[key]}, whose entries are not inspected"
+            f"{shipped}, whose entries are not inspected"
         )
     if key in installed:
         if _string_definitions_only(installed[key]):
@@ -373,6 +389,13 @@ def bibliography_styles(inspection: SourceGraph, selected: set[str]) -> list[Sty
     return styles
 
 
+def _declares_biblatex(command: Command) -> bool:
+    """Recognize a resource declaration or package import that indicates biblatex."""
+    return command.name == "addbibresource" or (
+        command.name in PACKAGE_COMMANDS and "biblatex" in (first_argument_names(command) or [])
+    )
+
+
 def uses_biblatex(graph: SourceGraph, selected: set[str]) -> bool:
     """Return whether a selected source declares an ``addbibresource`` or loads biblatex.
 
@@ -383,15 +406,11 @@ def uses_biblatex(graph: SourceGraph, selected: set[str]) -> bool:
     Returns:
         ``True`` when the document uses biblatex.
     """
-    for name in selected:
-        for command in commands_before_end(graph.sources[name]):
-            if command.name == "addbibresource":
-                return True
-            if command.name in PACKAGE_COMMANDS and "biblatex" in (
-                first_argument_names(command) or []
-            ):
-                return True
-    return False
+    return any(
+        _declares_biblatex(command)
+        for name in selected
+        for command in commands_before_end(graph.sources[name])
+    )
 
 
 def selected_bibliography(
@@ -521,6 +540,55 @@ def _citation_marked(text: str) -> bool:
     return any(marker in lowered for marker in _CITATION_MARKERS)
 
 
+def _invoked_name(command: Command) -> str:
+    """Name the command, environment, or literal command used through an indirect name."""
+    if command.arguments:
+        value = command.arguments[0].value.strip()
+        if command.name in {"begin", "end"}:
+            return f"begin{{{value}}}"
+        if command.name == "@nameuse":
+            return value
+    return command.name
+
+
+def _argument_specification_bodies(commands: list[Command]) -> Iterator[MacroDefinition]:
+    """Locate replacement bodies when the definition has an explicit argument specification."""
+    for declaration, named in pairwise(commands):
+        if declaration.name not in ARGUMENT_SPECIFICATION_DEFINITIONS:
+            continue
+        if named.named_by != declaration.name:
+            continue
+        arguments = named.arguments or declaration.arguments[1:]
+        if len(arguments) >= 2:
+            body = arguments[1]
+            yield MacroDefinition(named.name, body.start, body.end)
+
+
+def _citation_wrappers(inspection: SourceGraph, sources: dict[str, list[Command]]) -> set[str]:
+    """Find local definitions that can reach a citation, including through other wrappers."""
+    callers: dict[str, set[str]] = defaultdict(set)
+    for path, commands in sources.items():
+        cancellation_point()
+        starts = [command.start for command in commands]
+        definitions = [
+            *macro_definitions(inspection.sources[path].masked, commands),
+            *_argument_specification_bodies(commands),
+        ]
+        for definition in definitions:
+            first = bisect_left(starts, definition.start)
+            last = bisect_left(starts, definition.end)
+            for command in commands[first:last]:
+                callers[_invoked_name(command)].add(definition.name)
+    pending = [name for name in callers if _cites_by_name(name)]
+    wrappers: set[str] = set()
+    while pending:
+        cancellation_point()
+        new = callers[pending.pop()] - wrappers
+        wrappers.update(new)
+        pending.extend(new)
+    return wrappers
+
+
 def _execution_gaps(command: Command, spans: list[tuple[int, int]]) -> Iterator[str]:
     """Describe the constructs around one command that lexical inspection cannot follow.
 
@@ -589,6 +657,7 @@ def _read_citation(
     command: Command,
     *,
     in_place: bool,
+    wrappers: set[str],
 ) -> Iterator[str]:
     r"""Record the literal keys of a citation or \bibitem; yield what stays unverified.
 
@@ -603,9 +672,14 @@ def _read_citation(
         command: The command to read.
         in_place: Whether the command runs where it stands (``runs_in_place``).
 
+        wrappers: Project-defined commands and environments that can reach citations.
+
     Yields:
         A description of each unverified aspect of the command.
     """
+    if _invoked_name(command) in wrappers:
+        yield f"citation-bearing command \\{command.name} is not expanded"
+        return
     lowered = command.name.lower()
     multicite = lowered in MULTICITE_COMMANDS
     inline = command.name == "bibitem"
@@ -633,11 +707,14 @@ def _read_citation(
                 graph.citations.append(Citation(key, name, command.line))
 
 
-def build_citation_graph(inspection: SourceGraph) -> CitationGraph:
+def build_citation_graph(
+    inspection: SourceGraph, *, inspected_bbl: str | None = None
+) -> CitationGraph:
     """Collect the literal citations, resources and evidence gaps of the selected main.
 
     Args:
         inspection: The source graph of the manuscript.
+        inspected_bbl: The shipped .bbl whose keys this check reads directly, if any.
 
     Returns:
         The citation graph; without a selected main source, it holds only the
@@ -664,7 +741,9 @@ def build_citation_graph(inspection: SourceGraph) -> CitationGraph:
             for item in graph_failures(inspection, selected)
         ),
     ]
-    resources, resource_reasons = resource_declarations(inspection, selected)
+    resources, resource_reasons = resource_declarations(
+        inspection, selected, inspected_bbl=inspected_bbl
+    )
     graph.resources.update(resources)
     uncertainties.extend(map(Uncertainty, resource_reasons))
     unused: list[Uncertainty] = []
@@ -678,15 +757,20 @@ def build_citation_graph(inspection: SourceGraph) -> CitationGraph:
             for command in inspection.sources[name].commands
         )
     )
-    for name in sorted(selected):
+    commands_by_path = {
+        name: commands_before_end(inspection.sources[name]) for name in sorted(selected)
+    }
+    wrappers = _citation_wrappers(inspection, commands_by_path)
+    for name, commands in commands_by_path.items():
         cancellation_point()
         source = inspection.sources[name]
         spans = conditional_spans(source.commands)
         definitions = definition_spans(source.masked, source.commands)
-        for command in commands_before_end(source):
+        for command in commands:
+            graph.uses_biblatex |= _declares_biblatex(command)
             if name in package_code and in_half_open_span(definitions, command.start):
                 # A definition body in package code runs only where the macro is used, and
-                # a use of a citation-like macro in the document text is a gap there.
+                # a use of a citation-bearing macro in the document text is a gap there.
                 continue
             gaps = [
                 *_execution_gaps(command, spans),
@@ -699,6 +783,7 @@ def build_citation_graph(inspection: SourceGraph) -> CitationGraph:
                         source,
                         command,
                         in_place=runs_in_place(command, definitions, defined),
+                        wrappers=wrappers,
                     )
                 ),
             ]

@@ -20,7 +20,6 @@ import functools
 import os
 import re
 import secrets
-import stat
 from dataclasses import asdict, dataclass, replace
 from datetime import date
 from importlib import resources
@@ -107,7 +106,7 @@ def stage_loaded_options(project: Path, main: str, work: Path) -> LoadedOptionsP
     """
     main_path = project / main
     try:
-        original = read_regular_file(main_path, _MAX_MAIN_BYTES)
+        original = read_regular_file(main_path, _MAX_MAIN_BYTES, root=work)
     except FileTooLargeError:
         raise PreparationError(
             f"Loaded-option instrumentation supports main files up to {_MAX_MAIN_BYTES // MIB} MiB"
@@ -351,14 +350,12 @@ def loaded_options_unavailable(reason: str, main: str) -> Finding:
     return LoadedOptionsEvidence(uncertainty=reason).finding(main)
 
 
-def _unchanged_regular_file(path: Path, expected: bytes) -> bool:
-    """Return whether ``path`` is a regular file, not a link, that holds exactly ``expected``."""
-    info = path.lstat()
-    return (
-        stat.S_ISREG(info.st_mode)
-        and info.st_size == len(expected)
-        and path.read_bytes() == expected
-    )
+def _unchanged_regular_file(path: Path, expected: bytes, root: Path) -> bool:
+    """Return whether the rooted regular file still holds exactly ``expected``."""
+    try:
+        return read_regular_file(path, len(expected), root=root) == expected
+    except FileTooLargeError:
+        return False
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -399,13 +396,10 @@ def _require_fresh_evidence(probe: LoadedOptionsProbe, build: BuildEvidence) -> 
         raise PreparationError("A successful build and complete recorder are required")
     if probe.hook not in build.recorder_inputs:
         raise PreparationError("The final recorder did not observe the trusted options hook")
-    if not _unchanged_regular_file(probe.hook, probe.hook_bytes) or not _unchanged_regular_file(
-        probe.main, probe.staged_bytes
-    ):
+    root = probe.hook.parent
+    hook_unchanged = _unchanged_regular_file(probe.hook, probe.hook_bytes, root)
+    if not hook_unchanged or not _unchanged_regular_file(probe.main, probe.staged_bytes, root):
         raise PreparationError("The instrumented disposable source changed during execution")
-    info = probe.sidecar.lstat()
-    if not stat.S_ISREG(info.st_mode) or info.st_size > min(build.max_bytes, _MAX_EVIDENCE_BYTES):
-        raise PreparationError("Option evidence is not a bounded regular output file")
 
 
 def _join_recorded_packages(kernel: KernelOptions, build: BuildEvidence) -> KernelOptions:
@@ -453,7 +447,11 @@ def collect_loaded_options(
     try:
         _require_fresh_evidence(probe, build)
         kernel = parse_kernel_options(
-            probe.sidecar.read_text(encoding="ascii"), probe.token, build.engine
+            read_regular_file(
+                probe.sidecar, min(build.max_bytes, _MAX_EVIDENCE_BYTES), root=probe.hook.parent
+            ).decode("ascii"),
+            probe.token,
+            build.engine,
         )
         return LoadedOptionsEvidence(_join_recorded_packages(kernel, build))
     except OSError as error:

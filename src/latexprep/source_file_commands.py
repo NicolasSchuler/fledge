@@ -10,8 +10,26 @@ and the ones that judge commands (``source_command_checks``) share these names.
 
 from __future__ import annotations
 
+from pathlib import PurePosixPath
+
 # Graphics lookup order of the default pdfTeX graphics rules.
-GRAPHICS_SUFFIXES = (".pdf", ".png", ".jpg", ".mps", ".jpeg", ".jbig2", ".jb2", ".eps", ".ps")
+GRAPHICS_SUFFIXES = (
+    ".pdf",
+    ".png",
+    ".jpg",
+    ".mps",
+    ".jpeg",
+    ".jbig2",
+    ".jb2",
+    ".PDF",
+    ".PNG",
+    ".JPG",
+    ".JPEG",
+    ".JBIG2",
+    ".JB2",
+    ".eps",
+    ".ps",
+)
 # Suffixes TeX tries, in order, before the bare name of a suffixless reference.
 DEFAULT_SUFFIXES_BY_FILE_COMMAND: dict[str, tuple[str, ...]] = {
     "input": (".tex",),
@@ -47,6 +65,32 @@ DEFAULT_SUFFIXES_BY_FILE_COMMAND: dict[str, tuple[str, ...]] = {
     "fontspec": (),
 }
 FILE_COMMANDS = frozenset(DEFAULT_SUFFIXES_BY_FILE_COMMAND)
+
+
+def candidate_paths(command: str, paths: list[str], suffixes: tuple[str, ...]) -> list[str]:
+    r"""Return the lookup candidates for ``paths`` in the order the command tries them.
+
+    LaTeX's ``\include`` and BibTeX's database and style readers complete the name
+    with their own suffix, even after another dot. With graphicx, each candidate
+    extension is tried across the entire search path before the next extension.
+    An explicit supported graphics extension is tried first.
+    """
+    if command in {"include", "bibliography", "bibliographystyle"}:
+        (suffix,) = suffixes
+        return [path if path.endswith(suffix) else path + suffix for path in paths]
+    if command == "includegraphics" and paths:
+        extended = [path + suffix for suffix in suffixes for path in paths]
+        if PurePosixPath(paths[0]).suffix.lower() in GRAPHICS_SUFFIXES:
+            return [*paths, *extended]
+        return [*extended, *paths]
+    candidates: list[str] = []
+    for path in paths:
+        if not PurePosixPath(path).suffix:
+            candidates.extend(path + suffix for suffix in suffixes)
+        candidates.append(path)
+    return candidates
+
+
 # Commands taking a directory and then a file name.
 IMPORT_COMMANDS = frozenset({"import", "subimport", "inputfrom", "subinputfrom"})
 SECOND_ARGUMENT_FILE_COMMANDS = frozenset({*IMPORT_COMMANDS, "DTLloaddb", "inputminted"})

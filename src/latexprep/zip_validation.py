@@ -280,6 +280,10 @@ def zip_entries(archive: zipfile.ZipFile, budget: ImportBudget) -> list[ProjectE
         if info.compress_type not in _ALLOWED_COMPRESSION:
             raise PreparationError(f"Unsupported ZIP compression for {path!r}.")
         registry.add(path, is_dir=is_dir)
+        # Extraction creates implicit parent directories even when the ZIP omits their
+        # records. Count those directories once, including ones later listed explicitly.
+        if len(registry.paths) > budget.limits.max_files:
+            raise entry_limit_error(budget.limits.max_files)
         declared_bytes += info.file_size
         if declared_bytes > budget.limits.max_bytes:
             raise PreparationError(

@@ -721,6 +721,49 @@ class ReportFileReplacementTests(unittest.TestCase):
             write_report_text(self.destination, "second\n", replace_existing=False)
         self.assertEqual(self.destination.read_text(), "first\n")
 
+    def test_a_failed_first_write_leaves_no_partial_report(self):
+        def fail_after_writing(stream, data):
+            stream.write(data[:5])
+            raise OSError("disk full")
+
+        with (
+            patch("latexprep.file_safety._write_file_bytes", side_effect=fail_after_writing),
+            self.assertRaises(OSError),
+        ):
+            write_report_text(self.destination, "complete report\n", replace_existing=False)
+        self.assertEqual(list(self.root.iterdir()), [])
+        write_report_text(self.destination, "complete report\n", replace_existing=False)
+        self.assertEqual(self.destination.read_text(), "complete report\n")
+
+    def test_a_report_failure_retains_the_internal_error_outcome(self):
+        report = Report("check", outcome=Outcome.INTERNAL_ERROR)
+        with patch("latexprep.report_files.write_report_text", side_effect=OSError("disk full")):
+            public, rendered = save_reports(report, ReportFiles(json=self.destination), None)
+        self.assertEqual(public.outcome, Outcome.INTERNAL_ERROR)
+        self.assertEqual(json.loads(rendered.json)["outcome"], "internal_error")
+        self.assertEqual([item.rule for item in public.findings], ["report.write"])
+
+    def test_preview_artifacts_and_sidecar_errors_report_the_correct_release_state(self):
+        check = Report(
+            "check", outcome=Outcome.PASSED, artifacts={"preview.1": "/output/page-0001.png"}
+        )
+        self.assertTrue(render_compact(check).endswith("Previews were written."))
+        self.assertNotIn("submission was written", render_compact(check))
+        for name in ("archive", "supplement.archive"):
+            report = Report(
+                "prepare", outcome=Outcome.PASSED, artifacts={name: "/output/submission.zip"}
+            )
+            with patch(
+                "latexprep.report_files.write_report_text", side_effect=OSError("disk full")
+            ):
+                public, _ = save_reports(report, ReportFiles(json=self.destination), None)
+            self.assertEqual(public.outcome, Outcome.ERROR)
+            self.assertTrue(
+                render_compact(public).endswith(
+                    "Could not write all requested reports. The submission was written."
+                )
+            )
+
     def test_an_allowed_replacement_happens_only_once_the_new_file_is_complete(self):
         earlier_report = Report("inspect").to_json()
         self.destination.write_text(earlier_report)
@@ -752,7 +795,7 @@ class ReportFileReplacementTests(unittest.TestCase):
             return open_file(path, flags, *arguments, **options)
 
         earlier = self.validated()
-        with patch("latexprep.report_files.os.open", side_effect=recording_open):
+        with patch("latexprep.file_safety.os.open", side_effect=recording_open):
             write_report_text(
                 self.destination, "new report\n", replace_existing=True, earlier=earlier
             )
@@ -809,7 +852,7 @@ class ReportFileReplacementTests(unittest.TestCase):
         self.assertEqual(self.destination.read_text(), "theirs\n")
         self.assertEqual(report.outcome, Outcome.ERROR)
         (failure,) = [item for item in report.findings if item.rule == "report.write"]
-        (kept,) = self.root.glob(".report.json.*.tmp")
+        (kept,) = self.root.glob(".fledge-file-*.tmp")
         self.assertIn(str(kept), failure.message)
         self.assertIn(str(kept), failure.suggestion or "")
         self.assertEqual(json.loads(kept.read_text())["command"], "inspect")

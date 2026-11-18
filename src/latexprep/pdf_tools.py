@@ -145,7 +145,7 @@ def image_list_argv(document: str = DOCUMENT) -> list[str]:
 def render_page_argv(
     page: int, dpi: int, raster: Literal["gray", "rgb", "png"], document: str = DOCUMENT
 ) -> list[str]:
-    """Build the ``pdftoppm`` command that renders one page.
+    """Build the ``pdftoppm`` command that renders one page's CropBox.
 
     The page becomes a single file named ``raster_filename(raster)`` in the working
     directory: 8-bit PGM (gray), PPM (rgb) or PNG.
@@ -166,6 +166,7 @@ def render_page_argv(
         str(page),
         "-l",
         str(page),
+        "-cropbox",
         "-singlefile",
         *options,
         "-r",
@@ -187,7 +188,7 @@ def render_pages_argv(
     raster: Literal["gray", "rgb", "png"],
     document: str = DOCUMENT,
 ) -> list[str]:
-    """Build the ``pdftoppm`` command that renders pages ``first`` to ``last`` in one process.
+    """Build the ``pdftoppm`` command that renders CropBoxes of pages ``first`` to ``last``.
 
     Each page becomes its own file in the working directory, named ``page-`` and the page
     number with as many digits as the document's page count has (``page-07.ppm``);
@@ -212,6 +213,7 @@ def render_pages_argv(
         str(first),
         "-l",
         str(last),
+        "-cropbox",
         *options,
         "-r",
         str(dpi),

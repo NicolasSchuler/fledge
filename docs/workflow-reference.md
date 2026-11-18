@@ -274,10 +274,13 @@ conditional, also in a `.sty`, and an input or class file that cannot be read le
 it incomplete.
 
 PDF comparison uses page count, extracted text and exact RGB page renders at 144
-DPI. When a page does not fit the raster limits at that resolution (16 million
-pixels, 8192 per side), as on an A0 poster, every page is rendered at the highest
-resolution, down to 36 DPI, at which all pages fit, and the report names it; a page
-too large even at 36 DPI cannot be compared. Explicit tolerances and accepted exceptions apply only to baseline versus
+DPI. Comparisons, previews and sparse-page checks render the visible page area
+defined by the PDF CropBox. Comparison reservations allow one pixel per side for
+rounding in Poppler's page dimensions. When a reservation exceeds the raster limits
+at 144 DPI (16 million pixels, 8192 per side), every page is rendered at the
+highest resolution from 144 to 36 DPI at which all reservations fit. The report
+names the resolution. A page too large even at 36 DPI cannot be compared.
+Explicit tolerances and accepted exceptions apply only to baseline versus
 prepared; repeated baselines, supplied reference PDFs and archive rebuilds are
 compared exactly. PDF inspection supports up to 5000 pages; rendering is capped
 at 300 pages, with an inconclusive result beyond that. A figure PDF without font resources passes the figure-font policy.

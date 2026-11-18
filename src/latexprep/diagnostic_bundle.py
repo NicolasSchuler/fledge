@@ -14,6 +14,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from .errors import PreparationError
+from .file_safety import write_new_file
 from .findings import Finding
 from .html_report import render_redacted_html
 from .report import Outcome, RedactedReport, Report, redact_report, redacted_json
@@ -109,8 +110,7 @@ def export_redacted_diagnostic_bundle(public: RedactedReport, destination: Path)
         raise PreparationError("Diagnostic destination already exists")
     data = _archive(_entries(_envelope(public)))
     try:
-        with destination.open("xb") as stream:
-            stream.write(data)
+        write_new_file(destination, data)
     except OSError as error:
         raise PreparationError(
             "Cannot write diagnostic bundle to the requested destination"

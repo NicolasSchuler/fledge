@@ -30,11 +30,13 @@ from .file_safety import read_regular_file
 from .file_scan import MAX_SCAN_MATCHES
 from .finding_text import list_locations, more_suffix
 from .findings import EvidenceKind, Finding
+from .literal_text import first_argument_names
 from .option_config import require_text, require_unique_strings, validate_scalars
 from .rules import code_for
 from .setting_choices import ENGINES, Engine
+from .source_file_commands import BIBLIOGRAPHY_RESOURCE_COMMANDS
 from .source_graph import SourceGraph
-from .tex_lexer import MAX_SOURCE_BYTES
+from .tex_lexer import CONTROL_SEQUENCE, MAX_SOURCE_BYTES, Region, blank_regions, mask_literals
 
 _BBL_RULE = "source.bibliography_bbl"
 _COVERAGE_RULE = "bibliography.bbl_coverage"
@@ -45,11 +47,12 @@ _MAX_LABEL_CHARACTERS = 4096
 # biblatex compares exactly these first two lines when it reads a .bbl.
 _BIBLATEX_BBL_SIGNATURE = "% $ biblatex auxiliary file $"
 _BIBLATEX_BBL_VERSION = re.compile(r"% \$ biblatex bbl format version (\S+) \$")
-_BIBITEM = re.compile(r"\\bibitem\b")
 _BIBITEM_KEY = re.compile(r"\{([^{}]+)\}")
-_ENTRY_START = re.compile(r"\\entry\s*\{")
-_ENTRY_KEY = re.compile(r"\\entry\s*\{([^{}]+)\}\s*\{")
-_KEY_ALIAS = re.compile(r"\\keyalias\s*\{([^{}]+)\}")
+_ENTRY_KEY = re.compile(r"\s*\{([^{}]+)\}\s*\{")
+# A Biber verbatim field starts with a field name on its own line and ends at \endverb.
+_BIBLATEX_VERBATIM_MARKER = re.compile(
+    r"^[ \t]*\\(verb\{[^{}\r\n]+\}|endverb)[ \t]*(?=\r?$)", re.MULTILINE
+)
 _BBL_FORMAT_VERSION = re.compile(r"[0-9]{1,4}(?:\.[0-9]{1,4}){0,3}")
 
 
@@ -210,27 +213,54 @@ def _skip_space(text: str, cursor: int) -> int:
     return cursor
 
 
-def _bibitem_keys(text: str) -> set[str]:
-    r"""Read the keys of BibTeX ``\bibitem[label]{key}``; the label may contain nested brackets."""
-    keys: set[str] = set()
-    for match in _BIBITEM.finditer(text):
-        cancellation_point()
-        cursor = _skip_space(text, match.end())
-        if text.startswith("[", cursor):
-            cursor = _skip_space(text, _skip_label(text, cursor))
-        key = _BIBITEM_KEY.match(text, cursor)
-        if key:
-            keys.add(key.group(1).strip())
-    return keys
+def _bibitem_key(text: str, cursor: int) -> str | None:
+    r"""Read the key after a ``\bibitem`` command and its optional label."""
+    cursor = _skip_space(text, cursor)
+    if text.startswith("[", cursor):
+        cursor = _skip_space(text, _skip_label(text, cursor))
+    key = _BIBITEM_KEY.match(text, cursor)
+    return key[1].strip() if key else None
+
+
+def _masked_bbl(text: str) -> str:
+    """Mask comments, TeX literal regions and Biber's verbatim fields before scanning."""
+    regions: list[Region] = []
+    start: int | None = None
+    for marker in _BIBLATEX_VERBATIM_MARKER.finditer(text):
+        if start is None and marker[1] != "endverb":
+            start = marker.start()
+        elif start is not None and marker[1] == "endverb":
+            regions.append(Region(start, marker.end(), "literal"))
+            start = None
+    if start is not None:
+        regions.append(Region(start, len(text), "literal"))
+    return mask_literals(blank_regions(text, regions) if regions else text)
 
 
 def bbl_keys(text: str) -> BblKeys:
     """Read the keys defined by the text of a .bbl, in the form its backend writes."""
-    if "\\datalist" in text or _ENTRY_START.search(text):
-        keys = set(_ENTRY_KEY.findall(text))
-        keys.update(_KEY_ALIAS.findall(text))
-        return BblKeys({key.strip() for key in keys}, Backend.BIBLATEX)
-    return BblKeys(_bibitem_keys(text), Backend.BIBTEX)
+    masked = _masked_bbl(text)
+    bibitems: set[str] = set()
+    entries: set[str] = set()
+    aliases: set[str] = set()
+    datalist = False
+    for token in CONTROL_SEQUENCE.finditer(masked):
+        cancellation_point()
+        match token[1]:
+            case "bibitem":
+                if key := _bibitem_key(masked, token.end()):
+                    bibitems.add(key)
+            case "datalist":
+                datalist = True
+            case "entry":
+                if entry := _ENTRY_KEY.match(masked, token.end()):
+                    entries.add(entry[1].strip())
+            case "keyalias":
+                if alias := _BIBITEM_KEY.match(masked, _skip_space(masked, token.end())):
+                    aliases.add(alias[1].strip())
+    if datalist or entries:
+        return BblKeys(entries | aliases, Backend.BIBLATEX)
+    return BblKeys(bibitems, Backend.BIBTEX)
 
 
 def _read_bbl(root: Path, expected: str) -> str | None:
@@ -297,6 +327,9 @@ def check_bbl(
     resources, _ = resource_declarations(graph, selected)
     bib = sorted(name for name in resources if name.lower().endswith(".bib"))
     if not bib:
+        # A submission may ship only the .bbl referenced by a literal declaration.
+        bib = _declared_bib_names(graph, selected)
+    if not bib:
         return _without_bib(main, options)
     expected = (PurePosixPath(main).parent / (PurePosixPath(main).stem + ".bbl")).as_posix()
     backend = Backend.BIBLATEX if uses_biblatex(graph, selected) else Backend.BIBTEX
@@ -307,6 +340,19 @@ def check_bbl(
     if options.biblatex_bbl_format_version is not None:
         findings.append(_bbl_format(root, plan, options.biblatex_bbl_format_version))
     return findings
+
+
+def _declared_bib_names(graph: SourceGraph, selected: set[str]) -> list[str]:
+    """Read the literal resource names even when there is no local .bib to inspect."""
+    return sorted(
+        {
+            name if name.lower().endswith(".bib") else name + ".bib"
+            for path in selected
+            for command in commands_before_end(graph.sources[path])
+            if command.name in BIBLIOGRAPHY_RESOURCE_COMMANDS and not command.named
+            for name in (first_argument_names(command) or [])
+        }
+    )
 
 
 def _without_bib(main: str, options: BblOptions) -> list[Finding]:
@@ -567,7 +613,7 @@ def _coverage(root: Path, graph: SourceGraph, plan: _Plan) -> Finding:
         return _unreadable(_COVERAGE_RULE, expected)
     defined = bbl_keys(text)
     keys = defined.keys
-    citations = build_citation_graph(graph)
+    citations = build_citation_graph(graph, inspected_bbl=expected)
     first: dict[str, dict[str, object]] = {}
     for key, path, line in citations.citations:
         first.setdefault(key, {"key": key, "path": path, "line": line})

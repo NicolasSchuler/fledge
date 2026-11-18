@@ -18,7 +18,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
-from typing import Final, NamedTuple
+from typing import NamedTuple
 
 from .cancellation import cancellation_point
 from .errors import PreparationError
@@ -35,6 +35,7 @@ from .pdf_artwork_options import (
 )
 from .pdf_check_options import PdfRegion
 from .pdf_geometry import (
+    RASTER_SIZE_TOLERANCE_PX,
     WCAG_FLARE,
     contains,
     exceeds_measurement_raster,
@@ -47,10 +48,6 @@ from .pdf_tools import PdfToolSession
 from .png_support import encode_gray_png
 from .raster_pixels import InkMask, PixelBox, RasterImage, channel_extrema
 
-# The pixel size of a render may differ from the size computed from the page box by this
-# many pixels per side (Poppler rounds the page size itself).
-_RENDER_SIZE_SLACK_PIXELS: Final = 1
-
 
 class PageGeometry(NamedTuple):
     """Every page size in points, and the pages whose frame rendered measurements must skip.
@@ -58,10 +55,12 @@ class PageGeometry(NamedTuple):
     Attributes:
         sizes: The width and height of every page, in points.
         misaligned_frame_pages: The pages whose frame rendered measurements must skip.
+        axis_swapped_pages: Pages whose raster has its width and height exchanged.
     """
 
     sizes: Sequence[tuple[float, float]]
     misaligned_frame_pages: frozenset[int]
+    axis_swapped_pages: frozenset[int]
 
 
 def figure_regions(
@@ -91,7 +90,7 @@ def figure_regions(
 def _render_matches(actual: tuple[int, int], expected: tuple[int, int]) -> bool:
     """Return whether a render's pixel size is the expected one, up to Poppler's rounding."""
     return all(
-        abs(found - wanted) <= _RENDER_SIZE_SLACK_PIXELS
+        abs(found - wanted) <= RASTER_SIZE_TOLERANCE_PX
         for found, wanted in zip(actual, expected, strict=True)
     )
 
@@ -549,7 +548,10 @@ async def inspect_rendered_figures(
         session.runner.limits.max_file_bytes,
     )
     for page in page_numbers:
-        result.extend(await _rendered_page(session, figures, page, sizes[page - 1], rendered_rules))
+        size = sizes[page - 1]
+        if page in geometry.axis_swapped_pages:
+            size = (size[1], size[0])
+        result.extend(await _rendered_page(session, figures, page, size, rendered_rules))
     return result
 
 

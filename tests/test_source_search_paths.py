@@ -95,6 +95,53 @@ class SourceSearchPathTests(ProjectTestCase):
         self.assertEqual(finding.details["alternatives"], ["b/result.pdf"])
         self.assertIn(b"\\includegraphics{a-result.pdf}", plan.contents["main.tex"])
 
+    def test_graphics_extension_priority_precedes_directory_priority(self) -> None:
+        self.write(
+            "main.tex",
+            "\\documentclass{article}\n\\graphicspath{{images/}}\n\\includegraphics{result}",
+        )
+        self.write("result.png", b"from the compilation directory")
+        self.write("images/result.pdf", b"from the graphics search path")
+        plan = plan_flatten(self.root, "main.tex")
+        self.assert_usable(plan)
+        self.assertEqual(
+            analyze_sources(self.root, "main.tex").dependencies,
+            {"main.tex", "images/result.pdf"},
+        )
+        self.assertIn(b"\\includegraphics{result.pdf}", plan.contents["main.tex"])
+
+    def test_graphics_can_complete_a_dotted_name_or_use_an_uppercase_extension(self) -> None:
+        self.write(
+            "main.tex",
+            "\\documentclass{article}\n\\includegraphics{plot.final}\n"
+            "\\includegraphics{sketch.png}\n\\includegraphics{diagram}",
+        )
+        images = {"plot.final.pdf", "sketch.png.pdf", "diagram.PDF"}
+        for path in images:
+            self.write(path, b"image")
+        self.assertEqual(analyze_sources(self.root, "main.tex").dependencies, images | {"main.tex"})
+
+    def test_explicit_include_and_dotted_bibtex_paths_survive_flattening(self) -> None:
+        self.write(
+            "main.tex",
+            "\\documentclass{article}\n\\include{sections/chapter.tex.tex}\n"
+            "\\bibliographystyle{bib/paper.final}\n\\bibliography{bib/refs.final}",
+        )
+        self.write("sections/chapter.tex.tex", "Chapter text.")
+        self.write("bib/paper.final.bst", "Style.")
+        self.write("bib/refs.final", "Other content.")
+        self.write("bib/refs.final.bib", "@misc{ref,title={Reference}}")
+        analysis = analyze_sources(self.root, "main.tex")
+        self.assertEqual(
+            analysis.dependencies,
+            {"main.tex", "sections/chapter.tex.tex", "bib/paper.final.bst", "bib/refs.final.bib"},
+        )
+        plan = plan_flatten(self.root, "main.tex")
+        self.assert_usable(plan)
+        self.assertIn(b"\\include{chapter.tex.tex}", plan.contents["main.tex"])
+        self.assertIn(b"\\bibliographystyle{paper.final}", plan.contents["main.tex"])
+        self.assertIn(b"\\bibliography{refs.final}", plan.contents["main.tex"])
+
     def test_tex_lookup_order_prefers_the_build_directory_and_default_suffix(self) -> None:
         self.write(
             "main.tex",

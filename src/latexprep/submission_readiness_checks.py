@@ -41,6 +41,7 @@ from .setting_choices import Engine
 from .source_graph import SourceGraph
 from .tex_commands import ROOT_SUFFIXES
 from .tex_comments import marked_comments, tex_comments
+from .tex_lexer import split_argument_items
 from .tex_spans import definition_spans, in_conditional, in_half_open_span
 
 # Matches and figures named in a message; the details list every one.
@@ -164,8 +165,8 @@ def _package_positions(document: ExpandedDocument) -> dict[str, tuple[int, Locat
         document: The expanded document to scan.
 
     Returns:
-        For each package name, the offset of its first declaration in the expanded text and
-        the location of that offset.
+        For each package name, its offset within the first declaration and the location
+        of the declaration itself.
     """
     definitions = definition_spans(document.text, document.commands)
     positions: dict[str, tuple[int, Location]] = {}
@@ -178,10 +179,12 @@ def _package_positions(document: ExpandedDocument) -> dict[str, tuple[int, Locat
             or command.depth
             or in_conditional(document.conditionals, command.start)
             or in_half_open_span(definitions, command.start)
+            or first_argument_names(command) is None
         ):
             continue
-        for name in first_argument_names(command) or []:
-            positions.setdefault(name, (command.start, document.location(command.start)))
+        location = document.location(command.start)
+        for item in split_argument_items(command.arguments[0]):
+            positions.setdefault(item.value, (item.start, location))
     return positions
 
 

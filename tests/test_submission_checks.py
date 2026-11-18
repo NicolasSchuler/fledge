@@ -809,6 +809,33 @@ class IncludedPdfInformationTests(ProjectTestCase):
             self.check(built_pdf(b"/Group << /S /Transparency >>"), role="baseline"), []
         )
 
+    def test_unreadable_included_metadata_keeps_the_result_incomplete(self) -> None:
+        for copied_name, expected in (
+            (b"", "inconclusive"),
+            (b"/PTEX.FileName (./plot.pdf)", "inconclusive"),
+            (b"/PTEX.FileName (./Example.pdf)", "failed"),
+        ):
+            with self.subTest(expected=expected, copied_name=copied_name):
+                form = pdf_stream(
+                    b"/Type /XObject /Subtype /Form /BBox [0 0 10 10] "
+                    b"/PieceInfo << /App << /Private 4 0 R >> >> " + copied_name,
+                    b"0 0 10 10 re f",
+                )
+                data = pdf_bytes(
+                    {
+                        1: b"<< /Type /Catalog /Pages 2 0 R >>",
+                        2: b"<< /Type /Pages /Kids [] /Count 0 >>",
+                        3: form,
+                        4: pdf_stream(b"", b"vendor application data"),
+                    }
+                )
+                (finding,) = self.check(data, ("Example",), role="published")
+                self.assertEqual(finding.status, expected)
+                self.assertTrue(finding.incomplete)
+                self.assertEqual(
+                    finding.details["limitations"], ["application data streams (PieceInfo)"]
+                )
+
 
 class IncludedPdfRoleWiringTests(AsyncProjectTestCase):
     """Which PDF of a job the included-PDF scan judges: check's build, or prepare's output."""

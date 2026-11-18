@@ -16,6 +16,7 @@ from datetime import date
 from pathlib import Path
 from typing import Literal, NamedTuple
 
+from .file_safety import read_file_prefix
 from .limits import KIB
 from .tex_lexer import ParseLimitExceeded, mask_literals, scan_commands
 
@@ -75,13 +76,14 @@ class _Release(NamedTuple):
     version: str | None
 
 
-def read_loaded_package(path: Path, project: Path) -> LoadedPackage:
+def read_loaded_package(path: Path, project: Path, *, root: Path | None = None) -> LoadedPackage:
     """Record bounded literal header metadata, never execute package source.
 
     Args:
         path: The class or package file the build read.
         project: The project folder; a file inside it belongs to the project, any other
             file to the toolchain.
+        root: The trusted ancestor of the recorded package file, if known.
 
     Returns:
         The package, with the release its header declares if the header establishes one.
@@ -92,13 +94,13 @@ def read_loaded_package(path: Path, project: Path) -> LoadedPackage:
         path=path.relative_to(project).as_posix() if local else str(path),
         origin="project" if local else "toolchain",
     )
-    release = _declared_release(path)
+    release = _declared_release(path, root=root)
     if release is None:
         return package
     return replace(package, declared_date=release.date, declared_version=release.version)
 
 
-def _declared_release(path: Path) -> _Release | None:
+def _declared_release(path: Path, *, root: Path | None = None) -> _Release | None:
     """Read the release that the header of ``path`` declares, if it establishes one.
 
     Only the first ``_MAX_PACKAGE_HEADER_BYTES`` are read, with literals masked. The header
@@ -110,8 +112,9 @@ def _declared_release(path: Path) -> _Release | None:
         none.
     """
     try:
-        with path.open("rb") as stream:
-            header = stream.read(_MAX_PACKAGE_HEADER_BYTES).decode("utf-8", errors="replace")
+        header = read_file_prefix(path, _MAX_PACKAGE_HEADER_BYTES, root=root).decode(
+            "utf-8", errors="replace"
+        )
     except OSError:
         return None
     header = mask_literals(header)

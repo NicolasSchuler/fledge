@@ -116,6 +116,26 @@ class BuildCheckTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(missing.success)
             self.assertIn("build.dependency_trace", {item.rule for item in missing.findings})
 
+    async def test_malformed_recorder_cannot_pass_a_package_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            source = root / "source"
+            source.mkdir()
+            (source / "main.tex").write_text("\\documentclass{article}\n")
+            result = await build_project(
+                source,
+                "main.tex",
+                root / "build",
+                "pdflatex",
+                FakeBuildRunner(trace="INPUT main.tex\nMalformed recorder row\n"),
+            )
+        self.assertFalse(result.recorder_complete)
+        self.assertFalse(result.success)
+        [finding] = check_build_details(
+            result, BuildCheckOptions(forbidden_loaded_packages=("unwanted.sty",))
+        )
+        self.assertEqual(finding.status, "inconclusive")
+
     def test_inactive_and_ambiguous_package_headers_never_supply_a_required_date(self):
         declaration = "\\ProvidesPackage{custom}[2099/01/01 v9]"
         for content in (

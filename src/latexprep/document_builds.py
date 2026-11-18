@@ -146,6 +146,7 @@ async def build_stage(
         stage.label,
         elapsed_seconds=timed.elapsed_seconds,
         queue_seconds=timed.queue_seconds,
+        source_root=tree,
     )
     context.emit(
         f"{stage.label} build: {'succeeded' if built else 'failed'} ({timed.elapsed_seconds:.1f}s)"

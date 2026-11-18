@@ -311,8 +311,8 @@ class StorageUsage(NamedTuple):
 def measure_storage(root: Path, workspaces: Sequence[Path], max_file_bytes: int) -> StorageUsage:
     """Walk ``root`` once, counting every file and checking each workspace under it.
 
-    Blocking: callers on the event loop use a worker thread. A file that disappears
-    during the walk is skipped.
+    Blocking: callers on the event loop use a worker thread. A child that disappears
+    during the walk is skipped. An inaccessible directory makes the measurement fail.
 
     Args:
         root: The tree to walk.
@@ -323,9 +323,20 @@ def measure_storage(root: Path, workspaces: Sequence[Path], max_file_bytes: int)
     Returns:
         The total size of the tree and the first violation of each workspace.
     """
+
+    def account_walk_error(error: OSError) -> None:
+        """Refuse a partial measurement unless a child disappeared during the walk."""
+        if isinstance(error, FileNotFoundError) and error.filename != str(root):
+            return
+        raise PreparationError(
+            f"Could not measure temporary storage: {error.strerror or type(error).__name__}"
+        ) from error
+
     tallies = [_WorkspaceTally(max_file_bytes) for _ in workspaces]
     tree_bytes = 0
-    for directory, directories, filenames in os.walk(root, followlinks=False):
+    for directory, directories, filenames in os.walk(
+        root, onerror=account_walk_error, followlinks=False
+    ):
         here = Path(directory)
         owners = [
             tally

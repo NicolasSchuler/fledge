@@ -82,6 +82,20 @@ class DiagnosticBundleTests(unittest.TestCase):
                 export_diagnostic_bundle(Report("check"), destination)
             self.assertEqual(destination.read_bytes(), b"user data")
 
+    def test_a_failed_write_leaves_no_partial_archive(self):
+        def fail_after_writing(stream, data):
+            stream.write(data[:5])
+            raise OSError("disk full")
+
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "diagnostics.zip"
+            with (
+                patch("latexprep.file_safety._write_file_bytes", side_effect=fail_after_writing),
+                self.assertRaises(PreparationError),
+            ):
+                export_diagnostic_bundle(Report("check"), destination)
+            self.assertEqual(list(destination.parent.iterdir()), [])
+
     def test_unwritable_destination_is_reported_not_raised_as_oserror(self):
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaises(PreparationError):

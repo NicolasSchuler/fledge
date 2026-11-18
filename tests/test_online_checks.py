@@ -262,6 +262,39 @@ class OnlineCheckTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(finding.details["outcome"], "identifier_mismatch")
 
+    async def test_biblatex_date_and_journaltitle_supply_metadata_when_unambiguous(self):
+        for aliases, status, unmeasured in (
+            ("date={2024-03}, journaltitle={Example Journal}", "passed", []),
+            (
+                "date={2024-03-11}, year={2024}, journal={example journal}, "
+                "journaltitle={Example Journal}",
+                "passed",
+                [],
+            ),
+            ("date={2023}, journaltitle={Another Journal}", "failed", []),
+            (
+                "date={2024}, year={2023}, journal={Example Journal}, "
+                "journaltitle={Another Journal}",
+                "inconclusive",
+                ["year", "venue"],
+            ),
+            (
+                "date={2024-02-30}, journaltitle={Example Journal}, journaltitle={Another Journal}",
+                "inconclusive",
+                ["year", "venue"],
+            ),
+        ):
+            with self.subTest(aliases=aliases):
+                self.bib.write_text(
+                    "@article{key,title={A reference title},author={Smith, Ada},"
+                    "doi={10.1234/example}," + aliases + "}"
+                )
+                finding, _, _ = await self.run_check(
+                    options(online_metadata=True), document(metadata()), "online.metadata", "NET002"
+                )
+                self.assertEqual(finding.status, status)
+                self.assertEqual(finding.details["unmeasured_fields"], unmeasured)
+
     async def test_missing_doi_valid_invalid_uncertain(self):
         self.reference("url={https://example.org/paper}")
         selected = options(online_missing_doi=True)

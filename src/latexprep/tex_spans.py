@@ -336,6 +336,27 @@ def opens_conditional(command: Command) -> bool:
     )
 
 
+def is_source_terminator(command: Command) -> bool:
+    r"""Return whether the command may stop its file or the document."""
+    return not command.named and (command.name == "endinput" or command.ends("document"))
+
+
+def stops_source(command: Command, conditionals: Sequence[tuple[int, int]]) -> bool:
+    """Return whether a literal source terminator stands outside an uncertain context."""
+    return (
+        is_source_terminator(command)
+        and not command.depth
+        and not in_conditional(conditionals, command.start)
+    )
+
+
+def endinput_has_suffix(text: str, command: Command) -> bool:
+    r"""Return whether more than trivia follows ``\endinput`` on its physical line."""
+    return command.name == "endinput" and bool(
+        text[command.name_end : end_of_line(text, command.name_end)].strip()
+    )
+
+
 def conditional_branches(
     commands: Sequence[Command], index: int
 ) -> tuple[list[tuple[int, int]], int] | None:

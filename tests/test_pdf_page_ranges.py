@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 
 from latexprep.pdf_comparison import compare_pdfs
@@ -22,6 +22,7 @@ from latexprep.pdf_page_renders import (
 from latexprep.pdf_tools import DOCUMENT, render_page_argv, render_pages_argv, rendered_page_files
 from latexprep.resource_budget import ResourceBudget
 from latexprep.workflow_options import ComparisonOptions
+from tests.fakes import Reply, ToolCall
 from tests.page_render_fakes import RangeRunner
 
 
@@ -65,11 +66,23 @@ class RangeFilesTests(unittest.TestCase):
     def test_the_range_command_is_the_single_page_command_for_several_pages(self) -> None:
         self.assertEqual(
             render_page_argv(3, 144, "rgb"),
-            ["pdftoppm", "-f", "3", "-l", "3", "-singlefile", "-r", "144", DOCUMENT, "page"],
+            [
+                "pdftoppm",
+                "-f",
+                "3",
+                "-l",
+                "3",
+                "-cropbox",
+                "-singlefile",
+                "-r",
+                "144",
+                DOCUMENT,
+                "page",
+            ],
         )
         self.assertEqual(
             render_pages_argv(3, 9, 144, "rgb"),
-            ["pdftoppm", "-f", "3", "-l", "9", "-r", "144", DOCUMENT, "page"],
+            ["pdftoppm", "-f", "3", "-l", "9", "-cropbox", "-r", "144", DOCUMENT, "page"],
         )
         self.assertIn("-png", render_pages_argv(1, 2, 144, "png"))
 
@@ -152,6 +165,27 @@ class RangeComparisonTests(unittest.IsolatedAsyncioTestCase):
         )
         # At 144 DPI a letter page is 5.8 MB of raster, so a range holds five pages at most.
         self.assertFalse((self.root / "ranges/pages-0001-0005").exists())
+
+    async def test_comparisons_accept_fractional_crop_box_rasters(self) -> None:
+        class CroppedRunner(RangeRunner):
+            def respond(self, call: ToolCall) -> Reply:
+                reply = super().respond(call)
+                if call.tool == "pdfinfo" and "-box" in call.argv:
+                    return replace(reply, stdout=reply.stdout.replace("612 x 792", "20 x 30"))
+                if reply.files:
+                    # The 20.0001 pt CropBox width is printed as 20 pt by pdfinfo.
+                    raster = b"P6\n41 60\n255\n" + b"\xff" * (41 * 60 * 3)
+                    return replace(reply, files=dict.fromkeys(reply.files, raster))
+                return reply
+
+        for pages in (1, 3):
+            with self.subTest(pages=pages):
+                runner = CroppedRunner(pages=pages)
+                findings = await self.compare(runner, f"cropped-{pages}")
+                statuses = {item["rule"]: item["status"] for item in findings}
+                self.assertNotIn("compare.unavailable", statuses)
+                self.assertEqual(statuses["compare.rendering"], "passed")
+                self.assertEqual(bool(runner.range_renders), pages > 1)
 
     async def test_findings_are_identical_with_one_page_per_process(self) -> None:
         ranged = await self.compare(RangeRunner(pages=12, changed_pages=(2, 9)), "ranged")

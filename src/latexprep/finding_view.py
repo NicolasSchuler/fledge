@@ -560,41 +560,65 @@ def _is_build_aftermath(finding: Finding) -> bool:
     )
 
 
-def _build_cause(findings: Sequence[Finding], causes: Mapping[int, int]) -> int | None:
+def _build_cause(
+    findings: Sequence[Finding], indices: Sequence[int], causes: Mapping[int, int]
+) -> int | None:
     """Choose the result that explains a failed build, if the build failed.
 
-    The first TeX error other than TeX's closing lines explains it, through the source
-    error at the same place when there is one; else a build tool problem such as a
-    timeout; else the failed build itself.
+    A tool problem such as a timeout explains a stopped build. Otherwise the first
+    substantive TeX error explains it, through the source error at the same place when
+    there is one, or the failed build itself.
 
     Args:
         findings: The findings in display order.
+        indices: The findings from one document's build stage.
         causes: The causes found so far, by the index of the finding they explain.
 
     Returns:
         The index of the explaining finding, or ``None`` when no build failed or nothing
         explains it.
     """
-    if not any(_is_build_aftermath(item) for item in findings):
-        return None
-    for index, finding in enumerate(findings):
+    for index in indices:
+        finding = findings[index]
+        if finding.is_blocking and finding.prevents_checking:
+            return index
+    for index in indices:
+        finding = findings[index]
         if (
             finding.rule == _TEX_ERROR_RULE
             and finding.status == "failed"
             and not _TEX_STOP_TRAILER.search(finding.message)
         ):
             return causes.get(index, index)
-    for index, finding in enumerate(findings):
-        if finding.is_blocking and finding.prevents_checking and finding.rule.startswith("build."):
-            return index
     return next(
         (
             index
-            for index, finding in enumerate(findings)
-            if finding.rule == _BUILD_FAILED_RULE and finding.status != "passed"
+            for index in indices
+            if findings[index].rule == _BUILD_FAILED_RULE and findings[index].status != "passed"
         ),
         None,
     )
+
+
+def _build_follow_ons(findings: Sequence[Finding], causes: Mapping[int, int]) -> dict[int, int]:
+    """Find follow-ons to stopped builds within the same document and build stage."""
+    builds: dict[tuple[str | None, str | None], list[int]] = {}
+    for index, finding in enumerate(findings):
+        if finding.rule.startswith("build."):
+            builds.setdefault((finding.document, finding.stage), []).append(index)
+    stopped = stopped_build_stages(findings)
+    result = {}
+    for indices in builds.values():
+        cause = _build_cause(findings, indices, causes)
+        if cause is None:
+            continue
+        for index in indices:
+            finding = findings[index]
+            if index == cause or index in causes or finding.status == "passed":
+                continue
+            if _is_build_aftermath(finding) or follows_stopped_build(finding, stopped):
+                result[index] = cause
+    return result
 
 
 def _same_place_causes(findings: Sequence[Finding]) -> dict[int, int]:
@@ -661,18 +685,19 @@ def _restated_source_causes(
     Returns:
         The cause of each such result, by index.
     """
-    by_reason: dict[str, int] = {}
+    by_reason: dict[tuple[str | None, str], int] = {}
     for index, finding in enumerate(findings):
         if index in causes or not finding.is_blocking:
             continue
         if finding.path:
-            by_reason.setdefault(f"{finding.path}: {finding.message}", index)
+            by_reason.setdefault((finding.document, f"{finding.path}: {finding.message}"), index)
         if finding.rule in _MAIN_SELECTION_RULES:
-            by_reason.setdefault(NO_MAIN_SOURCE, index)
+            by_reason.setdefault((finding.document, NO_MAIN_SOURCE), index)
     restated = {}
     for index, finding in enumerate(findings):
         reasons = [] if index in causes else _restated_reasons(finding)
-        cause = next((by_reason[item] for item in reasons if item in by_reason), None)
+        keys = ((finding.document, reason) for reason in reasons)
+        cause = next((by_reason[key] for key in keys if key in by_reason), None)
         if cause is not None and cause != index:
             restated[index] = cause
     return restated
@@ -729,14 +754,7 @@ def follow_on_causes(findings: Sequence[Finding]) -> dict[int, int]:
         The cause of each follow-on, by index.
     """
     causes = _same_place_causes(findings)
-    build_cause = _build_cause(findings, causes)
-    stopped = stopped_build_stages(findings)
-    if build_cause is not None:
-        for index, finding in enumerate(findings):
-            if index == build_cause or index in causes or finding.status == "passed":
-                continue
-            if _is_build_aftermath(finding) or follows_stopped_build(finding, stopped):
-                causes[index] = build_cause
+    causes.update(_build_follow_ons(findings, causes))
     causes.update(_restated_source_causes(findings, causes))
     causes.update(_document_summary_causes(findings, causes))
     resolved = {}
@@ -848,8 +866,14 @@ def _problems(views: Sequence[FindingView]) -> list[FindingView]:
 
 
 def _published(report: RedactedReport) -> str:
-    """Say that a preparation published nothing; other commands never publish."""
-    return " Nothing was published." if report.command == "prepare" else ""
+    """Describe the artifacts that this run actually wrote."""
+    if report.submission_written:
+        return " The submission was written."
+    if any(name.startswith("preview.") for name in report.artifacts):
+        return " Previews were written."
+    if report.command == "prepare" and not report.outcome.passed:
+        return " Nothing was published."
+    return ""
 
 
 def interrupted_tasks(report: RedactedReport) -> list[str]:
@@ -887,6 +911,8 @@ def _error_verdict(report: RedactedReport, views: Sequence[FindingView]) -> str:
     cause = next((view for view in problems if view.finding.prevents_checking), None)
     if report.is_request_error and cause is not None:
         return f"Error: {cause.message}"
+    if cause is None and any(view.finding.rule == "report.write" for view in problems):
+        return f"Could not write all requested reports.{_published(report)}"
     reason = cause.title if cause else "the run did not finish"
     return f"Could not check: {reason}.{_published(report)}"
 
@@ -906,7 +932,7 @@ def verdict_line(report: RedactedReport, views: Sequence[FindingView]) -> str:
         not view.cause and view.finding.severity == "warning" and view.finding.status != "passed"
         for view in views
     )
-    written = " The submission was written." if report.artifacts else ""
+    written = _published(report)
     match report.outcome:
         case Outcome.BLOCKED:
             return _blocked_verdict(report, views)
@@ -915,7 +941,7 @@ def verdict_line(report: RedactedReport, views: Sequence[FindingView]) -> str:
         case Outcome.INTERNAL_ERROR:
             return (
                 "Internal error: a defect in Fledge stopped the run; your files are not at "
-                "fault. Rerun with --debug and report it."
+                f"fault. Rerun with --debug and report it.{written}"
             )
         case Outcome.CANCELLED:
             return cancellation_line(report)

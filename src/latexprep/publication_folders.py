@@ -11,16 +11,18 @@ link. ``publication`` composes these steps into one transaction.
 from __future__ import annotations
 
 import errno
+import fcntl
 import os
 import re
 import secrets
 import shutil
 import stat
-from contextlib import suppress
+from collections.abc import Generator, Iterable
+from contextlib import ExitStack, contextmanager, suppress
 from pathlib import Path
 from typing import NamedTuple
 
-from .file_safety import read_file_prefix
+from .file_safety import DIRECTORY_FLAGS, DirectoryIdentity, read_file_prefix
 
 # The file in every directory publication writes; a later run may replace only such a
 # directory, and only when asked to.
@@ -89,6 +91,25 @@ def is_replaceable_output(path: Path) -> bool:
     return is_fledge_output(path) and is_own_directory(path)
 
 
+def existing_identity(path: Path) -> DirectoryIdentity | None:
+    """Identify an existing entry without following a link, or return None if absent."""
+    try:
+        return DirectoryIdentity.from_stat(path.lstat())
+    except FileNotFoundError:
+        return None
+
+
+@contextmanager
+def lock_output_parents(destinations: Iterable[Path]) -> Generator[None]:
+    """Serialize cooperating commits in each destination parent without creating files."""
+    with ExitStack() as descriptors:
+        for parent in sorted({path.parent for path in destinations}):
+            descriptor = os.open(parent, DIRECTORY_FLAGS)
+            descriptors.callback(os.close, descriptor)
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        yield
+
+
 # A staging or set-aside directory is private while the transaction uses it.
 _PRIVATE_DIRECTORY_MODE = 0o700
 
@@ -105,12 +126,14 @@ class StagedOutput(NamedTuple):
         mode: The permission bits of ``destination`` when it was accepted, which the output
             receives as it takes its place, so a folder the user kept private stays private.
             Access control lists and extended attributes are not carried over.
+        identity: The identity of the accepted destination directory.
     """
 
     staging: Path
     destination: Path
     replaces: bool
     mode: int
+    identity: DirectoryIdentity
 
 
 def remove_tree(path: Path) -> None:
@@ -151,7 +174,7 @@ def new_sibling(path: Path, prefix: str) -> Path:
 def _require_unchanged(staged: StagedOutput) -> None:
     """Check that the existing directory of a staged output is still what was accepted.
 
-    It must be a real directory, never a link, of the user's; an earlier output must still
+    It must be the same real directory of the user's; an earlier output must still
     hold its marker. Emptiness is left to ``rmdir``, which refuses a non-empty directory.
 
     Raises:
@@ -161,6 +184,12 @@ def _require_unchanged(staged: StagedOutput) -> None:
         raise NotADirectoryError(
             errno.ENOTDIR, "it is no longer a folder of yours", str(staged.destination)
         )
+    current = staged.destination.lstat()
+    if (
+        DirectoryIdentity.from_stat(current) != staged.identity
+        or stat.S_IMODE(current.st_mode) != staged.mode
+    ):
+        raise OSError(errno.EBUSY, "the accepted output folder changed", str(staged.destination))
     if staged.replaces and not is_fledge_output(staged.destination):
         raise FileNotFoundError(
             errno.ENOENT, "it no longer holds the Fledge output marker", str(staged.destination)
@@ -221,6 +250,10 @@ def move_into_place(staged: StagedOutput) -> Path | None:
         previous.rmdir()
         raise
     try:
+        if existing_identity(previous) != staged.identity:
+            raise OSError(
+                errno.EBUSY, "the accepted output folder changed", str(staged.destination)
+            )
         staged.staging.rename(staged.destination)
     except OSError as error:
         try:

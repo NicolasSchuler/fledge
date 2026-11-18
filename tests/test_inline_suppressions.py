@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import unittest
 
+from latexprep.check_selection import CheckSelection
 from latexprep.config import Settings
+from latexprep.core import run_job
 from latexprep.document_tasks import TaskName
 from latexprep.findings import Finding
 from latexprep.inline_suppressions import silenced_codes, split_silenced_suggestions
+from latexprep.job_context import JobRequest
 from latexprep.report import Report
 from latexprep.scheduler import TaskResult, TaskStatus
 from latexprep.task_reporting import TaskReporter
-from tests.support import ProjectTestCase
+from tests.support import AsyncProjectTestCase, ProjectTestCase, controlled_backends
 
 
 def suggestion(line: int, path: str = "main.tex", rule: str = "source.edit_marker") -> Finding:
@@ -96,6 +99,36 @@ class TaskReporterTests(ProjectTestCase):
         self.assertEqual(
             report.execution["silenced_suggestions"],
             [{"code": "TEX001", "path": "main.tex", "line": 2}],
+        )
+
+
+class ArchivedSuppressionTests(AsyncProjectTestCase):
+    """Final findings use source locations in the verified archive."""
+
+    async def test_flat_layout_keeps_a_suggestion_suppressed_at_its_new_path(self):
+        source = self.write_project(
+            {
+                "paper/main.tex": (
+                    "\\documentclass{article}\n\\begin{document}\n"
+                    "Fast... % fledge: ignore STY305\n\\end{document}\n"
+                )
+            }
+        )
+        output = self.root / "output"
+        settings = Settings(
+            main="paper/main.tex", layout="flat", checks=CheckSelection(select=("ALL", "STY305"))
+        )
+        report = await run_job(
+            JobRequest("prepare", source, settings, output), backends=controlled_backends()
+        )
+        self.assertTrue(report.submission_written, report.to_dict())
+        self.assertFalse(any(item.code == "STY305" for item in report.findings))
+        self.assertEqual(
+            report.execution["silenced_suggestions"],
+            [
+                {"code": "STY305", "path": "paper/main.tex", "line": 3},
+                {"code": "STY305", "path": "main.tex", "line": 3},
+            ],
         )
 
 

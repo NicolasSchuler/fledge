@@ -17,7 +17,7 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from .errors import PreparationError
-from .file_safety import read_file_prefix
+from .file_safety import open_regular_file, read_regular_file
 from .findings import Finding
 from .toolchain import texlive_root
 
@@ -130,11 +130,12 @@ def _native_font_file(reader: _Reader, identification: int) -> str:
     return name
 
 
-def xdv_font_files(xdv: Path) -> list[str]:
+def xdv_font_files(xdv: Path, *, root: Path | None = None) -> list[str]:
     """List the font files of the native fonts that an XDV file defines.
 
     Args:
         xdv: The XDV file that XeTeX wrote.
+        root: The trusted ancestor for a descriptor-relative read, if given.
 
     Returns:
         The font files, in the order of their definitions, without repeats.
@@ -144,8 +145,7 @@ def xdv_font_files(xdv: Path) -> list[str]:
             understands.
     """
     try:
-        size = xdv.stat().st_size
-        with xdv.open("rb") as stream:
+        with open_regular_file(xdv, root=root) as (stream, size):
             stream.seek(max(0, size - _MAX_XDV_TAIL_BYTES))
             data = stream.read(_MAX_XDV_TAIL_BYTES)
     except OSError as error:
@@ -167,17 +167,25 @@ def xdv_font_files(xdv: Path) -> list[str]:
     return list(files)
 
 
-def luaotfload_font_files(recorder_inputs: Iterable[Path]) -> list[str]:
+def luaotfload_font_files(
+    recorder_inputs: Iterable[Path], *, roots: tuple[Path, ...], workspace: Path | None = None
+) -> list[str]:
     """List the font files whose luaotfload caches a LuaLaTeX build read.
 
     Each cached font has a plain-text copy (``.lua``) beside its compiled form (``.luc``);
-    the copy names the font file. A cache without a readable copy is skipped.
+    the copy names the font file.
 
     Args:
         recorder_inputs: The files the build's recorder lists as read.
+        roots: The only cache trees that may supply evidence.
+        workspace: The trusted ancestor of any writable cache tree, if present.
 
     Returns:
         The font files, without repeats.
+
+    Raises:
+        PreparationError: No approved font cache was observed, or a recorded
+            cache lacks bounded, readable text evidence of its font.
     """
     files: dict[str, None] = {}
     caches = {
@@ -185,13 +193,21 @@ def luaotfload_font_files(recorder_inputs: Iterable[Path]) -> list[str]:
         for path in recorder_inputs
         if path.suffix in _FONT_CACHE_SUFFIXES and _FONT_CACHE_FOLDER in path.as_posix()
     }
+    if not caches:
+        raise PreparationError("The recorder did not identify any luaotfload font caches")
     for cache in sorted(caches):
+        root = next((root for root in roots if cache.is_relative_to(root)), None)
+        if root is None:
+            raise PreparationError("The recorder named a font cache outside the approved trees")
+        read_root = workspace if workspace is not None and root.is_relative_to(workspace) else root
         try:
-            data = read_file_prefix(cache, _MAX_FONT_CACHE_BYTES)
-        except OSError:
-            continue
-        if match := _CACHE_FONT_FILE.search(data):
-            files[match[1].decode("utf-8", errors="replace")] = None
+            data = read_regular_file(cache, _MAX_FONT_CACHE_BYTES, root=read_root)
+        except OSError as error:
+            raise PreparationError("A recorded font cache has no readable text copy") from error
+        match = _CACHE_FONT_FILE.search(data)
+        if not match:
+            raise PreparationError("A recorded font cache does not identify a font file")
+        files[match[1].decode("utf-8", errors="replace")] = None
     return list(files)
 
 

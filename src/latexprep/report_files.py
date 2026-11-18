@@ -9,8 +9,6 @@ and the printed report agree. Printing the final report is in ``report_formats``
 from __future__ import annotations
 
 import errno
-import os
-import secrets
 import stat
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -19,17 +17,13 @@ from typing import NamedTuple
 from .command_options import record_internal_error
 from .defects import is_expected_failure
 from .diagnostic_bundle import export_redacted_diagnostic_bundle
+from .errors import PreparationError, RequestError
+from .file_safety import write_new_file, write_sibling_temporary
 from .findings import Finding
 from .html_report import render_redacted_html
 from .publication import validate_destination
 from .publication_folders import is_fledge_report
 from .report import Outcome, RedactedReport, Report, redact_report, redacted_json
-
-# The permissions a temporary report file is created with: readable by its owner only when
-# it replaces an earlier report, whose permissions it receives once complete; otherwise
-# those of any new file, which the umask narrows.
-_PRIVATE_FILE_MODE = 0o600
-_NEW_FILE_MODE = 0o666
 
 
 class ReportIdentity(NamedTuple):
@@ -85,10 +79,6 @@ class ReportFiles:
     replace_existing: bool = False
     earlier: dict[Path, ReportIdentity] = field(default_factory=dict)
 
-    def discard(self) -> None:
-        """Forget every destination, so that no report file is written at all."""
-        self.json = self.html = self.diagnostics = None
-
     def remember_earlier_report(self, destination: Path) -> None:
         """Record which file is at the validated ``destination``, if any, to replace only it.
 
@@ -124,6 +114,8 @@ def resolve_report_files(
     diagnostics: Path | None,
     files: ReportFiles,
     force: bool = False,
+    output: Path | None = None,
+    preview_output: Path | None = None,
 ) -> None:
     """Validate each requested destination against ``source`` and record it in ``files``.
 
@@ -136,11 +128,28 @@ def resolve_report_files(
         force: Whether ``--force`` lets the JSON and HTML reports replace an earlier Fledge
             report; the new report then replaces it only once it is complete. A
             diagnostic file is always new.
+        output: The requested bundle directory.
+        preview_output: The requested preview directory.
 
     Raises:
-        RequestError: A destination is not a new file outside ``source`` in an existing
-            folder; ``files`` keeps the destinations validated before it.
+        RequestError: A destination overlaps an output directory or cannot be written
+            safely outside ``source``.
+        PreparationError: Two file destinations are the same.
     """
+    reports = [path.resolve() for path in (json, html, diagnostics) if path is not None]
+    folders = [path.resolve() for path in (output, preview_output) if path is not None]
+    if len(set(reports)) != len(reports):
+        raise PreparationError("Output, JSON, HTML and diagnostics destinations must be distinct")
+    if any(
+        report.is_relative_to(folder) or folder.is_relative_to(report)
+        for report in reports
+        for folder in folders
+    ):
+        raise RequestError(
+            "Report files must be saved outside the output and preview folders",
+            "Choose --json-report, --html-report and --diagnostics paths outside --output "
+            "and --preview-output; the output folder receives its own report.json.",
+        )
     files.replace_existing = force
     if json:
         files.json = validate_destination(source, json, "--json-report", force=force)
@@ -177,7 +186,8 @@ def record_write_failure(report: Report, option: str, destination: Path, error: 
             f"Choose a {option} path in a folder that exists and is writable, with no file at "
             "that path yet, then rerun the command."
         )
-    report.outcome = Outcome.ERROR
+    if report.outcome not in {Outcome.INTERNAL_ERROR, Outcome.CANCELLED}:
+        report.outcome = Outcome.ERROR
     report.findings.append(
         Finding(
             "report.write",
@@ -187,39 +197,6 @@ def record_write_failure(report: Report, option: str, destination: Path, error: 
             suggestion=suggestion,
         )
     )
-
-
-def _write_temporary(destination: Path, text: str, *, private: bool) -> Path:
-    """Write ``text`` to a new temporary file beside ``destination``.
-
-    Args:
-        destination: The report file the temporary file is to replace.
-        text: The complete text of the report.
-        private: Whether only the owner may read the file, as when it replaces a report
-            that may be private; otherwise it gets the permissions of any new file.
-
-    Returns:
-        The temporary file.
-    """
-    temporary = destination.with_name(f".{destination.name}.{secrets.token_hex(8)}.tmp")
-    descriptor = os.open(
-        temporary,
-        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
-        _PRIVATE_FILE_MODE if private else _NEW_FILE_MODE,
-    )
-    try:
-        stream = os.fdopen(descriptor, "w", encoding="utf-8")
-    except BaseException:
-        os.close(descriptor)
-        temporary.unlink(missing_ok=True)
-        raise
-    try:
-        with stream:
-            stream.write(text)
-    except BaseException:
-        temporary.unlink(missing_ok=True)
-        raise
-    return temporary
 
 
 def _earlier_report_mode(destination: Path, earlier: ReportIdentity | None) -> int | None:
@@ -275,11 +252,11 @@ def write_report_text(
             the new report.
         OSError: The file could not be written.
     """
+    data = text.encode("utf-8")
     if not replace_existing:
-        with destination.open("x", encoding="utf-8") as stream:
-            stream.write(text)
+        write_new_file(destination, data)
         return
-    temporary = _write_temporary(destination, text, private=earlier is not None)
+    temporary = write_sibling_temporary(destination, data, private=earlier is not None)
     try:
         # Checked just before the replacement: nothing that appeared meanwhile is replaced.
         mode = _earlier_report_mode(destination, earlier)
@@ -289,9 +266,14 @@ def write_report_text(
         temporary.unlink(missing_ok=True)
         raise
     try:
-        if mode is not None:
+        if mode is None:
+            destination.hardlink_to(temporary)
+            temporary.unlink()
+        else:
             temporary.chmod(mode)
-        temporary.replace(destination)
+            temporary.replace(destination)
+    except FileExistsError:
+        raise ChangedReportError(destination, temporary) from None
     except BaseException:
         temporary.unlink(missing_ok=True)
         raise
@@ -320,7 +302,7 @@ def save_reports(
     # changes the report.
     html_document = None
     # Write the HTML and diagnostics first, so a failure is reflected in the saved JSON.
-    if files.html is not None:
+    if files.html is not None and _can_write_report(files, files.html, public.outcome):
         try:
             html_document = render_redacted_html(public, preview_images=preview_images)
             write_report_text(
@@ -339,7 +321,7 @@ def save_reports(
             record_write_failure(report, "--diagnostics", files.diagnostics, error)
             public, html_document = redact_report(report), None
     encoded = redacted_json(public)
-    if files.json is not None:
+    if files.json is not None and _can_write_report(files, files.json, public.outcome):
         try:
             write_report_text(
                 files.json,
@@ -352,3 +334,8 @@ def save_reports(
             public, html_document = redact_report(report), None
             encoded = redacted_json(public)
     return public, RenderedReport(encoded, html_document)
+
+
+def _can_write_report(files: ReportFiles, path: Path, outcome: Outcome) -> bool:
+    """Write a new report for any outcome and replace an earlier one only after success."""
+    return path not in files.earlier or outcome.passed or outcome is Outcome.PLANNED

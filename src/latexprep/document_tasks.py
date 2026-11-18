@@ -11,7 +11,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from pathlib import Path
-from typing import TypeVar
+from typing import NamedTuple, TypeVar
 
 from .analysed_source import AnalysedSource
 from .author_records import check_author_records
@@ -337,9 +337,16 @@ _SOURCE_CHECKS = (
 )
 
 
+class CheckedSources(NamedTuple):
+    """A source check's findings and the snapshot their locations refer to."""
+
+    root: Path
+    findings: list[Finding]
+
+
 def _final_source_findings(
     root: Path, main: str, settings: Settings, analysed: AnalysedSource
-) -> list[Finding]:
+) -> CheckedSources:
     """Re-evaluate the actual shipped sources after all transformations.
 
     Args:
@@ -349,12 +356,12 @@ def _final_source_findings(
         analysed: The shared source analysis.
 
     Returns:
-        The findings of the source analysis, followed by those of every source check.
+        The source root and the findings of the analysis and source checks.
     """
     findings = list(analyze_sources(root, main, analysed=analysed).findings)
     for check in _SOURCE_CHECKS:
         findings.extend(check.run(root, main, settings, analysed))
-    return findings
+    return CheckedSources(root, findings)
 
 
 def _original_submission_options(settings: Settings, command: JobCommand) -> SubmissionOptions:

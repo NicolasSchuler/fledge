@@ -14,7 +14,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import IntEnum
 from pathlib import Path, PurePosixPath
@@ -375,10 +375,15 @@ def flat_filenames(
 def _replacement(target: str, command: str, mapping: dict[str, str]) -> str:
     """Return the flat name that replaces a reference to ``target`` made by ``command``.
 
-    A command that adds its default suffix itself receives the name without it.
+    A command that adds its default suffix itself receives the name without it when
+    the shortened name will still select the same file.
     """
     output = mapping[target]
-    if command in {"include", "bibliography", *TOOLCHAIN_FILE_COMMANDS}:
+    if command in {"include", "bibliography", "bibliographystyle"}:
+        (suffix,) = DEFAULT_SUFFIXES_BY_FILE_COMMAND[command]
+        stem = output.removesuffix(suffix)
+        return output if stem.endswith(suffix) else stem
+    if command in TOOLCHAIN_FILE_COMMANDS:
         (suffix,) = DEFAULT_SUFFIXES_BY_FILE_COMMAND[command]
         if output.lower().endswith(suffix):
             output = output[: -len(suffix)]
@@ -427,8 +432,8 @@ def _check_roots(graph: SourceGraph) -> list[Finding]:
     ]
 
 
-def _check_unvisited_sources(graph: SourceGraph) -> list[Finding]:
-    """Report sources the walk never reached that still name files: their directory is unknown."""
+def _check_unvisited_sources(graph: SourceGraph, mapping: Mapping[str, str]) -> list[Finding]:
+    """Report unvisited file references, except resolved vendor copies kept in place."""
     return [
         Finding(
             "flatten.unresolved_context",
@@ -441,6 +446,7 @@ def _check_unvisited_sources(graph: SourceGraph) -> list[Finding]:
         )
         for name, source in graph.sources.items()
         if name not in graph.visited
+        and not (name in graph.installed_package_copies and mapping.get(name) == name)
         and any(
             command.name in FILE_COMMANDS or command.name == "graphicspath"
             for command in source.commands
@@ -599,9 +605,9 @@ def plan_flatten(
         return plan
     findings.extend(_translate_uncertainties(graph))
     findings.extend(_check_roots(graph))
-    findings.extend(_check_unvisited_sources(graph))
     names = flat_filenames(graph.files, graph.main, filename_overrides)
     plan.mapping = names.mapping
+    findings.extend(_check_unvisited_sources(graph, plan.mapping))
     findings.extend(names.findings)
     findings.extend(_check_system_shadowing(graph, plan.mapping))
     findings.extend(_check_companions(plan.mapping))

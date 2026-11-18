@@ -125,6 +125,18 @@ class StorageWalkTests(ProjectTestCase):
                 workspace_violation(workspace, 100), "Workspace entry count exceeded 3"
             )
 
+    def test_unreadable_subtree_cannot_count_as_a_complete_measurement(self) -> None:
+        def unreadable(_root, *, onerror, followlinks):
+            """Exercise the traversal error handler without changing permissions."""
+            onerror(PermissionError(13, "Permission denied", str(self.root / "subtree")))
+            return iter(())
+
+        with (
+            patch("latexprep.resource_monitor.os.walk", side_effect=unreadable),
+            self.assertRaisesRegex(PreparationError, "Could not measure temporary storage"),
+        ):
+            workspace_violation(self.root, 100)
+
 
 class ProcessListingTests(unittest.IsolatedAsyncioTestCase):
     """Process listing: its launch, the message for a missing tool, and a failing monitor."""

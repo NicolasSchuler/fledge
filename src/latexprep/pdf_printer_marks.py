@@ -80,14 +80,14 @@ class _Search(NamedTuple):
     max_length: float
 
 
-def _crop_stroke_operations(
+def _crop_strokes(
     lines: Sequence[Line],
     search: _Search,
     *,
     axis: int,
     corner: Point,
     trim: tuple[float, float],
-) -> list[int]:
+) -> list[Line]:
     """Find the strokes along ``axis`` that start at a trim corner and lie outside the trim.
 
     A crop stroke has both ends on the corner's line, extends away from the trim region
@@ -101,13 +101,13 @@ def _crop_stroke_operations(
         trim: The trim region's low and high edge along the axis.
 
     Returns:
-        The operation numbers of the crop strokes.
+        The matching crop stroke segments.
     """
     tolerance, max_length = search
     cross = 1 - axis
     low, high = trim
     at_low_edge = corner[axis] == low
-    operations = []
+    matching = []
     for line in lines:
         ends = (line.start, line.end)
         on_corner_line = max(abs(end[cross] - corner[cross]) for end in ends) <= tolerance
@@ -117,8 +117,8 @@ def _crop_stroke_operations(
             outside = min(end[axis] for end in ends) >= high - tolerance
         near = min(abs(end[axis] - corner[axis]) for end in ends) <= max_length
         if on_corner_line and outside and near:
-            operations.append(line.operation)
-    return operations
+            matching.append(line)
+    return matching
 
 
 def _corner_marks(region: PdfRegion, lines: Sequence[Line], search: _Search) -> list[Candidate]:
@@ -136,20 +136,22 @@ def _corner_marks(region: PdfRegion, lines: Sequence[Line], search: _Search) -> 
     left, top, right, bottom = region.box
     for x, y in ((left, top), (right, top), (left, bottom), (right, bottom)):
         corner = Point(x, y)
-        horizontal = _crop_stroke_operations(
-            lines, search, axis=0, corner=corner, trim=(left, right)
+        horizontal = _crop_strokes(lines, search, axis=0, corner=corner, trim=(left, right))
+        vertical = _crop_strokes(lines, search, axis=1, corner=corner, trim=(top, bottom))
+        if not horizontal or not vertical:
+            continue
+        # A single segment can be within tolerance of both axes at the corner.
+        if len(horizontal) == len(vertical) == 1 and horizontal[0] is vertical[0]:
+            continue
+        marks.append(
+            {
+                "page": region.page,
+                "region": region.name,
+                "corner_pt": (x, y),
+                "operations": sorted({line.operation for line in horizontal + vertical}),
+                "candidate": "paired trim-aligned crop strokes",
+            }
         )
-        vertical = _crop_stroke_operations(lines, search, axis=1, corner=corner, trim=(top, bottom))
-        if horizontal and vertical:
-            marks.append(
-                {
-                    "page": region.page,
-                    "region": region.name,
-                    "corner_pt": (x, y),
-                    "operations": sorted(set(horizontal + vertical)),
-                    "candidate": "paired trim-aligned crop strokes",
-                }
-            )
     return marks
 
 

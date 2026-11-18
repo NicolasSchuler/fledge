@@ -423,6 +423,15 @@ class PdfArtworkTests(unittest.IsolatedAsyncioTestCase):
         await self.status(
             options, "passed", trace=trace(marks.split("</stroke_path>")[0] + "</stroke_path>")
         )
+        diagonal = stroke(first=(19.8, 19.8), second=(20, 20))
+        await self.status(options, "passed", trace=trace(diagonal))
+        combined = (
+            '<stroke_path linewidth="1" transform="1 0 0 1 0 0">'
+            '<moveto x="5" y="20"/><lineto x="15" y="20"/>'
+            '<moveto x="20" y="5"/><lineto x="20" y="15"/></stroke_path>'
+        )
+        paired = await self.status(options, "failed", trace=trace(combined))
+        self.assertEqual(paired.details["violations"][0]["operations"], [1])
         exempt = await self.status(
             replace(options, printer_mark_exemptions=(1,)), "inconclusive", trace=trace(marks)
         )

@@ -12,6 +12,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from latexprep.build_result import BuildResult
+from latexprep.check_selection import CheckSelection
+from latexprep.compact_report import render_compact
 from latexprep.config import Settings, load_settings
 from latexprep.core import run_job
 from latexprep.defects import REPORT_DEFECT_SUGGESTION
@@ -20,6 +22,7 @@ from latexprep.findings import Finding
 from latexprep.job_context import JobRequest
 from latexprep.main_selection import main_selection_error
 from latexprep.pdf_comparison import compare_pdfs
+from latexprep.review_policy import ReportingOptions, ReviewRule
 from latexprep.staging import stage_document
 from latexprep.workflow_options import ComparisonOptions, DocumentOptions, WorkflowOptions
 from tests.pdf_fakes import FakePdfRunner
@@ -92,6 +95,69 @@ class MultiDocumentTests(unittest.IsolatedAsyncioTestCase):
             any(item.code == "PKG301" and item.status == "passed" for item in report.findings)
         )
         self.assertTrue((self.base / "out/report.json").is_file())
+
+    async def test_global_and_document_review_rules_can_have_the_same_reason(self):
+        settings = replace(
+            self.settings,
+            reporting=ReportingOptions(
+                accepted_exceptions=(
+                    ReviewRule("PDF001", "Approved extra page"),
+                    ReviewRule("PDF001", "Approved extra page", document="paper"),
+                )
+            ),
+        )
+        page_policy = Finding("pdf.page_limit", "Too many pages", severity="error")
+        report = await run_job(
+            JobRequest("prepare", self.source, settings, self.base / "out"),
+            backends=controlled_backends(inspect_pdf=[page_policy]),
+        )
+        self.assertEqual(report.outcome, "accepted_exceptions", report.to_dict())
+        self.assertTrue(report.submission_written)
+        self.assertTrue((self.base / "out/paper/submission.zip").is_file())
+
+    async def test_independent_build_problems_keep_their_own_outcomes_and_causes(self):
+        async def fail(tree, main, work, engine, runner, **options):
+            if main == "main.tex":
+                rule, message = "build.timeout", "Stopped after 7 s."
+            else:
+                rule, message = "build.tex_error", "Undefined control sequence."
+            return fake_build_result(
+                work,
+                main,
+                success=False,
+                findings=[Finding(rule, message, severity="error", path=main)],
+            )
+
+        report = await run_job(
+            JobRequest("check", self.source, self.settings),
+            backends=controlled_backends(build=fail),
+        )
+        self.assertEqual(report.outcome, "blocked", report.to_dict())
+        lines = render_compact(report).splitlines()
+        paper = next(line for line in lines if "build.baseline error/inconclusive paper:" in line)
+        supplement = next(
+            line for line in lines if "build.baseline error/inconclusive supplement:" in line
+        )
+        self.assertIn("caused by: build.timeout main.tex", paper)
+        self.assertIn("caused by: BLD009 extra.tex", supplement)
+
+    async def test_combined_report_retains_each_document_suppression(self):
+        text = (
+            "\\documentclass{article}\n\\begin{document}\n"
+            "Fast... % fledge: ignore STY305\n\\end{document}\n"
+        )
+        (self.source / "paper/main.tex").write_text(text)
+        (self.source / "supplement/extra.tex").write_text(text)
+        settings = replace(self.settings, checks=CheckSelection(select=("ALL", "STY305")))
+        report = await run_job(JobRequest("inspect", self.source, settings))
+        self.assertFalse(any(item.code == "STY305" for item in report.findings))
+        self.assertEqual(
+            report.execution["silenced_suggestions"],
+            [
+                {"code": "STY305", "path": "main.tex", "line": 3, "document": "paper"},
+                {"code": "STY305", "path": "extra.tex", "line": 3, "document": "supplement"},
+            ],
+        )
 
     async def test_one_failed_document_prevents_all_publication(self):
         async def failure(tree, main, work, engine, runner, **_options):

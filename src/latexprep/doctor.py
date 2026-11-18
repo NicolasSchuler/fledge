@@ -530,8 +530,17 @@ async def _diagnose_formatting(run: _DoctorRun, source: Path) -> None:
         ),
         budget=run.budget,
     )
-    if not formatted.contents and not has_blockers(formatted.findings):
-        formatted.findings.append(
+    # A stable style difference is evidence that the formatter ran successfully.
+    findings = [
+        item
+        for item in formatted.findings
+        if (item.rule, item.status, item.severity) != ("source.formatting", "failed", "warning")
+    ]
+    complete = bool(formatted.contents) or any(
+        item.rule == "source.formatting" and item.status == "passed" for item in findings
+    )
+    if not complete and not has_blockers(findings):
+        findings.append(
             Finding(
                 "doctor.format_evidence",
                 "Formatter produced no source output.",
@@ -539,7 +548,7 @@ async def _diagnose_formatting(run: _DoctorRun, source: Path) -> None:
                 status="inconclusive",
             )
         )
-    if run.record_stage("formatting", formatted.findings):
+    if run.record_stage("formatting", findings):
         run.mark_exercised({"tex-fmt"})
 
 

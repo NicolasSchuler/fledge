@@ -395,6 +395,12 @@ class HyperrefOrderTests(ReadinessCase):
                 self.document(preamble)
                 self.assertEqual(self.findings("source.hyperref_load_order"), [])
 
+    def test_order_inside_a_single_package_list_is_respected(self) -> None:
+        for names, status in (("cleveref,hyperref", "failed"), ("hyperref,cleveref", "passed")):
+            with self.subTest(names=names):
+                self.document(f"\\usepackage{{{names}}}\n")
+                self.assertEqual(self.one("source.hyperref_load_order").status, status)
+
 
 class FigureTests(ReadinessCase):
     """EPS figures, and the raster colour space policy read from PNG and JPEG headers."""

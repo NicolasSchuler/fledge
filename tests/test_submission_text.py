@@ -142,6 +142,12 @@ class SubmissionTextTests(ProjectTestCase):
         self.assertEqual(abstract.status, "ready", abstract)
         self.assertEqual(abstract.draft, "A café at https://example.org/a_b. α")
 
+    def test_ready_text_preserves_word_boundaries_across_groups_and_wrappers(self) -> None:
+        self.write(r"\documentclass{article}\title{A \textbf{bold }word\emph{,} then {one }two}")
+        title = read_submission_text(self.root, "main.tex")["title"]
+        self.assertEqual((title.status, title.draft), ("ready", "A bold word, then one two"))
+        self.assertEqual(convert_text(r"\iftrue\textbf{bold }\fi{}word"), ("bold word", []))
+
     def test_keywords_preserve_explicit_phrase_separators(self) -> None:
         self.write(
             r"\documentclass{article}\keywords{machine learning\sep"

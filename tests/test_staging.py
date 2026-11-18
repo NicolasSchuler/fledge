@@ -123,6 +123,26 @@ class StagingTests(unittest.TestCase):
             (outcome.root, outcome.main, outcome.path_mapping), (shipment, "main.tex", {})
         )
 
+    def test_flat_staging_uses_rewritten_bytes_and_streams_unchanged_assets(self) -> None:
+        shipment = self.project() / "paper"
+        asset = b"figure data" * 9000
+        (shipment / "figure.pdf").write_bytes(asset)
+        work = self.base / "work"
+        work.mkdir()
+        plan = SimpleNamespace(
+            changes=[],
+            contents={"main.tex": b"rewritten"},
+            findings=[],
+            mapping={"main.tex": "main.tex", "figure.pdf": "figure.pdf"},
+        )
+        with (
+            patch("latexprep.staging.plan_flatten", return_value=plan),
+            patch.object(Path, "read_bytes", side_effect=AssertionError("whole-file read")),
+        ):
+            outcome = flatten_sources(shipment, work, "main.tex", Settings(layout="flat"))
+        self.assertEqual((outcome.root / "figure.pdf").read_bytes(), asset)
+        self.assertEqual((outcome.root / "main.tex").read_bytes(), b"rewritten")
+
 
 if __name__ == "__main__":
     unittest.main()

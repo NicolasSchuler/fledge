@@ -12,18 +12,50 @@ import os
 import threading
 import unittest
 from collections.abc import Callable
+from pathlib import Path
 from typing import TypeVar
 from unittest.mock import patch
 
 from latexprep.bibliography_controls import read_bibliography_evidence
 from latexprep.bibtex_syntax import BibFileReader, describe_read_failure
 from latexprep.build_log import read_bounded
+from latexprep.file_safety import read_regular_file
 from latexprep.source_analysis import discover_roots
 from latexprep.source_graph import SourceGraph
 from tests.support import ProjectTestCase
 
 T = TypeVar("T")
 ROOT_DOCUMENT = "\\documentclass{article}\n\\begin{document}Hi\\end{document}\n"
+
+
+class RootedFileTests(ProjectTestCase):
+    """Read build artifacts through descriptors rooted in the owned workspace."""
+
+    def test_an_unopenable_parent_is_refused_before_opening_the_artifact(self) -> None:
+        descriptor = os.open
+        opened: list[tuple[str, bool]] = []
+
+        def open_path(path, flags, *, dir_fd=None):
+            """Model a child directory rejected by the no-follow directory open."""
+            opened.append((str(path), dir_fd is not None))
+            if path == "output":
+                raise NotADirectoryError(20, "Not a directory")
+            return descriptor(path, flags, dir_fd=dir_fd)
+
+        with patch("latexprep.file_safety.os.open", side_effect=open_path):
+            self.assertEqual(
+                read_bounded(self.root / "output" / "main.log", 100, root=self.root),
+                ("", False),
+            )
+        self.assertEqual(opened, [(str(self.root), False), ("output", True)])
+
+    def test_a_path_outside_the_root_is_not_opened(self) -> None:
+        with (
+            patch("latexprep.file_safety.os.open") as open_path,
+            self.assertRaisesRegex(OSError, "outside the read root"),
+        ):
+            read_regular_file(self.root.parent / Path("unrelated.txt"), 100, root=self.root)
+        open_path.assert_not_called()
 
 
 def returns_promptly(action: Callable[[], T]) -> T:

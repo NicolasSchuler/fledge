@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 import shutil
 import stat
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import TracebackType
@@ -28,6 +28,7 @@ from typing import NamedTuple, Self
 
 from . import __version__
 from .errors import PreparationError, RequestError
+from .file_safety import DirectoryIdentity
 from .findings import Finding
 from .path_safety import is_contained
 from .publication_folders import (
@@ -35,10 +36,12 @@ from .publication_folders import (
     OUTPUT_MARKER,
     STAGING_PREFIX,
     StagedOutput,
+    existing_identity,
     is_empty_directory,
     is_fledge_report,
     is_own_directory,
     is_replaceable_output,
+    lock_output_parents,
     move_back,
     move_into_place,
     new_sibling,
@@ -199,6 +202,20 @@ def validate_destination(
     return resolved
 
 
+def validate_output_directory(
+    source: Path, destination: Path, option: str, *, force: bool
+) -> tuple[Path, DirectoryIdentity | None]:
+    """Validate an output directory and record the entry that a later commit may replace."""
+    expected = existing_identity(destination)
+    resolved = validate_destination(source, destination, option, folder=True, force=force)
+    if existing_identity(resolved) != expected:
+        raise RequestError(
+            f"{option.capitalize()} changed during validation: {destination}",
+            f"Choose a stable {option} path or wait for the other operation to finish and retry.",
+        )
+    return resolved, expected
+
+
 class OutputTransaction:
     """Directories one publication writes; a failure removes everything it wrote.
 
@@ -216,6 +233,7 @@ class OutputTransaction:
             the rollback is the one that propagates.
         replace_previous: Whether a directory that publication wrote earlier may be
             replaced.
+        accepted: Exact destination identities at request validation, if known.
     """
 
     def __init__(
@@ -224,12 +242,14 @@ class OutputTransaction:
         report: Report | None = None,
         *,
         replace_previous: bool = False,
+        accepted: Mapping[Path, DirectoryIdentity | None] | None = None,
     ) -> None:
         self._created: list[Path] = []
         self._staged: list[StagedOutput] = []
         self._progress = progress or (lambda _message: None)
         self._report = report
         self._replace_previous = replace_previous
+        self._accepted = dict(accepted or {})
 
     def __enter__(self) -> Self:
         return self
@@ -241,7 +261,20 @@ class OutputTransaction:
         traceback: TracebackType | None,
     ) -> None:
         if exc_type is None:
-            self._commit()
+            try:
+                with lock_output_parents(item.destination for item in self._staged):
+                    replaced = self._commit()
+            except OSError as error:
+                self._roll_back(error)
+                self._clear_artifacts()
+                message = (
+                    "Another publication is committing in the output parent. "
+                    "Retry when it finishes."
+                    if isinstance(error, BlockingIOError)
+                    else f"Could not lock the output parent: {error}"
+                )
+                raise PreparationError(message) from error
+            self._remove_replaced(replaced)
             return
         self._roll_back(exc_value)
 
@@ -264,7 +297,7 @@ class OutputTransaction:
             except OSError as error:
                 self._report_leftover(path, error, cause)
 
-    def _commit(self) -> None:
+    def _commit(self) -> list[Path]:
         """Move every staged output into place; on a failure, put the existing ones back.
 
         Raises:
@@ -284,17 +317,23 @@ class OutputTransaction:
                             f"in {previous or 'no folder'}."
                         )
                 self._roll_back(error)
-                if self._report is not None:
-                    self._report.artifacts.clear()
-                    locate_previews(self._report, ())
+                self._clear_artifacts()
                 raise PreparationError(
                     f"Could not move the new output into {staged.destination} "
                     f"({error.strerror or error}); it was left as it was and nothing new "
                     "was published"
                 ) from error
-        for _, previous in moved:
-            if previous is None:
-                continue
+        return [previous for _, previous in moved if previous is not None]
+
+    def _clear_artifacts(self) -> None:
+        """Remove publication paths from a report after a failed commit."""
+        if self._report is not None:
+            self._report.artifacts.clear()
+            locate_previews(self._report, ())
+
+    def _remove_replaced(self, replaced: Sequence[Path]) -> None:
+        """Remove former outputs after their replacements were committed."""
+        for previous in replaced:
             try:
                 remove_tree(previous)
             except OSError as error:
@@ -357,8 +396,11 @@ class OutputTransaction:
         if self._inside_output(path):
             written.mkdir()
             return written
-        if path.exists() or path.is_symlink():
-            written = self._stage(path, label)
+        identity = existing_identity(path)
+        if path in self._accepted and identity != self._accepted[path]:
+            raise PreparationError(f"{label} changed while the job ran: {path}")
+        if identity is not None:
+            written = self._stage(path, label, identity)
         else:
             # mkdir is exclusive, so a concurrent creation is never written into.
             try:
@@ -369,12 +411,13 @@ class OutputTransaction:
         _write_new_text(written / OUTPUT_MARKER, MARKER_TEXT.format(version=__version__))
         return written
 
-    def _stage(self, path: Path, label: str) -> Path:
+    def _stage(self, path: Path, label: str, identity: DirectoryIdentity) -> Path:
         """Create the sibling directory that takes the place of the existing ``path``.
 
         Args:
             path: The existing directory: empty, or an earlier output that may be replaced.
             label: Names the output in the error message.
+            identity: The accepted directory's identity.
 
         Returns:
             The new sibling directory.
@@ -391,7 +434,7 @@ class OutputTransaction:
             raise PreparationError(f"{label} changed while the job ran: {path}")
         mode = stat.S_IMODE(path.lstat().st_mode)
         staging = new_sibling(path, STAGING_PREFIX)
-        self._staged.append(StagedOutput(staging, path, replaces, mode))
+        self._staged.append(StagedOutput(staging, path, replaces, mode, identity))
         return staging
 
     def _inside_output(self, path: Path) -> bool:

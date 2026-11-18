@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import re
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Literal, NamedTuple
 from urllib.parse import urlsplit
 
@@ -27,11 +27,10 @@ from .bibtex_syntax import (
     has_only_escaped_underscores,
 )
 from .cancellation import cancellation_point
-from .citation_graph import Uncertainty
+from .citation_graph import INHERITANCE_FIELDS, Uncertainty
 from .findings import EvidenceKind, Finding, Status
 from .limits import CANCELLATION_STRIDE_CHARS
 
-_INHERITANCE = frozenset({"crossref", "xref", "xdata"})
 _URL_SCHEMES = frozenset({"http", "https", "ftp"})
 
 
@@ -63,7 +62,7 @@ def content_state(entry: Entry, names: list[str]) -> Presence:
                 uncertain = True
             elif value.translate(str.maketrans("", "", "{}")).strip():
                 return "present"
-    if uncertain or any(item.name in _INHERITANCE for item in entry.fields):
+    if uncertain or any(item.name in INHERITANCE_FIELDS for item in entry.fields):
         return "unknown"
     return "missing"
 
@@ -350,7 +349,7 @@ def check_entry_fields(
     options: BibliographyOptions,
     results: ResultCollector,
     *,
-    bibtex_styles: bool | None = None,
+    bibtex_styles: Mapping[str, bool],
 ) -> None:
     """Run the configured field checks over ``references`` and summarize each of them.
 
@@ -361,8 +360,8 @@ def check_entry_fields(
         options: Which checks run, the required fields by entry type and the DOI entry
             types.
         results: The collector that receives the findings and the summaries.
-        bibtex_styles: Whether a BibTeX style formats the entries, rather than biblatex;
-            ``None`` when that is unknown.
+        bibtex_styles: Whether any root using a resource formats it with a BibTeX
+            style, keyed by resource path. An absent path has no backend evidence.
     """
     requirements = dict(options.required_fields)
     enabled = {
@@ -384,13 +383,14 @@ def check_entry_fields(
     for reference in references:
         cancellation_point()
         entry = reference.entry
+        uses_bibtex = bibtex_styles.get(reference.document.path)
         for spec in (*requirements.get("*", ()), *requirements.get(entry.entry_type, ())):
             add("required_fields", _required_field(reference, spec, uncertain=bool(uncertainties)))
         if "*" in options.doi_entry_types or entry.entry_type in options.doi_entry_types:
             add("missing_doi", _doi_presence(reference))
         for rule, (name, _, _) in _FIELD_CHECKS.items():
             if enabled[rule] and (bib_fields := entry.fields_named(name)):
-                add(rule, _field_syntax(reference, rule, bib_fields, bibtex_styles=bibtex_styles))
+                add(rule, _field_syntax(reference, rule, bib_fields, bibtex_styles=uses_bibtex))
     for rule, row in rows.items():
         spec = SummarySpec(
             rule,

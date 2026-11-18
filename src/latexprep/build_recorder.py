@@ -68,7 +68,7 @@ def read_recorder(
     stem = PurePosixPath(main).stem
     try:
         trace = read_recorder_trace(
-            layout.output / f"{stem}.fls", layout.output, layout.cwd, max_bytes
+            layout.output / f"{stem}.fls", layout.work, layout.cwd, max_bytes
         )
     except (OSError, PreparationError):
         missing = Finding(
@@ -106,23 +106,25 @@ def _interpret(
     packages: dict[Path, LoadedPackage] = {}
     findings: list[Finding] = []
     too_many_packages = False
+    invalid_path = False
     for recorded in trace.inputs:
-        path = recorded.absolute.resolve()
+        try:
+            path = recorded.absolute.resolve()
+        except (OSError, RuntimeError, ValueError):
+            invalid_path = True
+            continue
         inputs.add(path)
         in_project = path.is_relative_to(layout.project)
-        declared = (
-            in_project
-            or path.is_relative_to(layout.work)
-            or any(path.is_relative_to(root) for root in declared_roots)
-        )
-        if declared and path.suffix.lower() in _PACKAGE_SUFFIXES and path not in packages:
+        root = _read_root(path, recorded.absolute, layout.work, declared_roots)
+        if root is not None and path.suffix.lower() in _PACKAGE_SUFFIXES and path not in packages:
             if len(packages) >= MAX_LOADED_PACKAGES:
                 too_many_packages = True
             else:
-                packages[path] = read_loaded_package(path, layout.project)
+                read_path = recorded.absolute if root == layout.work else path
+                packages[path] = read_loaded_package(read_path, layout.project, root=root)
         if in_project:
             project_inputs.add(path.relative_to(layout.project).as_posix())
-        elif not declared:
+        elif root is None:
             findings.append(
                 Finding(
                     _EXTERNAL_RULE,
@@ -131,12 +133,17 @@ def _interpret(
                     path=main,
                 )
             )
-    read_main = (layout.project / main).resolve() in inputs
-    if not read_main:
+    problem = _trace_problem(
+        trace,
+        invalid_path=invalid_path,
+        too_many_packages=too_many_packages,
+        read_main=layout.project / main in inputs,
+    )
+    if problem is not None:
         findings.append(
             Finding(
                 _TRACE_RULE,
-                "Recorder trace does not establish that the selected main file was read.",
+                problem,
                 severity="error",
                 status="inconclusive",
                 path=main,
@@ -147,6 +154,33 @@ def _interpret(
         frozenset(inputs),
         frozenset(project_inputs),
         tuple(packages.values()),
-        read_main and not too_many_packages,
+        problem is None,
         tuple(findings),
     )
+
+
+def _read_root(path: Path, recorded: Path, workspace: Path, roots: tuple[Path, ...]) -> Path | None:
+    """Choose the workspace or a declared resource root for an already resolved input."""
+    if path.is_relative_to(workspace):
+        return workspace
+    for root in roots:
+        if path.is_relative_to(root):
+            if recorded.is_relative_to(workspace):
+                return None
+            return root.parent if path == root else root
+    return None
+
+
+def _trace_problem(
+    trace: RecorderTrace, *, invalid_path: bool, too_many_packages: bool, read_main: bool
+) -> str | None:
+    """Explain why a recorder trace cannot establish a complete package inventory."""
+    if trace.defect is not None:
+        return f"Recorder trace is incomplete: {trace.defect}."
+    if invalid_path:
+        return "Recorder trace contains a path that could not be resolved."
+    if too_many_packages:
+        return f"Recorder trace exceeds the limit of {MAX_LOADED_PACKAGES} loaded packages."
+    if not read_main:
+        return "Recorder trace does not establish that the selected main file was read."
+    return None

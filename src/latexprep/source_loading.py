@@ -21,7 +21,7 @@ from pathlib import Path
 from .errors import PreparationError
 from .file_safety import FileTooLargeError, read_regular_file
 from .limits import KIB, MIB
-from .source_file_commands import DEFAULT_SUFFIXES_BY_FILE_COMMAND, is_literal_text
+from .source_file_commands import DEFAULT_SUFFIXES_BY_FILE_COMMAND, candidate_paths, is_literal_text
 from .source_findings import FOREIGN_ENCODING_RULE, GraphFindings
 from .tex_lexer import (
     MAX_ARGUMENT_CHARS,
@@ -36,7 +36,7 @@ from .tex_lexer import (
     scan_commands,
     source_regions,
 )
-from .tex_spans import conditional_spans, in_conditional, runs_in_place
+from .tex_spans import conditional_spans, in_conditional, runs_in_place, stops_source
 from .text_edits import with_bom
 
 # How a source that is not valid UTF-8 is read: as UTF-8, with every byte that does not
@@ -165,8 +165,8 @@ def is_document_root(commands: Sequence[Command]) -> bool:
 def _literal_inputs(name: str, commands: Sequence[Command]) -> Iterator[str]:
     r"""Yield the project paths that the literal ``\input`` and ``\include`` of a file may name.
 
-    The file is read as a main file, so a name resolves against its own directory, as
-    itself and with the ``.tex`` suffix TeX tries first. Only a command that runs where it
+    The file is read as a main file, so a name resolves against its own directory
+    with the command's usual suffix handling. Only a command that runs where it
     stands counts: one inside a conditional, a definition or the argument of a command
     that may drop it, as in ``\iffalse\input{supplement}\fi``, may read nothing.
 
@@ -180,6 +180,8 @@ def _literal_inputs(name: str, commands: Sequence[Command]) -> Iterator[str]:
     directory = posixpath.dirname(name)
     conditionals = conditional_spans(list(commands))
     for command in commands:
+        if stops_source(command, conditionals):
+            break
         if (
             command.name not in _DOCUMENT_INPUT_COMMANDS
             or command.named_by
@@ -191,8 +193,9 @@ def _literal_inputs(name: str, commands: Sequence[Command]) -> Iterator[str]:
         value = command.arguments[0].value.strip()
         if is_literal_text(value):
             path = posixpath.normpath(posixpath.join(directory, value))
-            yield path
-            yield from (path + suffix for suffix in DEFAULT_SUFFIXES_BY_FILE_COMMAND[command.name])
+            yield from candidate_paths(
+                command.name, [path], DEFAULT_SUFFIXES_BY_FILE_COMMAND[command.name]
+            )
 
 
 def document_roots(commands_by_name: Mapping[str, Sequence[Command]]) -> list[str]:

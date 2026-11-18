@@ -171,6 +171,7 @@ class IncludedPdfTests(unittest.TestCase):
             result.limitations,
             ["streams with filters other than FlateDecode", "application data streams (PieceInfo)"],
         )
+        self.assertEqual(result.included_limitations, [])
 
 
 class HostilePdfTests(unittest.TestCase):
