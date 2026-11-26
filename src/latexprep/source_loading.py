@@ -14,25 +14,34 @@ from __future__ import annotations
 
 import codecs
 import posixpath
+from bisect import bisect_left
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import NamedTuple
 
 from .errors import PreparationError
 from .file_safety import FileTooLargeError, read_regular_file
 from .limits import KIB, MIB
-from .source_file_commands import DEFAULT_SUFFIXES_BY_FILE_COMMAND, candidate_paths, is_literal_text
+from .source_file_commands import (
+    DEFAULT_SUFFIXES_BY_FILE_COMMAND,
+    candidate_paths,
+    file_argument_index,
+    is_literal_text,
+)
 from .source_findings import FOREIGN_ENCODING_RULE, GraphFindings
 from .tex_lexer import (
     MAX_ARGUMENT_CHARS,
     MAX_COMMANDS,
     MAX_SOURCE_BYTES,
     MAX_TOTAL_SOURCE_BYTES,
+    Argument,
     Command,
     ParseLimit,
     ParseLimitExceeded,
     blank_regions,
     comment_starts,
+    end_of_line,
     scan_commands,
     source_regions,
 )
@@ -136,6 +145,21 @@ class ParsedSource:
         """Return the 1-based line of ``offset`` in ``text``."""
         return self.text.count("\n", 0, offset) + 1
 
+    def has_buffered_endinput_suffix(self, command: Command) -> bool:
+        r"""Return whether ``\endinput`` leaves noncomment tokens on its physical line.
+
+        Use the raw text before the comment, since the lexer masks URL and other
+        literal commands as well as comments, and those commands are still tokens.
+        """
+        if command.name != "endinput":
+            return False
+        start = command.name_end
+        end = end_of_line(self.text, start)
+        comment = bisect_left(self.comment_starts, start)
+        if comment < len(self.comment_starts):
+            end = min(end, self.comment_starts[comment])
+        return bool(self.text[start:end].strip())
+
     def encode(self, text: str | None = None) -> bytes:
         """Encode ``text`` as the file stores it: UTF-8, with the source's byte-order mark.
 
@@ -153,6 +177,80 @@ class ParsedSource:
         if self.foreign:
             raise PreparationError("A source that is not valid UTF-8 cannot be rewritten")
         return with_bom(self.text if text is None else text, bom=self.bom).encode("utf-8")
+
+
+def file_command_end(source: ParsedSource, command: Command) -> int:
+    r"""Return the end of a file command that has its file argument, braced or bare.
+
+    Later groups belong to the text that follows the file read, not the read itself.
+    The lexer, which does not know most command signatures, may record those groups
+    as additional arguments.
+    """
+    argument = command.arguments[file_argument_index(command.name)]
+    return argument.end + (source.masked[argument.start - 1] == "{")
+
+
+class SubfileBody(NamedTuple):
+    r"""The lexical wrapper of a file entered with ``\subfile``.
+
+    Attributes:
+        declaration: The class declaration that supplies the parent argument.
+        parent: The literal parent argument, trimmed to its text.
+        start: The offset just after the opening document delimiter.
+        end: The offset of the closing document delimiter.
+    """
+
+    declaration: Command
+    parent: Argument
+    start: int
+    end: int
+
+
+def read_subfile_body(
+    name: str, source: ParsedSource, findings: GraphFindings
+) -> SubfileBody | None:
+    """Locate the sole literal document environment and parent declaration of a subfile.
+
+    Unknown wrappers are reported and have no body in the supported subset. The caller
+    must still resolve the parent and check that it names the selected main file.
+
+    Args:
+        name: The project-relative name of the file.
+        source: Its parsed source.
+        findings: Receives findings for an unsupported wrapper.
+
+    Returns:
+        The subfile's body offsets and declared parent, or ``None`` for an unsupported wrapper.
+    """
+    declarations = [command for command in source.commands if command.name == "documentclass"]
+    starts = [command for command in source.commands if command.begins("document", exact=True)]
+    ends = [command for command in source.commands if command.ends("document", exact=True)]
+    if (
+        len(declarations) != 1
+        or len(starts) != 1
+        or len(ends) != 1
+        or not declarations[0].arguments
+        or declarations[0].arguments[0].value != "subfiles"
+        or not declarations[0].start < starts[0].start < ends[0].start
+    ):
+        findings.uncertain(
+            "source.subfile_structure",
+            "A subfile requires one literal subfiles class and document environment.",
+            name,
+        )
+        return None
+    declaration = declarations[0]
+    if len(declaration.options) != 1 or not is_literal_text(declaration.options[0].value):
+        findings.uncertain(
+            "source.subfile_structure", "A subfile requires an explicit parent path.", name
+        )
+        return None
+    return SubfileBody(
+        declaration,
+        declaration.options[0].stripped(),
+        starts[0].arguments[0].end + 1,
+        ends[0].start,
+    )
 
 
 def is_document_root(commands: Sequence[Command]) -> bool:

@@ -251,6 +251,7 @@ MODULES_BY_LAYER: dict[str, tuple[str, ...]] = {
         "main_selection",
         "package_verification",
         "publication",
+        "rule_catalogue",
         "scheduler",
         "staging",
         "standalone_checks",

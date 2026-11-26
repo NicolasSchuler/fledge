@@ -1,4 +1,7 @@
 # All constraints come from the author. No publisher profile is loaded.
+# Copying this file replaces some defaults rather than restating them: Fledge's own
+# defaults are engine = "auto", layout = "preserve", and jobs and render_jobs that
+# follow the CPU count. Delete a line to keep the default.
 main = "main.tex"
 layout = "flat"
 engine = "pdflatex"

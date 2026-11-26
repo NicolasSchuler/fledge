@@ -14,13 +14,13 @@ import contextlib
 import logging
 import os
 import time
-from collections.abc import AsyncGenerator, Sequence
+from collections.abc import AsyncGenerator, Callable, Generator, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 from typing import NamedTuple
 
-from .cancellation import complete_despite_cancellation
+from .cancellation import cancellation_point, complete_despite_cancellation, run_in_thread
 from .errors import PreparationError
 from .limits import MAX_WORKSPACE_ENTRIES
 from .process_control import kill_process_group, kill_unfinished, start_process
@@ -337,6 +337,7 @@ def measure_storage(root: Path, workspaces: Sequence[Path], max_file_bytes: int)
     for directory, directories, filenames in os.walk(
         root, onerror=account_walk_error, followlinks=False
     ):
+        cancellation_point()
         here = Path(directory)
         owners = [
             tally
@@ -346,6 +347,7 @@ def measure_storage(root: Path, workspaces: Sequence[Path], max_file_bytes: int)
         for tally in owners:
             tally.add_entries(len(directories) + len(filenames))
         for name in filenames:
+            cancellation_point()
             with contextlib.suppress(FileNotFoundError):
                 size = (here / name).lstat().st_size
                 tree_bytes += size
@@ -384,6 +386,7 @@ class ResourceMonitor:
         self.statistics = statistics
         self.active_commands: dict[int, ActiveCommand] = {}
         self.scope: JobScope | None = None
+        self._on_job_failure: Callable[[], None] | None = None
         # Job samples in a row whose process table did not answer in time.
         self._slow_process_tables = 0
         # Whether the last memory measurement was close to a limit of the job or a command.
@@ -439,6 +442,27 @@ class ResourceMonitor:
         self.active_commands.pop(command.process.pid, None)
         command.finished.set()
 
+    @contextlib.contextmanager
+    def on_job_failure(self, stop: Callable[[], None]) -> Generator[None]:
+        """Notify the workflow of the first job-wide failure so it can stop its own work.
+
+        The notification is synchronous; the monitor only stops tool processes, and
+        the workflow is responsible for cancelling and draining its other workers.
+
+        Args:
+            stop: Called once on failure, immediately if the monitor has already failed.
+
+        Yields:
+            Control with the callback registered for the duration of the block.
+        """
+        previous, self._on_job_failure = self._on_job_failure, stop
+        try:
+            if self.failure is not None:
+                stop()
+            yield
+        finally:
+            self._on_job_failure = previous
+
     def fail_job(self, message: str) -> None:
         """Record ``message`` as the job-wide failure unless one is recorded already.
 
@@ -446,6 +470,8 @@ class ResourceMonitor:
         """
         if self.statistics.resource_exceeded is None:
             self.statistics.resource_exceeded = message
+            if self._on_job_failure is not None:
+                self._on_job_failure()
         for command in tuple(self.active_commands.values()):
             command.fail(self.statistics.resource_exceeded)
 
@@ -660,7 +686,7 @@ class ResourceMonitor:
             # Walking the workspaces and the job tree is blocking and grows with
             # the toolchain payload and build output, so it never runs inline.
             watched = tuple(commands.values())
-            failures, total = await asyncio.to_thread(
+            failures, total = await run_in_thread(
                 self._job_storage, scope, tuple(item.workspace for item in watched)
             )
             for command, failure in zip(watched, failures, strict=True):
@@ -673,23 +699,26 @@ class ResourceMonitor:
             self.statistics.samples += 1
             self.statistics.monitor_seconds += time.monotonic() - start
 
-    async def _monitor_job(self, scope: JobScope) -> None:
-        """Sample the job until cancelled; an unexpected error fails the job."""
-        start = time.monotonic()
+    async def _sample_or_fail(self, scope: JobScope) -> None:
+        """Take a sample, failing the job if the measurement cannot be completed."""
         try:
-            while True:
-                await self.sample_job(scope)
-                # A sample that swallowed this task's cancellation must not keep the
-                # monitor alive, or job_scope would wait for it indefinitely.
-                current = asyncio.current_task()
-                if current is not None and current.cancelling():
-                    raise asyncio.CancelledError
-                interval = sample_interval(start)
-                self.statistics.sample_interval_seconds = interval
-                await asyncio.sleep(interval)
+            await self.sample_job(scope)
         except Exception as error:  # noqa: BLE001 - fail closed and report the cause
-            # Fail closed: commands must not outlive their resource accounting.
             self.fail_job(f"Job resource accounting failed: {type(error).__name__}: {error}")
+
+    async def _monitor_job(self, scope: JobScope) -> None:
+        """Sample the job until cancelled or the accounting finds a job-wide failure."""
+        start = time.monotonic()
+        while not self.failure:
+            await self._sample_or_fail(scope)
+            # A sample that swallowed this task's cancellation must not keep the
+            # monitor alive, or job_scope would wait for it indefinitely.
+            current = asyncio.current_task()
+            if current is not None and current.cancelling():
+                raise asyncio.CancelledError
+            interval = sample_interval(start)
+            self.statistics.sample_interval_seconds = interval
+            await asyncio.sleep(interval)
 
     @contextlib.asynccontextmanager
     async def job_scope(
@@ -737,6 +766,6 @@ class ResourceMonitor:
             scope.monitor.cancel()
             await asyncio.gather(scope.monitor, return_exceptions=True)
             # Include very short/source-only jobs in the final sample.
-            await self.sample_job(scope)
+            await self._sample_or_fail(scope)
         finally:
             self.scope = None

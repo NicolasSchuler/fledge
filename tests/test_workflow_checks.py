@@ -6,6 +6,7 @@ import json
 import string
 import tempfile
 import unittest
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -13,6 +14,7 @@ from unittest.mock import AsyncMock, patch
 from click.testing import CliRunner
 
 from latexprep.build_checks import BuildCheckOptions
+from latexprep.build_result import BuildResult
 from latexprep.cli import cli
 from latexprep.config import Settings
 from latexprep.core import run_job
@@ -25,14 +27,38 @@ from latexprep.pdf_check_options import PdfCheckOptions
 from latexprep.pdf_check_pipeline import inspect_configured_pdf_checks
 from latexprep.report import Outcome, Report
 from latexprep.resource_budget import ResourceBudget
+from latexprep.review_policy import BASELINE_VERSUS_PREPARED_STAGE
 from latexprep.runtime import ToolRunner
+from latexprep.source_transform import SourceTransformOptions
 from latexprep.submission_options import SubmissionOptions
 from tests.support import (
     AsyncProjectTestCase,
     build_with_loaded_class,
     controlled_backends,
+    fake_build_result,
     single_file_project,
 )
+
+
+def recorded_build(
+    builds: list[str], failing: str | None = None
+) -> Callable[..., Awaitable[BuildResult]]:
+    """Return a controlled build backend that records its workspaces and can fail one.
+
+    Args:
+        builds: Receives the workspace directory name of every build, in order.
+        failing: The workspace directory whose build produces no PDF; every other build
+            succeeds with ``main`` as its only input.
+
+    Returns:
+        The build backend.
+    """
+
+    async def build(_tree, main, work, *_args, **_options) -> BuildResult:
+        builds.append(work.name)
+        return fake_build_result(work, main, success=work.name != failing)
+
+    return build
 
 
 class WorkflowCheckTests(AsyncProjectTestCase):
@@ -168,6 +194,55 @@ class WorkflowCheckTests(AsyncProjectTestCase):
             self.assertTrue(
                 any(item.code == code and item.status == "failed" for item in report.findings)
             )
+
+    async def test_a_failed_rebuild_of_the_prepared_sources_publishes_nothing(self):
+        single_file_project(self.source, preamble="% remove me")
+        transformed = Settings(source_transforms=SourceTransformOptions(comment_policy="all"))
+        # Removing the comment changes the staged copy, so it is rebuilt; a flat layout is
+        # rebuilt from its flattened sources even when staging changed nothing.
+        for stage, workspace, settings in (
+            ("transformed", "transformed-build", transformed),
+            ("prepared", "staged-build", Settings(layout="flat")),
+        ):
+            builds: list[str] = []
+            output = self.root / stage
+            backends = controlled_backends(build=recorded_build(builds, failing=workspace))
+            with self.subTest(stage=stage):
+                report = await run_job(
+                    JobRequest("prepare", self.source, settings, output), backends=backends
+                )
+                self.assertEqual(report.outcome, "blocked", report.to_dict())
+                # Nothing was archived: the stop came before the archive rebuild.
+                self.assertEqual(builds, ["baseline", workspace])
+                self.assertFalse(output.exists())
+                self.assertEqual(report.artifacts, {})
+                (failure,) = [item for item in report.findings if item.rule == f"build.{stage}"]
+                self.assertEqual((failure.severity, failure.status), ("error", "inconclusive"))
+                statuses = {item["name"]: item["status"] for item in report.stages}
+                self.assertEqual(statuses[stage], "failed")
+
+    async def test_a_blocked_comparison_with_the_baseline_publishes_nothing(self):
+        single_file_project(self.source)
+        changed = Finding("compare.rendering", "Rendered pixels changed", severity="error")
+        comparison = AsyncMock(side_effect=[[changed]])
+        builds: list[str] = []
+        output = self.root / "out"
+        backends = controlled_backends(build=recorded_build(builds), compare_pdfs=comparison)
+        # A flat layout is rebuilt from different sources, so its PDF is compared with the
+        # baseline's; the preserved layout of unchanged sources is not.
+        report = await run_job(
+            JobRequest("prepare", self.source, Settings(layout="flat"), output), backends=backends
+        )
+        self.assertEqual(report.outcome, "blocked", report.to_dict())
+        # The comparison with the baseline was the only one, and no archive was rebuilt.
+        self.assertEqual(comparison.await_count, 1)
+        self.assertEqual(comparison.await_args.args[2].name, "compare-prepared")
+        self.assertEqual(builds, ["baseline", "staged-build"])
+        self.assertFalse(output.exists())
+        self.assertEqual(report.artifacts, {})
+        (difference,) = [item for item in report.findings if item.rule == "compare.rendering"]
+        self.assertEqual(difference.details["stage"], BASELINE_VERSUS_PREPARED_STAGE)
+        self.assertTrue(difference.is_blocking)
 
     async def test_failed_final_configured_pdf_check_prevents_publication(self):
         single_file_project(self.source)
@@ -388,6 +463,115 @@ class PdfCheckCompositionTests(unittest.IsolatedAsyncioTestCase):
                 )
             self.assertEqual(len(findings), 1, findings)
             self.assertEqual((findings[0].code, findings[0].path), ("PDF212", "figure.pdf"))
+
+
+class UnreachedOnlineChecksTests(AsyncProjectTestCase):
+    """The ``online.not_reached`` note of a preparation that stops before its online checks.
+
+    A real preparation runs the selected online checks once, on the final archive extraction,
+    so a stage that blocks earlier leaves them unrun and the report says so. ``check`` and a
+    dry run check the original sources instead; nothing is noted when online checks are not
+    consented to or selected, or when they already reported.
+    """
+
+    CONSENTED = OnlineOptions(online=True, online_doi_resolution=True)
+    CHANGED = (Finding("compare.rendering", "Rendered pixels changed", severity="error"),)
+
+    async def asyncSetUp(self):
+        """Write the project ``input`` and replace the online reference checks by a recorder."""
+        self.source = self.root / "input"
+        single_file_project(self.source)
+        self.online = AsyncMock(return_value=[])
+        patcher = patch("latexprep.document_tasks.check_online_references", new=self.online)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    async def run_job_with(
+        self,
+        settings: Settings,
+        command: str = "prepare",
+        *,
+        failing: str | None = None,
+        compare_pdfs: object = (),
+        dry_run: bool = False,
+    ) -> Report:
+        """Run ``command`` on the project with controlled builds and comparisons.
+
+        Args:
+            settings: The settings of the job.
+            command: The command to run.
+            failing: The workspace directory whose build fails, if any.
+            compare_pdfs: The behaviour of the comparison backend.
+            dry_run: Whether ``prepare`` only plans.
+
+        Returns:
+            The report; a ``prepare`` job would publish to ``self.root / "out"``.
+        """
+        backends = controlled_backends(
+            build=recorded_build([], failing=failing), compare_pdfs=compare_pdfs
+        )
+        output = self.root / "out" if command == "prepare" else None
+        request = JobRequest(command, self.source, settings, output, dry_run=dry_run)
+        return await run_job(request, backends=backends)
+
+    def notes(self, report: Report) -> list[Finding]:
+        """Return the report's ``online.not_reached`` findings."""
+        return [item for item in report.findings if item.rule == "online.not_reached"]
+
+    async def test_a_preparation_that_stops_early_notes_the_online_checks_it_never_ran(self):
+        flat = Settings(layout="flat", online_checks=self.CONSENTED)
+        for stop, settings, options in (
+            ("baseline build", Settings(online_checks=self.CONSENTED), {"failing": "baseline"}),
+            ("prepared rebuild", flat, {"failing": "staged-build"}),
+            ("comparison with the baseline", flat, {"compare_pdfs": self.CHANGED}),
+        ):
+            with self.subTest(stop=stop):
+                report = await self.run_job_with(settings, **options)
+                self.assertEqual(report.outcome, "blocked", report.to_dict())
+                [note] = self.notes(report)
+                self.assertEqual((note.severity, note.status), ("info", "skipped"))
+                self.assertIn("final archive extraction", note.message)
+                self.assertIn("preparation stopped earlier", note.message)
+                self.assertFalse(note.is_blocking)
+                self.online.assert_not_called()
+                self.assertFalse((self.root / "out").exists())
+
+    async def test_online_checks_that_already_reported_are_not_noted_as_unreached(self):
+        self.online.return_value = [
+            Finding("online.doi_resolution", "Resolved", severity="info", status="passed")
+        ]
+        # The archive rebuild differs, which stops the preparation after its online checks.
+        report = await self.run_job_with(
+            Settings(online_checks=self.CONSENTED), compare_pdfs=self.CHANGED
+        )
+        self.assertEqual(report.outcome, "blocked", report.to_dict())
+        self.assertEqual(self.online.await_count, 1)
+        self.assertTrue(any(item.rule == "online.doi_resolution" for item in report.findings))
+        self.assertEqual(self.notes(report), [])
+
+    async def test_nothing_is_noted_when_online_checks_were_not_due_at_the_final_extraction(self):
+        for case, settings, command, dry_run in (
+            ("check", Settings(online_checks=self.CONSENTED), "check", False),
+            ("dry run", Settings(online_checks=self.CONSENTED), "prepare", True),
+            (
+                "no consent",
+                Settings(online_checks=OnlineOptions(online_doi_resolution=True)),
+                "prepare",
+                False,
+            ),
+            (
+                "no check selected",
+                Settings(online_checks=OnlineOptions(online=True)),
+                "prepare",
+                False,
+            ),
+        ):
+            with self.subTest(case=case):
+                report = await self.run_job_with(
+                    settings, command, failing="baseline", dry_run=dry_run
+                )
+                self.assertEqual(report.outcome, "blocked", report.to_dict())
+                self.assertEqual(self.notes(report), [])
 
 
 class OnlineCliTests(unittest.TestCase):

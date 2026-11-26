@@ -56,11 +56,12 @@ bash install.sh --uninstall
 ```
 
 Use the same `--prefix` and `--bin-dir` as for the installation. Uninstalling
-removes the prefix and the launcher, and only when the installer wrote that
-launcher for that prefix; otherwise nothing is removed. It refuses a symlinked
-prefix or one containing your home directory, and it leaves Homebrew, TeX,
-Poppler, shell files and your projects untouched. To upgrade, uninstall, then run
-the installer from the newer source, such as a clone of the newer tag.
+removes an existing prefix only when the installer's `.fledge-installer` marker
+is inside it, and removes the launcher only when it runs that prefix; otherwise
+nothing is removed. It refuses a symlinked prefix or one containing your home
+directory, and it leaves Homebrew, TeX, Poppler, shell files and your projects
+untouched. To upgrade, uninstall, then run the installer from the newer source,
+such as a clone of the newer tag.
 
 ## Install with pipx or uv
 
@@ -143,19 +144,22 @@ test job sets it to `0` only on its disposable runner.
 
 ## Windows
 
-Native Windows has no build sandbox, so `check` and `prepare` cannot build there;
-`inspect` and `bib check` need only Python. To build on Windows, use WSL 2 with a
-Linux distribution such as Ubuntu and follow the [Linux](#linux) instructions
-inside it. That route has not been tested live.
+Fledge does not run on native Windows: the command stops before it starts,
+because it relies on file locking that only macOS and Linux provide, and Windows
+also has no build sandbox. Use WSL 2 with a Linux distribution such as Ubuntu
+and follow the [Linux](#linux) instructions inside it, for every command. That
+route has not been tested live.
 
 ## Tools
 
 | Operation | Tools |
 | --- | --- |
 | `inspect`, `bib check` | Python package only; with TeX installed, `kpsewhich` also confirms files that the TeX installation supplies |
-| `check`, `prepare` | `latexmk`, the selected TeX engine and packages, the bibliography backend (BibTeX or [Biber](workflow-reference.md#biber-on-macos)), plus Poppler |
+| `submission-text`, `init`, `rules`, `rule` | Python package only |
+| `check`, `prepare`, `doctor` | `latexmk`, the selected TeX engine and packages, the bibliography backend (BibTeX or [Biber](workflow-reference.md#biber-on-macos)), plus Poppler |
 | PDF analysis and comparison | `pdfinfo`, `pdftotext`, `pdftoppm`, `pdffonts`, `pdfdetach`, `pdfimages`; `pdftohtml` for text geometry |
 | Formatting and optional PDF checks | `tex-fmt`; `qpdf` and MuPDF's `mutool` |
+| Lint suggestions (`CHK001`) | `chktex`; see [lint with chktex](chktex.md) |
 
 A tool is needed only for the checks that use it. When a configured check's tool
 is missing, that check is reported as incomplete rather than passed. Fledge never

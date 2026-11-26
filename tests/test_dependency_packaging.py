@@ -8,6 +8,7 @@ import zipfile
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+from latexprep import publication_folders
 from latexprep.bbl_checks import BblOptions
 from latexprep.bibliography_transform import BibliographyTransformOptions
 from latexprep.build_dependencies import SubmissionDependencies
@@ -176,23 +177,25 @@ class DependencyPackagingTests(unittest.IsolatedAsyncioTestCase):
         original = directory_contents(self.source)
         build = RecordedBuild({"main.tex": ({"main.tex"},) * 2})
         report = Report("prepare")
-        mkdir = Path.mkdir
+        rename = publication_folders._rename_exclusive
         raced_contents: dict[str, bytes] = {}
 
-        def race_mkdir(path: Path, *args, **kwargs) -> None:
-            if path == output and not raced_contents:
+        def race_commit(source: Path, destination: Path) -> None:
+            """Create a competing output just before the staged move is attempted."""
+            if destination == output:
                 self.assertEqual(build.counts["main.tex"], 2)
-                mkdir(path, *args, **kwargs)
-                with zipfile.ZipFile(path / "submission.zip", "w") as archive:
+                self.assertTrue((source / "submission.zip").is_file())
+                destination.mkdir()
+                with zipfile.ZipFile(destination / "submission.zip", "w") as archive:
                     archive.writestr("previous.tex", "Another job's completed archive.\n")
-                (path / "user-notes.bin").write_bytes(b"Another job's data\x00must survive")
-                raced_contents.update(directory_contents(path))
-            mkdir(path, *args, **kwargs)
+                (destination / "user-notes.bin").write_bytes(b"Another job's data\x00must survive")
+                raced_contents.update(directory_contents(destination))
+            rename(source, destination)
 
         backends = controlled_backends(build=build.__call__)
         with (
-            patch.object(Path, "mkdir", race_mkdir),
-            self.assertRaisesRegex(PreparationError, "Output appeared while the job ran"),
+            patch.object(publication_folders, "_rename_exclusive", race_commit),
+            self.assertRaisesRegex(PreparationError, "Could not move the new output"),
         ):
             await run_job(
                 JobRequest("prepare", self.source, Settings(main="main.tex"), output),

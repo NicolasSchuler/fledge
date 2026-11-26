@@ -270,7 +270,7 @@ an output format. (75 modules)
 
 The job workflow: validating a request and settings, scheduling the tasks of one document or of
 several, importing, building, staging, verifying and publishing, and turning the results into a
-report. It uses everything below it and knows nothing of terminals, HTML or the command line. (19 modules)
+report. It uses everything below it and knows nothing of terminals, HTML or the command line. (20 modules)
 
 | Module | Responsibility |
 | --- | --- |
@@ -288,6 +288,7 @@ report. It uses everything below it and knows nothing of terminals, HTML or the 
 | `main_selection` | Choosing the main file of a project: the configured one, else the only candidate root |
 | `package_verification` | The last steps of preparation: archive the sources, rebuild from the ZIP, run final checks |
 | `publication` | Publish verified packages, previews and reports into new directories outside the input |
+| `rule_catalogue` | Classify registered checks and name their enabling settings for the CLI and generated documentation |
 | `scheduler` | Dependency scheduling of job tasks under the shared resource budget |
 | `staging` | Staging copies of an imported project: document selection, transformations and flattening |
 | `standalone_checks` | Checks of one aspect without the build workflow: a PDF, the bibliography or formatting |

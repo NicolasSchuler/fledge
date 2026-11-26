@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shutil
 import tempfile
 import threading
@@ -12,6 +13,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+from latexprep import publication_folders
 from latexprep.build_result import BuildTools
 from latexprep.check_selection import CheckSelection
 from latexprep.config import Settings
@@ -19,11 +21,13 @@ from latexprep.core import run_job
 from latexprep.defects import REPORT_DEFECT_SUGGESTION
 from latexprep.errors import PreparationError
 from latexprep.findings import Finding
-from latexprep.job_context import JobRequest
+from latexprep.job_context import JobCommand, JobRequest
 from latexprep.job_execution import JobDeadlineExceeded
+from latexprep.process_table import ProcessSample
 from latexprep.publication import VerifiedPackage
 from latexprep.redaction import scrub_local_paths
 from latexprep.report import Outcome, Report
+from latexprep.resource_monitor import ResourceMonitor
 from latexprep.staging import apply_contents
 from tests.support import controlled_backends
 
@@ -94,7 +98,11 @@ class ParallelWorkflowTests(unittest.IsolatedAsyncioTestCase):
 
             def cancel_copy(src, dst, *args, **kwargs):
                 result = copytree(src, dst, *args, **kwargs)
-                if dst.resolve() == (output / "sources").resolve():
+                if (
+                    dst.name == "sources"
+                    and dst.parent.parent.parent == output.parent.resolve()
+                    and dst.parent.parent.name.startswith(publication_folders.STAGING_PREFIX)
+                ):
                     asyncio.current_task().cancel()
                 return result
 
@@ -129,25 +137,22 @@ class ParallelWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 report.outcome = Outcome.PASSED
                 return VerifiedPackage(prepared, archive, pdf)
 
-            remove = shutil.rmtree
-
-            def refuse(path, *args, **kwargs):
-                # Only the rollback of the new output fails; the workspace is removed normally.
-                if Path(path) == output.resolve():
-                    raise PermissionError(13, "Permission denied", str(path))
-                remove(path, *args, **kwargs)
+            def refuse(path):
+                raise PermissionError(13, "Permission denied", str(path))
 
             with (
                 patch("latexprep.core.run_project", side_effect=ready),
                 patch("latexprep.publication.shutil.copyfile", side_effect=RuntimeError("full")),
-                patch("latexprep.publication.shutil.rmtree", side_effect=refuse),
+                patch("latexprep.publication.remove_tree", side_effect=refuse),
                 self.assertRaises(RuntimeError),
             ):
                 await run_job(
                     JobRequest("prepare", source, Settings(), output), messages.append, report
                 )
+            self.assertFalse(output.exists())
+            [leftover] = set(base.iterdir()) - {source}
         [rollback] = [item for item in report.findings if item.rule == "execution.rollback"]
-        self.assertIn(scrub_local_paths(str(output.resolve())), rollback.message)
+        self.assertIn(scrub_local_paths(str(leftover.resolve())), rollback.message)
         self.assertIn("manually", rollback.next_step)
         self.assertTrue(any("remove it manually" in message for message in messages))
 
@@ -440,16 +445,75 @@ class ParallelWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report.outcome, "cancelled")
         self.assertEqual(report.execution["resources"]["active_cpu"], 0)
 
-    async def test_job_disk_limit_blocks_publication_even_without_real_tool_commands(self):
+    async def test_job_storage_failure_stops_and_drains_an_active_writer(self):
+        started, cleaning, release = (asyncio.Event() for _ in range(3))
+        written: list[Path] = []
+
+        async def sample(_monitor):
+            """Measure resources only after the controlled build writes its overflow file."""
+            await started.wait()
+            return [ProcessSample(os.getpid(), -1, 1024)]
+
+        async def writing_build(_tree, _main, work, *_args, **_options):
+            """Write too much and wait to be stopped, keeping the workspace during cleanup."""
+            work.mkdir()
+            overflow = work / "large.bin"
+            overflow.write_bytes(bytes(2048))
+            written.append(overflow)
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cleaning.set()
+                await release.wait()
+                self.assertTrue(overflow.is_file())
+
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            source, output = base / "input", base / "output"
+            project(source)
+            settings = Settings(max_temporary_bytes=1024, job_timeout_seconds=60)
+            backends = controlled_backends(build=writing_build)
+            with patch.object(ResourceMonitor, "sample_processes", sample):
+                task = asyncio.create_task(
+                    run_job(
+                        JobRequest(JobCommand.PREPARE, source, settings, output), backends=backends
+                    )
+                )
+                try:
+                    await asyncio.wait_for(cleaning.wait(), 5)
+                    self.assertFalse(task.done())
+                    self.assertTrue(written[0].is_file())
+                    release.set()
+                    report = await asyncio.wait_for(task, 5)
+                finally:
+                    started.set()
+                    release.set()
+                    if not task.done():
+                        task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+            self.assertFalse(output.exists())
+        self.assertFalse(written[0].exists())
+        self.assertEqual(report.outcome, Outcome.ERROR)
+        self.assertNotIn("execution.deadline", {finding.rule for finding in report.findings})
+        [failure] = [item for item in report.findings if item.rule == "execution.resources"]
+        self.assertEqual(failure.message, "Job temporary storage exceeded 1024 bytes")
+        observed, resources = report.execution["observed"], report.execution["resources"]
+        assert isinstance(observed, dict) and isinstance(resources, dict)
+        self.assertEqual(observed["resource_exceeded"], failure.message)
+        self.assertEqual((resources["active_cpu"], resources["queued"]), (0, 0))
+
+    async def test_final_job_disk_sample_blocks_publication_without_real_tool_commands(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
             source, output = base / "input", base / "output"
             project(source)
             backends = controlled_backends(build=build)
-            report = await run_job(
-                JobRequest("prepare", source, Settings(max_temporary_bytes=1), output),
-                backends=backends,
-            )
+            with patch.object(ResourceMonitor, "_monitor_job", AsyncMock()):
+                report = await run_job(
+                    JobRequest(JobCommand.PREPARE, source, Settings(max_temporary_bytes=1), output),
+                    backends=backends,
+                )
             self.assertFalse(output.exists())
         self.assertEqual(report.outcome, "error")
         self.assertTrue(any(f.rule == "execution.resources" for f in report.findings))

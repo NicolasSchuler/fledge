@@ -47,7 +47,8 @@ sources, or `submission.zip` when the venue asks for sources.
 | Figure metadata | `PRV103` searches the metadata of the figures the document includes for `image_identity_terms`; `PRV104` reports home-folder paths such as `/Users/<name>/` there without any setting |
 | Included PDF figures | `PRV105` reports identity terms and home-folder paths that included PDFs leave in the built PDF; the preset's `suppress_included_pdf_information` (`TEX204`) keeps their information dictionaries and file names out of the PDF that `prepare` builds |
 | Comments and files | Private notes in comments (`PRV005`), credential-shaped text (`PRV004`) and unused files (`PKG106`), which matter when reviewers receive the source |
-| PDF | Embedded fonts (`PDF104`) and no attachments (`PDF109`) |
+| Draft leftovers | The `draft` class option (`TEX102`), which replaces figures with boxes, and the `showframe` package (`TEX103`), which draws page frames |
+| PDF | Embedded fonts (`PDF104`) and no attachments (`PDF109`); rejecting Type 3 fonts (`PDF105`) is a commented-out line of the preset |
 | Layout | Layout manipulation such as negative spacing or shrunken margins (`MAN002`, advisory) and floats: a caption on every figure and table (`MAN011`) and labels after their captions (`MAN013`) block; a missing label (`MAN012`) and a float the text never refers to (`MAN014`) are reported as warnings, through `[checks] advisory`; the order of first references (`MAN015`) is a commented-out line of the preset |
 
 The `TEX204` setting cannot be written into a main file that is not UTF-8, such as
@@ -64,6 +65,8 @@ Copy these from the venue's current call for papers:
 - `require_line_numbers` under `[manuscript_checks]` (`MAN017`): when reviewers
   are asked to refer to line numbers;
 - `max_archive_bytes` (`PKG105`): an upload size limit;
+- `forbid_type3_fonts = true` (`PDF105`): when the venue rejects Type 3 fonts,
+  which often come from bitmap fonts in figures;
 - `comment_policy = "private"` under `[source_transforms]`: when reviewers also
   receive the source, this removes comments with private markers from the copy.
 

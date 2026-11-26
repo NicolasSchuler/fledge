@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import tempfile
 import unittest
 from io import StringIO
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from click.testing import CliRunner
@@ -54,6 +56,27 @@ class ToolVersionTests(unittest.TestCase):
         self.assertIn("Tools", terminal.stdout)
         self.assertIn("Version 4.88", terminal.stdout)
         self.assertEqual(json.loads(structured.stdout)["tools"]["latexmk"]["installed"], True)
+
+    def test_the_tool_list_and_the_report_show_the_same_redacted_copy(self) -> None:
+        home_path = str(Path.home() / "private" / "chktexrc")
+        tools = {
+            "chktex": {"installed": True, "required": False, "version": [f"ChkTeX {home_path}"]}
+        }
+        with tempfile.TemporaryDirectory() as folder:
+            for words in (["doctor", folder, "--quiet"], ["doctor", folder, "--json", "-q"]):
+                report = Report("doctor", outcome=Outcome.PASSED, tools=dict(tools))
+                with (
+                    self.subTest(words=words),
+                    patch(
+                        "latexprep.doctor_command.run_doctor",
+                        new=AsyncMock(return_value=report),
+                    ),
+                ):
+                    result = CliRunner().invoke(cli, words, terminal_width=200)
+                    self.assertEqual(result.exit_code, 0, result.output)
+                    self.assertNotIn(str(Path.home()), result.stdout)
+                    self.assertNotIn(folder, result.stdout)
+                    self.assertIn("ChkTeX ~/private/chktexrc", result.stdout)
 
 
 if __name__ == "__main__":

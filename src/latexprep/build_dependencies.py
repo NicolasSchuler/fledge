@@ -39,12 +39,11 @@ _HEADER = re.compile(
 _INPUT = re.compile(rf'"([^"\r\n]+)" ({_NUMBER}) (-?\d+) ([0-9a-fA-F]{{32}}|0) "([^"\r\n]*)"')
 _PATH_ROW = re.compile(r'"([^"\r\n]+)"')
 _RECORDER_KINDS = frozenset({"PWD", "INPUT", "OUTPUT"})
-# The style file that the glossaries package records in the .aux file; the last record
-# counts, as for the glossary rules of ``latexmk_command``. A style for xindy makes those
-# rules leave the glossary and the list of acronyms empty instead of running makeindex.
-_GLOSSARY_STYLE_RECORD = re.compile(rb"\\@istfilename\{([^{}\r\n]+)\}")
+# The style file that the glossaries package records in the .aux file; use the first
+# record per line and the last matching line, as in the controlled glossary rules.
+_GLOSSARY_STYLE_RECORD = re.compile(rb"^[^\n]*?\\@istfilename\{([^{}\n]+)\}", re.MULTILINE)
 _XINDY_STYLE_SUFFIX = b".xdy"
-# The suffix of each list those rules leave empty, with the suffix of its tool input.
+# The suffix of each list the controlled glossary rules handle, with that of its tool input.
 _XINDY_LIST_INPUTS = {".gls": ".glo", ".acr": ".acn"}
 
 
@@ -140,12 +139,11 @@ class SubmissionDependencies:
         generated_files: Where each generated file the build read lies, by its name in
             ``generated_reads``, except the lists in ``xindy_lists``; preparation ships the
             index and glossary files from here.
-        never_created: The generated files the run looked for that no tool wrote although
-            the tool's input has entries, relative to the output directory, such as
-            ``main.nls`` when nomencl's makeindex step did not run. The document then lacks
-            that list.
-        xindy_lists: The files in ``never_created`` that the build left empty because the
-            glossaries package writes them for xindy, which the isolated build does not run.
+        never_created: Lists missing from the document despite nonempty tool inputs, such
+            as ``main.nls`` when nomencl's makeindex step did not run. Includes empty xindy
+            lists; names are relative to the output or project directory.
+        xindy_lists: The subset that was empty because no usable xindy list was supplied.
+            The isolated build does not run xindy.
         workspace: The trusted ancestor of the generated files, if collected from a build.
     """
 
@@ -651,18 +649,22 @@ def _read_primary_rule(request: DependencyRequest) -> list[_LatexmkRule]:
 
 
 def _merge_rule_evidence(
-    request: DependencyRequest, rules: list[_LatexmkRule], observed: _ObservedPaths
+    request: DependencyRequest,
+    rules: list[_LatexmkRule],
+    observed: _ObservedPaths,
+    preserved: Mapping[str, Path],
 ) -> None:
     """Add the sources, inputs and outputs of every rule that ran to what the recorder showed.
 
-    An input that a rule produces counts as generated, unless that rule never ran: then
-    the file the build read is whatever existed before, such as a supplied ``.bbl``. A
-    rule that never ran contributes nothing.
+    An input that a rule produces counts as generated, unless that rule never ran or
+    kept a supplied file unchanged. A rule that never ran contributes nothing.
 
     Args:
         request: The finished build.
         rules: The rules of latexmk's database.
         observed: The paths seen so far; updated in place.
+        preserved: The destination of each controlled rule that kept a seeded xindy list,
+            by rule name. latexmk records the destination even when the rule does not write.
 
     Raises:
         PreparationError: A rule's generated files lack its destination, the main file
@@ -677,11 +679,12 @@ def _merge_rule_evidence(
         destinations = {_absolute_path(path, cwd) for path in rule.generated}
         if _absolute_path(rule.destination, cwd) not in destinations:
             raise PreparationError(f"Dependency rule {rule.name!r} lacks its generated output")
-        observed.generated.update(destinations)
+        kept = preserved.get(rule.name)
+        observed.generated.update(path for path in destinations if path != kept)
         for filename, producer in rule.inputs:
             path = _absolute_path(filename, cwd)
             observed.inputs.add(path)
-            if producer and producer not in never_ran:
+            if producer and producer not in never_ran and path != preserved.get(producer):
                 observed.generated.add(path)
     if request.layout.project / request.main in observed.generated:
         raise PreparationError("The selected main source was marked as a generated file")
@@ -858,45 +861,67 @@ def _never_created(request: DependencyRequest, rules: list[_LatexmkRule]) -> tup
     return tuple(sorted(found))
 
 
-def _has_entries(path: Path, root: Path) -> bool:
-    """Return whether ``path`` is a non-empty regular file under ``root``."""
+def _file_size(path: Path, root: Path) -> int | None:
+    """Return the size of a readable regular file under ``root``, or ``None``."""
     try:
         with open_regular_file(path, root=root) as (_, size):
-            return size > 0
+            return size
     except OSError:
-        return False
+        return None
 
 
-def _xindy_lists(request: DependencyRequest, rules: list[_LatexmkRule]) -> tuple[str, ...]:
-    """Find the glossary lists that the build left empty because they are written for xindy.
+def _has_entries(path: Path, root: Path) -> bool:
+    """Return whether ``path`` is a non-empty regular file under ``root``."""
+    return (_file_size(path, root) or 0) > 0
 
-    The glossary rules of ``latexmk_command`` write an empty glossary or list of acronyms
-    when the ``.aux`` file next to it records an xindy style. Only lists whose tool input
-    has entries count, as for :func:`_never_created`: the document then lacks the list.
+
+def _xindy_rule_outputs(request: DependencyRequest, rules: list[_LatexmkRule]) -> dict[str, Path]:
+    """Map controlled glossary rules to outputs whose final auxiliary file specifies xindy.
+
+    An xindy style in the auxiliary file means the rule keeps an existing list or makes
+    a placeholder instead of running makeindex. latexmk records either as rule output.
 
     Args:
         request: The finished build.
         rules: The rules of latexmk's database.
 
     Returns:
-        The lists, relative to the output folder, sorted.
+        The matching rules that ran, mapped to their destinations in the output folder.
     """
-    layout, found = request.layout, set()
+    layout, outputs = request.layout, {}
     for rule in rules:
-        tool_input = _XINDY_LIST_INPUTS.get(Path(rule.destination).suffix)
+        suffix = Path(rule.destination).suffix
+        tool_input = _XINDY_LIST_INPUTS.get(suffix)
         if not rule.ran or tool_input is None:
             continue
-        try:
-            path = _absolute_path(rule.destination, layout.cwd)
-        except PreparationError:
+        if not rule.name.startswith(f"cusdep {tool_input[1:]} {suffix[1:]} "):
             continue
-        if (
-            path.is_relative_to(layout.output)
-            and _has_entries(path.with_suffix(tool_input), layout.work)
-            and _records_xindy_style(path.with_suffix(".aux"), layout.work, request.max_bytes)
+        path = _absolute_path(rule.destination, layout.cwd)
+        if path.is_relative_to(layout.output) and _records_xindy_style(
+            path.with_suffix(".aux"), layout.work, request.max_bytes
         ):
-            found.add(path.relative_to(layout.output).as_posix())
-    return tuple(sorted(found))
+            outputs[rule.name] = path
+    return outputs
+
+
+def _empty_xindy_lists(
+    request: DependencyRequest, rule_outputs: Mapping[str, Path], reads: set[Path]
+) -> tuple[str, ...]:
+    """Name empty xindy lists with entries to print, even if no rule ran for a supplied list."""
+    layout = request.layout
+    known = set(rule_outputs.values())
+    empty = []
+    for path in known | (layout.seeded.keys() & reads):
+        tool_input = _XINDY_LIST_INPUTS.get(path.suffix)
+        if tool_input is None or _file_size(path, layout.work) != 0:
+            continue
+        if path not in known and not _records_xindy_style(
+            path.with_suffix(".aux"), layout.work, request.max_bytes
+        ):
+            continue
+        if _has_entries(path.with_suffix(tool_input), layout.work):
+            empty.append(path.relative_to(layout.output).as_posix())
+    return tuple(sorted(empty))
 
 
 def _records_xindy_style(aux: Path, root: Path, max_bytes: int) -> bool:
@@ -917,6 +942,16 @@ def _records_xindy_style(aux: Path, root: Path, max_bytes: int) -> bool:
     return bool(records) and records[-1].endswith(_XINDY_STYLE_SUFFIX)
 
 
+def _matches_supplied_list(request: DependencyRequest, path: Path) -> bool:
+    """Verify the final bytes: an earlier pass may have run makeindex before the style was xindy."""
+    layout = request.layout
+    if (name := layout.seeded.get(path)) is None:
+        return False
+    return _read_owned_bytes(path, layout.work, request.max_bytes) == _read_owned_bytes(
+        layout.source / name, layout.source, request.max_bytes
+    )
+
+
 def collect_submission_dependencies(request: DependencyRequest) -> SubmissionDependencies:
     """Return the original project inputs of a build, or ``None`` with an actionable uncertainty.
 
@@ -933,11 +968,17 @@ def collect_submission_dependencies(request: DependencyRequest) -> SubmissionDep
     try:
         observed = _verify_primary_output(request)
         rules = _read_primary_rule(request)
-        _merge_rule_evidence(request, rules, observed)
+        xindy_outputs = _xindy_rule_outputs(request, rules)
+        preserved = {
+            name: path
+            for name, path in xindy_outputs.items()
+            if _matches_supplied_list(request, path)
+        }
+        _merge_rule_evidence(request, rules, observed, preserved)
         classified = _classify_inputs(request, observed)
     except (OSError, UnicodeError, ValueError, PreparationError) as error:
         return SubmissionDependencies(None, uncertainty=(str(error),))
-    xindy = _xindy_lists(request, rules)
+    xindy = _empty_xindy_lists(request, xindy_outputs, observed.inputs)
     return SubmissionDependencies(
         classified.project_inputs,
         rules=tuple(rule.name for rule in rules if rule.ran),

@@ -114,11 +114,12 @@ class PdfTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("144", rendered.message)
 
     async def test_large_pages_are_compared_at_the_highest_resolution_that_fits(self) -> None:
-        # An A0 poster: too large for 144 DPI within the raster limits.
-        a0 = "Page 1 size: 2383.94 x 3370.39 pts\n"
-        runner = ConfigurablePdfRunner(outputs={"geometry": a0})
-        findings = await compare_pdfs(self.left, self.right, self.root / "compare", runner)
-        dpi = comparison_dpi(parse_page_sizes(a0, 1))
+        # Reduce the comparison limit instead of allocating two poster-size rasters.
+        runner = FakePdfRunner()
+        with patch("latexprep.pdf_geometry.MAX_RASTER_PIXELS", 1200):
+            dpi = comparison_dpi([runner.page_size_pt])
+            findings = await compare_pdfs(self.left, self.right, self.root / "compare", runner)
+        self.assertLess(dpi, COMPARISON_DPI)
         self.assertNotIn("compare.unavailable", {item.rule for item in findings})
         rendered = next(item for item in findings if item.rule == "compare.rendering")
         self.assertEqual((rendered.status, rendered.details["dpi"]), ("passed", dpi))

@@ -366,7 +366,7 @@ class OutputTransactionTests(unittest.TestCase):
             first, second = Path(directory) / "first", Path(directory) / "second"
 
             def refuse_second(path, *args, **kwargs):
-                if Path(path) == second:
+                if Path(path) == staging:
                     raise PermissionError(13, "Permission denied", str(path))
                 remove(path, *args, **kwargs)
 
@@ -376,22 +376,22 @@ class OutputTransactionTests(unittest.TestCase):
             ):
                 with OutputTransaction() as transaction:
                     transaction.create(first)
-                    transaction.create(second)
+                    staging = transaction.create(second)
                     raise RuntimeError("publication failed")
             # The cause stays primary; the directory that stayed behind is named.
             self.assertEqual(str(raised.exception), "publication failed")
             notes = "\n".join(raised.exception.__notes__)
-            self.assertIn(str(second), notes)
+            self.assertIn(str(staging), notes)
             self.assertIn("Permission denied", notes)
             self.assertIn("remove it manually", notes)
-            self.assertFalse(first.exists())
-            self.assertTrue(second.exists())
+            self.assertEqual(set(Path(directory).iterdir()), {staging.parent})
+            self.assertEqual(set(staging.parent.iterdir()), {staging})
 
     def test_a_directory_that_stays_behind_is_announced_and_recorded_in_the_report(self):
         messages: list[str] = []
         report = Report("prepare")
         with tempfile.TemporaryDirectory() as directory:
-            leftover = Path(directory) / "output"
+            output = Path(directory) / "output"
 
             def refuse(path, *_args, **_kwargs):
                 raise PermissionError(13, "Permission denied", str(path))
@@ -401,7 +401,7 @@ class OutputTransactionTests(unittest.TestCase):
                 self.assertRaises(RuntimeError),
                 OutputTransaction(messages.append, report) as transaction,
             ):
-                transaction.create(leftover)
+                leftover = transaction.create(output)
                 raise RuntimeError("publication failed")
             [finding] = report.findings
             self.assertEqual(finding.rule, "execution.rollback")

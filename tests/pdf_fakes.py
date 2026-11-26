@@ -15,6 +15,7 @@ from typing import ClassVar
 from latexprep.command_runner import CommandResult
 from latexprep.pdf_artwork_options import PdfContrastSample
 from latexprep.pdf_check_options import PdfRegion
+from latexprep.pdf_geometry import measurement_raster_size
 from tests.fakes import FakeCommandRunner, Reply, ToolCall
 
 # What ``pdfimages -list`` (Poppler 26.11) printed for the six-page PDF of TeX Live 2026's
@@ -34,20 +35,29 @@ page   num  type   width height color comp bpc  enc interp  object ID x-ppi y-pp
 CAS_DC_PAGES = 6
 
 
-def geometry(*, pages: int = 1, rotation: int = 0, crop: str = "0 0 612 792") -> str:
-    """Return the page geometry that ``pdfinfo -box`` prints for letter pages.
+def geometry(
+    *,
+    pages: int = 1,
+    rotation: int = 0,
+    crop: str | None = None,
+    size: tuple[float, float] = (612, 792),
+) -> str:
+    """Return the page geometry that ``pdfinfo -box`` prints, by default for letter pages.
 
     Args:
         pages: The number of pages.
         rotation: The rotation of every page.
         crop: The crop box of every page.
+        size: The reported page size and the dimensions of the media box, in points.
 
     Returns:
         The text, four lines per page.
     """
+    width, height = size
+    media = f"0 0 {width:g} {height:g}"
     return "".join(
-        f"Page {page} size: 612 x 792 pts\nPage {page} rot: {rotation}\n"
-        f"Page {page} MediaBox: 0 0 612 792\nPage {page} CropBox: {crop}\n"
+        f"Page {page} size: {width:g} x {height:g} pts\nPage {page} rot: {rotation}\n"
+        f"Page {page} MediaBox: {media}\nPage {page} CropBox: {media if crop is None else crop}\n"
         for page in range(1, pages + 1)
     )
 
@@ -521,6 +531,17 @@ class ArtworkRunner(PdfToolRunner):
     }
 
 
+COMPARISON_PAGE_SIZE_PT = (20, 30)
+
+
+def comparison_ppm(size: tuple[int, int], *, changed: bool = False) -> bytes:
+    """Return a white comparison page, with one black pixel when ``changed`` is set."""
+    width, height = size
+    first_pixel = b"\0\0\0" if changed else b"\xff\xff\xff"
+    header = f"P6\n{width} {height}\n255\n".encode()
+    return header + first_pixel + b"\xff" * (3 * (width * height - 1))
+
+
 class FakePdfRunner(FakeCommandRunner):
     """Poppler output for two PDFs, the second of which (containing "right") may differ.
 
@@ -532,6 +553,8 @@ class FakePdfRunner(FakeCommandRunner):
         pages_right: The page count of the second PDF.
         missing: A tool that raises ``PreparationError``, as in :class:`FakeCommandRunner`.
     """
+
+    page_size_pt: tuple[float, float] = COMPARISON_PAGE_SIZE_PT
 
     def __init__(
         self,
@@ -547,6 +570,10 @@ class FakePdfRunner(FakeCommandRunner):
         self.pages_right = pages_right
         self.missing = missing
 
+    def page_size(self, *, right: bool) -> tuple[float, float]:
+        """Return the width and height in points for either side."""
+        return self.page_size_pt
+
     def respond(self, call: ToolCall) -> Reply:
         """Return what a Poppler tool prints for the first or the second PDF.
 
@@ -559,17 +586,17 @@ class FakePdfRunner(FakeCommandRunner):
         if tool == "pdfinfo":
             output = f"Pages: {pages}\nEncrypted: no\nForm: none\nJavaScript: no\n"
             if "-box" in call.argv:
-                output += "".join(
-                    f"Page {page} size: 612 x 792 pts\n" for page in range(1, pages + 1)
-                )
+                output += geometry(pages=pages, size=self.page_size(right=right))
             return Reply(output)
         if tool == "pdftotext":
             return Reply(
                 (("Changed\n" if right and self.text_changed else "Text\n") + "\f") * pages
             )
         if tool == "pdftoppm":
-            pixel = b"\0\0\0" if right and self.raster_changed else b"\xff\xff\xff"
-            return Reply(files={call.argv[-1] + ".ppm": b"P6\n1 1\n255\n" + pixel})
+            dpi = int(call.argv[call.argv.index("-r") + 1])
+            size = measurement_raster_size(self.page_size(right=right), dpi)
+            data = comparison_ppm(size, changed=right and self.raster_changed)
+            return Reply(files={call.argv[-1] + ".ppm": data})
         if tool == "pdffonts":
             return Reply(
                 "name type encoding emb sub uni object ID\n---\n"
@@ -600,6 +627,8 @@ class ConfigurablePdfRunner(FakePdfRunner):
         outputs: Outputs by tool name; the key ``geometry`` stands for ``pdfinfo -box``.
     """
 
+    page_size_pt = (612, 792)
+
     def __init__(
         self, *, pages: int = 1, outputs: dict[str, str] | None = None, missing: str | None = None
     ) -> None:
@@ -629,9 +658,7 @@ class ConfigurablePdfRunner(FakePdfRunner):
         key = "geometry" if argv[0] == "pdfinfo" and "-box" in argv else argv[0]
         defaults = {
             "pdfinfo": f"Pages: {self.pages}\nEncrypted: no\nForm: none\nJavaScript: no\n",
-            "geometry": "".join(
-                f"Page {page} size: 612 x 792 pts\n" for page in range(1, self.pages + 1)
-            ),
+            "geometry": geometry(pages=self.pages, size=self.page_size_pt),
             "pdftotext": "Text\n\f" * self.pages,
         }
         output = self.outputs.get(key, defaults.get(key, result.stdout))

@@ -241,7 +241,7 @@ class Report:
             and all(finding.rule == REQUEST_ERROR_RULE for finding in self.findings)
         )
 
-    def redacted_copy(self) -> Report:
+    def redacted_copy(self) -> RedactedReport:
         """Sanitize every output field together, including settings and tool inventories.
 
         Artifact paths keep their location; every other local path is generalized.
@@ -271,7 +271,7 @@ class Report:
             for stage in result.stages
         ):
             return _withheld_report(self.command, "invalid_stage_record")
-        return result
+        return RedactedReport(result)
 
     def _with_control_data(self, values: dict[str, Any]) -> dict[str, Any]:
         """Restore the original enums and rule names in the redacted ``values``.
@@ -333,14 +333,14 @@ class Report:
         return redacted_json(redact_report(self))
 
 
-# A report whose output fields were redacted together; renderers are built on one so that
-# a report is sanitized once per run, however many formats are written.
+# A snapshot whose output fields were redacted together. Only pass it to the redacted
+# renderers unchanged; a report with new input must go through redaction again.
 RedactedReport = NewType("RedactedReport", Report)
 
 
 def redact_report(report: Report) -> RedactedReport:
     """Sanitize every output field once, before any of it is displayed or saved."""
-    return RedactedReport(report.redacted_copy())
+    return report.redacted_copy()
 
 
 def redacted_dict(public: RedactedReport) -> dict[str, object]:
@@ -374,7 +374,7 @@ def redacted_json(public: RedactedReport) -> str:
 _REDACTION_LIMIT_CAUSE = "redaction_limit"
 
 
-def _withheld_report(command: str, cause: str) -> Report:
+def _withheld_report(command: str, cause: str) -> RedactedReport:
     """Build a report without content, for output that cannot be sanitized safely.
 
     Args:
@@ -401,20 +401,22 @@ def _withheld_report(command: str, cause: str) -> Report:
             "Repeat the job; if this persists, report the cause shown together with the command "
             "you ran. A very short credential-like value in your settings can also trigger it."
         )
-    return Report(
-        command if command in REPORT_COMMANDS else "inspect",
-        outcome=Outcome.ERROR,
-        scope="report sanitization",
-        findings=[
-            Finding(
-                "report.redaction_limit",
-                message,
-                severity="error",
-                status="inconclusive",
-                suggestion=suggestion,
-                details={"cause": cause},
-            )
-        ],
+    return RedactedReport(
+        Report(
+            command if command in REPORT_COMMANDS else "inspect",
+            outcome=Outcome.ERROR,
+            scope=WITHHELD_SCOPE,
+            findings=[
+                Finding(
+                    "report.redaction_limit",
+                    message,
+                    severity="error",
+                    status="inconclusive",
+                    suggestion=suggestion,
+                    details={"cause": cause},
+                )
+            ],
+        )
     )
 
 

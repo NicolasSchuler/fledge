@@ -23,6 +23,24 @@ code 4; with `--json` they print an object with `schema_version` and `error` (th
 message) to stdout as well as the message to stderr. Missing optional fields do not
 make a preview fail.
 
+## Projects with several documents
+
+`submission-text` reads one main document. When the discovered settings list
+several documents in `workflow.documents`, it cannot choose one: without `--main`
+the fields are unresolved, and `--main` stops with an error, because `main` and
+`workflow.documents` cannot be combined. Skip the settings file and name the
+document instead:
+
+```sh
+fledge submission-text paper --isolated --main supplement.tex --field abstract
+```
+
+`--isolated` ignores every setting in `fledge.toml`, including raised import
+limits such as `max_import_bytes`. To keep those, pass `--config` with a settings
+file that sets them but not `workflow.documents`.
+
+## How the text is converted
+
 The converter retains the text inside common formatting commands, decodes
 escaped characters and common accents, preserves Unicode, converts TeX dashes
 and double quotes, and joins source line breaks. Comment continuation follows

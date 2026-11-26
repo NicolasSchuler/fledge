@@ -169,6 +169,38 @@ class ManuscriptTests(ProjectTestCase):
                 self.assertIn("math", result.details["counting_method"])
                 self.assertEqual(result.code, "TEX105")
 
+    def test_abstract_word_limit_counts_text_in_a_literal_input(self) -> None:
+        self.write("summary.tex", "word " * 150 + "last\n")
+        result = self.finding(
+            "\\documentclass{article}\n\\begin{document}\n\\begin{abstract}\n"
+            "\\input{summary}\n\\end{abstract}\n\\end{document}\n",
+            ManuscriptOptions(abstract_max_words=150),
+            "manuscript.abstract_words",
+        )
+        self.assertEqual(result.code, "TEX105")
+        self.assertEqual(result.status, "failed", result.details)
+        self.assertEqual(result.details["word_count_range"], [151, 151])
+
+    def test_abstract_inputs_in_ambiguous_execution_contexts_are_inconclusive(self) -> None:
+        self.write("summary.tex", "word " * 151 + "\n")
+        for abstract in (
+            r"\abstract{\input{summary}}",
+            r"\begin{abstract}\iftrue\input{summary}\fi\end{abstract}",
+        ):
+            with self.subTest(abstract=abstract):
+                result = self.finding(
+                    r"\documentclass{article}" + abstract,
+                    ManuscriptOptions(abstract_max_words=150),
+                    "manuscript.abstract_words",
+                )
+                self.assertEqual(result.status, "inconclusive", result.details)
+                self.assertTrue(result.incomplete)
+                self.assertIsNone(result.details["word_count_range"])
+                self.assertIn(
+                    "abstract input could not be expanded unambiguously",
+                    result.details["abstracts"][0]["uncertainty"],
+                )
+
     def test_keyword_limits_count_phrases_and_common_environments(self) -> None:
         for body in (
             r"\keywords{machine learning, testing; verification}",

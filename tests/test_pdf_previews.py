@@ -18,40 +18,56 @@ from pathlib import Path
 from latexprep.command_runner import CommandResult
 from latexprep.errors import PreparationError
 from latexprep.pdf_comparison import compare_pdfs
+from latexprep.pdf_geometry import COMPARISON_DPI, measurement_raster_size
 from latexprep.pdf_previews import PdfPreviewStore, PreviewPage, PreviewSide
+from latexprep.png_support import encode_gray_png
 from latexprep.resource_budget import ResourceBudget
 from latexprep.workflow_options import ComparisonOptions
 from tests.fakes import ToolCall
-from tests.pdf_fakes import FakePdfRunner
+from tests.pdf_fakes import COMPARISON_PAGE_SIZE_PT, FakePdfRunner, geometry
 from tests.support import PNG
+
+
+def page_png(size: tuple[int, int]) -> bytes:
+    """Return a white PNG of the given width and height in pixels."""
+    width, height = size
+    return encode_gray_png(width, height, b"\xff" * (width * height))
+
+
+PAGE_PIXELS = measurement_raster_size(COMPARISON_PAGE_SIZE_PT, COMPARISON_DPI)
+PAGE_PNG = page_png(PAGE_PIXELS)
 
 
 class PreviewRunner(FakePdfRunner):
     """Poppler output for two PDFs that also renders PNG previews with ``pdftoppm -png``.
 
     The PDF that contains "right" has ``pages_right`` pages and the other ``pages_left``.
-    A PNG render records the call, writes ``png`` as ``page.png`` and awaits ``png_hook``.
+    A PNG render writes a page-sized PNG (or ``png`` when supplied) and awaits ``png_hook``.
 
     Args:
         **kwargs: The keyword arguments of :class:`FakePdfRunner`.
 
     Attributes:
         pages_left: The page count of the PDF that does not contain "right".
-        png: The bytes every PNG render writes.
+        png: The PNG bytes to override the page-sized render, or ``None``.
         png_error: Whether a PNG render raises :class:`PreparationError` after writing.
-        resize: Whether the pages of the PDF that contains "right" are 790 instead of 792
-            points high.
+        resize: Whether the CropBox of the PDF that contains "right" is two points shorter.
         png_hook: An async function without arguments that each PNG render awaits, or
             ``None``.
     """
 
-    def __init__(self, *, pages_left=1, png=PNG, png_error=False, resize=False, **kwargs):
+    def __init__(self, *, pages_left=1, png=None, png_error=False, resize=False, **kwargs):
         super().__init__(**kwargs)
         self.pages_left = pages_left
         self.png = png
         self.png_error = png_error
         self.resize = resize
         self.png_hook = None
+
+    def page_size(self, *, right: bool) -> tuple[float, float]:
+        """Return the CropBox dimensions, with a shorter right page when resized."""
+        width, height = super().page_size(right=right)
+        return (width, height - 2) if right and self.resize else (width, height)
 
     async def run(
         self, argv, cwd, workspace, *, readonly_inputs=(), memory_mb=None
@@ -69,7 +85,7 @@ class PreviewRunner(FakePdfRunner):
         if argv[0] == "pdftoppm" and "-png" in argv:
             self.require_frozen(readonly_inputs)
             self.calls.append(ToolCall(list(argv), workspace, readonly_inputs))
-            (workspace / "page.png").write_bytes(self.png)
+            (workspace / "page.png").write_bytes(self.png_bytes(argv, readonly_inputs))
             if self.png_hook:
                 await self.png_hook()
             if self.png_error or self.missing == "pdftoppm":
@@ -89,15 +105,20 @@ class PreviewRunner(FakePdfRunner):
         if argv[0] == "pdfinfo":
             output = f"Pages: {pages}\n"
             if "-box" in argv:
-                height = 790 if right and self.resize else 792
-                output += "".join(
-                    f"Page {page} size: 612 x {height} pts\n" for page in range(1, pages + 1)
-                )
+                output += geometry(pages=pages, size=self.page_size(right=right))
             result = replace(result, stdout=output)
         elif argv[0] == "pdftotext":
             text = "Changed" if right and self.text_changed else "Text"
             result = replace(result, stdout=f"{text}\n\f" * pages)
         return result
+
+    def png_bytes(self, argv: list[str], readonly_inputs: tuple[Path, ...]) -> bytes:
+        """Return the override PNG or a page-sized PNG at the requested resolution."""
+        if self.png is not None:
+            return self.png
+        right = any(b"right" in path.read_bytes() for path in readonly_inputs)
+        dpi = int(argv[argv.index("-r") + 1])
+        return page_png(measurement_raster_size(self.page_size(right=right), dpi))
 
 
 class PreviewDescriptorTests(unittest.TestCase):
@@ -210,8 +231,8 @@ class PdfPreviewTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first_png, 6)
         for page in pages:
             for side in ("left", "right"):
-                self.assertEqual(store.images[page[side]["image_id"]], PNG)
-                self.assertEqual(page[side]["pixels"], [1, 1])
+                self.assertEqual(store.images[page[side]["image_id"]], PAGE_PNG)
+                self.assertEqual(page[side]["pixels"], list(PAGE_PIXELS))
         self.assertFalse(list((self.root / "compare").glob("preview-*")))
         self.assertFalse(list((self.root / "compare").rglob("*.ppm")))
         shutil.rmtree(self.root / "compare")
@@ -228,8 +249,8 @@ class PdfPreviewTests(unittest.IsolatedAsyncioTestCase):
         page = store.summary()["comparisons"][0]["pages"][0]
         self.assertTrue(page["text_only"])
         self.assertFalse(page["rendering_changed"])
-        self.assertEqual(store.images[page["left"]["image_id"]], PNG)
-        self.assertEqual(store.images[page["right"]["image_id"]], PNG)
+        self.assertEqual(store.images[page["left"]["image_id"]], PAGE_PNG)
+        self.assertEqual(store.images[page["right"]["image_id"]], PAGE_PNG)
 
     async def test_page_count_difference_marks_absent_side_and_captures_present_page(self):
         store = PdfPreviewStore()
@@ -251,8 +272,10 @@ class PdfPreviewTests(unittest.IsolatedAsyncioTestCase):
         await self.compare(PreviewRunner(resize=True), store)
         page = store.summary()["comparisons"][0]["pages"][0]
         self.assertTrue(page["page_dimensions_changed"])
-        self.assertEqual(page["left"]["dimensions_pt"], [612, 792])
-        self.assertEqual(page["right"]["dimensions_pt"], [612, 790])
+        width, height = COMPARISON_PAGE_SIZE_PT
+        self.assertEqual(page["left"]["dimensions_pt"], [width, height])
+        self.assertEqual(page["right"]["dimensions_pt"], [width, height - 2])
+        self.assertEqual(page["right"]["pixels"], [PAGE_PIXELS[0], PAGE_PIXELS[1] - 4])
 
     async def test_default_path_and_unchanged_comparison_do_not_capture(self):
         for index, store in enumerate((None, PdfPreviewStore())):
@@ -298,6 +321,22 @@ class PdfPreviewTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second_store.summary()["unavailable_page_pairs"], 1)
         self.assertNotIn(str(self.root), json.dumps(second_store.summary()))
 
+    async def test_mis_sized_pngs_are_unavailable_without_changing_findings(self) -> None:
+        baseline = await self.compare(PreviewRunner(text_changed=True), name="baseline")
+        width, height = PAGE_PIXELS
+        for name, image in (("undersized", PNG), ("swapped", page_png((height, width)))):
+            with self.subTest(name=name):
+                store = PdfPreviewStore()
+                findings = await self.compare(
+                    PreviewRunner(text_changed=True, png=image), store, name
+                )
+                self.assertEqual(findings, baseline)
+                page = store.summary()["comparisons"][0]["pages"][0]
+                self.assertEqual(page["status"], "unavailable")
+                self.assertEqual(page["left"]["status"], "unavailable")
+                self.assertEqual(page["right"]["status"], "unavailable")
+                self.assertFalse(store.images)
+
     async def test_unavailable_preview_does_not_replace_a_passing_tolerant_verdict(self):
         store = PdfPreviewStore()
         runner = PreviewRunner(raster_changed=True, png_error=True)
@@ -316,12 +355,12 @@ class PdfPreviewTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(store.images)
 
     async def test_byte_limit_retains_one_side_and_omits_remaining_pages(self):
-        store = PdfPreviewStore(max_total_bytes=len(PNG))
+        store = PdfPreviewStore(max_total_bytes=len(PAGE_PNG))
         runner = PreviewRunner(text_changed=True, pages_left=2, pages_right=2)
         findings = await self.compare(runner, store)
         self.assertEqual(next(f.status for f in findings if f.rule == "compare.text"), "failed")
         summary = store.summary()
-        self.assertEqual(summary["image_bytes"], len(PNG))
+        self.assertEqual(summary["image_bytes"], len(PAGE_PNG))
         self.assertEqual(summary["partial_page_pairs"], 1)
         self.assertEqual(summary["omitted_page_pairs"], 1)
         self.assertEqual(len(store.images), 1)

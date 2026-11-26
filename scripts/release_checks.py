@@ -9,6 +9,11 @@
     another directory, so a file missing from the wheel cannot be hidden by the
     source tree: ``--version``, ``--help`` and an offline inspection of the example
     in ``docs/examples.md``, which needs no TeX or PDF tools and must pass.
+``sdist DIST_DIRECTORY``
+    Extract the one built source archive, install it into a fresh virtual environment
+    with pytest, and run the documentation and packaging tests from the extracted
+    tree, so a file those tests read but the archive lacks fails here. Pip needs
+    network access to fetch the dependencies.
 ``installed VERSION``
     Used by ``wheel`` inside the fresh environment: the installed distribution, its
     commands and its shipped presets match the expected version and the source tree.
@@ -21,6 +26,7 @@ import ast
 import json
 import subprocess
 import sys
+import tarfile
 import tempfile
 import tomllib
 from collections.abc import Sequence
@@ -63,6 +69,9 @@ DEMO_INSPECT_OPTIONS = ("--main", "main.tex", "--isolated", "--offline", "--json
 DEMO_TIMEOUT_SECONDS = 300
 # How many trailing lines of the inspection's stdout and stderr a failure shows.
 OUTPUT_TAIL_LINES = 20
+# The tests that run from the extracted source archive; they read files outside the package.
+SDIST_TESTS = ("tests/test_docs.py", "tests/test_packaging.py")
+SDIST_TEST_REQUIREMENT = "pytest>=9,<10"
 
 
 def declared_version(root: Path = ROOT) -> str:
@@ -161,6 +170,44 @@ def check_wheel(dist: Path) -> int:
         script = Path(__file__).resolve()
         installed = [str(python), "-I", str(script), "installed", version]
         return subprocess.run(installed, cwd=temporary, check=False).returncode
+
+
+def check_sdist(dist: Path) -> int:
+    archives = sorted(dist.glob("*.tar.gz"))
+    if len(archives) != 1:
+        print(f"::error::Expected exactly one source archive in {dist}, found {len(archives)}")
+        return 1
+    with tempfile.TemporaryDirectory(prefix="sdist-tests-") as temporary:
+        extracted = Path(temporary) / "source"
+        # The "data" filter refuses members that would land outside ``extracted``.
+        with tarfile.open(archives[0]) as archive:
+            archive.extractall(extracted, filter="data")
+        roots = [path for path in extracted.iterdir() if path.is_dir()]
+        if len(roots) != 1:
+            print(
+                f"::error::{archives[0].name} should hold one top-level directory, "
+                f"found {len(roots)}"
+            )
+            return 1
+        source = roots[0]
+        environment = Path(temporary) / "venv"
+        subprocess.run([sys.executable, "-m", "venv", str(environment)], check=True)
+        python = str(environment / "bin" / "python")
+        subprocess.run(
+            [
+                python,
+                "-m",
+                "pip",
+                "install",
+                "--disable-pip-version-check",
+                str(source),
+                SDIST_TEST_REQUIREMENT,
+            ],
+            check=True,
+        )
+        # Run inside the extracted tree, so the tests read its files and not the checkout's.
+        tests = [python, "-m", "pytest", *SDIST_TESTS, "-q", "-p", "no:cacheprovider"]
+        return subprocess.run(tests, cwd=source, check=False).returncode
 
 
 def inspect_offline_demo(fledge: Sequence[str], directory: Path) -> int:
@@ -284,6 +331,8 @@ def main(arguments: list[str]) -> int:
     version.add_argument("--tag", default="", help="release tag such as v0.3.0; empty to skip")
     wheel = commands.add_parser("wheel", help="install and run the built wheel")
     wheel.add_argument("dist", type=Path, help="directory holding exactly one built wheel")
+    sdist = commands.add_parser("sdist", help="run the docs and packaging tests from the sdist")
+    sdist.add_argument("dist", type=Path, help="directory holding exactly one source archive")
     installed = commands.add_parser("installed", help="check the installed distribution")
     installed.add_argument("version")
     parsed = parser.parse_args(arguments)
@@ -291,6 +340,8 @@ def main(arguments: list[str]) -> int:
         return check_version(parsed.tag)
     if parsed.command == "wheel":
         return check_wheel(parsed.dist)
+    if parsed.command == "sdist":
+        return check_sdist(parsed.dist)
     return check_installed(parsed.version)
 
 

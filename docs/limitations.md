@@ -14,16 +14,23 @@ direct. No Fledge result guarantees that a venue will accept a submission.
   namespaces. Fledge's live integration tests run weekly in CI under Bubblewrap
   on a GitHub-hosted Ubuntu 24.04 runner, with TeX Live from Ubuntu's packages.
   Other distributions and TeX installations are not tested.
-- **Windows** has no build sandbox, so `check` and `prepare` cannot build there.
-  `inspect` and `bib check` need only Python. To build on Windows, use WSL 2 with
-  the Linux instructions in [installation](installation.md#windows); that route
-  has not been tested live.
+- **Native Windows is not supported.** Fledge relies on file locking that only
+  macOS and Linux provide, so no command starts there, and Windows has no build
+  sandbox either. Use WSL 2 with the Linux instructions in
+  [installation](installation.md#windows); that route has not been tested live.
+- **Some commands need no TeX.** On macOS and Linux, `inspect`, `bib check`,
+  `submission-text`, `init`, `rules` and `rule` need only the Python package; see
+  [tools](installation.md#tools).
 - **No unsandboxed fallback exists.** If the sandbox cannot start, for example
   inside another sandbox or under a restrictive host policy, builds cannot run
   and the run ends with exit code 4.
-- **Optional `qpdf` and MuPDF checks** are tested against recorded tool output,
-  not against the live tools. If either tool is missing, its checks are
-  reported as incomplete.
+- **Optional `qpdf` and MuPDF checks are mostly tested against recorded tool
+  output.** The weekly live tests on macOS and Linux install both tools and run
+  four of their checks against them: the catalog language (`PDF209`), forbidden
+  annotations (`PDF210`), stroke width (`PDF213`) and color spaces (`PDF214`).
+  The other checks that read `qpdf` or MuPDF output, such as the tagged-structure
+  and artwork checks, are not tested against the live tools. If either tool is
+  missing, its checks are reported as incomplete.
 - **The chktex lint (`CHK001`) is only lightly tested on Linux.** It has run live
   under the macOS sandbox; its Bubblewrap configuration on Linux has not yet been
   confirmed in a live run. See [lint with chktex](chktex.md).
@@ -46,8 +53,10 @@ direct. No Fledge result guarantees that a venue will accept a submission.
 - **Glossaries, lists of acronyms and nomenclatures are built with makeindex,**
   using the style file that the `glossaries` package records and `nomencl`'s style.
   Glossaries that need `xindy` or `bib2gls`, and glossary types other than the main
-  glossary and the acronyms, are not built. For a glossary written for `xindy`,
-  `TEX012` says so; run makeglossaries locally and ship the `.gls` file.
+  glossary and the acronyms, are not built. For `xindy`, run makeglossaries locally and
+  supply the resulting `.gls` or `.acr` beside the main file. The build reads the supplied
+  list as-is, and preparation ships it as an input. If the document wrote entries but
+  the list is missing or empty, `TEX012` reports that the PDF lacks the list.
 - **The memory of a PDF measurement follows the size of the PDF, not its images.**
   `pdfimages -list` opens every image, and a JPEG 2000 image takes far more memory
   to open than its compressed size suggests. A small PDF with a very large image of

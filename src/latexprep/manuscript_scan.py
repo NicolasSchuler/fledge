@@ -15,6 +15,7 @@ from __future__ import annotations
 import re
 from collections import Counter
 from dataclasses import dataclass, field, replace
+from functools import cached_property
 from typing import Literal
 
 from .expanded_document import (
@@ -23,6 +24,7 @@ from .expanded_document import (
     DocumentPart,
     ExpandedDocument,
     commands_before_end,
+    environment_regions,
     finding_reason,
     package_code_sources,
 )
@@ -43,7 +45,13 @@ from .source_graph import INCOMPLETE_GRAPH_RULES
 from .source_loading import ParsedSource
 from .tex_commands import MATH_MARKER, TYPESET_ARGUMENT_COMMANDS
 from .tex_lexer import CONTROL_SEQUENCE, Command
-from .tex_spans import conditional_spans, definition_spans, in_conditional, in_half_open_span
+from .tex_spans import (
+    conditional_spans,
+    definition_spans,
+    in_conditional,
+    in_half_open_span,
+    opens_conditional,
+)
 from .uncertainty_reasons import context_reasons
 
 COUNT_METHOD = (
@@ -82,6 +90,7 @@ _IMMEDIATE_BRANCHES = frozenset(
 )
 
 _BlockKind = Literal["abstract", "keywords"]
+_ABSTRACT_INPUTS = CONTENT_INPUT_COMMANDS | {"subfile", "subfileinclude"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -222,12 +231,14 @@ class Block:
         line: The line where the declaration begins.
         value: The raw text; empty when the body is missing or ambiguous.
         uncertain: Why the declaration is unclear.
+        delimiters: Original offsets of the opening and closing environment commands, if paired.
     """
 
     path: str
     line: int
     value: str
     uncertain: tuple[str, ...] = ()
+    delimiters: tuple[int, int] | None = None
 
 
 class _BlockReader:
@@ -318,7 +329,9 @@ class _BlockReader:
             if opening.start in self.nested
             else self.source.masked[opening.arguments[0].end + 1 : command.start]
         )
-        self.result.append(Block(self.name, opening.line, value, self._reasons(opening)))
+        delimiters = (opening.start, command.start)
+        uncertainty = self._reasons(opening)
+        self.result.append(Block(self.name, opening.line, value, uncertainty, delimiters))
 
 
 def graph_reasons(
@@ -406,6 +419,41 @@ class ManuscriptScan:
     _definitions: tuple[list[tuple[int, int]], DeferredBodies] | None = field(
         default=None, init=False, repr=False
     )
+
+    def count_abstracts(self) -> list[AbstractCount]:
+        """Count each abstract, using bounded literal expansion when an input supplies its text."""
+        return [abstract_count(self._expand_abstract(block)) for block in self.abstracts]
+
+    def _expand_abstract(self, block: Block) -> Block:
+        """Replace a local body containing inputs, or record why no reliable count is possible."""
+        if not _contains_abstract_input(block.value):
+            return block
+        if block.delimiters is not None and not block.uncertain:
+            span = self._expanded_abstract_ranges.get((block.path, *block.delimiters))
+            if span is not None:
+                body = self.document.text[span[0] : span[1]]
+                if not _contains_abstract_input(body):
+                    return replace(block, value=body)
+        reason = "abstract input could not be expanded unambiguously"
+        return replace(block, uncertain=(*block.uncertain, reason))
+
+    @cached_property
+    def _expanded_abstract_ranges(self) -> dict[tuple[str, int, int], tuple[int, int]]:
+        """Index clear expanded bodies by the original offsets of their local delimiters."""
+        document = self.document
+        if document.graph_uncertainty:
+            return {}
+        regions, _ = environment_regions(document, {"abstract"})
+        ranges = {}
+        for region in regions:
+            if region.uncertainty or any(opens_conditional(item) for item in region.commands):
+                continue
+            opening = document.source_offset(region.command.start)
+            closing = document.source_offset(region.end)
+            if opening is not None and closing is not None and opening[0] == closing[0]:
+                start = region.command.arguments[0].end + 1
+                ranges[(*opening, closing[1])] = (start, region.end)
+        return ranges
 
     def read(self, name: str, source: ParsedSource, *, content: bool) -> None:
         """Collect one source; only content sources supply abstracts, keywords and headings.
@@ -616,6 +664,11 @@ def _runs_here(command: Command, definitions: list[tuple[int, int]]) -> bool:
             return False
         group = group.parent
     return True
+
+
+def _contains_abstract_input(value: str) -> bool:
+    """Return whether an input command may contribute text to this masked abstract body."""
+    return any(match[1] in _ABSTRACT_INPUTS for match in CONTROL_SEQUENCE.finditer(value))
 
 
 def abstract_count(block: Block) -> AbstractCount:

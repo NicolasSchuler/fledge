@@ -27,12 +27,13 @@ an existing Homebrew installation; see https://brew.sh if Homebrew is missing.
                    Default: ~/.local/share/fledge
   --bin-dir DIR    Launcher directory. Default: ~/.local/bin
   --uninstall      Remove the installation directory and launcher that this
-                   script created, using the same --prefix and --bin-dir. Only
-                   a launcher that runs that directory's environment qualifies;
-                   a directory holding this script's marker file (.fledge-installer)
-                   is removed even if the install failed before the launcher
-                   was written, and a launcher that is not Fledge's is left alone.
-                   Homebrew and TeX packages are left installed.
+                   script created, using the same --prefix and --bin-dir. The
+                   directory is removed only if it holds this script's marker
+                   file (.fledge-installer), also when the install failed
+                   before the launcher was written. The launcher is removed
+                   only if it runs that directory's environment; a launcher
+                   that is not Fledge's is left alone. Homebrew and TeX
+                   packages are left installed.
   --help           Show this help.
 
 To upgrade, run --uninstall, then run the installer again from the newer source.
@@ -42,9 +43,10 @@ and system installation requiring administrator approval. Homebrew and MacTeX
 manage their own system files; this script never edits shell startup files.
 Existing installation directories or launchers are never overwritten.
 The launcher saves only the directories that supplied the selected TeX, Poppler
-and optional tools, in the order they were searched, followed by the fallback
-directories and the system directories. The rest of this terminal's PATH,
-such as a virtual environment or project directory, is not saved.
+and optional tools and an existing chktex, in the order they were searched,
+followed by the fallback directories and the system directories. The rest of
+this terminal's PATH, such as a virtual environment or project directory, is
+not saved.
 Linux and Windows are not supported by this installer. It does not validate
 a document build.
 EOF
@@ -87,7 +89,7 @@ find_tool() {
 
 find_python() {
     local name candidate
-    for name in python3 python3.14 python3.13 python3.12 python3.11; do
+    for name in python3 python3.15 python3.14 python3.13 python3.12 python3.11; do
         candidate=$(find_tool "$name" || true)
         if [[ -n "$candidate" ]] && "$candidate" -c \
             'import sys, venv, ensurepip; sys.exit(sys.version_info < (3, 11))' \
@@ -183,22 +185,53 @@ prefix_has_marker() {
     [[ -d "$1" && ! -L "$1" && -f "$1/$INSTALL_MARKER" && ! -L "$1/$INSTALL_MARKER" ]]
 }
 
+# Whether directory $1 is, or contains, the home directory. Physical paths are
+# compared, so neither "..", "." nor a symbolic link among the parents hides it.
+contains_home() {
+    local directory home
+    directory=$(cd -P -- "$1" 2>/dev/null && pwd -P) || directory="$1"
+    home=$(cd -P -- "$HOME" 2>/dev/null && pwd -P) || home="$HOME"
+    [[ "$directory" = / ]] && return 0
+    case "$home/" in
+        "$directory"/*) return 0 ;;
+    esac
+    return 1
+}
+
+# Remove a marked installation directory, deleting the marker last: if removal
+# stops partway, the marker still proves ownership and --uninstall can be repeated.
+remove_installation_directory() {
+    local prefix="$1" entry
+    for entry in "$prefix"/* "$prefix"/.[!.]* "$prefix"/..?*; do
+        if [[ "$entry" != "$prefix/$INSTALL_MARKER" ]] && [[ -e "$entry" || -L "$entry" ]]; then
+            rm -rf -- "$entry"
+        fi
+    done
+    rm -f -- "$prefix/$INSTALL_MARKER"
+    rmdir -- "$prefix"
+}
+
 uninstall_fledge() {
     local prefix="$1" launcher="$2" dry_run="$3" accept="$4"
-    case "$HOME/" in
-        "$prefix"/*) fail "Refusing to remove $prefix: it is or contains your home directory." ;;
-    esac
     [[ ! -L "$prefix" ]] ||
         fail "Installation directory is a symbolic link: $prefix. Nothing was removed; delete the link yourself if it is unwanted."
     [[ ! -e "$prefix" || -d "$prefix" ]] ||
         fail "Installation path is not a directory: $prefix. Nothing was removed."
-    # Either proof of ownership is enough: the launcher runs this prefix's environment,
-    # or the installer's marker is in the prefix. A failed install may have no launcher.
+    if contains_home "$prefix"; then
+        fail "Refusing to remove $prefix: it is or contains your home directory."
+    fi
+    # Only the installer's marker authorizes removing an existing directory. A launcher
+    # that runs this prefix's environment proves ownership of the launcher alone: the
+    # directory may have been deleted and the path reused. A failed install may have
+    # no launcher.
     local owns_launcher=false owns_prefix=false
     if launcher_belongs_to "$launcher" "$prefix"; then owns_launcher=true; fi
     if prefix_has_marker "$prefix"; then owns_prefix=true; fi
     if ! "$owns_launcher" && ! "$owns_prefix"; then
         fail "Launcher $launcher is missing or does not run $prefix/venv/bin/fledge, and $prefix has no $INSTALL_MARKER file. Nothing was removed; pass the --prefix and --bin-dir used for installation."
+    fi
+    if [[ -d "$prefix" ]] && ! "$owns_prefix"; then
+        fail "$prefix has no $INSTALL_MARKER file, although $launcher runs its environment: the directory may have been reused, or installed by Fledge 0.2 or earlier. Nothing was removed; check its contents, then delete it and the launcher yourself."
     fi
     printf 'Uninstall plan for Fledge:\n'
     if "$owns_launcher"; then
@@ -216,15 +249,18 @@ uninstall_fledge() {
     printf '  Homebrew, TeX and Poppler packages, shell startup files and projects are not touched.\n'
     if "$dry_run"; then printf '\nDry run complete. Nothing removed.\n'; return; fi
     if ! "$accept"; then confirm_plan || return 0; fi
-    # Recheck after confirmation. Remove the environment first: while it remains,
-    # the launcher still proves ownership, so a partial removal can be repeated.
+    # Recheck after confirmation. Remove the environment first: while its marker
+    # remains, a partial removal can be repeated.
     if "$owns_launcher" && ! launcher_belongs_to "$launcher" "$prefix"; then
         fail "The launcher changed after the plan was shown. Nothing was removed."
     fi
     if "$owns_prefix" && ! prefix_has_marker "$prefix"; then
         fail "The installation directory changed after the plan was shown. Nothing was removed."
     fi
-    rm -rf -- "$prefix"
+    if ! "$owns_prefix" && [[ -e "$prefix" || -L "$prefix" ]]; then
+        fail "The installation directory appeared after the plan was shown. Nothing was removed."
+    fi
+    if "$owns_prefix"; then remove_installation_directory "$prefix"; fi
     if "$owns_launcher"; then rm -f -- "$launcher"; fi
     printf '\nFledge removed. To install it again, rerun this script without --uninstall.\n'
 }
@@ -378,13 +414,14 @@ main() {
         [[ -n "$found" ]] || fail "$tool is still unavailable after installation. Inspect Homebrew's output and rerun once it is on PATH."
         selected_tools+=("$found")
     done
-    if ! "$optional"; then
-        # Not required, but keep an existing tex-fmt, qpdf or mutool reachable.
-        for tool in "${optional_tools[@]}"; do
-            found=$(find_tool "$tool" || true)
-            if [[ -n "$found" ]]; then selected_tools+=("$found"); fi
-        done
-    fi
+    # Not required, but keep an existing chktex reachable, and without
+    # --with-optional also an existing tex-fmt, qpdf or mutool.
+    local reachable_tools=(chktex)
+    if ! "$optional"; then reachable_tools+=("${optional_tools[@]}"); fi
+    for tool in "${reachable_tools[@]}"; do
+        found=$(find_tool "$tool" || true)
+        if [[ -n "$found" ]]; then selected_tools+=("$found"); fi
+    done
     current_step='creating the private Python environment'
     mkdir -p -- "${prefix%/*}"
     mkdir -- "$prefix"

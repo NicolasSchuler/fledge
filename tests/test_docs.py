@@ -79,25 +79,73 @@ class DocumentationTests(unittest.TestCase):
             "docs/checks.md is out of date; run scripts/generate_check_docs.py",
         )
 
-    def test_check_catalogue_lists_every_code_once_with_its_fix(self) -> None:
-        import re
+    def test_check_catalogue_lists_every_code_once(self) -> None:
+        from latexprep.rules import RULES
+
+        catalogue = (ROOT / "docs" / "checks.md").read_text(encoding="utf-8")
+        rows = re.findall(r"^\| `([A-Z]{3}\d{3})` \|", catalogue, flags=re.MULTILINE)
+        self.assertCountEqual(rows, [rule.code for rule in RULES])
+
+    @unittest.skipUnless(
+        importlib.util.find_spec("myst_parser"), "needs MyST-Parser from the docs extra"
+    )
+    def test_check_catalogue_renders_rule_texts_exactly_as_written(self) -> None:
+        """Check that MyST shows each rule's plain text literally in the catalogue.
+
+        Rule texts hold LaTeX and paths, such as display-math brackets, ``<main>.bbl`` and
+        TeX quotes, which unescaped Markdown would turn into escapes, HTML tags or code.
+        """
+        from docutils import nodes
+        from docutils.core import publish_doctree
+        from myst_parser.parsers.docutils_ import Parser
 
         from latexprep.rules import RULES
 
-        generator = _generator()
-        catalogue = generator.DOCUMENT.read_text(encoding="utf-8")
-        rows = re.findall(r"^\| `([A-Z]{3}\d{3})` \|", catalogue, flags=re.MULTILINE)
-        self.assertCountEqual(rows, [rule.code for rule in RULES])
-        kinds = {generator.classify(rule)[0] for rule in RULES}
-        self.assertEqual(
-            kinds,
-            {generator.ALWAYS, generator.DEFAULT, generator.OPT_IN, generator.SUGGESTION},
+        doctree = publish_doctree(
+            (ROOT / "docs" / "checks.md").read_text(encoding="utf-8"),
+            parser=Parser(),
+            settings_overrides={"report_level": 5},
         )
+        self.assertEqual(list(doctree.findall(nodes.raw)), [], "raw HTML in the catalogue")
+        rows = {}
+        for row in doctree.findall(nodes.row):
+            cells = [entry.astext() for entry in row.findall(nodes.entry)]
+            rows[cells[0]] = cells
         for rule in RULES:
-            kind, setting = generator.classify(rule)
             with self.subTest(code=rule.code):
-                # Opt-in checks and suggestions name what switches them on.
-                self.assertEqual(kind in {generator.OPT_IN, generator.SUGGESTION}, bool(setting))
+                cells = rows[rule.code]
+                plain = [" ".join(text.split()) for text in (rule.title, rule.description)]
+                self.assertEqual(cells[1], f"{plain[0]}. {plain[1]}")
+                self.assertEqual(cells[-1], " ".join(rule.fix.split()))
+        self.assertIn(r"\[ ... \]", rows["STY102"][-1])
+        self.assertIn("Write ``word'' or use", rows["STY304"][-1])
+        self.assertIn(r"/Users/<name>/, /home/<name>/ or C:\Users\<name>\ ", rows["PRV104"][1])
+        self.assertIn("ships the <main>.bbl", rows["TEX009"][-1])
+
+    def test_check_catalogue_names_both_pdf207_settings_in_their_own_scope(self) -> None:
+        catalogue = (ROOT / "docs" / "checks.md").read_text(encoding="utf-8")
+        [row] = [line for line in catalogue.splitlines() if line.startswith("| `PDF207` |")]
+        self.assertIn(
+            " | `match_source_pdf_metadata` or `expected_metadata` in `pdf_checks`. ", row
+        )
+
+    def test_catalogue_distinguishes_tuning_fields_combinations_and_commands(self) -> None:
+        catalogue = (ROOT / "docs" / "checks.md").read_text(encoding="utf-8")
+        for code, expected in (
+            ("PDF205", " | `min_page_ink_ratio` in `pdf_checks` | "),
+            ("PDF215", " | `min_text_contrast` and `contrast_background_rgb` in `pdf_checks` | "),
+            (
+                "PDF310",
+                "`raster_regions` and `min_raster_region_coverage` in `rendered_pdf_artwork` or "
+                "`raster_regions` and `min_raster_region_coverage` in `included_figure_artwork`",
+            ),
+            ("FMT001", " | `fledge fmt`. No setting switches on this diagnostic."),
+        ):
+            with self.subTest(code=code):
+                [row] = [
+                    line for line in catalogue.splitlines() if line.startswith(f"| `{code}` |")
+                ]
+                self.assertIn(expected, row)
 
     def test_agent_skill_uses_existing_commands_and_options(self) -> None:
         import re

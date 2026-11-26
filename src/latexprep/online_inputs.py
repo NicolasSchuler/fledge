@@ -208,13 +208,11 @@ def _link_commands(text: str) -> list[Command]:
     return scan_commands(blank_regions(text, kept), comment_starts(regions))
 
 
-def _source_links(
-    inspection: SourceGraph, options: OnlineOptions, gaps: list[str]
-) -> list[Reference]:
+def _source_links(graph: SourceGraph, options: OnlineOptions, gaps: list[str]) -> list[Reference]:
     """Collect configured and literal source URLs, up to the link bound.
 
     Args:
-        inspection: The selected source graph, whose visited sources are scanned.
+        graph: The selected source graph, including the ranges reached by its walk.
         options: The online options, which list the configured links.
         gaps: Receives the reasons why link coverage is incomplete.
 
@@ -226,15 +224,24 @@ def _source_links(
         Reference(f"configured link {index}", None, None, "url", {"url": url})
         for index, url in enumerate(options.online_replication_urls, 1)
     ]
-    if inspection.main is None or inspection.uncertainties:
+    if graph.main is None or graph.uncertainties:
         gaps.append("Literal source-link coverage is incomplete in the selected source graph")
-    for name in sorted(inspection.visited):
+    gaps.extend(
+        rf"{name}:{line}: tokens after \endinput on the same line may still run; "
+        "that suffix was not checked for URLs"
+        for name, line in graph.buffered_endinputs
+    )
+    ranges = (
+        (name, start, end)
+        for name, spans in sorted(graph.active_ranges.items())
+        for start, end in spans
+    )
+    for name, start, end in ranges:
         cancellation_point()
-        source = inspection.sources.get(name)
-        if source is None:
-            continue
+        source = graph.sources[name]
+        line_offset = source.line_at(start) - 1
         try:
-            commands = _link_commands(source.text)
+            commands = _link_commands(source.text[start:end])
         except ParseLimitExceeded:
             gaps.append(f"{name}: URL command arguments are incomplete")
             continue
@@ -244,7 +251,8 @@ def _source_links(
                 if any(char in value for char in "{}\\") or command.depth:
                     gaps.append(f"{name}: an indirect or grouped URL command was not requested")
                     continue
-                links.append(Reference("source link", name, command.line, "url", {"url": value}))
+                line = command.line + line_offset
+                links.append(Reference("source link", name, line, "url", {"url": value}))
                 if len(links) >= MAX_REFERENCES:
                     gaps.append(f"Source-link scan exceeded its {MAX_REFERENCES}-link bound")
                     return links

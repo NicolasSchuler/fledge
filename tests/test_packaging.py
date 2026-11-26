@@ -6,6 +6,9 @@ import fnmatch
 import importlib.util
 import os
 import re
+import subprocess
+import sys
+import tarfile
 import tempfile
 import tomllib
 import unittest
@@ -92,6 +95,113 @@ class VersionTests(unittest.TestCase):
             self.assertTrue(any("literal version" in problem for problem in problems), problems)
 
 
+def _write_sdist(dist: Path, name: str, members: dict[str, str]) -> None:
+    """Write a gzipped tar archive into ``dist``.
+
+    Args:
+        dist: The folder that receives the archive.
+        name: The archive's file name.
+        members: The text of each member, by its path inside the archive.
+    """
+    dist.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory() as staging, tarfile.open(dist / name, "w:gz") as archive:
+        for member, text in members.items():
+            path = Path(staging) / member
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+            archive.add(path, arcname=member)
+
+
+class SourceArchiveCheckTests(unittest.TestCase):
+    """``release_checks.py sdist`` runs the docs and packaging tests from the extracted archive.
+
+    ``subprocess.run`` is replaced, so no environment is created and nothing is downloaded.
+    """
+
+    def run_check(self, dist: Path, tests_exit_code: int = 0) -> tuple[int, list[dict]]:
+        """Run the sdist check on ``dist`` with every child process faked.
+
+        Args:
+            dist: The folder holding the built distributions.
+            tests_exit_code: The exit code the faked pytest run returns.
+
+        Returns:
+            The check's exit code and, for each child, its command, working directory and
+            whether that directory held the extracted ``pyproject.toml`` at the time.
+        """
+        checks = _release_checks()
+        calls: list[dict] = []
+
+        def fake_run(command, cwd=None, **_options):
+            """Record ``command`` and pretend it ran."""
+            calls.append(
+                {
+                    "command": [str(part) for part in command],
+                    "cwd": cwd,
+                    "extracted": cwd is not None and (Path(cwd) / "pyproject.toml").is_file(),
+                }
+            )
+            exit_code = tests_exit_code if "pytest" in command[1:3] else 0
+            return subprocess.CompletedProcess(command, exit_code)
+
+        with patch.object(checks.subprocess, "run", side_effect=fake_run):
+            return checks.main(["sdist", str(dist)]), calls
+
+    def test_the_tests_run_from_the_extracted_archive_in_a_fresh_environment(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            dist = Path(directory) / "dist"
+            _write_sdist(
+                dist,
+                "fledge_latex-1.2.3.tar.gz",
+                {"fledge_latex-1.2.3/pyproject.toml": "[project]\n"},
+            )
+            (dist / "fledge_latex-1.2.3-py3-none-any.whl").write_text("")
+            exit_code, calls = self.run_check(dist)
+        self.assertEqual(exit_code, 0)
+        venv, install, tests = calls
+        self.assertEqual(venv["command"][1:3], ["-m", "venv"])
+        python = str(Path(venv["command"][3]) / "bin" / "python")
+        self.assertEqual(install["command"][:4], [python, "-m", "pip", "install"])
+        source = Path(install["command"][-2])
+        self.assertEqual(source.name, "fledge_latex-1.2.3")
+        self.assertEqual(install["command"][-1], "pytest>=9,<10")
+        test_files = ["tests/test_docs.py", "tests/test_packaging.py"]
+        self.assertEqual(
+            tests["command"],
+            [python, "-m", "pytest", *test_files, "-q", "-p", "no:cacheprovider"],
+        )
+        self.assertEqual(Path(tests["cwd"]), source)
+        self.assertTrue(tests["extracted"])
+
+    def test_a_failing_test_run_fails_the_check(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            dist = Path(directory) / "dist"
+            _write_sdist(dist, "project-1.0.tar.gz", {"project-1.0/pyproject.toml": ""})
+            exit_code, _calls = self.run_check(dist, tests_exit_code=1)
+        self.assertEqual(exit_code, 1)
+
+    def test_the_check_needs_exactly_one_archive_with_one_top_level_directory(self) -> None:
+        cases = {
+            "no archive": {},
+            "two archives": {
+                "a-1.0.tar.gz": {"a-1.0/pyproject.toml": ""},
+                "b-1.0.tar.gz": {"b-1.0/pyproject.toml": ""},
+            },
+            "two top-level directories": {
+                "a-1.0.tar.gz": {"a-1.0/pyproject.toml": "", "b-1.0/pyproject.toml": ""}
+            },
+        }
+        for case, archives in cases.items():
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                dist = Path(directory) / "dist"
+                dist.mkdir()
+                for name, members in archives.items():
+                    _write_sdist(dist, name, members)
+                exit_code, calls = self.run_check(dist)
+                self.assertEqual(exit_code, 1)
+                self.assertEqual(calls, [])
+
+
 class SourceArchiveTests(unittest.TestCase):
     """The source archive ships the scripts, golden files and changelog the tests read."""
 
@@ -135,15 +245,7 @@ class SourceArchiveTests(unittest.TestCase):
 
 @unittest.skipUnless(WORKFLOWS.is_dir(), "the workflow files are not part of the source archive")
 class WorkflowTests(unittest.TestCase):
-    """The CI workflows: pinned actions, Dependabot, and the files and variables of live jobs."""
-
-    def workflow(self, name: str) -> str:
-        """Read the workflow file ``name`` in ``.github/workflows``.
-
-        Returns:
-            The text of the file.
-        """
-        return (WORKFLOWS / name).read_text(encoding="utf-8")
+    """Action pins, Dependabot and the documented live opt-in variable."""
 
     def test_every_action_is_pinned_to_a_commit(self) -> None:
         references = [
@@ -160,32 +262,11 @@ class WorkflowTests(unittest.TestCase):
         configuration = (ROOT / ".github" / "dependabot.yml").read_text(encoding="utf-8")
         self.assertIn("package-ecosystem: github-actions", configuration)
 
-    def test_every_test_file_with_live_tests_runs_in_a_live_job(self) -> None:
-        """Check that every test file with live tests runs in a live job.
-
-        Hand-written file lists once left three live tests out of CI unnoticed.
-        """
-        live_jobs = self.workflow("tests.yml").split("\n  live-macos:", 1)[1]
-        live_files = sorted(
-            path.name
-            for path in (ROOT / "tests").glob("test_*.py")
-            if path != Path(__file__).resolve()
-            and "@live_test(" in path.read_text(encoding="utf-8")
-        )
-        self.assertGreater(len(live_files), 5)
-        for name in live_files:
-            with self.subTest(file=name):
-                self.assertIn(f"tests/{name}", live_jobs)
-
     def test_live_jobs_use_the_documented_environment_variable(self) -> None:
         workflows = "".join(path.read_text(encoding="utf-8") for path in WORKFLOWS.glob("*.yml"))
         self.assertIn('FLEDGE_RUN_INTEGRATION: "1"', workflows)
         for legacy in ("LATEX_PREP_RUN_INTEGRATION", "LATEXPREP_RUN_SANDBOX_TESTS"):
             self.assertNotIn(legacy, workflows)
-
-    def test_the_linux_live_job_runs_the_linux_isolation_test(self) -> None:
-        linux = self.workflow("tests.yml").split("\n  live-linux:", 1)[1]
-        self.assertIn("tests/test_runtime_backends.py", linux)
 
 
 class LiveTestMarkerTests(unittest.TestCase):
@@ -205,27 +286,31 @@ class LiveTestMarkerTests(unittest.TestCase):
         ]
         self.assertEqual(offenders, [], "Gate live tests with @live_test from tests/support.py.")
 
-    def test_the_decorator_skips_unless_enabled_and_applies_the_marker(self) -> None:
+    def test_the_decorator_applies_the_marker_and_gates_opt_in_and_platform(self) -> None:
         if importlib.util.find_spec("pytest") is None:
             self.skipTest("the live marker belongs to pytest")
         from tests.support import live_test
 
-        def declare() -> type[unittest.TestCase]:
-            @live_test("opt-in")
+        def declare(platform: str) -> type[unittest.TestCase]:
+            """Declare a live test for ``platform`` under the current environment."""
+
+            @live_test("opt-in", platform=platform)
             class Live(unittest.TestCase):
-                pass
+                """A stand-in for a platform-specific live test."""
 
             return Live
 
         disabled = {"FLEDGE_RUN_INTEGRATION": "0", "LATEX_PREP_RUN_INTEGRATION": "0"}
         with patch.dict(os.environ, disabled):
-            skipped = declare()
+            skipped = declare(sys.platform)
         with patch.dict(os.environ, {"FLEDGE_RUN_INTEGRATION": "1"}):
-            enabled = declare()
-        self.assertTrue(skipped.__unittest_skip__)
-        self.assertEqual(skipped.__unittest_skip_why__, "opt-in")
+            enabled = declare(sys.platform)
+            wrong_platform = declare("darwin" if sys.platform == "linux" else "linux")
+        for declared in (skipped, wrong_platform):
+            self.assertTrue(declared.__unittest_skip__)
+            self.assertEqual(declared.__unittest_skip_why__, "opt-in")
         self.assertFalse(getattr(enabled, "__unittest_skip__", False))
-        for declared in (skipped, enabled):
+        for declared in (skipped, wrong_platform, enabled):
             self.assertEqual([mark.name for mark in declared.pytestmark], ["live"])
 
 

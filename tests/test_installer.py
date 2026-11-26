@@ -819,6 +819,121 @@ class InstallerTests(unittest.TestCase):
         self.assertIn("already absent", result.stdout)
         self.assertFalse(self.launcher.exists())
 
+    def test_uninstall_keeps_an_unmarked_directory_that_reuses_a_stale_launchers_prefix(self):
+        # The installation was deleted by hand and its path reused; the launcher
+        # still runs that path's environment but does not authorize removing it.
+        self.install()
+        shutil.rmtree(self.prefix)
+        user_file = self.prefix / "venv/bin/fledge"
+        user_file.parent.mkdir(parents=True)
+        user_file.write_text("user data")
+        launcher_text = self.launcher.read_text()
+        for args in (("--dry-run",), ("--yes",)):
+            with self.subTest(args=args):
+                result = self.run_installer("--uninstall", *args)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("has no .fledge-installer file", result.stderr)
+                self.assertIn("Nothing was removed", result.stderr)
+                self.assertEqual(user_file.read_text(), "user data")
+                self.assertEqual(self.launcher.read_text(), launcher_text)
+
+    def test_uninstall_removes_a_marked_directory_without_a_launcher(self):
+        self.prefix.mkdir(parents=True)
+        (self.prefix / ".fledge-installer").write_text("marker")
+        (self.prefix / "venv/bin").mkdir(parents=True)
+        (self.prefix / ".hidden").write_text("partial")
+        result = self.run_installer("--uninstall", "--yes")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("No launcher at", result.stdout)
+        self.assertFalse(self.prefix.exists())
+        self.assertTrue(self.prefix.parent.is_dir())
+
+    @unittest.skipIf(os.geteuid() == 0, "root ignores directory permissions")
+    def test_interrupted_uninstall_keeps_the_marker_so_it_can_be_repeated(self):
+        self.install()
+        locked = self.prefix / "venv/locked"
+        locked.mkdir()
+        (locked / "file").write_text("cannot be removed yet")
+        locked.chmod(0o555)
+        self.addCleanup(lambda: locked.exists() and locked.chmod(0o755))
+        failed = self.run_installer("--uninstall", "--yes")
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertTrue((self.prefix / ".fledge-installer").is_file())
+        self.assertTrue(self.launcher.is_file())
+        locked.chmod(0o755)
+        result = self.run_installer("--uninstall", "--yes")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(self.prefix.exists() or self.launcher.exists())
+
+    def test_uninstall_compares_physical_paths_with_the_home_directory(self):
+        keep = self.home / "keep"
+        keep.write_text("keep")
+        (self.home / ".fledge-installer").write_text("marker")
+        (self.home / "sub").mkdir()
+        elsewhere = self.root / "elsewhere"
+        elsewhere.mkdir()
+        (elsewhere / "alias").symlink_to(self.home / "sub")
+        for prefix in (
+            f"{self.home}/sub/..",  # ".." leads back to the home directory
+            f"{self.home}/./",
+            f"{elsewhere}/alias/..",  # a symbolic link among the parents leads home
+            f"{self.home}/sub/../..",  # the parent of the home directory
+        ):
+            with self.subTest(prefix=prefix):
+                result = self.run_installer("--uninstall", "--yes", "--prefix", prefix)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("home directory", result.stderr)
+                self.assertEqual(keep.read_text(), "keep")
+                self.assertTrue((self.home / ".fledge-installer").is_file())
+
+    def test_uninstall_still_refuses_a_symbolic_link_as_the_prefix(self):
+        real_prefix = self.root / "real prefix"
+        real_prefix.mkdir()
+        (real_prefix / ".fledge-installer").write_text("marker")
+        link = self.root / "link"
+        link.symlink_to(real_prefix)
+        result = self.run_installer("--uninstall", "--yes", "--prefix", str(link))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("symbolic link", result.stderr)
+        self.assertTrue(link.is_symlink() and (real_prefix / ".fledge-installer").is_file())
+
+    def test_only_a_versioned_python_3_15_is_found_and_reused(self):
+        self.add_tools("python3.15", *TEX_TOOLS, *PDF_TOOLS)
+        result = self.run_installer("--yes")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"Reuse Python: {self.tools}/python3.15", result.stdout)
+        venv = next(command for command in self.commands() if command[1:3] == ["-m", "venv"])
+        self.assertEqual(venv[0], "python3.15")
+
+    def test_launcher_keeps_an_existing_chktex_reachable(self):
+        # chktex is never installed by this script, but a separately installed copy
+        # must stay reachable, with or without --with-optional.
+        self.complete_tools()
+        self.add_tools("tex-fmt", "qpdf", "mutool")
+        chktex_directory = self.root / "chktex bin"
+        chktex_directory.mkdir()
+        shutil.copy2(self.program, chktex_directory / "chktex")
+        path = f"{self.tools}:{chktex_directory}:/usr/bin:/bin"
+        for args in ((), ("--with-optional",)):
+            with self.subTest(args=args):
+                name = "optional" if args else "default"
+                shutil.copy2(INSTALLER, self.script)  # the helper rewrites this copy
+                result = self.run_with_real_discovery(
+                    path,
+                    (self.tools,),
+                    "--yes",
+                    "--prefix",
+                    f"prefix {name}",
+                    "--bin-dir",
+                    f"bin {name}",
+                    *args,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(
+                    self.launcher_path(self.root / f"bin {name}/fledge"),
+                    resolved_unique_directories(self.tools, chktex_directory, *SYSTEM_DIRECTORIES),
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

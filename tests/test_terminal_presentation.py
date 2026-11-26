@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import unittest
 from dataclasses import replace
 from io import StringIO
@@ -58,7 +59,13 @@ def render(
         markup=True,
     )
     options = RenderOptions(show_files=show_files, show_diff=show_diff)
-    print_report(report, console, options=options)
+    # Rich reads TERM and NO_COLOR when it draws, so a dumb or colourless host terminal
+    # would otherwise change the coloured rendering.
+    with patch.dict(os.environ):
+        if color:
+            os.environ["TERM"] = "xterm-256color"
+            os.environ.pop("NO_COLOR", None)
+        print_report(report, console, options=options)
     return output.getvalue()
 
 

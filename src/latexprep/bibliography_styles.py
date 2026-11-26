@@ -2,12 +2,13 @@
 
 A .bib file may use macros such as ``jan`` or ``jacm`` that no ``@string`` in it defines,
 because the bibliography style defines them. This module owns what is known about that:
-the month macros every style has, the journal macros of the standard styles, and the
-``MACRO`` definitions of a .bst file that ships in the project, and the ``@string``
-names of a .bib file that BibTeX reads from the TeX installation, such as IEEE's
-``IEEEabrv.bib``. A style or installation file that is named but unavailable is recorded
-as unread, so the caller can report an uncertainty instead of an error. It reads no
-project .bib file and builds no finding.
+the month macros every style has, the journal macros of the standard styles, the
+``MACRO`` definitions of a .bst file that ships in the project or that the TeX
+installation holds, such as ``ACM-Reference-Format.bst``, and the ``@string`` names of a
+.bib file that BibTeX reads from the installation, such as IEEE's ``IEEEabrv.bib``. A
+style or installation file that is named but unavailable is recorded as unread, so the
+caller can report an uncertainty instead of an error. It reads no project .bib file and
+builds no finding.
 """
 
 from __future__ import annotations
@@ -20,6 +21,8 @@ from .cancellation import cancellation_point
 from .citation_graph import StyleReference
 from .file_safety import read_regular_file
 from .limits import MIB
+from .source_file_commands import STANDARD_BIBTEX_STYLES
+from .source_resolution import installation_file_names, installed_input_path
 
 MONTH_MACROS = frozenset("jan feb mar apr may jun jul aug sep oct nov dec".split())
 # The standard styles, and the natbib and other styles derived from them, define these
@@ -28,9 +31,6 @@ MONTH_MACROS = frozenset("jan feb mar apr may jun jul aug sep oct nov dec".split
 _STANDARD_STYLE_MACROS = frozenset(
     "acmcs acta cacm ibmjrd ibmsj ieeese ieeetc ieeetcad ipl jacm jcss scp sicomp tocs "
     "tods tog toms toois toplas tcs".split()
-)
-_STANDARD_STYLES = frozenset(
-    "plain unsrt alpha abbrv ieeetr acm siam apalike plainnat unsrtnat abbrvnat".split()
 )
 _MAX_STYLE_BYTES = 2 * MIB
 _STYLE_MACRO = re.compile(r"^[ \t]*MACRO[ \t]*\{[ \t]*([^\s{}]+)[ \t]*\}", re.MULTILINE)
@@ -82,7 +82,10 @@ class StyleMacros:
 def style_macros(
     root: Path, styles: list[StyleReference] | None, installed: tuple[str, ...] = ()
 ) -> StyleMacros:
-    """Collect the macros of the named styles: project .bst files are read, standard ones known.
+    """Collect the macros of the named styles: .bst files are read, standard ones known.
+
+    A style is read from its project .bst file, known when it is standard, and otherwise
+    read from the TeX installation's .bst file when the installation holds it.
 
     Args:
         root: The project directory that the local style files are relative to.
@@ -108,18 +111,35 @@ def style_macros(
         return StyleMacros(frozenset(macros), tuple(unread), unknown=True)
     for style in styles:
         cancellation_point()
-        base = style.name.removesuffix(".bst").casefold()
-        if style.local_file is not None:
-            defined = _read_style(root / style.local_file)
-            if defined is None:
-                unread.append(style.name)
-            else:
-                macros |= defined
-        elif base in _STANDARD_STYLES:
-            macros |= _STANDARD_STYLE_MACROS
-        else:
+        defined = _named_style_macros(root, style)
+        if defined is None:
             unread.append(style.name)
+        else:
+            macros |= defined
     return StyleMacros(frozenset(macros), tuple(unread))
+
+
+def _named_style_macros(root: Path, style: StyleReference) -> frozenset[str] | None:
+    """Return the macros one named style defines, or ``None`` when they are not available.
+
+    Args:
+        root: The project directory that the local style file is relative to.
+        style: The style name and the project .bst file it resolved to, if any.
+
+    Returns:
+        The macros of the project .bst file, of a standard style, or of the TeX
+        installation's .bst file; ``None`` when the file cannot be read or the style is
+        neither standard nor held by the installation.
+    """
+    if style.local_file is not None:
+        return _read_style(root / style.local_file)
+    if style.name.removesuffix(".bst").casefold() in STANDARD_BIBTEX_STYLES:
+        return _STANDARD_STYLE_MACROS
+    for file_name in installation_file_names(style.name, "bibliographystyle"):
+        installed = installed_input_path(file_name)
+        if installed is not None:
+            return _read_style(installed)
+    return None
 
 
 def _read_strings(path: Path) -> set[str] | None:
@@ -134,10 +154,10 @@ def _read_strings(path: Path) -> set[str] | None:
     return {name.casefold() for name in _STRING_MACRO.findall(text)}
 
 
-def _read_style(path: Path) -> set[str] | None:
+def _read_style(path: Path) -> frozenset[str] | None:
     """Read the macro names a .bst file defines, or ``None`` when the file cannot be read."""
     try:
         text = read_regular_file(path, _MAX_STYLE_BYTES).decode("utf-8", errors="replace")
     except OSError:
         return None
-    return {name.casefold() for name in _STYLE_MACRO.findall(_STYLE_COMMENT.sub("", text))}
+    return frozenset(name.casefold() for name in _STYLE_MACRO.findall(_STYLE_COMMENT.sub("", text)))

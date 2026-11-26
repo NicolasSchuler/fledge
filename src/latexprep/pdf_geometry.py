@@ -101,6 +101,28 @@ def measurement_raster_size(size: tuple[float, float], dpi: int) -> tuple[int, i
     )
 
 
+def require_raster_size(pixels: tuple[int, int], size: tuple[float, float], dpi: int) -> None:
+    """Require each raster axis to match the page at ``dpi``, within one pixel.
+
+    Args:
+        pixels: The raster's width and height in pixels.
+        size: The corresponding width and height of the rendered page in points.
+        dpi: The resolution used for the render.
+
+    Raises:
+        PreparationError: A raster dimension disagrees with the page geometry.
+    """
+    expected = measurement_raster_size(size, dpi)
+    if any(
+        abs(actual - target) > RASTER_SIZE_TOLERANCE_PX
+        for actual, target in zip(pixels, expected, strict=True)
+    ):
+        raise PreparationError(
+            f"Renderer output dimensions ({pixels[0]} x {pixels[1]} pixels) do not match "
+            f"the page geometry ({expected[0]} x {expected[1]} pixels at {dpi} DPI)"
+        )
+
+
 def comparison_raster_size(size: tuple[float, float], dpi: int) -> tuple[int, int]:
     """Return the reserved raster size, allowing for rounded pdfinfo dimensions."""
     width, height = measurement_raster_size(size, dpi)

@@ -49,8 +49,10 @@ your project ──copy──▶ snapshot ──build──▶ baseline PDF
    runs. Generated files that ship are not regenerated here: the tools that wrote
    them are blocked, which proves the shipped files suffice. Source and
    bibliography policies run again on the extracted files.
-8. **Publish.** Only now does the output appear in the `--output` folder. A
-   blocked, expired or cancelled run publishes nothing.
+8. **Publish.** Only now does the verified output appear in the `--output` folder.
+   A blocked or expired preparation does not publish a package. An interruption
+   before publication commits rolls back the installation; after commit, the
+   verified output stays in place.
 
 ## What each command covers
 
@@ -63,6 +65,10 @@ your project ──copy──▶ snapshot ──build──▶ baseline PDF
 | `fledge bib check INPUT` | Bibliography checks only |
 | `fledge fmt INPUT --check` | Read-only `tex-fmt` formatting check |
 | `fledge pdf check PDF` | Configured PDF checks on an existing PDF |
+| `fledge submission-text INPUT` | Title, abstract and keywords for a submission form; no build ([details](submission-text.md)) |
+| `fledge doctor` | Builds a tiny built-in document to test the TeX and Poppler setup ([details](doctor.md)) |
+| `fledge init [DIRECTORY]` | Writes a starter `fledge.toml`, optionally from a preset |
+| `fledge rules` and `fledge rule CODE` | List the checks, or explain one ([catalogue](checks.md)) |
 
 INPUT is the paper's folder or ZIP. A `.tex` file works too: `fledge check
 paper/main.tex` means `fledge check paper --main main.tex`, and a note says so.
@@ -87,17 +93,18 @@ that file, and only such a folder, and only after the new run has passed. Any ot
 existing folder or file is still refused, and report files (`--json-report`,
 `--html-report`, `--diagnostics`) must lie outside the output folders.
 
-Fledge writes only into folders it has just created itself. For an existing empty
-folder, and for an earlier output it replaces, it writes the new output into a
-hidden sibling folder (`.fledge-staging-…`) and moves it into place once everything
-is written, after checking that the existing folder is still a folder of yours and
-not a link; an empty folder in which anything appeared meanwhile is left alone and
-the run fails. A blocked, failed or cancelled run leaves the existing folder as it
-was. Because of this, the folder that holds DIR must be writable, and DIR cannot be
-a mount point, such as a volume mounted into a container; give a new folder inside
-it instead. A blocked, failed or cancelled run also leaves an earlier
-`--preview-output` folder as it was, and writes its previews only into a new or
-empty one.
+Fledge writes each output into a private sibling folder (`.fledge-staging-…`) before
+moving it into place. If another run creates the destination in the meantime,
+publication fails rather than replacing it. For an existing destination, Fledge
+checks that it is still the folder it accepted: a folder that was empty must
+still be empty, and an earlier output must still hold the marker. The folder
+that holds DIR must therefore be writable, and DIR cannot be a mount point,
+such as a volume mounted into a container; give a new folder inside it instead.
+A preparation blocked before installation leaves earlier outputs untouched,
+including an older `--preview-output` folder. If installation fails or is
+interrupted, Fledge restores the earlier folders without overwriting new arrivals.
+Fledge commits once all moves finish, then removes the old folders. An
+interruption during that cleanup leaves the new outputs in place.
 
 ```sh
 fledge prepare paper -o submission          # first run: new or empty folder

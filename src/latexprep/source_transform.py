@@ -369,10 +369,12 @@ class _Merge(NamedTuple):
     Attributes:
         edit: The edit that replaces the ``\input`` line by the file's expanded text.
         target: The project path of the merged file.
+        location: The inspected reference site that this edit replaces.
     """
 
     edit: TextEdit
     target: str
+    location: ArgumentLocation
 
 
 class _InputMerger:
@@ -385,8 +387,8 @@ class _InputMerger:
         texts: The proposed text of each source, in which the proposal is built.
         plan: The plan that receives the findings and the removals.
         expanded_bytes: The UTF-8 size of all merged replacements so far.
-        merged: Each file merged so far, remembered so the plan can remove it from the
-            package.
+        merged: The files expanded into the main source and proposed for removal.
+        rewritten: The original reference sites replaced in the expansion.
     """
 
     def __init__(
@@ -397,34 +399,37 @@ class _InputMerger:
         self.plan = plan
         self.expanded_bytes = 0
         self.merged: set[str] = set()
+        self.rewritten: set[ArgumentLocation] = set()
 
     def run(self) -> None:
         """Merge the inputs of the main file and record the outcome in the plan.
 
-        A merged input that a different file-reading command also uses is a problem. Without
-        blocking findings, the merged files are added to the plan's removals with a passed
-        finding that lists them.
+        Remove a merged file only when no live reference to it survives the expansion.
         """
         main = self.graph.main
         if main is None:
             return
         self.texts[main] = self.expand(main, ())
-        if any(
-            reference.target in self.merged and reference.command != "input"
-            for reference in self.graph.references.values()
-        ):
-            self._problem("A merged input is also used by a different file-reading command.")
-        if not has_blockers(self.plan.findings):
-            self.plan.removals.update(self.merged)
-            self.plan.findings.append(
-                Finding(
-                    _MERGE_RULE,
-                    f"Planned recursive merging of {len(self.merged)} literal input files.",
-                    severity="info",
-                    status="passed",
-                    details={"files": sorted(self.merged)},
+        if self._blocked():
+            return
+        for location, reference in self.graph.references.items():
+            if reference.target in self.merged and location not in self.rewritten:
+                self._problem(
+                    f"Cannot remove merged input {reference.target!r}: "
+                    f"an unrewritten \\{reference.command} still references it.",
+                    location.path,
                 )
+                return
+        self.plan.removals.update(self.merged)
+        self.plan.findings.append(
+            Finding(
+                _MERGE_RULE,
+                f"Planned recursive merging of {len(self.merged)} literal input files.",
+                severity="info",
+                status="passed",
+                details={"files": sorted(self.merged)},
             )
+        )
 
     def _problem(self, message: str, path: str | None = None) -> None:
         """Add a merge problem to the plan.
@@ -488,6 +493,7 @@ class _InputMerger:
                 return text
             edits.append(merge.edit)
             self.merged.add(merge.target)
+            self.rewritten.add(merge.location)
         return apply_text_edits(text, edits)
 
     def _input_merge(
@@ -527,7 +533,8 @@ class _InputMerger:
             self._problem("Input position could not be reconciled after comment edits.", name)
             return None
         located = original.arguments[0].stripped()
-        reference = self.graph.references.get(ArgumentLocation(name, located.start, located.end))
+        location = ArgumentLocation(name, located.start, located.end)
+        reference = self.graph.references.get(location)
         if reference is None or reference.target in stack:
             self._problem("Input target or execution order is unresolved.", name)
             return None
@@ -544,7 +551,7 @@ class _InputMerger:
         leading = _command_comments(text[line.start : line.command_end])
         trailing = _command_comments(text[line.command_end : line.end])
         replacement = leading + self.expand(target, (*stack, name)) + trailing
-        return _Merge(TextEdit(line.start, line.end, replacement), target)
+        return _Merge(TextEdit(line.start, line.end, replacement), target, location)
 
 
 def _merge_inputs(graph: SourceGraph, texts: dict[str, str], plan: SourceTransformPlan) -> None:

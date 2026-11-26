@@ -2,11 +2,14 @@
 
 ``collect_submission_dependencies`` ships the original project inputs a build read and
 nothing generated or from the toolchain; missing, linked, malformed, inconsistent or
-oversized evidence fails closed.
+oversized evidence fails closed. ``read_recorder`` judges the recorder trace for build
+checks: a trace that is absent, unreadable, oversized or unresolvable is reported as
+inconclusive, and an input that leaves the workspace is undeclared.
 """
 
 from __future__ import annotations
 
+import os
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -16,8 +19,10 @@ from latexprep.build_dependencies import (
     collect_submission_dependencies,
     read_recorder_trace,
 )
-from latexprep.build_workspace import BuildLayout
+from latexprep.build_recorder import RecorderEvidence, read_recorder
+from latexprep.build_workspace import BuildLayout, seed_generated_files
 from latexprep.errors import PreparationError
+from latexprep.package_headers import LoadedPackage
 from tests.support import ProjectTestCase
 
 
@@ -498,6 +503,74 @@ class SubmissionDependenciesTests(ProjectTestCase):
                 self.assertEqual(result.never_created, ("main.gls",) if xindy else ())
                 self.assertEqual("main.gls" in result.generated_files, not xindy)
 
+    def test_seeded_lists_preserved_for_xindy_are_project_inputs(self):
+        """Treat the lists as supplied even when the custom rules claim to produce them."""
+        extra_rules, producers = [], {}
+        tool_inputs = []
+        for tool_suffix, list_suffix in (("glo", "gls"), ("acn", "acr")):
+            self.original(f"article/main.{list_suffix}")
+            (self.output / f"main.{tool_suffix}").write_text("xindy entries\n")
+            tool_input = f"../../output/main.{tool_suffix}"
+            destination = f"../../output/main.{list_suffix}"
+            producer = f"cusdep {tool_suffix} {list_suffix} ../../output/main"
+            extra_rules.append(rule(producer, tool_input, destination, [(tool_input, "pdflatex")]))
+            producers[destination] = producer
+            tool_inputs.append(tool_input)
+        (self.output / "main.aux").write_text("\\@istfilename{main.xdy}\n")
+        seeded = seed_generated_files(self.project, self.cwd, self.output)
+        self.evidence(
+            tuple(producers),
+            generated=tuple(tool_inputs),
+            extra_rules="".join(extra_rules),
+            producers=producers,
+        )
+        result = self.collect(seeded=seeded)
+        self.assertEqual(
+            result.inputs, {"article/main.tex", "article/main.gls", "article/main.acr"}
+        )
+        self.assertEqual(result.generated_reads, {"main.glo", "main.acn"})
+        self.assertEqual(set(result.generated_files), result.generated_reads)
+        self.assertEqual(result.generated_inputs, 2)
+        self.assertEqual(result.never_created, ())
+        self.assertEqual(result.xindy_lists, ())
+
+        # A prior makeindex pass can replace a seed before the AUX switches to xindy.
+        (self.output / "main.gls").write_text("edited content")
+        changed = self.collect(seeded=seeded)
+        self.assertEqual(changed.inputs, {"article/main.tex", "article/main.acr"})
+        self.assertEqual(changed.generated_files["main.gls"], self.output / "main.gls")
+        self.assertEqual(changed.xindy_lists, ())
+
+        # Empty supplied lists are still inputs, but provide no entries for the PDF.
+        for path, name in seeded.items():
+            for copy in (self.source / name, self.project / name, path):
+                copy.write_bytes(b"")
+        empty = self.collect(seeded=seeded)
+        self.assertEqual(empty.inputs, result.inputs)
+        self.assertEqual(empty.xindy_lists, ("main.acr", "main.gls"))
+        self.assertEqual(empty.never_created, empty.xindy_lists)
+
+        (self.output / "main.aux").write_text("\\@istfilename{main.ist}\n")
+        for path in seeded:
+            path.write_text("regenerated with makeindex\n")
+        regenerated = self.collect(seeded=seeded)
+        self.assertEqual(regenerated.inputs, {"article/main.tex"})
+        self.assertEqual(
+            regenerated.generated_reads, {"main.glo", "main.acn", "main.gls", "main.acr"}
+        )
+
+    def test_empty_seed_read_without_a_custom_rule_still_reports_the_missing_list(self):
+        for root in (self.source, self.project):
+            (root / "article/main.acr").write_bytes(b"")
+        seeded = seed_generated_files(self.project, self.cwd, self.output)
+        (self.output / "main.aux").write_text("\\@istfilename{main.xdy}\n")
+        (self.output / "main.acn").write_text("acronym entry\n")
+        self.assertEqual(self.collect(seeded=seeded).xindy_lists, ())  # No read of the empty seed.
+        self.evidence(("../../output/main.acr",), generated=("../../output/main.acn",))
+        result = self.collect(seeded=seeded)
+        self.assertEqual(result.xindy_lists, ("main.acr",))
+        self.assertEqual(result.inputs, {"article/main.tex", "article/main.acr"})
+
     def test_a_generated_input_without_a_producer_names_the_tool_that_writes_it(self):
         (self.output / "main.gls").write_text("glossary")
         self.evidence(("../../output/main.gls",))
@@ -537,6 +610,231 @@ class SubmissionDependenciesTests(ProjectTestCase):
         self.assertEqual(result.toolchain_inputs, 3, result.to_details())
         for name in inputs:
             self.assertEqual(resolved.count(Path(name)), 1, name)
+
+
+class RecorderEvidenceTests(ProjectTestCase):
+    """Tests of ``read_recorder`` on written recorder traces in a build workspace.
+
+    The workspace ``work`` holds the project copy with the main file ``article/main.tex`` and
+    the output folder that receives the trace; ``toolchain`` is the declared toolchain root.
+    """
+
+    def setUp(self) -> None:
+        """Create the workspace, the project copy with its main file and the toolchain root."""
+        super().setUp()
+        self.work = self.root / "work"
+        self.project = self.work / "project"
+        self.cwd = self.project / "article"
+        self.output = self.work / "output"
+        self.toolchain = self.root / "toolchain"
+        for directory in (self.cwd, self.output, self.toolchain):
+            directory.mkdir(parents=True)
+        (self.cwd / "main.tex").write_text("main")
+        self.layout = BuildLayout(
+            self.root / "source", self.work, self.project, self.output, self.cwd
+        )
+        self.fls = self.output / "main.fls"
+
+    def trace(self, *inputs: str) -> None:
+        """Write the recorder trace of a build that read ``main.tex`` and then ``inputs``.
+
+        Args:
+            inputs: The input paths recorded after the main file, as TeX wrote them.
+        """
+        self.fls.write_text(
+            f"PWD {self.cwd}\n" + "".join(f"INPUT {name}\n" for name in ("main.tex", *inputs))
+        )
+
+    def package(self, directory: Path, name: str) -> Path:
+        """Write the class or package file ``name`` in ``directory`` with a literal header.
+
+        Args:
+            directory: The directory of the file.
+            name: The file name, ending in ``.cls`` or ``.sty``.
+
+        Returns:
+            The path of the file.
+        """
+        path = directory / name
+        kind = "Class" if path.suffix == ".cls" else "Package"
+        path.write_text(f"\\Provides{kind}{{{path.stem}}}[2024/01/02 v1.0 Test]\n")
+        return path
+
+    def read(self, max_bytes: int = 2_097_152) -> RecorderEvidence:
+        """Read the trace of ``article/main.tex``, with the toolchain as the declared root."""
+        return read_recorder("article/main.tex", self.layout, (self.toolchain,), max_bytes)
+
+    def resolution_fails(self, path: Path, failure: Exception):
+        """Make resolving ``path`` raise ``failure``, as a loop of links or an odd name would.
+
+        Args:
+            path: The path that cannot be resolved.
+            failure: The exception that resolving it raises.
+
+        Returns:
+            The patch, to use as a context manager.
+        """
+        original = Path.resolve
+
+        def resolve(candidate: Path, *, strict: bool = False) -> Path:
+            """Raise ``failure`` for ``path`` and resolve every other path as usual."""
+            if candidate == path:
+                raise failure
+            return original(candidate, strict=strict)
+
+        return patch.object(Path, "resolve", resolve)
+
+    def assert_trace_finding(self, evidence: RecorderEvidence, fragment: str) -> None:
+        """Assert that ``evidence`` is incomplete and holds one inconclusive trace error.
+
+        Args:
+            evidence: The evidence that was read.
+            fragment: Text that the message of the finding must contain.
+        """
+        self.assertFalse(evidence.complete)
+        self.assertEqual(len(evidence.findings), 1, evidence.findings)
+        finding = evidence.findings[0]
+        self.assertEqual(
+            (finding.rule, finding.severity, finding.status, finding.path),
+            ("build.dependency_trace", "error", "inconclusive", "article/main.tex"),
+        )
+        self.assertIn(fragment, finding.message)
+
+    def assert_without_trace(self, evidence: RecorderEvidence) -> None:
+        """Assert that no trace could be read: no evidence at all, and the finding that says so."""
+        self.assertIsNone(evidence.trace)
+        self.assertEqual(evidence.inputs, frozenset())
+        self.assertEqual(evidence.project_inputs, frozenset())
+        self.assertEqual(evidence.loaded_packages, ())
+        self.assert_trace_finding(evidence, "recorder trace was not produced")
+
+    def test_a_complete_trace_sorts_project_and_toolchain_inputs(self):
+        local = self.package(self.cwd, "local.sty")
+        (self.cwd / "chapter.tex").write_text("chapter")
+        system = self.package(self.toolchain, "article.cls")
+        self.trace("local.sty", "chapter.tex", str(system))
+        evidence = self.read()
+        self.assertTrue(evidence.complete, evidence.findings)
+        self.assertEqual(evidence.findings, ())
+        self.assertIsNotNone(evidence.trace)
+        self.assertEqual(
+            evidence.project_inputs,
+            {"article/main.tex", "article/local.sty", "article/chapter.tex"},
+        )
+        self.assertEqual(
+            evidence.inputs,
+            {self.cwd / "main.tex", local, self.cwd / "chapter.tex", system},
+        )
+        self.assertEqual(
+            evidence.loaded_packages,
+            (
+                LoadedPackage("local.sty", "article/local.sty", "project", "2024/01/02", "v1.0"),
+                LoadedPackage("article.cls", str(system), "toolchain", "2024/01/02", "v1.0"),
+            ),
+        )
+
+    def test_a_missing_trace_leaves_no_evidence_and_an_inconclusive_error(self):
+        self.assert_without_trace(self.read())
+
+    def test_a_directory_in_place_of_the_trace_leaves_no_evidence(self):
+        self.fls.mkdir()
+        self.assert_without_trace(self.read())
+
+    def test_a_linked_trace_leaves_no_evidence(self):
+        self.trace()
+        elsewhere = self.root / "elsewhere.fls"
+        self.fls.rename(elsewhere)
+        self.fls.symlink_to(elsewhere)
+        self.assert_without_trace(self.read())
+
+    @unittest.skipIf(os.geteuid() == 0, "the superuser can read every file")
+    def test_a_trace_without_read_permission_leaves_no_evidence(self):
+        self.trace()
+        self.fls.chmod(0)
+        self.assert_without_trace(self.read())
+
+    def test_a_trace_over_the_size_limit_leaves_no_evidence_but_one_at_the_limit_is_read(self):
+        self.trace()
+        size = self.fls.stat().st_size
+        self.assert_without_trace(self.read(max_bytes=size - 1))
+        evidence = self.read(max_bytes=size)
+        self.assertTrue(evidence.complete, evidence.findings)
+        self.assertIsNotNone(evidence.trace)
+
+    def test_a_recorded_path_that_cannot_be_resolved_leaves_the_trace_incomplete(self):
+        self.trace("unresolvable.tex")
+        unresolvable = self.cwd / "unresolvable.tex"
+        failures = (
+            OSError("unreadable"),
+            RuntimeError("loop of links"),
+            ValueError("embedded null byte"),
+        )
+        for failure in failures:
+            with self.subTest(failure=type(failure).__name__):
+                with self.resolution_fails(unresolvable, failure):
+                    evidence = self.read()
+                self.assert_trace_finding(evidence, "contains a path that could not be resolved")
+                # The path is skipped, not reported as external, and the main file still counts.
+                self.assertIsNotNone(evidence.trace)
+                self.assertEqual(evidence.inputs, {self.cwd / "main.tex"})
+                self.assertEqual(evidence.project_inputs, {"article/main.tex"})
+
+    def test_more_loaded_packages_than_the_limit_leave_the_trace_incomplete(self):
+        one, two, three = (self.package(self.toolchain, f"{name}.sty") for name in "abc")
+        (self.cwd / "chapter.tex").write_text("chapter")
+        with patch("latexprep.build_recorder.MAX_LOADED_PACKAGES", 2):
+            # A package read twice and a file that is no package do not count against the limit.
+            self.trace(str(one), str(two), str(one), "chapter.tex")
+            at_limit = self.read()
+            self.trace(str(one), str(two), str(three))
+            over_limit = self.read()
+        self.assertTrue(at_limit.complete, at_limit.findings)
+        self.assertEqual([package.name for package in at_limit.loaded_packages], ["a.sty", "b.sty"])
+        self.assert_trace_finding(over_limit, "exceeds the limit of 2 loaded packages")
+        # The first packages stay recorded and the one over the limit is still an input.
+        self.assertEqual(
+            [package.name for package in over_limit.loaded_packages], ["a.sty", "b.sty"]
+        )
+        self.assertIn(three, over_limit.inputs)
+
+    def test_a_link_that_leads_out_of_the_workspace_is_an_undeclared_external_input(self):
+        outside = self.package(self.root, "secret.sty")
+        (self.cwd / "linked.sty").symlink_to(outside)
+        self.trace("linked.sty")
+        evidence = self.read()
+        self.assertEqual(len(evidence.findings), 1, evidence.findings)
+        finding = evidence.findings[0]
+        self.assertEqual(
+            (finding.rule, finding.severity, finding.status, finding.path),
+            ("build.external_dependency", "error", "failed", "article/main.tex"),
+        )
+        self.assertIn("linked.sty", finding.message)
+        # The target is recorded where it lies, is no project file and is never read as a package.
+        self.assertIn(outside, evidence.inputs)
+        self.assertEqual(evidence.project_inputs, {"article/main.tex"})
+        self.assertEqual(evidence.loaded_packages, ())
+        self.assertTrue(evidence.complete)
+
+    def test_a_link_from_the_workspace_into_a_declared_root_is_not_a_declared_input(self):
+        system = self.package(self.toolchain, "system.sty")
+        (self.cwd / "linked.sty").symlink_to(system)
+        self.trace("linked.sty")
+        linked = self.read()
+        self.assertEqual(
+            [finding.rule for finding in linked.findings], ["build.external_dependency"]
+        )
+        self.assertIn("linked.sty", linked.findings[0].message)
+        self.assertEqual(linked.loaded_packages, ())
+        self.assertEqual(linked.project_inputs, {"article/main.tex"})
+        # Reading the file by its own path is declared; reaching it through the workspace is not.
+        self.trace("linked.sty", str(system))
+        both = self.read()
+        self.assertEqual(both.findings, linked.findings)
+        self.assertEqual(
+            both.loaded_packages,
+            (LoadedPackage("system.sty", str(system), "toolchain", "2024/01/02", "v1.0"),),
+        )
+        self.assertEqual(both.inputs, {self.cwd / "main.tex", system})
 
 
 if __name__ == "__main__":

@@ -159,9 +159,27 @@ class RedirectedProgressTests(unittest.TestCase):
                 update("Starting source checks")
             self.assertEqual(output.getvalue(), "Starting baseline build\n")
 
+    def test_quiet_progress_ignores_updates(self):
+        output = TerminalBuffer()
+        progress = TerminalProgress(
+            Console(file=output, force_terminal=True, color_system=None), quiet=True
+        )
+        progress.update("Starting baseline build")
+        progress.update("Rebuilding archive sources")
+        self.assertEqual(output.getvalue(), "")
+        self.assertEqual(progress.describe().plain, "Starting")
+
 
 class LiveProgressTests(unittest.TestCase):
     """The live line on a terminal: the running stage, its time, and restoring the streams."""
+
+    def setUp(self):
+        # Rich reads TERM and NO_COLOR when it draws, so a dumb or colourless host terminal
+        # would turn these capable fake terminals into plain ones.
+        environment = patch.dict(os.environ, {"TERM": "xterm-256color"})
+        environment.start()
+        self.addCleanup(environment.stop)
+        os.environ.pop("NO_COLOR", None)
 
     def live(self) -> tuple[TerminalProgress, FakeClock]:
         """Return progress on a fake 80-column terminal with a clock the test moves."""

@@ -32,7 +32,7 @@ document release check is `PKG301`; scheduling itself adds no check codes.
 This document retains the design rationale and acceptance criteria. It refines the
 {download}`architecture <../architecture.md>` and
 {download}`requirements <../requirements.md>`; the
-[workflow reference](workflow.md) remains the description of shipped behavior. No distributed
+[workflow reference](workflow-reference.md) remains the description of shipped behavior. No distributed
 queue, web server, network lookup, new PDF parser, or additional tool installation
 is needed for the steps below.
 
@@ -68,30 +68,36 @@ applicable, relative file path or numeric page. Display descriptive task names.
 Do not derive identity or output paths from task start/completion order.
 
 ```text
-flowchart TD
-    input["Import and freeze inputs"] --> source["Source analysis"]
-    input --> bibliography["Bibliography analysis"]
-    input --> baseline["Baseline build"]
-    baseline --> preflight["Baseline PDF preflight"]
-    preflight --> inspect["Independent PDF inventories"]
-    preflight --> reference["Supplied-PDF comparison, when requested"]
-    source --> plan["Reconcile evidence and resolve change plan"]
-    bibliography --> plan
-    inspect --> plan
-    reference --> plan
-    plan --> changes["Apply ordered project transformations"]
-    changes --> format["Compute independent formatting patches"]
-    format --> freeze["Apply patches and freeze prepared sources"]
-    freeze --> prepared["Prepared build"]
-    prepared --> preserve["Compare baseline and prepared PDF"]
-    preserve --> archive["Write exact archive and extract afresh"]
-    archive --> final["Archive build"]
-    final --> finalInspect["Final PDF inspection"]
-    final --> finalCompare["Prepared and archive comparison"]
-    final --> finalReference["Supplied-PDF and archive comparison"]
-    finalInspect --> release["Collect required results and publish"]
-    finalCompare --> release
-    finalReference --> release
+import and freeze inputs
+ ├──▶ source analysis ───────────────────────────────────┐
+ ├──▶ bibliography analysis ─────────────────────────────┤
+ └──▶ baseline build                                     │
+      └──▶ baseline PDF preflight                        │
+           ├──▶ independent PDF inventories ─────────────┤
+           └──▶ supplied-PDF comparison, when requested ─┤
+ ┌───────────────────────────────────────────────────────┘
+ ▼
+reconcile evidence and resolve change plan
+ ▼
+apply ordered project transformations
+ ▼
+compute independent formatting patches
+ ▼
+apply patches and freeze prepared sources
+ ▼
+prepared build
+ ▼
+compare baseline and prepared PDF
+ ▼
+write exact archive and extract afresh
+ ▼
+archive build
+ ├──▶ final PDF inspection ────────────────┐
+ ├──▶ prepared and archive comparison ─────┤
+ └──▶ supplied-PDF and archive comparison ─┤
+ ┌─────────────────────────────────────────┘
+ ▼
+collect required results and publish
 ```
 
 The diagram shows successful artifact flow. Diagnostic collection depends on

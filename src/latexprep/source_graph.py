@@ -45,7 +45,14 @@ from .source_file_commands import (
     is_literal_text,
 )
 from .source_findings import GraphFindings, listed_names
-from .source_loading import LoadBudget, ParsedSource, document_roots, load_source
+from .source_loading import (
+    LoadBudget,
+    ParsedSource,
+    document_roots,
+    file_command_end,
+    load_source,
+    read_subfile_body,
+)
 from .source_resolution import (
     LookupScope,
     ProjectTree,
@@ -68,7 +75,7 @@ from .tex_lexer import (
     skip_space,
     split_argument_items,
 )
-from .tex_spans import conditional_spans, in_conditional, stops_source
+from .tex_spans import conditional_spans, in_conditional, merge_spans, stops_source
 
 MAX_INPUT_DEPTH = 128
 # The findings of a project without exactly one document root to select.
@@ -249,6 +256,9 @@ class SourceGraph:
             bibliography database the project lacks, keyed by the file, command offset and
             name of the reference.
         visited: The files the walk read.
+        active_ranges: Half-open character ranges the walk reached in each file, sorted and
+            merged across visits. Only a validated subfile body can start inside a file.
+        buffered_endinputs: File and line of reached stops with tokens left on the same line.
         installed_package_copies: Dependencies identical to installed classes or packages.
         subfile_targets: The files read as supported ``\subfile`` bodies.
         subfiles_package_loaded: Whether the walk has seen the ``subfiles`` package loaded.
@@ -270,6 +280,8 @@ class SourceGraph:
         self.system_references: list[SystemReference] = []
         self.shipped_bibliographies: dict[tuple[str, int, str], str] = {}
         self.visited: set[str] = set()
+        self.active_ranges: dict[str, list[tuple[int, int]]] = {}
+        self.buffered_endinputs: set[tuple[str, int]] = set()
         self.installed_package_copies: set[str] = set()
         self.subfile_targets: set[str] = set()
         self.subfiles_package_loaded = False
@@ -707,47 +719,17 @@ class SourceGraph:
                     )
         return directory
 
-    def _subfile_commands(self, name: str, source: ParsedSource) -> list[Command]:
-        """Return the commands of a subfile body, or none when the file is not a supported subfile.
+    def _subfile_commands(self, name: str, source: ParsedSource) -> tuple[list[Command], int, int]:
+        r"""Return a resolved subfile's body commands and offsets; empty on failure.
 
-        A subfile has one ``subfiles`` document class naming the main file as its parent
-        and one document environment; only the commands inside that environment are read.
-        A supported subfile records its parent argument as a reference to the main file and
-        joins ``subfile_targets``; an unsupported one is reported.
-
-        Args:
-            name: The project file read as a subfile.
-            source: Its parsed source.
-
-        Returns:
-            The commands inside the document environment, or an empty list.
+        A supported ``\subfile`` records its parent argument as a reference to the
+        selected main and joins ``subfile_targets``. Other wrappers and parents are reported.
         """
-        declarations = [command for command in source.commands if command.name == "documentclass"]
-        starts = [command for command in source.commands if command.begins("document", exact=True)]
-        ends = [command for command in source.commands if command.ends("document", exact=True)]
-        if (
-            len(declarations) != 1
-            or len(starts) != 1
-            or len(ends) != 1
-            or not declarations[0].arguments
-            or declarations[0].arguments[0].value != "subfiles"
-            or not declarations[0].start < starts[0].start < ends[0].start
-        ):
-            self._reporter.uncertain(
-                "source.subfile_structure",
-                "A subfile requires one literal subfiles class and document environment.",
-                name,
-            )
-            return []
-        declaration = declarations[0]
-        if len(declaration.options) != 1 or not is_literal_text(declaration.options[0].value):
-            self._reporter.uncertain(
-                "source.subfile_structure", "A subfile requires an explicit parent path.", name
-            )
-            return []
-        parent_argument = declaration.options[0].stripped()
+        body = read_subfile_body(name, source, self._reporter)
+        if body is None:
+            return [], 0, 0
         parent = project_path(
-            Reference(parent_argument.value, name, declaration),
+            Reference(body.parent.value, name, body.declaration),
             self._tree(),
             self._reporter,
             base=posixpath.dirname(name),
@@ -758,15 +740,14 @@ class SourceGraph:
                 "The subfile parent must name the selected main file exactly.",
                 name,
             )
-            return []
-        location = ArgumentLocation(name, parent_argument.start, parent_argument.end)
+            return [], 0, 0
+        location = ArgumentLocation(name, body.parent.start, body.parent.end)
         self.references[location] = FileReference(parent, "input")
         self.subfile_targets.add(name)
-        return [
-            command
-            for command in source.commands
-            if starts[0].start < command.start < ends[0].start
+        commands = [
+            command for command in source.commands if body.start <= command.start < body.end
         ]
+        return commands, body.start, body.end
 
     def _visit(self, frame: _Frame, stack: tuple[str, ...]) -> tuple[str, ...]:
         """Walk the file of ``frame`` and return the graphics search path in force at its end.
@@ -776,7 +757,7 @@ class SourceGraph:
         visit returns the search path it was given. A file that cannot be loaded is not
         visited at all. The walk stops, with a finding, once the whole graph has
         processed ``MAX_COMMANDS`` commands. A frame already walked in the same ``subfiles``
-        state returns its cached result.
+        state returns its cached result; its active range was already recorded.
 
         Args:
             frame: The file and the lookup state it starts with.
@@ -810,13 +791,16 @@ class SourceGraph:
         self.visited.add(name)
         conditionals = self._conditionals[name]
         visit = _Visit(name, source, stack, frame.context, conditionals, frame.certain)
-        commands = self._subfile_commands(name, source) if frame.subfile else source.commands
+        commands, start, end = (
+            self._subfile_commands(name, source)
+            if frame.subfile
+            else (source.commands, 0, len(source.text))
+        )
         search = frame.search
         for command in commands:
-            if self._document_ended:
-                break
             if stops_source(command, conditionals):
-                self._document_ended = frame.certain and command.ends("document")
+                self._stop_source(visit, command)
+                end = command.start
                 break
             self._events += 1
             if self._events > MAX_COMMANDS:
@@ -826,10 +810,24 @@ class SourceGraph:
                     name,
                     command.line,
                 )
-                return search
+                end = command.start
+                break
             search = self._visit_command(visit, command, search)
+            if self._document_ended or self._events > MAX_COMMANDS:
+                end = file_command_end(source, command)
+                break
+        if start < end:
+            self.active_ranges[name] = merge_spans(
+                [*self.active_ranges.get(name, ()), (start, end)]
+            )
         self._cache[key] = search
         return search
+
+    def _stop_source(self, visit: _Visit, command: Command) -> None:
+        """Record the scope of a terminator and whether its physical line has unread tokens."""
+        self._document_ended = visit.certain and command.ends("document")
+        if visit.source.has_buffered_endinput_suffix(command):
+            self.buffered_endinputs.add((visit.path, command.line))
 
     def _visit_command(
         self, visit: _Visit, command: Command, search: tuple[str, ...]
@@ -965,7 +963,7 @@ class SourceGraph:
                 search = self._visit(
                     _Frame(target, search, visit.context, certain=certain), visit.inner_stack
                 )
-            if self._document_ended:
+            if self._document_ended or self._events > MAX_COMMANDS:
                 break
         return search
 

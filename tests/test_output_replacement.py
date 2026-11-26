@@ -8,6 +8,7 @@ place once complete, so a run that fails or is blocked leaves the earlier output
 from __future__ import annotations
 
 import asyncio
+import errno
 import json
 import os
 import shutil
@@ -17,6 +18,7 @@ from unittest.mock import patch
 
 from click.testing import CliRunner
 
+from latexprep import publication_folders
 from latexprep.cli import cli
 from latexprep.config import Settings
 from latexprep.core import run_job
@@ -207,21 +209,164 @@ class TransactionTests(ProjectTestCase):
         self.assertEqual([path.name for path in victim.iterdir()], ["precious.txt"])
         self.assertEqual((victim / "precious.txt").read_text(), "keep\n")
 
-    def test_a_new_folder_is_written_in_place_and_an_empty_one_beside_it(self) -> None:
-        empty = self.root / "empty"
+    def test_new_and_empty_outputs_stay_behind_a_private_wrapper_until_rename(self) -> None:
+        self.addCleanup(os.umask, os.umask(0o027))
+        new, empty = self.root / "new", self.root / "empty"
         empty.mkdir()
-        with OutputTransaction() as transaction:
-            self.assertEqual(transaction.create(self.root / "new"), self.root / "new")
-            staging = transaction.create(empty)
-            self.assertNotEqual(staging, empty)
-            self.assertEqual(staging.parent, empty.parent)
-            (staging / "file.txt").write_text("x\n")
-            # Nothing is written into the existing folder before the block ends.
+        empty.chmod(0o755)
+        modes = {new: 0o750, empty: 0o755}
+        payloads: dict[Path, Path] = {}
+        installed = []
+        rename = publication_folders._rename_exclusive
+
+        def check_at_rename(source: Path, target: Path) -> None:
+            """Inspect permissions at the last point before installation."""
+            if target in modes:
+                self.assertEqual(source, payloads[target])
+                self.assertEqual(source.parent.parent, target.parent)
+                self.assertEqual(stat.S_IMODE(source.parent.stat().st_mode), 0o700)
+                self.assertEqual(stat.S_IMODE(source.stat().st_mode), modes[target])
+                installed.append(target)
+            rename(source, target)
+
+        with (
+            patch.object(publication_folders, "_rename_exclusive", check_at_rename),
+            OutputTransaction() as transaction,
+        ):
+            for folder in modes:
+                staging = transaction.create(folder)
+                payloads[folder] = staging
+                self.assertNotEqual(staging, folder)
+                (staging / "file.txt").write_text("x\n")
+            self.assertFalse(new.exists())
             self.assertEqual(list(empty.iterdir()), [])
-        for folder in (self.root / "new", empty):
+        self.assertEqual(installed, [new, empty])
+        for folder, mode in modes.items():
             self.assertTrue(is_fledge_output(folder), folder)
-        self.assertEqual((empty / "file.txt").read_text(), "x\n")
+            self.assertEqual((folder / "file.txt").read_text(), "x\n")
+            self.assertEqual(stat.S_IMODE(folder.stat().st_mode), mode)
         self.assertEqual(leftovers(self.root), [])
+
+    def test_new_outputs_inherit_shared_directory_settings_without_chmod(self) -> None:
+        self.addCleanup(os.umask, os.umask(0o027))
+        parent = self.root / "shared"
+        parent.mkdir()
+        parent.chmod(0o2770)
+        ordinary = parent / "ordinary"
+        ordinary.mkdir()
+        output = parent / "output"
+        # No chmod means a nonmember of the parent group won't lose inherited setgid.
+        with (
+            patch.object(Path, "chmod", side_effect=AssertionError("unnecessary chmod")),
+            OutputTransaction() as transaction,
+        ):
+            payload = transaction.create(output)
+            self.assertEqual(stat.S_IMODE(payload.parent.stat().st_mode) & 0o777, 0o700)
+        self.assertEqual(stat.S_IMODE(output.stat().st_mode), stat.S_IMODE(ordinary.stat().st_mode))
+        self.assertEqual(output.stat().st_gid, ordinary.stat().st_gid)
+        self.assertEqual(leftovers(parent), [])
+
+    def test_new_output_restores_its_mode_after_staging_under_a_restrictive_umask(self) -> None:
+        self.addCleanup(os.umask, os.umask(0o427))
+        output = self.root / "new"
+        with OutputTransaction() as transaction:
+            payload = transaction.create(output)
+            self.assertEqual(stat.S_IMODE(payload.parent.stat().st_mode), 0o700)
+            self.assertEqual(stat.S_IMODE(payload.stat().st_mode), 0o750)
+        self.assertEqual(stat.S_IMODE(output.stat().st_mode), 0o350)
+        self.assertTrue(is_fledge_output(output))
+        self.assertEqual(leftovers(self.root), [])
+
+    def test_a_failed_mode_change_does_not_publish_with_different_permissions(self) -> None:
+        self.addCleanup(os.umask, os.umask(0o027))
+        output = self.earlier_output()
+        output.chmod(0o700)
+        # The filesystem can report success even when the requested mode does not stick.
+        with (
+            patch.object(Path, "chmod", return_value=None) as chmod,
+            self.assertRaisesRegex(PreparationError, "could not apply the directory permissions"),
+            OutputTransaction(replace_previous=True) as transaction,
+        ):
+            payload = transaction.create(output)
+        chmod.assert_called_once_with(0o700, follow_symlinks=False)
+        self.assertFalse(payload.exists())
+        self.assertEqual((output / "old.txt").read_text(), "old\n")
+        self.assertEqual(leftovers(self.root), [])
+
+    def test_a_failed_payload_creation_removes_the_private_wrapper(self) -> None:
+        output = self.root / "new"
+        mkdir = Path.mkdir
+
+        def refuse_payload(path: Path, *args, **kwargs) -> None:
+            """Fail to create the payload as a full disk would; create any other folder."""
+            if path.name == "payload":
+                raise OSError(errno.ENOSPC, "No space left on device", str(path))
+            mkdir(path, *args, **kwargs)
+
+        with (
+            patch.object(Path, "mkdir", refuse_payload),
+            self.assertRaises(OSError) as raised,
+            OutputTransaction() as transaction,
+        ):
+            transaction.create(output)
+        self.assertEqual(raised.exception.errno, errno.ENOSPC)
+        # The wrapper was removed, so the error needs no note about leftovers.
+        self.assertEqual(getattr(raised.exception, "__notes__", []), [])
+        self.assertFalse(output.exists())
+        self.assertEqual(leftovers(self.root), [])
+
+    def test_a_failed_staging_removes_every_staged_output_and_says_so(self) -> None:
+        first, second = self.root / "first", self.root / "second"
+        set_mode = publication_folders._set_mode
+        first_staged: list[bool] = []
+
+        def refuse_second_payload(path: Path, current: int, wanted: int) -> None:
+            """Fail to open the second payload for writing; set any other mode."""
+            if first_staged and path.name == "payload":
+                raise OSError(errno.EIO, "Input/output error", str(path))
+            set_mode(path, current, wanted)
+
+        messages: list[str] = []
+        with (
+            patch.object(publication_folders, "_set_mode", refuse_second_payload),
+            self.assertRaises(OSError) as raised,
+            OutputTransaction(messages.append) as transaction,
+        ):
+            (transaction.create(first) / "file.txt").write_text("x\n")
+            first_staged.append(True)
+            transaction.create(second)
+        self.assertEqual(raised.exception.errno, errno.EIO)
+        self.assertEqual(getattr(raised.exception, "__notes__", []), [])
+        self.assertEqual(messages, ["Publication failed; removing the partial output"])
+        self.assertFalse(first.exists())
+        self.assertFalse(second.exists())
+        self.assertEqual(leftovers(self.root), [])
+
+    def test_a_staging_wrapper_that_cannot_be_removed_is_named_on_the_error(self) -> None:
+        output = self.root / "new"
+        set_mode = publication_folders._set_mode
+
+        def fail_after_writing(path: Path, current: int, wanted: int) -> None:
+            """Leave a file in the payload, then fail as a full disk would."""
+            if path.name == "payload":
+                (path / "partial.txt").write_text("partial\n")
+                raise OSError(errno.ENOSPC, "No space left on device", str(path))
+            set_mode(path, current, wanted)
+
+        with (
+            patch.object(publication_folders, "_set_mode", fail_after_writing),
+            self.assertRaises(OSError) as raised,
+            OutputTransaction() as transaction,
+        ):
+            transaction.create(output)
+        self.assertEqual(raised.exception.errno, errno.ENOSPC)
+        # The payload is not empty, so it and its wrapper stay, and the error says where.
+        [holding] = leftovers(self.root)
+        wrapper = self.root / holding
+        [note] = raised.exception.__notes__
+        self.assertIn(f"Could not remove the incomplete staging wrapper {wrapper} (", note)
+        self.assertEqual((wrapper / "payload" / "partial.txt").read_text(), "partial\n")
+        self.assertFalse(output.exists())
 
     def test_a_private_folder_stays_private_when_the_output_takes_its_place(self) -> None:
         empty = self.root / "private"
@@ -229,8 +374,7 @@ class TransactionTests(ProjectTestCase):
         empty.chmod(0o700)
         with OutputTransaction() as transaction:
             directory = transaction.create(empty)
-            # While it is written, the staging folder beside it is private too.
-            self.assertEqual(stat.S_IMODE(directory.stat().st_mode) & 0o077, 0)
+            self.assertEqual(stat.S_IMODE(directory.parent.stat().st_mode) & 0o777, 0o700)
             (directory / "report.json").write_text("{}\n")
         self.assertEqual(stat.S_IMODE(empty.stat().st_mode), 0o700)
         self.assertTrue((empty / "report.json").is_file())
@@ -246,19 +390,20 @@ class TransactionTests(ProjectTestCase):
         private = self.root / "private"
         private.mkdir()
         private.chmod(0o700)
-        rename = Path.rename
+        rename = publication_folders._rename_exclusive
 
-        def refuse_staging(path: Path, target: Path) -> Path:
+        def refuse_staging(path: Path, target: Path) -> None:
             """Refuse to move a new output into place; move anything else."""
-            if path.name.startswith(".fledge-staging-"):
+            if path == staging:
                 raise PermissionError(13, "Permission denied", str(path))
-            return rename(path, target)
+            rename(path, target)
 
         # The output cannot move into the private folder, which is put back.
-        with patch("latexprep.publication.Path.rename", new=refuse_staging):
+        with patch.object(publication_folders, "_rename_exclusive", refuse_staging):
             with self.assertRaisesRegex(PreparationError, "left as it was"):
                 with OutputTransaction() as transaction:
-                    (transaction.create(private) / "new.txt").write_text("new\n")
+                    staging = transaction.create(private)
+                    (staging / "new.txt").write_text("new\n")
         self.assertEqual(stat.S_IMODE(private.stat().st_mode), 0o700)
         # A second output cannot move into its folder, so the first one moves back out.
         other = self.root / "other"
@@ -284,6 +429,149 @@ class TransactionTests(ProjectTestCase):
         self.assertEqual(list(empty.iterdir()), [])
         self.assertEqual(leftovers(self.root), [])
 
+    def test_a_failing_writer_does_not_remove_a_second_writers_commit(self) -> None:
+        output = self.root / "output"
+        with self.assertRaisesRegex(RuntimeError, "copy failed"), OutputTransaction() as failing:
+            (failing.create(output) / "partial.txt").write_text("partial")
+            with OutputTransaction() as winner:
+                (winner.create(output) / "winner.txt").write_text("complete")
+            raise RuntimeError("copy failed")
+        self.assertEqual((output / "winner.txt").read_text(), "complete")
+        self.assertFalse((output / "partial.txt").exists())
+        self.assertEqual(leftovers(self.root), [])
+
+    def test_a_late_empty_directory_is_not_replaced_and_earlier_moves_are_undone(self) -> None:
+        output, previews = self.root / "output", self.root / "previews"
+        rename = publication_folders._rename_exclusive
+        arrivals = []
+
+        def arrive_at_commit(source: Path, destination: Path) -> None:
+            """Create an empty preview destination at the final rename, after staging."""
+            if destination == previews:
+                self.assertTrue((output / OUTPUT_MARKER).is_file())
+                destination.mkdir()
+                arrivals.append(destination.stat().st_ino)
+            rename(source, destination)
+
+        report = Report("prepare", artifacts={"preview.1": str(previews / "page-0001.png")})
+        with (
+            patch.object(publication_folders, "_rename_exclusive", arrive_at_commit),
+            self.assertRaisesRegex(PreparationError, "nothing new was published"),
+            OutputTransaction(report=report, replace_previous=True) as transaction,
+        ):
+            transaction.create(output)
+            transaction.create(previews)
+        self.assertEqual(arrivals, [previews.stat().st_ino])
+        self.assertEqual(list(previews.iterdir()), [])
+        self.assertFalse(output.exists())
+        self.assertEqual(report.artifacts, {})
+        self.assertEqual(leftovers(self.root), [])
+
+    def test_a_late_empty_arrival_does_not_overwrite_or_destroy_a_force_backup(self) -> None:
+        output = self.earlier_output()
+        rename = publication_folders._rename_exclusive
+
+        def arrive_during_replacement(source: Path, destination: Path) -> None:
+            """Create an empty directory after the old output has been moved aside."""
+            if destination == output and source == staging:
+                destination.mkdir()
+            rename(source, destination)
+
+        messages: list[str] = []
+        with (
+            patch.object(publication_folders, "_rename_exclusive", arrive_during_replacement),
+            self.assertRaisesRegex(PreparationError, "check rollback diagnostics"),
+            OutputTransaction(messages.append, replace_previous=True) as transaction,
+        ):
+            staging = transaction.create(output)
+        self.assertEqual(list(output.iterdir()), [])
+        [holding] = leftovers(self.root)
+        [backup] = (self.root / holding).iterdir()
+        self.assertEqual((backup / "old.txt").read_text(), "old\n")
+        self.assertTrue(any(str(backup) in message for message in messages))
+
+    def test_a_failed_second_move_does_not_remove_a_replaced_first_destination(self) -> None:
+        output, other = self.root / "output", self.root / "other"
+        displaced = self.root / "displaced"
+        rename = publication_folders._rename_exclusive
+
+        def replace_first(source: Path, destination: Path) -> None:
+            """Replace the first publication before the second move fails."""
+            if destination == other:
+                output.rename(displaced)
+                output.mkdir()
+                (output / "theirs.txt").write_text("keep")
+                other.mkdir()
+            rename(source, destination)
+
+        messages: list[str] = []
+        with (
+            patch.object(publication_folders, "_rename_exclusive", replace_first),
+            self.assertRaisesRegex(PreparationError, "check rollback diagnostics"),
+            OutputTransaction(messages.append) as transaction,
+        ):
+            transaction.create(output)
+            transaction.create(other)
+        self.assertEqual((output / "theirs.txt").read_text(), "keep")
+        self.assertTrue(any("Could not undo publication" in message for message in messages))
+        self.assertEqual(leftovers(self.root), [])
+
+    def test_interrupt_during_second_swap_restores_both_earlier_outputs(self) -> None:
+        for move in ("set aside", "before install", "after install"):
+            with self.subTest(move=move):
+                self._check_interrupted_second_swap(move)
+
+    def _check_interrupted_second_swap(self, move: str) -> None:
+        """Interrupt at one move boundary; both original directory identities must return."""
+        first, second = self.root / "output", self.root / "previews"
+        accepted = {}
+        for output in (first, second):
+            output.mkdir(exist_ok=True)
+            (output / OUTPUT_MARKER).write_text("Fledge wrote this folder.\n")
+            (output / "old.txt").write_text(output.name)
+            accepted[output] = output.stat().st_ino
+        preview = str(second / "page-0001.png")
+        report = Report(
+            "prepare", artifacts={"archive": str(first / "archive.zip"), "preview.1": preview}
+        )
+        report.findings.append(
+            Finding("pdf.comparison", "Preview", details={"artifacts": [preview]})
+        )
+        interrupt = KeyboardInterrupt("interrupt the second swap")
+        rename = publication_folders._rename_exclusive
+
+        def interrupt_swap(source: Path, target: Path) -> None:
+            """Inject a single interrupt around a rename in the second replacement."""
+            matches = (
+                source == second and target.parent == payload.parent
+                if move == "set aside"
+                else source == payload and target == second
+            )
+            if matches:
+                self.assertTrue((first / "new.txt").is_file())
+                if move != "before install":
+                    rename(source, target)
+                raise interrupt
+            rename(source, target)
+
+        with (
+            patch.object(publication_folders, "_rename_exclusive", interrupt_swap),
+            self.assertRaises(KeyboardInterrupt) as raised,
+            OutputTransaction(report=report, replace_previous=True) as transaction,
+        ):
+            (transaction.create(first) / "new.txt").write_text("new")
+            payload = transaction.create(second)
+            (payload / "new.txt").write_text("new")
+        self.assertIs(raised.exception, interrupt)
+        self.assertEqual(getattr(interrupt, "__notes__", []), [])
+        for output, inode in accepted.items():
+            self.assertEqual(output.stat().st_ino, inode)
+            self.assertEqual((output / "old.txt").read_text(), output.name)
+            self.assertEqual({path.name for path in output.iterdir()}, {OUTPUT_MARKER, "old.txt"})
+        self.assertEqual(leftovers(self.root), [])
+        self.assertEqual(report.artifacts, {})
+        self.assertEqual(report.findings[0].details["artifacts"], [])
+
     def test_two_staged_replacements_preserve_the_first_commit(self) -> None:
         output = self.earlier_output()
         with self.assertRaisesRegex(PreparationError, "accepted output folder changed"):
@@ -293,6 +581,64 @@ class TransactionTests(ProjectTestCase):
                     (first.create(output) / "first.txt").write_text("first")
         self.assertEqual((output / "first.txt").read_text(), "first")
         self.assertFalse((output / "second.txt").exists())
+        self.assertEqual(leftovers(self.root), [])
+
+    def test_a_folder_whose_permissions_change_before_the_swap_is_not_replaced(self) -> None:
+        empty = self.root / "empty"
+        empty.mkdir()
+        output = self.earlier_output()
+        for folder, replaces, contents in (
+            (empty, False, []),
+            (output, True, [OUTPUT_MARKER, "old.txt"]),
+        ):
+            folder.chmod(0o755)
+            with self.subTest(folder=folder.name):
+                with self.assertRaises(PreparationError) as raised:
+                    with OutputTransaction(replace_previous=replaces) as transaction:
+                        (transaction.create(folder) / "new.txt").write_text("new\n")
+                        # Another process tightens the folder after it was accepted.
+                        folder.chmod(0o700)
+                self.assertIn("the accepted output folder changed", str(raised.exception))
+                self.assertIn("nothing new was published", str(raised.exception))
+                self.assertEqual(stat.S_IMODE(folder.stat().st_mode), 0o700)
+                self.assertEqual(sorted(path.name for path in folder.iterdir()), contents)
+                self.assertEqual(leftovers(self.root), [])
+
+    def test_an_output_that_loses_its_marker_before_the_swap_is_not_replaced(self) -> None:
+        output = self.earlier_output()
+        with self.assertRaises(PreparationError) as raised:
+            with OutputTransaction(replace_previous=True) as transaction:
+                (transaction.create(output) / "new.txt").write_text("new\n")
+                # Without its marker the folder is no longer one that Fledge may replace.
+                (output / OUTPUT_MARKER).unlink()
+        self.assertIn("it no longer holds the Fledge output marker", str(raised.exception))
+        self.assertIn("nothing new was published", str(raised.exception))
+        self.assertEqual(sorted(path.name for path in output.iterdir()), ["old.txt"])
+        self.assertEqual((output / "old.txt").read_text(), "old\n")
+        self.assertEqual(leftovers(self.root), [])
+
+    def test_a_folder_that_loses_its_marker_while_set_aside_is_put_back(self) -> None:
+        output = self.earlier_output()
+        accepted = output.stat().st_ino
+        rename = publication_folders._rename_exclusive
+
+        def lose_marker_when_set_aside(source: Path, destination: Path) -> None:
+            """Move the folder aside, then delete its marker as another process might."""
+            rename(source, destination)
+            if source == output:
+                (destination / OUTPUT_MARKER).unlink()
+
+        with (
+            patch.object(publication_folders, "_rename_exclusive", lose_marker_when_set_aside),
+            self.assertRaises(PreparationError) as raised,
+            OutputTransaction(replace_previous=True) as transaction,
+        ):
+            (transaction.create(output) / "new.txt").write_text("new\n")
+        self.assertIn("it no longer holds the Fledge output marker", str(raised.exception))
+        self.assertIn("nothing new was published", str(raised.exception))
+        # The very folder that was accepted is back in its place, as the failed check left it.
+        self.assertEqual(output.stat().st_ino, accepted)
+        self.assertEqual(sorted(path.name for path in output.iterdir()), ["old.txt"])
         self.assertEqual(leftovers(self.root), [])
 
     def test_publication_rejects_a_new_destination_after_request_validation(self) -> None:
@@ -401,17 +747,19 @@ class TransactionTests(ProjectTestCase):
         messages: list[str] = []
         with patch("latexprep.publication_folders.SAFE_TREE_REMOVAL", new=False):
             with OutputTransaction(messages.append, replace_previous=True) as transaction:
-                (transaction.create(output) / "new.txt").write_text("new\n")
-            [replaced] = leftovers(self.root)
-            self.assertTrue(replaced.startswith(".fledge-replaced-"))
-            self.assertIn(
-                f"Could not remove the replaced output {self.root / replaced}", messages[-1]
-            )
+                payload = transaction.create(output)
+                (payload / "new.txt").write_text("new\n")
+            self.assertEqual(leftovers(self.root), [payload.parent.name])
+            [backup] = payload.parent.iterdir()
+            self.assertEqual((backup / "old.txt").read_text(), "old\n")
+            self.assertIn(str(payload.parent), messages[-1])
             with self.assertRaises(RuntimeError):
                 with OutputTransaction(messages.append) as transaction:
-                    transaction.create(self.root / "new")
+                    staging = transaction.create(self.root / "new")
                     raise RuntimeError("publication failed")
-        self.assertTrue((self.root / "new").is_dir())
+        self.assertFalse((self.root / "new").exists())
+        self.assertTrue(staging.is_dir())
+        self.assertIn(str(staging), messages[-1])
         self.assertIn("remove it manually", messages[-1])
 
     def test_a_folder_of_another_user_is_neither_accepted_nor_replaced(self) -> None:
@@ -456,18 +804,19 @@ class TransactionTests(ProjectTestCase):
     def test_a_swap_that_fails_restores_the_earlier_output_and_clears_the_artifacts(self) -> None:
         output = self.earlier_output()
         report = Report("prepare", artifacts={"sources": str(output / "sources")})
-        rename = Path.rename
+        rename = publication_folders._rename_exclusive
 
-        def refuse_staging(path: Path, target: Path) -> Path:
+        def refuse_staging(path: Path, target: Path) -> None:
             """Refuse to move the new output into place; move anything else."""
-            if path.name.startswith(".fledge-staging-"):
+            if path == staging:
                 raise PermissionError(13, "Permission denied", str(path))
-            return rename(path, target)
+            rename(path, target)
 
-        with patch("latexprep.publication.Path.rename", new=refuse_staging):
+        with patch.object(publication_folders, "_rename_exclusive", refuse_staging):
             with self.assertRaisesRegex(PreparationError, "left as it was and nothing new"):
                 with OutputTransaction(report=report, replace_previous=True) as transaction:
-                    (transaction.create(output) / "new.txt").write_text("new\n")
+                    staging = transaction.create(output)
+                    (staging / "new.txt").write_text("new\n")
         self.assertEqual(sorted(path.name for path in output.iterdir()), [OUTPUT_MARKER, "old.txt"])
         self.assertEqual(report.artifacts, {})
         self.assertEqual(leftovers(self.root), [])

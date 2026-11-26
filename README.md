@@ -18,6 +18,11 @@ cd fledge
 bash install.sh
 ```
 
+The installer puts the `fledge` command in `~/.local/bin` and does not edit your
+shell files. If `fledge` is then "command not found", that folder is not on your
+`PATH`: run `~/.local/bin/fledge` instead, or add
+`export PATH="$HOME/.local/bin:$PATH"` to `~/.zshrc` and open a new terminal.
+
 Elsewhere, or if TeX and Poppler are already installed, install the same tag
 with pipx (or `uv tool install` with the same argument):
 

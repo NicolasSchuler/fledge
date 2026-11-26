@@ -99,9 +99,9 @@ It depends on its severity:
 
 ## Does Fledge run on Windows?
 
-`inspect` and `bib check` run anywhere Python does. Building needs a sandbox,
-which native Windows lacks, so `check` and `prepare` need WSL 2 with the Linux
-instructions; see [installation](installation.md#windows).
+Not natively: Fledge requires POSIX APIs and a build sandbox, neither of which
+native Windows provides. Use WSL 2 with the Linux instructions (not tested live
+in CI); see [installation](installation.md#windows).
 
 ## Is Fledge on PyPI?
 

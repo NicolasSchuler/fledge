@@ -358,12 +358,6 @@ class BibliographyTests(unittest.TestCase):
         self.assertIn("'ACM-Reference-Format' may define it", finding.message)
         self.assertIn("unless the style defines it", finding.suggestion or "")
 
-    # Open defect: BIB004 says "may define" for a macro that an installed .bst defines, as
-    # ACM-Reference-Format.bst defines csur. The TeX installation is never asked for a
-    # \bibliographystyle name: ``installation_file_names`` and ``installation_candidates``
-    # in source_resolution.py know only \input, \bibliography and figure names, and the
-    # installation's answer has no public accessor for the bibliography styles to read.
-    @unittest.expectedFailure
     def test_macros_of_an_installed_style_are_read_from_its_file(self) -> None:
         installation = Path(self.directory.name) / "installation"
         installed = installation / "ACM-Reference-Format.bst"
@@ -380,6 +374,18 @@ class BibliographyTests(unittest.TestCase):
             )
         self.assertEqual([item.message.split("'")[1] for item in findings], ["notamacro"])
         self.assertEqual((findings[0].severity, findings[0].status), ("error", "failed"))
+
+    def test_macros_of_an_installed_style_that_cannot_be_read_stay_inconclusive(self) -> None:
+        name = "ACM-Reference-Format.bst"
+        gone = Path(self.directory.name) / "installation" / name
+        self.write("@article{k, journal = csur}")
+        with installed_inputs_known(InstalledInputs(frozenset({name}), {name: str(gone)})):
+            findings = self.macro_findings(
+                "\\bibliographystyle{ACM-Reference-Format}\\bibliography{references}"
+            )
+        (finding,) = findings
+        self.assertEqual((finding.severity, finding.status), ("warning", "inconclusive"))
+        self.assertIn("'ACM-Reference-Format' may define it", finding.message)
 
     def test_macros_of_a_shipped_style_are_read_from_its_file(self) -> None:
         self.write("@article{k, journal = myjournal}\n@article{j, journal = hidden}")

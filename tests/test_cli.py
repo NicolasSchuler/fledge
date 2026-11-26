@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock, patch
 
 from click.testing import CliRunner
 
+from latexprep import publication_folders
 from latexprep.build_result import BuildResult
 from latexprep.cli import (
     USAGE_EXIT_CODE,
@@ -28,12 +29,14 @@ from latexprep.config import Settings, load_settings
 from latexprep.core import run_job
 from latexprep.errors import RequestError
 from latexprep.findings import Finding
-from latexprep.redaction import scrub_local_paths
-from latexprep.report import Outcome, Report
+from latexprep.publication import VerifiedPackage
+from latexprep.redaction import redact_data, scrub_local_paths
+from latexprep.report import Outcome, Report, redacted_dict
+from latexprep.report_files import write_report_text
 from latexprep.rule_definition import RULE_SCHEMA_VERSION
 from latexprep.rules import RULES
 from tests import SOURCE_ROOT
-from tests.support import ProjectTestCase, controlled_backends
+from tests.support import ProjectTestCase, controlled_backends, single_file_project
 
 
 class BrokenPipeTests(ProjectTestCase):
@@ -509,35 +512,135 @@ class MissingToolchainTests(unittest.TestCase):
         self.assertIn("basictex" if sys.platform == "darwin" else "TeX Live", finding["next_step"])
 
 
-class RedactionOncePerRunTests(unittest.TestCase):
-    """Tests that one redaction serves every report file and the final report of a run."""
+class ReportDeliveryTests(ProjectTestCase):
+    """Exercise the redaction and rendering boundary through the real CLI and job."""
 
-    def test_one_redaction_serves_every_file_and_the_final_report(self):
-        from latexprep.redaction import redact_data
+    def setUp(self) -> None:
+        """Write an inspectable project and an offline configuration with a synthetic secret."""
+        super().setUp()
+        self.source = self.root / "project"
+        single_file_project(self.source, body="TODO review the results.")
+        self.credential = "SyntheticCredentialValue_1234"
+        self.config = self.write(
+            "settings.toml",
+            "[online_checks]\n"
+            f'online_replication_urls = ["https://example.org/?token={self.credential}"]\n',
+        )
 
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory).resolve()
-            project = root / "project"
-            project.mkdir()
-            (project / "main.tex").write_text("\\documentclass{article}\n")
-            report = Report("inspect", outcome=Outcome.PASSED)
-            for output_format in ("terminal", "compact", "json", "html", "ci"):
-                destinations = {
-                    option: root / f"{output_format}-{option[2:]}"
-                    for option in ("--html-report", "--json-report", "--diagnostics")
-                }
-                arguments = ["inspect", str(project), "--quiet", "--output-format", output_format]
-                for option, destination in destinations.items():
-                    arguments += [option, str(destination)]
+    def inspect(self, *arguments: str):
+        """Run a quiet inspection using the fixture config and the supplied report options."""
+        return CliRunner().invoke(
+            cli, ["inspect", str(self.source), "--config", str(self.config), "--quiet", *arguments]
+        )
+
+    def test_stdout_only_redacts_once_and_encodes_json_only_if_requested(self):
+        for output_format in ("terminal", "compact", "html", "ci", "json"):
+            with (
+                self.subTest(output_format=output_format),
+                patch("latexprep.report.redact_data", wraps=redact_data) as redaction,
+                patch("latexprep.report.redacted_dict", wraps=redacted_dict) as encode,
+            ):
+                result = self.inspect("--output-format", output_format)
+                self.assertEqual(result.exit_code, 1, result.output)
+                self.assertIn("TEX001", result.stdout)
+                self.assertNotIn(self.credential, result.output)
+                self.assertEqual(redaction.call_count, 1)
+                self.assertEqual(encode.call_count, int(output_format == "json"))
+
+    def test_saved_and_printed_json_reuse_one_encoding_of_the_public_report(self):
+        saved = self.root / "report.json"
+        with (
+            patch("latexprep.report.redact_data", wraps=redact_data) as redaction,
+            patch("latexprep.report.redacted_dict", wraps=redacted_dict) as encode,
+        ):
+            result = self.inspect("--json", "--json-report", str(saved))
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertEqual(saved.read_bytes(), result.stdout_bytes)
+        self.assertNotIn(self.credential, result.output)
+        self.assertIn("[REDACTED]", result.stdout)
+        self.assertEqual(redaction.call_count, 1)
+        self.assertEqual(encode.call_count, 1)
+
+    def test_failed_sidecar_writes_redact_new_findings_with_the_original_context(self):
+        for failed_format, output_format, encodings in (
+            ("html", "json", 1),
+            ("json", "json", 2),
+            ("json", "html", 1),
+        ):
+            with self.subTest(failed_format=failed_format, output_format=output_format):
+                stem = f"{failed_format}-{output_format}"
+                html = self.root / f"{stem}.html"
+                saved = self.root / f"{stem}.json"
+                failed = html if failed_format == "html" else saved
+
+                def write_or_fail(destination, text, *, fail_at=failed, **options):
+                    """Fail just the selected write, echoing a bare credential and a local path."""
+                    if destination == fail_at:
+                        raise OSError(f"disk full: {self.credential} at {self.root}/private.log")
+                    write_report_text(destination, text, **options)
+
                 with (
-                    self.subTest(output_format=output_format),
-                    patch("latexprep.cli.run_job", new=AsyncMock(return_value=report)),
+                    patch("latexprep.report_files.write_report_text", side_effect=write_or_fail),
+                    patch("latexprep.report.redact_data", wraps=redact_data) as redaction,
+                    patch("latexprep.report.redacted_dict", wraps=redacted_dict) as encode,
+                ):
+                    result = self.inspect(
+                        "--output-format",
+                        output_format,
+                        "--html-report",
+                        str(html),
+                        "--json-report",
+                        str(saved),
+                    )
+                self.assertEqual(result.exit_code, 4, result.output)
+                self.assertIn("disk full: [REDACTED]", result.stdout)
+                self.assertNotIn(self.credential, result.output)
+                self.assertNotIn(f"{self.root}/private.log", result.output)
+                self.assertFalse(failed.exists())
+                if failed_format == "html":
+                    self.assertEqual(saved.read_bytes(), result.stdout_bytes)
+                else:
+                    self.assertNotIn("disk full", html.read_text())
+                self.assertEqual(redaction.call_count, 2)
+                self.assertEqual(encode.call_count, encodings)
+
+    def test_failed_and_cancelled_jobs_redact_partial_evidence_before_delivery(self):
+        for failure, outcome in (
+            (OSError("disk full"), "error"),
+            (asyncio.CancelledError(), "cancelled"),
+        ):
+            with self.subTest(outcome=outcome):
+
+                async def fail_with_partial_report(_context, report, error=failure):
+                    """Collect a finding before the job fails or is cancelled."""
+                    report.findings.append(
+                        Finding("source.edit_marker", f"Review {self.credential}")
+                    )
+                    raise error
+
+                with (
+                    patch("latexprep.core._run_command", new=fail_with_partial_report),
                     patch("latexprep.report.redact_data", wraps=redact_data) as redaction,
                 ):
-                    result = CliRunner().invoke(cli, arguments)
-                self.assertEqual(result.exit_code, 0, result.output)
-                self.assertTrue(all(path.exists() for path in destinations.values()))
+                    result = self.inspect("--json")
+                self.assertEqual(result.exit_code, Outcome(outcome).exit_code, result.output)
+                self.assertEqual(json.loads(result.stdout)["outcome"], outcome)
+                self.assertIn("Review [REDACTED]", result.stdout)
+                self.assertNotIn(self.credential, result.output)
                 self.assertEqual(redaction.call_count, 1)
+
+    def test_redaction_failure_outputs_only_the_withheld_report(self):
+        saved = self.root / "withheld.json"
+        with patch("latexprep.report.redact_data", return_value="over budget") as redaction:
+            result = self.inspect("--json", "--json-report", str(saved))
+        self.assertEqual(result.exit_code, 4, result.output)
+        self.assertEqual(saved.read_bytes(), result.stdout_bytes)
+        report = json.loads(result.stdout)
+        self.assertEqual(report["scope"], "report sanitization")
+        self.assertEqual(report["settings"], {})
+        self.assertEqual([item["rule"] for item in report["findings"]], ["report.redaction_limit"])
+        self.assertNotIn(self.credential, result.output)
+        self.assertEqual(redaction.call_count, 1)
 
 
 class UnexpectedFailureTests(ProjectTestCase):
@@ -637,6 +740,75 @@ class UnexpectedFailureTests(ProjectTestCase):
                 self.assertEqual(code, 130)
                 self.assertEqual(report["outcome"], "cancelled")
                 self.assertEqual(report["scope"], "run did not finish")
+
+    def test_interrupt_after_installing_both_outputs_reports_the_committed_package(self):
+        output, previews = self.root / "submission", self.root / "previews"
+        for directory in (output, previews):
+            self.write(f"{directory.name}/{publication_folders.OUTPUT_MARKER}", "Earlier output")
+            self.write(f"{directory.name}/old.txt", directory.name)
+        config = self.write("settings.toml", "[rendered_pdf_artwork]\ngrayscale_preview = true\n")
+
+        async def verified(context, report):
+            """Stand in for verification and supply a package and a workspace preview."""
+            sources = context.work / "prepared"
+            single_file_project(sources)
+            archive = context.work / "submission.zip"
+            with zipfile.ZipFile(archive, "w") as package:
+                package.write(sources / "main.tex", "main.tex")
+            pdf, preview = context.work / "built.pdf", context.work / "gray.png"
+            pdf.write_bytes(b"PDF fixture")
+            preview.write_bytes(b"new preview")
+            report.findings.append(
+                Finding(
+                    "pdf.grayscale_preview",
+                    "Generated",
+                    severity="info",
+                    status="passed",
+                    details={"artifacts": [str(preview)]},
+                )
+            )
+            report.outcome = Outcome.PASSED
+            return VerifiedPackage(sources, archive, pdf)
+
+        def interrupt_cleanup(staged):
+            """Discard the first backup, then interrupt, as a user could during cleanup."""
+            self.assertEqual(staged.destination, output)
+            publication_folders.discard_previous(staged)
+            raise KeyboardInterrupt("private interruption details")
+
+        with (
+            patch("latexprep.core.run_project", new=verified),
+            patch("latexprep.publication.discard_previous", new=interrupt_cleanup),
+        ):
+            code, out, err = self.run_main(
+                "prepare",
+                str(self.source),
+                "--force",
+                "--json",
+                "--quiet",
+                "--output",
+                str(output),
+                "--preview-output",
+                str(previews),
+                "--config",
+                str(config),
+            )
+        self.assertEqual(code, 130, out + err)
+        report = json.loads(out)
+        self.assertEqual(report["outcome"], "cancelled")
+        [cancelled] = [item for item in report["findings"] if item["rule"] == "execution.cancelled"]
+        self.assertIn("the verified output was published", cancelled["message"])
+        self.assertIn("Cleanup may be incomplete", cancelled["message"])
+        self.assertNotIn("private interruption details", out + err)
+        self.assertNotIn("execution.rollback", {item["rule"] for item in report["findings"]})
+        self.assertEqual(report["artifacts"]["archive"], str(output / "submission.zip"))
+        with zipfile.ZipFile(output / "submission.zip") as package:
+            self.assertEqual(package.namelist(), ["main.tex"])
+        self.assertEqual((previews / "page-0001.png").read_bytes(), b"new preview")
+        self.assertFalse((output / "old.txt").exists())
+        self.assertFalse((previews / "old.txt").exists())
+        [backup_file] = self.root.glob(".fledge-staging-*/previous/old.txt")
+        self.assertEqual(backup_file.read_text(), "previews")
 
     def test_interrupt_while_writing_the_report_says_whether_output_was_published(self):
         published = Report(

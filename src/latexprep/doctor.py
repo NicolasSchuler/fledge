@@ -17,6 +17,9 @@ from pathlib import Path
 from typing import NotRequired, TypedDict
 
 from .build_result import BuildResult
+from .check_policy import suggestion_selected
+from .chktex_lint import CHKTEX
+from .chktex_rules import CHKTEX_WARNING
 from .command_runner import ToolVersion
 from .config import Settings
 from .engine_selection import DEFAULT_ENGINE
@@ -241,6 +244,10 @@ def selected_tools(settings: Settings) -> tuple[set[str], set[str]]:
         | required_artwork_tools(settings.rendered_pdf_artwork)
         | required_artwork_tools(settings.included_figure_artwork)
     )
+    # The chktex lint is an opt-in suggestion that never changes the outcome, so chktex is
+    # advisory too, and only when CHK001 is selected as the jobs select it.
+    if suggestion_selected(settings.checks, CHKTEX_WARNING.code):
+        optional.add(CHKTEX)
     optional -= required
     return required, optional
 

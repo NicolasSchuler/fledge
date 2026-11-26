@@ -52,7 +52,7 @@ from .publication import (
     validate_output_directory,
 )
 from .publication_folders import is_replaceable_output
-from .report import Outcome, Report
+from .report import Outcome, RedactedReport, Report
 from .rules import MANDATORY_CODES
 from .standalone_checks import check_bibliography, check_formatting, check_standalone_pdf
 from .task_findings import has_task_defect
@@ -474,7 +474,7 @@ async def run_job(
     report: Report | None = None,
     *,
     backends: DocumentBackends | None = None,
-) -> Report:
+) -> RedactedReport:
     """Run one job and return its sanitized report.
 
     Every outcome other than a request that cannot succeed, including a missed deadline,
@@ -518,20 +518,27 @@ async def run_job(
             outputs: JobOutput = None
             try:
                 async with execution.bounded(work):
-                    outputs = await _run_command(context, report)
+                    outputs = await execution.run_until_resource_failure(
+                        _run_command(context, report)
+                    )
             finally:
                 _record_execution(report, execution, request)
-            if _block_on_resource_failure(report, execution):
-                outputs = None
+                resource_failed = _block_on_resource_failure(report, execution)
             if has_task_defect(report.findings):
                 # A defect in a check is not a problem with the input: it ends as an
                 # internal error, whatever the other tasks found, and no package is published.
                 # Previews still go to an explicit preview directory, as for a blocked run.
                 report.outcome = Outcome.INTERNAL_ERROR
                 outputs = None
-            execution.check_deadline()
             previews: PreviewPlan = ()
-            if _grayscale_previews(settings):
+            if resource_failed:
+                locate_previews(report, ())
+                emit(
+                    "No output was published: the job could not satisfy the runtime resource checks"
+                )
+            else:
+                execution.check_deadline()
+            if not resource_failed and _grayscale_previews(settings):
                 previews = _export_previews(
                     report,
                     outputs,
@@ -545,9 +552,10 @@ async def run_job(
             reviewed = True
             # All asynchronous readers, tool children and the monitor are drained.
             # Publication is the final synchronous critical section, never an early branch.
-            # It renders the report before it writes anything and refuses a report that
-            # cannot be sanitized, so the report is sanitized only once, on return.
-            _publish(report, context, destinations, execution, outputs, previews)
+            # Publication checks the report with its final artifact paths before writing it.
+            # The caller receives a sanitized snapshot after the transaction has settled.
+            if not resource_failed:
+                _publish(report, context, destinations, execution, outputs, previews)
     except JobDeadlineExceeded:
         if not reviewed:
             # Findings collected before the deadline still follow the check selection and

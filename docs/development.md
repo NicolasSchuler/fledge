@@ -10,8 +10,9 @@ source assets remain trackable. Fledge is released under the MIT License (`LICEN
 
 ## Install from source
 
-Python 3.11 or later is required. Create a virtual environment and install the
-checkout in editable mode with the development tools:
+Python 3.11 or later is required. To reproduce CI's primary gate from a checkout,
+use the [locked environment](#run-checks). For an editable install without `uv`,
+or from an extracted source distribution, create a virtual environment:
 
 ```sh
 python3 -m venv .venv
@@ -64,19 +65,29 @@ status; the deployed site is at <https://nicolasschuler.github.io/fledge/>.
 
 ## Run checks
 
+From a checkout, run the same gate as the `quality` CI job: install `uv`, then
+sync the `dev` and `docs` extras for Python 3.13 from the checked-in `uv.lock`.
+`--locked` fails if the lockfile is out of date; refresh it deliberately when
+updating dependencies, not as part of running checks.
+
 ```sh
-python -m pytest tests -n auto
-python -m pytest tests -n auto --cov
-ruff check src tests docs/conf.py scripts
-ruff format --check src tests docs/conf.py scripts
-ty check src/latexprep tests/support.py tests/fakes.py tests/pdf_fakes.py tests/live_support.py
+uv sync --locked --python 3.13 --extra dev --extra docs
+uv run --no-sync ruff check src tests docs/conf.py scripts
+uv run --no-sync ruff format --check src tests docs/conf.py scripts
+uv run --no-sync ty check src/latexprep tests/support.py tests/fakes.py tests/pdf_fakes.py tests/live_support.py
+uv run --no-sync python -m sphinx -n -W --keep-going -b html docs docs/_build/html
+uv run --no-sync python -m pytest tests -m 'not live' -n auto -ra -p no:cacheprovider --cov
 ```
 
-The second command measures branch coverage, including the child processes that
+An extracted source archive does not contain `uv.lock`. Use the editable install
+above and run the same check commands without `uv run --no-sync`; those dependencies
+are not pinned by the lockfile.
+
+`pytest --cov` measures branch coverage, including the child processes that
 `tests/test_process_boundary.py` starts, and fails when the total falls below
 `fail_under` in `[tool.coverage.report]` of `pyproject.toml`. That number is a ratchet
 that sits a little below the measured total, so a change that leaves new code untested
-fails the unit job. After a change that lifts the total, run the full suite with `--cov`
+fails the quality job. After a change that lifts the total, run the full unit suite with `--cov`
 and set `fail_under` to the whole percentage just below the new total. A run of a few
 test files needs `--cov-fail-under=0`, because it covers little of the package.
 `ty` also checks the shared test support modules, whose doubles stand in for the
@@ -247,9 +258,9 @@ Three more test modules keep the suite honest about what it proves:
   for the TeX lexer, edit lists and paths. It asserts invariants (only the documented
   errors, nothing left behind, offsets and containment kept), not exact results. A seed
   is fixed so that a failure repeats; raise a count locally to look for a defect.
-- `tests/test_ci_workflows.py` fails when a CI safeguard is removed: the coverage gate,
-  the alert on a failed scheduled run, the tests before a release, the run on the oldest
-  declared dependencies.
+- `tests/test_ci_workflows.py` guards the locked quality and coverage gate, the PR
+  smoke and scheduled live suites, the scheduled failure alert, the tests before
+  a release and the lowest-dependency run.
 
 A test that checks speed compares the processor time of two input sizes and asserts a
 bound on the growth, as `tests/test_literal_text.py` and `tests/test_bbl_checks.py` do;
@@ -295,19 +306,17 @@ Click.
 The [Tests workflow](https://github.com/NicolasSchuler/fledge/actions/workflows/tests.yml)
 runs on pushes to `main`, pull requests, manual dispatch and weekly. Every run:
 
-- lints with Ruff (`check` and `format --check`) and checks types with `ty`, for the
-  package and the shared test support modules;
+- runs the [locked quality gate](#run-checks) on a fresh Ubuntu runner with Python 3.13:
+  Ruff, ty, the strict Sphinx build and unit tests with branch coverage. It writes the
+  coverage report to the job summary;
 - lints `install.sh` with ShellCheck;
-- builds the documentation with `-n -W`, as the Deploy documentation workflow does,
-  so a broken link fails the pull request instead of the merge;
 - builds the source archive and wheel, installs the wheel into a fresh
   environment, runs `fledge --version` from another directory, inspects the
   [offline example](examples.md) with that installation, and runs
   `tests/test_docs.py` and `tests/test_packaging.py` from the extracted source
   archive, so a file missing from either distribution fails the pull request;
-- runs the unit tests with pytest on macOS and Ubuntu with Python 3.11 to 3.15. The
-  Ubuntu cell with Python 3.13 also measures coverage and applies the coverage gate
-  (see [Run checks](#run-checks)) and writes the report to the job summary;
+- runs the unit tests on macOS and Ubuntu with Python 3.11 to 3.15 using floating
+  dependencies: each cell installs the `dev` extra with pip, without the lockfile;
 - runs the unit tests on the oldest versions of the dependencies that `pyproject.toml`
   declares (`lowest-dependencies`, Python 3.11, installed with
   `uv pip install --resolution lowest-direct`), so a floor that no longer works fails
@@ -315,11 +324,23 @@ runs on pushes to `main`, pull requests, manual dispatch and weekly. Every run:
   standard output, and Click 8.2.2 gives an absent boolean flag the value `False`,
   which overrides the settings file; the floor is therefore `click>=8.2.0,!=8.2.2`.
 
-Manual and weekly runs add live jobs that run the opt-in integration tests
-(`FLEDGE_RUN_INTEGRATION=1`) without tool doubles. Each lists its test files by
-hand, and `tests/test_packaging.py` fails when a test file with live tests
-is missing from both lists. A failing live test writes the JSON report of the run to
-`FLEDGE_TEST_ARTIFACT_DIR`, and the job uploads that directory as an artifact:
+Every PR also runs `live-linux-smoke` on Ubuntu 24.04. It installs only Bubblewrap,
+base LaTeX, latexmk and Poppler and prepares a minimal article. The test checks that
+Fledge uses Bubblewrap, rebuilds the submission ZIP, matches the rebuilt PDF and
+publishes the outputs. Keeping this small case on every PR avoids a path filter that
+could miss changes to shared code. To run it locally on Linux with those tools and a
+working Bubblewrap sandbox:
+
+```sh
+FLEDGE_RUN_INTEGRATION=1 uv run --no-sync python -m pytest tests/test_live_linux_smoke.py -m live -v
+```
+
+Manual and weekly runs add the comprehensive live jobs. Both use
+`FLEDGE_RUN_INTEGRATION=1` and `pytest tests -m live` without tool doubles and run
+serially. The tests' platform gates select the appropriate Linux and macOS cases
+without keeping file lists in CI. When a live outcome assertion fails, it writes a
+JSON report to `FLEDGE_TEST_ARTIFACT_DIR`; the job uploads that directory as an
+artifact.
 
 - `live-macos` installs BasicTeX, Poppler, `tex-fmt` and Biber and also runs the
   macOS sandbox tests.
@@ -334,10 +355,8 @@ is missing from both lists. A failing live test writes the JSON report of the ru
   apt leg gets from its packages), about 280 MB in all. It runs the installer only after
   checking its SHA-512 and the signature of that hash by the TeX Live signing key, whose
   primary fingerprint the workflow pins, and its install step has a timeout of 25
-  minutes. It uses the same Poppler, Bubblewrap and `tex-fmt`. Both legs leave out
-  `test_runtime_inputs.py` and `test_runtime_monitoring.py`, whose live tests
-  run only on macOS, and
-  add `test_runtime_backends.py` for the live Bubblewrap isolation test.
+  minutes. It uses the same Poppler, Bubblewrap and `tex-fmt` as the apt leg.
+  Linux-only cases include the Bubblewrap isolation test and the prepare smoke.
   The apt leg first passed on 2026-10-12. What the documentation says about Linux rests
   on this job, so a failure is a real result that must not be ignored: fix the
   cause or correct those statements. On Ubuntu 24.04 it sets
@@ -417,13 +436,16 @@ tag they name with every release until then.
    from the Actions tab when the release depends on them.
 3. Optional dry run: on the Release workflow page choose **Run workflow** on
    `main`. It builds the source archive and wheel, installs the wheel into a fresh
-   environment, checks `fledge --version`, the offline example and the packaged
-   presets, and uploads the files as the `python-distributions` artifact, but
-   never publishes.
+   environment and checks `fledge --version`, the offline example and the packaged
+   presets (`python scripts/release_checks.py wheel dist`). It then unpacks the
+   source archive and runs `tests/test_docs.py` and `tests/test_packaging.py` from it
+   (`python scripts/release_checks.py sdist dist`). It uploads the files as the
+   `python-distributions` artifact, but never publishes.
 4. Create a GitHub release: choose or create the tag `vX.Y.Z` (for the current
    version, `v0.4.0`) on `main` and publish the release. Publishing starts the
-   workflow, which verifies the tag, builds, smoke-tests and then uploads to PyPI
-   from the `pypi` environment. Approve the deployment if you added a reviewer.
+   workflow, which verifies the tag, builds, tests the wheel and the source archive
+   as in the dry run, and then uploads to PyPI from the `pypi` environment. Approve
+   the deployment if you added a reviewer.
 5. Check the result in a clean environment: `pipx install fledge-latex==X.Y.Z`,
    then `fledge --version`.
 
@@ -448,7 +470,10 @@ The wheel installs the CLI. The source archive also carries the documentation,
 examples, tests, agent skill, architecture, requirements, changelog and the scripts, so it can be
 used to build these docs and run the documented source checks. It also includes
 the opt-in macOS installer; installer tests use controlled commands, not native
-Homebrew or MacTeX installation.
+Homebrew or MacTeX installation. To test the built files as the Release workflow
+does, run `python scripts/release_checks.py wheel dist` and
+`python scripts/release_checks.py sdist dist`; the second needs network access to
+install the dependencies.
 
 ## Design and planning references
 

@@ -94,15 +94,15 @@ class ReportFiles:
 
 
 class RenderedReport(NamedTuple):
-    """The JSON text of a report, and its HTML if that is still the final report.
+    """The texts already rendered for report files, when they still match the final report.
 
     Attributes:
-        json: The JSON text.
+        json: The saved JSON text, or ``None`` if none was saved.
         html: The HTML text, or ``None`` when none was rendered or a later write failure
             changed the report.
     """
 
-    json: str
+    json: str | None
     html: str | None
 
 
@@ -280,24 +280,31 @@ def write_report_text(
 
 
 def save_reports(
-    report: Report, files: ReportFiles, preview_images: dict | None
+    report: Report,
+    files: ReportFiles,
+    preview_images: dict | None,
+    *,
+    public: RedactedReport | None = None,
 ) -> tuple[RedactedReport, RenderedReport]:
     """Save the requested report files; a write failure is recorded in the report itself.
 
-    The report is redacted once and every file is written from that copy. A failure adds
-    a finding to ``report``, so the copy is made again and the later files include it.
+    Reuse the sanitized snapshot of a finished job or sanitize the raw report before
+    writing anything. If a write adds a finding, sanitize the complete raw report again:
+    even a bare credential in a write error may be recognized from the original settings.
     The HTML and diagnostics files are written before the JSON file, so a failure is
     reflected in the saved JSON.
 
     Args:
-        report: The report to save.
+        report: The raw report, with the context needed to redact later write errors.
         files: The validated destinations; an unset one is not written.
         preview_images: PDF preview images for the HTML file.
+        public: The already sanitized snapshot of ``report``, if there is one.
 
     Returns:
-        The final redacted report with the text of its JSON and, if still valid, HTML.
+        The final redacted report and the rendered files that still match it.
     """
-    public = redact_report(report)
+    if public is None:
+        public = redact_report(report)
     # Rendered once for the file and reused for stdout unless a later write failure
     # changes the report.
     html_document = None
@@ -320,20 +327,21 @@ def save_reports(
         except Exception as error:  # noqa: BLE001 - a failed file becomes a finding with its cause
             record_write_failure(report, "--diagnostics", files.diagnostics, error)
             public, html_document = redact_report(report), None
-    encoded = redacted_json(public)
+    json_document = None
     if files.json is not None and _can_write_report(files, files.json, public.outcome):
+        json_document = redacted_json(public)
         try:
             write_report_text(
                 files.json,
-                encoded,
+                json_document,
                 replace_existing=files.replace_existing,
                 earlier=files.earlier.get(files.json),
             )
         except Exception as error:  # noqa: BLE001 - a failed file becomes a finding with its cause
             record_write_failure(report, "--json-report", files.json, error)
-            public, html_document = redact_report(report), None
-            encoded = redacted_json(public)
-    return public, RenderedReport(encoded, html_document)
+            public = redact_report(report)
+            json_document = html_document = None
+    return public, RenderedReport(json_document, html_document)
 
 
 def _can_write_report(files: ReportFiles, path: Path, outcome: Outcome) -> bool:

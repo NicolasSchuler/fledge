@@ -3,13 +3,13 @@
 Owns the low-level steps that let publication write only into directories it created
 itself: recognising an earlier Fledge output by ``OUTPUT_MARKER`` and a Fledge report by
 how it begins, checking that a folder is a real directory of the current user's, creating
-exclusive hidden siblings, moving a staged output into the place of an existing folder
-after checking that the folder is unchanged, and removing a tree without ever following a
-link. ``publication`` composes these steps into one transaction.
+exclusive hidden siblings, making no-replace moves, and removing trees without following
+links. ``publication`` composes these steps into one transaction.
 """
 
 from __future__ import annotations
 
+import ctypes
 import errno
 import fcntl
 import os
@@ -17,8 +17,9 @@ import re
 import secrets
 import shutil
 import stat
+import sys
 from collections.abc import Generator, Iterable
-from contextlib import ExitStack, contextmanager, suppress
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import NamedTuple
 
@@ -38,9 +39,8 @@ _REPORT_BEGINNINGS = (
     re.compile(rb'\A\s*\{\s*"schema_version"\s*:\s*\d+\s*,\s*"command"\s*:\s*"'),
     re.compile(rb"\A<!doctype html><html[^>]*><head>.*?<title>Fledge [^<]*report", re.DOTALL),
 )
-# The names of the sibling directories that receive a new output and the replaced one.
+# The name of the private sibling that holds the new output and any set-aside directory.
 STAGING_PREFIX = ".fledge-staging-"
-REPLACED_PREFIX = ".fledge-replaced-"
 # Whether this platform removes a directory tree through directory descriptors, so a link
 # planted in the tree while it is removed is unlinked, never followed (macOS and Linux).
 # Read once, so a test that replaces ``shutil.rmtree`` does not change the answer.
@@ -110,30 +110,51 @@ def lock_output_parents(destinations: Iterable[Path]) -> Generator[None]:
         yield
 
 
-# A staging or set-aside directory is private while the transaction uses it.
+# Keep the payload inaccessible even when it already has its final permissions.
 _PRIVATE_DIRECTORY_MODE = 0o700
 
 
 class StagedOutput(NamedTuple):
-    """An output written beside an existing directory, to take its place once complete.
+    """A payload and optional set-aside directory in one private sibling of the destination.
 
     Attributes:
-        staging: The new sibling directory, created by the transaction, that receives the
-            output.
-        destination: The existing directory whose place the output takes.
-        replaces: Whether ``destination`` is an earlier Fledge output that is replaced;
-            otherwise it is an empty directory.
-        mode: The permission bits of ``destination`` when it was accepted, which the output
-            receives as it takes its place, so a folder the user kept private stays private.
-            Access control lists and extended attributes are not carried over.
-        identity: The identity of the accepted destination directory.
+        staging: Where the new output is written, below the private sibling.
+        destination: Where the new output belongs.
+        replaces: Whether an earlier Fledge output may be removed after commit, rather than
+            only an empty directory.
+        mode: The accepted directory's permissions, or the normal creation mode for a new one.
+            The output takes those bits, not the earlier directory's ACLs or extended attributes.
+        identity: Identity of the accepted directory, or ``None`` if absent.
+        staging_identity: Identity of the payload, which stays the same after a move.
+        wrapper_identity: Identity of the private sibling, which never moves.
     """
 
     staging: Path
     destination: Path
     replaces: bool
     mode: int
-    identity: DirectoryIdentity
+    identity: DirectoryIdentity | None
+    staging_identity: DirectoryIdentity
+    wrapper_identity: DirectoryIdentity
+
+    @property
+    def wrapper(self) -> Path:
+        """Return the private sibling containing the payload and any set-aside directory."""
+        return self.staging.parent
+
+    @property
+    def previous(self) -> Path:
+        """Return the reserved path for the accepted directory when moved aside."""
+        return self.wrapper / "previous"
+
+    def require_wrapper(self) -> None:
+        """Refuse to use a private sibling that no longer belongs to the transaction."""
+        _require_identity(self.wrapper, self.wrapper_identity, "the staging wrapper changed")
+
+    def remove_wrapper(self) -> None:
+        """Remove the private sibling only if it is still ours and empty."""
+        self.require_wrapper()
+        self.wrapper.rmdir()
 
 
 def remove_tree(path: Path) -> None:
@@ -154,16 +175,12 @@ def remove_tree(path: Path) -> None:
     shutil.rmtree(path)
 
 
-def new_sibling(path: Path, prefix: str) -> Path:
-    """Create a new hidden directory beside ``path`` whose name starts with ``prefix``.
-
-    The directory is readable by its owner only while the transaction uses it.
-
-    Returns:
-        The new, empty directory, created exclusively.
-    """
+def _new_sibling(path: Path) -> Path:
+    """Create an initially private staging sibling without replacing any existing entry."""
     while True:
-        sibling = path.parent / f"{prefix}{secrets.token_hex(4)}"
+        sibling = path.parent / f"{STAGING_PREFIX}{secrets.token_hex(4)}"
+        if sibling == path:
+            continue
         try:
             sibling.mkdir(mode=_PRIVATE_DIRECTORY_MODE)
         except FileExistsError:
@@ -171,118 +188,208 @@ def new_sibling(path: Path, prefix: str) -> Path:
         return sibling
 
 
-def _require_unchanged(staged: StagedOutput) -> None:
-    """Check that the existing directory of a staged output is still what was accepted.
+def _set_mode(path: Path, current: int, wanted: int) -> None:
+    """Change permission bits only when needed and verify the filesystem retained them."""
+    if current != wanted:
+        path.chmod(wanted, follow_symlinks=False)
+        # Some filesystems can silently clear setgid when chmod is called by a nonmember.
+        if stat.S_IMODE(path.lstat().st_mode) != wanted:
+            raise OSError(errno.EPERM, "could not apply the directory permissions", str(path))
 
-    It must be the same real directory of the user's; an earlier output must still
-    hold its marker. Emptiness is left to ``rmdir``, which refuses a non-empty directory.
+
+def stage_output(
+    destination: Path, *, replaces: bool, mode: int | None, identity: DirectoryIdentity | None
+) -> StagedOutput:
+    """Create a new payload behind a private wrapper beside its destination."""
+    wrapper = _new_sibling(destination)
+    info = wrapper.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+        raise OSError(errno.EBUSY, "the staging wrapper changed", str(wrapper))
+    wrapper_identity = DirectoryIdentity.from_stat(info)
+    staging = wrapper / "payload"
+    staging_identity = None
+    try:
+        wrapper_mode = stat.S_IMODE(info.st_mode)
+        # Keep the wrapper private without losing the parent's group inheritance.
+        _set_mode(wrapper, wrapper_mode, _PRIVATE_DIRECTORY_MODE | (wrapper_mode & stat.S_ISGID))
+        # Let mkdir apply the umask and default permissions behind the private wrapper.
+        staging.mkdir()
+        info = staging.lstat()
+        staging_identity = DirectoryIdentity.from_stat(info)
+        created_mode = stat.S_IMODE(info.st_mode)
+        if mode is None:
+            mode = created_mode
+        # The wrapper provides privacy; the payload only needs enough owner access to write it.
+        _set_mode(staging, created_mode, created_mode | stat.S_IRWXU)
+        return StagedOutput(
+            staging, destination, replaces, mode, identity, staging_identity, wrapper_identity
+        )
+    except BaseException as error:
+        try:
+            _require_identity(wrapper, wrapper_identity, "the staging wrapper changed")
+            if staging_identity is not None:
+                _require_identity(staging, staging_identity, "the staging directory changed")
+                staging.rmdir()
+            wrapper.rmdir()
+        except OSError as cleanup_error:
+            error.add_note(
+                f"Could not remove the incomplete staging wrapper {wrapper} ({cleanup_error})."
+            )
+        raise
+
+
+def _rename_exclusive(source: Path, destination: Path) -> None:
+    """Move ``source`` without ever replacing ``destination``, even if it is empty.
+
+    The Python rename API has no such option for directories. Fail closed if the platform
+    or filesystem does not support the native no-replace operation.
+
+    Args:
+        source: The entry to move.
+        destination: The new path, which must not exist.
 
     Raises:
-        OSError: The directory is gone, is a link or something else, or lost its marker.
+        OSError: The move failed or the operation is unsupported.
     """
-    if not is_own_directory(staged.destination):
-        raise NotADirectoryError(
-            errno.ENOTDIR, "it is no longer a folder of yours", str(staged.destination)
-        )
-    current = staged.destination.lstat()
-    if (
-        DirectoryIdentity.from_stat(current) != staged.identity
-        or stat.S_IMODE(current.st_mode) != staged.mode
-    ):
-        raise OSError(errno.EBUSY, "the accepted output folder changed", str(staged.destination))
-    if staged.replaces and not is_fledge_output(staged.destination):
+    libc = ctypes.CDLL(None, use_errno=True)
+    origin, target = os.fsencode(source), os.fsencode(destination)
+    try:
+        if sys.platform == "darwin":
+            rename = libc.renamex_np
+            rename.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+            result = rename(origin, target, 0x00000004)  # RENAME_EXCL
+        elif sys.platform == "linux":
+            rename = libc.renameat2
+            rename.argtypes = [
+                ctypes.c_int,
+                ctypes.c_char_p,
+                ctypes.c_int,
+                ctypes.c_char_p,
+                ctypes.c_uint,
+            ]
+            result = rename(-100, origin, -100, target, 1)  # AT_FDCWD, RENAME_NOREPLACE
+        else:
+            raise AttributeError("no native no-replace rename")
+    except AttributeError as error:
+        raise OSError(
+            errno.ENOTSUP, "this platform cannot move an output without replacing it"
+        ) from error
+    if result != 0:
+        code = ctypes.get_errno()
+        raise OSError(code, os.strerror(code), str(source), None, str(destination))
+
+
+def _require_identity(path: Path, expected: DirectoryIdentity | None, message: str) -> None:
+    """Refuse to move or remove an entry that is not the recorded one.
+
+    Args:
+        path: The entry to check.
+        expected: Its recorded identity.
+        message: What changed, for the error.
+
+    Raises:
+        OSError: The entry is missing or has a different identity.
+    """
+    if expected is None or existing_identity(path) != expected:
+        raise OSError(errno.EBUSY, message, str(path))
+
+
+def _require_unchanged(staged: StagedOutput, path: Path) -> None:
+    """Check that a directory to be replaced is still the same folder of the user's.
+
+    Args:
+        staged: The staged output replacing the accepted directory.
+        path: The accepted directory, either in place or set aside.
+
+    Raises:
+        OSError: The directory changed or lost its marker.
+    """
+    if not is_own_directory(path):
+        raise NotADirectoryError(errno.ENOTDIR, "it is no longer a folder of yours", str(path))
+    _require_identity(path, staged.identity, "the accepted output folder changed")
+    if stat.S_IMODE(path.lstat().st_mode) != staged.mode:
+        raise OSError(errno.EBUSY, "the accepted output folder changed", str(path))
+    if staged.replaces and not is_fledge_output(path):
         raise FileNotFoundError(
-            errno.ENOENT, "it no longer holds the Fledge output marker", str(staged.destination)
+            errno.ENOENT, "it no longer holds the Fledge output marker", str(path)
         )
 
 
-def _restore_empty_directory(staged: StagedOutput) -> None:
-    """Put back the empty directory whose place the output was to take, with its mode.
-
-    ``mkdir`` applies the umask, which only removes permissions, so the directory is never
-    more open than it was; ``chmod`` then restores the recorded bits exactly.
-
-    Raises:
-        OSError: The directory could not be created or given its mode.
-    """
-    staged.destination.mkdir(mode=staged.mode)
-    staged.destination.chmod(staged.mode)
+def _restore(source: Path, destination: Path, cause: BaseException) -> None:
+    """Try to return a moved directory without clobbering a new arrival."""
+    try:
+        _rename_exclusive(source, destination)
+    except OSError as error:
+        cause.add_note(f"Could not restore {destination} from {source} ({error}).")
 
 
-def move_into_place(staged: StagedOutput) -> Path | None:
-    """Move a complete output from its sibling into the place of the existing directory.
+def move_into_place(staged: StagedOutput) -> None:
+    """Move a complete output into place without clobbering any concurrent arrival.
 
-    An empty directory is removed with ``rmdir``, which fails if anything, such as a
-    planted link, appeared in it. An earlier output is moved aside into a new hidden
-    sibling. A directory renamed onto an existing path replaces only an empty directory,
-    so a link or file put in place of the existing directory makes the move fail instead
-    of being followed or overwritten.
+    The payload receives its final permissions while still behind the private wrapper.
+    An accepted directory is moved into the same wrapper and checked there. The caller
+    must undo the moves if this call or a later installation fails.
 
     Args:
         staged: The staged output.
 
-    Returns:
-        Where the earlier output now is, a hidden sibling directory, or ``None`` when the
-        output took the place of an empty directory.
-
     Raises:
-        OSError: The existing directory changed, or a move failed; the existing directory
-            is back in place when it can be.
+        OSError: The output could not be moved into place.
     """
-    _require_unchanged(staged)
-    # The output takes the permissions of the directory whose place it takes.
-    staged.staging.chmod(staged.mode)
-    if not staged.replaces:
-        # rmdir neither follows a link nor removes a directory that is no longer empty.
-        staged.destination.rmdir()
-        try:
-            staged.staging.rename(staged.destination)
-        except OSError:
-            with suppress(OSError):
-                _restore_empty_directory(staged)
-            raise
-        return None
-    previous = new_sibling(staged.destination, REPLACED_PREFIX)
+    staged.require_wrapper()
+    _require_identity(staged.staging, staged.staging_identity, "the staging directory changed")
+    _set_mode(staged.staging, stat.S_IMODE(staged.staging.lstat().st_mode), staged.mode)
+    if staged.identity is not None:
+        _require_unchanged(staged, staged.destination)
+        _rename_exclusive(staged.destination, staged.previous)
+        _require_unchanged(staged, staged.previous)
+        if not staged.replaces and not is_empty_directory(staged.previous):
+            raise OSError(errno.ENOTEMPTY, "the accepted output folder is no longer empty")
+    _rename_exclusive(staged.staging, staged.destination)
+
+
+def _return_payload(staged: StagedOutput, cause: BaseException) -> None:
+    """Return this run's output to staging if its installation took effect."""
+    if existing_identity(staged.staging) == staged.staging_identity:
+        return
+    _require_identity(staged.destination, staged.staging_identity, "the published output changed")
+    _rename_exclusive(staged.destination, staged.staging)
     try:
-        # Renaming a directory onto an empty one replaces it in one step.
-        staged.destination.replace(previous)
+        _require_identity(staged.staging, staged.staging_identity, "the published output changed")
     except OSError:
-        previous.rmdir()
+        _restore(staged.staging, staged.destination, cause)
         raise
-    try:
-        if existing_identity(previous) != staged.identity:
-            raise OSError(
-                errno.EBUSY, "the accepted output folder changed", str(staged.destination)
-            )
-        staged.staging.rename(staged.destination)
-    except OSError as error:
-        try:
-            previous.rename(staged.destination)
-        except OSError:
-            error.add_note(f"The earlier output is now in {previous}.")
-        raise
-    return previous
 
 
-def move_back(staged: StagedOutput, previous: Path | None) -> bool:
-    """Undo a completed move: the new output goes back beside, the existing one returns.
+def move_back(staged: StagedOutput, cause: BaseException) -> None:
+    """Undo the attempted installation using on-disk evidence of the moves that occurred.
 
-    The rollback that follows removes the sibling, never the existing directory.
+    An interrupt can arrive after a rename took effect but before it returned to Python.
+    The known staging identity and reserved path for the old directory let us undo either
+    move, without relying on a return value or overwriting a concurrent arrival.
 
     Args:
-        staged: The staged output that was moved into place.
-        previous: Where the earlier output was moved, or ``None`` for an empty directory.
-
-    Returns:
-        Whether the existing directory is back in place; when a move fails, the
-        directories stay where they are.
+        staged: The output whose installation was attempted.
+        cause: The original error, which receives notes for moves that could not be undone.
     """
+    staged.require_wrapper()
     try:
-        staged.destination.rename(staged.staging)
-        if previous is None:
-            _restore_empty_directory(staged)
-        else:
-            previous.rename(staged.destination)
-    except OSError:
-        return False
-    return True
+        _return_payload(staged, cause)
+    except OSError as error:
+        cause.add_note(f"Could not undo publication at {staged.destination} ({error}).")
+    # Restore whatever was moved aside, even if the verification after that move failed.
+    if staged.identity is not None and existing_identity(staged.previous) is not None:
+        _restore(staged.previous, staged.destination, cause)
+
+
+def discard_previous(staged: StagedOutput) -> None:
+    """Remove an accepted directory after a successful commit, if one was set aside."""
+    if staged.identity is None:
+        return
+    staged.require_wrapper()
+    _require_identity(staged.previous, staged.identity, "the set-aside directory changed")
+    if staged.replaces:
+        remove_tree(staged.previous)
+    else:
+        # Do not delete anything that was added after the emptiness check.
+        staged.previous.rmdir()

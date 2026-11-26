@@ -40,7 +40,6 @@ from .tex_spans import (
     conditional_spans,
     defined_names,
     definition_spans,
-    endinput_has_suffix,
     in_conditional,
     is_source_terminator,
     runs_in_place,
@@ -450,6 +449,14 @@ class ExpandedDocument:
         )
         return Location(segment.path, line)
 
+    def source_offset(self, offset: int) -> tuple[str, int] | None:
+        """Return the original file and character offset of one copied character."""
+        index = bisect_right(self._segment_starts, offset) - 1
+        if index < 0 or offset >= self.segments[index].end:
+            return None
+        segment = self.segments[index]
+        return segment.path, segment.source_start + offset - segment.start
+
     def located(self, offset: int, **details: object) -> dict[str, object]:
         """Build report details for an offset: its path and line followed by ``details``."""
         return {**self.location(offset).as_dict(), **details}
@@ -593,7 +600,7 @@ class _Splice:
         stops = stops_source(command, conditionals)
         if command.name == "endinput":
             # TeX can keep reading the current physical line from its buffer.
-            if not stops or endinput_has_suffix(source.masked, command):
+            if not stops or source.has_buffered_endinput_suffix(command):
                 self.uncertainty.append(f"{path}: unresolved endinput context")
         elif stops and certain:
             self.stopped = True

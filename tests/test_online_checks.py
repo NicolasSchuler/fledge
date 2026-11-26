@@ -485,6 +485,84 @@ class OnlineCheckTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertIn("reproducibility", finding.message)
 
+    async def test_replication_links_exclude_drafts_after_local_source_stops(self):
+        (self.root / "main.tex").write_text(
+            "\\documentclass{article}\n\\begin{document}\n\\input{fragment}\n"
+            "\\href{https://example.org/main}{Main text}\n"
+            "\\end{document}\\url{https://example.org/same-line-draft}\n"
+            "\\url{https://example.org/main-draft}\n"
+        )
+        (self.root / "fragment.tex").write_text(
+            "\\nolinkurl{https://example.org/inside%20input}\n"
+            "\\endinput % \\url{https://example.org/comment}\n"
+            "\\url{https://example.org/input-draft}\n"
+        )
+        _, findings, calls = await self.run_check(
+            options(
+                online_replication_links=True,
+                online_replication_urls=("https://example.org/configured",),
+            ),
+            Response(200),
+            "online.replication_link",
+            "NET007",
+        )
+        self.assertCountEqual(
+            [call.target.path for call in calls], ["/configured", "/inside%20input", "/main"]
+        )
+        self.assertEqual(
+            {finding.status for finding in findings if finding.code == "NET007"}, {"passed"}
+        )
+
+    async def test_replication_link_coverage_is_incomplete_for_a_buffered_endinput_suffix(self):
+        (self.root / "main.tex").write_text(
+            "\\documentclass{article}\n\\begin{document}\n\\input{fragment}\n\\end{document}\n"
+        )
+        (self.root / "fragment.tex").write_text(
+            "\\url{https://example.org/before}\n"
+            "\\endinput\\url{https://example.org/same-line}\n"
+            "\\url{https://example.org/next-line}\n"
+        )
+        _, findings, calls = await self.run_check(
+            options(online_replication_links=True),
+            Response(200),
+            "online.replication_link",
+            "NET007",
+        )
+        self.assertEqual([call.target.path for call in calls], ["/before"])
+        (coverage,) = [
+            item for item in findings if item.details.get("outcome") == "input_coverage_incomplete"
+        ]
+        self.assertEqual((coverage.code, coverage.status), ("NET007", "inconclusive"))
+        self.assertIn(
+            r"fragment.tex:2: tokens after \endinput on the same line may still run; "
+            "that suffix was not checked for URLs",
+            coverage.details["reasons"],
+        )
+
+    async def test_replication_links_stop_in_the_caller_after_an_input_ends_the_document(self):
+        (self.root / "main.tex").write_text(
+            "\\documentclass{article}\n\\usepackage{local}\n\\begin{document}\n"
+            "\\url{https://example.org/main}\n"
+            "\\input{closing}\\url{https://example.org/caller-draft}\n"
+        )
+        (self.root / "local.sty").write_text(
+            "\\ProvidesPackage{local}\n\\url{https://example.org/package}\n"
+            "\\endinput\n\\url{https://example.org/package-draft}\n"
+        )
+        (self.root / "closing.tex").write_text(
+            "\\url{https://example.org/closing}\n"
+            "\\end{document}\n\\url{https://example.org/child-draft}\n"
+        )
+        _, _, calls = await self.run_check(
+            options(online_replication_links=True),
+            Response(200),
+            "online.replication_link",
+            "NET007",
+        )
+        self.assertCountEqual(
+            [call.target.path for call in calls], ["/main", "/package", "/closing"]
+        )
+
     async def test_author_comparison_ignores_and_others_and_keeps_compound_names(self):
         def authors(*families):
             return metadata(author=[{"family": family} for family in families])

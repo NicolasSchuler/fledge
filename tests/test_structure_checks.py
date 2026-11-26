@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 from latexprep.author_records import AuthorRecordOptions, check_author_records
 from latexprep.errors import PreparationError
+from latexprep.limits import MAX_PDF_NESTING_LEVELS
 from latexprep.option_config import read_option_groups, read_options
 from latexprep.pdf_structure_checks import (
     HeadingExpectation,
@@ -29,6 +30,11 @@ def object_value(document: dict[str, object], number: int) -> dict[str, object]:
     The value is the dictionary held in ``document``, so editing it changes the document.
     """
     return document["qpdf"][1][f"obj:{number} 0 R"]["value"]
+
+
+def add_object(document: dict[str, object], number: int, value: dict[str, object]) -> None:
+    """Add object ``number`` (generation 0) holding ``value`` to a qpdf JSON ``document``."""
+    document["qpdf"][1][f"obj:{number} 0 R"] = {"value": value}
 
 
 class AuthorRecordTests(unittest.TestCase):
@@ -272,6 +278,29 @@ class PdfStructureTests(unittest.IsolatedAsyncioTestCase):
         )
         return result
 
+    async def assert_every_check_unavailable(self, document, message: str) -> None:
+        """Assert that each structure check reports ``document`` as unreadable with ``message``.
+
+        Args:
+            document: The qpdf JSON of the tagged PDF.
+            message: The text of the error that leaves every check inconclusive.
+        """
+        options = StructureOptions(
+            require_structure_tree=True,
+            check_table_structure=True,
+            check_link_structure=True,
+            require_figure_alt=True,
+        )
+        findings = await self.check(options, document)
+        self.assertEqual(
+            {finding.code for finding in findings}, {"PDF402", "PDF403", "PDF404", "PDF405"}
+        )
+        for finding in findings:
+            with self.subTest(code=finding.code):
+                self.assertEqual(finding.status, "inconclusive")
+                self.assertTrue(finding.incomplete)
+                self.assertEqual(finding.message, message)
+
     async def test_heading_expectations_match_differ_and_remain_uncertain(self) -> None:
         options = StructureOptions(heading_expectations=(HeadingExpectation(1, "Methods", "2"),))
         passed = (await self.check(options))[0]
@@ -473,6 +502,157 @@ class PdfStructureTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(findings["PDF401"].status, "passed")
         self.assertEqual(findings["PDF405"].status, "inconclusive")
         self.assertEqual(findings["PDF404"].status, "inconclusive")
+
+    async def test_a_structure_root_of_the_wrong_or_missing_type_is_unreadable(self) -> None:
+        for change in ("wrong", "missing"):
+            document = structured_pdf_objects()
+            if change == "wrong":
+                object_value(document, 4)["/Type"] = "/StructElem"
+            else:
+                object_value(document, 4).pop("/Type")
+            with self.subTest(change=change):
+                await self.assert_every_check_unavailable(
+                    document, "The PDF structure root has an unsupported object type"
+                )
+
+    async def test_a_cyclic_or_excessively_deep_role_map_is_unreadable(self) -> None:
+        message = "PDF structure role mapping is cyclic or excessively deep"
+        # A role that reaches a standard role through several mappings is still resolved.
+        document = structured_pdf_objects()
+        object_value(document, 9)["/S"] = "/A"
+        object_value(document, 4)["/RoleMap"] = {"/A": "/B", "/B": "/Figure"}
+        options = StructureOptions(require_figure_alt=True)
+        self.assertEqual((await self.check(options, document))[0].status, "passed")
+        object_value(document, 4)["/RoleMap"] = {"/A": "/B", "/B": "/A"}
+        with self.subTest(role_map="cycle"):
+            await self.assert_every_check_unavailable(document, message)
+        object_value(document, 4)["/RoleMap"] = {
+            f"/Role{number}": f"/Role{number + 1}" for number in range(MAX_PDF_NESTING_LEVELS + 2)
+        }
+        object_value(document, 9)["/S"] = "/Role0"
+        with self.subTest(role_map="deep chain"):
+            await self.assert_every_check_unavailable(document, message)
+
+    async def test_an_object_reference_must_name_an_indirect_object(self) -> None:
+        for name, reference in (
+            ("direct dictionary", {"/Obj": {"/Type": "/Annot", "/Subtype": "/Link"}}),
+            ("missing", {}),
+            ("number", {"/Obj": 10}),
+        ):
+            document = structured_pdf_objects()
+            link = {"/Type": "/OBJR", "/Pg": "3 0 R", **reference}
+            object_value(document, 12)["/K"] = [2, link]
+            with self.subTest(target=name):
+                references = (
+                    await self.check(StructureOptions(check_structure_references=True), document)
+                )[0]
+                self.assertEqual(references.code, "PDF405")
+                self.assertEqual(references.status, "failed")
+                self.assertEqual(
+                    references.details["violations"],
+                    [
+                        {
+                            "object": "12 0 R",
+                            "role": "/Link",
+                            "page": 1,
+                            "target": reference.get("/Obj"),
+                            "reason": "missing indirect object reference",
+                        }
+                    ],
+                )
+                # The annotation is then tied to no Link tag, and the Link tag to no annotation.
+                links = (await self.check(StructureOptions(check_link_structure=True), document))[0]
+                self.assertEqual(links.status, "failed")
+                self.assertEqual(
+                    [item["reason"] for item in links.details["violations"]],
+                    [
+                        "link annotation needs exactly one Link tag association",
+                        "Link tag has no associated annotation",
+                    ],
+                )
+
+    async def test_an_object_reference_needs_a_valid_page_and_a_matching_parent_tree_entry(
+        self,
+    ) -> None:
+        options = StructureOptions(check_structure_references=True)
+        for change, reason in (
+            ("no_struct_parent", "missing object parent-tree entry"),
+            ("unknown_key", "missing object parent-tree entry"),
+            ("negative_key", "missing object parent-tree entry"),
+            ("other_owner", "object parent-tree owner does not match"),
+            ("invalid_page", "object reference lacks a valid page"),
+        ):
+            document = structured_pdf_objects()
+            if change == "no_struct_parent":
+                object_value(document, 10).pop("/StructParent")
+            elif change == "unknown_key":
+                object_value(document, 10)["/StructParent"] = 7
+            elif change == "negative_key":
+                object_value(document, 10)["/StructParent"] = -1
+            elif change == "other_owner":
+                object_value(document, 11)["/Nums"] = [0, ["8 0 R", "9 0 R", "12 0 R"], 1, "9 0 R"]
+            else:
+                object_value(document, 12)["/K"] = [
+                    2,
+                    {"/Type": "/OBJR", "/Pg": "90 0 R", "/Obj": "10 0 R"},
+                ]
+            with self.subTest(change=change):
+                finding = (await self.check(options, document))[0]
+                self.assertEqual(finding.status, "failed")
+                self.assertEqual(
+                    finding.details["violations"],
+                    [
+                        {
+                            "object": "12 0 R",
+                            "role": "/Link",
+                            "page": 1,
+                            "target": "10 0 R",
+                            "reason": reason,
+                        }
+                    ],
+                )
+
+    async def test_a_cyclic_or_repeated_parent_tree_node_is_unreadable(self) -> None:
+        message = "Structure parent number tree is cyclic"
+        for change in ("self", "two_nodes", "repeated_kid"):
+            document = structured_pdf_objects()
+            if change == "self":
+                add_object(document, 11, {"/Kids": ["11 0 R"]})
+            elif change == "two_nodes":
+                add_object(document, 11, {"/Kids": ["13 0 R"]})
+                add_object(document, 13, {"/Kids": ["11 0 R"]})
+            else:
+                add_object(document, 11, {"/Kids": ["13 0 R", "13 0 R"]})
+                add_object(document, 13, {"/Nums": []})
+            with self.subTest(change=change):
+                await self.assert_every_check_unavailable(document, message)
+
+    async def test_a_parent_tree_with_invalid_or_duplicate_keys_is_unreadable(self) -> None:
+        marked = ["8 0 R", "9 0 R", "12 0 R"]
+        options = StructureOptions(check_structure_references=True)
+        # The same entries split over two leaf nodes are read in full.
+        document = structured_pdf_objects()
+        add_object(document, 11, {"/Kids": ["13 0 R", "14 0 R"]})
+        add_object(document, 13, {"/Nums": [0, marked]})
+        add_object(document, 14, {"/Nums": [1, "12 0 R"]})
+        passed = (await self.check(options, document))[0]
+        self.assertEqual(passed.status, "passed")
+        self.assertEqual(passed.details["marked_content_count"], 3)
+        message = "Structure parent number tree has invalid or duplicate keys"
+        for change in ("duplicate", "duplicate_across_nodes", "negative", "not_a_number"):
+            document = structured_pdf_objects()
+            if change == "duplicate":
+                object_value(document, 11)["/Nums"] = [0, marked, 0, marked, 1, "12 0 R"]
+            elif change == "duplicate_across_nodes":
+                add_object(document, 11, {"/Kids": ["13 0 R", "14 0 R"]})
+                add_object(document, 13, {"/Nums": [0, marked, 1, "12 0 R"]})
+                add_object(document, 14, {"/Nums": [1, "12 0 R"]})
+            elif change == "negative":
+                object_value(document, 11)["/Nums"] = [0, marked, -1, "12 0 R"]
+            else:
+                object_value(document, 11)["/Nums"] = [0, marked, "1", "12 0 R"]
+            with self.subTest(change=change):
+                await self.assert_every_check_unavailable(document, message)
 
     async def test_structure_probes_keep_frozen_inputs_and_shared_resource_lease(self) -> None:
         budget = ResourceBudget(2, 256)

@@ -740,7 +740,7 @@ class ReportFileReplacementTests(unittest.TestCase):
         with patch("latexprep.report_files.write_report_text", side_effect=OSError("disk full")):
             public, rendered = save_reports(report, ReportFiles(json=self.destination), None)
         self.assertEqual(public.outcome, Outcome.INTERNAL_ERROR)
-        self.assertEqual(json.loads(rendered.json)["outcome"], "internal_error")
+        self.assertIsNone(rendered.json)
         self.assertEqual([item.rule for item in public.findings], ["report.write"])
 
     def test_preview_artifacts_and_sidecar_errors_report_the_correct_release_state(self):

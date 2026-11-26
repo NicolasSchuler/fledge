@@ -28,8 +28,8 @@ from .doctor import run_doctor
 from .execution_records import CONFIG_PATH_KEY
 from .finding_view import RenderOptions
 from .findings import cancelled_finding
-from .report import UNFINISHED_SCOPE, Report
-from .report_formats import OutputFormat, write_report
+from .report import UNFINISHED_SCOPE, Report, redact_report
+from .report_formats import OutputFormat, write_redacted_report
 from .setting_choices import ENGINES, Engine
 from .terminal_console import stderr_console, stdout_console
 from .terminal_progress import TerminalProgress
@@ -157,16 +157,18 @@ def doctor_command(
             "Correct the selected settings or configuration path and rerun fledge doctor.",
             job_started=job_started,
         )
+    # One redacted copy of the finished report feeds both the report and the tool list.
+    public = redact_report(report)
     try:
         console = stdout_console()
-        write_report(
-            report,
+        write_redacted_report(
+            public,
             OutputFormat.JSON if json_output else OutputFormat.TERMINAL,
             console=console,
             options=RenderOptions(show_passed=True),
         )
         if not json_output:
-            print_tool_versions(report.tools, console)
+            print_tool_versions(public.tools, console)
     except BrokenPipeError:
         # The reader of stdout stopped early; the verdict is still the exit code.
         discard_closed_stdout()

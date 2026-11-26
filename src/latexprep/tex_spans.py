@@ -350,13 +350,6 @@ def stops_source(command: Command, conditionals: Sequence[tuple[int, int]]) -> b
     )
 
 
-def endinput_has_suffix(text: str, command: Command) -> bool:
-    r"""Return whether more than trivia follows ``\endinput`` on its physical line."""
-    return command.name == "endinput" and bool(
-        text[command.name_end : end_of_line(text, command.name_end)].strip()
-    )
-
-
 def conditional_branches(
     commands: Sequence[Command], index: int
 ) -> tuple[list[tuple[int, int]], int] | None:

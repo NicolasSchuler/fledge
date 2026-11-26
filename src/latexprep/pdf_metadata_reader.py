@@ -1,10 +1,10 @@
 """Bounded reader of the metadata a PDF file carries, for the privacy checks.
 
 The reader collects the document information dictionary, every XMP metadata stream, the
-application data of ``/PieceInfo`` dictionaries, and what pdfTeX and LuaTeX copy into the
-form XObject of each included PDF: ``/PTEX.FileName``, ``/PTEX.InfoDict`` and the included
-page's ``/Metadata`` and ``/PieceInfo``. It walks the file object by object with a
-hand-written lexer and never renders a page or interprets a content stream. Only object
+application data of catalog and page ``/PieceInfo`` dictionaries, and what pdfTeX and
+LuaTeX copy into the form XObject of each included PDF: ``/PTEX.FileName``, ``/PTEX.InfoDict``
+and the included page's ``/Metadata`` and ``/PieceInfo``. It walks the file object by object
+with a hand-written lexer and never renders a page or interprets a content stream. Only object
 streams and metadata streams are decompressed. Every count, length, nesting level and
 decompressed size is bounded. A file that exceeds a bound, is encrypted or is not a PDF
 raises ``PreparationError``, which callers report as an incomplete scan of that file; an
@@ -19,6 +19,7 @@ from __future__ import annotations
 import html
 import re
 import zlib
+from codecs import charmap_decode
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -400,17 +401,30 @@ class _Lexer:
         return position + 1
 
 
-def pdf_text(raw: bytes) -> str:
-    """Decode a PDF text string: UTF-16 or UTF-8 with a byte-order mark, else UTF-8 or Latin-1.
+# PDFDocEncoding (PDF specification, Annex D). Undefined bytes 0x7F, 0x9F and 0xAD
+# become replacement characters; the unchanged ranges follow Latin-1.
+_PDFDOC_ENCODING: Final = (
+    bytes(range(0x18)).decode("latin-1")
+    + "˘ˇˆ˙˝˛˚˜"
+    + bytes(range(0x20, 0x7F)).decode("ascii")
+    + "\ufffd"
+    + "•†‡…—–ƒ⁄‹›−‰„“”‘"
+    + "’‚™ﬁﬂŁŒŠŸŽıłœšž\ufffd"
+    + "€"
+    + bytes(range(0xA1, 0xAD)).decode("latin-1")
+    + "\ufffd"
+    + bytes(range(0xAE, 0x100)).decode("latin-1")
+)
 
-    PDFDocEncoding agrees with Latin-1 for the letters of names; the few symbols where the
-    two differ do not affect matching names or paths.
+
+def pdf_text(raw: bytes) -> str:
+    """Decode a PDF text string, using PDFDocEncoding when there is no byte-order mark.
 
     Args:
         raw: The string's bytes.
 
     Returns:
-        The decoded text; undecodable UTF-16 units become replacement characters.
+        The decoded text, with replacement characters for undefined or malformed input.
     """
     if raw.startswith(b"\xfe\xff"):
         return raw[2:].decode("utf-16-be", errors="replace")
@@ -418,10 +432,15 @@ def pdf_text(raw: bytes) -> str:
         return raw[2:].decode("utf-16-le", errors="replace")
     if raw.startswith(b"\xef\xbb\xbf"):
         return raw[3:].decode("utf-8", errors="replace")
+    return charmap_decode(raw, "strict", _PDFDOC_ENCODING)[0]
+
+
+def _included_filename(raw: bytes) -> str:
+    """Decode a TeX engine's pathname bytes, which need not be a PDF text string."""
     try:
-        return raw.decode("utf-8")
+        return raw.decode("utf-8-sig")
     except UnicodeDecodeError:
-        return raw.decode("latin-1")
+        return pdf_text(raw)
 
 
 def _xmp_text(raw: bytes) -> str:
@@ -806,7 +825,7 @@ def _collect_included(collector: _Collector, form: dict[str, object]) -> None:
     file_name = form.get("PTEX.FileName")
     name = collector.walk.resolve(file_name)
     if isinstance(name, bytes):
-        if text := pdf_text(name).strip():
+        if text := _included_filename(name).strip():
             collector.add(included, "PTEX.FileName", text)
     elif file_name is not None:
         collector.walk.note("unreadable included PDF file names", origin=included)
@@ -820,8 +839,21 @@ def _collect_included(collector: _Collector, form: dict[str, object]) -> None:
         collector.strings(form["PieceInfo"], included, "included PieceInfo")
 
 
+def _collect_catalog_piece_info(collector: _Collector) -> None:
+    """Record the application data of each catalog named by a trailer, once."""
+    walk = collector.walk
+    seen: set[int] = set()
+    for trailer in walk.trailers:
+        catalog = walk.resolve(trailer.get("Root"))
+        if not isinstance(catalog, dict) or catalog.get("Type") != "Catalog":
+            continue
+        if id(catalog) not in seen and "PieceInfo" in catalog:
+            seen.add(id(catalog))
+            collector.strings(catalog["PieceInfo"], MetadataOrigin.DOCUMENT, "PieceInfo")
+
+
 def _collect_document(collector: _Collector) -> None:
-    """Record the file's own information dictionary, XMP streams and page application data."""
+    """Record the file's own information dictionary, XMP streams and application data."""
     walk = collector.walk
     document = MetadataOrigin.DOCUMENT
     for trailer in walk.trailers:
@@ -832,6 +864,7 @@ def _collect_document(collector: _Collector) -> None:
     for value in walk.objects.values():
         if isinstance(value, dict) and value.get("Type") == "Page" and "PieceInfo" in value:
             collector.strings(value["PieceInfo"], document, "PieceInfo")
+    _collect_catalog_piece_info(collector)
 
 
 def read_pdf_metadata(data: bytes, limits: PdfMetadataLimits | None = None) -> PdfMetadata:

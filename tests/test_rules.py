@@ -29,26 +29,10 @@ TESTS = Path(__file__).resolve().parent
 # the check. Writing a clean case (see ``tests/test_clean_cases.py``) or a linked test that
 # records a passed result removes a code from here; the check below fails until it is
 # removed, so the list can only shrink. A new check starts with a clean case instead.
-CHECKS_WITHOUT_CLEAN_CASE: frozenset[str] = frozenset(
-    {
-        "BIB006",
-        "BIB008",
-        "BLD010",
-        "BLD015",
-        "BLD107",
-        "PKG006",
-        "PKG007",
-        "PKG008",
-        "PKG303",
-        "RPT102",
-        "RPT103",
-        "TEX011",
-        "TEX303",
-        "TEX307",
-        "TEX312",
-        "TEX324",
-    }
-)
+#
+# RPT103 is the one code left. It labels every diagnostic export as unverified, whatever
+# the report holds, so no input exists on which it stays silent.
+CHECKS_WITHOUT_CLEAN_CASE: frozenset[str] = frozenset({"RPT103"})
 
 
 class RuleRegistryTests(unittest.TestCase):

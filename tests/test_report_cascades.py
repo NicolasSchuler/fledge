@@ -742,6 +742,18 @@ class BriefStatusTests(unittest.TestCase):
             compact[-1], "verdict: Cancelled during baseline build; nothing was published."
         )
 
+    def test_cancelled_report_distinguishes_a_committed_archive_from_preview_paths(self):
+        for artifacts, expected in (
+            ({"paper.archive": "paper/submission.zip"}, "the verified output was published"),
+            ({"preview.1": "previews/p1.png"}, "no submission archive was published"),
+        ):
+            with self.subTest(artifacts=artifacts):
+                report = Report("prepare", outcome=Outcome.CANCELLED, artifacts=artifacts)
+                for render in (render_terminal, render_compact, render_html):
+                    text = " ".join(render(report).split())
+                    self.assertIn(expected, text)
+                    self.assertNotIn("nothing was published", text)
+
 
 class BibliographyCommandTests(unittest.TestCase):
     """``bib check`` blocks an undefined citation, also beside an unrelated problem."""

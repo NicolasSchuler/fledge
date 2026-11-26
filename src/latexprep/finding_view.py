@@ -62,6 +62,10 @@ class RenderOptions:
 
 
 DEFAULT_RENDER_OPTIONS = RenderOptions()
+CANCELLED_AFTER_PUBLICATION = (
+    "Cancelled after the verified output was published; it stays in place. "
+    "Cleanup may be incomplete; check for .fledge-staging-* folders beside the outputs."
+)
 
 _STATUS_LABELS = {"skipped": "not checked", "not_applicable": "not applicable"}
 
@@ -887,10 +891,14 @@ def interrupted_tasks(report: RedactedReport) -> list[str]:
 
 
 def cancellation_line(report: RedactedReport) -> str:
-    """Say during which tasks the run was cancelled, and that nothing was published."""
-    if tasks := interrupted_tasks(report):
-        return f"Cancelled during {', '.join(tasks)}; nothing was published."
-    return "Cancelled; nothing was published."
+    """Say what was interrupted without claiming that a committed submission was rolled back."""
+    if report.submission_written:
+        return CANCELLED_AFTER_PUBLICATION
+    tasks = interrupted_tasks(report)
+    during = f" during {', '.join(tasks)}" if tasks else ""
+    # Preview paths can be planned before their destination is committed.
+    outcome = "no submission archive was published" if report.artifacts else "nothing was published"
+    return f"Cancelled{during}; {outcome}."
 
 
 def _blocked_verdict(report: RedactedReport, views: Sequence[FindingView]) -> str:

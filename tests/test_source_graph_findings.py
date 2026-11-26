@@ -17,6 +17,7 @@ from latexprep.flat_layout import plan_flatten
 from latexprep.rule_definition import Rule
 from latexprep.rules import MANDATORY_CODES, RULES
 from latexprep.source_analysis import analyze_sources
+from latexprep.source_graph import SourceGraph
 from tests.support import SOURCE_GRAPH_ADVISORY_RULES, ProjectTestCase
 
 DOCUMENT = "\\documentclass{article}\n"
@@ -107,6 +108,17 @@ class SourceGraphFindingTests(ProjectTestCase):
         self.write("body.tex", "Body.\n")
         with patch("latexprep.source_graph.MAX_COMMANDS", 2):
             self.assertEqual(self.report("source.expansion_limit").path, "main.tex")
+
+    def test_active_ranges_end_after_the_argument_of_a_terminating_input(self) -> None:
+        body = "Read text.\n"
+        self.write("body.tex", body + "\\end{document}\nUnread draft.")
+        for read in (r"\input{body}", r"\input body"):
+            with self.subTest(read=read):
+                main = DOCUMENT + "\\begin{document}\n" + read
+                self.write("main.tex", main + "{Unread group.}\\relax\n")
+                graph = SourceGraph.build(self.root, "main.tex")
+                expected = {"main.tex": [(0, len(main))], "body.tex": [(0, len(body))]}
+                self.assertEqual(graph.active_ranges, expected)
 
     def test_a_project_without_a_document_root_reports_it(self) -> None:
         self.write("notes.tex", "Notes without a document class.\n")

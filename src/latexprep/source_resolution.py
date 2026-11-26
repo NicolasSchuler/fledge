@@ -9,13 +9,14 @@ of its findings. It does not walk files (``source_graph``) or judge commands
 (``source_command_checks``), and it records nothing itself: the caller applies the
 returned ``Resolution``.
 
-A bare ``\input{name}``, ``\bibliography{name}`` or ``\includegraphics{name}`` that the
-project lacks may name a file of the TeX installation, such as ``glyphtounicode.tex``,
-IEEE's ``IEEEabrv.bib`` or the sample figure ``example-image-a.pdf``. The job
-asks the installation once about such names (``tex_installation``) and makes the answer
-current with :func:`installed_inputs_known`. When the installation could not be asked,
-such a name is reported as not checked rather than missing; without a question, as
-outside a job, it is reported missing.
+A bare ``\input{name}``, ``\bibliography{name}``, ``\bibliographystyle{name}`` or
+``\includegraphics{name}`` that the project lacks may name a file of the TeX installation,
+such as ``glyphtounicode.tex``, IEEE's ``IEEEabrv.bib``, ``ACM-Reference-Format.bst`` or
+the sample figure ``example-image-a.pdf``. The job asks the installation once about such
+names (``tex_installation``) and makes the answer current with
+:func:`installed_inputs_known`; :func:`installed_input_path` reads it back. When the
+installation could not be asked, such a name is reported as not checked rather than
+missing; without a question, as outside a job, it is reported missing.
 
 A missing file is a confirmed missing dependency only where the build needs it. A
 bibliography database is not needed when the ``.bbl`` the build reads is shipped beside
@@ -45,6 +46,7 @@ from .source_file_commands import (
     DEFAULT_SUFFIXES_BY_FILE_COMMAND,
     GRAPHICS_SUFFIXES,
     INSTALLATION_INPUT_COMMANDS,
+    STANDARD_BIBTEX_STYLES,
     TOOLCHAIN_FILE_COMMANDS,
     candidate_paths,
     is_literal_text,
@@ -108,23 +110,25 @@ def installed_inputs_known(answer: InstalledInputs | None) -> Generator[None]:
 
 
 def installation_file_names(reference: str, command: str = "input") -> tuple[str, ...]:
-    r"""Return the file names a bare ``\input``, ``\bibliography`` or figure name may have.
+    r"""Return the file names a bare ``\input``, bibliography, style or figure name may have.
 
     Args:
         reference: The name as the command writes it.
-        command: ``input``, ``bibliography`` or ``includegraphics``, without the backslash.
+        command: ``input``, ``bibliography``, ``bibliographystyle`` or
+            ``includegraphics``, without the backslash.
 
     Returns:
         For ``\input``, the name with ``.tex`` when it has no suffix; for
-        ``\bibliography``, the name with ``.bib`` unless it ends with it, as BibTeX reads
-        it; for a figure without a graphics suffix, the name with each suffix that TeX
-        Live's sample figures such as ``example-image`` come in. Nothing when the
-        reference has a directory or characters no installation file name has.
+        ``\bibliography`` and ``\bibliographystyle``, the name with ``.bib`` or ``.bst``
+        unless it ends with it, as BibTeX reads it; for a figure without a graphics
+        suffix, the name with each suffix that TeX Live's sample figures such as
+        ``example-image`` come in. Nothing when the reference has a directory or
+        characters no installation file name has.
     """
     value = reference.strip()
     if not _INSTALLATION_NAME.fullmatch(value) or value.endswith("."):
         return ()
-    if command == "bibliography":
+    if command in {"bibliography", "bibliographystyle"}:
         return tuple(candidate_paths(command, [value], DEFAULT_SUFFIXES_BY_FILE_COMMAND[command]))
     if command == "includegraphics":
         if PurePosixPath(value).suffix.lower() in GRAPHICS_SUFFIXES:
@@ -134,9 +138,10 @@ def installation_file_names(reference: str, command: str = "input") -> tuple[str
 
 
 def installation_candidates(root: Path) -> list[str]:
-    r"""Return the bare input, bibliography and figure names that no project file has.
+    r"""Return the bare input, bibliography, style and figure names that no project file has.
 
-    Only these may be files of the TeX installation. The sources are lexed, not walked:
+    Only these may be files of the TeX installation; a standard BibTeX style, whose macros
+    are known without its file, is not asked about. The sources are lexed, not walked:
     the analysis builds the one source graph later, with the installation's answer. A
     name that some project file has is left to that graph's lookup.
 
@@ -144,15 +149,16 @@ def installation_candidates(root: Path) -> list[str]:
         root: The project folder.
 
     Returns:
-        The distinct file names, with their suffixes, in project order; figure names,
-        each under several suffixes, after the input and bibliography names.
+        The distinct file names, with their suffixes, in project order: input and
+        bibliography names first, then figure names, each under several suffixes, then
+        style names. The lookup is bounded, and a name left unasked is reported missing,
+        except a style name, whose macros merely stay uncertain.
     """
     files = project_files(root)
     project_names = {PurePosixPath(name).name for name in files}
     budget, ignored = LoadBudget(), GraphFindings([], [])
     names: dict[str, None] = {}
-    # Figures come last: each is asked under several suffixes, and the lookup is bounded.
-    figures: dict[str, None] = {}
+    later: dict[str, dict[str, None]] = {"includegraphics": {}, "bibliographystyle": {}}
     for name, path in files.items():
         cancellation_point()
         source = load_source(name, path, budget, ignored) if is_parsed_source(name, path) else None
@@ -166,11 +172,37 @@ def installation_candidates(root: Path) -> list[str]:
             argument = command.arguments[0].value
             values = argument.split(",") if command.name in COMMA_LIST_FILE_COMMANDS else [argument]
             for value in (item.strip() for item in values):
+                if _standard_style(value, command.name):
+                    continue
                 file_names = installation_file_names(value, command.name)
                 if file_names and not {value, *file_names} & project_names:
-                    found = figures if command.name == "includegraphics" else names
-                    found.update(dict.fromkeys(file_names))
-    return [*names, *(name for name in figures if name not in names)]
+                    later.get(command.name, names).update(dict.fromkeys(file_names))
+    for bucket in later.values():
+        names.update(bucket)  # a name already asked keeps its earlier place
+    return list(names)
+
+
+def _standard_style(value: str, command: str) -> bool:
+    """Return whether ``value`` names a standard BibTeX style in a style command."""
+    return (
+        command == "bibliographystyle"
+        and value.removesuffix(".bst").casefold() in STANDARD_BIBTEX_STYLES
+    )
+
+
+def installed_input_path(name: str) -> Path | None:
+    """Return where the TeX installation holds a file the project lacks.
+
+    Args:
+        name: The file name with its suffix, as ``installation_file_names`` gives it.
+
+    Returns:
+        The installation path when the installation was asked about ``name`` and holds
+        it; ``None`` otherwise, as outside a job.
+    """
+    installed = _installed_inputs.get()
+    path = installed.found.get(name) if installed is not None else None
+    return Path(path) if path is not None else None
 
 
 def installed_copy(path: str) -> bool:

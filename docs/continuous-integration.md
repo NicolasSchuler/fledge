@@ -143,8 +143,9 @@ repositories, a macOS minute costs more than a Linux minute; see
 [GitHub Actions billing](https://docs.github.com/en/billing/concepts/product-billing/github-actions).
 Every run installs BasicTeX and its packages again, which adds to the minutes used.
 
-Fledge cannot build on a Windows runner because Windows has no build sandbox. A
-Linux runner is the cheaper option; the next section shows how to switch.
+Fledge does not run on a native Windows runner (it requires POSIX APIs and a
+build sandbox). A Linux runner is the cheaper option; the next section shows
+how to switch.
 
 ## Linux runner
 

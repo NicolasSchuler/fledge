@@ -66,7 +66,7 @@ PAGES = b"<< /Type /Pages /Kids [] /Count 0 >>"
 
 
 class DocumentMetadataTests(unittest.TestCase):
-    """The file's own information dictionary and XMP, in every string and stream form."""
+    """The file's own information dictionary, XMP and catalog application data."""
 
     def test_information_strings_are_decoded_in_each_encoding(self) -> None:
         utf16 = "Zoë Example".encode("utf-16-be").hex().encode()
@@ -83,6 +83,25 @@ class DocumentMetadataTests(unittest.TestCase):
                 ("document", "Info Subject", "Café"),
                 ("document", "Info Creator", "linecontinued"),
             ],
+        )
+
+    def test_bomless_information_uses_pdfdocencoding_even_when_valid_utf8(self) -> None:
+        info = b"<< /Author (\\225ukasz \\233ukasz) /Title <C3A9> /Subject <1880A07F9FAD> >>"
+        data = pdf_bytes({1: catalog(), 2: PAGES, 3: info}, b"<< /Root 1 0 R /Info 3 0 R >>")
+        self.assertEqual(
+            entries(data),
+            [
+                ("document", "Info Author", "Łukasz łukasz"),
+                ("document", "Info Title", "Ã©"),
+                ("document", "Info Subject", "˘•€\ufffd\ufffd\ufffd"),
+            ],
+        )
+
+    def test_little_endian_utf16_and_utf8_byte_order_marks_are_honored(self) -> None:
+        info = b"<< /Author <FFFE4100> /Title <EFBBBFC3A9> >>"
+        data = pdf_bytes({1: catalog(), 2: PAGES, 3: info}, b"<< /Root 1 0 R /Info 3 0 R >>")
+        self.assertEqual(
+            entries(data), [("document", "Info Author", "A"), ("document", "Info Title", "é")]
         )
 
     def test_xmp_properties_name_their_field_in_raw_and_compressed_streams(self) -> None:
@@ -109,6 +128,23 @@ class DocumentMetadataTests(unittest.TestCase):
             entries(bytes(data)),
             [("document", "Info Author", "Packed Person"), ("document", "Info Producer", "Writer")],
         )
+
+    def test_catalog_pieceinfo_is_collected_once_from_trailer_roots(self) -> None:
+        root = catalog(b"/PieceInfo << /App << /Private [(Catalog note) 4 0 R] >> >> ")
+        unreferenced = catalog(b"/PieceInfo << /App << /Private (Unreferenced note) >> >> ")
+        objects = {
+            2: PAGES,
+            3: unreferenced,
+            4: b"4 0 R",
+            5: object_stream({1: root}),
+            6: pdf_stream(b"/Type /XRef /Root 1 0 R", b""),
+        }
+        for trailer in (b"<< >>", b"<< /Root 1 0 R >>"):
+            with self.subTest(trailer=trailer):
+                data = pdf_bytes(objects, trailer)
+                self.assertEqual(entries(data), [("document", "PieceInfo", "Catalog note")])
+                with self.assertRaisesRegex(PreparationError, "extraction limit"):
+                    read_pdf_metadata(data, PdfMetadataLimits(max_text_bytes=1))
 
 
 class IncludedPdfTests(unittest.TestCase):

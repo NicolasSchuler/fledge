@@ -4,77 +4,56 @@
 Run ``python scripts/generate_check_docs.py`` after changing a rule; use
 ``--check`` to fail when the documentation is out of date (used by the tests).
 
-Each code is placed in one of four tables, derived from the rules marked ``mandatory``
-(``latexprep.rules.MANDATORY_CODES``) or ``suggestion``, ``check_policy.opt_in_activation()``
-and the default ``Settings``:
+The shared rule catalogue classifies each code into one of four tables:
 
 - always enforced: rules marked ``mandatory``, which selection cannot remove;
 - on by default: checks that run without any configuration;
-- opt-in: checks whose activating setting is off or empty by default;
+- opt-in: checks that need explicit settings or a dedicated command;
 - suggestions: style advice that runs only when selected.
 """
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from latexprep import check_policy  # noqa: E402
-from latexprep.config import Settings, toml_table  # noqa: E402
-from latexprep.rules import MANDATORY_CODES, RULES, Rule  # noqa: E402
+from latexprep.config import Settings  # noqa: E402
+from latexprep.rule_catalogue import (  # noqa: E402
+    ALWAYS,
+    DEFAULT,
+    OPT_IN,
+    SUGGESTION,
+    activation_options,
+    rule_activation,
+)
+from latexprep.rule_definition import Rule  # noqa: E402
+from latexprep.rules import RULES  # noqa: E402
 
 DOCUMENT = ROOT / "docs" / "checks.md"
 BEGIN = "% Begin generated catalogue: run scripts/generate_check_docs.py; do not edit by hand.\n"
 END = "% End generated catalogue.\n"
 
-# Opt-in checks activated outside the selection policy's activation tables.
-_ACTIVATED_ELSEWHERE: dict[str, tuple[str | None, tuple[str, ...]]] = {
-    "FMT001": (None, ("apply_formatting",)),
-}
 
-ALWAYS = "always"
-DEFAULT = "default"
-OPT_IN = "opt-in"
-SUGGESTION = "suggestion"
-
-
-def _activation() -> dict[str, list[tuple[str | None, tuple[str, ...]]]]:
-    """Map each opt-in code to the (table, fields) that switch it on."""
-    result = {
-        code: [(group, tuple(fields)) for group, fields in entries]
-        for code, entries in check_policy.opt_in_activation().items()
-    }
-    for code, entry in _ACTIVATED_ELSEWHERE.items():
-        result.setdefault(code, [entry])
-    return result
-
-
-def classify(rule: Rule, defaults: Settings | None = None) -> tuple[str, str]:
-    """Return the rule's kind and, for opt-in checks, the settings that enable it."""
-    if rule.code in MANDATORY_CODES:
-        return ALWAYS, ""
-    if rule.suggestion:
-        return SUGGESTION, f"`--select ALL --select {rule.code}`"
-    entries = _activation().get(rule.code)
-    if not entries:
-        return DEFAULT, ""
-    values = (defaults or Settings()).top_level_values()
-    group, fields = entries[0]
-    disabled = all(
-        not (values[field] if group is None else getattr(values[group], field)) for field in fields
-    )
-    if not disabled:
-        return DEFAULT, ""
-    tables = " or ".join(dict.fromkeys(f"`{toml_table(name)}`" for name, _ in entries if name))
-    names = " or ".join(f"`{field}`" for field in fields)
-    return OPT_IN, f"{names} in {tables}" if tables else names
+# Characters that Markdown would read as syntax in a rule's plain title, description or
+# fix: escapes, code spans, emphasis, links, raw HTML, entities, table cells, and the math
+# and strikethrough of GitHub's renderer. A backslash makes each one print as itself.
+_MARKDOWN_SYNTAX = re.compile(r"([\\`*_\[\]<>&|$~])")
 
 
 def _cell(text: str) -> str:
-    return " ".join(text.split()).replace("|", "\\|")
+    """Return plain rule text as one table cell that renders exactly as written.
+
+    Args:
+        text: A rule's title, description or fix, which is plain text, not Markdown.
+
+    Returns:
+        The text on one line, with every Markdown-significant character escaped.
+    """
+    return _MARKDOWN_SYNTAX.sub(r"\\\1", " ".join(text.split()))
 
 
 def _table(rules: list[tuple[Rule, str]], *, with_setting: bool) -> str:
@@ -99,9 +78,15 @@ SECTIONS = (
     (
         OPT_IN,
         "Opt-in checks",
-        "These {count} checks run only after you supply the setting in the *Enabled by* column, "
-        "for example through a preset or your `fledge.toml`. Online checks also need "
-        "network permission.",
+        "These {count} checks need the settings or command in the *Enabled by* column. "
+        "Use a preset or `fledge.toml` to supply settings. Each alternative joined by *or* "
+        "is sufficient to configure the check; settings joined by *and* go together, "
+        "in one table where indicated. Unqualified settings go at the top level. "
+        "The catalogue uses current names; see [renamed settings]"
+        "(configuration.md#renamed-settings) for accepted aliases. "
+        "Checks still need the relevant command and evidence: "
+        "`[rendered_pdf_artwork]` applies to the manuscript PDF, while `[included_figure_artwork]` "
+        "needs a source project with included PDF figures.",
     ),
     (
         SUGGESTION,
@@ -126,8 +111,11 @@ def generated() -> str:
     defaults = Settings()
     grouped: dict[str, list[tuple[Rule, str]]] = {kind: [] for kind, _, _ in SECTIONS}
     for rule in RULES:
-        kind, setting = classify(rule, defaults)
-        grouped[kind].append((rule, setting))
+        activation = rule_activation(rule, defaults)
+        setting = " or ".join(activation_options(activation, markdown=True))
+        if activation.note:
+            setting = f"{setting}. {activation.note}"
+        grouped[activation.kind].append((rule, setting))
     parts = []
     for kind, heading, intro in SECTIONS:
         rules = grouped[kind]

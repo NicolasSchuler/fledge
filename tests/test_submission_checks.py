@@ -770,6 +770,21 @@ class IncludedPdfInformationTests(ProjectTestCase):
             [{"channel": "PTEX.InfoDict Title", "kind": "macOS home folder"}],
         )
 
+    def test_non_ascii_identity_terms_in_copied_filenames_are_not_disclosed(self) -> None:
+        for term, pathname in (
+            ("Zoë", "./Zoë.pdf".encode()),
+            ("Zoë", "./Zoë.pdf".encode("utf-16")),
+            ("Łukasz", b"./\x95ukasz.pdf"),
+        ):
+            with self.subTest(pathname=pathname):
+                data = built_pdf(b"/PTEX.FileName <" + pathname.hex().encode() + b">")
+                (finding,) = self.check(data, (term,))
+                self.assertEqual((finding.code, finding.status), ("PRV105", "failed"))
+                self.assertEqual(
+                    finding.details["matches"], [{"channel": "PTEX.FileName", "term_index": 1}]
+                )
+                self.assertNotIn(term, str(finding))
+
     def test_clean_suppressed_and_unreadable_pdfs(self) -> None:
         (clean,) = self.check(built_pdf(b"/PTEX.FileName (./figures/plot.pdf)"), ("Jane",))
         self.assertEqual((clean.status, clean.severity), ("passed", "info"))

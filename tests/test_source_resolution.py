@@ -15,10 +15,15 @@ from latexprep.source_file_commands import DEFAULT_SUFFIXES_BY_FILE_COMMAND, can
 from latexprep.source_findings import MAX_LISTED_PATHS, GraphFindings, listed_names
 from latexprep.source_graph import SourceGraph
 from latexprep.source_resolution import (
+    InstalledInputs,
     LookupScope,
     ProjectTree,
     Reference,
     existing_files,
+    installation_candidates,
+    installation_file_names,
+    installed_input_path,
+    installed_inputs_known,
     resolve_reference,
 )
 from latexprep.tex_lexer import scan_source_commands
@@ -302,6 +307,59 @@ class PackageCodeReferenceTests(ProjectTestCase):
             with self.subTest(name=name):
                 self.assertEqual((found[name].status, found[name].severity), ("failed", "error"))
         self.assertEqual(found["venue-logo"].status, "inconclusive")
+
+
+class InstalledStyleTests(ProjectTestCase):
+    r"""A ``\bibliographystyle`` name the project lacks may name a .bst of the TeX installation.
+
+    The installation is asked about it as about a bare ``\bibliography`` name, so that the
+    bibliography checks can read the macros an installed style such as
+    ``ACM-Reference-Format.bst`` defines.
+    """
+
+    def test_a_style_name_is_asked_with_the_suffix_bibtex_adds(self) -> None:
+        for name in ("ACM-Reference-Format", "ACM-Reference-Format.bst"):
+            with self.subTest(name=name):
+                self.assertEqual(
+                    installation_file_names(name, "bibliographystyle"),
+                    ("ACM-Reference-Format.bst",),
+                )
+        # BibTeX adds .bst even after another dot, and finds no style in a directory.
+        self.assertEqual(installation_file_names("acm.v2", "bibliographystyle"), ("acm.v2.bst",))
+        self.assertEqual(installation_file_names("styles/acm", "bibliographystyle"), ())
+
+    def test_only_a_style_that_no_project_file_has_is_a_candidate(self) -> None:
+        self.write("main.tex", "\\bibliographystyle{ACM-Reference-Format}\n\\bibliography{refs}\n")
+        self.write("refs.bib", "")
+        self.assertEqual(installation_candidates(self.root), ["ACM-Reference-Format.bst"])
+        self.write("ACM-Reference-Format.bst", "")
+        self.assertEqual(installation_candidates(self.root), [])
+
+    def test_a_standard_style_is_not_asked_about(self) -> None:
+        # Its macros are known without its file, so it costs the job no lookup.
+        self.write("main.tex", "\\bibliographystyle{Plain}\n\\bibliography{refs}\n")
+        self.write("refs.bib", "")
+        self.assertEqual(installation_candidates(self.root), [])
+
+    def test_style_names_are_asked_after_input_and_figure_names(self) -> None:
+        # An unasked style leaves its macros uncertain; an unasked input or figure is missing.
+        self.write(
+            "main.tex",
+            "\\bibliographystyle{acmstyle}\n\\includegraphics{example-image}\n"
+            "\\input{glyphtounicode}\n",
+        )
+        names = installation_candidates(self.root)
+        self.assertEqual(names[0], "glyphtounicode.tex")
+        self.assertEqual(names[-1], "acmstyle.bst")
+        self.assertEqual(len(names), 1 + 4 + 1)
+
+    def test_the_installation_path_is_known_only_while_its_answer_applies(self) -> None:
+        name = "ACM-Reference-Format.bst"
+        answer = InstalledInputs(frozenset({name, "missing.bst"}), {name: "/texlive/" + name})
+        with installed_inputs_known(answer):
+            self.assertEqual(installed_input_path(name), Path("/texlive/" + name))
+            self.assertIsNone(installed_input_path("missing.bst"))
+        self.assertIsNone(installed_input_path(name))
 
 
 class ProjectFilesTests(unittest.TestCase):

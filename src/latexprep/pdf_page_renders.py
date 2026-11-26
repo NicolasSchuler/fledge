@@ -33,7 +33,7 @@ from typing import Final
 from .cancellation import run_in_thread
 from .errors import PreparationError
 from .limits import MIB
-from .pdf_geometry import COMPARISON_DPI, comparison_raster_size
+from .pdf_geometry import COMPARISON_DPI, comparison_raster_size, require_raster_size
 from .pdf_job_sessions import PageDigests, PageRaster
 from .pdf_tools import (
     PdfToolSession,
@@ -129,7 +129,7 @@ class RenderSide:
     Attributes:
         name: The side, ``left`` or ``right``; it names the side's command directories.
         session: The side's view of its PDF session, which runs the renders.
-        dimensions: The size of every page in points.
+        dimensions: The rotation-adjusted CropBox size of every page, in points.
         digests: The digests of the pages of this PDF rendered so far.
         dpi: The resolution of the renders, the same for both sides (``comparison_dpi``).
     """
@@ -372,11 +372,11 @@ def _read_page(side: RenderSide, page: int, path: Path) -> RasterImage:
         The raster.
 
     Raises:
-        PreparationError: The file is missing, unreadable, malformed or larger than the page.
+        PreparationError: The file is missing, unreadable, malformed or mis-sized.
     """
-    image = read_pnm_raster(
-        path, channels=3, max_pixels=raster_pixel_count(side.dimensions[page - 1], side.dpi)
-    )
+    size = side.dimensions[page - 1]
+    image = read_pnm_raster(path, channels=3, max_pixels=raster_pixel_count(size, side.dpi))
+    require_raster_size((image.width, image.height), size, side.dpi)
     path.unlink()
     return image
 
@@ -413,6 +413,7 @@ def _page_raster(
         return known, None
     if isinstance(rendered, PreparationError):
         raise rendered
+    # Only geometrically valid rasters may seed the job's digest cache.
     image = _read_page(side, page, rendered)
     raster = PageRaster(image.width, image.height, hashlib.sha256(image.data).digest())
     side.digests.record(page, side.dpi, raster, side.session.versions.get(_RENDERER))

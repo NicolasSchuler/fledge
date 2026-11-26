@@ -176,6 +176,23 @@ class SourceTransformTests(ProjectTestCase):
         self.assertTrue(has_blockers(missing.findings))
         self.assertEqual(next(f for f in missing.findings if f.code == "TEX202").status, "failed")
 
+    def test_merge_cannot_remove_an_input_still_read_by_a_package(self) -> None:
+        self.write(
+            "main.tex",
+            "\\documentclass{article}\n\\usepackage{local}\n\\input{shared}\n",
+        )
+        self.write("local.sty", "\\ProvidesPackage{local}\n\\input{shared}\n")
+        self.write("shared.tex", "Shared text.\n")
+
+        plan = self.plan(merge_inputs=True)
+
+        self.assertTrue(has_blockers(plan.findings), plan.findings)
+        self.assertEqual((plan.contents, plan.removals), ({}, set()))
+        problem = next(f for f in plan.findings if f.code == "TEX202")
+        self.assertEqual(problem.path, "local.sty")
+        self.assertIn("shared.tex", problem.message)
+        self.assertIn(r"unrewritten \input", problem.message)
+
     def test_merge_rejects_inline_execution_and_retains_comments(self) -> None:
         self.write("main.tex", "\\documentclass{article}\nText \\input{body} after.\n")
         self.write("body.tex", "Body.\n")

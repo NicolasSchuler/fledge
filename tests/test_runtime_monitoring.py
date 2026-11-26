@@ -186,6 +186,27 @@ class ProcessListingTests(unittest.IsolatedAsyncioTestCase):
             "Job resource accounting failed: KeyError: 'scope'",
         )
 
+    async def test_final_storage_measurement_failure_stays_in_resource_diagnostics(self) -> None:
+        monitor = self.monitor()
+
+        async def sample(scope):
+            """Fail only when the closing scope takes its required final sample."""
+            if asyncio.current_task() is not scope.monitor:
+                raise PreparationError("Could not measure temporary storage: Permission denied")
+
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(monitor, "sample_job", sample):
+                async with monitor.job_scope(
+                    Path(directory), max_temp_bytes=1024, max_file_bytes=1024
+                ):
+                    self.assertIsNone(monitor.failure)
+        self.assertIsNone(monitor.scope)
+        self.assertEqual(
+            monitor.failure,
+            "Job resource accounting failed: PreparationError: "
+            "Could not measure temporary storage: Permission denied",
+        )
+
 
 class SlowProcessTableTests(unittest.IsolatedAsyncioTestCase):
     """A process table that answers late is retried; one that never answers stops the job.

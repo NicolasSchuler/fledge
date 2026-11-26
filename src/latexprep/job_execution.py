@@ -9,16 +9,20 @@ from __future__ import annotations
 import asyncio
 import tempfile
 import time
-from collections.abc import AsyncGenerator, Generator
+from collections.abc import AsyncGenerator, Coroutine, Generator
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import asdict
 from pathlib import Path
+from typing import Any, TypeVar
 
+from .cancellation import cancel_and_drain
 from .command_runner import RuntimeLimits
 from .config import COORDINATOR_MEMORY_MB, Settings
 from .pdf_job_sessions import pdf_job_scope
 from .resource_budget import ResourceBudget
 from .runtime import ToolRunner
+
+T = TypeVar("T")
 
 
 class JobDeadlineExceeded(TimeoutError):
@@ -102,6 +106,36 @@ class JobExecution:
                 if deadline.expired():
                     raise JobDeadlineExceeded from error
                 raise
+
+    async def run_until_resource_failure(self, operation: Coroutine[Any, Any, T]) -> T | None:
+        """Run the workflow inside the resource scope, draining it if the monitor fails.
+
+        Only the workflow task receives the monitor's cancellation. The calling task
+        still receives caller cancellation and deadline expiry independently.
+
+        Args:
+            operation: The workflow that owns all other work it starts.
+
+        Returns:
+            The workflow's result, or ``None`` when stopped by a job-wide resource failure.
+        """
+        task = asyncio.create_task(operation)
+        stopped = False
+
+        def stop() -> None:
+            """Ask the workflow to unwind unless it is already unwinding for another reason."""
+            nonlocal stopped
+            if not task.cancelling():
+                stopped = task.cancel()
+
+        with self.runner.monitor.on_job_failure(stop):
+            try:
+                # Wait without propagating task cancellation to the caller or vice versa.
+                await asyncio.wait((task,))
+            except BaseException:
+                await cancel_and_drain((task,))
+                raise
+        return None if stopped and task.cancelled() else task.result()
 
     def check_deadline(self) -> None:
         """Stop a synchronous step once the job is cancelled or its deadline has passed.

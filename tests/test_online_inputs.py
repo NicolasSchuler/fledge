@@ -113,6 +113,38 @@ class CollectInputsTests(unittest.TestCase):
             inputs.gaps, ["main.tex: an indirect or grouped URL command was not requested"]
         )
 
+    def test_a_repeated_subfile_contributes_only_one_copy_of_its_body_links(self):
+        (self.root / "main.tex").write_text(
+            "\\documentclass{article}\n\\usepackage{subfiles}\n\\begin{document}\n"
+            "\\iffalse\\endinput\\fi\n\\subfile{chapter}\n\\subfile{chapter}\n\\end{document}\n"
+        )
+        (self.root / "chapter.tex").write_text(
+            "\\documentclass[main.tex]{subfiles}\n\\url{https://example.org/preamble}\n"
+            "\\begin{document}\n\\url{https://example.org/chapter}\n\\end{document}\n"
+            "\\url{https://example.org/draft}\n"
+        )
+        result = collect_inputs(self.root, "main.tex", options(online_replication_links=True))
+        self.assertEqual(
+            [(link.path, link.line, link.values["url"]) for link in result.links],
+            [("chapter.tex", 4, "https://example.org/chapter")],
+        )
+
+    def test_source_links_stop_when_the_graph_budget_runs_out_in_an_input(self):
+        self.manuscript(
+            "\\url{https://example.org/main}\n"
+            "\\input chapter\\url{https://example.org/caller-draft}\n"
+        )
+        (self.root / "chapter.tex").write_text(
+            "\\url{https://example.org/chapter}\n\\relax\n\\url{https://example.org/child-draft}\n"
+        )
+        with patch("latexprep.source_graph.MAX_COMMANDS", 3):
+            result = collect_inputs(self.root, "main.tex", options(online_replication_links=True))
+        self.assertEqual(
+            [link.values["url"] for link in result.links],
+            ["https://example.org/chapter", "https://example.org/main"],
+        )
+        self.assertTrue(result.gaps)
+
     def test_source_link_scan_reports_sorted_distinct_gaps_when_the_bound_is_hit(self):
         self.manuscript(
             "\\url{\\first}\n\\url{\\second}\n\\url{https://a.example.org/}\n"

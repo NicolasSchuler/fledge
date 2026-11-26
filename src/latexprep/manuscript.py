@@ -38,7 +38,6 @@ from .manuscript_scan import (
     KeywordCount,
     LiteralHeading,
     ManuscriptScan,
-    abstract_count,
     graph_reasons,
     keyword_count,
 )
@@ -555,7 +554,7 @@ def _abstract_words_finding(
     bounds: tuple[int, int] | None = None
     if not abstracts:
         bounds = (0, 0)
-    elif len(abstracts) == 1:
+    elif len(abstracts) == 1 and not abstracts[0].uncertainty:
         bounds = abstracts[0].word_count_range
     status: Status = "inconclusive"
     if not evidence.abstract_uncertain and bounds is not None:
@@ -729,7 +728,7 @@ def _collect_evidence(main: str, document: ExpandedDocument) -> _Evidence:
         graph_gaps=scan.graph_reasons,
         classes=scan.classes,
         packages=scan.packages,
-        abstracts=[abstract_count(block) for block in scan.abstracts],
+        abstracts=scan.count_abstracts(),
         keywords=[keyword_count(block) for block in scan.keywords],
         headings=scan.headings,
         sources=selected,

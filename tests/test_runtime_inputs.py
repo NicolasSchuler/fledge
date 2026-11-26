@@ -1,4 +1,4 @@
-"""Tool versions, frozen inputs and the sandbox grants of a runner."""
+"""Tool versions, frozen inputs, the sandbox grants and the sealed Biber copy of a runner."""
 
 from __future__ import annotations
 
@@ -9,15 +9,17 @@ from dataclasses import FrozenInstanceError
 from pathlib import Path
 from unittest.mock import patch
 
+from latexprep.biber_toolchain import create_biber_toolchain
 from latexprep.command_runner import CommandResult
 from latexprep.errors import PreparationError
 from latexprep.resource_budget import ResourceBudget
 from latexprep.runtime import ToolRunner
 from latexprep.sandbox import SeatbeltSandbox
 from latexprep.tool_launch import create_tool_environment
-from latexprep.toolchain import ToolContext
+from latexprep.toolchain import Toolchain, ToolContext
 from tests.fakes import (
     FixtureToolchain,
+    UnconfinedSandbox,
 )
 from tests.support import live_test
 
@@ -309,6 +311,95 @@ class VersionAndInputTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, "READ DENIED BLOCKED READONLY", result.stderr)
         self.assertFalse((sibling / "marker").exists())
+
+
+class SealedBiberSandbox(UnconfinedSandbox):
+    """An unconfined backend that, like Seatbelt, runs Biber only from a sealed copy.
+
+    Attributes:
+        requires_sealed_biber: ``True``: the runner prepares a Biber copy.
+    """
+
+    requires_sealed_biber = True
+
+
+class FailingWarmUpRunner(ToolRunner):
+    """A runner whose Biber warm-up exits with an error instead of running Biber.
+
+    Args:
+        installed: The Biber that its toolchain resolves before a copy is prepared.
+
+    Attributes:
+        warm_up_workspaces: The workspace of each command run, which is the payload directory
+            of the Biber copy being warmed up.
+        warm_up_tools: What the toolchain resolved ``biber`` to when each command ran.
+    """
+
+    def __init__(self, installed: Path) -> None:
+        super().__init__(
+            sandbox=SealedBiberSandbox(),
+            toolchain=Toolchain(frozenset(), frozenset(), {"biber": installed}),
+        )
+        self.warm_up_workspaces: list[Path] = []
+        self.warm_up_tools: list[Path] = []
+
+    async def run(
+        self,
+        argv: list[str],
+        cwd: Path,
+        workspace: Path,
+        *,
+        readonly_inputs: tuple[Path, ...] = (),
+        memory_mb: int | None = None,
+    ) -> CommandResult:
+        """Record the command and report that Biber failed to start.
+
+        The arguments are those of :meth:`CommandRunner.run`; nothing is executed.
+        """
+        self.warm_up_workspaces.append(workspace)
+        self.warm_up_tools.append(self.toolchain.resolve(argv[0]))
+        return CommandResult(1, "", "biber: cannot unpack its payload", resolved_command=argv)
+
+
+class SealedBiberPreparationTests(unittest.IsolatedAsyncioTestCase):
+    """The sealed Biber copy that a runner prepares once, or fails to prepare for good."""
+
+    async def asyncSetUp(self) -> None:
+        """Create a temporary directory as ``self.root``."""
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name).resolve()
+
+    async def test_a_failed_warm_up_withdraws_the_copy_and_is_not_retried(self) -> None:
+        installed = self.root / "installed-biber"
+        installed.write_bytes(b"#!/usr/bin/perl\n")
+        runner = FailingWarmUpRunner(installed)
+        self.assertTrue(runner.biber_needs_preparation)
+        with (
+            patch("latexprep.runtime.tool_path", return_value=installed),
+            patch("latexprep.toolchain.tool_path", return_value=installed),
+            patch(
+                "latexprep.runtime.create_biber_toolchain", wraps=create_biber_toolchain
+            ) as create,
+        ):
+            with self.assertRaises(PreparationError) as first:
+                await runner.prepare_biber(self.root)
+            # The warm-up ran the copy, and the failure took it back out of the toolchain.
+            (copy,) = runner.warm_up_tools
+            self.assertNotEqual(copy, installed)
+            self.assertEqual(copy, runner.warm_up_workspaces[0].parent / "biber")
+            self.assertEqual(runner.toolchain.resolve("biber"), installed)
+            self.assertIsNone(runner._biber.toolchain)
+            self.assertTrue(runner.biber_needs_preparation)
+            with self.assertRaises(PreparationError) as second:
+                await runner.prepare_biber(self.root)
+            self.assertEqual(runner.toolchain.resolve("biber"), installed)
+        self.assertIn("exited with status 1", str(first.exception))
+        self.assertEqual(str(second.exception), str(first.exception))
+        # The second call returned the remembered failure without preparing a second copy.
+        self.assertEqual(len(runner.warm_up_workspaces), 1)
+        create.assert_called_once()
+        self.assertTrue(runner.biber_needs_preparation)
 
 
 if __name__ == "__main__":

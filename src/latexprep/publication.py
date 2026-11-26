@@ -1,18 +1,15 @@
 """Publish verified packages, previews and reports into directories outside the input.
 
-Publication is one transaction, and it writes only into directories it created itself
-with an exclusive ``mkdir``. A new output directory is created in place. An existing empty
-directory of the user's, and, when the caller allows it, a directory that Fledge published
-earlier, are never written into: the new output goes into a new sibling directory, which
-takes their place once everything is written and the existing directory has been checked
-to be unchanged. When any step fails, exactly what the transaction created is removed
-again, and an existing directory stays as it was. Trees are removed only where the
-platform's removal never follows a link. Every published directory holds
-``OUTPUT_MARKER``, which is how a later run recognises it.
+Publication writes complete outputs behind private sibling directories before locking the
+output parents and moving the payloads into place. Only an unchanged, accepted empty
+directory or earlier Fledge output can be replaced. Until all payloads are installed, a
+failure removes our work and restores the outputs moved aside without overwriting new arrivals.
+Trees are removed only where the platform's removal never follows a link. Every published
+directory holds ``OUTPUT_MARKER``, which is how a later run recognises it.
 
 A report that cannot be represented safely is refused up front, before any directory
 exists: the refusal is recorded in the report as a ``report.redaction_limit`` error, never
-raised. A step that raises leaves ``report.artifacts`` to the caller, which clears it.
+raised. A pre-commit failure clears the report's staged artifact paths.
 """
 
 from __future__ import annotations
@@ -21,6 +18,7 @@ import json
 import shutil
 import stat
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import ExitStack
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import TracebackType
@@ -34,8 +32,8 @@ from .path_safety import is_contained
 from .publication_folders import (
     MARKER_TEXT,
     OUTPUT_MARKER,
-    STAGING_PREFIX,
     StagedOutput,
+    discard_previous,
     existing_identity,
     is_empty_directory,
     is_fledge_report,
@@ -44,8 +42,8 @@ from .publication_folders import (
     lock_output_parents,
     move_back,
     move_into_place,
-    new_sibling,
     remove_tree,
+    stage_output,
 )
 from .redaction import scrub_local_paths
 from .report import WITHHELD_SCOPE, Outcome, Report
@@ -217,13 +215,13 @@ def validate_output_directory(
 
 
 class OutputTransaction:
-    """Directories one publication writes; a failure removes everything it wrote.
+    """Stage complete outputs privately and install them as one transaction.
 
-    ``create`` makes a new directory in place. For an existing empty directory, and, with
-    ``replace_previous``, for an earlier Fledge output, it makes a new sibling directory
-    instead, and leaving the block without an error moves each sibling into place. A
-    failure removes the directories the transaction created and nothing else, so previous
-    and concurrent data stay as they were.
+    ``create`` makes a payload inside a private sibling of each destination. Leaving the
+    block without an error locks their parents and moves each completed payload into place.
+    If installation fails or is interrupted, restore the outputs moved aside and remove
+    only work identified as belonging to this transaction. After all outputs are installed,
+    the outputs and recorded artifacts stay in place even if backup cleanup is interrupted.
 
     Args:
         progress: Receives a message when a failure starts the removal and another for
@@ -244,7 +242,6 @@ class OutputTransaction:
         replace_previous: bool = False,
         accepted: Mapping[Path, DirectoryIdentity | None] | None = None,
     ) -> None:
-        self._created: list[Path] = []
         self._staged: list[StagedOutput] = []
         self._progress = progress or (lambda _message: None)
         self._report = report
@@ -261,69 +258,98 @@ class OutputTransaction:
         traceback: TracebackType | None,
     ) -> None:
         if exc_type is None:
-            try:
-                with lock_output_parents(item.destination for item in self._staged):
-                    replaced = self._commit()
-            except OSError as error:
-                self._roll_back(error)
-                self._clear_artifacts()
-                message = (
-                    "Another publication is committing in the output parent. "
-                    "Retry when it finishes."
-                    if isinstance(error, BlockingIOError)
-                    else f"Could not lock the output parent: {error}"
-                )
-                raise PreparationError(message) from error
-            self._remove_replaced(replaced)
-            return
-        self._roll_back(exc_value)
+            self._commit()
+        else:
+            self._roll_back(exc_value)
+            self._clear_artifacts()
 
     def _roll_back(self, cause: BaseException | None) -> None:
-        """Remove the directories the transaction created; announce it and name what stays.
-
-        Args:
-            cause: The error that caused the rollback, which receives a note for each
-                directory that stays behind.
-        """
-        if self._created or self._staged:
+        """Remove the directories the transaction created; announce it and name what stays."""
+        if self._staged:
             self._progress("Publication failed; removing the partial output")
-        # Try every directory: one that cannot be removed must neither hide the error
-        # that caused the rollback nor leave the remaining directories behind.
-        for path in [*reversed(self._created), *(item.staging for item in self._staged)]:
-            try:
-                remove_tree(path)
-            except FileNotFoundError:
-                continue
-            except OSError as error:
-                self._report_leftover(path, error, cause)
+        # Try every directory: one that cannot be removed must not hide the original error.
+        for item in reversed(self._staged):
+            self._remove_staging(item, cause)
 
-    def _commit(self) -> list[Path]:
-        """Move every staged output into place; on a failure, put the existing ones back.
+    def _remove_staging(self, item: StagedOutput, cause: BaseException | None) -> None:
+        """Remove only the identified payload and an empty wrapper; keep any backup."""
+        path = item.wrapper
+        try:
+            for path, expected in (
+                (item.wrapper, item.wrapper_identity),
+                (item.staging, item.staging_identity),
+            ):
+                identity = existing_identity(path)
+                if identity is not None and identity != expected:
+                    note = f"Left {path} untouched: it no longer belongs to this run."
+                    if cause is not None:
+                        cause.add_note(note)
+                    self._progress(note)
+                    return
+                if path == item.wrapper and identity is None:
+                    return
+            if identity is not None:
+                # Installation can have applied a final mode that disallows removal.
+                mode = stat.S_IMODE(item.staging.lstat().st_mode)
+                if mode & stat.S_IRWXU != stat.S_IRWXU:
+                    item.staging.chmod(mode | stat.S_IRWXU, follow_symlinks=False)
+                remove_tree(item.staging)
+            path = item.wrapper
+            if existing_identity(item.previous) is None:
+                item.remove_wrapper()
+        except OSError as error:
+            self._report_leftover(path, error, cause)
 
-        Raises:
-            PreparationError: An existing directory changed, or a staged output could not
-                be moved into place; every existing directory is back where it was, and
-                nothing new stays published.
-        """
-        moved: list[tuple[StagedOutput, Path | None]] = []
-        for staged in self._staged:
+    def _commit(self) -> None:
+        """Install every output under the parent locks, or reverse all attempted moves."""
+        attempted: list[StagedOutput] = []
+        with ExitStack() as locks:
             try:
-                moved.append((staged, move_into_place(staged)))
-            except OSError as error:
-                for done, previous in reversed(moved):
-                    if not move_back(done, previous):
-                        self._progress(
-                            f"Could not restore {done.destination}; its former contents are "
-                            f"in {previous or 'no folder'}."
-                        )
-                self._roll_back(error)
-                self._clear_artifacts()
-                raise PreparationError(
-                    f"Could not move the new output into {staged.destination} "
-                    f"({error.strerror or error}); it was left as it was and nothing new "
-                    "was published"
-                ) from error
-        return [previous for _, previous in moved if previous is not None]
+                locks.enter_context(lock_output_parents(item.destination for item in self._staged))
+                for staged in self._staged:
+                    # Enroll before moving: a rename can succeed just before an interrupt.
+                    attempted.append(staged)
+                    move_into_place(staged)
+            except BaseException as error:
+                self._undo_commit(attempted, error)
+                if isinstance(error, OSError):
+                    raise self._commit_error(attempted, error) from error
+                raise
+            # Every output is installed. Discarding the backups is not reversible.
+            self._finish_commit()
+
+    @staticmethod
+    def _commit_error(attempted: Sequence[StagedOutput], error: OSError) -> PreparationError:
+        """Translate a filesystem error, distinguishing a lock failure from a failed move."""
+        if not attempted:
+            return PreparationError(
+                "Another publication is committing in the output parent. Retry when it finishes."
+                if isinstance(error, BlockingIOError)
+                else f"Could not lock the output parent: {error}"
+            )
+        summary = (
+            "check rollback diagnostics for paths left in place"
+            if getattr(error, "__notes__", ())
+            else "it was left as it was and nothing new was published"
+        )
+        return PreparationError(
+            f"Could not move the new output into {attempted[-1].destination} "
+            f"({error.strerror or error}); {summary}"
+        )
+
+    def _undo_commit(self, attempted: Sequence[StagedOutput], error: BaseException) -> None:
+        """Restore prior outputs and clear the report before propagating the commit error."""
+        for staged in reversed(attempted):
+            try:
+                move_back(staged, error)
+            except OSError as rollback_error:
+                error.add_note(
+                    f"Could not undo publication at {staged.destination} ({rollback_error})."
+                )
+        for note in getattr(error, "__notes__", ()):
+            self._progress(note)
+        self._roll_back(error)
+        self._clear_artifacts()
 
     def _clear_artifacts(self) -> None:
         """Remove publication paths from a report after a failed commit."""
@@ -331,15 +357,16 @@ class OutputTransaction:
             self._report.artifacts.clear()
             locate_previews(self._report, ())
 
-    def _remove_replaced(self, replaced: Sequence[Path]) -> None:
-        """Remove former outputs after their replacements were committed."""
-        for previous in replaced:
+    def _finish_commit(self) -> None:
+        """Remove each committed output's identified backup and empty wrapper."""
+        for staged in self._staged:
             try:
-                remove_tree(previous)
+                discard_previous(staged)
+                staged.remove_wrapper()
             except OSError as error:
                 self._progress(
-                    f"Could not remove the replaced output {previous} ({error}); remove it "
-                    "manually."
+                    f"Could not clean up the staging wrapper {staged.wrapper} ({error}); "
+                    "check it before removing it manually."
                 )
 
     def _report_leftover(self, path: Path, error: OSError, cause: BaseException | None) -> None:
@@ -375,72 +402,39 @@ class OutputTransaction:
     def create(self, path: Path, label: str = "Output") -> Path:
         """Make a directory for what belongs in ``path`` and remember it for the rollback.
 
-        Inside a directory the transaction writes, a subdirectory is made there. Otherwise
-        a new ``path`` is created exclusively; for an existing empty directory, or an
-        earlier Fledge output that may be replaced, a new sibling directory is created
-        instead, to take its place on success. Each such top-level directory receives
-        ``OUTPUT_MARKER``.
+        Below a staged output, make a subdirectory in its payload. Otherwise make a private
+        sibling of ``path`` with a payload that takes its place on success, and write
+        ``OUTPUT_MARKER`` in that payload.
 
         Args:
             path: The directory to write.
             label: Names the output in the error message.
 
         Returns:
-            Where to write what belongs in ``path``: ``path`` itself, or the sibling
-            directory that takes its place.
+            Where to write what belongs in ``path``, inside the staged payload.
 
         Raises:
             PreparationError: Something else appeared at ``path`` while the job ran.
         """
         written = self.physical(path)
-        if self._inside_output(path):
+        if written != path:
             written.mkdir()
             return written
         identity = existing_identity(path)
         if path in self._accepted and identity != self._accepted[path]:
             raise PreparationError(f"{label} changed while the job ran: {path}")
+        replaces = False
+        mode = None
         if identity is not None:
-            written = self._stage(path, label, identity)
-        else:
-            # mkdir is exclusive, so a concurrent creation is never written into.
-            try:
-                path.mkdir()
-            except FileExistsError as error:
-                raise PreparationError(f"{label} appeared while the job ran: {path}") from error
-            self._created.append(path)
-        _write_new_text(written / OUTPUT_MARKER, MARKER_TEXT.format(version=__version__))
-        return written
-
-    def _stage(self, path: Path, label: str, identity: DirectoryIdentity) -> Path:
-        """Create the sibling directory that takes the place of the existing ``path``.
-
-        Args:
-            path: The existing directory: empty, or an earlier output that may be replaced.
-            label: Names the output in the error message.
-            identity: The accepted directory's identity.
-
-        Returns:
-            The new sibling directory.
-
-        Raises:
-            PreparationError: ``path`` is neither an empty directory of the user's nor a
-                replaceable earlier output.
-        """
-        if is_empty_directory(path):
-            replaces = False
-        elif self._replace_previous and is_replaceable_output(path):
-            replaces = True
-        else:
-            raise PreparationError(f"{label} changed while the job ran: {path}")
-        mode = stat.S_IMODE(path.lstat().st_mode)
-        staging = new_sibling(path, STAGING_PREFIX)
-        self._staged.append(StagedOutput(staging, path, replaces, mode, identity))
-        return staging
-
-    def _inside_output(self, path: Path) -> bool:
-        """Return whether ``path`` lies below a top-level directory this transaction writes."""
-        roots = [*self._created, *(staged.destination for staged in self._staged)]
-        return any(path != root and path.is_relative_to(root) for root in roots)
+            if not is_empty_directory(path):
+                if not (self._replace_previous and is_replaceable_output(path)):
+                    raise PreparationError(f"{label} changed while the job ran: {path}")
+                replaces = True
+            mode = stat.S_IMODE(path.lstat().st_mode)
+        staged = stage_output(path, replaces=replaces, mode=mode, identity=identity)
+        self._staged.append(staged)
+        _write_new_text(staged.staging / OUTPUT_MARKER, MARKER_TEXT.format(version=__version__))
+        return staged.staging
 
     def physical(self, path: Path) -> Path:
         """Return where to write ``path``: inside the sibling that takes its place, or ``path``.
@@ -449,8 +443,7 @@ class OutputTransaction:
             path: A path at or below an output of this transaction.
 
         Returns:
-            The corresponding path inside the sibling directory when ``path`` lies in an
-            existing directory whose place a staged output takes, otherwise ``path``.
+            The corresponding path inside staging for a staged output, otherwise ``path``.
         """
         for staged in self._staged:
             if path.is_relative_to(staged.destination):

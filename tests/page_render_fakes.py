@@ -8,13 +8,14 @@ real PDF for the live tests.
 
 from __future__ import annotations
 
+from latexprep.pdf_geometry import measurement_raster_size
 from tests.fakes import FakeCommandRunner, Reply, ToolCall
+from tests.pdf_fakes import COMPARISON_PAGE_SIZE_PT, comparison_ppm, geometry
 
 
-def _pixel(side: str, page: int, changed: tuple[int, ...]) -> bytes:
-    """Return a one-pixel PPM page that is black for a changed page of the right side."""
-    black = side == "right" and page in changed
-    return b"P6\n1 1\n255\n" + (b"\0\0\0" if black else b"\xff\xff\xff")
+def _page_raster(size: tuple[int, int], side: str, page: int, changed: tuple[int, ...]) -> bytes:
+    """Return a PPM page with one black pixel for a changed page of the right side."""
+    return comparison_ppm(size, changed=side == "right" and page in changed)
 
 
 class RangeRunner(FakeCommandRunner):
@@ -61,27 +62,27 @@ class RangeRunner(FakeCommandRunner):
         if call.tool == "pdfinfo":
             output = f"Pages: {self.pages}\n"
             if "-box" in argv:
-                output += "".join(
-                    f"Page {page} size: 612 x 792 pts\n" for page in range(1, self.pages + 1)
-                )
+                output += geometry(pages=self.pages, size=COMPARISON_PAGE_SIZE_PT)
             return Reply(output)
         if call.tool == "pdftotext":
             return Reply("Text\n\f" * self.pages)
         if call.tool != "pdftoppm":
             return Reply()
         first, last = int(argv[argv.index("-f") + 1]), int(argv[argv.index("-l") + 1])
+        dpi = int(argv[argv.index("-r") + 1])
+        size = measurement_raster_size(COMPARISON_PAGE_SIZE_PT, dpi)
         single = "-singlefile" in argv
         self.renders.append((side, first, last, single))
         if single:
             if first in self.fail_pages:
                 return Reply(stderr="Syntax Error: damaged page", returncode=1)
-            return Reply(files={"page.ppm": _pixel(side, first, self.changed_pages)})
+            return Reply(files={"page.ppm": _page_raster(size, side, first, self.changed_pages)})
         if self.fail_ranges:
             return Reply(stderr="Syntax Error: damaged range", returncode=1)
         width = len(str(self.pages))
         return Reply(
             files={
-                f"page-{page:0{width}d}.ppm": _pixel(side, page, self.changed_pages)
+                f"page-{page:0{width}d}.ppm": _page_raster(size, side, page, self.changed_pages)
                 for page in range(first, last + 1)
                 if page not in self.omit_pages
             }

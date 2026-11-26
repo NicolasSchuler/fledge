@@ -105,6 +105,17 @@ class GlossaryRuleTests(unittest.TestCase):
                 self.assertFalse(self.calls.exists())
                 self.assertEqual((self.output / output).read_bytes(), b"")
 
+    def test_a_style_for_xindy_preserves_supplied_lists_without_running_makeindex(self) -> None:
+        """Keep the contents of a supplied glossary and list of acronyms."""
+        (self.output / "main.aux").write_text("\\relax\n\\@istfilename{main.xdy}\n")
+        for rule, output in (("fledge_glossary", "main.gls"), ("fledge_acronyms", "main.acr")):
+            with self.subTest(rule=rule):
+                seeded = self.output / output
+                seeded.write_bytes(b"supplied list\n")
+                self.run_rule(rule)
+                self.assertFalse(self.calls.exists())
+                self.assertEqual(seeded.read_bytes(), b"supplied list\n")
+
     def test_defaults_without_aux_records_and_the_nomenclature(self) -> None:
         _, *arguments = self.call("fledge_glossary")
         self.assertEqual(arguments[:3], ["-q", "-s", "main.ist"])

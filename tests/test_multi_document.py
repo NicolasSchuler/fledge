@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import tempfile
 import unittest
 import zipfile
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -19,9 +21,12 @@ from latexprep.core import run_job
 from latexprep.defects import REPORT_DEFECT_SUGGESTION
 from latexprep.errors import PreparationError, RequestError
 from latexprep.findings import Finding
-from latexprep.job_context import JobRequest
+from latexprep.job_context import JobCommand, JobContext, JobRequest
 from latexprep.main_selection import main_selection_error
 from latexprep.pdf_comparison import compare_pdfs
+from latexprep.publication import VerifiedPackage
+from latexprep.report import Outcome, Report
+from latexprep.resource_monitor import ResourceMonitor
 from latexprep.review_policy import ReportingOptions, ReviewRule
 from latexprep.staging import stage_document
 from latexprep.workflow_options import ComparisonOptions, DocumentOptions, WorkflowOptions
@@ -95,6 +100,120 @@ class MultiDocumentTests(unittest.IsolatedAsyncioTestCase):
             any(item.code == "PKG301" and item.status == "passed" for item in report.findings)
         )
         self.assertTrue((self.base / "out/report.json").is_file())
+
+    async def test_interruption_retains_completed_and_partial_documents_in_configured_order(self):
+        for stop in ("cancel", "deadline", "resource"):
+            with self.subTest(stop=stop):
+                report = await self._interrupt_documents(stop)
+                self.assertFalse((self.base / stop).exists())
+                self.assertEqual(report.artifacts, {})
+                expected = Outcome.CANCELLED if stop == "cancel" else Outcome.ERROR
+                self.assertEqual(report.outcome, expected)
+                self.assertEqual(
+                    [f.document for f in report.findings if f.rule == "build.test_evidence"],
+                    ["supplement", "paper", "third"],
+                )
+                self.assertEqual(
+                    [f.document for f in report.findings if f.rule == "build.test_cleanup"],
+                    ["supplement", "third"],
+                )
+                rules = {item.rule for item in report.findings}
+                self.assertEqual("execution.deadline" in rules, stop == "deadline")
+                self.assertEqual("execution.resources" in rules, stop == "resource")
+                self.assertNotIn("package.independent_documents", rules)
+
+    async def _interrupt_documents(self, stop: str) -> Report:
+        """Return the report after stopping a job whose second document verified first."""
+        settings = replace(
+            self.settings,
+            jobs=2,
+            job_timeout_seconds=60,
+            workflow=WorkflowOptions(
+                documents=(
+                    *reversed(self.settings.workflow.documents),
+                    DocumentOptions("third", "main.tex", "paper"),
+                    DocumentOptions("queued", "main.tex", "paper"),
+                )
+            ),
+        )
+        third_started, finish_third, storage_failure = (asyncio.Event() for _ in range(3))
+        output = self.base / stop
+        report = Report("prepare")
+        timeout = asyncio.timeout
+        deadline = timeout(None)
+        admitted: list[str] = []
+        thread_operation = JobContext.thread_operation
+
+        async def record_admission(context, name, *args, **kwargs):
+            """Record the attempt to start staging, even if the thread has not run yet."""
+            admitted.append(name)
+            return await thread_operation(context, name, *args, **kwargs)
+
+        async def sample(monitor, scope):
+            """On cue, make a worker ready to advance just as a resource failure is confirmed."""
+            if stop == "resource" and asyncio.current_task() is scope.monitor:
+                await storage_failure.wait()
+                finish_third.set()
+                monitor.fail_job("Job temporary storage exceeded 1024 bytes")
+
+        run_document = partial(self._controlled_document, third_started, finish_third)
+        with (
+            patch("latexprep.documents.run_project", side_effect=run_document),
+            patch.object(JobContext, "thread_operation", record_admission),
+            patch.object(ResourceMonitor, "sample_job", sample),
+            patch(
+                "latexprep.job_execution.asyncio.timeout",
+                side_effect=lambda delay: (
+                    deadline if delay == settings.job_timeout_seconds else timeout(delay)
+                ),
+            ),
+        ):
+            task = asyncio.create_task(
+                run_job(
+                    JobRequest(JobCommand.PREPARE, self.source, settings, output), report=report
+                )
+            )
+            try:
+                await asyncio.wait_for(third_started.wait(), 5)
+                if stop == "cancel":
+                    task.cancel()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await asyncio.wait_for(task, 5)
+                else:
+                    if stop == "deadline":
+                        deadline.reschedule(asyncio.get_running_loop().time())
+                    else:
+                        storage_failure.set()
+                    report = await asyncio.wait_for(task, 5)
+            finally:
+                if not task.done():
+                    task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+        self.assertNotIn("select queued files", admitted)
+        return report
+
+    async def _controlled_document(
+        self,
+        third_started: asyncio.Event,
+        finish_third: asyncio.Event,
+        context: JobContext,
+        child: Report,
+    ) -> VerifiedPackage:
+        """Verify paper at once; keep the other documents running for the test to stop."""
+        name = context.request.document_name
+        child.findings.append(Finding("build.test_evidence", "Started", severity="info"))
+        if name != "paper":
+            try:
+                if name == "third":
+                    third_started.set()
+                    await finish_third.wait()
+                else:
+                    await asyncio.Event().wait()
+            finally:
+                self.assertTrue(context.work.is_dir())
+                child.findings.append(Finding("build.test_cleanup", "Drained", severity="info"))
+        child.outcome = Outcome.PASSED
+        return VerifiedPackage(context.work, context.work / "archive", context.work / "pdf")
 
     async def test_global_and_document_review_rules_can_have_the_same_reason(self):
         settings = replace(

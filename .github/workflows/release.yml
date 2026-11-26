@@ -36,7 +36,7 @@ jobs:
       - name: Install package and test tools
         run: python -m pip install -e '.[dev]'
       - name: Run unit tests
-        run: python -m pytest tests -n auto -ra -p no:cacheprovider
+        run: python -m pytest tests -m 'not live' -n auto -ra -p no:cacheprovider
 
   build:
     needs: test
@@ -70,6 +70,9 @@ jobs:
       # by the source tree.
       - name: Smoke-test the built wheel in a fresh environment
         run: python scripts/release_checks.py wheel dist
+      # The source archive must carry every file the documentation and packaging tests read.
+      - name: Run the documentation and packaging tests from the source distribution
+        run: python scripts/release_checks.py sdist dist
       - name: Upload distributions
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:

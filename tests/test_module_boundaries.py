@@ -13,7 +13,10 @@ from __future__ import annotations
 
 import ast
 import re
+import tempfile
 import unittest
+from functools import cache
+from importlib.util import resolve_name
 from pathlib import Path
 
 from .module_layers import LAYER_OF, LAYER_ORDER, LAYER_TITLES, MODULES_BY_LAYER
@@ -32,26 +35,50 @@ PRESENTATION_ONLY_PACKAGES = frozenset({"click", "rich"})
 TESTS = Path(__file__).resolve().parent
 
 
-def _relative_imports() -> dict[str, list[tuple[str, int, tuple[str, ...]]]]:
-    """Collect each module's package-internal imports.
+def _module_paths(package: Path) -> dict[str, Path]:
+    """Map dotted names, including nested package initializers, to source files."""
+    return {
+        ".".join(path.relative_to(package).with_suffix("").parts): path
+        for path in sorted(package.rglob("*.py"))
+    }
 
-    Returns:
-        Each module's imports as (target module, line, imported names), by module name.
+
+def _internal_targets(
+    node: ast.Import | ast.ImportFrom, context: str, modules: dict[str, str]
+) -> list[tuple[str, tuple[str, ...]]]:
+    """Resolve an import clause against the actual modules, without importing the package.
+
+    For ``from . import name``, ``name`` can be a child module or an attribute of
+    the package initializer. Keep the latter's name for the private-name check.
     """
-    imports: dict[str, list[tuple[str, int, tuple[str, ...]]]] = {}
-    for path in sorted(PACKAGE.glob("*.py")):
+    if isinstance(node, ast.Import):
+        return [(modules[item.name], ()) for item in node.names if item.name in modules]
+    base = resolve_name("." * node.level + (node.module or ""), context)
+    targets = []
+    for item in node.names:
+        child = f"{base}.{item.name}"
+        if child in modules:
+            targets.append((modules[child], (item.name,)))
+        elif base in modules:
+            targets.append((modules[base], (item.name,)))
+    return targets
+
+
+@cache
+def _relative_imports(package: Path = PACKAGE) -> dict[str, list[tuple[str, int, tuple[str, ...]]]]:
+    """Collect resolved internal imports as (target, source line, imported names)."""
+    paths = _module_paths(package)
+    modules = {f"{package.name}.{name}".removesuffix(".__init__"): name for name in paths}
+    imports = {}
+    for name, path in paths.items():
+        context = f"{package.name}.{name}".rpartition(".")[0]
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        found = imports.setdefault(path.stem, [])
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and node.level == 1:
-                if node.module is None:
-                    # `from . import name` imports package attributes such as __version__.
-                    continue
-                names = tuple(alias.name for alias in node.names)
-                found.append((node.module.split(".")[0], node.lineno, names))
-            elif isinstance(node, ast.ImportFrom) and (node.module or "").startswith("latexprep."):
-                names = tuple(alias.name for alias in node.names)
-                found.append((node.module.split(".")[1], node.lineno, names))
+        imports[name] = [
+            (target, node.lineno, names)
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.Import, ast.ImportFrom))
+            for target, names in _internal_targets(node, context, modules)
+        ]
     return imports
 
 
@@ -65,14 +92,14 @@ def _third_party_imports() -> dict[str, set[str]]:
         The top-level package names each module imports, by module name.
     """
     found: dict[str, set[str]] = {}
-    for path in sorted(PACKAGE.glob("*.py")):
+    for name, path in _module_paths(PACKAGE).items():
         names: set[str] = set()
         for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"), filename=str(path))):
             if isinstance(node, ast.Import):
                 names.update(alias.name.split(".")[0] for alias in node.names)
             elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
                 names.add(node.module.split(".")[0])
-        found[path.stem] = names
+        found[name] = names
     return found
 
 
@@ -91,13 +118,39 @@ def _documented_layers() -> dict[str, list[tuple[str, str]]]:
             current = title_to_layer.get(line[3:].strip())
             if current is not None:
                 tables[current] = []
-        elif current is not None and (row := re.fullmatch(r"\| `(\w+)` \| (.+) \|", line)):
+        elif current is not None and (row := re.fullmatch(r"\| `([\w.]+)` \| (.+) \|", line)):
             tables[current].append((row.group(1), row.group(2).strip()))
     return tables
 
 
 class ModuleBoundaryTests(unittest.TestCase):
     """Package-internal imports: no private names across modules and no import cycles."""
+
+    def test_internal_imports_resolve_modules_and_attributes_of_nested_packages(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            package = Path(directory) / "sample"
+            nested = package / "sub"
+            nested.mkdir(parents=True)
+            for path in (package / "__init__.py", nested / "__init__.py", nested / "feature.py"):
+                path.touch()
+            (nested / "consumer.py").write_text(
+                "from . import feature\n"
+                "from .. import __version__\n"
+                "import sample.sub.feature as other\n"
+                "from sample.sub.feature import _private\n"
+                "from sample import sub\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                _relative_imports(package)["sub.consumer"],
+                [
+                    ("sub.feature", 1, ("feature",)),
+                    ("__init__", 2, ("__version__",)),
+                    ("sub.feature", 3, ()),
+                    ("sub.feature", 4, ("_private",)),
+                    ("sub.__init__", 5, ("sub",)),
+                ],
+            )
 
     def test_no_module_imports_another_modules_private_names(self) -> None:
         violations = [
@@ -144,7 +197,7 @@ class LayerTests(unittest.TestCase):
     def test_every_module_belongs_to_exactly_one_layer(self) -> None:
         listed = [module for modules in MODULES_BY_LAYER.values() for module in modules]
         duplicated = sorted({module for module in listed if listed.count(module) > 1})
-        existing = {path.stem for path in PACKAGE.glob("*.py")}
+        existing = set(_module_paths(PACKAGE))
         self.assertEqual(duplicated, [], "listed in more than one layer")
         self.assertEqual(sorted(existing - set(listed)), [], "modules with no layer")
         self.assertEqual(sorted(set(listed) - existing), [], "layer entries without a module")

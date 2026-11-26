@@ -25,21 +25,21 @@ from latexprep.pdf_artwork_options import PdfArtworkOptions
 from latexprep.pdf_check_options import PdfCheckOptions
 from latexprep.pdf_check_pipeline import inspect_standalone_pdf
 from latexprep.pdf_comparison import compare_pdfs, pair_memory_mb
+from latexprep.pdf_geometry import measurement_raster_size
 from latexprep.pdf_inspection import PdfInspectionOptions, inspect_pdf
 from latexprep.raster_pixels import read_pnm_raster
 from latexprep.resource_budget import ResourceBudget
 from latexprep.runtime import ToolRunner
 from latexprep.submission_options import SubmissionOptions
-from tests.pdf_fakes import FakePdfRunner
+from tests.pdf_fakes import COMPARISON_PAGE_SIZE_PT, FakePdfRunner, comparison_ppm, geometry
 
 
 class RecordingPdfRunner(FakePdfRunner):
     """Fake tool output with the runtime's actual freeze and version-cache contracts.
 
-    Every command is recorded and counted while it runs. ``pdfinfo`` reports ``pages`` letter
-    pages, ``pdftotext`` one line of text per page, and ``pdftoppm`` writes a one-pixel
-    ``page.ppm`` that is black for a page of ``changed_pages`` when an input contains "right"
-    and white otherwise.
+    Every command is recorded and counted while it runs. ``pdfinfo`` reports ``pages`` pages,
+    ``pdftotext`` one line of text per page, and ``pdftoppm`` writes a white ``page.ppm`` with a
+    black pixel for a page of ``changed_pages`` when an input contains "right".
 
     Attributes:
         pages: The page count that ``pdfinfo`` reports.
@@ -102,17 +102,17 @@ class RecordingPdfRunner(FakePdfRunner):
             if argv[0] == "pdfinfo":
                 output = f"Pages: {self.pages}\nEncrypted: no\nForm: none\nJavaScript: no\n"
                 if "-box" in argv:
-                    output += "".join(
-                        f"Page {page} size: 612 x 792 pts\n" for page in range(1, self.pages + 1)
-                    )
+                    output += geometry(pages=self.pages, size=self.page_size_pt)
                 return replace(result, stdout=output)
             if argv[0] == "pdftotext":
                 return replace(result, stdout="Text\n\f" * self.pages)
             if rendering:
                 page = int(argv[argv.index("-f") + 1])
                 right = any(b"right" in source.read_bytes() for source in readonly_inputs)
-                pixel = b"\0\0\0" if right and page in self.changed_pages else b"\xff\xff\xff"
-                (workspace / "page.ppm").write_bytes(b"P6\n1 1\n255\n" + pixel)
+                dpi = int(argv[argv.index("-r") + 1])
+                size = measurement_raster_size(self.page_size_pt, dpi)
+                data = comparison_ppm(size, changed=right and page in self.changed_pages)
+                (workspace / "page.ppm").write_bytes(data)
                 if right:
                     self.render_completions.append(page)
             return result
@@ -202,8 +202,8 @@ class ParallelPdfTests(unittest.IsolatedAsyncioTestCase):
     async def test_serial_parallel_and_standalone_findings_are_identical(self) -> None:
         results = []
         options = PdfInspectionOptions(
-            expected_page_width_pt=612,
-            expected_page_height_pt=792,
+            expected_page_width_pt=COMPARISON_PAGE_SIZE_PT[0],
+            expected_page_height_pt=COMPARISON_PAGE_SIZE_PT[1],
             require_embedded_fonts=True,
             forbid_attachments=True,
             min_image_dpi=300,
@@ -533,7 +533,8 @@ class ParallelPdfTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_geometry_memory_request_rejects_rendering_before_launch(self) -> None:
         runner = RecordingPdfRunner(pages=1)
-        required = pair_memory_mb((612, 792), (612, 792))
+        runner.page_size_pt = (612, 792)
+        required = pair_memory_mb(runner.page_size_pt, runner.page_size_pt)
         self.assertGreater(required, 128)
         budget = ResourceBudget(4, required - 1, render_jobs=4)
         findings = await compare_pdfs(

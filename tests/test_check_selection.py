@@ -19,7 +19,7 @@ from latexprep.config import Settings, load_settings
 from latexprep.config_discovery import resolve_config_path
 from latexprep.errors import PreparationError
 from latexprep.redaction import scrub_local_paths
-from latexprep.report import Outcome, Report
+from latexprep.report import Outcome, RedactedReport, Report
 from latexprep.rules import RULES
 
 
@@ -342,10 +342,10 @@ class ConfigDiscoveryTests(unittest.TestCase):
             self.source / "latex-prep.toml", 'jobs = 3\n[checks]\nselect = ["BIB1"]\n'
         )
 
-        async def record_settings(request, _progress, report: Report) -> Report:
+        async def record_settings(request, _progress, report: Report) -> RedactedReport:
             report.settings = request.settings.to_dict()
             report.outcome = Outcome.PASSED
-            return report
+            return report.redacted_copy()
 
         with patch("latexprep.cli.run_job", new=AsyncMock(side_effect=record_settings)) as run:
             result = CliRunner().invoke(cli, ["inspect", str(self.source), "--jobs", "1", "--json"])

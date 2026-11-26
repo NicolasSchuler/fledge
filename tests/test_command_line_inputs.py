@@ -212,6 +212,7 @@ class CheckSelectionNoteTests(InputTestCase):
             (("bib", "check", str(self.project), "--select", "TEX001"), "fledge inspect"),
             (("pdf", "check", str(self.project), "--select", "STY3"), "fledge inspect"),
             (("inspect", str(self.project), "--select", "PKG301"), "fledge prepare"),
+            (("inspect", str(self.project), "--select", "PRV002"), "fledge check"),
             (("pdf", "check", str(self.project), "--select", "CMP101"), "fledge check"),
             (("check", str(self.project), "--select", "BIB201"), "fledge prepare"),
             (("prepare", str(self.project), "--dry-run", "--select", "PKG303"), "fledge prepare"),
@@ -231,9 +232,29 @@ class CheckSelectionNoteTests(InputTestCase):
         self.assertEqual(request.settings.checks.select, ("TEX001", "PDF001"))
         self.assertIn("Warning: PDF001 will not run: inspect does not build the PDF", result.stderr)
 
+    def test_the_pdf_identity_scan_runs_only_where_a_pdf_is_built_or_given(self) -> None:
+        # PRV002 reads only the built PDF: inspect must not pass without running it.
+        request, result = self.run_job_of(
+            "inspect", str(self.project), "--select", "PRV002", "--select", "TEX001", "--quiet"
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(request.settings.checks.select, ("PRV002", "TEX001"))
+        self.assertIn("Warning: PRV002 will not run: inspect does not build the PDF", result.stderr)
+        for command in ("check", "prepare"):
+            with self.subTest(command=command):
+                words = (command, str(self.project), "--select", "PRV002", "--quiet")
+                if command == "prepare":
+                    words += ("--dry-run",)
+                request, result = self.run_job_of(*words)
+                self.assertEqual(result.exit_code, 0, result.output)
+                self.assertIsNotNone(request)
+                self.assertNotIn("PRV002", result.stderr)
+        self.assertIsNone(check_selection_note(JobCommand.PDF, ("PRV002",)))
+
     def test_checks_the_command_runs_draw_no_note(self) -> None:
         cases = (
             (JobCommand.INSPECT, ("PDF313",)),
+            (JobCommand.INSPECT, ("PRV004",)),
             (JobCommand.INSPECT, ("ALL",)),
             (JobCommand.INSPECT, ("TEX1", "BIB1")),
             (JobCommand.INSPECT, ("ALL", "STY")),

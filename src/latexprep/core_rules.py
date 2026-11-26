@@ -366,8 +366,8 @@ RULES = (
         description=(
             "Check string macros against local definitions, built-in month names and the "
             "macros of the named bibliography style (the journal macros of the standard styles, "
-            "and the MACRO definitions of a project-shipped .bst file) and the @string "
-            "definitions of a .bib file read from the TeX installation, such as IEEEabrv; "
+            "and the MACRO definitions of a project-shipped or installed .bst file) and the "
+            "@string definitions of a .bib file read from the TeX installation, such as IEEEabrv; "
             "incomplete parse coverage is inconclusive."
         ),
         tests=(

@@ -28,6 +28,52 @@ The version is defined once, as `__version__` in `src/latexprep/__init__.py`.
 
 ### Fixed
 
+- **Overlapping preparations no longer share a partially written output folder.** Fledge
+  stages each output privately. If a destination appears before commit, the run leaves
+  it alone rather than replacing it or removing it during rollback.
+- **A job-wide resource failure stops outstanding work before publication.** Interrupted
+  multi-document runs keep the findings collected so far, labelled by document.
+- **Source checks respect where an input ends.** `NET007` no longer requests draft URLs
+  past an unconditional stop. `TEX105` counts text supplied by a literal input inside
+  the abstract, or reports an inconclusive count when the expansion is ambiguous.
+  Input merging refuses to remove a file still needed by an unmodified source.
+- **PDF checks use the right evidence.** The privacy scan reads PDFDocEncoding text and
+  catalog `/PieceInfo`, and recognizes UTF-8 filenames copied from included PDFs.
+  A comparison rejects a raster whose width or height disagrees with the page at the
+  requested resolution, rather than treating matching but mis-sized renders as a pass.
+- **Supplied xindy glossaries and acronym lists are preserved.** A nonempty `.gls` or
+  `.acr` ships as a project input. A missing or empty list with entries to print still
+  produces `TEX012`.
+- **`fledge rule` and the check reference distinguish alternatives from requirements.**
+  For example, `PDF207` accepts either a top-level or a table setting, while `PDF215`
+  needs both a contrast threshold and a background colour.
+- **`install.sh --uninstall` removes only a directory that the installer marked.** An
+  existing prefix is removed only when it holds the `.fledge-installer` marker, so a
+  reused directory that a leftover launcher still points to is left alone. The marker is
+  deleted last, so an interrupted uninstall can be repeated, and the home-directory
+  guard compares physical paths, so `..` or a symbolic link cannot hide the home
+  directory. The installer also finds `python3.15`, and the launcher keeps an installed
+  `chktex` on its `PATH`.
+- **`fledge inspect --select PRV002` no longer passes without running the check.** The
+  PDF privacy check needs a built PDF, which `inspect` does not build. Selecting only
+  such checks is now a usage error, and a mixed selection warns that they will not run.
+- **`fledge doctor` reports what it checked, consistently.** The terminal report and the
+  tool-versions table are both printed from the same redacted copy of the finished
+  report. When `CHK001` is selected, `doctor` also checks `chktex` as an advisory tool.
+- **Macros of an installed bibliography style count as defined (`BIB004`).** A
+  `\bibliographystyle` that the project does not ship, such as `ACM-Reference-Format`,
+  is looked up in the TeX installation, and the `MACRO` definitions of that `.bst` file
+  count as defined, as those of a shipped `.bst` already did.
+- **The check reference renders each rule's text as written.** Markdown and HTML
+  characters in titles, descriptions and fixes are escaped in the generated
+  `docs/checks.md`, and the documentation keeps straight quotes, so rules about literal
+  quotes and punctuation show the characters they mean. The guides now say that native
+  Windows is not supported and WSL 2 is the route, and which commands need no TeX.
+- **The Release workflow tests the source archive before it uploads.** Besides
+  installing the wheel into a fresh environment, it unpacks the source archive and runs
+  `tests/test_docs.py` and `tests/test_packaging.py` from it
+  (`python scripts/release_checks.py sdist dist`), as the Tests workflow does.
+
 - **Files of the TeX installation named by `\bibliography` or `\includegraphics` are no
   longer missing.** `\bibliography{IEEEabrv,references}`, as IEEE's template asks, and
   sample figures such as `\includegraphics{example-image-a}` in the elsarticle, JMLR, ACL

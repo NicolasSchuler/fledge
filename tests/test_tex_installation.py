@@ -319,7 +319,7 @@ class InstalledBibliographyTests(ProjectTestCase):
         )
 
     def test_each_name_of_a_bibliography_list_is_a_candidate(self) -> None:
-        self.assertEqual(installation_candidates(self.root), ["IEEEabrv.bib"])
+        self.assertEqual(installation_candidates(self.root), ["IEEEabrv.bib", "IEEEtran.bst"])
 
     def test_an_installed_bibliography_is_resolved_and_not_a_project_resource(self) -> None:
         with installed_inputs_known(self.answer):
@@ -354,7 +354,8 @@ class InstalledBibliographyTests(ProjectTestCase):
         self.write("main.tex", figures + IEEE_MAIN)
         names = installation_candidates(self.root)
         self.assertEqual(names[0], "IEEEabrv.bib")
-        self.assertEqual(len(names), 1 + 20 * 4)
+        self.assertEqual(names[-1], "IEEEtran.bst")
+        self.assertEqual(len(names), 1 + 20 * 4 + 1)
 
     def test_an_unreadable_installed_file_leaves_its_macros_uncertain(self) -> None:
         self.installed.unlink()

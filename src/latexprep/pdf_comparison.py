@@ -30,7 +30,7 @@ from .errors import PreparationError
 from .file_safety import FileTooLargeError, read_regular_file
 from .findings import Finding
 from .measurement_findings import TOOL_FAILURE_SUGGESTION, unavailable_finding
-from .pdf_geometry import COMPARISON_DPI, comparison_dpi
+from .pdf_geometry import COMPARISON_DPI, comparison_dpi, require_raster_size
 from .pdf_job_sessions import JobPdf, PageDigests, job_pdf_sessions
 from .pdf_page_renders import (
     RENDER_HEADROOM_MB,
@@ -40,7 +40,6 @@ from .pdf_page_renders import (
     RenderRequest,
     RenderSide,
     pair_memory_mb,
-    raster_pixel_count,
     render_page_pairs,
 )
 from .pdf_previews import (
@@ -55,7 +54,7 @@ from .pdf_previews import (
 from .pdf_tool_output import (
     normalized_text_pages,
     page_count,
-    parse_page_sizes,
+    page_frames,
     pdfinfo_fields,
     require_rendered_pages,
 )
@@ -217,7 +216,7 @@ def _side_evidence(
 
 
 def _comparable_page_sizes(output: str, pages: int) -> list[tuple[float, float]]:
-    """Parse the page sizes in points, refusing pages too large to compare.
+    """Read rotation-adjusted CropBox sizes, refusing pages too large to compare.
 
     A page must fit the raster limits at some comparison resolution (``comparison_dpi``).
 
@@ -231,7 +230,12 @@ def _comparable_page_sizes(output: str, pages: int) -> list[tuple[float, float]]
     Raises:
         PreparationError: The sizes cannot be parsed, or a page is too large.
     """
-    sizes = parse_page_sizes(output, pages)
+    frames = page_frames(output, pages)
+    # pdfinfo's page size describes the unrotated CropBox; pdftoppm applies the rotation.
+    sizes = [
+        (height, width) if page in frames.axis_swapped_pages else (width, height)
+        for page, (width, height) in enumerate(frames.sizes, 1)
+    ]
     comparison_dpi(sizes)
     return sizes
 
@@ -678,8 +682,7 @@ async def _capture_png(
                     "Preview renderer did not produce a regular PNG image"
                 ) from None
             pixels = preview_dimensions(data)
-            if pixels[0] * pixels[1] > raster_pixel_count(size, dpi):
-                raise PreparationError("Preview PNG dimensions exceed the geometry reservation")
+            require_raster_size(pixels, size, dpi)
             return store.add_image(slot, side, data), pixels
         finally:
             preview_work = session.work / name

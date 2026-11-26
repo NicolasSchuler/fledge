@@ -31,7 +31,8 @@ ZIP with your TeX installation; arXiv builds its own.
 | Generated lists | arXiv runs neither makeindex nor makeglossaries, so `prepare` ships the index, glossary and nomenclature files its build generated; `TEX012` warns when one is missing | Run `prepare`, or keep the generated file next to the main file |
 | Bibliography | arXiv runs BibTeX or Biber when no `.bbl` is uploaded, so `prepare` ships your `.bib` files and no `.bbl` | Nothing, unless you want to upload a `.bbl`; see below |
 | Published source | Private notes and TODO markers in comments (`PRV005`), credential-shaped text (`PRV004`), shell-escape constructs (`PRV006`) and files the paper does not use (`PKG106`) | Remove the text or file from your project; `prepare` also removes comments with private markers from the copy (`comment_policy = "private"`) |
-| Fonts | `PDF104` requires embedded fonts in your local build | Re-export the figure or load a font that embeds |
+| Draft leftovers | `TEX102` reports the `draft` class option, which replaces figures with boxes, and `TEX103` the `showframe` package, which draws page frames | Remove the option or the package declaration |
+| Fonts | `PDF104` requires embedded fonts in your local build; uncomment `forbid_type3_fonts = true` to also reject Type 3 fonts (`PDF105`), which often come from bitmap fonts in figures | Re-export the figure or load a font that embeds |
 
 `comment_policy = "private"` removes only comments that contain `TODO`, `FIXME`,
 `XXX`, `private`, `internal`, `confidential` or `note to self`. Check the

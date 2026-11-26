@@ -71,8 +71,10 @@ _PREPARATION_CHECKS = frozenset(
         "PRV101",
     }
 )
+# PRV002 and PRV105 read only the built PDF, which inspect does not build. PRV004 also scans
+# the sources, so inspect runs it.
 _CODES_NOT_RUN: dict[JobCommand, frozenset[str]] = {
-    JobCommand.INSPECT: _PREPARATION_CHECKS | {"PRV105"},
+    JobCommand.INSPECT: _PREPARATION_CHECKS | {"PRV002", "PRV105"},
     JobCommand.CHECK: _PREPARATION_CHECKS,
     JobCommand.BIBLIOGRAPHY: frozenset(
         {"BIB109", "BIB110", *(rule.code for rule in BIBLIOGRAPHY_TRANSFORM_RULES)}

@@ -101,7 +101,9 @@ class ReportSafetyTests(unittest.TestCase):
             source.mkdir()
             for output_format in ("terminal", "compact", "json"):
                 destination = root / (output_format + ".json")
-                with patch("latexprep.cli.run_job", new=AsyncMock(return_value=report)):
+                with patch(
+                    "latexprep.cli.run_job", new=AsyncMock(return_value=report.redacted_copy())
+                ):
                     response = CliRunner().invoke(
                         cli,
                         [

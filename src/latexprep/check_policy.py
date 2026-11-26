@@ -172,7 +172,8 @@ GROUP_CHECKS: dict[str, dict[str, dict[str, object]]] = {
 # Settings group (None for top-level settings) and the disabled value of each field that
 # activates an opt-in check. Names are the TOML setting names; a group is a field of
 # ``Settings``, which ``config.toml_table`` maps to the table a settings file uses.
-OptInActivation = dict[str, list[tuple[str | None, dict[str, object]]]]
+ActivationSection = tuple[str | None, dict[str, object]]
+OptInActivation = dict[str, list[ActivationSection]]
 
 # The policies read the settings as ``Settings.top_level_values`` returns them:
 # top-level setting names mapped to their values, table names to option objects.

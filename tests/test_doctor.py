@@ -563,6 +563,25 @@ class DoctorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(optional - {"bibtex", "biber"}, {"qpdf", "mutool", "pdftohtml"})
         self.assertFalse(optional & required)
 
+    def test_chktex_is_advisory_only_when_its_lint_is_selected(self):
+        from latexprep.check_selection import CheckSelection
+        from latexprep.doctor import selected_tools
+
+        # CHK001 is a suggestion: ALL does not select it, and ignore wins over a selection.
+        for checks in (
+            CheckSelection(),
+            CheckSelection(select=("ALL",)),
+            CheckSelection(select=("CHK",), ignore=("CHK001",)),
+        ):
+            with self.subTest(checks=checks):
+                required, optional = selected_tools(Settings(checks=checks))
+                self.assertNotIn("chktex", required | optional)
+        for checks in (CheckSelection(select=("CHK001",)), CheckSelection(select=("ALL", "CHK"))):
+            with self.subTest(checks=checks):
+                required, optional = selected_tools(Settings(checks=checks))
+                self.assertIn("chktex", optional)
+                self.assertNotIn("chktex", required)
+
     async def test_cancellation_propagates_to_the_active_work(self):
         started = asyncio.Event()
         cancelled = asyncio.Event()

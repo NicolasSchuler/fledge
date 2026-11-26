@@ -17,9 +17,10 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  lint:
+  # The reproducible gate; the compatibility matrix below still resolves dependencies afresh.
+  quality:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 25
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -29,20 +30,34 @@ jobs:
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.13"
-          cache: pip
-          cache-dependency-path: pyproject.toml
-      - name: Install development dependencies
-        run: python -m pip install -e '.[dev]'
+      - name: Sync the locked development and documentation extras
+        run: |
+          python -m pip install --disable-pip-version-check uv
+          uv sync --locked --python 3.13 --extra dev --extra docs
       - name: Lint
-        run: ruff check src tests docs/conf.py scripts
+        run: uv run --no-sync ruff check src tests docs/conf.py scripts
       - name: Check formatting
-        run: ruff format --check src tests docs/conf.py scripts
-      # The shared test support modules are checked with the package, because the doubles that
-      # they build stand in for its adapters; the test modules themselves are not.
+        run: uv run --no-sync ruff format --check src tests docs/conf.py scripts
+      # These shared test modules supply doubles for the package's adapters.
       - name: Check types
         run: >-
-          ty check src/latexprep tests/support.py tests/fakes.py tests/pdf_fakes.py
-          tests/live_support.py
+          uv run --no-sync ty check src/latexprep tests/support.py tests/fakes.py
+          tests/pdf_fakes.py tests/live_support.py tests/page_render_fakes.py
+          tests/online_support.py tests/module_layers.py
+      # Run the same strict Sphinx build as Deploy documentation, without publishing.
+      - name: Build documentation with warnings as errors
+        run: >-
+          uv run --no-sync python -m sphinx -n -W --keep-going -b html
+          -d "$RUNNER_TEMP/sphinx-doctrees" docs "$RUNNER_TEMP/docs-html"
+      # pyproject.toml sets branch and subprocess coverage and the fail_under gate.
+      - name: Run unit tests with the coverage gate
+        id: coverage
+        run: uv run --no-sync python -m pytest tests -m 'not live' -n auto -ra -p no:cacheprovider --cov
+      - name: Show the coverage report in the job summary
+        if: ${{ !cancelled() && (steps.coverage.outcome == 'success' || steps.coverage.outcome == 'failure') }}
+        run: >-
+          uv run --no-sync python -m coverage report --format=markdown
+          --fail-under=0 >> "$GITHUB_STEP_SUMMARY"
 
   # Shell scripts are linted here because the installer is the one shell program shipped.
   shellcheck:
@@ -58,29 +73,6 @@ jobs:
         run: |
           shellcheck --version
           shellcheck install.sh
-
-  # The same strict build as the Deploy documentation workflow, without publishing,
-  # so a broken link or reference fails the pull request and not the merge.
-  docs:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - name: Check out source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-      - name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
-        with:
-          python-version: "3.13"
-          cache: pip
-          cache-dependency-path: pyproject.toml
-      - name: Install documentation dependencies
-        run: python -m pip install '.[docs]'
-      - name: Build documentation with warnings as errors
-        run: >-
-          python -m sphinx -n -W --keep-going -b html
-          -d "$RUNNER_TEMP/sphinx-doctrees" docs "$RUNNER_TEMP/docs-html"
 
   # Build what would be published and use it the way a user would: install the wheel
   # into a fresh environment and run it from another directory, then run the
@@ -110,15 +102,7 @@ jobs:
       - name: Install the wheel in a fresh environment and run fledge on the offline example
         run: python scripts/release_checks.py wheel dist
       - name: Run the documentation and packaging tests from the source distribution
-        run: |
-          extract="$(mktemp -d)"
-          tar -xzf dist/*.tar.gz -C "$extract"
-          cd "$extract"/*/
-          python -m venv "$RUNNER_TEMP/sdist-tests"
-          "$RUNNER_TEMP/sdist-tests/bin/python" -m pip install --disable-pip-version-check \
-            . 'pytest>=9,<10'
-          "$RUNNER_TEMP/sdist-tests/bin/python" -m pytest tests/test_docs.py tests/test_packaging.py \
-            -q -p no:cacheprovider
+        run: python scripts/release_checks.py sdist dist
 
   unit:
     runs-on: ${{ matrix.os }}
@@ -128,11 +112,6 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
         python-version: ["3.11", "3.12", "3.13", "3.14", "3.15"]
-        include:
-          # One cell measures coverage, so the other nine run without its overhead.
-          - os: ubuntu-latest
-            python-version: "3.13"
-            coverage: true
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -146,24 +125,9 @@ jobs:
           cache-dependency-path: pyproject.toml
       - name: Install package and test tools
         run: python -m pip install -e '.[dev]'
-      # Tests that need TeX, Poppler or a live sandbox skip unless their
-      # opt-in variables are set; the live-macos job sets them.
-      # pytest replaces `python -m unittest discover`: it collects the same
-      # unittest.TestCase tests, reports each failing subTest, and pytest-xdist
-      # spreads them over one worker process per CPU. `-ra` (also set in
-      # pyproject.toml) summarises every failure, error and skip reason.
+      # Real tool and sandbox checks run separately from this floating compatibility matrix.
       - name: Run unit tests
-        if: ${{ !matrix.coverage }}
-        run: python -m pytest tests -n auto -ra -p no:cacheprovider
-      # `[tool.coverage]` in pyproject.toml sets branch coverage, the package to measure,
-      # the measurement of the child processes that tests start, and `fail_under`, the
-      # coverage gate: a change that leaves enough code untested fails here.
-      - name: Run unit tests with the coverage gate
-        if: ${{ matrix.coverage }}
-        run: python -m pytest tests -n auto -ra -p no:cacheprovider --cov
-      - name: Show the coverage report in the job summary
-        if: ${{ !cancelled() && matrix.coverage }}
-        run: python -m coverage report --format=markdown --fail-under=0 >> "$GITHUB_STEP_SUMMARY"
+        run: python -m pytest tests -m 'not live' -n auto -ra -p no:cacheprovider
 
   # The oldest versions that pyproject.toml declares, so a floor that no longer works
   # fails here and not on the machine of a user who has that version.
@@ -191,7 +155,49 @@ jobs:
           uv pip list --python "$RUNNER_TEMP/lowest/bin/python"
       - name: Run unit tests
         run: >-
-          "$RUNNER_TEMP/lowest/bin/python" -m pytest tests -n auto -ra -p no:cacheprovider
+          "$RUNNER_TEMP/lowest/bin/python" -m pytest tests -m 'not live' -n auto -ra -p no:cacheprovider
+
+  # One small build on every PR: changes to shared code can affect the build and
+  # publication without touching their own modules. No Biber, extra engines or fonts.
+  live-linux-smoke:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.13"
+      # This is a disposable runner setting, as in live-linux below.
+      - name: Allow unprivileged user namespaces on this runner
+        run: |
+          if sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+      - name: Install the minimal TeX and PDF toolchain and Bubblewrap
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            bubblewrap latexmk texlive-latex-base poppler-utils
+      - name: Install package and test tools
+        run: python -m pip install -e '.[dev]'
+      - name: Prepare and rebuild the submission ZIP under Bubblewrap
+        env:
+          FLEDGE_RUN_INTEGRATION: "1"
+          FLEDGE_TEST_ARTIFACT_DIR: ${{ runner.temp }}/fledge-test-reports
+        run: python -m pytest tests/test_live_linux_smoke.py -m live -v -ra -p no:cacheprovider
+      - name: Keep the report if the smoke fails
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: live-linux-smoke-failing-report
+          path: ${{ runner.temp }}/fledge-test-reports
+          if-no-files-found: ignore
+          retention-days: 14
 
   live-macos:
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
@@ -215,7 +221,7 @@ jobs:
       - name: Install TeX and PDF tools
         run: |
           brew install --cask basictex
-          brew install poppler tex-fmt
+          brew install poppler tex-fmt qpdf mupdf-tools
           echo "/Library/TeX/texbin" >> "$GITHUB_PATH"
       # cm-super provides the Type 1 versions of the Computer Modern text fonts.
       # Without it, LaTeX's default list bullet, \S and \$ need a bitmap font,
@@ -234,6 +240,8 @@ jobs:
           pdflatex --version | head -n 1
           biber --version
           pdfinfo -v
+          qpdf --version | head -n 1
+          mutool -v
           tex-fmt --version
       - name: Install package and test tools
         run: python -m pip install -e '.[dev]'
@@ -245,26 +253,7 @@ jobs:
           FLEDGE_RUN_INTEGRATION: "1"
           # The live tests write the JSON report of every failing outcome here.
           FLEDGE_TEST_ARTIFACT_DIR: ${{ runner.temp }}/fledge-test-reports
-        run: >-
-          python -m pytest
-          tests/test_integration.py
-          tests/test_integration_checks.py
-          tests/test_integration_packages.py
-          tests/test_integration_backends.py
-          tests/test_integration_bibliography.py
-          tests/test_integration_chktex.py
-          tests/test_integration_comparisons.py
-          tests/test_integration_engines.py
-          tests/test_integration_inputs.py
-          tests/test_integration_policies.py
-          tests/test_integration_runtime.py
-          tests/test_integration_sources.py
-          tests/test_loaded_options.py
-          tests/test_pdf.py
-          tests/test_pdf_checks.py
-          tests/test_runtime_inputs.py
-          tests/test_runtime_monitoring.py
-          -v -ra --durations=25 -p no:cacheprovider
+        run: python -m pytest tests -m live -v -ra --durations=25 -p no:cacheprovider
       - name: Keep the reports of failing live tests
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
@@ -322,10 +311,12 @@ jobs:
           else
             echo "kernel.apparmor_restrict_unprivileged_userns is absent; nothing to relax."
           fi
-      - name: Install Bubblewrap and Poppler
+      # qpdf and MuPDF's mutool are optional; the live PDF tool tests need them.
+      - name: Install Bubblewrap, Poppler, qpdf and MuPDF
         run: |
           sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends bubblewrap poppler-utils
+          sudo apt-get install --yes --no-install-recommends \
+            bubblewrap poppler-utils qpdf mupdf-tools
       # Debian-layout TeX Live packages: the Linux sandbox grants only system
       # prefixes such as /usr/share/texlive and /var/lib/texmf (see
       # _LINUX_SYSTEM_RESOURCES in src/latexprep/sandbox.py). The latex-recommended
@@ -444,6 +435,8 @@ jobs:
           lualatex --version | head -n 1
           biber --version
           pdfinfo -v
+          qpdf --version | head -n 1
+          mutool -v
           tex-fmt --version
           command -v pdflatex
       # Start Bubblewrap with the namespaces and capability drop Fledge requires,
@@ -461,38 +454,14 @@ jobs:
           echo "Bubblewrap started with the full Fledge namespace set."
       - name: Install package and test tools
         run: python -m pip install -e '.[dev]'
-      # Serial on purpose, as in live-macos. The live tests in
-      # test_runtime_inputs.py and test_runtime_monitoring.py run only on macOS, so those
-      # files are left out.
-      # test_integration_realistic.py is added here because it covers
-      # ordinary-paper constructs and Biber, and test_runtime_backends.py because
-      # it holds the live Bubblewrap isolation test. A packaging test fails when a
-      # test file with live tests is missing from the live jobs.
+      # Serial, as on macOS. The live marker selects the suite and each platform gate
+      # stays with its test, so new live cases are discovered without editing CI.
       - name: Run live integration tests
         env:
           FLEDGE_RUN_INTEGRATION: "1"
           # The live tests write the JSON report of every failing outcome here.
           FLEDGE_TEST_ARTIFACT_DIR: ${{ runner.temp }}/fledge-test-reports
-        run: >-
-          python -m pytest
-          tests/test_integration.py
-          tests/test_integration_checks.py
-          tests/test_integration_packages.py
-          tests/test_integration_backends.py
-          tests/test_integration_bibliography.py
-          tests/test_integration_chktex.py
-          tests/test_integration_comparisons.py
-          tests/test_integration_engines.py
-          tests/test_integration_inputs.py
-          tests/test_integration_policies.py
-          tests/test_integration_runtime.py
-          tests/test_integration_sources.py
-          tests/test_integration_realistic.py
-          tests/test_loaded_options.py
-          tests/test_pdf.py
-          tests/test_pdf_checks.py
-          tests/test_runtime_backends.py
-          -v -ra --durations=25 -p no:cacheprovider
+        run: python -m pytest tests -m live -v -ra --durations=25 -p no:cacheprovider
       - name: Keep the reports of failing live tests
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
@@ -506,12 +475,12 @@ jobs:
   # edited the cron line. This job opens an issue, or comments on the open one, so the
   # maintainers are notified. It is the only job with `issues: write`, and it checks out no
   # code. Close the issue once the cause is fixed; the next failure opens a new one.
+  # The PR-only smoke is omitted here; live-linux covers it on the schedule.
   alert-on-scheduled-failure:
     if: ${{ !cancelled() && github.event_name == 'schedule' && contains(needs.*.result, 'failure') }}
     needs:
-      - lint
+      - quality
       - shellcheck
-      - docs
       - package
       - unit
       - lowest-dependencies

@@ -20,6 +20,7 @@ root_doc = "index"
 exclude_patterns = ["_build"]
 myst_heading_anchors = 4
 nitpicky = True
+smartquotes = False
 
 html_theme = "alabaster"
 html_theme_options = {"description": f"Version {release}"}

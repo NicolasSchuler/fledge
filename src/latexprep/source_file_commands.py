@@ -118,9 +118,17 @@ TOOLCHAIN_FILE_COMMANDS = frozenset(
     }
 )
 # Commands whose bare file name TeX or BibTeX may also find in the installation, as
-# ``\input{glyphtounicode}``, ``\bibliography{IEEEabrv}`` and
-# ``\includegraphics{example-image}`` do; ``\include`` always reads a chapter of the project.
-INSTALLATION_INPUT_COMMANDS = frozenset({"input", "bibliography", "includegraphics"})
+# ``\input{glyphtounicode}``, ``\bibliography{IEEEabrv}``,
+# ``\bibliographystyle{ACM-Reference-Format}`` and ``\includegraphics{example-image}`` do;
+# ``\include`` always reads a chapter of the project.
+INSTALLATION_INPUT_COMMANDS = frozenset(
+    {"input", "bibliography", "bibliographystyle", "includegraphics"}
+)
+# The standard BibTeX styles and the natbib styles derived from them, by case-folded name.
+# Their string macros are known without reading them, so the installation is not asked.
+STANDARD_BIBTEX_STYLES = frozenset(
+    "plain unsrt alpha abbrv ieeetr acm siam apalike plainnat unsrtnat abbrvnat".split()
+)
 # Commands whose resolved target is read as TeX source in the current path context;
 # a subfile is traversed with its own directory as context instead.
 TRAVERSED_COMMANDS = frozenset(

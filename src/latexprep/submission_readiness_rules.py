@@ -158,10 +158,9 @@ RULES = (
         name="source.venue_engine",
         title="Engine offered by the receiving service",
         description=(
-            "Default check that reports only when submission_checks.venue_engines lists the "
-            "engines the receiving service compiles with: the document builds with another "
-            "engine. The arxiv preset lists pdflatex and xelatex, because arXiv's processors "
-            "are tex, pdftex, latex (DVI), pdflatex and xelatex, not LuaLaTeX."
+            "Compare the chosen engine with submission_checks.venue_engines when that list "
+            "is configured. The arxiv preset lists pdflatex and xelatex, because arXiv's "
+            "processors are tex, pdftex, latex (DVI), pdflatex and xelatex, not LuaLaTeX."
         ),
         tests=(
             "tests.test_submission_readiness.VenueEngineTests.test_an_engine_the_venue_does_not_offer_warns",

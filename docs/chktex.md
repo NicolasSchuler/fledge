@@ -40,8 +40,8 @@ and on Debian or Ubuntu `sudo apt install chktex`.
 
 chktex's own controls work as usual:
 
-- `% chktex 2` at the end of a line keeps warning 2 on that line, and `% chktex-file 2`
-  keeps it in the whole file. `% fledge: ignore CHK001` silences every chktex suggestion
+- `% chktex 2` at the end of a line silences warning 2 on that line, and `% chktex-file 2`
+  silences it in the whole file. `% fledge: ignore CHK001` silences every chktex suggestion
   on its line, as for any other suggestion.
 - A `.chktexrc` beside the main file, where you would run chktex yourself, is read after
   chktex's built-in settings. For example, to switch two warnings off for the project:

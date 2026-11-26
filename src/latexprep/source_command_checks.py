@@ -35,7 +35,6 @@ from .tex_spans import (
     conditional_spans,
     defined_names,
     definition_spans,
-    endinput_has_suffix,
     in_conditional,
     macro_definitions,
     runs_in_place,
@@ -532,7 +531,7 @@ def check_source(checks: SourceChecks, conditionals: list[tuple[int, int]] | Non
         conditionals = conditional_spans(commands)
     for index, command in enumerate(commands):
         if stops_source(command, conditionals):
-            if endinput_has_suffix(source.masked, command):
+            if source.has_buffered_endinput_suffix(command):
                 checks.uncertain(
                     command,
                     "source.unsupported_command",

@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import tempfile
 import unittest
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 
 from latexprep.errors import PreparationError
@@ -21,7 +21,9 @@ from latexprep.pdf_inspection import inspect_pdf
 from latexprep.pdf_job_sessions import job_pdf_sessions, pdf_job_scope
 from latexprep.resource_budget import ResourceBudget
 from latexprep.workflow_options import ComparisonOptions
+from tests.fakes import Reply, ToolCall
 from tests.page_render_fakes import RangeRunner
+from tests.pdf_fakes import comparison_ppm
 
 PAGES = 12
 
@@ -133,6 +135,38 @@ class JobSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(runner.renders), renders)
         rendering = next(item for item in swapped if item["rule"] == "compare.rendering")
         self.assertEqual(rendering["details"]["changed_pages"], [2])
+
+    async def test_equal_mis_sized_rasters_are_inconclusive_and_not_remembered(self) -> None:
+        class MisSizedRunner(RangeRunner):
+            """Write identical mis-sized PPMs until the override is cleared."""
+
+            override: bytes | None = None
+
+            def respond(self, call: ToolCall) -> Reply:
+                """Replace rendered pages with the override when set."""
+                reply = super().respond(call)
+                if reply.files and self.override is not None:
+                    return replace(reply, files=dict.fromkeys(reply.files, self.override))
+                return reply
+
+        # The real rasters of these 20 x 30 point pages are 40 x 60 at 144 DPI.
+        for pixels in ((38, 60), (40, 58), (60, 40)):
+            with self.subTest(pixels=pixels):
+                runner = MisSizedRunner(pages=1)
+                runner.override = comparison_ppm(pixels)
+                async with pdf_job_scope(self.root / f"job-{pixels[0]}", runner, self.budget):
+                    first = await self.compare(runner, self.plain, self.first, f"bad-{pixels[0]}")
+                    runner.override = None
+                    second = await self.compare(runner, self.plain, self.first, f"ok-{pixels[0]}")
+                by_rule = {item["rule"]: item for item in first}
+                self.assertNotIn("compare.rendering", by_rule)
+                self.assertEqual(by_rule["compare.text"]["status"], "passed")
+                unavailable = by_rule["compare.unavailable"]
+                self.assertEqual(unavailable["status"], "inconclusive")
+                self.assertEqual(unavailable["details"]["unavailable_pages"], [1])
+                self.assertIn("do not match the page geometry", unavailable["message"])
+                self.assertEqual(runner.single_renders, [("left", 1), ("right", 1)] * 2)
+                self.assertTrue(all(item["status"] == "passed" for item in second))
 
     async def test_pixel_counts_render_only_the_pages_that_differ_again(self) -> None:
         options = ComparisonOptions(1, 0.5)

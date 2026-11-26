@@ -24,6 +24,7 @@ from latexprep.resource_budget import ResourceBudget
 from latexprep.workflow_options import ComparisonOptions
 from tests.fakes import Reply, ToolCall
 from tests.page_render_fakes import RangeRunner
+from tests.pdf_fakes import comparison_ppm
 
 
 class RangePlanningTests(unittest.TestCase):
@@ -155,33 +156,44 @@ class RangeComparisonTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             sorted(runner.range_renders),
             [
-                ("left", 1, 5),
-                ("left", 6, 10),
-                ("left", 11, 12),
-                ("right", 1, 5),
-                ("right", 6, 10),
-                ("right", 11, 12),
+                ("left", 1, 6),
+                ("left", 7, 12),
+                ("right", 1, 6),
+                ("right", 7, 12),
             ],
         )
-        # At 144 DPI a letter page is 5.8 MB of raster, so a range holds five pages at most.
-        self.assertFalse((self.root / "ranges/pages-0001-0005").exists())
+        self.assertFalse((self.root / "ranges/pages-0001-0006").exists())
 
-    async def test_comparisons_accept_fractional_crop_box_rasters(self) -> None:
+    async def test_single_and_range_renders_accept_rounded_crop_boxes_and_rotation(self) -> None:
         class CroppedRunner(RangeRunner):
+            """Render a rounded, rotated CropBox inside a larger MediaBox."""
+
+            rotation: int
+            pixels: tuple[int, int]
+
             def respond(self, call: ToolCall) -> Reply:
+                """Substitute the crop and its raster for the default comparison page."""
                 reply = super().respond(call)
                 if call.tool == "pdfinfo" and "-box" in call.argv:
-                    return replace(reply, stdout=reply.stdout.replace("612 x 792", "20 x 30"))
+                    boxes = "".join(
+                        f"Page {page} size: 20 x 30 pts\nPage {page} rot: {self.rotation}\n"
+                        f"Page {page} MediaBox: 0 0 612 792\n"
+                        f"Page {page} CropBox: 5 10 25 40\n"
+                        for page in range(1, self.pages + 1)
+                    )
+                    return replace(reply, stdout=reply.stdout.splitlines()[0] + "\n" + boxes)
                 if reply.files:
-                    # The 20.0001 pt CropBox width is printed as 20 pt by pdfinfo.
-                    raster = b"P6\n41 60\n255\n" + b"\xff" * (41 * 60 * 3)
+                    raster = comparison_ppm(self.pixels)
                     return replace(reply, files=dict.fromkeys(reply.files, raster))
                 return reply
 
-        for pages in (1, 3):
-            with self.subTest(pages=pages):
+        # pdfinfo rounds fractional point sizes; allow one pixel on either axis in either
+        # direction. For quarter turns, the raster dimensions must follow the rotated CropBox.
+        for pages, rotation, pixels in ((1, 0, (41, 60)), (3, 90, (59, 41)), (3, 270, (60, 41))):
+            with self.subTest(pages=pages, rotation=rotation):
                 runner = CroppedRunner(pages=pages)
-                findings = await self.compare(runner, f"cropped-{pages}")
+                runner.rotation, runner.pixels = rotation, pixels
+                findings = await self.compare(runner, f"cropped-{rotation}")
                 statuses = {item["rule"]: item["status"] for item in findings}
                 self.assertNotIn("compare.unavailable", statuses)
                 self.assertEqual(statuses["compare.rendering"], "passed")

@@ -578,6 +578,31 @@ class LiveEngineSelectionTests(AsyncLiveProjectTestCase):
         )
         self.assertNotIn("Glossary", pdf_text(self.base / "prepared" / "manuscript.pdf"))
 
+    async def test_a_supplied_xindy_glossary_is_read_and_shipped_unchanged(self) -> None:
+        """Read the supplied glossary in the verified build and ship it as an input."""
+        self.require_tools("latexmk", "pdflatex", *POPPLER_TOOLS)
+        self.installed_tex_file("glossaries.sty", "tlmgr install glossaries")
+        seed = "\\par A glossary supplied with the source.\\par\n"
+        source = write_project(
+            self.base / "seeded-xindy", {"main.tex": XINDY_GLOSSARY_ARTICLE, "main.gls": seed}
+        )
+        report = await self.prepare(source)
+        output = self.base / "prepared"
+        self.assertIn("A glossary supplied with the source.", pdf_text(output / "manuscript.pdf"))
+        with zipfile.ZipFile(output / "submission.zip") as archive:
+            self.assertEqual(archive.read("main.gls"), seed.encode())
+        selections = [item for item in report.findings if item.code == "PKG302"]
+        self.assertTrue(selections, blocking_summary(report))
+        for selection in selections:
+            self.assertIn("main.gls", selection.details["included"])
+            self.assertNotIn("main.gls", selection.details["generated_files"])
+        self.assertFalse(
+            any(
+                item.code == "TEX012" and "never_created" in item.details
+                for item in report.findings
+            )
+        )
+
     async def test_index_and_nomenclature_are_built(self) -> None:
         """Check that the index and the nomenclature appear in the prepared PDF."""
         self.require_tools("latexmk", "pdflatex", "makeindex", *POPPLER_TOOLS)

@@ -886,6 +886,30 @@ class PdfFigureMetadataTests(ProjectTestCase):
         self.assertIn("1 PDF figure", clean.message)
         self.assertIn("PDF files the document does not include", clean.message)
 
+    def test_identity_terms_in_pdfdocencoding_and_catalog_pieceinfo(self) -> None:
+        self.write("main.tex", INCLUDING_MAIN)
+        private = pdf_bytes(
+            {
+                1: b"<< /Type /Catalog /Pages 2 0 R /PieceInfo 4 0 R >>",
+                2: b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+                3: b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 10 10] >>",
+                4: b"<< /Example << /Private (Jane Q. Secret) >> >>",
+            }
+        )
+        for data, term, channel in (
+            (figure_pdf(b"/Author (\\225ukasz Example)"), "Łukasz Example", "PDF Info Author"),
+            (private, "Jane Q. Secret", "PDF PieceInfo"),
+        ):
+            with self.subTest(channel=channel):
+                self.write("figures/plot.pdf", data)
+                finding = self.scan((term,))["PRV103"]
+                self.assertEqual((finding.status, finding.severity), ("failed", "error"))
+                self.assertEqual(
+                    finding.details["matches"],
+                    [{"path": "figures/plot.pdf", "channel": channel, "term_index": 1}],
+                )
+                self.assertEqual(self.scan(("Somebody Else",))["PRV103"].status, "passed")
+
     def test_unreadable_pdf_figures_and_unincluded_pdfs(self) -> None:
         self.write("main.tex", INCLUDING_MAIN.replace("figures/plot", "figures/plot.pdf"))
         self.write("figures/plot.pdf", b"this is not a PDF")

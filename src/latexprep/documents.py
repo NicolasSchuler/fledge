@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 from pathlib import Path
 
@@ -95,7 +96,7 @@ def _failed_document_finding(error: Exception, document: DocumentOptions) -> Fin
 
 
 async def _run_document(
-    context: JobContext, shared_root: Path, document: DocumentOptions
+    context: JobContext, shared_root: Path, document: DocumentOptions, child: Report
 ) -> DocumentResult:
     """Check, and for preparation verify, one document from the shared import.
 
@@ -107,13 +108,13 @@ async def _run_document(
         context: The parent job.
         shared_root: The shared import of the project.
         document: The document's settings.
+        child: The report, retained even if the document is interrupted.
 
     Returns:
         The document's name, report and verified package; the package is ``None`` when the
         run failed or verified none.
     """
     request = context.request
-    child = Report(request.command.value)
     settings = _document_settings(context.settings, document)
     child.settings = settings.to_dict()
     settings = replace(settings, reporting=_document_reporting(settings.reporting, document.name))
@@ -148,35 +149,33 @@ async def _run_document(
         child.findings.append(_failed_document_finding(error, document))
         child.outcome = Outcome.BLOCKED
         package = None
-    select_and_review(child, settings)
+    finally:
+        select_and_review(child, settings)
     return DocumentResult(document.name, child, package)
 
 
-def _merge_document(report: Report, document: DocumentResult) -> None:
+def _merge_document(report: Report, name: str, child: Report) -> None:
     """Add one document's results to the combined report, labelled with its name."""
-    child = document.report
     report.findings.extend(
-        replace(item, details={**item.details, "document": document.name})
-        for item in child.findings
+        replace(item, details={**item.details, "document": name}) for item in child.findings
     )
     report.changes.extend(
         replace(
             change,
-            path=f"{document.name}/{change.path}",
-            destination=f"{document.name}/{change.destination}" if change.destination else None,
+            path=f"{name}/{change.path}",
+            destination=f"{name}/{change.destination}" if change.destination else None,
         )
         for change in child.changes
     )
     report.stages.extend(
-        {**stage, "name": f"{document.name}: {stage['name']}", "document": document.name}
-        for stage in child.stages
+        {**stage, "name": f"{name}: {stage['name']}", "document": name} for stage in child.stages
     )
     report.tools.update(child.tools)
     report.package_contents.extend(child.package_contents)
     silenced = child.execution.get(SILENCED_SUGGESTIONS_KEY)
     if isinstance(silenced, list):
         record_silenced_suggestions(
-            report.execution, [{**item, "document": document.name} for item in silenced]
+            report.execution, [{**item, "document": name} for item in silenced]
         )
 
 
@@ -210,13 +209,25 @@ async def run_documents(context: JobContext, report: Report) -> list[DocumentRes
     if is_blocked(report, settings):
         report.outcome = Outcome.BLOCKED
         return []
-    documents = await bounded_map(
-        settings.workflow.documents,
-        lambda document: _run_document(context, imported.root, document),
-        limit=1 if context.preview_serial else settings.jobs,
-    )
-    for document in documents:
-        _merge_document(report, document)
+    children: dict[str, Report] = {}
+
+    async def run(document: DocumentOptions) -> DocumentResult:
+        """Retain even unfinished reports, without starting more work after a resource failure."""
+        if context.runner.monitor.failure is not None:
+            raise asyncio.CancelledError
+        child = children[document.name] = Report(request.command.value)
+        return await _run_document(context, imported.root, document, child)
+
+    try:
+        documents = await bounded_map(
+            settings.workflow.documents, run, limit=1 if context.preview_serial else settings.jobs
+        )
+    finally:
+        # bounded_map has drained every worker, including its cancellation cleanup.
+        # Only evidence is merged on unwind: the verified package list never escapes.
+        for document in settings.workflow.documents:
+            if (child := children.get(document.name)) is not None:
+                _merge_document(report, document.name, child)
     verified = all(document.package is not None for document in documents)
     if request.command is JobCommand.PREPARE and not request.dry_run:
         report.findings.append(

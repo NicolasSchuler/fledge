@@ -56,12 +56,12 @@ from .core import run_job
 from .doctor_command import doctor_command
 from .errors import PreparationError, RequestError, SettingsError
 from .execution_records import CONFIG_PATH_KEY, record_settings_source
-from .finding_view import RenderOptions
+from .finding_view import CANCELLED_AFTER_PUBLICATION, RenderOptions
 from .findings import cancelled_finding
 from .init_command import init_command
 from .job_context import JobCommand, JobRequest
 from .pdf_previews import PdfPreviewStore
-from .report import UNFINISHED_SCOPE, USAGE_EXIT_CODE, Outcome, Report
+from .report import UNFINISHED_SCOPE, USAGE_EXIT_CODE, Outcome, RedactedReport, Report
 from .report_files import ReportFiles, resolve_report_files, save_reports
 from .report_formats import (
     OutputFormat,
@@ -620,7 +620,7 @@ def _run(
     settings: Settings,
     pdf_previews: PdfPreviewStore | None,
     report: Report,
-) -> Report:
+) -> RedactedReport:
     """Run the job with progress messages on stderr.
 
     Args:
@@ -631,7 +631,7 @@ def _run(
         report: The report that the job fills in.
 
     Returns:
-        The finished report.
+        The sanitized snapshot of the finished report.
     """
     request = JobRequest(
         options.command,
@@ -668,6 +668,8 @@ def _deliver_report(
     options: CommandOptions,
     pdf_previews: PdfPreviewStore | None,
     settings_file: str | None = None,
+    *,
+    public: RedactedReport | None = None,
 ) -> int:
     """Save the requested report files, print the final report and return the exit code.
 
@@ -675,21 +677,22 @@ def _deliver_report(
     report is written ends in the internal-error exit code.
 
     Args:
-        report: The finished report.
+        report: The raw report, including the context needed to redact any write failures.
         files: The report files to save.
         output_format: The format of the printed report.
         options: The options of the command, which choose what the printed report shows.
         pdf_previews: The page previews for an HTML report, if any.
         settings_file: The settings file as the printed report names it, if any.
+        public: The sanitized snapshot of a finished job, if the job returned one.
 
     Returns:
         The exit code of the outcome of the report, or the internal-error exit code after
         a defect.
     """
     preview_images = pdf_previews.images if pdf_previews else None
-    outcome = report.outcome
+    outcome = (public if public is not None else report).outcome
     try:
-        public, rendered = save_reports(report, files, preview_images)
+        public, rendered = save_reports(report, files, preview_images, public=public)
         outcome = public.outcome
         write_redacted_report(
             public,
@@ -789,6 +792,7 @@ def _execute(command: JobCommand, arguments: dict[str, Any]) -> int:
     options = _checked_options(CommandOptions(command=command, **arguments))
     output_format = options.output_choice()
     report = Report(command.value, scope=UNFINISHED_SCOPE)
+    public = None
     files = ReportFiles()
     pdf_previews = None
     job_started = False
@@ -810,11 +814,15 @@ def _execute(command: JobCommand, arguments: dict[str, Any]) -> int:
         if files.html is not None or output_format is OutputFormat.HTML:
             pdf_previews = PdfPreviewStore()
         job_started = True
-        report = _run(options, settings, pdf_previews, report)
+        public = _run(options, settings, pdf_previews, report)
     except (KeyboardInterrupt, asyncio.CancelledError):
-        record_cancellation(
-            report, cancelled_finding("Cancelled; no verified output was published")
+        # Publication clears staged artifacts on rollback but keeps them after commit.
+        message = (
+            CANCELLED_AFTER_PUBLICATION
+            if report.submission_written
+            else "Cancelled; no verified output was published"
         )
+        record_cancellation(report, cancelled_finding(message))
     except Exception as error:  # noqa: BLE001 - recorded as a job failure with its cause
         record_job_failure(
             report,
@@ -823,10 +831,12 @@ def _execute(command: JobCommand, arguments: dict[str, Any]) -> int:
             job_started=job_started,
         )
     try:
-        return _deliver_report(report, files, output_format, options, pdf_previews, settings_file)
+        return _deliver_report(
+            report, files, output_format, options, pdf_previews, settings_file, public=public
+        )
     except KeyboardInterrupt:
         # The job has finished; whatever it published stays, so the message must say so.
-        click.echo(_interrupted_report_message(report), err=True)
+        click.echo(_interrupted_report_message(public if public is not None else report), err=True)
         return Outcome.CANCELLED.exit_code
 
 
@@ -850,7 +860,8 @@ def main(argv: list[str] | None = None) -> int:
         error.show()
         return error.exit_code
     except (click.Abort, KeyboardInterrupt):
-        click.echo("Cancelled; no verified output was published", err=True)
+        # Outside a job's report boundary, the state of publication is unknown.
+        click.echo("Cancelled", err=True)
         return 130
     except BrokenPipeError:
         # Output the reader no longer wants; the command itself had finished.
